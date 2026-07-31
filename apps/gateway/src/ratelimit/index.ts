@@ -166,6 +166,64 @@ export {
 } from "./quota.js";
 
 export {
+  type PolicyBindings,
+  type PolicyRuleSet,
+  type EvaluatePolicyOptions,
+  type PolicyRulesResolution,
+  NO_POLICY_RULES,
+  POLICY_MAX_REQUEST_BYTES,
+  compilePolicyRules,
+  defaultProviderForModel,
+  evaluatePolicyRules,
+  expandPolicyRule,
+  policyRequestFrom,
+  policyRulesFromEnv,
+  policyTenantFrom,
+  requestModel,
+} from "./policy.js";
+
+export {
+  type TokenBudgetBindings,
+  type TokenBudgetReading,
+  type TokenBudgetSource,
+  NO_TOKEN_BUDGET,
+  d1TokenBudgetSource,
+  tokenBudgetSourceFromEnv,
+} from "./token-budget.js";
+
+export {
+  type WalletAdmission,
+  type WalletAdmissionBindings,
+  type WalletAdmissionOptions,
+  type WalletAdmissionOutcome,
+  type WalletHold,
+  DEFAULT_WALLET_HOLD_CREDITS,
+  NO_WALLET_ADMISSION,
+  WALLET_HOLD_TTL_SECONDS,
+  d1WalletAdmission,
+  gatewayTenantHandle,
+  walletAdmissionFromEnv,
+  walletHoldCreditsFromEnv,
+  walletHoldId,
+} from "./wallet.js";
+
+export {
+  type WorkflowBudgetBindings,
+  type WorkflowBudgetLookup,
+  type WorkflowBudgetSource,
+  type WorkflowDeclarationResult,
+  type WorkflowStepDeclaration,
+  NO_WORKFLOW_BUDGETS,
+  WORKFLOW_ID_HEADER,
+  WORKFLOW_RUN_ID_HEADER,
+  WORKFLOW_VERSION_HEADER,
+  d1WorkflowBudgetSource,
+  preflightStep,
+  workflowBudgetSourceFromEnv,
+  workflowDeclarationFrom,
+} from "./workflow.js";
+
+export {
   type RateLimitBindings,
   type RateLimitDeps,
   type ResolvedWindows,

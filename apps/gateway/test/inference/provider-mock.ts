@@ -134,6 +134,34 @@ export function providerSse(frames: readonly string[], status = 200): Response {
   });
 }
 
+/**
+ * An SSE response whose headers are a clean `200` and whose BODY then faults.
+ *
+ * This is the shape the failover ladder must never retry: the status said
+ * success, the gateway committed to the stream and handed the client a piped
+ * body, and only then did the upstream break. `frames` are delivered first so
+ * the fault lands strictly AFTER bytes have been flushed — a stream that errors
+ * before its first chunk would not test the point of no return.
+ */
+export function providerSseThatFaults(
+  frames: readonly string[],
+  reason = "upstream connection reset",
+): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) {
+        controller.enqueue(encoder.encode(`${frame}\n\n`));
+      }
+      controller.error(new Error(reason));
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 /** Build the exact bytes {@link providerSse} would emit, for byte-for-byte asserts. */
 export function sseBytes(frames: readonly string[]): string {
   return frames.map((frame) => `${frame}\n\n`).join("");

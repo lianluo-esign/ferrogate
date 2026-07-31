@@ -1,0 +1,40 @@
+/**
+ * The harness Worker the tenancy specs drive through `SELF`.
+ *
+ * ## Why this exists rather than driving `src/worker.ts`
+ *
+ * Two things this slice may not touch are required for a REAL per-tenant D1
+ * topology: `[[d1_databases]]` stanzas for each tenant in
+ * `apps/gateway/wrangler.toml`, and the `tenantDatabase()` entry in
+ * `GATEWAY_MIDDLEWARE` in `apps/gateway/src/index.ts`. Both belong to the
+ * integrate step (see the WIRING block in `src/tenancy/index.ts`).
+ *
+ * So this module is a SECOND ENTRY POINT over the SAME composition root, not a
+ * second app — the shape `test/ratelimit/harness/worker.ts` established:
+ *
+ *  - it calls the real {@link createGatewayApp}, not a bespoke `new Hono()`, so
+ *    the real `contractAuth` guard runs and `c.get("auth")` is the real
+ *    `AuthContext` the deployed Worker would resolve;
+ *  - it mounts the real `GATEWAY_ROUTE_MODULES` imported from `src/index.ts`,
+ *    so the routes are the deployed ones and cannot drift;
+ *  - it passes `middleware: [tenantDatabase()]`, which is the EXACT zero-edit
+ *    line documented for the integrate step.
+ *
+ * That last point is what makes `mount.spec.ts` a real unmount gate: deleting
+ * `tenantDatabase()` from the array below turns those assertions red and leaves
+ * every other spec in the suite green.
+ */
+import { GATEWAY_ROUTE_MODULES } from "../../../src/index.js";
+import { createGatewayApp } from "../../../src/routes/index.js";
+import { tenantDatabase } from "../../../src/tenancy/index.js";
+
+const { app } = createGatewayApp({
+  modules: [...GATEWAY_ROUTE_MODULES],
+  // THE MOUNT UNDER TEST. `harness/wrangler.toml` pins
+  // `GATEWAY_TENANT_DB_ROUTING = "binding_strict"`, so every tenant-scoped
+  // credential must resolve to a routable D1 database before its request is
+  // served — which is what makes the mount observable over HTTP.
+  middleware: [tenantDatabase()],
+});
+
+export default app;

@@ -35,12 +35,23 @@ import {
   isDenied,
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
+import { LIFECYCLE_STATUS_ALL, type LifecycleStatus } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import type { StoreRecord } from "../ports.js";
-import { adminItem } from "../responses.js";
+import { StoreConflictError, type StoreRecord } from "../ports.js";
+import { adminDeleted, adminItem } from "../responses.js";
+import {
+  deleteProjectRow,
+  deleteWorkspaceRow,
+  projectTenantRow,
+  referencedConflict,
+  tenantDatabaseFor,
+  tenantOf,
+  workspaceTenantRow,
+} from "../store/tenancy.js";
 import {
   type GroupModule,
+  type Handler,
   adminRecordSchema,
   crudGroup,
   json,
@@ -50,9 +61,19 @@ import {
   scopeOf,
 } from "./resource.js";
 
-/** Rust `LifecycleStatus`. */
-export const LIFECYCLE_STATUSES = ["active", "disabled", "suspended", "deleted"] as const;
-export const lifecycleStatusSchema = z.enum(LIFECYCLE_STATUSES);
+/**
+ * Rust `LifecycleStatus` — the vocabulary itself comes from
+ * `@ferrogate/storage`'s `lifecycle-status.ts`, which is the port of
+ * `ferrogate-storage::lifecycle_status` and the one place the closed set is
+ * defined. It used to be re-spelled here; two copies of a closed vocabulary
+ * drift, and the direction that bites is the WRITE side accepting a token the
+ * read side does not recognize (which then parses to `active` and silently
+ * un-suspends the tenancy).
+ */
+export const LIFECYCLE_STATUSES = LIFECYCLE_STATUS_ALL;
+export const lifecycleStatusSchema = z.enum(
+  LIFECYCLE_STATUS_ALL as unknown as [LifecycleStatus, ...LifecycleStatus[]],
+);
 
 export const tenantAccountSchema = adminRecordSchema.extend({
   name: z.string().trim().min(1).optional(),
@@ -197,6 +218,113 @@ function effectiveQuotaWire(quota: EffectiveQuota): Record<string, unknown> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The per-tenant D1 projection (see `src/store/tenancy.ts`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the admin document, then project it into the owning tenant's database.
+ *
+ * The document goes FIRST and is the arbiter: its `(kind, id)` primary key is
+ * what turns a duplicate into the 409 the surface has always returned, and the
+ * tenant row's upsert cannot report one. See `src/store/tenancy.ts` for why
+ * this ordering (and not the reverse) is the one whose crash state is benign.
+ *
+ * A tenant with no provisioned database projects nothing and behaves exactly as
+ * before — which is every deployment that has not onboarded a tenant database,
+ * so this cannot regress one.
+ */
+function createHierarchyRow(options: {
+  readonly collection: string;
+  readonly object: string;
+  readonly schema: z.ZodTypeAny;
+  readonly project: (
+    handle: Awaited<ReturnType<typeof tenantDatabaseFor>> & object,
+    record: StoreRecord,
+    nowUnix: number,
+  ) => Promise<void>;
+}): Handler {
+  return async (c) => {
+    const deps = c.get("deps");
+    const scope = scopeOf(c);
+    const body = (await readJson(c, options.schema)) as Record<string, unknown>;
+    const declared = body.id;
+    const id =
+      typeof declared === "string" && declared.trim() !== ""
+        ? declared.trim()
+        : crypto.randomUUID();
+
+    let stored: StoreRecord;
+    try {
+      stored = await deps.store.create(options.collection, scope, { ...body, id });
+    } catch (error) {
+      if (error instanceof StoreConflictError) {
+        throw new HttpError(409, "conflict", `${options.object} ${id} already exists`);
+      }
+      throw error;
+    }
+
+    const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantOf(stored));
+    if (handle !== null) {
+      await options.project(handle, stored, Math.floor(Date.now() / 1000));
+    }
+    return json(c, 201, adminItem(options.object, stored));
+  };
+}
+
+/**
+ * Delete through `@ferrogate/storage`'s §1.5.7 reference-guarded delete, then
+ * drop the admin document.
+ *
+ * The guarded tenant-database delete goes FIRST, because it is the one that can
+ * REFUSE: removing the document first and then discovering a live workspace
+ * would leave the operator with a project they can no longer see and a
+ * `projects` row the data plane still reads. A refusal here is a 409 that names
+ * the blockers and leaves both rows exactly as they were.
+ */
+function deleteHierarchyRow(options: {
+  readonly collection: string;
+  readonly object: string;
+  readonly param: string;
+  readonly guardedDelete: (
+    handle: Awaited<ReturnType<typeof tenantDatabaseFor>> & object,
+    id: string,
+  ) => Promise<{ readonly kind: string; readonly [field: string]: unknown }>;
+}): Handler {
+  return async (c) => {
+    const deps = c.get("deps");
+    const scope = scopeOf(c);
+    const id = pathParam(c, options.param);
+
+    // Read through the CALLER's scope first, so a tenant-scoped caller cannot
+    // reach another tenant's row — and so the tenant we route to is the row's
+    // own, never the caller's.
+    const existing = await deps.store.get(options.collection, scope, id);
+    if (existing === null) {
+      throw new HttpError(404, "not_found", `${options.object} ${id} not found`);
+    }
+
+    const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantOf(existing));
+    if (handle !== null) {
+      const outcome = await options.guardedDelete(handle, id);
+      if (outcome.kind === "referenced") {
+        throw referencedConflict(options.object, id, {
+          workspaces: Number(outcome.workspaces ?? 0),
+          "virtual keys": Number(outcome.virtualKeys ?? 0),
+        });
+      }
+      // `not_found` in the tenant database is NOT a 404: the admin document
+      // exists and is what the operator asked to delete. It means the typed row
+      // was never projected (a document predating this seam, or a crash between
+      // the two legs), and the document delete below is still owed.
+    }
+
+    const removed = await deps.store.remove(options.collection, scope, id);
+    if (!removed) throw new HttpError(404, "not_found", `${options.object} ${id} not found`);
+    return json(c, 200, adminDeleted(options.object, id));
+  };
+}
+
 export const tenantHierarchyRoutes: GroupModule = crudGroup(
   "tenant_hierarchy",
   [
@@ -206,6 +334,31 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
     readOnlyCollection("tenants", "tenant"),
   ],
   {
+    createProject: createHierarchyRow({
+      collection: "projects",
+      object: "project",
+      schema: projectSchema,
+      project: projectTenantRow,
+    }),
+    deleteProject: deleteHierarchyRow({
+      collection: "projects",
+      object: "project",
+      param: "project_id",
+      guardedDelete: deleteProjectRow,
+    }),
+    createWorkspace: createHierarchyRow({
+      collection: "workspaces",
+      object: "workspace",
+      schema: workspaceSchema,
+      project: workspaceTenantRow,
+    }),
+    deleteWorkspace: deleteHierarchyRow({
+      collection: "workspaces",
+      object: "workspace",
+      param: "workspace_id",
+      guardedDelete: deleteWorkspaceRow,
+    }),
+
     assignTenantPlan: async (c) => {
       const deps = c.get("deps");
       const scope = scopeOf(c);

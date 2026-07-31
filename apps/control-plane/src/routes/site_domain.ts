@@ -198,28 +198,69 @@ export const siteDomainRoutes: GroupModule = crudGroup(
 
       const verification = toVerification(existing);
 
-      // (1) Rate limit BEFORE any outbound DNS, and RESERVE the slot by writing
-      // `last_checked_at_unix` before the resolver is touched. Reading the
-      // cooldown and then doing I/O before recording the attempt is how a
-      // concurrent burst all passes the same check.
-      const attempt = siteDomainVerificationAttemptDecision(
-        verification.lastCheckedAtUnix,
-        now,
-        VERIFY_MIN_INTERVAL_SECONDS,
+      // (1) Rate limit BEFORE any outbound DNS — and the limit IS the write.
+      //
+      // This used to be `siteDomainVerificationAttemptDecision(...)` as a
+      // standalone check followed by an UNCONDITIONAL `store.merge`. That is a
+      // read-then-write, and under concurrency it is not a rate limit at all:
+      // two `POST …/verify` calls read the same `lastCheckedAtUnix`, are both
+      // told `allowed`, and both reach `lookupTxt`. `@ferrogate/storage`'s own
+      // docblock on this decision function states the contract every backend
+      // owes it — "every backend then reserves the slot with an atomic
+      // conditional write on exactly this predicate" — and no backend did
+      // (`docs/rewrite/parity-audit-storage.md` §4.7). #576 exists precisely so
+      // an `admin.write` credential cannot drive unbounded outbound DNS, and a
+      // burst is the cheapest way to try.
+      //
+      // The decision now runs ONLY inside `mergeIf`'s precondition. There is
+      // deliberately no second, standalone call to it beforehand, for two
+      // reasons:
+      //
+      //   * it would be a duplicate of the guard, and a duplicate of a security
+      //     predicate is a thing that can disagree with the guard it shadows;
+      //   * and — the practical one — a redundant pre-check makes the ONLY
+      //     remaining evidence of the conditional write a concurrent race, which
+      //     `SELF.fetch` cannot observe (the test pool dispatches Worker
+      //     requests one at a time). With the check living in the guard, swapping
+      //     `mergeIf` back to `merge` removes the rate limit outright and
+      //     `test/site-domain-cas.test.ts` fails on a plain sequential retry.
+      //
+      // `mergeIf` re-evaluates the predicate on every attempt against the state
+      // the winning writer left, so the loser of a race is refused by the
+      // winner's own `last_checked_at_unix` rather than by the snapshot it read
+      // before the winner committed.
+      const reserved = await deps.store.mergeIf(
+        VERIFICATIONS,
+        scope,
+        id,
+        { last_checked_at_unix: now, updated_at_unix: now },
+        (current) =>
+          siteDomainVerificationAttemptDecision(
+            toVerification(current).lastCheckedAtUnix,
+            now,
+            VERIFY_MIN_INTERVAL_SECONDS,
+          ).kind === "allowed",
       );
-      if (attempt.kind === "rate_limited") {
+      if (reserved.kind === "not_found") {
+        throw new HttpError(404, "not_found", `site domain ${hostname} not found`);
+      }
+      if (reserved.kind === "precondition_failed") {
+        // The slot is held. The refusal is LABELLED from the row that holds it,
+        // so the retry-after is the real remaining cooldown rather than a
+        // constant — and it is labelled, never decided, here: the guard already
+        // said no.
+        const holder = siteDomainVerificationAttemptDecision(
+          toVerification(reserved.current).lastCheckedAtUnix,
+          now,
+          VERIFY_MIN_INTERVAL_SECONDS,
+        );
         throw new HttpError(
           429,
           "rate_limited",
-          `site domain verification for ${hostname} may be retried in ${attempt.retryAfterSecs}s`,
+          `site domain verification for ${hostname} may be retried in ${
+            holder.kind === "rate_limited" ? holder.retryAfterSecs : VERIFY_MIN_INTERVAL_SECONDS
+          }s`,
         );
-      }
-      const reserved = await deps.store.merge(VERIFICATIONS, scope, id, {
-        last_checked_at_unix: now,
-        updated_at_unix: now,
-      });
-      if (reserved === null) {
-        throw new HttpError(404, "not_found", `site domain ${hostname} not found`);
       }
       verification.lastCheckedAtUnix = now;
 

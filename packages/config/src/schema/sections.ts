@@ -143,9 +143,29 @@ export const authServiceConfigSchema = z.object({
 });
 export type AuthServiceConfig = z.infer<typeof authServiceConfigSchema>;
 
+/**
+ * The Rust default `[billing_service].endpoint` — the loopback address of a
+ * standalone `ferrogate-billing serve` process.
+ *
+ * Exported so `inertBillingServiceWarnings` can tell "left at the default" from
+ * "pointed at a real host" without a second copy of the literal that could
+ * drift out of agreement with the schema below.
+ */
+export const BILLING_SERVICE_DEFAULT_ENDPOINT = "http://127.0.0.1:8092";
+
+/**
+ * `[billing_service]`.
+ *
+ * `enabled` is LIVE: it gates the issue-#146 refusal that every model and
+ * fallback route must carry a gateway-side price. `endpoint` / `timeout_millis`
+ * / `token` / `token_env` are the HTTP-client half and are INERT on Cloudflare —
+ * the gateway settles in-process. The load says so out loud through
+ * `inertBillingServiceWarnings` (`../validate/sections.ts`); see the decision
+ * recorded at `@ferrogate/billing`'s `createBillingService`.
+ */
 export const billingServiceConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  endpoint: z.string().default("http://127.0.0.1:8092"),
+  endpoint: z.string().default(BILLING_SERVICE_DEFAULT_ENDPOINT),
   timeout_millis: z.number().int().default(1000),
   token: optString,
   token_env: optString,

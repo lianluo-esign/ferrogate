@@ -27,9 +27,11 @@ export { parseSecretRef, isSecretRef, describeSecretRef } from "./secret-ref.js"
 export type { SecretResolver } from "./resolver.js";
 export { EnvSecretResolver } from "./resolver.js";
 
-// Environment helpers.
-export type { EnvLike } from "./env.js";
-export { defaultEnv, nonEmptyEnv } from "./env.js";
+// Environment helpers. `EnvLike` admits BOTH Worker slot shapes — a plain
+// string and a `[[secrets_store_secrets]]` binding — and `readEnvSecret` is the
+// async reader that serves either (inventory-policy-core §4.8).
+export type { EnvLike, SecretsStoreBinding } from "./env.js";
+export { defaultEnv, nonEmptyEnv, readEnvSecret, isSecretsStoreBinding } from "./env.js";
 
 // Minimal HTTP client (Rust `http_get`/`http_post`).
 export type { Header, HttpOptions } from "./http.js";

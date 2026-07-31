@@ -27,11 +27,22 @@
  * the whole `tenant → project → workspace` chain rather than only the tenant the
  * credential happened to declare.
  *
- * The one credential leg that is NOT durable here is the native/virtual one, and
- * it is a platform limit rather than an unfinished port — see the PORT-TODO in
- * `src/store/api_keys.ts`, which states it exactly (a key's scopes live in the
- * per-tenant database and Workers resolve D1 bindings at deploy time).
+ * The NATIVE/virtual credential leg is durable too, as of the storage-wiring
+ * slice: `resolveApiKeys` builds `D1NativeApiKeyAuthenticator` over
+ * `api_key_directory` (control) plus the `api_keys` row in that tenant's OWN
+ * database, reached with `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter`
+ * (`resolveTenantDatabases`). It used to be documented as a platform limit —
+ * "a Worker cannot open a D1 database by uuid at runtime" — which was true and
+ * beside the point: a Worker selects a database by BINDING NAME, and the router
+ * is the registry that turns a tenant id into one. The chain is therefore
+ * durable-native → durable-static → declarative vars, which is Rust
+ * `authenticate_with_admission`'s source ordering exactly.
  */
+import {
+  type BindingEnvironment,
+  EnvBindingTenantDatabaseRouter,
+  type TenantDatabaseRouter,
+} from "@ferrogate/storage";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -55,7 +66,7 @@ import {
   StaticAnswersTxtResolver,
   UnboundTxtResolver,
 } from "./site_domain_txt.js";
-import { D1ApiKeyAuthenticator } from "./store/api_keys.js";
+import { D1ApiKeyAuthenticator, D1NativeApiKeyAuthenticator } from "./store/api_keys.js";
 import { D1ControlPlaneStore } from "./store/d1.js";
 import {
   type LifecycleStatus,
@@ -64,6 +75,7 @@ import {
   parseLifecycleStatus,
 } from "./store/lifecycle.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
+import { UnprovisionedTenantDatabaseRouter } from "./store/tenancy.js";
 
 // ---------------------------------------------------------------------------
 // Declarative key material
@@ -621,7 +633,21 @@ export function resolveApiKeys(env: ControlPlaneBindings): ApiKeyAuthenticatorPo
   );
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
   if (env.DB === undefined || env.DB === null) return declarative;
-  return new D1ApiKeyAuthenticator(env.DB, declarative);
+  // Rust `authenticate_with_admission`'s SOURCE ORDERING, preserved exactly:
+  // durable NATIVE keys first, then durable STATIC/operator keys, then the
+  // declarative vars. Each layer is the fallback of the one before it, so a
+  // deployment that has provisioned neither table behaves exactly as it did —
+  // and one that has provisioned either cannot be loosened by a stale var.
+  //
+  // The native leg needs the tenant router because a virtual key's scopes live
+  // in its own tenant's database; `resolveTenantDatabases` is the SAME
+  // construction the admin routes take, so the two cannot disagree about which
+  // database a tenant is.
+  return new D1NativeApiKeyAuthenticator(
+    env.DB,
+    resolveTenantDatabases(env),
+    new D1ApiKeyAuthenticator(env.DB, declarative),
+  );
 }
 
 /**
@@ -657,6 +683,43 @@ export function resolveLifecycle(
   return new StoreTenancyLifecycleGate(store, declarative);
 }
 
+/**
+ * Pick the tenant-database router — `@ferrogate/storage`'s
+ * `EnvBindingTenantDatabaseRouter`, over the control database's
+ * `tenant_databases` registry.
+ *
+ * THE mount for the database-per-tenant directive on this Worker. Before it, the
+ * whole durable half of `@ferrogate/storage` had zero importers under `apps/*`
+ * (see `docs/rewrite/parity-audit-storage.md` §4.1), so the tenant migrations
+ * ran and no code ever wrote a row through them.
+ *
+ * Two things about the shape are worth stating, because both look like
+ * omissions and neither is:
+ *
+ *  - **Constructing the router needs no per-tenant `[[d1_databases]]` stanza.**
+ *    The registry lives in the CONTROL database, which `wrangler.toml` already
+ *    binds; a tenant's own stanza is written when that tenant is onboarded, and
+ *    the router resolves it by NAME off `env` at request time
+ *    (`env[binding_name]`). So this is deployable exactly as committed, and it
+ *    starts routing the moment a tenant is provisioned — no code change.
+ *  - **It is tied to the same `CONTROL_PLANE_STORE` switch as the store, the
+ *    RBAC authorizer and the credential resolver.** `"memory"` means "run this
+ *    deployment without the control database", and a router that kept querying
+ *    it would fail every admin write in a configuration that is otherwise
+ *    entirely valid. One switch, one answer to "is the database in play".
+ */
+export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabaseRouter {
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") {
+    return new UnprovisionedTenantDatabaseRouter();
+  }
+  if (env.DB === undefined || env.DB === null) return new UnprovisionedTenantDatabaseRouter();
+  // The registration cache is per-router and `resolveDeps` builds one per
+  // request, so the TTL only ever elides repeat lookups WITHIN a request. A
+  // provisioning write is therefore visible on the very next request, with no
+  // cache to invalidate.
+  return new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -669,6 +732,7 @@ export function resolveDeps(
     lifecycle: resolveLifecycle(env, store),
     rbac: resolveRbac(env),
     store,
+    tenantDatabases: resolveTenantDatabases(env),
     runtime: new StoreRuntimeStatus(store),
     txtResolver: resolveTxtResolver(env),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does

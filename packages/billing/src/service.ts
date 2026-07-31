@@ -170,33 +170,43 @@ export async function chargeAndRecord(
  * `(request: Request) => Promise<Response>` that can be mounted directly or
  * wrapped by Hono.
  *
- * PORT-TODO(inventory-data-billing §2.4/§2.5) — MOUNTED ON NOTHING. RECORD A
- * DECISION; this is the weakest of the audit's findings, not a proven defect.
+ * ## DECISION RECORDED (inventory-data-billing §2.4/§2.5) — option (b), NOT a
+ * ## PORT-TODO
  *
- * `grep -rn "createBillingService\|/v1/billing/charge" apps/` returns zero hits,
- * so these four routes ship in no Worker. Unlike the `[[policies]]` engine and
- * the workflow-run budget (see `@ferrogate/policy`'s markers), that is DEFENSIBLE
- * here: in Rust this is a standalone process (`ferrogate-billing serve`, its own
- * `TcpListener`), the committed 251-operation contract at
- * `docs/openapi/runtime-api-contract.json` carries NO `/v1/billing/*` operation,
- * and the gateway's own settlement path does not go through HTTP — it calls
- * `charge()` directly via `apps/gateway/src/metering/*` and drains the
- * `billing_report_outbox`, which IS mounted and tested.
+ * The audit asked whether these four routes should be mounted on a Worker or
+ * declared out of the Cloudflare topology. **Declared out of it**, for three
+ * reasons that are each independently checkable:
  *
- * So the open question is a product one, and it should be answered in writing
- * rather than left to `grep`: does `[billing_service] enabled = true` +
- * `endpoint` (still in `@ferrogate/config`'s `billingServiceConfigSchema`, still
- * validated by `validateAuthService`'s sibling `validateBillingAlerts` path)
- * point at anything on Cloudflare? Either
- *   (a) mount this handler as its own Worker (or a route group behind a service
- *       binding) and add the four operations to the route contract, with a
- *       wiring assertion that fails when it is unmounted; or
- *   (b) declare the standalone billing service N/A on Cloudflare — the gateway
- *       settles in-process — and say so where `billingServiceConfigSchema` is
- *       defined, the way `[tls]`/`[tls.acme]` already announce that they are
- *       inert.
- * Leaving it as-is is the one option that keeps an operator's `billing_service`
- * block looking honored while nothing answers on it.
+ *  1. The committed 251-operation route contract
+ *     (`docs/openapi/runtime-api-contract.json`) carries NO `/v1/billing/*`
+ *     operation. Mounting these would mean ADDING operations to the contract —
+ *     a product change, not a port.
+ *  2. The gateway does not settle over HTTP on this platform. It calls
+ *     {@link charge} directly (`apps/gateway/src/metering/*`) and drains
+ *     `billing_report_outbox`; both are mounted and tested. An intra-account
+ *     HTTP hop to a second Worker would add a failure mode and a network
+ *     round-trip to the money path and buy nothing.
+ *  3. In Rust this is a SEPARATE PROCESS (`ferrogate-billing serve`, its own
+ *     `TcpListener`), deliberately deployable away from the data plane. The
+ *     Cloudflare equivalent of "a separate process" is a separate Worker with
+ *     its own account resources, which is a deployment decision an operator
+ *     makes, not something this port should presume.
+ *
+ * So this stays a PORTABLE Fetch handler — complete, tested, and directly
+ * mountable by a self-hosted or standalone deployment — and it is mounted on no
+ * Worker in this repo. That is a decision, not a defect, and it differs from
+ * `@ferrogate/policy`'s `BasicPolicyEngine` / `preflightWorkflowBudget` markers,
+ * which describe guarantees an operator BELIEVES are in force and are not.
+ *
+ * The half that could have become a silent lie is `[billing_service] endpoint /
+ * token / token_env`: an operator pointing that at a real host would otherwise
+ * get a clean load and no traffic. `@ferrogate/config`'s
+ * `inertBillingServiceWarnings` now reports it as INERT through
+ * `loadConfigFromObject`, exactly the way `[tls]`/`[tls.acme]` announce
+ * themselves, and `packages/config/test/platform-limits.test.ts` asserts that
+ * warning through the LOADER so an implemented-but-unmounted warning fails.
+ * `billing_service.enabled` itself is NOT inert — it still gates the issue-#146
+ * refusal that every model and fallback route carries a price.
  */
 export function createBillingService(
   config: BillingServiceConfig,

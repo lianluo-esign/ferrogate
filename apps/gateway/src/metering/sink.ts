@@ -66,7 +66,7 @@ import {
   charge as chargeEvent,
   ledgerEntryId,
 } from "@ferrogate/billing";
-import type { Usage, UsageRecordContext, UsageSink } from "../inference/ports.js";
+import type { Usage, UsageSink } from "../inference/ports.js";
 import { usdToCredits } from "./credits.js";
 import { D1LedgerStore } from "./d1.js";
 import { billingEventFromUsage } from "./event.js";
@@ -94,6 +94,12 @@ import {
   systemClock,
 } from "./ports.js";
 import { InMemoryBillingReportPublisher, QueueBillingReportPublisher } from "./publisher.js";
+import {
+  type MeteringAttribution,
+  type MeteringDrainContext,
+  d1UsageAggregateSink,
+  usageWriteFor,
+} from "./usage-ledger.js";
 import type { MeteringBindingResolver } from "./runtime.js";
 
 /**
@@ -107,6 +113,13 @@ import type { MeteringBindingResolver } from "./runtime.js";
 interface MeteringBackend {
   readonly ledger: LedgerStore;
   readonly publisher: BillingReportPublisher;
+  /**
+   * The TENANT database the usage aggregates accumulate into, when one is
+   * bound. A THIRD seam, deliberately not folded into `ledger`: the billing
+   * ledger is on the CONTROL database and the aggregates are on the tenant one,
+   * and D1 has no cross-database transaction — see `./usage-ledger.ts`.
+   */
+  readonly usageDatabase?: D1Database | undefined;
 }
 
 /**
@@ -252,7 +265,7 @@ export class MeteringUsageSink implements UsageSink {
    * `rc.env`; when it is absent see {@link MeteringSinkOptions.bindings} for
    * why the drain is then deliberately deferred to `meteringDrain()`.
    */
-  record(usage: Usage, rc?: UsageRecordContext): void {
+  record(usage: Usage, rc?: MeteringDrainContext): void {
     try {
       this.#settle(usage, rc);
     } catch (error) {
@@ -279,7 +292,7 @@ export class MeteringUsageSink implements UsageSink {
    * settles into D1 and publishes onto the Queue; otherwise it settles into the
    * construction-time fallbacks.
    */
-  async flush(rc?: UsageRecordContext): Promise<void> {
+  async flush(rc?: MeteringDrainContext): Promise<void> {
     const chained = (this.#draining ?? Promise.resolve()).then(
       () => this.#drain(rc),
       () => this.#drain(rc),
@@ -357,16 +370,18 @@ export class MeteringUsageSink implements UsageSink {
     }
     const database = this.#bindings.database(env);
     const queue = this.#bindings.queue(env);
+    const usageDatabase = this.#bindings.usageDatabase?.(env);
     const resolved: MeteringBackend = {
       ledger: database === undefined ? fallback.ledger : new D1LedgerStore(database),
       publisher: queue === undefined ? fallback.publisher : new QueueBillingReportPublisher(queue),
+      ...(usageDatabase === undefined ? {} : { usageDatabase }),
     };
     this.#backends.set(env, resolved);
     return resolved;
   }
 
   /** `ctx.waitUntil` when the request context is in hand, else the default. */
-  #schedule(work: Promise<unknown>, rc: UsageRecordContext | undefined): void {
+  #schedule(work: Promise<unknown>, rc: MeteringDrainContext | undefined): void {
     const ctx = rc?.ctx;
     if (ctx !== undefined) {
       executionContextScheduler(ctx).waitUntil(work);
@@ -375,7 +390,7 @@ export class MeteringUsageSink implements UsageSink {
     this.#scheduler.waitUntil(work);
   }
 
-  #settle(usage: Usage, rc: UsageRecordContext | undefined): void {
+  #settle(usage: Usage, rc: MeteringDrainContext | undefined): void {
     const now = this.#clock.nowUnixSeconds();
     const settledCostUsd = this.#settledCostUsd?.(usage);
     const event = billingEventFromUsage(usage, {
@@ -462,9 +477,10 @@ export class MeteringUsageSink implements UsageSink {
    * through all 20 attempts in one `waitUntil` — the exact starvation
    * `MAX_BILLING_OUTBOX_ATTEMPTS` exists to bound.
    */
-  async #drain(rc: UsageRecordContext | undefined): Promise<void> {
+  async #drain(rc: MeteringDrainContext | undefined): Promise<void> {
     const attempted = new Set<string>();
     const backend = this.#backend(rc?.env);
+    const attribution = rc?.attribution;
     try {
       for (;;) {
         const now = this.#clock.nowUnixSeconds();
@@ -476,7 +492,7 @@ export class MeteringUsageSink implements UsageSink {
         }
         for (const record of due) {
           attempted.add(record.id);
-          await this.#deliverOnce(record, now, backend);
+          await this.#deliverOnce(record, now, backend, attribution);
         }
       }
     } catch (error) {
@@ -495,7 +511,12 @@ export class MeteringUsageSink implements UsageSink {
    * straight to delivery, which is exactly what `sweep_billing_outbox_once`
    * does (it only ever calls `deliver_once`).
    */
-  async #deliverOnce(record: OutboxRecord, now: number, backend: MeteringBackend): Promise<void> {
+  async #deliverOnce(
+    record: OutboxRecord,
+    now: number,
+    backend: MeteringBackend,
+    attribution: MeteringAttribution | undefined,
+  ): Promise<void> {
     const { id, charge, attempts } = record;
     try {
       if (!record.settled) {
@@ -523,6 +544,12 @@ export class MeteringUsageSink implements UsageSink {
         }
         this.#stats.recorded += 1;
         this.#outbox.markSettled(id);
+        // CLAIM FIRST, ACCUMULATE SECOND — and ONLY on `recorded`. The control
+        // database's `ON CONFLICT DO NOTHING` claim is the exactly-once gate;
+        // the tenant-database accumulate below is `existing + excluded`, i.e.
+        // additive and NOT idempotent, so running it on a `duplicate` would
+        // count one request's tokens twice. See `./usage-ledger.ts`.
+        await this.#accumulate(backend, charge, attribution);
       }
       await backend.publisher.deliver(charge);
       this.#stats.delivered += 1;
@@ -569,6 +596,54 @@ export class MeteringUsageSink implements UsageSink {
     await this.#durable(backend, (outbox) => outbox.reap(id), "reap");
   }
 
+  /**
+   * The committed-token / monthly-spend FEEDBACK LOOP: accumulate this charge
+   * into the tenant database's `tenant_contexts` + `usage_aggregate_rollups` +
+   * `usage_monthly_rollups`, through `@ferrogate/storage`'s `D1UsageLedger`.
+   *
+   * Those three tables are the inputs of two admission gates that, before this
+   * call existed, read a table nothing ever wrote:
+   * `ratelimit/quota.ts::d1SpendSource` (the monthly USD budget) and
+   * `ratelimit/token-budget.ts` (`api_keys.monthly_token_budget`).
+   *
+   * BEST-EFFORT by construction, and the failure direction is deliberate: an
+   * accumulate that fails leaves the budget UNDER-counted, which can only fail
+   * to refuse a caller, never wrongly refuse one. Rethrowing would run
+   * `#deliverOnce`'s `catch`, which counts a delivery failure and arms a retry —
+   * i.e. a bookkeeping failure would become a duplicate downstream REPORT of a
+   * charge that was already delivered.
+   */
+  async #accumulate(
+    backend: MeteringBackend,
+    charge: MeteredCharge,
+    attribution: MeteringAttribution | undefined,
+  ): Promise<void> {
+    const db = backend.usageDatabase;
+    if (db === undefined) {
+      return; // no tenant database bound; nothing to accumulate into
+    }
+    const write = usageWriteFor(charge, attribution);
+    if (write === null) {
+      // No scope at all: `persistUsageAggregate` would refuse this, and rightly
+      // — "a call folded into no scope is spend that no budget check can ever
+      // see". Counted so an attribution regression is visible rather than
+      // showing up months later as a budget that never trips.
+      this.#stats.unattributed += 1;
+      this.#guard(
+        () => this.#diagnostics.onError?.("usage_unattributed", new Error(charge.requestId)),
+        "usage_unattributed",
+      );
+      return;
+    }
+    try {
+      const tenantId = write.context.organizationId ?? "";
+      await d1UsageAggregateSink(db, tenantId).accumulate(write);
+      this.#stats.aggregated += 1;
+    } catch (error) {
+      this.#report("usage_aggregate", error);
+    }
+  }
+
   /** Run one durable-outbox state move, if this backend keeps one. */
   async #durable(
     backend: MeteringBackend,
@@ -600,7 +675,7 @@ export class MeteringUsageSink implements UsageSink {
    * still owned by the `waitUntil` of the request that created them, and racing
    * that would produce a duplicate report for no benefit. Never rejects.
    */
-  async sweep(rc: UsageRecordContext, nowUnixSeconds?: number): Promise<void> {
+  async sweep(rc: MeteringDrainContext, nowUnixSeconds?: number): Promise<void> {
     const backend = this.#backend(rc.env);
     const outbox = backend.ledger.outbox;
     if (outbox === undefined) {

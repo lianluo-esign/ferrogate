@@ -181,6 +181,113 @@ describe.each(BACKENDS)("ControlPlaneStore contract: $name", (backend) => {
   });
 
   // -------------------------------------------------------------------------
+  // mergeIf — the compare-and-set
+  // -------------------------------------------------------------------------
+  //
+  // Held to ONE contract across both backends for the usual reason, but with an
+  // extra edge here: the memory store gets its atomicity from the isolate being
+  // single-threaded, while D1 has to reconstruct it with a revision guard and a
+  // retry. Those are entirely different mechanisms, so "they agree" is not a
+  // given — it is the thing under test.
+
+  it("applies the patch when the precondition holds", async () => {
+    await store.create("site-domain-verifications", TENANT_A, { id: "v1", attempts: 0 });
+    const outcome = await store.mergeIf(
+      "site-domain-verifications",
+      TENANT_A,
+      "v1",
+      { attempts: 1 },
+      (current) => current.attempts === 0,
+    );
+    expect(outcome.kind).toBe("merged");
+    expect(await store.get("site-domain-verifications", TENANT_A, "v1")).toMatchObject({
+      attempts: 1,
+    });
+  });
+
+  it("refuses and WRITES NOTHING when the precondition fails", async () => {
+    await store.create("site-domain-verifications", TENANT_A, { id: "v1", attempts: 7 });
+    const outcome = await store.mergeIf(
+      "site-domain-verifications",
+      TENANT_A,
+      "v1",
+      { attempts: 8 },
+      (current) => current.attempts === 0,
+    );
+    expect(outcome.kind).toBe("precondition_failed");
+    // The refusal carries the row it was decided against, so a caller can label
+    // it (how long is left on a cooldown) instead of re-reading and racing again.
+    if (outcome.kind === "precondition_failed") {
+      expect(outcome.current).toMatchObject({ attempts: 7 });
+    }
+    expect(await store.get("site-domain-verifications", TENANT_A, "v1")).toMatchObject({
+      attempts: 7,
+    });
+  });
+
+  it("reports `not_found` — not `precondition_failed` — for a row that does not exist", async () => {
+    // The two are different facts: one is a 404, the other a 429/409. A store
+    // that collapsed them would make a rate limit report itself as a missing
+    // resource, and the precondition must not even be consulted.
+    let consulted = false;
+    const outcome = await store.mergeIf("plans", OPERATOR, "ghost", { x: 1 }, () => {
+      consulted = true;
+      return true;
+    });
+    expect(outcome.kind).toBe("not_found");
+    expect(consulted).toBe(false);
+  });
+
+  it("reports `not_found` for another tenant's row, without consulting the predicate", async () => {
+    await store.create("plans", TENANT_A, { id: "p1", secret: "a" });
+    let consulted = false;
+    const outcome = await store.mergeIf("plans", TENANT_B, "p1", { secret: "b" }, (current) => {
+      consulted = true;
+      return current.secret === "a";
+    });
+    expect(outcome.kind).toBe("not_found");
+    // Handing another tenant's row to the caller's own predicate would leak its
+    // contents even though the write is refused.
+    expect(consulted).toBe(false);
+    expect(await store.get("plans", TENANT_A, "p1")).toMatchObject({ secret: "a" });
+  });
+
+  it("keeps `id` and `tenant_id` structural, exactly as `merge` does", async () => {
+    await store.create("plans", TENANT_A, { id: "p1" });
+    await store.mergeIf(
+      "plans",
+      TENANT_A,
+      "p1",
+      { id: "forged", tenant_id: "tenant_b", label: "ok" },
+      () => true,
+    );
+    expect(await store.get("plans", OPERATOR, "p1")).toMatchObject({
+      id: "p1",
+      tenant_id: "tenant_a",
+      label: "ok",
+    });
+    expect(await store.get("plans", OPERATOR, "forged")).toBeNull();
+  });
+
+  it("admits exactly ONE of two concurrent claims on the same row", async () => {
+    // The whole reason the method exists. `get` + `merge` passes every test
+    // above and FAILS this one: both readers see `claimed: false`, both are
+    // told yes, and both write.
+    await store.create("plans", OPERATOR, { id: "slot", claimed: false });
+    const claim = () =>
+      store.mergeIf(
+        "plans",
+        OPERATOR,
+        "slot",
+        { claimed: true },
+        (current) => current.claimed !== true,
+      );
+    const outcomes = await Promise.all([claim(), claim(), claim(), claim(), claim()]);
+    expect(outcomes.filter((outcome) => outcome.kind === "merged")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.kind === "precondition_failed")).toHaveLength(4);
+  });
+
+  // -------------------------------------------------------------------------
   // remove
   // -------------------------------------------------------------------------
 

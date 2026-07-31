@@ -605,9 +605,36 @@ async function refreshCredential(
   return refreshed;
 }
 
+/**
+ * Materialize an upstream's `client_secret_ref` through the bound secret seam
+ * ({@link McpPorts.secrets}, which `resolvePorts` binds to
+ * `@ferrogate/secrets`' registry).
+ *
+ * Two distinct outcomes, both reported as `mcp_identity_secret_unavailable`
+ * because both leave the exchange unable to proceed, but with different text:
+ *
+ *  - `undefined` — the reference parsed and named nothing that is bound
+ *    ("not configured").
+ *  - a THROW — a genuine backend failure: an unparseable reference, an
+ *    ambiguous `cf://` name the resolver refuses to guess at, a `vault://`
+ *    reference with no `VAULT_ADDR`/`VAULT_TOKEN`. The resolver's own message
+ *    is the operator's only diagnostic, so it is carried through rather than
+ *    collapsed into a 500. Resolver messages name variables and references,
+ *    never values.
+ */
 async function resolveClientSecret(ports: McpPorts, oauth: McpOauthConfig): Promise<string> {
   if (oauth.clientSecretRef === undefined) return "";
-  const resolved = await ports.secrets.resolve(oauth.clientSecretRef);
+  let resolved: string | undefined;
+  try {
+    resolved = await ports.secrets.resolve(oauth.clientSecretRef);
+  } catch (cause) {
+    throw McpIdentityError.unavailable(
+      "mcp_identity_secret_unavailable",
+      `MCP OAuth client secret ${oauth.clientSecretRef} could not be resolved: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+  }
   if (resolved === undefined) {
     throw McpIdentityError.unavailable(
       "mcp_identity_secret_unavailable",

@@ -132,7 +132,19 @@ export {
   ledgerDocument,
 } from "./d1.js";
 
-export { meteringDrain } from "./middleware.js";
+export { attributionFrom, meteringDrain } from "./middleware.js";
+
+export {
+  type MeteringAttribution,
+  type MeteringDrainContext,
+  type UsageAggregateSink,
+  type UsageLedgerBindings,
+  d1UsageAggregateSink,
+  usageContextId,
+  usageDatabaseFrom,
+  usageScopesFor,
+  usageWriteFor,
+} from "./usage-ledger.js";
 
 export {
   executionContextOf,

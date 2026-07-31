@@ -194,3 +194,78 @@ describe("tls/acme: Cloudflare terminates TLS, so the sections are inert", () =>
     }
   });
 });
+
+/**
+ * 5. `[billing_service]` — the standalone billing service is NOT part of the
+ *    Cloudflare topology (decision recorded at `@ferrogate/billing`'s
+ *    `createBillingService`). `enabled` stays LIVE; the HTTP-client half is
+ *    inert and the load says so.
+ *
+ * Asserted through the LOADER, not by calling `inertBillingServiceWarnings`
+ * directly, so an implemented-but-unmounted warning goes red — the failure mode
+ * this repo keeps hitting.
+ */
+describe("billing_service: the HTTP client half is inert on Cloudflare", () => {
+  const pricedModel = {
+    name: "gpt-4o",
+    provider: "openai",
+    provider_model: "gpt-4o",
+    input_price_per_1m: 5,
+    output_price_per_1m: 15,
+  };
+  const withProvider = {
+    providers: [{ name: "openai", kind: "openai", base_url: "https://api.openai.com/v1" }],
+    models: [pricedModel],
+  };
+
+  test("the LOADER reports a NON-DEFAULT endpoint as inert", () => {
+    const { warnings } = loadConfigFromObject({
+      ...withProvider,
+      billing_service: { enabled: true, endpoint: "http://billing.internal:8092" },
+    });
+    expect(warnings.join("\n")).toMatch(/\[billing_service\] endpoint\/token are INERT/);
+    // The message must say what DOES happen, not merely what does not.
+    expect(warnings.join("\n")).toMatch(/settles IN-PROCESS/);
+  });
+
+  test("the LOADER reports a configured token as inert even on the default endpoint", () => {
+    const { warnings } = loadConfigFromObject({
+      ...withProvider,
+      billing_service: { enabled: true, token: "shared-secret" },
+    });
+    expect(warnings.join("\n")).toMatch(/\[billing_service\] endpoint\/token are INERT/);
+    // The warning names the section, never the credential.
+    expect(warnings.join("\n")).not.toContain("shared-secret");
+  });
+
+  test("merely ENABLING billing does not warn — the in-process path is supported", () => {
+    // A false positive here would train operators to ignore the warning.
+    const { warnings } = loadConfigFromObject({
+      ...withProvider,
+      billing_service: { enabled: true },
+    });
+    expect(warnings.join("\n")).not.toMatch(/billing_service/);
+  });
+
+  test("`enabled` is NOT inert: it still refuses a model with no price (#146)", () => {
+    // The live half of the section. If this ever stops throwing, the decision
+    // recorded in `@ferrogate/billing` is wrong and the warning is misleading.
+    expect(() =>
+      loadConfigFromObject({
+        providers: [{ name: "openai", kind: "openai", base_url: "https://api.openai.com/v1" }],
+        models: [{ name: "gpt-4o", provider: "openai", provider_model: "gpt-4o" }],
+        billing_service: { enabled: true, endpoint: "http://billing.internal:8092" },
+      }),
+    ).toThrow(/billing_service\.enabled requires input_price_per_1m/);
+  });
+
+  test("no Worker in this repo mounts the billing service handler", () => {
+    // The decision itself, asserted rather than left to a `grep` in a comment:
+    // `@ferrogate/config` must not gain a route-contract entry for it, and this
+    // package must not start exporting a Worker entry point.
+    const surface = Object.keys(configPackage);
+    for (const absent of ["createBillingService", "billingServiceRoutes"]) {
+      expect(surface).not.toContain(absent);
+    }
+  });
+});

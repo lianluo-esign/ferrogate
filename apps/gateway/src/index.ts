@@ -31,6 +31,7 @@ import {
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
+import { tenantDatabase } from "./tenancy/index.js";
 
 /**
  * The durable metering sink behind `UsageSink`.
@@ -101,7 +102,11 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * ingress order (`docs/legacy/inventory-request-path.md` §"Cross-crate
  * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
  *
- *   contractAuth  →  meteringDrain  →  rateLimit  →  guardrails  →  validate  →  dispatch
+ *   contractAuth → meteringDrain → rateLimit → guardrails → tenantDatabase
+ *                → responseCache → validate → dispatch
+ *
+ * (`responseCache` is mounted by `createGatewayApp` itself, immediately after
+ * this array and immediately before the routes — see `CreateGatewayAppOptions`.)
  *
  * `meteringDrain` is FIRST because it is the only one that does its work on the
  * way OUT: it wraps `await next()`, so being outermost is what lets it see the
@@ -188,6 +193,20 @@ export const GATEWAY_MIDDLEWARE = [
       return translated.ok ? translated.body : undefined;
     },
   })),
+  // Per-tenant D1 — ONE DATABASE PER TENANT (`src/tenancy/`, which is the only
+  // importer of `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter` /
+  // `ControlDatabaseTenantRegistry`). It is LAST in this array because it is
+  // the only entry that routes on the tenant the credential resolved to and
+  // nothing ahead of it reads a tenant handle: the admission counters and the
+  // guardrail policies are CONTROL-plane state (`CONTROL_DB` / `BILLING_DB`),
+  // which per-tenant routing deliberately does not move — see `tenancy/ports.ts`
+  // on the CONTROL/TENANT split.
+  //
+  // Inert while `GATEWAY_TENANT_DB_ROUTING` is `"off"` (the committed default),
+  // and it NEVER falls back to the shared `DB`: an unprovisioned or unbound
+  // tenant is refused `503 tenant_database_unavailable` rather than silently
+  // served another tenant's rows.
+  tenantDatabase(),
 ] as const;
 
 const { app, router } = createGatewayApp({

@@ -8,6 +8,27 @@
  * land, bind a real implementation in {@link resolvePorts} — nothing else in
  * this app changes.
  *
+ * ## Which ports are actually BOUND to a real package (keep this honest)
+ *
+ * A narrow port whose only implementation is the in-memory default is a
+ * DEFERRAL wearing an abstraction's clothes: the package exists, the tests are
+ * green, and the deployed Worker never calls it. Current state:
+ *
+ * | port          | production binding                                        |
+ * |---------------|-----------------------------------------------------------|
+ * | `guardrails`  | `@ferrogate/guardrails` `DeterministicDetector` — BOUND    |
+ * | `secrets`     | `@ferrogate/secrets` `SecretResolverRegistry` — BOUND      |
+ * | `credentials` | `DurableCredentialStore` (D1 + KV + DO) — BOUND           |
+ * | `cipher`      | `identityCipherFrom(FERROGATE_MCP_IDENTITY_KEY)` — BOUND   |
+ * | `upstreams`   | `HttpMcpUpstreams` + the `MCP_SESSION` DO — BOUND          |
+ * | `auth`        | {@link UnboundAuth} — NOT BOUND, fails closed (see below)  |
+ * | `oauth`       | {@link unboundOauthProvider} — NOT BOUND, fails closed     |
+ * | `audit`       | {@link InMemoryAuditSink} — isolate-local (see wrangler)   |
+ *
+ * `guardrails` and `secrets` are each bound in EVERY posture and each has a
+ * mount-gate test that goes red when the binding is dropped
+ * (`test/guardrails.test.ts`, `test/secrets-mount.test.ts`).
+ *
  * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio MCP upstreams
  * are impossible in a Worker. The Rust host
  * (`crates/ferrogate-mcp/src/stdio_client.rs`) spawns a child process per
@@ -23,6 +44,7 @@
  * note and the tests that pin it.
  */
 import type { JsonValue } from "@ferrogate/core";
+import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
 import {
   DeterministicDetector,
   type SecretPattern,
@@ -1329,7 +1351,7 @@ export function inMemoryPorts(): InMemoryMcpPorts {
     assets: new InMemoryAssets(),
     credentials: new InMemoryCredentialStore(),
     oauth: unboundOauthProvider(),
-    secrets: { resolve: async () => undefined },
+    secrets: unresolvableSecrets(),
     cipher: webCryptoIdentityCipher(),
     audit: new InMemoryAuditSink(),
     metrics: new InMemoryMetrics(),
@@ -1349,7 +1371,8 @@ export function resetInMemoryPorts(): void {
   ports.audit.clear();
   ports.metrics.clear();
   ports.oauth = unboundOauthProvider();
-  ports.secrets = { resolve: async () => undefined };
+  secretResolverOverride = undefined;
+  ports.secrets = unresolvableSecrets();
 }
 
 /** Replace the OAuth provider seam (tests bind a deterministic fake here). */
@@ -1357,9 +1380,72 @@ export function setOauthProvider(provider: OauthProviderPort): void {
   inMemoryPorts().oauth = provider;
 }
 
-/** Replace the secret resolver seam. */
+/**
+ * A test-only override for the secret seam, consulted by {@link resolvePorts}
+ * ahead of {@link workerSecretResolver}.
+ *
+ * It is a module-level slot rather than a mutation of {@link inMemoryPorts} so
+ * that "a test installed a fake" and "nothing is bound" are DISTINGUISHABLE.
+ * Without that distinction the real registry could only ever be bound in a
+ * posture no test reaches, and the mount would be unprovable — which is how the
+ * previous `{ resolve: async () => undefined }` default survived unnoticed.
+ */
+let secretResolverOverride: SecretResolverPort | undefined;
+
+/** Replace the secret resolver seam (tests bind a deterministic fake here). */
 export function setSecretResolver(resolver: SecretResolverPort): void {
+  secretResolverOverride = resolver;
   inMemoryPorts().secrets = resolver;
+}
+
+/** The placeholder held on the in-memory bundle when no override is installed. */
+function unresolvableSecrets(): SecretResolverPort {
+  return { resolve: async () => undefined };
+}
+
+/**
+ * The REAL secret seam: `@ferrogate/secrets`' `SecretResolverRegistry`, reading
+ * THIS Worker's `env`.
+ *
+ * Every `secret_ref` an operator can write in an upstream's
+ * {@link McpOauthConfig.clientSecretRef} goes through it:
+ *
+ *  - `env://NAME` — a `[vars]` entry, a `wrangler secret put` value, or a
+ *    `[[secrets_store_secrets]]` binding (awaited via `SecretsStoreSecret.get()`);
+ *  - `cf://<store>/<name>` — the `FERROGATE_CF_SECRET_<NAME>` binding
+ *    convention, with the lossy-name ambiguity guard that refuses rather than
+ *    serve a credential the operator did not name;
+ *  - `vault://<mount>/<path>#<field>` — HashiCorp Vault KV v2, when
+ *    `VAULT_ADDR` + `VAULT_TOKEN` are bound.
+ *
+ * WHY THIS EXISTS: until this mount, `resolvePorts` bound
+ * `{ resolve: async () => undefined }` in EVERY posture, so a per-user-OAuth
+ * upstream carrying a `client_secret_ref` could never complete a token exchange
+ * on a deployed Worker — every authorize/refresh answered
+ * `mcp_identity_secret_unavailable` — while `@ferrogate/secrets` sat fully
+ * implemented and fully tested with zero importers in any app. The registry is
+ * built LAZILY (first `resolve`) so an upstream with no `client_secret_ref`
+ * never pays for it, and so a malformed backend configuration surfaces on the
+ * request that needs the secret rather than on every request.
+ *
+ * `McpEnv` is cast to `EnvLike` because a Worker `env` is heterogeneous — it
+ * also carries KV/D1/DO namespaces. That is safe: the registry only ever reads
+ * the specific NAMES a secret reference or a backend variable asks for, and
+ * `isSecretsStoreBinding` refuses any slot that looks like another binding.
+ */
+export function workerSecretResolver(env: McpEnv): SecretResolverPort {
+  let registry: SecretResolverRegistry | undefined;
+  return {
+    async resolve(reference: string): Promise<string | undefined> {
+      registry ??= SecretResolverRegistry.fromEnv(env as unknown as EnvLike);
+      // The registry's `null` is "not configured"; the port's `undefined` means
+      // the same thing to `resolveClientSecret`. A genuine failure (ambiguous
+      // `cf://` name, Vault unreachable, unparseable reference) THROWS, and the
+      // caller turns it into `mcp_identity_secret_unavailable` with the reason
+      // attached rather than a bare 500.
+      return (await registry.resolve(reference)) ?? undefined;
+    },
+  };
 }
 
 function unboundOauthProvider(): OauthProviderPort {
@@ -1539,13 +1625,23 @@ export function parseGuardrailVar(raw: string | undefined): ManagedActionGuardra
  * so dropping the binding here silently un-scans every MCP tool argument and
  * every tool result while leaving the whole suite green — the exact defect
  * `test/guardrails.test.ts` drives over `SELF` to prevent.
+ *
+ * The SECRET SEAM is bound in EVERY posture for the same reason: an upstream's
+ * `client_secret_ref` must resolve wherever the OAuth exchange can run, and the
+ * dev bundle is the only posture the offline suite can drive end to end, so
+ * binding it anywhere else would leave the mount unprovable. `secrets` is
+ * {@link workerSecretResolver} unless a test installed an override through
+ * {@link setSecretResolver}. Dropping this binding silently returns the Worker
+ * to answering `mcp_identity_secret_unavailable` for every configured upstream
+ * credential — `test/secrets-mount.test.ts` drives that over `SELF`.
  */
 export function resolvePorts(env: McpEnv): McpPorts {
   const guardrails = deterministicManagedActionGuardrails(
     parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS),
   );
-  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return { ...inMemoryPorts(), guardrails };
-  const ports = { ...inMemoryPorts(), guardrails };
+  const secrets = secretResolverOverride ?? workerSecretResolver(env);
+  if (env.FG_DEV_IN_MEMORY_PORTS === "1") return { ...inMemoryPorts(), guardrails, secrets };
+  const ports = { ...inMemoryPorts(), guardrails, secrets };
   if (durableIdentityBound(env)) {
     return {
       ...ports,

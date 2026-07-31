@@ -23,6 +23,7 @@
  */
 import { z } from "zod";
 import { providerIsDurable, providerIsImplemented } from "@ferrogate/storage/provider";
+import { BILLING_SERVICE_DEFAULT_ENDPOINT } from "../schema/sections.js";
 import type { Config, StorageProviderKind } from "../schema/index.js";
 import { IpCidr } from "../network-access.js";
 import {
@@ -752,6 +753,45 @@ export function inertTlsWarnings(config: Config): string[] {
     );
   }
   return warnings;
+}
+
+/**
+ * The compensating control for the STANDALONE BILLING SERVICE, which is not part
+ * of the Cloudflare deployment topology (inventory-data-billing §2.4/§2.5; the
+ * decision recorded at `@ferrogate/billing`'s `createBillingService`).
+ *
+ * What is REAL and stays real: `billing_service.enabled = true` still means
+ * "billing reporting is on", and it still gates the issue-#146 price-completeness
+ * refusal in `validate/entities.ts` — a model or fallback route with no
+ * gateway-side price is rejected at load, exactly as in Rust.
+ *
+ * What is INERT: the HTTP-CLIENT half — `endpoint`, `timeout_millis`, `token`,
+ * `token_env`. In Rust the gateway POSTs each settlement to a separate
+ * `ferrogate-billing serve` process at that endpoint. On Cloudflare the gateway
+ * settles IN-PROCESS (`apps/gateway/src/metering/*` calls `charge()` directly and
+ * drains `billing_report_outbox`), the committed 251-operation contract carries
+ * no `/v1/billing/*` operation, and nothing dials `endpoint`. The handler in
+ * `@ferrogate/billing` is retained as a portable Fetch handler for a
+ * self-hosted deployment; it is mounted on no Worker here.
+ *
+ * Warn-only, and only when a NON-DEFAULT endpoint/token is present: an operator
+ * who merely flips `enabled` is using the supported in-process path and should
+ * not be nagged, while one who points the section at a real host must be told
+ * nothing will dial it. Silence there is the lie this exists to prevent.
+ */
+export function inertBillingServiceWarnings(config: Config): string[] {
+  const billing = config.billing_service;
+  const endpointConfigured =
+    billing.endpoint.trim() !== "" && billing.endpoint !== BILLING_SERVICE_DEFAULT_ENDPOINT;
+  const tokenConfigured = billing.token !== null || billing.token_env !== null;
+  if (!endpointConfigured && !tokenConfigured) return [];
+  return [
+    "[billing_service] endpoint/token are INERT on Cloudflare: no Worker dials the standalone " +
+      "billing service, and the runtime API contract carries no /v1/billing/* operation. The " +
+      "gateway settles IN-PROCESS (charge() plus the billing_report_outbox drain), so " +
+      "billing_service.enabled still turns reporting on and still requires a price on every " +
+      "model and fallback route -- only the HTTP client half is unused.",
+  ];
 }
 
 /**

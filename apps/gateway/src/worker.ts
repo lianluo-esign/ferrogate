@@ -68,3 +68,20 @@ export default handler;
  * see `test/ratelimit/harness/` for the same export under vitest.
  */
 export { RateLimiterDurableObject } from "./ratelimit/index.js";
+
+/**
+ * The `PROVIDER_CIRCUIT` Durable Object class — the cross-isolate provider
+ * circuit breaker (`src/inference/circuit-do.ts`).
+ *
+ * Same startup rule as `RateLimiterDurableObject` above: workerd resolves the
+ * `[[durable_objects.bindings]]` `class_name` against THIS module, so without
+ * this line `wrangler dev` fails with "Durable Object class
+ * ProviderCircuitDurableObject not found" while the whole vitest suite stays
+ * green (`@cloudflare/vitest-pool-workers` does not run the entrypoint-shape
+ * check).
+ *
+ * One instance per provider NAME, so a wedged provider concentrates on one
+ * object; provider names come from the operator's `GATEWAY_PROVIDERS` table,
+ * never from a caller, so no request input can choose a DO id.
+ */
+export { ProviderCircuitDurableObject } from "./inference/index.js";

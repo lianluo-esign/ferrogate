@@ -41,6 +41,11 @@
  * (`defaultAuthScheme` in `adapters.ts`); a route only ever deviates because an
  * operator wrote `auth_scheme` in the provider table.
  */
+// Type-only, and therefore erased at build time: `reliability.ts` imports
+// `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
+// here would be a real cycle.
+import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
+
 export type ProviderAuthScheme = "bearer" | "x-api-key";
 
 /** `ferrogate_providers::ModelCapability` — the closed capability vocabulary. */
@@ -132,6 +137,35 @@ export interface PhysicalRoute {
   readonly capabilities?: readonly ModelCapability[] | undefined;
   /** `ModelRoute.region` (issue #173) — `undefined` when the provider declares none. */
   readonly region?: string | undefined;
+  /**
+   * `ModelRoute.context_window` — the declared token ceiling, and half of the
+   * `model_routing.rs` eligibility gate. `undefined` means "undeclared", which
+   * is only tolerated on a capability-neutral route (see
+   * `candidates.ts::routeExclusionReasons`).
+   */
+  readonly contextWindow?: number | undefined;
+  /**
+   * `ModelRoute.priority` — ASCENDING, so `0` is tried before `1`. Absent is
+   * `0`, i.e. every route a legacy config declares shares one priority group.
+   */
+  readonly priority?: number | undefined;
+  /** `ModelRoute.weight` — DESCENDING within a priority group. Absent is `0`. */
+  readonly weight?: number | undefined;
+  /**
+   * `CanaryRoute.percent` (0–100). Present ⇒ this route is a CANARY: it is
+   * promoted to the head of the candidate list for the sticky subset of callers
+   * `canarySelected` picks, and dropped for everyone else. See
+   * `candidates.ts::applyCanary`.
+   */
+  readonly canaryPercent?: number | undefined;
+  /**
+   * `ShadowRoute.sample_percent` (0–100). Present ⇒ this route is a MIRROR and
+   * is never servable to a client — `candidates.ts::servableCandidates` strips
+   * it out of the ladder before the first dispatch.
+   */
+  readonly shadowPercent?: number | undefined;
+  /** `ShadowRoute.max_requests` — the budget cap; `0` is uncapped. */
+  readonly shadowMaxRequests?: number | undefined;
   /** Disabled models resolve to `null` but still exist; see {@link ModelResolver.catalog}. */
   readonly enabled: boolean;
   /** Tenant that owns a private model; `undefined` means globally visible. */
@@ -150,61 +184,56 @@ export interface PhysicalRoute {
  * `enabled: false` is `model_disabled`. Keeping `resolve` at the one-line
  * signature keeps the seam trivial for the wave-2 `@ferrogate/routing` adapter.
  *
- * ## PORT-TODO(inventory-request-path §1.7 + §"routing/failover", issue #582)
+ * ## The candidate list (was PORT-TODO F3/F4/F5 — now wired)
  *
- * `resolve` returning ONE {@link PhysicalRoute} is the reason the entire Rust
- * reliability layer between "resolve a model" and "call the provider" is absent
- * from this data plane. Rust's counterpart is
- * `AppState::candidate_model_routes` (`state_routing.rs:489`), which returns an
- * ORDERED LIST, and `chat.rs:259`'s `'routes:` loop walks it. Three distinct
- * behaviors die on this signature; none is a platform limit.
+ * `resolve` returning ONE route was the reason the entire Rust reliability
+ * layer between "resolve a model" and "call the provider" was absent from this
+ * data plane. {@link ModelResolver.candidates} is the port of
+ * `AppState::candidate_model_routes` (`state_routing.rs:489`) — the ORDERED
+ * list `chat.rs:259`'s `'routes:` loop walks — and
+ * `handlers.ts::dispatchCandidates` walks it through
+ * `reliability.ts::dispatchWithFailover`, consulting a
+ * {@link ProviderCircuit} per candidate and `isRetryableStatus` (imported from
+ * `@ferrogate/providers`) per attempt. Eligibility (issue #582) is
+ * `candidates.ts::eligibleCandidates`, applied BEFORE the first dispatch,
+ * exactly as `model_routing.rs` applies it before any strategy reads price or
+ * health.
  *
- *  1. **Circuit breaking.** `ProviderCircuitBreaker` (`state.rs:5540`;
- *     `reliability.provider_circuit_breaker_failure_threshold` /
- *     `_cooldown_secs`), `provider_circuit_allows` /
- *     `record_provider_success` / `record_provider_failure`
- *     (`state_routing.rs:686-719`), and the two branches at `chat.rs:283-314`:
- *     an open circuit SKIPS to the next candidate, or — if there is no next
- *     candidate — answers `503 provider_circuit_open`. `grep -ri circuit
- *     apps/gateway/src` returns zero. A wedged provider is retried on every
- *     single request, forever.
- *  2. **The failover ladder.** `ProviderAttemptDecision::from_retryable_status`
- *     / `::from_dispatch_error` (`chat.rs:3163-3187`) is a two-level ladder:
- *     retry the SAME provider up to `provider_dispatch_max_retries`, then fall
- *     through to the next candidate route, then `ReturnError`.
- *     `isRetryableStatus` — the predicate the first level turns on — is fully
- *     implemented in `@ferrogate/providers` (`types.ts:308`, `registry.ts:174`)
- *     and is **called from nowhere in this app**. `handlers.ts` dispatches
- *     exactly once. Note the billing coupling already recorded at
- *     `src/metering/event.ts` (`SINGLE_PROVIDER_ATTEMPT_INDEX`): when this
- *     lands, the attempt index must be threaded onto `Usage`, or the second
- *     attempt of a request collapses onto the first's `ledgerEntryId` and is
- *     absorbed by `ON CONFLICT DO NOTHING` as a silent under-bill.
- *  3. **Route eligibility (issue #582).** `model_routing.rs` (564 lines) filters
- *     candidates on declared {@link ModelCapability}, `context_window` fit
- *     (`input_token_upper_bound` + `explicit_output_tokens`), unbounded-media
- *     exclusion, and the caller's `region_allowlist` — deliberately BEFORE any
- *     strategy reads price or health, "so an incompatible cheap/healthy route
- *     cannot influence ordering and is never allowed to reach dispatch".
- *     {@link PhysicalRoute.capabilities} exists here but is read only when the
- *     catalog is built, never as a gate; `contextWindow`, the per-1M prices and
- *     `AuthContext.region_allowlist` are not on this type at all. Do not
- *     mistake the adapter-level `unsupported_capability` in `handlers.ts:318`
- *     for this check — that one is "the provider FAMILY cannot do images", a
- *     different and much coarser test.
+ * `candidates` is OPTIONAL so every existing {@link ModelResolver} keeps
+ * compiling; `defaults.ts::resolveCandidates` falls back to
+ * `[resolve(model)]`, i.e. the pre-wiring single-route behavior. It is the
+ * `InMemoryModelResolver` shipped in `defaults.ts` that implements it for real.
  *
- * To close: widen this to `resolve(model, requirements) -> PhysicalRoute[]`
- * (ordered, already filtered), have `handlers.ts` loop it with a circuit
- * consulted per candidate, and put the breaker state in a Durable Object — the
- * Rust `Arc<HashMap<String, ProviderCircuitBreaker>>` is per-process and would
- * silently become per-isolate as a module global. See
- * `docs/rewrite/parity-audit-request-path.md` F3/F4/F5.
+ * ### Still open on this seam
+ *
+ * PORT-TODO(`src/metering/event.ts` `SINGLE_PROVIDER_ATTEMPT_INDEX`): the
+ * provider ATTEMPT INDEX is not yet threaded onto {@link Usage}. The ladder can
+ * now make more than one attempt per request, and the metering event's
+ * `ledgerEntryId` is derived without it, so two attempts of one request would
+ * collapse onto one ledger row and the second be absorbed by `ON CONFLICT DO
+ * NOTHING` as a silent under-bill. Today that is latent rather than live —
+ * usage is recorded exactly once, from the attempt that actually produced the
+ * served response, and abandoned attempts are never metered — but the moment a
+ * failed attempt is metered (for provider-cost attribution) the index has to
+ * land with it. The fix is in `src/metering/`, which this slice does not own.
+ *
+ * PORT-TODO(state_routing.rs:517, F6): `RoutingStrategy::{LowestCost,
+ * LowestLatency,Balanced}` and the weighted round-robin WITHIN a priority group
+ * are still unported; `candidates.ts::orderCandidates` implements the
+ * priority→weight ORDERING only. See the marker on that function.
  */
 export interface ModelResolver {
   /** Resolve a logical model to the physical route to dispatch on. */
   resolve(model: string): PhysicalRoute | null;
   /** Every configured route, enabled or not — backs `GET /v1/models`. */
   catalog(): readonly PhysicalRoute[];
+  /**
+   * `AppState::candidate_model_routes` — every enabled route for the logical
+   * model, primary first then fallbacks, in `orderCandidates` order.
+   *
+   * Optional for backward compatibility only; see the class docs above.
+   */
+  candidates?(model: string): readonly PhysicalRoute[];
 }
 
 /**
@@ -454,6 +483,18 @@ export interface Caller {
   readonly allowedModels?: readonly string[] | undefined;
   /** `AuthContext.denied_models`. */
   readonly deniedModels?: readonly string[] | undefined;
+  /**
+   * `AuthContext.region_allowlist` — the tenant's data-residency policy, read
+   * by `candidates.ts::routeExclusionReasons`.
+   *
+   * EMPTY OR ABSENT MEANS NO GATE, which is the Rust rule
+   * (`if !region_allowlist.is_empty()`), and it is the only safe default: a
+   * non-empty list excludes every route that does not declare a matching
+   * `region`, including routes that declare none at all. Populating this from a
+   * credential that does not actually carry a residency policy would black-hole
+   * a working catalog.
+   */
+  readonly regionAllowlist?: readonly string[] | undefined;
 }
 
 /** `AuthContext::can_use_model` — deny wins, then the allowlist if non-empty. */
@@ -616,6 +657,20 @@ export interface InferenceDeps {
    * model restrictions so the app is runnable before the auth middleware lands.
    */
   readonly caller?: (request: Request) => Caller;
+  /**
+   * `[reliability]` — circuit-breaker thresholds and dispatch retries. Absent
+   * ⇒ read from the `GATEWAY_RELIABILITY` var, and absent there ⇒ Rust's own
+   * defaults, which are "breaker off, no retries" (see
+   * `reliability.ts::DEFAULT_RELIABILITY`).
+   */
+  readonly reliability?: Partial<ReliabilitySettings>;
+  /**
+   * The provider circuit breaker. Absent ⇒ built per Worker `env`: the
+   * `PROVIDER_CIRCUIT` Durable Object when it is bound, the per-isolate
+   * approximation otherwise, and `NO_PROVIDER_CIRCUIT` when the operator has
+   * not configured a threshold + cooldown.
+   */
+  readonly circuit?: ProviderCircuit | ((env: InferenceBindings) => ProviderCircuit);
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -629,4 +684,6 @@ export interface ResolvedInferenceDeps {
   readonly requestIds: RequestIdFactory;
   readonly limits: InferenceLimits;
   readonly caller: (request: Request) => Caller;
+  readonly reliability: ReliabilitySettings;
+  readonly circuit: ProviderCircuit;
 }

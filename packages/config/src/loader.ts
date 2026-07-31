@@ -28,7 +28,7 @@ import type { GatewayConfig } from "./caddyfile/types.js";
 import type { EnvSource } from "./secrets.js";
 import { parseConfig, type Config } from "./schema/config.js";
 import { validateConfig, type ValidateOptions } from "./validate.js";
-import { inertTlsWarnings } from "./validate/sections.js";
+import { inertBillingServiceWarnings, inertTlsWarnings } from "./validate/sections.js";
 
 /** Whether a path's filename is exactly `Caddyfile` (case-insensitive). */
 export function isCaddyfilePath(path: string): boolean {
@@ -96,7 +96,14 @@ export function loadConfigFromObject(
   // The compensating control for the REMOVED TLS/ACME validators: the sections
   // decode but nothing reads them, so the load says so out loud rather than
   // letting an operator believe TLS is configured here.
-  return { config, warnings: [...migrated.warnings, ...inertTlsWarnings(config)] };
+  return {
+    config,
+    warnings: [
+      ...migrated.warnings,
+      ...inertTlsWarnings(config),
+      ...inertBillingServiceWarnings(config),
+    ],
+  };
 }
 
 /**

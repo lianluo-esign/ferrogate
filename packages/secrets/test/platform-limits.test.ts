@@ -10,12 +10,29 @@ import { describe, expect, test } from "vitest";
 import {
   CF_BINDING_ENV_PREFIX,
   CfSecretBindings,
+  EnvSecretResolver,
+  EnvTokenResolver,
+  SecretResolverRegistry,
+  type SecretsStoreBinding,
   cfBindingEnvVar,
   defaultEnv,
   httpGet,
+  isSecretsStoreBinding,
   nonEmptyEnv,
   parseSecretRef,
+  readEnvSecret,
 } from "../src/index.js";
+
+/**
+ * A stand-in for workerd's `SecretsStoreSecret`, the object a
+ * `[[secrets_store_secrets]]` stanza puts on `env`. It is deliberately NOT a
+ * string: every assertion below that expects the plaintext therefore fails if
+ * the `await …get()` read is removed, because the only other thing this value
+ * can become is `[object Object]` or a `TypeError`.
+ */
+function secretsStoreSlot(value: string): SecretsStoreBinding {
+  return { get: () => Promise.resolve(value) };
+}
 
 describe("PLATFORM LIMIT — workerd has no process environment (4.8)", () => {
   /**
@@ -102,5 +119,128 @@ describe("PLATFORM LIMIT — Secrets Store reads need a DEPLOY-time binding (4.6
     await expect(
       CfSecretBindings.new({}).resolve(parseSecretRef("env://OPENAI_API_KEY")),
     ).rejects.toThrow(/non-cf/);
+  });
+});
+
+/**
+ * CLOSED (inventory-policy-core §4.8). These pin the CF-NATIVE read path — the
+ * one shape the `cf://` scheme exists to serve and the one shape this package
+ * could not read until the `readEnvSecret` split. Every assertion here fails if
+ * the `await slot.get()` branch is removed, because the slot is an object.
+ */
+describe("CLOSED — a [[secrets_store_secrets]] binding is read with await get()", () => {
+  const ref = parseSecretRef("cf://provider-keys/openai-api-key");
+
+  test("cf:// resolves a SecretsStoreSecret-shaped slot, not just a string", async () => {
+    const bound = CfSecretBindings.new({
+      FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk-from-secrets-store"),
+    });
+    await expect(bound.resolve(ref)).resolves.toBe("sk-from-secrets-store");
+    // …and the same read through the registry, which is the surface apps use.
+    const registry = SecretResolverRegistry.new({
+      FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk-from-secrets-store"),
+    });
+    await expect(registry.resolve("cf://provider-keys/openai-api-key")).resolves.toBe(
+      "sk-from-secrets-store",
+    );
+  });
+
+  test("the AMBIGUITY GUARD still fires BEFORE any binding is touched", async () => {
+    // Load-bearing ordering: a non-canonical name must refuse without ever
+    // calling `get()`, or a lossy variable name could serve a credential the
+    // operator did not ask for. `get()` records whether it was reached.
+    let reads = 0;
+    const bound = CfSecretBindings.new({
+      FERROGATE_CF_SECRET_OPENAI_API_KEY: {
+        get: () => {
+          reads += 1;
+          return Promise.resolve("sk-shared");
+        },
+      },
+    });
+    await expect(bound.lookupAsync("openai.api.key")).rejects.toThrow(/not canonical/);
+    expect(reads).toBe(0);
+  });
+
+  test("an exactly-injected binding still wins over the env slot", async () => {
+    const bound = CfSecretBindings.fromMap({ "openai-api-key": "sk-injected" }, {
+      FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk-store"),
+    });
+    await expect(bound.resolve(ref)).resolves.toBe("sk-injected");
+  });
+
+  test("an EMPTY Secrets Store value is unset, not the empty string", async () => {
+    const bound = CfSecretBindings.new({
+      FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("   "),
+    });
+    await expect(bound.resolve(ref)).resolves.toBeNull();
+  });
+
+  test("env:// reads the same slot shape, so a bound name is not a TypeError", async () => {
+    const resolver = new EnvSecretResolver({ OPENAI_API_KEY: secretsStoreSlot("sk-env-store") });
+    await expect(resolver.resolve(parseSecretRef("env://OPENAI_API_KEY"))).resolves.toBe(
+      "sk-env-store",
+    );
+  });
+
+  test("the Cloudflare manage-plane token may itself live in Secrets Store", async () => {
+    const resolver = new EnvTokenResolver({
+      CLOUDFLARE_API_TOKEN: secretsStoreSlot("cf-token"),
+    });
+    await expect(resolver.resolve("env://CLOUDFLARE_API_TOKEN")).resolves.toBe("cf-token");
+  });
+
+  test("readEnvSecret serves BOTH shapes; isSecretsStoreBinding separates them", async () => {
+    await expect(readEnvSecret("A", { A: "plain" })).resolves.toBe("plain");
+    await expect(readEnvSecret("A", { A: secretsStoreSlot("bound") })).resolves.toBe("bound");
+    await expect(readEnvSecret("A", {})).resolves.toBeUndefined();
+    expect(isSecretsStoreBinding(secretsStoreSlot("x"))).toBe(true);
+    expect(isSecretsStoreBinding("x")).toBe(false);
+    expect(isSecretsStoreBinding(null)).toBe(false);
+  });
+
+  test("another CF binding that happens to expose get() is NOT a secret", async () => {
+    // A Worker `env` is heterogeneous. `env://MCP_OAUTH_KV` must not call
+    // `kvNamespace.get()` with no key and serve whatever comes back.
+    const kvShaped = {
+      get: () => Promise.resolve("value-for-some-key"),
+      put: () => Promise.resolve(),
+      list: () => Promise.resolve({ keys: [] }),
+      delete: () => Promise.resolve(),
+    };
+    const r2Shaped = { get: () => Promise.resolve(null), head: () => Promise.resolve(null) };
+    const doShaped = { get: () => Promise.resolve(""), idFromName: () => ({}) };
+    for (const binding of [kvShaped, r2Shaped, doShaped]) {
+      expect(isSecretsStoreBinding(binding)).toBe(false);
+    }
+    await expect(readEnvSecret("MCP_OAUTH_KV", { MCP_OAUTH_KV: kvShaped } as never)).resolves
+      .toBeUndefined();
+  });
+
+  test("the SYNCHRONOUS readers refuse loudly instead of stringifying the object", () => {
+    // Before the split these produced `TypeError: value.trim is not a function`
+    // — or, at a call site that concatenated first, the literal text
+    // "[object Object]" in a credential field. Both are worse than a refusal
+    // that names the async reader.
+    expect(() => nonEmptyEnv("VAULT_TOKEN", { VAULT_TOKEN: secretsStoreSlot("t") })).toThrow(
+      /readEnvSecret/,
+    );
+    expect(() =>
+      CfSecretBindings.new({
+        FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk"),
+      }).lookup("openai-api-key"),
+    ).toThrow(/lookupAsync/);
+  });
+
+  test("the RESIDUAL limit is unchanged: a name with no stanza is unresolvable", async () => {
+    // `get()` takes no argument — a binding serves exactly the one secret it was
+    // bound to at DEPLOY time, so there is still no `env.SECRETS.get(name)` over
+    // the account's store. This is the half of the marker that stays open.
+    const bound = CfSecretBindings.new({
+      FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk-store"),
+    });
+    await expect(
+      bound.resolve(parseSecretRef("cf://provider-keys/some-other-runtime-name")),
+    ).resolves.toBeNull();
   });
 });

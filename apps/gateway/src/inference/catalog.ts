@@ -125,50 +125,86 @@ export const providerRecordSchema = z
   .strict();
 
 /**
- * One `[[models]]` row (the primary `ModelRoute` of a `ModelRegistryEntry`).
+ * The fields a FALLBACK / CANARY / SHADOW route carries — i.e. everything on a
+ * `ModelRoute` except the logical name and the tenancy, which belong to the
+ * owning `ModelRegistryEntry` and are inherited.
  *
- * ## PORT-TODO(inventory-request-path §3.2 "Model registry", §"routing/failover")
+ * PORT-TODO(inventory-request-path §3.2, F6): three `ModelRegistryEntry` fields
+ * are still unrepresentable and each blocks one behavior —
+ * `routing_strategy: RoutingStrategy` (`LowestCost`/`LowestLatency`/`Balanced`,
+ * declared in `@ferrogate/providers` and consumed by nothing),
+ * `input_price_per_1m`/`output_price_per_1m` (`route_estimated_cost`'s only
+ * inputs, so `LowestCost` cannot be scored), and `cache_enabled` (the per-model
+ * leg of `AppState::ai_cache_enabled`, which has no cache to gate yet — F11).
+ * Priority ordering, weight, fallbacks, the context window and the rollout
+ * splits ARE expressible as of this slice.
+ */
+const routeFieldsSchema = {
+  /** `ModelRoute.provider` — must name a row in the provider table. */
+  provider: z.string().trim().min(1),
+  /** `ModelRoute.provider_model` — the id put on the wire. */
+  provider_model: z.string().trim().min(1),
+  capabilities: z.array(capabilitySchema).optional(),
+  /** `ModelRoute.region` (issue #173). */
+  region: z.string().trim().min(1).optional(),
+  /** `ModelRoute.context_window` — the eligibility gate's declared ceiling. */
+  context_window: z.number().int().positive().optional(),
+  /** `ModelRoute.priority` — ASCENDING; `0` is tried first. */
+  priority: z.number().int().min(0).optional(),
+  /** `ModelRoute.weight` — DESCENDING within a priority group. */
+  weight: z.number().int().min(0).optional(),
+} as const;
+
+/** One `[[models]].fallbacks` entry — a `ModelRoute` with no rollout split. */
+const fallbackRouteSchema = z.object({ ...routeFieldsSchema }).strict();
+
+/**
+ * `CanaryRoute` (`state_rollout.rs:47`) — a route plus the sticky percentage of
+ * callers diverted onto it.
  *
- * This schema can only express a `ModelRegistryEntry`'s PRIMARY route. Six
- * fields of the Rust entry have no key here, and every one of them is load
- * bearing for a behavior that is consequently unreachable:
+ * `percent` is required: a canary route with no percentage is an operator
+ * mistake that would otherwise read as "0%", i.e. a canary configured, passing
+ * validation, and reached by nobody. That is precisely the failure mode
+ * `packages/routing`'s marker describes, so it fails the table instead.
+ */
+const canaryRouteSchema = z
+  .object({ ...routeFieldsSchema, percent: z.number().int().min(0).max(100) })
+  .strict();
+
+/**
+ * `ShadowRoute` (`server/shadow.rs:69,78`) — a MIRROR. Never served to a
+ * client; sampled by `shadowSampled` and capped by `max_requests`.
+ */
+const shadowRouteSchema = z
+  .object({
+    ...routeFieldsSchema,
+    sample_percent: z.number().int().min(0).max(100),
+    /** `shadow.max_requests`; `0` (and absence) is uncapped. */
+    max_requests: z.number().int().min(0).optional(),
+  })
+  .strict();
+
+/**
+ * One `[[models]]` row — a `ModelRegistryEntry`: the primary `ModelRoute`, its
+ * `fallbacks`, and the optional canary/shadow splits.
  *
- *  - `fallbacks: Vec<ModelRoute>` — the candidate list `chat.rs:259` walks. No
- *    fallbacks means no failover, whatever the dispatch loop later does.
- *  - `ModelRoute.priority` / `.weight` — the Priority strategy's ordering AND
- *    its weighted round-robin within a priority group (`model_route_counter`,
- *    `weighted_start_index`, `total_weight`, `state_routing.rs:517-540`).
- *  - `routing_strategy: RoutingStrategy` — `LowestCost` (needs the prices),
- *    `LowestLatency` (needs `provider_routing_metrics`), `Balanced`. The enum is
- *    declared in `@ferrogate/providers` (`models.ts:8`) and consumed by nothing.
- *  - `input_price_per_1m` / `output_price_per_1m` — `route_estimated_cost`'s
- *    only inputs, so `LowestCost` cannot even be scored.
- *  - `context_window` — half of the `model_routing.rs` eligibility gate (see the
- *    PORT-TODO on `ModelResolver` in `./ports.ts`).
- *  - `cache_enabled` — the per-model leg of `AppState::ai_cache_enabled`.
- *
- * `packages/providers/src/models.ts` already ports `ModelRegistry` /
- * `ModelRegistryEntry` / `ModelRoute` WITH all of these, and sorts fallbacks by
- * priority→weight→provider→model exactly as Rust does. The gateway does not use
- * it: `buildModelCatalog` flattens straight to {@link PhysicalRoute}. Closing
- * the failover findings therefore starts HERE — the config vocabulary has to
- * carry the routes before the dispatcher can choose between them. Not a
- * platform limit; `GATEWAY_MODELS` is a plain JSON var and can hold a nested
- * `fallbacks` array. See `docs/rewrite/parity-audit-request-path.md` F4/F6.
+ * `fallbacks` is what makes the failover ladder REACHABLE. A dispatch loop that
+ * can walk N candidates while the config vocabulary can only express one is the
+ * dead-code shape this wave exists to remove, so the two land together.
  */
 export const modelRecordSchema = z
   .object({
     /** `ModelRegistryEntry.name` — the LOGICAL model a client asks for. */
     name: z.string().trim().min(1),
-    /** `ModelRoute.provider` — must name a row in the provider table. */
-    provider: z.string().trim().min(1),
-    /** `ModelRoute.provider_model` — the id put on the wire. */
-    provider_model: z.string().trim().min(1),
-    capabilities: z.array(capabilitySchema).optional(),
+    ...routeFieldsSchema,
     /** `ModelRegistryEntry.enabled`; defaults to `true` as in Rust. */
     enabled: z.boolean().optional(),
-    /** `ModelRoute.region` (issue #173). */
-    region: z.string().trim().min(1).optional(),
+    /** `ModelRegistryEntry.fallbacks` — the candidate list `chat.rs:259` walks. */
+    fallbacks: z.array(fallbackRouteSchema).optional(),
+    /** `ModelRegistryEntry.canary` — the rollout split. */
+    canary: canaryRouteSchema.optional(),
+    /** `ModelRegistryEntry.shadow` — the mirror. */
+    shadow: shadowRouteSchema.optional(),
     /** Owning tenant of a private model; absent = globally visible. */
     tenant_id: z.string().trim().min(1).optional(),
     /** Owning project; absent = tenant-wide. */
@@ -180,6 +216,16 @@ export const modelRecordSchema = z
 
 export type ProviderRecord = z.infer<typeof providerRecordSchema>;
 export type ModelRecord = z.infer<typeof modelRecordSchema>;
+
+/** The route half of a `[[models]]` row, shared by the primary and every leg. */
+type RouteLeg = z.infer<typeof fallbackRouteSchema>;
+
+/** The rollout discriminators a canary/shadow leg carries onto its route. */
+interface RouteRollout {
+  readonly canaryPercent?: number;
+  readonly shadowPercent?: number;
+  readonly shadowMaxRequests?: number;
+}
 
 /** Either the flattened routes, or the reason the whole table was refused. */
 export type ModelCatalogResult =
@@ -406,59 +452,93 @@ export function buildModelCatalog(
     }
     seen.add(model.name);
 
-    const provider = byName.get(model.provider);
-    if (provider === undefined) {
-      return {
-        ok: false,
-        reason: `model ${model.name} names unknown provider ${model.provider}`,
-      };
-    }
+    // The primary route, then `fallbacks`, then the canary and shadow splits.
+    // ALL of them flatten into one table keyed by `logicalModel`: the ladder
+    // reads it through `ModelResolver.candidates`, `GET /v1/models` dedupes it
+    // (`InMemoryModelResolver.catalog`), and the rollout rows carry the two
+    // discriminators (`canaryPercent` / `shadowPercent`) that
+    // `candidates.ts` splits them back out on.
+    const legs: readonly (RouteLeg & { readonly rollout?: RouteRollout })[] = [
+      model,
+      ...(model.fallbacks ?? []),
+      ...(model.canary === undefined
+        ? []
+        : [{ ...model.canary, rollout: { canaryPercent: model.canary.percent } }]),
+      ...(model.shadow === undefined
+        ? []
+        : [
+            {
+              ...model.shadow,
+              rollout: {
+                shadowPercent: model.shadow.sample_percent,
+                shadowMaxRequests: model.shadow.max_requests ?? 0,
+              },
+            },
+          ]),
+    ];
 
-    let apiKey: string | undefined;
-    if (provider.api_key_var !== undefined) {
-      const value = secrets[provider.api_key_var];
-      if (typeof value !== "string" || value.trim() === "") {
+    for (const leg of legs) {
+      const provider = byName.get(leg.provider);
+      if (provider === undefined) {
         return {
           ok: false,
-          reason: `provider ${provider.name} names api_key_var ${provider.api_key_var}, which is not bound`,
+          reason: `model ${model.name} names unknown provider ${leg.provider}`,
         };
       }
-      apiKey = value;
+
+      let apiKey: string | undefined;
+      if (provider.api_key_var !== undefined) {
+        const value = secrets[provider.api_key_var];
+        if (typeof value !== "string" || value.trim() === "") {
+          return {
+            ok: false,
+            reason: `provider ${provider.name} names api_key_var ${provider.api_key_var}, which is not bound`,
+          };
+        }
+        apiKey = value;
+      }
+
+      const credentials = credentialsByName.get(provider.name) ?? {};
+
+      // `ModelRoute.region` IS the provider's declared region in Rust (the
+      // registry copies `Provider.region` onto every route it builds), so the
+      // provider row is the source. A model-level `region` still wins, which is
+      // additive: it can only make a route MORE specific than the provider's.
+      const region = leg.region ?? provider.region;
+
+      routes.push({
+        logicalModel: model.name,
+        provider: provider.name,
+        providerModel: leg.provider_model,
+        providerKind: provider.kind,
+        baseUrl: provider.base_url,
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(credentials.aws === undefined ? {} : { awsCredentials: credentials.aws }),
+        ...(credentials.gcp === undefined ? {} : { gcpCredentials: credentials.gcp }),
+        authScheme: provider.auth_scheme ?? defaultAuthScheme(provider.kind),
+        ownedBy: model.owned_by ?? provider.name,
+        ...(leg.capabilities !== undefined
+          ? { capabilities: leg.capabilities as readonly ModelCapability[] }
+          : {}),
+        ...(region !== undefined ? { region } : {}),
+        ...(leg.context_window !== undefined ? { contextWindow: leg.context_window } : {}),
+        ...(leg.priority !== undefined ? { priority: leg.priority } : {}),
+        ...(leg.weight !== undefined ? { weight: leg.weight } : {}),
+        ...(leg.rollout ?? {}),
+        // `ModelRegistryEntry.enabled` governs the WHOLE entry, fallbacks
+        // included: Rust disables the registry entry, not a single route, so a
+        // disabled model must not be reachable through one of its fallbacks.
+        enabled: model.enabled ?? true,
+        ...(model.tenant_id !== undefined ? { tenantId: model.tenant_id } : {}),
+        ...(model.project_id !== undefined ? { projectId: model.project_id } : {}),
+        ...(provider.openrouter_http_referer !== undefined
+          ? { openrouterHttpReferer: provider.openrouter_http_referer }
+          : {}),
+        ...(provider.openrouter_x_title !== undefined
+          ? { openrouterXTitle: provider.openrouter_x_title }
+          : {}),
+      });
     }
-
-    const credentials = credentialsByName.get(provider.name) ?? {};
-
-    // `ModelRoute.region` IS the provider's declared region in Rust (the
-    // registry copies `Provider.region` onto every route it builds), so the
-    // provider row is the source. A model-level `region` still wins, which is
-    // additive: it can only make a route MORE specific than the provider's.
-    const region = model.region ?? provider.region;
-
-    routes.push({
-      logicalModel: model.name,
-      provider: provider.name,
-      providerModel: model.provider_model,
-      providerKind: provider.kind,
-      baseUrl: provider.base_url,
-      ...(apiKey !== undefined ? { apiKey } : {}),
-      ...(credentials.aws === undefined ? {} : { awsCredentials: credentials.aws }),
-      ...(credentials.gcp === undefined ? {} : { gcpCredentials: credentials.gcp }),
-      authScheme: provider.auth_scheme ?? defaultAuthScheme(provider.kind),
-      ownedBy: model.owned_by ?? provider.name,
-      ...(model.capabilities !== undefined
-        ? { capabilities: model.capabilities as readonly ModelCapability[] }
-        : {}),
-      ...(region !== undefined ? { region } : {}),
-      enabled: model.enabled ?? true,
-      ...(model.tenant_id !== undefined ? { tenantId: model.tenant_id } : {}),
-      ...(model.project_id !== undefined ? { projectId: model.project_id } : {}),
-      ...(provider.openrouter_http_referer !== undefined
-        ? { openrouterHttpReferer: provider.openrouter_http_referer }
-        : {}),
-      ...(provider.openrouter_x_title !== undefined
-        ? { openrouterXTitle: provider.openrouter_x_title }
-        : {}),
-    });
   }
 
   return { ok: true, routes };

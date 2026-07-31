@@ -1,28 +1,61 @@
 /**
  * `apps/control-plane` test pool.
  *
- * The one non-obvious piece is `TEST_D1_SCHEMA`. The D1-backed
- * `D1ControlPlaneStore` is only worth testing against a REAL D1 binding, and a
- * real binding is only useful once the control schema exists in it. The DDL is
- * read here, in Node, from `sql/d1-ts/control/` — THE migrations directory
- * `wrangler.toml` points `wrangler d1 migrations apply` at — and handed to the
- * tests as a binding so `test/d1.ts` can apply it with `applyD1Migrations`.
+ * ## `TEST_D1_SCHEMA` / `TEST_TENANT_D1_SCHEMA`
+ *
+ * The D1-backed `D1ControlPlaneStore` is only worth testing against a REAL D1
+ * binding, and a real binding is only useful once the schema exists in it. The
+ * DDL is read here, in Node, from `sql/d1-ts/{control,tenant}/` — the SAME
+ * directories `wrangler d1 migrations apply` is pointed at (`wrangler.toml`
+ * names the control one as `migrations_dir`) — and handed to the tests as
+ * bindings so `test/d1.ts` can apply them with `applyD1Migrations`.
  *
  * Running the deployed migrations rather than a fixture copy of the DDL is the
  * point: a column rename in the migration then breaks these tests, instead of
  * the tests passing happily against a private schema production does not have.
+ *
+ * ## The per-tenant databases
+ *
+ * `TENANT_DB_A` / `TENANT_DB_B` are declared HERE and not in `wrangler.toml`,
+ * and that asymmetry is not an oversight — it is what the topology actually
+ * looks like. A tenant's `[[d1_databases]]` stanza is written by the
+ * PROVISIONING flow when that tenant is onboarded (see
+ * `EnvBindingTenantDatabaseRouter` in `@ferrogate/storage`: bindings resolve at
+ * deploy time, and the registry maps `tenant_id -> binding_name`), so the
+ * committed config cannot enumerate tenants that do not exist yet. What the
+ * committed config DOES carry is the control database, which is the only one
+ * this Worker needs in order to *resolve* a tenant.
+ *
+ * Two databases, not one, because the router's whole job is to hand back
+ * DIFFERENT databases: a cross-tenant assertion against a single shared
+ * database would pass against a router that ignored its argument.
+ *
+ * A third tenant is registered in `test/tenant-db.ts` naming a binding that is
+ * deliberately NOT declared here, so the "provisioned but not yet redeployed"
+ * refusal has something real to refuse.
  */
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
 
-const migrations = await readD1Migrations("../../sql/d1-ts/control");
+const controlMigrations = await readD1Migrations("../../sql/d1-ts/control");
+const tenantMigrations = await readD1Migrations("../../sql/d1-ts/tenant");
+
+if (controlMigrations.length === 0 || tenantMigrations.length === 0) {
+  // A silently-empty migration set makes every D1 test fail with "no such
+  // table" and look like a code bug. Fail here, where the cause is.
+  throw new Error("control-plane tests: no D1 migrations found under sql/d1-ts/{control,tenant}");
+}
 
 export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
-        bindings: { TEST_D1_SCHEMA: migrations },
+        d1Databases: ["TENANT_DB_A", "TENANT_DB_B"],
+        bindings: {
+          TEST_D1_SCHEMA: controlMigrations,
+          TEST_TENANT_D1_SCHEMA: tenantMigrations,
+        },
       },
     }),
   ],

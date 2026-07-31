@@ -240,6 +240,126 @@ GATEWAY_PLANS = "{}"
 GATEWAY_TENANT_PLANS = "{}"
 
 # ---------------------------------------------------------------------------
+# [vars] — deny/allow policy rules and the prepaid-wallet hold
+#
+# GATEWAY_POLICY_RULES is read by `policyRulesFromEnv` (src/ratelimit/policy.ts):
+# a JSON array of `@ferrogate/policy` rules (model / provider / request-size
+# allow-deny), evaluated inside the same admission middleware as the counters
+# so a denied model never reaches a provider. Empty ⇒ nothing is denied, which
+# is the Rust posture for an unconfigured policy table.
+#
+# GATEWAY_WALLET_HOLD_CREDITS is read by `walletHoldCreditsFromEnv`
+# (src/ratelimit/wallet.ts): the credits reserved per in-flight request against
+# `wallets` minus live `wallet_reservations`, which is what makes concurrent
+# requests unable to oversell a prepaid balance. The hold is released on
+# settle; unset ⇒ DEFAULT_WALLET_HOLD_CREDITS.
+# ---------------------------------------------------------------------------
+GATEWAY_POLICY_RULES = "[]"
+GATEWAY_WALLET_HOLD_CREDITS = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — provider reliability (circuit breaker + retry), the `PROVIDER_CIRCUIT`
+# companion
+#
+# Read by `reliabilitySettingsFromEnv` (src/inference/reliability.ts). A single
+# JSON object so the three fields stay one atomic setting:
+#
+#   provider_circuit_breaker_failure_threshold  consecutive failures that OPEN
+#   provider_circuit_breaker_cooldown_secs      half-open re-probe delay
+#   provider_dispatch_max_retries               same-provider retry attempts
+#
+# EMPTY IS "NO BREAKER", deliberately: the Rust reproduces "both fields unset ⇒
+# the breaker is not constructed", so the committed default below leaves the
+# ladder in its pre-wave-9 behaviour and an operator opts in. The reference
+# setting is:
+#
+#   GATEWAY_RELIABILITY = '''
+#   {"provider_circuit_breaker_failure_threshold": 5,
+#    "provider_circuit_breaker_cooldown_secs": 30,
+#    "provider_dispatch_max_retries": 1}
+#   '''
+#
+# The breaker is only CROSS-ISOLATE when the `PROVIDER_CIRCUIT` Durable Object
+# below is bound; without it `providerCircuitFor` falls back to a per-isolate
+# map, which counts failures per isolate and is not a correct breaker.
+# ---------------------------------------------------------------------------
+GATEWAY_RELIABILITY = "{}"
+
+# ---------------------------------------------------------------------------
+# [vars] — the exact-match AI response cache (`src/cache/`)
+#
+# The Worker spelling of the `[cache]` section `packages/config` has validated
+# since wave 1 and nothing read. `GATEWAY_CACHE_ENABLED` is the global switch
+# and defaults FALSE exactly as the Zod schema does — an unconfigured
+# deployment caches nothing — and the three DISABLED_* tables are the
+# per-model / per-key / per-profile opt-outs of Rust `ai_cache_enabled`'s
+# four-level ladder (any level saying `false` wins).
+#
+# A malformed value here DISABLES the cache and reports `x-ferrogate-cache:
+# bypass`; it does not 503. That is the opposite of the network gate above, on
+# purpose: degrading "no allowlist" is an open gateway, degrading "no cache"
+# costs only latency.
+#
+# `exact_match` is the only ported mode; `semantic` needs Vectorize + Workers AI
+# embeddings, neither of which is bound (see "NOT DECLARED" at the end).
+# ---------------------------------------------------------------------------
+GATEWAY_CACHE_ENABLED = "false"
+GATEWAY_CACHE_TTL_SECONDS = "300"
+GATEWAY_CACHE_MAX_RECORDS = "1000"
+GATEWAY_CACHE_MODE = "exact_match"
+GATEWAY_CACHE_DISABLED_MODELS = "[]"
+GATEWAY_CACHE_DISABLED_API_KEYS = "[]"
+GATEWAY_CACHE_DISABLED_PROFILES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] — per-tenant D1 routing (ONE DATABASE PER TENANT)
+#
+# Read by `resolverForEnv` (src/tenancy/resolver.ts), mounted as the last entry
+# of `GATEWAY_MIDDLEWARE`. Modes:
+#
+#   off                 no routing; handlers that ask for a tenant handle are
+#                       refused. THE COMMITTED DEFAULT.
+#   binding             route on `tenant_databases.binding_name` → `env[name]`,
+#                       resolved lazily at first use.
+#   binding_strict      same, but resolved BEFORE the request is served, so an
+#                       un-provisioned tenant is refused at the door.
+#   rest                D1 REST API (no `batch()` atomicity — see ports.ts).
+#   shared_development  every tenant on `DB`. LOCAL ONLY.
+#
+# It NEVER falls back to the shared `DB`: a tenant with no registry row, or a
+# row whose `binding_name` is NULL or names an undeployed binding, is refused
+# `503 tenant_database_unavailable`. That is the whole point — a fallback is a
+# silent cross-tenant read.
+#
+# The registry lives in CONTROL_DB (`tenant_databases`, already migrated). Each
+# provisioned tenant additionally needs its own stanza, which is DEPLOY-TIME
+# state and therefore not committed with real ids:
+#
+#   [[d1_databases]]
+#   binding = "TENANT_DB_ACME"                    # == tenant_databases.binding_name
+#   database_name = "ferrogate-tenant-acme"
+#   database_id = "replace-at-deploy"             # PLACEHOLDER — never a real uuid
+#   migrations_dir = "../../sql/d1-ts/tenant"
+#
+# `GATEWAY_TENANT_DB_ACCOUNT_ID` is only read in `"rest"` mode; its companion
+# `GATEWAY_TENANT_DB_API_TOKEN` is a SECRET (`wrangler secret put`) and is
+# deliberately absent from this file.
+# ---------------------------------------------------------------------------
+GATEWAY_TENANT_DB_ROUTING = "off"
+GATEWAY_TENANT_DB_ACCOUNT_ID = "replace-at-deploy"
+
+# Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
+# makes `/readyz` answer 503 while `/healthz` stays 200, which is the
+# deploy-time approximation of the Rust drain flag: flip it, redeploy, let the
+# load balancer take the version out, then roll.
+GATEWAY_DRAIN = "false"
+
+# Read by `agentUpstreamsFromEnv` (src/routes/agent-discovery.ts). JSON map of
+# agent id → upstream descriptor for the agent-discovery route. Empty ⇒ nothing
+# is discoverable, which is the unconfigured posture.
+GATEWAY_AGENT_UPSTREAMS = "{}"
+
+# ---------------------------------------------------------------------------
 # [vars] — guardrail policies
 #
 # Read by `guardrailDepsFromEnv` (src/guardrails/config.ts).
@@ -560,6 +680,38 @@ class_name = "RateLimiterDurableObject"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RateLimiterDurableObject"]
+
+# ---------------------------------------------------------------------------
+# Durable Objects — the provider circuit breaker
+#
+# One DO instance per PROVIDER NAME (`idFromName("provider:" + name)`) replaces
+# the Rust `Arc<HashMap<String, ProviderCircuitBreaker>>` on `AppState`. The
+# arithmetic is the same one that forced the counters onto a DO: a per-isolate
+# `Map` lets a wedged provider absorb `threshold · K` failures across `K` live
+# isolates before every one of them has opened.
+#
+# Provider names come from the operator's `GATEWAY_PROVIDERS` table, never from
+# a caller, so no request input can choose a DO id here. The object has no
+# `fetch()` surface — every method is RPC over this binding — so it is not
+# addressable from the internet.
+#
+# `class_name` is resolved by workerd against the ENTRY MODULE (`src/worker.ts`),
+# which re-exports `ProviderCircuitDurableObject`; delete that line and the
+# Worker stops booting while every vitest test still passes.
+#
+# A SHIPPED MIGRATION IS IMMUTABLE, so this is a NEW tag rather than an edit to
+# `v1` above. `new_sqlite_classes` for the same reason as the counters.
+#
+# Unbound, `providerCircuitFor` falls back to the per-isolate breaker and says
+# so; the breaker itself stays inert until `GATEWAY_RELIABILITY` is set.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "PROVIDER_CIRCUIT"
+class_name = "ProviderCircuitDurableObject"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ProviderCircuitDurableObject"]
 
 # ---------------------------------------------------------------------------
 # Cron — the billing-outbox recovery sweep

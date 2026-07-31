@@ -5,30 +5,46 @@
  * registry consults BEFORE any REST call: an injected name→value map, then the
  * `FERROGATE_CF_SECRET_<NAME>` environment convention.
  *
- * PORT-TODO(4.6/4.7) — PLATFORM LIMIT, NOT CLOSED.
+ * The CF-NATIVE READ PATH IS NOW IMPLEMENTED (inventory-policy-core §4.8, the
+ * former "REAL GAP" marker on `lookup`): a slot bound by a
+ * `[[secrets_store_secrets]]` stanza is a `SecretsStoreSecret` OBJECT, and
+ * {@link CfSecretBindings.lookupAsync} reads it with `await slot.get()` —
+ * which is what {@link CfSecretBindings.resolve} calls. Before that, the one
+ * binding shape the whole `cf://` scheme exists to serve was the one shape this
+ * could not read (`slot.trim()` raised `TypeError`), so `cf://` worked only from
+ * an injected map or a plain `[vars]` string, i.e. `env://` by another name.
  *
- * The exact limitation: **Cloudflare Secrets Store values are WRITE-ONLY over
- * the REST API, and the only read path is a `[[secrets_store_secrets]]` binding
- * declared at DEPLOY time.** So a `cf://<name>` whose name is only known at
- * RUNTIME — from a tenant's stored config, from a request — cannot be resolved:
- * there is no `env.SECRETS.get(name)` over the account's store, and the REST
- * `GET` returns metadata, never the value. `env` is an ordinary object, so a
- * PRE-BOUND name can be selected at runtime by string
- * (`env[cfBindingEnvVar(name)]`), but a name with no stanza in `wrangler.toml`
- * is unresolvable, full stop.
+ * PORT-TODO(4.6/4.7) — PLATFORM LIMIT, NOT CLOSED (the RUNTIME-NAME half).
  *
- * The closest behavior implemented instead is exactly that runtime-select-over-
- * a-deploy-time-declared-set: {@link CfSecretBindings} looks the name up in an
- * injected map and then in the env convention, and returns `null` — "not
- * configured" — when neither has it. It NEVER falls back to a REST read of the
- * value, because no such read exists; a resolver that appeared to work for
- * unbound names would be a fake.
+ * The exact limitation that remains: **Cloudflare Secrets Store values are
+ * WRITE-ONLY over the REST API, and the only read path is a
+ * `[[secrets_store_secrets]]` binding declared at DEPLOY time.** So a
+ * `cf://<name>` whose name is only known at RUNTIME — from a tenant's stored
+ * config, from a request — cannot be resolved: there is no
+ * `env.SECRETS.get(name)` over the account's store (the binding's `get()` takes
+ * NO argument and serves exactly the one secret it was bound to), and the REST
+ * `GET` returns metadata, never the value.
+ *
+ * The closest behavior implemented instead is runtime-select-over-a-deploy-time-
+ * declared-set: `env` is an ordinary object, so a PRE-BOUND name is selected at
+ * runtime by string (`env[cfBindingEnvVar(name)]`) and then read in whichever of
+ * the two shapes it arrived in. A name with no stanza in `wrangler.toml` yields
+ * `null` — "not configured". It NEVER falls back to a REST read of the value,
+ * because no such read exists; a resolver that appeared to work for unbound
+ * names would be a fake.
  *
  * The operational consequence, stated plainly: onboarding a new `cf://` secret
  * requires a DEPLOY, the same coupling `EnvBindingTenantDatabaseRouter` has for
- * per-tenant D1. `test/platform-limits.test.ts` pins the refusal.
+ * per-tenant D1. `test/platform-limits.test.ts` pins both the refusal and the
+ * `SecretsStoreSecret` read that now succeeds.
  */
-import { type EnvLike, INSPECT, defaultEnv } from "./env.js";
+import {
+  type EnvLike,
+  INSPECT,
+  defaultEnv,
+  isSecretsStoreBinding,
+  readEnvSecret,
+} from "./env.js";
 import type { SecretResolver } from "./resolver.js";
 import type { SecretRef } from "./secret-ref.js";
 import { describeSecretRef } from "./secret-ref.js";
@@ -114,69 +130,93 @@ export class CfSecretBindings implements SecretResolver {
    * shared with other distinct secrets; resolving it could serve a credential
    * the operator did not name.
    *
-   * PORT-TODO(inventory-policy-core §4.8) — REAL GAP, NOT A PLATFORM LIMIT.
-   *
-   * Both paths below read a **plain string**. The CF-native read path the
-   * inventory names (`§4.8`: "a `secrets_store_secrets` binding in
-   * `wrangler.jsonc` exposes the value at runtime — `await env.MY_SECRET.get()`")
-   * is NOT implemented, here or anywhere in the repo: `grep -r secrets_store_secrets
-   * packages apps --include=*.ts` finds only prose. With a real stanza declared
-   * as `FERROGATE_CF_SECRET_OPENAI_API_KEY`, `env[...]` is a `SecretsStoreSecret`
-   * OBJECT, so `fromEnv.trim()` below throws `TypeError` instead of resolving —
-   * i.e. the one binding shape the whole `cf://` scheme exists to serve is the
-   * one shape this cannot read. Today `cf://` therefore works only from
-   * {@link fromMap}/{@link insert} or a `[vars]`/`wrangler secret put` STRING,
-   * both of which are `env://` by another name.
-   *
-   * TO CLOSE (no platform blocker; `SecretsStoreSecret` is GA):
-   *   1. widen {@link EnvLike} to `string | { get(): Promise<string> } | undefined`;
-   *   2. make {@link lookup} async (or add `lookupAsync`) and `await value.get()`
-   *      when the slot is an object with a callable `get` — the `resolve()` seam
-   *      is already `Promise`-valued, so only `lookup` changes shape;
-   *   3. keep the ambiguity guard AHEAD of the read, unchanged — a non-canonical
-   *      name must still refuse before touching any binding;
-   *   4. extend `test/platform-limits.test.ts` > "a PRE-BOUND name resolves" with
-   *      a stub `{ get: async () => "sk-bound" }` slot, and MUTATION-TEST it by
-   *      deleting the `await …get()` branch (must go RED, since the stub then
-   *      stringifies to `[object Object]`).
-   * The genuinely unclosable half stays exactly as written above: a name with NO
-   * deploy-time stanza is still unresolvable, and that is the platform limit.
+   * SYNCHRONOUS, so it reads only a STRING slot. The CF-native read path
+   * (`§4.8`: "a `secrets_store_secrets` binding exposes the value at runtime —
+   * `await env.MY_SECRET.get()`") is asynchronous by construction and lives in
+   * {@link lookupAsync}, which {@link resolve} uses. A binding-shaped slot makes
+   * THIS method throw rather than stringify — see {@link lookupAsync} for why
+   * that is the safe direction.
    */
   lookup(secretName: string): string | null {
-    // Injected map is keyed exactly (no collapsing) → consulted first, valid
-    // for any name. A present-but-empty binding still short-circuits ("unset").
-    if (this.bindings.has(secretName)) {
-      const value = this.bindings.get(secretName) as string;
-      return value.trim() === "" ? null : value;
-    }
-    if (!cfBindingNameIsUnambiguous(secretName)) {
-      const variable = cfBindingEnvVar(secretName);
+    const injected = this.injected(secretName);
+    if (injected !== undefined) return injected;
+    this.assertUnambiguous(secretName);
+    const variable = cfBindingEnvVar(secretName);
+    const fromEnv = this.env[variable];
+    if (isSecretsStoreBinding(fromEnv)) {
       throw new Error(
-        `cf:// secret name ${JSON.stringify(secretName)} cannot be resolved from the ` +
-          `Worker-binding environment convention: it is not canonical, so the variable it maps ` +
-          `to (${variable}) is shared with other distinct Cloudflare secrets (e.g. ` +
-          `openai-api-key, openai.api.key, openai_api_key and OpenAI-API-Key all map to ` +
-          `FERROGATE_CF_SECRET_OPENAI_API_KEY) and reading it could return a credential you did ` +
-          `not name. Fix by either (1) renaming the Secrets Store secret to the canonical shape ` +
-          `[a-z0-9-]+ (e.g. openai-api-key) so the mapping is collision-free, or (2) injecting ` +
-          `the value under its exact name via CfSecretBindings.fromMap/insert + ` +
-          `SecretResolverRegistry.withCfBindings, which is keyed exactly and never collapses. ` +
-          `See docs/cloudflare-secrets-resolution.md`,
+        `cf:// secret ${JSON.stringify(secretName)} is bound as a Cloudflare Secrets Store ` +
+          `secret ([[secrets_store_secrets]] ${variable}), whose value can only be read ` +
+          `asynchronously with await ${variable}.get(). Use CfSecretBindings.lookupAsync (or ` +
+          `resolve(), which already awaits) instead of the synchronous lookup().`,
       );
     }
-    const fromEnv = this.env[cfBindingEnvVar(secretName)];
     return fromEnv !== undefined && fromEnv.trim() !== "" ? fromEnv : null;
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- async so both
-  // the non-cf guard and the ambiguous-name guard surface as rejections.
+  /**
+   * The asynchronous binding read — the one {@link resolve} uses, and the only
+   * one that can serve a real `[[secrets_store_secrets]]` stanza.
+   *
+   * Order is load-bearing and identical to {@link lookup}:
+   *   1. the injected map, keyed EXACTLY (lossless, valid for any name);
+   *   2. the ambiguity guard — a non-canonical name refuses HERE, before any
+   *      binding is touched, so a lossy variable name can never serve a
+   *      credential the operator did not ask for;
+   *   3. the `FERROGATE_CF_SECRET_<NAME>` slot, read as a string OR awaited
+   *      through {@link SecretsStoreBinding.get}.
+   *
+   * Empty/whitespace is "unset" in both shapes.
+   */
+  async lookupAsync(secretName: string): Promise<string | null> {
+    const injected = this.injected(secretName);
+    if (injected !== undefined) return injected;
+    this.assertUnambiguous(secretName);
+    return (await readEnvSecret(cfBindingEnvVar(secretName), this.env)) ?? null;
+  }
+
+  /**
+   * The injected map is keyed exactly (no collapsing) → consulted first, valid
+   * for any name. A present-but-empty binding still short-circuits ("unset").
+   * `undefined` means "the map does not have it", which is distinct from the
+   * `null` that means "present but empty".
+   */
+  private injected(secretName: string): string | null | undefined {
+    if (!this.bindings.has(secretName)) return undefined;
+    const value = this.bindings.get(secretName) as string;
+    return value.trim() === "" ? null : value;
+  }
+
+  /** The lossy-mapping ambiguity guard; throws, never returns a wrong value. */
+  private assertUnambiguous(secretName: string): void {
+    if (cfBindingNameIsUnambiguous(secretName)) return;
+    const variable = cfBindingEnvVar(secretName);
+    throw new Error(
+      `cf:// secret name ${JSON.stringify(secretName)} cannot be resolved from the ` +
+        `Worker-binding environment convention: it is not canonical, so the variable it maps ` +
+        `to (${variable}) is shared with other distinct Cloudflare secrets (e.g. ` +
+        `openai-api-key, openai.api.key, openai_api_key and OpenAI-API-Key all map to ` +
+        `FERROGATE_CF_SECRET_OPENAI_API_KEY) and reading it could return a credential you did ` +
+        `not name. Fix by either (1) renaming the Secrets Store secret to the canonical shape ` +
+        `[a-z0-9-]+ (e.g. openai-api-key) so the mapping is collision-free, or (2) injecting ` +
+        `the value under its exact name via CfSecretBindings.fromMap/insert + ` +
+        `SecretResolverRegistry.withCfBindings, which is keyed exactly and never collapses. ` +
+        `See docs/cloudflare-secrets-resolution.md`,
+    );
+  }
+
   async resolve(reference: SecretRef): Promise<string | null> {
     if (reference.kind !== "cfSecret") {
       throw new Error(
         `CfSecretBindings cannot resolve a non-cf:// reference: ${describeSecretRef(reference)}`,
       );
     }
-    return this.lookup(reference.name);
+    // `return await`, not a bare `return`: a bare return hands back the inner
+    // promise for THIS one to adopt, and workerd reports a rejection observed
+    // only after adoption as an unhandled rejection even though every caller
+    // awaits it. Awaiting here keeps the ambiguity-guard rejection on one
+    // promise chain.
+    return await this.lookupAsync(reference.name);
   }
 
   private redacted(): Record<string, unknown> {

@@ -14,6 +14,7 @@
  * `AuthError`), `crates/ferrogate-storage/src/lifecycle_gate.rs`, and the admin
  * handler family in `crates/ferrogate-gateway/src/server/*.rs`.
  */
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { ApiOperation } from "./contract.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
 
@@ -248,6 +249,40 @@ export interface ControlPlaneStore {
     id: string,
     patch: Readonly<Record<string, unknown>>,
   ): Promise<StoreRecord | null>;
+  /**
+   * A CONDITIONAL merge: apply `patch` only while the stored row still satisfies
+   * `precondition`, decided against the same snapshot the write is guarded on.
+   *
+   * This is the port's compare-and-set, and it exists because
+   * `get` → decide → `merge` is **not** one. Two requests that read the same row
+   * both decide "yes" and both write; a rate limit built that way admits a
+   * concurrent burst that it was written to refuse. `routes/site_domain.ts` is
+   * the case that forced it — #576 requires that an `admin.write` credential
+   * cannot drive unbounded outbound DNS, and the cooldown slot has to be
+   * *reserved*, not merely checked.
+   *
+   * The contract both stores implement:
+   *
+   *  - `precondition` runs on the CURRENT stored record;
+   *  - if it holds, the patch is applied atomically with respect to that exact
+   *    record — a writer that commits in between makes this attempt fail and
+   *    re-evaluate `precondition` against the state that writer left, never
+   *    against the stale snapshot;
+   *  - `precondition` must therefore be PURE and cheap: it is called once per
+   *    attempt, and an impure one would make the retry observable.
+   *
+   * The outcome is a discriminated union rather than `null` because
+   * "no such row" (→ 404) and "the row says no" (→ 429/409) are different
+   * answers, and collapsing them is how a rate limit reports itself as a
+   * missing resource.
+   */
+  mergeIf(
+    collection: string,
+    scope: CallerScope,
+    id: string,
+    patch: Readonly<Record<string, unknown>>,
+    precondition: (current: StoreRecord) => boolean,
+  ): Promise<MergeIfOutcome>;
   /** `true` when a row was removed, `false` when it did not exist / is not visible. */
   remove(collection: string, scope: CallerScope, id: string): Promise<boolean>;
   /**
@@ -271,6 +306,18 @@ export interface ControlPlaneStore {
     mutations: readonly StoreMutation[],
   ): Promise<readonly StoreRecord[] | null>;
 }
+
+/** The three answers {@link ControlPlaneStore.mergeIf} can give. */
+export type MergeIfOutcome =
+  | { readonly kind: "merged"; readonly record: StoreRecord }
+  /** No such row, or not visible to `scope` — the same fact `merge`'s `null` is. */
+  | { readonly kind: "not_found" }
+  /**
+   * The row exists and the precondition did not hold. `current` is the record
+   * the refusal was decided against, so a caller can label it (how long is left
+   * on a cooldown, which generation it lost to) instead of guessing.
+   */
+  | { readonly kind: "precondition_failed"; readonly current: StoreRecord };
 
 /**
  * One leg of an {@link ControlPlaneStore.atomic} unit.
@@ -341,6 +388,26 @@ export interface ControlPlaneDeps {
   readonly lifecycle: TenancyLifecycleGatePort;
   readonly rbac: RbacAuthorizerPort;
   readonly store: ControlPlaneStore;
+  /**
+   * `@ferrogate/storage`'s `TenantDatabaseRouter` — the tenantId → per-tenant D1
+   * handle seam, and the reason the database-per-tenant directive is in effect
+   * on this Worker at all.
+   *
+   * The control plane is where a tenant's hierarchy is MINTED, so it is where
+   * the typed per-tenant tables (`projects`, `workspaces`, `api_keys` in
+   * `sql/d1-ts/tenant/`) get their rows. Before this seam existed the admin
+   * surface wrote only the account-global `control_plane_resources` document and
+   * the tenant databases stayed empty, which made two package-level guards
+   * unreachable: `D1ReferenceGuardedDeletes` (a project deleted out from under a
+   * live workspace) and everything downstream that reads those tables.
+   *
+   * `forTenant` NEVER falls back. A tenant with no registry row throws
+   * `StorageError` `not_found`; one whose `binding_name` is absent or names a
+   * non-D1 binding throws `runtime`. `src/store/tenancy.ts` is the single place
+   * that decides what those two mean for an admin request, and the split there
+   * is load-bearing — see its docblock.
+   */
+  readonly tenantDatabases: TenantDatabaseRouter;
   readonly runtime: RuntimeStatusPort;
   /**
    * The DNS seam `POST /admin/v1/site-domains/{hostname}/verify` resolves the
@@ -385,10 +452,14 @@ export interface ControlPlaneDeps {
  */
 export interface ControlPlaneBindings {
   /**
-   * JSON array of durable/native virtual keys, the DECLARATIVE fallback for the
-   * one leg the control database cannot answer — see the platform-limit
-   * PORT-TODO in `src/store/api_keys.ts` (a virtual key's scopes live in the
-   * per-tenant database, and D1 bindings resolve at deploy time).
+   * JSON array of durable/native virtual keys — now the FALLBACK, not the path.
+   *
+   * `D1NativeApiKeyAuthenticator` (`src/store/api_keys.ts`) resolves a virtual
+   * key from `api_key_directory` in the control database plus the `api_keys` row
+   * in that tenant's OWN database, reached through `@ferrogate/storage`'s tenant
+   * router. This var is consulted only for a credential neither table knows,
+   * exactly like its static and lifecycle siblings — so a stale var can never
+   * re-enable a key the database revoked.
    */
   readonly CONTROL_PLANE_NATIVE_API_KEYS?: string;
   /** JSON array of operator-authored static config keys; fallback for `static_api_keys`. */

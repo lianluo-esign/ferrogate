@@ -54,6 +54,18 @@
  * `packages/storage/README.md` §4 for the exact wiring). Whoever does it must
  * add an assertion that FAILS when the store is unmounted — deleting the mount
  * has to turn a test red, or this comment will be true again in a month.
+ *
+ * PARTIAL CLOSE (tenant ROUTING half): `apps/gateway/src/tenancy/` now imports
+ * `EnvBindingTenantDatabaseRouter`, `ControlDatabaseTenantRegistry`,
+ * `requireAtomicBatch` and `NonAtomicD1RestTenantDatabaseRouter` and exposes
+ * them to the request path as `tenantDatabase()` + `tenantDatabaseOf(c)`, with
+ * the unmount gate the paragraph above demands: `apps/gateway/test/tenancy/`
+ * asserts the resolver IS `EnvBindingTenantDatabaseRouter` (a hand-rolled
+ * replacement turns it red), that two tenants get two PHYSICALLY different D1
+ * databases, and that an unresolvable tenant errors instead of falling back to
+ * the shared/control database. STILL OPEN: the `D1*Store` half — nothing yet
+ * calls `reserveWalletCredits`/`debitWorkflowBudget`/`D1UsageLedger` through a
+ * routed handle, so the guards still guard no money.
  * ---------------------------------------------------------------------------
  *
  * PORT-TODO(inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`,
@@ -115,4 +127,12 @@ export * from "./payment-attempt.js";
  * a plain vitest suite) stays safe.
  */
 export * from "./tenant-router.js";
+/**
+ * The REST leg of the tenant router (strategy (c) of `D1_BINDING_STRATEGIES`):
+ * a `D1Database`-shaped client addressed by RUNTIME `database_uuid`, with
+ * `batch()` refused and `supportsAtomicBatch: false` so `requireAtomicBatch`
+ * keeps every money path off it. See the file docblock for the exact
+ * atomic/non-atomic table.
+ */
+export * from "./tenant-rest.js";
 export * from "./d1/index.js";

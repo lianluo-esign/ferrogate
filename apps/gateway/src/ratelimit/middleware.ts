@@ -26,6 +26,40 @@
  * empty store would — 0 spent, no wallet — so binding the database can only
  * tighten admission, never loosen it.
  *
+ * ## The four guards this file MOUNTS, which existed and guarded nothing
+ *
+ * Everything above was already here. What follows was implemented, tested, and
+ * had zero callers under `apps/` — the defect class
+ * `docs/rewrite/parity-audit-storage.md` §4.1 names. Each is now called from the
+ * chain below, and each has an assertion that fails when the call is removed
+ * (`test/ratelimit/guards.test.ts`, `test/metering/usage-ledger.test.ts`):
+ *
+ *   3b. **wallet no-oversell** (`./wallet.ts` → `@ferrogate/storage`'s
+ *       `D1WalletStore.reserveWalletCredits`) → 429 `wallet_balance_exhausted`.
+ *       Step 3 is a READ and cannot bound a race; the storage guard puts the
+ *       decision inside the writing statement and therefore can. Both are kept:
+ *       step 3 bounds cumulative spend, 3b bounds concurrent overdraft.
+ *   5.  **workflow-run budget pre-flight** (`./workflow.ts` →
+ *       `@ferrogate/policy`'s `preflightWorkflowBudget`) → **402**
+ *       `workflow_budget_exceeded`, matching `server/agent_runs.rs:756`.
+ *   6.  **operator deny rules** (`./policy.ts` → `@ferrogate/policy`'s
+ *       `BasicPolicyEngine`) → 403 with the rule's own code and message,
+ *       matching `server/chat.rs:421`.
+ *   5b. **`api_keys.monthly_token_budget`** (`./token-budget.ts` →
+ *       `@ferrogate/storage`'s `sumApiKeyCommittedTokens` +
+ *       `RateLimiter.reserveTokenBudget`) → 429 `token_budget_exceeded`,
+ *       enforced in {@link admitTokensPerMinute} where the estimate exists.
+ *
+ * ## Holds are released in a `finally`, because JS has no `Drop`
+ *
+ * Steps 3b and 5b take RESERVATIONS, which Rust released when the guard was
+ * dropped. Every hold taken during admission is pushed onto a per-request list
+ * and released in the middleware's `finally`, so a request refused by a LATER
+ * step — or one that throws anywhere in the chain — cannot strand credits or
+ * token budget. The durable wallet hold additionally carries an
+ * `expires_at_unix` (`WALLET_HOLD_TTL_SECONDS`), which is the second release
+ * for the case a `finally` cannot cover: an isolate that dies mid-request.
+ *
  * Step 5 is NOT middleware, for the same reason it is not middleware in Rust: a
  * token estimate does not exist until the request body has been parsed and the
  * model resolved, which happens inside the handler. It is exported as two plain
@@ -48,7 +82,7 @@ import type { AuthContext, GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import { DurableObjectRateLimiter } from "./do-limiter.js";
 import type { RateLimiterNamespace } from "./durable-object.js";
-import type { CounterWindow } from "./keys.js";
+import { type CounterWindow, tokenBudgetCounterKey } from "./keys.js";
 import { InMemoryRateLimiter } from "./memory.js";
 import {
   RATE_LIMIT_REFUSALS,
@@ -57,6 +91,13 @@ import {
   type RateLimiter,
   type TokenAdmission,
 } from "./ports.js";
+import {
+  type PolicyBindings,
+  type PolicyRuleSet,
+  type PolicyRulesResolution,
+  evaluatePolicyRules,
+  policyRulesFromEnv,
+} from "./policy.js";
 import {
   type QuotaBindings,
   type QuotaPolicySource,
@@ -69,6 +110,25 @@ import {
   resolveQuotaWindows,
   spendSourceFromEnv,
 } from "./quota.js";
+import {
+  type TokenBudgetBindings,
+  type TokenBudgetSource,
+  tokenBudgetSourceFromEnv,
+} from "./token-budget.js";
+import {
+  type WalletAdmission,
+  type WalletAdmissionBindings,
+  walletAdmissionFromEnv,
+  walletHoldId,
+} from "./wallet.js";
+import {
+  type WorkflowBudgetBindings,
+  type WorkflowBudgetSource,
+  type WorkflowStepDeclaration,
+  preflightStep,
+  workflowBudgetSourceFromEnv,
+  workflowDeclarationFrom,
+} from "./workflow.js";
 
 /**
  * Bindings this module reads.
@@ -79,7 +139,13 @@ import {
  * middleware; until then {@link rateLimit} reads it through this structural
  * type. See the WIRING block in `index.ts`.
  */
-export interface RateLimitBindings extends QuotaBindings, SpendBindings {
+export interface RateLimitBindings
+  extends QuotaBindings,
+    SpendBindings,
+    WalletAdmissionBindings,
+    TokenBudgetBindings,
+    WorkflowBudgetBindings,
+    PolicyBindings {
   /** The `RateLimiterDurableObject` namespace. Absent ⇒ in-memory fallback. */
   readonly RATE_LIMIT?: RateLimiterNamespace | undefined;
 }
@@ -95,6 +161,43 @@ export interface RateLimitDeps extends RateLimitOptions {
    * to {@link spendSourceFromEnv}, i.e. the tenant database when `DB` is bound.
    */
   readonly spend?: SpendSource | ((env: RateLimitBindings) => SpendSource);
+  /**
+   * Override the prepaid-wallet no-oversell guard (admission step 3b). Defaults
+   * to {@link walletAdmissionFromEnv}, i.e. `@ferrogate/storage`'s
+   * `D1WalletStore` on the tenant database when `DB` is bound.
+   */
+  readonly wallet?: WalletAdmission | ((env: RateLimitBindings) => WalletAdmission);
+  /**
+   * Override the `api_keys.monthly_token_budget` source (step 5b). Defaults to
+   * {@link tokenBudgetSourceFromEnv}.
+   */
+  readonly tokenBudget?: TokenBudgetSource | ((env: RateLimitBindings) => TokenBudgetSource);
+  /**
+   * Override the workflow-run execution-budget source (step 5). Defaults to
+   * {@link workflowBudgetSourceFromEnv}.
+   */
+  readonly workflowBudgets?:
+    | WorkflowBudgetSource
+    | ((env: RateLimitBindings) => WorkflowBudgetSource);
+  /**
+   * Override the operator deny rules (step 6). Defaults to
+   * {@link policyRulesFromEnv}, i.e. the `GATEWAY_POLICY_RULES` var parsed with
+   * `packages/config`'s own `policyRuleSchema`.
+   */
+  readonly policies?: PolicyRuleSet | ((env: RateLimitBindings) => PolicyRulesResolution);
+  /**
+   * Resolve the physical provider for a logical model, so a `providers`-scoped
+   * deny rule names the provider the request would really have reached.
+   *
+   * Defaults to the SAME registry the dispatcher resolves against
+   * (`modelsFromEnv`, i.e. `GATEWAY_PROVIDERS` / `GATEWAY_MODELS`), which is
+   * what `src/index.ts` hands `inferenceRouteModule`. Overridable for the same
+   * reason `guardrails()` takes the hook: a composition that injects its own
+   * `ModelResolver` must be able to keep the two in agreement, and a policy
+   * engine resolving against a DIFFERENT registry than the dispatcher would
+   * deny (or fail to deny) on a provider nobody was going to call.
+   */
+  readonly providerForModel?: (model: string, env: RateLimitBindings) => string | undefined;
   /**
    * The clock the monthly-budget period key is derived from
    * (`AppState::current_period_month`). Injectable so a test can pin the
@@ -218,9 +321,56 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
         : (deps.quotas ?? quotaPolicySourceFromEnv(env));
     const spend =
       typeof deps.spend === "function" ? deps.spend(env) : (deps.spend ?? spendSourceFromEnv(env));
+    const wallet =
+      typeof deps.wallet === "function"
+        ? deps.wallet(env)
+        : (deps.wallet ?? walletAdmissionFromEnv(env));
+    const tokenBudget =
+      typeof deps.tokenBudget === "function"
+        ? deps.tokenBudget(env)
+        : (deps.tokenBudget ?? tokenBudgetSourceFromEnv(env));
+    const workflowBudgets =
+      typeof deps.workflowBudgets === "function"
+        ? deps.workflowBudgets(env)
+        : (deps.workflowBudgets ?? workflowBudgetSourceFromEnv(env));
+    const policyResolution: PolicyRulesResolution =
+      typeof deps.policies === "function"
+        ? deps.policies(env)
+        : deps.policies !== undefined
+          ? { ok: true, rules: deps.policies }
+          : policyRulesFromEnv(env);
+    // Unreadable deny rules refuse EVERYTHING (see `policy.ts`): a rule table
+    // that cannot be parsed must not degrade to "no rules", because losing a
+    // deny rule grants access. This is the one place in the limiter where fail
+    // closed does not mean "configure nothing".
+    if (!policyResolution.ok) {
+      throw new HttpError(
+        503,
+        "policy_rules_unavailable",
+        `operator policy rules could not be read: ${policyResolution.detail}`,
+      );
+    }
+
+    // Read BEFORE the subject short-circuit: a credential with no api-key id is
+    // unlimited by the quota chain (Rust `request_windows()` returns an empty
+    // vec) but it still spends a workflow run's execution budget, and a
+    // malformed declaration is a 400 whether or not a quota governs the caller.
+    const declaration = workflowDeclarationFrom(c.req.raw.headers);
+    if (declaration.kind === "invalid") {
+      throw new HttpError(400, "invalid_workflow_declaration", declaration.detail);
+    }
+    const workflowStep = declaration.kind === "declared" ? declaration.step : null;
 
     const subject = subjectFor(c, deps.perKeyRequestLimit?.(auth));
     if (subject === null) {
+      if (workflowStep !== null) {
+        await enforceWorkflowBudget(
+          workflowBudgets,
+          workflowStep,
+          auth.tenancy.tenantId ?? "",
+          deps.nowUnixSeconds?.() ?? Math.floor(Date.now() / 1000),
+        );
+      }
       await next();
       return;
     }
@@ -313,19 +463,134 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       }
     }
 
-    // 4. RPM.
-    const outcome = await limiter.consumeRequest(resolution.rpm);
-    if (outcome.allowed === "unavailable") unavailable(outcome.detail);
-    if (!outcome.allowed) {
-      refuse(outcome, "rate_limit_exceeded", c.get("requestId") ?? "", deps);
-    }
+    /**
+     * Every reservation this request took, released in the `finally` below.
+     *
+     * The list is the TS stand-in for Rust's `Drop`: from here on the chain can
+     * refuse (a later guard), throw (a handler), or complete, and in all three
+     * cases the holds go back. Nothing after this point may `return` without
+     * passing through the `finally`.
+     */
+    const holds: { release(): Promise<void> }[] = [];
+    try {
+      // 3b. THE NO-OVERSELL GUARD — `@ferrogate/storage`'s `D1WalletStore`
+      //     three-statement atomic batch, whose predicate lives INSIDE the
+      //     INSERT. Step 3 above is a read and cannot bound a race; this can,
+      //     and it is the only thing here that can. See `./wallet.ts`.
+      if (walletTenantId !== undefined && walletTenantId !== "") {
+        const requestId = c.get("requestId") ?? "";
+        const reserved = await wallet.reserve(
+          walletTenantId,
+          walletHoldId(requestId),
+          deps.nowUnixSeconds?.() ?? Math.floor(Date.now() / 1000),
+        );
+        if (reserved.kind === "unavailable") {
+          // An outage has not proven the caller is overdrawn: 503, never 429.
+          throw new HttpError(
+            503,
+            "quota_resolution_unavailable",
+            `wallet reservation failed: ${reserved.detail}`,
+          );
+        }
+        if (reserved.kind === "insufficient") {
+          const refusal = RATE_LIMIT_REFUSALS.wallet_balance_exhausted;
+          throw new HttpError(refusal.status, refusal.code, refusal.message());
+        }
+        if (reserved.kind === "admitted") holds.push(reserved.hold);
+      }
 
-    // Publish the resolved windows so the inference handlers can enforce TPM
-    // without re-merging the chain (Rust resolves the quota ONCE in
-    // `finalize_auth` and the handlers read `auth.effective_quota`).
-    setResolvedWindows(c, { tpm: resolution.tpm, limiter, options: deps });
-    await next();
+      // 4. RPM.
+      const outcome = await limiter.consumeRequest(resolution.rpm);
+      if (outcome.allowed === "unavailable") unavailable(outcome.detail);
+      if (!outcome.allowed) {
+        refuse(outcome, "rate_limit_exceeded", c.get("requestId") ?? "", deps);
+      }
+
+      // 5. Workflow-run execution budget, zero proposed spend — which still
+      //    decides `exhausted` and `wall_clock` completely. The token dimension
+      //    is re-checked in `admitTokensPerMinute`, where an estimate exists.
+      if (workflowStep !== null) {
+        await enforceWorkflowBudget(
+          workflowBudgets,
+          workflowStep,
+          subject.chain.tenantId ?? "",
+          deps.nowUnixSeconds?.() ?? Math.floor(Date.now() / 1000),
+        );
+      }
+
+      // 6. Operator deny rules (`[[policies]]`) — 403 with the RULE's own code
+      //    and message, exactly as `server/chat.rs:421` renders them. After the
+      //    quota chain, matching Rust: the policy check lives in the handler,
+      //    downstream of `finalize_auth`.
+      const decision = await evaluatePolicyRules(c, auth, policyResolution.rules, {
+        ...(deps.providerForModel === undefined
+          ? {}
+          : {
+              providerForModel: (model: string, e: unknown) =>
+                deps.providerForModel?.(model, e as RateLimitBindings),
+            }),
+      });
+      if (decision.kind === "deny") {
+        throw new HttpError(403, decision.code, decision.message);
+      }
+
+      // Publish the resolved windows so the inference handlers can enforce TPM
+      // without re-merging the chain (Rust resolves the quota ONCE in
+      // `finalize_auth` and the handlers read `auth.effective_quota`).
+      setResolvedWindows(c, {
+        tpm: resolution.tpm,
+        limiter,
+        options: deps,
+        holds,
+        tokenBudget,
+        apiKeyId: subject.apiKeyId,
+        tenantId: subject.chain.tenantId,
+        ...(workflowStep === null
+          ? {}
+          : { workflow: { source: workflowBudgets, step: workflowStep } }),
+        nowUnixSeconds: deps.nowUnixSeconds,
+      });
+      await next();
+    } finally {
+      // Rust released these when the guard dropped; JS has no destructor, so
+      // this is the release. `release()` never throws (see `./wallet.ts` and
+      // `do-limiter.ts::releaseOnce`), so a settlement problem cannot turn an
+      // already-served response into a 500.
+      for (const hold of holds) {
+        await hold.release();
+      }
+    }
   };
+}
+
+/**
+ * Step 5 — the durable workflow-run envelope, pre-flighted with a zero spend.
+ *
+ * Refuses with **402 `workflow_budget_exceeded`** and the denial's own message,
+ * matching `server/agent_runs.rs:756` (`StatusCode::PAYMENT_REQUIRED`) rather
+ * than inventing a status. A lookup failure is 503: an unreadable envelope has
+ * not proven the run is exhausted, and admitting on it would be the free-spend
+ * direction.
+ */
+async function enforceWorkflowBudget(
+  source: WorkflowBudgetSource,
+  step: WorkflowStepDeclaration,
+  tenantId: string,
+  nowUnixSeconds: number,
+): Promise<void> {
+  const lookup = await source.forStep(step, tenantId);
+  if (lookup.kind === "unavailable") {
+    throw new HttpError(
+      503,
+      "workflow_budget_unavailable",
+      `workflow run budget lookup failed: ${lookup.detail}`,
+    );
+  }
+  if (lookup.kind === "unbudgeted") return;
+  const preflight = preflightStep(lookup.budget, 0, 0, 0, nowUnixSeconds);
+  if (!preflight.ok) {
+    throw new HttpError(402, "workflow_budget_exceeded", preflight.denial.message);
+  }
 }
 
 /**
@@ -371,6 +636,26 @@ export interface ResolvedWindows {
   readonly tpm: CounterWindow | null;
   readonly limiter: RateLimiter;
   readonly options: RateLimitOptions;
+  /**
+   * The request's live reservation list, owned by `rateLimit`'s `finally`.
+   *
+   * {@link admitTokensPerMinute} pushes the monthly-token-budget hold onto it
+   * rather than releasing it itself, because a hold taken deep inside the
+   * handler must survive until the handler is done and must be freed even when
+   * the handler throws. Optional so a caller that builds windows by hand (a
+   * unit test) is not forced to invent one.
+   */
+  readonly holds?: { release(): Promise<void> }[] | undefined;
+  /** `api_keys.monthly_token_budget` + the committed sum (step 5b). */
+  readonly tokenBudget?: TokenBudgetSource | undefined;
+  /** The credential the budget is charged to. */
+  readonly apiKeyId?: string | undefined;
+  readonly tenantId?: string | undefined;
+  /** The declared workflow run, when the request carries one (step 5). */
+  readonly workflow?:
+    | { readonly source: WorkflowBudgetSource; readonly step: WorkflowStepDeclaration }
+    | undefined;
+  readonly nowUnixSeconds?: (() => number) | undefined;
 }
 
 /**
@@ -423,12 +708,108 @@ export interface TokenAdmissionRefusal {
  *               backend that is DOWN has not proven the caller is over limit).
  *  - handle   → `Ok(true)`, plus the settlement handle.
  */
+/**
+ * Step 5b — `api_keys.monthly_token_budget`, the loop this wave closed.
+ *
+ * `RateLimiter.reserveTokenBudget` and
+ * `D1UsageLedger.sumApiKeyCommittedTokens` both existed with tests and no
+ * caller, because nothing produced a `committed` count. `./token-budget.ts`
+ * supplies it, `../metering/usage-ledger.ts` grows it, and this is the call.
+ *
+ * Returns `null` when nothing governs the request, or a refusal. The hold, when
+ * one is taken, goes onto the request's release list — NOT released here: the
+ * budget must stay held for the whole request, or two concurrent calls from one
+ * key each see the other's tokens as un-reserved and both are admitted past the
+ * cap.
+ */
+async function admitMonthlyTokenBudget(
+  resolved: ResolvedWindows,
+  estimatedTokens: number,
+): Promise<TokenAdmissionRefusal | null> {
+  const source = resolved.tokenBudget;
+  const apiKeyId = resolved.apiKeyId;
+  if (source === undefined || apiKeyId === undefined || apiKeyId === "") return null;
+
+  const reading = await source.forApiKey(apiKeyId, resolved.tenantId);
+  if (!reading.ok) {
+    const refusal = RATE_LIMIT_REFUSALS.governance_counter_unavailable;
+    return { status: refusal.status, code: refusal.code, message: refusal.message(reading.detail) };
+  }
+  if (reading.budget === undefined) return null;
+
+  // SECURITY: the counter key comes from `keys.ts`, which routes every
+  // derivation through `@ferrogate/policy`'s `QuotaScopeSelector.counterKey`
+  // and asserts the result is scope-namespaced. Re-deriving it here — even as
+  // the bare api-key id, which is what Rust used — is how a tenant that mints a
+  // virtual key named `tenant:<victim>` collides another tenant's aggregate
+  // window. `test/ratelimit/keys.test.ts` holds that attack.
+  const outcome = await resolved.limiter.reserveTokenBudget(
+    tokenBudgetCounterKey(apiKeyId),
+    reading.committedTokens,
+    reading.budget,
+    estimatedTokens,
+  );
+  if (outcome.outcome === "unavailable") {
+    const refusal = RATE_LIMIT_REFUSALS.governance_counter_unavailable;
+    return { status: refusal.status, code: refusal.code, message: refusal.message(outcome.detail) };
+  }
+  if (outcome.outcome === "insufficient") {
+    const refusal = RATE_LIMIT_REFUSALS.token_budget_exceeded;
+    return { status: refusal.status, code: refusal.code, message: refusal.message() };
+  }
+  if (outcome.outcome === "reserved") {
+    resolved.holds?.push(outcome.reservation);
+  }
+  return null;
+}
+
+/** Step 5c — the workflow envelope's token dimension, with the real estimate. */
+async function admitWorkflowTokens(
+  resolved: ResolvedWindows,
+  estimatedTokens: number,
+): Promise<TokenAdmissionRefusal | null> {
+  const workflow = resolved.workflow;
+  if (workflow === undefined) return null;
+
+  const nowUnix = resolved.nowUnixSeconds?.() ?? Math.floor(Date.now() / 1000);
+  const lookup = await workflow.source.forStep(workflow.step, resolved.tenantId ?? "");
+  if (lookup.kind === "unavailable") {
+    return {
+      status: 503,
+      code: "workflow_budget_unavailable",
+      message: `workflow run budget lookup failed: ${lookup.detail}`,
+    };
+  }
+  if (lookup.kind === "unbudgeted") return null;
+
+  const preflight = preflightStep(lookup.budget, 0, estimatedTokens, 0, nowUnix);
+  if (preflight.ok) return null;
+  return { status: 402, code: "workflow_budget_exceeded", message: preflight.denial.message };
+}
+
 export async function admitTokensPerMinute(
   c: Context<GatewayEnv>,
   estimatedTokens: number,
 ): Promise<TokenAdmission | TokenAdmissionRefusal | null> {
   const resolved = resolvedWindows(c);
-  if (resolved === undefined || resolved.tpm === null) return null;
+  if (resolved === undefined) return null;
+
+  // 5b. `api_keys.monthly_token_budget` (#330). Checked BEFORE the TPM window
+  //     because it is the harder limit — a caller over its lifetime budget is
+  //     refused outright, not throttled — and because Rust decides it upstream
+  //     of the handler (`authenticate_durable` / `try_reserve_api_key_tokens`).
+  const budgetRefusal = await admitMonthlyTokenBudget(resolved, estimatedTokens);
+  if (budgetRefusal !== null) return budgetRefusal;
+
+  // 5c. The workflow envelope's TOKEN dimension, now that an estimate exists.
+  //     The middleware pre-flighted the same envelope with a zero spend, which
+  //     could only decide `exhausted` and `wall_clock`; this is the step that
+  //     refuses a run about to breach `token_budget` — before the provider is
+  //     paid, which is the whole point of pre-flighting at all.
+  const workflowRefusal = await admitWorkflowTokens(resolved, estimatedTokens);
+  if (workflowRefusal !== null) return workflowRefusal;
+
+  if (resolved.tpm === null) return null;
   const admission = await resolved.limiter.consumeTokens(resolved.tpm, estimatedTokens);
   if (admission.allowed === "unavailable") {
     const refusal = RATE_LIMIT_REFUSALS.governance_counter_unavailable;

@@ -33,7 +33,17 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import type { z } from "zod";
-import { resolveDeps } from "./defaults.js";
+import {
+  applyCanary,
+  eligibleCandidates,
+  routeRequirements,
+  routingRejectionFor,
+  servableCandidates,
+} from "./candidates.js";
+import type { ModelEndpointKind } from "./candidates.js";
+import { resolveCandidates, resolveDeps } from "./defaults.js";
+import { dispatchWithFailover } from "./reliability.js";
+import type { AttemptCandidate } from "./reliability.js";
 import {
   ProviderBodyTooLargeError,
   ProviderEndpointError,
@@ -247,14 +257,47 @@ function validateBody<S extends z.ZodTypeAny>(
 // Steps 5 + 6 — metadata bounds, model gate, model resolution
 // ---------------------------------------------------------------------------
 
+/**
+ * The ORDERED candidate ladder for one request, each with its upstream request
+ * already prepared.
+ *
+ * Rust's `routing.eligible_routes` (`chat.rs:243`) — the list the `'routes:`
+ * loop walks. It is a LIST rather than a single route because that signature is
+ * what the circuit breaker, the failover ladder and the eligibility gate all
+ * hang off; see the class docs on `ModelResolver` in `./ports.ts`.
+ */
 interface PlannedRequest {
-  readonly route: PhysicalRoute;
-  readonly upstream: UpstreamRequest;
+  readonly candidates: readonly AttemptCandidate[];
+}
+
+/** `ModelEndpointKind` for the eligibility gate. */
+function endpointKindFor(operation: InferenceOperation): ModelEndpointKind {
+  switch (operation) {
+    case "embeddings":
+      return "embeddings";
+    case "images":
+      return "images";
+    case "responses":
+      return "responses";
+    default:
+      // `model_catalog` never reaches the gate (it is not a dispatched
+      // inference request); `/v1/messages` plans as `chat.completions` because
+      // it dispatches a translated chat request, which is what Rust does too.
+      return "chat.completions";
+  }
 }
 
 /**
- * Runs steps 5 and 6 and builds the upstream request. Returns a rejection
- * instead of throwing so the caller keeps the Rust status/code pairs verbatim.
+ * Runs steps 5 and 6 and builds the upstream request for every eligible
+ * candidate route. Returns a rejection instead of throwing so the caller keeps
+ * the Rust status/code pairs verbatim.
+ *
+ * `inputTokenUpperBound` is the prompt half of the pre-dispatch estimate,
+ * threaded in because the context-window leg of the eligibility gate needs it
+ * (Rust passes the same quantity as `request_input_token_upper_bound`). It is
+ * a pure computation, so hoisting it above the TPM admission — which still runs
+ * AFTER planning, for the reason documented on {@link admitTokens} — changes
+ * nothing about when the caller is charged.
  */
 function planUpstream(
   deps: ResolvedInferenceDeps,
@@ -264,6 +307,7 @@ function planUpstream(
   metadata: RequestMetadata | undefined,
   stream: boolean,
   body: Record<string, unknown>,
+  inputTokenUpperBound = 0,
 ): PlannedRequest | InferenceRejection {
   const metadataReason = validateRequestMetadata(metadata);
   if (metadataReason !== null) {
@@ -310,8 +354,10 @@ function planUpstream(
   //     a platform limit.
   //
   // See `docs/rewrite/parity-audit-request-path.md` F10/F11.
-  const route = deps.models.resolve(logicalModel);
-  if (route === null) {
+  // `AppState::candidate_model_routes` — every ENABLED route for the model,
+  // primary then fallbacks, priority→weight ordered.
+  const resolved = resolveCandidates(deps.models, logicalModel);
+  if (resolved.length === 0) {
     const known = deps.models
       .catalog()
       .find((candidate) => candidate.logicalModel === logicalModel);
@@ -322,47 +368,116 @@ function planUpstream(
 
   // A tenant must not be able to invoke another tenant's private model even
   // when it guessed the logical name (`can_tenant_use_model`). The listing
-  // filter and the invocation gate MUST agree — that was issue #515.
-  if (!scopeCanSeeModel(caller.scope, caller.projectId, route)) {
+  // filter and the invocation gate MUST agree — that was issue #515. Tenancy
+  // lives on the registry ENTRY, so every candidate carries the same answer;
+  // checking the primary is checking all of them.
+  if (!scopeCanSeeModel(caller.scope, caller.projectId, resolved[0] as PhysicalRoute)) {
     return reject(400, "model_not_found", `unknown model ${logicalModel}`);
   }
 
-  const adapter = deps.adapters.adapterFor(route.providerKind);
-  if (adapter === null) {
-    return reject(
-      502,
-      "provider_adapter_error",
-      `unsupported provider kind ${route.providerKind.trim().toLowerCase()}`,
-    );
-  }
+  // `AppState::canary_route` — promote the canary for the sticky subset of
+  // callers it selects, drop it for everyone else — and then strip the SHADOW
+  // route, which is a mirror and must never be servable to a client.
+  const rolled = servableCandidates(applyCanary(resolved, caller));
 
-  const built = adapter.buildUpstreamRequest({
-    operation,
-    route,
-    logicalModel,
-    providerModel: route.providerModel,
-    stream,
+  // `model_routing.rs` — eligibility runs BEFORE anything reads price or
+  // health, "so an incompatible route is never allowed to reach dispatch".
+  const requirements = routeRequirements(
+    endpointKindFor(operation),
     body,
-  });
-  if (!built.ok) {
-    // `UnsupportedCapability` is the fail-closed capability error from issue
-    // #275 (e.g. images on an Anthropic route) and is a client-side 400;
-    // an unknown kind is a server-side misconfiguration, 502.
-    const status = built.error.kind === "unsupported_capability" ? 400 : 502;
-    const code =
-      built.error.kind === "unsupported_capability"
-        ? "model_capability_unsupported"
-        : built.error.kind === "invalid_request"
-          ? "invalid_request"
-          : "provider_adapter_error";
-    return reject(
-      built.error.kind === "invalid_request" ? 400 : status,
-      code,
-      adapterErrorMessage(built.error),
+    stream,
+    inputTokenUpperBound,
+  );
+  const decision = eligibleCandidates(rolled, requirements, caller.regionAllowlist ?? []);
+  if (decision.eligible.length === 0) {
+    const rejection = routingRejectionFor(logicalModel, decision.exclusions);
+    return reject(rejection.status, rejection.code, rejection.message);
+  }
+
+  const candidates: AttemptCandidate[] = [];
+  let firstFailure: InferenceRejection | null = null;
+  for (const route of decision.eligible) {
+    const adapter = deps.adapters.adapterFor(route.providerKind);
+    if (adapter === null) {
+      firstFailure ??= reject(
+        502,
+        "provider_adapter_error",
+        `unsupported provider kind ${route.providerKind.trim().toLowerCase()}`,
+      );
+      continue;
+    }
+
+    const built = adapter.buildUpstreamRequest({
+      operation,
+      route,
+      logicalModel,
+      providerModel: route.providerModel,
+      stream,
+      body,
+    });
+    if (!built.ok) {
+      // `UnsupportedCapability` is the fail-closed capability error from issue
+      // #275 (e.g. images on an Anthropic route) and is a client-side 400;
+      // an unknown kind is a server-side misconfiguration, 502.
+      const status = built.error.kind === "unsupported_capability" ? 400 : 502;
+      const code =
+        built.error.kind === "unsupported_capability"
+          ? "model_capability_unsupported"
+          : built.error.kind === "invalid_request"
+            ? "invalid_request"
+            : "provider_adapter_error";
+      firstFailure ??= reject(
+        built.error.kind === "invalid_request" ? 400 : status,
+        code,
+        adapterErrorMessage(built.error),
+      );
+      continue;
+    }
+
+    candidates.push({ route, upstream: built.request });
+  }
+
+  // A candidate whose adapter refuses the request is dropped, not fatal — the
+  // ladder falls through to one that can serve it. Only when NOTHING can be
+  // prepared does the first refusal become the answer, which is exactly the
+  // single-route behavior this path had before the ladder existed.
+  if (candidates.length === 0) {
+    return (
+      firstFailure ??
+      reject(502, "provider_adapter_error", `no provider adapter for model ${logicalModel}`)
     );
   }
 
-  return { route, upstream: built.request };
+  return { candidates };
+}
+
+/**
+ * The `'routes:` loop, at the four dispatch sites.
+ *
+ * Everything about the ladder lives in `reliability.ts`; this function is the
+ * seam that hands it the gateway-policy half of dispatch — endpoint-scheme
+ * validation and the `limits.dispatchTimeoutMs` deadline, which stay in
+ * {@link dispatchUpstream} so that every dispatcher, including one a test
+ * injects, is held to them.
+ */
+async function dispatchCandidates(
+  deps: ResolvedInferenceDeps,
+  planned: PlannedRequest,
+  signal: AbortSignal | undefined,
+): Promise<
+  { readonly route: PhysicalRoute; readonly response: Response } | InferenceRejection
+> {
+  const outcome = await dispatchWithFailover({
+    candidates: planned.candidates,
+    circuit: deps.circuit,
+    settings: deps.reliability,
+    attempt: async (candidate) => await dispatchUpstream(deps, candidate.upstream, signal),
+    isRejection: (value): value is InferenceRejection => isRejection(value),
+  });
+  if (!outcome.ok) {
+    return outcome.rejection;
+  }
+  return { route: outcome.candidate.route, response: outcome.response };
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +911,10 @@ async function handleOpenAiInference(
   const stream = request["stream"] === true;
   const metadata = request["metadata"] as RequestMetadata | undefined;
 
+  // Rust `estimate_chat_completion_usage` — `/v1/responses` shares it, because
+  // both surfaces go through `build_chat_completion_request_plan`.
+  const estimated = estimateChatCompletionUsage(request, logicalModel);
+
   const planned = planUpstream(
     deps,
     caller,
@@ -804,36 +923,36 @@ async function handleOpenAiInference(
     metadata,
     stream,
     request,
+    estimated.promptTokens,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
   }
 
-  // Rust `estimate_chat_completion_usage` — `/v1/responses` shares it, because
-  // both surfaces go through `build_chat_completion_request_plan`.
-  const admitted = await admitTokens(c, estimateChatCompletionUsage(request, logicalModel));
+  const admitted = await admitTokens(c, estimated);
   if (isRejection(admitted)) {
     return errorResponse(admitted, requestId);
   }
   const admission = admissionHandle(admitted);
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
-  if (isRejection(upstreamResponse)) {
-    return errorResponse(upstreamResponse, requestId);
+  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
   }
+  const { route: servedRoute, response: upstreamResponse } = dispatched;
 
   const routeLabel = ROUTE_LABELS[operation];
-  const usageDialect = usageProviderKindFor(operation, planned.route.providerKind);
+  const usageDialect = usageProviderKindFor(operation, servedRoute.providerKind);
   const meterBase = {
     requestId,
     route: routeLabel,
     logicalModel,
-    provider: planned.route.provider,
-    providerModel: planned.route.providerModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
     stream,
     status: upstreamResponse.status,
     ...(metadata !== undefined ? { metadata } : {}),
-    ...(planned.route.tenantId !== undefined ? { tenantId: planned.route.tenantId } : {}),
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
@@ -844,7 +963,7 @@ async function handleOpenAiInference(
       upstreamResponse,
       dialect,
       usageDialect,
-      planned.route,
+      servedRoute,
       requestId,
       (usage) => {
         recordUsage(deps, meterBase, usage);
@@ -911,6 +1030,12 @@ async function handleMessages(
     );
   }
 
+  // Rust `estimate_messages_usage` reads the TRANSLATED body, not the Anthropic
+  // one the client sent: `to_chat_completions` has already folded the top-level
+  // `system` prompt into `messages[0]`, so estimating the original would drop
+  // the system prompt out of the reservation entirely.
+  const estimated = estimateMessagesUsage(translated.body, logicalModel);
+
   const planned = planUpstream(
     deps,
     caller,
@@ -919,36 +1044,34 @@ async function handleMessages(
     undefined,
     stream,
     translated.body,
+    estimated.promptTokens,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
   }
 
-  // Rust `estimate_messages_usage` reads the TRANSLATED body, not the Anthropic
-  // one the client sent: `to_chat_completions` has already folded the top-level
-  // `system` prompt into `messages[0]`, so estimating the original would drop
-  // the system prompt out of the reservation entirely.
-  const admitted = await admitTokens(c, estimateMessagesUsage(translated.body, logicalModel));
+  const admitted = await admitTokens(c, estimated);
   if (isRejection(admitted)) {
     return errorResponse(admitted, requestId);
   }
   const admission = admissionHandle(admitted);
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
-  if (isRejection(upstreamResponse)) {
-    return errorResponse(upstreamResponse, requestId);
+  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
   }
+  const { route: servedRoute, response: upstreamResponse } = dispatched;
 
-  const usageDialect = usageProviderKindFor("messages", planned.route.providerKind);
+  const usageDialect = usageProviderKindFor("messages", servedRoute.providerKind);
   const meterBase = {
     requestId,
     route: ROUTE_LABELS.messages,
     logicalModel,
-    provider: planned.route.provider,
-    providerModel: planned.route.providerModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
     stream,
     status: upstreamResponse.status,
-    ...(planned.route.tenantId !== undefined ? { tenantId: planned.route.tenantId } : {}),
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
@@ -963,7 +1086,7 @@ async function handleMessages(
       upstreamResponse,
       "anthropic.messages",
       usageDialect,
-      planned.route,
+      servedRoute,
       requestId,
       (usage) => {
         recordUsage(deps, meterBase, usage);
@@ -1011,6 +1134,12 @@ async function handleEmbeddings(
   const logicalModel = String(request["model"]);
   const metadata = request["metadata"] as RequestMetadata | undefined;
 
+  // Rust `estimate_embeddings_usage` — the arm that scores a PRE-TOKENIZED
+  // `input` (a flat array of token ids) at one token each is the one that
+  // matters: a character-only count reads those as 0 and lets a caller drive
+  // unlimited embedding tokens straight past this gate (issue #207).
+  const estimated = estimateEmbeddingsUsage(request, logicalModel);
+
   const planned = planUpstream(
     deps,
     caller,
@@ -1019,25 +1148,23 @@ async function handleEmbeddings(
     metadata,
     false,
     request,
+    estimated.promptTokens,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
   }
 
-  // Rust `estimate_embeddings_usage` — the arm that scores a PRE-TOKENIZED
-  // `input` (a flat array of token ids) at one token each is the one that
-  // matters: a character-only count reads those as 0 and lets a caller drive
-  // unlimited embedding tokens straight past this gate (issue #207).
-  const admitted = await admitTokens(c, estimateEmbeddingsUsage(request, logicalModel));
+  const admitted = await admitTokens(c, estimated);
   if (isRejection(admitted)) {
     return errorResponse(admitted, requestId);
   }
   const admission = admissionHandle(admitted);
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
-  if (isRejection(upstreamResponse)) {
-    return errorResponse(upstreamResponse, requestId);
+  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
   }
+  const { route: servedRoute, response: upstreamResponse } = dispatched;
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -1047,12 +1174,12 @@ async function handleEmbeddings(
     requestId,
     route: ROUTE_LABELS.embeddings,
     logicalModel,
-    provider: planned.route.provider,
-    providerModel: planned.route.providerModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
     stream: false,
     status: upstreamResponse.status,
     ...(metadata !== undefined ? { metadata } : {}),
-    ...(planned.route.tenantId !== undefined ? { tenantId: planned.route.tenantId } : {}),
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -1073,7 +1200,7 @@ async function handleEmbeddings(
   // `translate_embeddings_response`: `undefined` means "pass the upstream body
   // through byte-for-byte" — correct for the OpenAI-compatible family, whose
   // `/embeddings` response already IS the canonical shape (issue #274).
-  const adapter = deps.adapters.adapterFor(planned.route.providerKind);
+  const adapter = deps.adapters.adapterFor(servedRoute.providerKind);
   const translated = adapter?.translateEmbeddingsResponse?.(parsed, logicalModel);
   if (translated !== undefined) {
     return jsonResponse(translated, requestId, upstreamResponse.status);
@@ -1115,10 +1242,11 @@ async function handleImages(
   }
   const admission = admissionHandle(admitted);
 
-  const upstreamResponse = await dispatchUpstream(deps, planned.upstream, clientSignal(c));
-  if (isRejection(upstreamResponse)) {
-    return errorResponse(upstreamResponse, requestId);
+  const dispatched = await dispatchCandidates(deps, planned, clientSignal(c));
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
   }
+  const { route: servedRoute, response: upstreamResponse } = dispatched;
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -1140,13 +1268,13 @@ async function handleImages(
       requestId,
       route: ROUTE_LABELS.images,
       logicalModel,
-      provider: planned.route.provider,
-      providerModel: planned.route.providerModel,
+      provider: servedRoute.provider,
+      providerModel: servedRoute.providerModel,
       stream: false,
       status: upstreamResponse.status,
       ...(imageCount !== undefined ? { imageCount } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
-      ...(planned.route.tenantId !== undefined ? { tenantId: planned.route.tenantId } : {}),
+      ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     },
     undefined,
   );

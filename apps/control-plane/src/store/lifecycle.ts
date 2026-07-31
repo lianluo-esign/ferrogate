@@ -52,6 +52,10 @@
  * Rust: "fail-open here would hand every suspended tenant a trivial bypass
  * (make the control plane flap and keep serving)."
  */
+import {
+  type LifecycleStatus,
+  parseLifecycleStatus as parseLifecycleStatusToken,
+} from "@ferrogate/storage";
 import type { ApiOperation } from "../contract.js";
 import type {
   AuthContext,
@@ -62,8 +66,15 @@ import type {
   TenancyLifecycleGatePort,
 } from "../ports.js";
 
-/** Rust `LifecycleStatus`. */
-export type LifecycleStatus = "active" | "disabled" | "suspended" | "deleted";
+/**
+ * Rust `LifecycleStatus`, re-exported from `@ferrogate/storage` rather than
+ * re-declared. The package's `lifecycle-status.ts` IS the port of
+ * `ferrogate-storage::lifecycle_status`; a second declaration here compiled
+ * against it by coincidence of both being the same four strings, and the
+ * coincidence is the hazard — a status added to one side is a type error
+ * nowhere.
+ */
+export type { LifecycleStatus };
 
 /** The collections the hierarchy rows live in (`routes/tenant_hierarchy.ts`). */
 export const TENANT_ACCOUNTS_COLLECTION = "tenant-accounts";
@@ -95,19 +106,14 @@ export const RECOVERY_OPERATION_IDS: ReadonlySet<string> = new Set([
  * Rust `LifecycleStatus::parse` — case- and whitespace-insensitive, and
  * anything outside the closed vocabulary (including absent and `""`) is
  * `active`. See the module docblock for why that default is load-bearing.
+ *
+ * The parse itself is `@ferrogate/storage`'s; this wrapper only widens the input
+ * to `unknown`, because a value read out of a JSON document has no type. The
+ * non-string case lands on the SAME fail-open default the package gives an
+ * unrecognized token, so widening cannot introduce a second policy.
  */
 export function parseLifecycleStatus(raw: unknown): LifecycleStatus {
-  if (typeof raw !== "string") return "active";
-  switch (raw.trim().toLowerCase()) {
-    case "suspended":
-      return "suspended";
-    case "disabled":
-      return "disabled";
-    case "deleted":
-      return "deleted";
-    default:
-      return "active";
-  }
+  return typeof raw === "string" ? parseLifecycleStatusToken(raw) : "active";
 }
 
 /** One resolved ancestor in the chain. Rust `LifecycleRef`. */

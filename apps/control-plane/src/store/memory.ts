@@ -35,6 +35,7 @@ import {
   type ControlPlaneStore,
   type ListPage,
   type ListQuery,
+  type MergeIfOutcome,
   StoreConflictError,
   type StoreMutation,
   type StoreRecord,
@@ -132,6 +133,44 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     };
     this.#bucket(collection).set(id, stored);
     return stored;
+  }
+
+  /**
+   * {@link ControlPlaneStore.mergeIf}, the reference semantics.
+   *
+   * The whole body is **synchronous** — no `await` anywhere between the read,
+   * the predicate and the write — and that is load-bearing rather than tidy. A
+   * single-threaded isolate cannot interleave another request across a
+   * synchronous span, so read-decide-write here is genuinely one step, which is
+   * the property the D1 store reconstructs with a revision guard and a retry.
+   *
+   * Writing it the obvious way, `const existing = await this.get(...)`, does NOT
+   * work and the conformance suite catches it: `await` yields to the microtask
+   * queue even on an already-resolved promise, so five concurrent claims all
+   * complete their `get` before any of them writes and **all five are admitted**.
+   * The `async` keyword is kept only so the return type is a promise and the
+   * signature matches the port; nothing inside suspends, and adding an `await`
+   * to "tidy that up" reintroduces the bug.
+   */
+  async mergeIf(
+    collection: string,
+    scope: CallerScope,
+    id: string,
+    patch: Readonly<Record<string, unknown>>,
+    precondition: (current: StoreRecord) => boolean,
+  ): Promise<MergeIfOutcome> {
+    const existing = this.#bucket(collection).get(id);
+    if (existing === undefined || !visibleTo(existing, scope)) return { kind: "not_found" };
+    if (!precondition(existing)) return { kind: "precondition_failed", current: existing };
+    const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
+    const stored: StoreRecord = {
+      ...existing,
+      ...fields,
+      id,
+      tenant_id: existing.tenant_id ?? null,
+    };
+    this.#bucket(collection).set(id, stored);
+    return { kind: "merged", record: stored };
   }
 
   async remove(collection: string, scope: CallerScope, id: string): Promise<boolean> {

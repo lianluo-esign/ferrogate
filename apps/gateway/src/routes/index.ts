@@ -18,8 +18,6 @@
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { depsFromEnv } from "../adapters.js";
-import { agentDiscoveryHandler } from "./agent-discovery.js";
-import { readinessResponse } from "./readiness.js";
 import { type ApiOperation, type HttpMethod, operationById } from "../contract.js";
 import { type DepsResolver, contractAuth } from "../middleware/auth.js";
 import {
@@ -29,7 +27,10 @@ import {
   requestId,
 } from "../middleware/errors.js";
 import { networkAccess } from "../middleware/network.js";
+import { responseCache } from "../middleware/response-cache.js";
 import type { GatewayEnv } from "../ports.js";
+import { agentDiscoveryHandler } from "./agent-discovery.js";
+import { readinessResponse } from "./readiness.js";
 
 /** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
 export const SERVICE_NAME = "ferrogate-gateway";
@@ -304,6 +305,19 @@ export interface CreateGatewayAppOptions {
    * It is deliberately NOT nullable: there is no way to ask for "no gate".
    */
   readonly networkAccess?: MiddlewareHandler<GatewayEnv>;
+  /**
+   * Override the exact-match AI response cache (Rust `AiResponseCache`).
+   *
+   * Production never passes this: the default reads the `GATEWAY_CACHE_*` vars
+   * and is inert until `GATEWAY_CACHE_ENABLED=true`, which is Rust's
+   * `CacheConfig::default().enabled == false`. It exists so a test can inject
+   * the in-memory store with a fixed clock and assert TTL/LRU expiry, which no
+   * test can do against the platform Cache API.
+   *
+   * Like `networkAccess` it is NOT nullable — there is no way to ask for "no
+   * cache middleware", only for a cache that is switched off by config.
+   */
+  readonly responseCache?: MiddlewareHandler<GatewayEnv>;
 }
 
 /** The assembled Worker plus the registry the anti-drift test inspects. */
@@ -335,6 +349,16 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   for (const middleware of options.middleware ?? []) {
     app.use("*", middleware);
   }
+
+  // The exact-match AI response cache (Rust `AiResponseCache`, consulted at
+  // `server/chat.rs:481`). LAST in the chain and immediately before the routes,
+  // which is the same place the Rust seam sits inside the handler: after the
+  // credential is resolved (the key is built from the AUTHENTICATED identity),
+  // after admission (a hit is still a request, so it must not bypass the rate
+  // limiter) and after request-stage screening (a hit must not let a prompt
+  // skip guardrails) — but before dispatch, because not dispatching is the
+  // point. Inert until `GATEWAY_CACHE_ENABLED=true`.
+  app.use("*", options.responseCache ?? responseCache());
 
   const router = new GatewayRouter(app);
 

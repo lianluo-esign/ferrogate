@@ -15,6 +15,17 @@ import {
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
+import { orderCandidates } from "./candidates.js";
+import { DurableObjectProviderCircuit } from "./circuit-do.js";
+import type { ProviderCircuitNamespace } from "./circuit-do.js";
+import {
+  DEFAULT_RELIABILITY,
+  InMemoryProviderCircuit,
+  NO_PROVIDER_CIRCUIT,
+  circuitEnabled,
+  reliabilityFromVar,
+} from "./reliability.js";
+import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type {
   Caller,
   InferenceBindings,
@@ -79,9 +90,97 @@ export class InMemoryModelResolver implements ModelResolver {
     return this.#routes.find((route) => route.logicalModel === model && route.enabled) ?? null;
   }
 
+  /**
+   * `GET /v1/models` lists ONE entry per logical model.
+   *
+   * Fallbacks flatten into this table as extra rows sharing a `logicalModel`
+   * (`catalog.ts::buildModelCatalog`), so without this dedupe a model with two
+   * fallbacks would appear three times in the OpenAI listing — a wire-shape
+   * regression a client would see. The entry kept is the first ENABLED row,
+   * falling back to the first row of any kind, which is what preserves
+   * `model_disabled` (a model whose every route is disabled still appears, with
+   * `enabled: false`, so `handlers.ts` can tell it from `model_not_found`).
+   */
   catalog(): readonly PhysicalRoute[] {
-    return this.#routes;
+    const byModel = new Map<string, PhysicalRoute>();
+    for (const route of this.#routes) {
+      const existing = byModel.get(route.logicalModel);
+      if (existing === undefined || (!existing.enabled && route.enabled)) {
+        byModel.set(route.logicalModel, route);
+      }
+    }
+    return [...byModel.values()];
   }
+
+  /**
+   * `AppState::candidate_model_routes` — every ENABLED route for the logical
+   * model, in `orderCandidates` order (priority ascending, then weight
+   * descending, then a total tiebreak).
+   *
+   * Disabled routes are filtered here rather than at ordering time so a
+   * fallback an operator switched off can never be reached by failover; that is
+   * the same rule `resolve` applies to the primary.
+   */
+  candidates(model: string): readonly PhysicalRoute[] {
+    return orderCandidates(
+      this.#routes.filter((route) => route.logicalModel === model && route.enabled),
+    );
+  }
+}
+
+/**
+ * `ModelResolver.candidates`, with the single-route fallback.
+ *
+ * A resolver written before the failover ladder existed implements only
+ * `resolve`, and for it the candidate list is exactly the one route it returns
+ * — i.e. the pre-wiring behavior, preserved bit for bit. Every resolver this
+ * app ships implements `candidates` for real.
+ */
+export function resolveCandidates(
+  models: ModelResolver,
+  model: string,
+): readonly PhysicalRoute[] {
+  if (typeof models.candidates === "function") {
+    return models.candidates(model);
+  }
+  const single = models.resolve(model);
+  return single === null ? [] : [single];
+}
+
+/**
+ * Build the {@link ProviderCircuit} for a Worker `env`.
+ *
+ * Three-way, and the ORDER is the whole contract:
+ *
+ *  1. breaker not configured (`circuitEnabled` false — Rust's
+ *     `provider_circuit_config == None`) ⇒ {@link NO_PROVIDER_CIRCUIT}. This is
+ *     the default, so wiring the ladder changes no deployed behavior until an
+ *     operator sets `GATEWAY_RELIABILITY`.
+ *  2. `PROVIDER_CIRCUIT` bound ⇒ the Durable Object, which is the only
+ *     cross-isolate answer (see `./circuit-do.ts`).
+ *  3. otherwise ⇒ {@link InMemoryProviderCircuit}, the per-isolate
+ *     approximation, marked PORT-TODO on the class itself.
+ *
+ * A configured breaker with no binding must NOT silently do nothing: shedding
+ * late is much better than never shedding, and arm 3 is what makes the config
+ * var meaningful before the DO lands.
+ */
+export function providerCircuitFor(
+  settings: ReliabilitySettings,
+  env: InferenceBindings,
+): ProviderCircuit {
+  if (!circuitEnabled(settings)) {
+    return NO_PROVIDER_CIRCUIT;
+  }
+  const namespace = env["PROVIDER_CIRCUIT"];
+  if (
+    typeof namespace === "object" &&
+    namespace !== null &&
+    typeof (namespace as ProviderCircuitNamespace).idFromName === "function"
+  ) {
+    return new DurableObjectProviderCircuit(namespace as ProviderCircuitNamespace, settings);
+  }
+  return new InMemoryProviderCircuit(settings);
 }
 
 /** An empty registry — every model resolves to `model_not_found` (400). */
@@ -245,6 +344,16 @@ export function resolveDeps(
   env: InferenceBindings = {},
 ): ResolvedInferenceDeps {
   const models = typeof deps.models === "function" ? deps.models(env) : deps.models;
+  // An INJECTED partial always wins over the var, so a test that asks for a
+  // threshold of 2 gets 2 whatever the deployment configured.
+  const reliability: ReliabilitySettings = {
+    ...reliabilityFromVar(env["GATEWAY_RELIABILITY"]),
+    ...deps.reliability,
+  };
+  const circuit =
+    typeof deps.circuit === "function"
+      ? deps.circuit(env)
+      : (deps.circuit ?? providerCircuitFor(reliability, env));
   return {
     models: models ?? emptyModelResolver,
     adapters: deps.adapters ?? defaultAdapterRegistry,
@@ -255,5 +364,7 @@ export function resolveDeps(
     requestIds: deps.requestIds ?? defaultRequestIds,
     limits: { ...DEFAULT_INFERENCE_LIMITS, ...deps.limits },
     caller: deps.caller ?? defaultCallerResolver,
+    reliability,
+    circuit,
   };
 }

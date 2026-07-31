@@ -304,6 +304,65 @@ export interface GatewayBindings {
    * (`wrangler secret put`), never a committed var.
    */
   readonly GUARDRAIL_EVIDENCE_HMAC_KEY?: string;
+
+  // -------------------------------------------------------------------------
+  // Wave-9 bindings — "the great wiring". Each is declared in `wrangler.toml`
+  // and read by the module named below.
+  // -------------------------------------------------------------------------
+
+  /**
+   * `ProviderCircuitDurableObject` namespace — one instance per provider name,
+   * read by `src/inference/defaults.ts` (`providerCircuitFor`). Unbound, the
+   * breaker degrades to a per-isolate `Map`, which counts failures per isolate
+   * and so is NOT a correct cross-isolate breaker.
+   *
+   * The class must be re-exported from `src/worker.ts`: workerd resolves a
+   * binding's `class_name` against the ENTRY module.
+   */
+  readonly PROVIDER_CIRCUIT?: DurableObjectNamespace;
+  /**
+   * JSON object of the three provider-reliability settings — read by
+   * `src/inference/reliability.ts`. Absent/empty ⇒ NO breaker and no retry,
+   * reproducing Rust's "both fields unset ⇒ the breaker is not constructed".
+   */
+  readonly GATEWAY_RELIABILITY?: string;
+
+  /** JSON array of `@ferrogate/policy` deny/allow rules — `src/ratelimit/policy.ts`. */
+  readonly GATEWAY_POLICY_RULES?: string;
+  /** Credits held per in-flight request — `src/ratelimit/wallet.ts`. */
+  readonly GATEWAY_WALLET_HOLD_CREDITS?: string;
+
+  /**
+   * The `[cache]` section, one var per field — read by `src/cache/config.ts`.
+   * `GATEWAY_CACHE_ENABLED` defaults FALSE; a malformed value here disables the
+   * cache and reports `x-ferrogate-cache: bypass` rather than failing the
+   * request (see `src/cache/config.ts` on why this fails the opposite way from
+   * the network gate).
+   */
+  readonly GATEWAY_CACHE_ENABLED?: string;
+  readonly GATEWAY_CACHE_TTL_SECONDS?: string;
+  readonly GATEWAY_CACHE_MAX_RECORDS?: string;
+  readonly GATEWAY_CACHE_MODE?: string;
+  readonly GATEWAY_CACHE_DISABLED_MODELS?: string;
+  readonly GATEWAY_CACHE_DISABLED_API_KEYS?: string;
+  readonly GATEWAY_CACHE_DISABLED_PROFILES?: string;
+
+  /**
+   * Per-tenant D1 routing mode — `src/tenancy/resolver.ts`. `"off"` (the
+   * committed default) leaves the middleware inert; no mode ever falls back to
+   * the shared `DB`.
+   */
+  readonly GATEWAY_TENANT_DB_ROUTING?: string;
+  /** D1 REST account id — `"rest"` mode only. */
+  readonly GATEWAY_TENANT_DB_ACCOUNT_ID?: string;
+  /** D1 REST API token — `"rest"` mode only. A SECRET, never a committed var. */
+  readonly GATEWAY_TENANT_DB_API_TOKEN?: string;
+  //
+  // The per-tenant D1 handles themselves are deliberately NOT declared here:
+  // each is bound under the name recorded in `tenant_databases.binding_name`,
+  // so the set is deploy-time data and an index signature would erase every
+  // typo check on the fields above. `TenancyBindings` (src/tenancy/ports.ts)
+  // carries the `Record<string, unknown>` lookup shape for that one read.
 }
 
 /** Per-request context values set by the middleware chain. */

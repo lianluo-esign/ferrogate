@@ -43,11 +43,48 @@
  * lucky. It adds no buffering: `pull` reads exactly one upstream chunk per
  * downstream demand, so backpressure and first-token latency are unchanged.
  */
-import type { MiddlewareHandler } from "hono";
-import type { UsageRecordContext } from "../inference/ports.js";
-import type { GatewayEnv } from "../ports.js";
+import type { Context, MiddlewareHandler } from "hono";
+import type { AuthContext, GatewayEnv } from "../ports.js";
 import { executionContextOf } from "./runtime.js";
 import type { MeteringUsageSink } from "./sink.js";
+import type { MeteringAttribution, MeteringDrainContext } from "./usage-ledger.js";
+
+/**
+ * Who this request's usage is attributed to, from the authenticated credential.
+ *
+ * This is the ONLY place the api-key id is available to metering: `Usage`
+ * (`src/inference/ports.ts`) does not carry one, and that file belongs to the
+ * composition root rather than to this slice. Without it
+ * `tenant_contexts.api_key_id` is never written, and
+ * `sumApiKeyCommittedTokens` — the operand of `api_keys.monthly_token_budget` —
+ * sums zero forever. See `./usage-ledger.ts` for why it is guarded by request
+ * id when it is applied.
+ *
+ * `undefined` for an anonymous operation, which meters nothing anyway.
+ *
+ * `requestId` is supplied by the caller rather than read from
+ * `c.get("requestId")`, and that is load-bearing: the inference handlers run
+ * inside the INNER Hono app `inferenceRouteModule` delegates into, which mints
+ * its OWN id (`inference/handlers.ts:781`) unless the client sent an inbound
+ * `x-request-id`. The id a charge carries is therefore the INNER one, and the
+ * outer variable would never match it. See {@link meteringDrain} for where the
+ * matching id comes from.
+ */
+export function attributionFrom(
+  c: Context<GatewayEnv>,
+  requestId: string,
+): MeteringAttribution | undefined {
+  const auth = c.get("auth") as AuthContext | null | undefined;
+  if (auth === null || auth === undefined) return undefined;
+  const { tenantId, projectId, workspaceId } = auth.tenancy;
+  return {
+    requestId,
+    ...(tenantId === null || tenantId === undefined ? {} : { tenantId }),
+    ...(projectId === null || projectId === undefined ? {} : { projectId }),
+    ...(workspaceId === null || workspaceId === undefined ? {} : { workspaceId }),
+    ...(auth.subject === null ? {} : { apiKeyId: auth.subject }),
+  };
+}
 
 /** Responses whose usage frame lands AFTER the headers are flushed. */
 function isEventStream(response: Response): boolean {
@@ -118,8 +155,25 @@ export function meteringDrain(sink: MeteringUsageSink): MiddlewareHandler<Gatewa
   return async function meteringDrainMiddleware(c, next): Promise<void> {
     await next();
 
+    /**
+     * The id the CHARGE will carry.
+     *
+     * `inference/handlers.ts:695` stamps its own `requestId` onto the response,
+     * and `middleware/errors.ts:191` only fills the header in when it is
+     * absent — so the response header is the inner id for a metered request and
+     * the outer id for everything else. That is exactly the id
+     * `MeteringUsageSink` files the charge under, which is what makes the
+     * request-id guard in `./usage-ledger.ts` able to match at all.
+     */
+    const requestId = c.res.headers.get("x-request-id") ?? c.get("requestId") ?? "";
+    const attribution = attributionFrom(c, requestId);
+
     const ctx = executionContextOf(c);
-    const rc: UsageRecordContext = { env: c.env, ctx };
+    const rc: MeteringDrainContext = {
+      env: c.env,
+      ctx,
+      ...(attribution === undefined ? {} : { attribution }),
+    };
 
     // No `ExecutionContext` (a unit test's `app.request()`): the sink's own
     // scheduler is the only lifetime available, and `flush` never rejects.

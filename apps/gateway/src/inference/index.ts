@@ -37,6 +37,13 @@ export type {
   TokenGovernor,
 } from "./identity.js";
 export * from "./catalog.js";
+export * from "./candidates.js";
+export * from "./reliability.js";
+export {
+  DurableObjectProviderCircuit,
+  ProviderCircuitDurableObject,
+} from "./circuit-do.js";
+export type { ProviderCircuitNamespace } from "./circuit-do.js";
 export * from "./schemas.js";
 export * from "./errors.js";
 export * from "./usage.js";
@@ -51,6 +58,8 @@ export {
   fetchDispatcher,
   passthroughNormalizers,
   platformOperatorCaller,
+  providerCircuitFor,
+  resolveCandidates,
   resolveDeps,
 } from "./defaults.js";
 export {

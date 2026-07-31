@@ -10,7 +10,7 @@
  * and binding backends complete synchronously but keep the async signature for
  * a uniform dispatch surface.
  */
-import { type EnvLike, defaultEnv } from "./env.js";
+import { type EnvLike, defaultEnv, readEnvSecret } from "./env.js";
 import type { SecretRef } from "./secret-ref.js";
 import { describeSecretRef } from "./secret-ref.js";
 
@@ -28,6 +28,13 @@ export interface SecretResolver {
  * Resolves `env://NAME` references by reading the environment. The default,
  * zero-configuration resolver; preserves exactly the pre-#163
  * `key_env`/`api_key_env` behavior (empty values treated as unset).
+ *
+ * Reads through `readEnvSecret`, so `env://NAME` serves BOTH Worker slot shapes:
+ * a plain string (`[vars]` / `wrangler secret put` / `process.env`) and a
+ * `[[secrets_store_secrets]]` binding, which is awaited. An operator who binds
+ * `OPENAI_API_KEY` through Secrets Store and writes `env://OPENAI_API_KEY` gets
+ * the credential rather than a `TypeError` on `.trim()`; the DISTINCT thing
+ * `cf://` still buys is the canonical-name mapping and its ambiguity guard.
  */
 export class EnvSecretResolver implements SecretResolver {
   private readonly env: EnvLike;
@@ -36,15 +43,12 @@ export class EnvSecretResolver implements SecretResolver {
     this.env = env;
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- async so the
-  // guard surfaces as a rejection, not a synchronous throw, for `.then` callers.
   async resolve(reference: SecretRef): Promise<string | null> {
     if (reference.kind !== "env") {
       throw new Error(
         `EnvSecretResolver cannot resolve a non-env:// reference: ${describeSecretRef(reference)}`,
       );
     }
-    const value = this.env[reference.name];
-    return value !== undefined && value.trim() !== "" ? value : null;
+    return (await readEnvSecret(reference.name, this.env)) ?? null;
   }
 }

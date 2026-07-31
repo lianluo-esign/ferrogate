@@ -492,6 +492,19 @@ export interface MeteringStats {
   deliveryFailures: number;
   /** Reports abandoned after `MAX_BILLING_OUTBOX_ATTEMPTS` (#143). */
   deadLettered: number;
+  /**
+   * Charges accumulated into the TENANT database's usage rollups — the input
+   * of both budget gates (`./usage-ledger.ts`). Distinct from `recorded`, which
+   * counts the CONTROL database's billing ledger: the two are separate
+   * databases and D1 cannot commit them together, so a gap between these two
+   * counters is the visible size of that window.
+   */
+  aggregated: number;
+  /**
+   * Charges that named NO attribution scope and so could not be rolled up. A
+   * non-zero value here means spend exists that no budget check can ever see.
+   */
+  unattributed: number;
 }
 
 /** A zeroed {@link MeteringStats}. */
@@ -507,5 +520,7 @@ export function emptyMeteringStats(): MeteringStats {
     delivered: 0,
     deliveryFailures: 0,
     deadLettered: 0,
+    aggregated: 0,
+    unattributed: 0,
   };
 }

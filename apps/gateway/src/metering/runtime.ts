@@ -33,6 +33,7 @@
  */
 import type { UsageRecordContext } from "../inference/ports.js";
 import type { MeteringDatabase, MeteringQueue } from "./ports.js";
+import { usageDatabaseFrom } from "./usage-ledger.js";
 
 /**
  * The bindings metering reads, and NOTHING else.
@@ -112,12 +113,32 @@ export function meteringQueueFrom(env: unknown): MeteringQueue | undefined {
 export interface MeteringBindingResolver {
   database(env: unknown): MeteringDatabase | undefined;
   queue(env: unknown): MeteringQueue | undefined;
+  /**
+   * `env.DB` — the TENANT database the committed-token / monthly-spend
+   * aggregates accumulate into (`./usage-ledger.ts`).
+   *
+   * A THIRD binding, not a rename of `database()`: `billing_ledger` is in the
+   * CONTROL database and `usage_aggregate_rollups` is in the tenant one, and D1
+   * has no transaction spanning the two. Optional so a resolver that only knows
+   * about the billing half (a test double) still satisfies the interface and
+   * simply accumulates nothing.
+   */
+  usageDatabase?(env: unknown): D1Database | undefined;
 }
 
-/** The production resolver: `env.BILLING_DB` + `env.BILLING`. */
+/**
+ * The production resolver: `env.BILLING_DB` + `env.BILLING` + `env.DB`.
+ *
+ * `usageDatabase` is what mounts `@ferrogate/storage`'s `D1UsageLedger` on the
+ * drain, which is the only thing that makes `usage_monthly_rollups` (the
+ * monthly USD budget's input) and `usage_aggregate_rollups` (the monthly TOKEN
+ * budget's input) non-empty. Both budget gates read tables that, before this,
+ * nothing in `apps/` ever wrote.
+ */
 export const meteringBindingsFromEnv: MeteringBindingResolver = {
   database: meteringDatabaseFrom,
   queue: meteringQueueFrom,
+  usageDatabase: usageDatabaseFrom,
 };
 
 /**

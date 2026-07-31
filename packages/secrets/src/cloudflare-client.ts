@@ -24,6 +24,8 @@
  */
 import { z } from "zod";
 
+import { type EnvLike, readEnvSecret } from "./env.js";
+
 /** HTTP verbs the client issues. */
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -61,24 +63,28 @@ export interface TokenResolver {
  * Resolves `env://VAR` token references from an environment map; a non-`env://`
  * reference is treated as an inline plaintext token (test convenience,
  * mirroring the Rust `EnvTokenResolver`).
+ *
+ * Reads through `readEnvSecret`, so `CLOUDFLARE_API_TOKEN` may itself be bound
+ * as a `[[secrets_store_secrets]]` secret — the account-scoped manage-plane
+ * token is exactly the credential an operator would keep there.
  */
 export class EnvTokenResolver implements TokenResolver {
-  private readonly env: Record<string, string | undefined>;
-  constructor(env: Record<string, string | undefined> = {}) {
+  private readonly env: EnvLike;
+  constructor(env: EnvLike = {}) {
     this.env = env;
   }
-  resolve(reference: string): Promise<string> {
+  async resolve(reference: string): Promise<string> {
     if (reference.startsWith("env://")) {
       const name = reference.slice("env://".length);
-      const value = this.env[name];
-      if (value === undefined || value.trim() === "") {
+      const value = await readEnvSecret(name, this.env);
+      if (value === undefined) {
         throw new CloudflareError(
           `token reference ${reference} resolved to an empty value`,
         );
       }
-      return Promise.resolve(value);
+      return value;
     }
-    return Promise.resolve(reference);
+    return reference;
   }
 }
 

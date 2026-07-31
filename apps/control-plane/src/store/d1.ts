@@ -34,10 +34,14 @@
  * open-ended `passthrough()` documents and those tables have no overflow column:
  * projecting a record onto their fixed columns would silently discard every
  * operator-supplied field they do not name, which is a behaviour regression, not
- * a storage detail. The lossless document is therefore canonical. Projecting it
- * INTO those tables (so the data plane's key lookup can read `api_keys`
- * directly) is a follow-up that needs a schema decision from the migrations
- * slice — see `PORT-TODO(inventory-edge-control §9.3)` below.
+ * a storage detail. The lossless document is therefore canonical.
+ *
+ * Projecting a document INTO its typed table is a separate, ADDITIVE job, and it
+ * does not belong in this store: the typed rows for `projects` / `workspaces`
+ * live in the tenant's OWN database, so they cannot share a `batch()` with the
+ * control-database document at all. `routes/tenant_hierarchy.ts` owns that pair
+ * and `src/store/tenancy.ts` states the ordering that makes it safe. See the
+ * schema notes at the bottom of this file for what is still un-projected.
  *
  * ## Tenant isolation
  *
@@ -77,6 +81,7 @@ import {
   type ControlPlaneStore,
   type ListPage,
   type ListQuery,
+  type MergeIfOutcome,
   StoreConflictError,
   type StoreMutation,
   type StoreRecord,
@@ -352,6 +357,78 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       id,
       tenant_id: existing.tenant_id ?? null,
     }));
+  }
+
+  /**
+   * {@link ControlPlaneStore.mergeIf} — the compare-and-set.
+   *
+   * The atomicity is the SAME revision guard `#update` uses, and that is the
+   * whole trick: the predicate is evaluated on the record read at revision `r`,
+   * and the write only lands `WHERE revision = r`. So the pair
+   * (decision, write) is indivisible with respect to any other writer —
+   * a concurrent commit moves the revision, this UPDATE matches zero rows, and
+   * the next attempt RE-EVALUATES the precondition against the state that writer
+   * left. The stale snapshot can never be the one a write is authorized by.
+   *
+   * That re-evaluation is the difference between this and `get` + `merge`, and
+   * it is not a micro-optimization: with `get` + `merge`, two concurrent
+   * `POST /admin/v1/site-domains/{h}/verify` calls both read
+   * `last_checked_at_unix = NULL`, both are told the cooldown is clear, and both
+   * reach the DNS resolver — which is precisely the burst #576 exists to stop.
+   * Here the loser re-reads the winner's `last_checked_at_unix`, the predicate
+   * refuses, and it never touches the network.
+   *
+   * Exhausting the retries is reported as a lost race (a 500 the caller may
+   * retry) rather than as `precondition_failed`, because "I could not decide"
+   * and "the answer is no" are different facts and only one of them is safe to
+   * cache in a caller's head.
+   */
+  async mergeIf(
+    collection: string,
+    scope: CallerScope,
+    id: string,
+    patch: Readonly<Record<string, unknown>>,
+    precondition: (current: StoreRecord) => boolean,
+  ): Promise<MergeIfOutcome> {
+    const tenant = tenantScopeSql(scope);
+    const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
+
+    for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
+      const existing = await this.#load(collection, scope, id);
+      if (existing === null) return { kind: "not_found" };
+      if (!precondition(existing.record)) {
+        return { kind: "precondition_failed", current: existing.record };
+      }
+
+      const next: StoreRecord = {
+        ...existing.record,
+        ...fields,
+        id,
+        tenant_id: existing.record.tenant_id ?? null,
+      };
+      const result = await this.#db
+        .prepare(
+          `UPDATE ${RESOURCE_TABLE}
+             SET document_json = ?, revision = revision + 1, updated_at_unix = ?
+           WHERE resource_kind = ? AND resource_id = ? AND revision = ?${tenant.sql}`,
+        )
+        .bind(
+          JSON.stringify(next),
+          this.#now(),
+          collection,
+          id,
+          existing.revision,
+          ...tenant.params,
+        )
+        .run();
+      if ((result.meta.changes ?? 0) > 0) {
+        await this.#audit("merge", collection, next, existing.revision + 1, scope);
+        return { kind: "merged", record: next };
+      }
+    }
+    throw new Error(
+      `control_plane_resources ${collection}/${id} lost ${UPDATE_ATTEMPTS} conditional write races; retry`,
+    );
   }
 
   async remove(collection: string, scope: CallerScope, id: string): Promise<boolean> {
@@ -859,9 +936,18 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 // deployment disagree about the schema, which is the exact failure the shared
 // directory exists to prevent. Both are also PERFORMANCE/ergonomics, not
 // correctness: every statement above is correct against the schema as shipped.
-// The one credential-facing consequence of (2) — that this Worker cannot
-// authorize a durable virtual key — is a genuine platform limit and is stated
-// where it bites, in `src/store/api_keys.ts`.
+//
+// (2) has since been closed for the two families that were actually blocking
+// something, and the ANSWER was the second of the two options it named — the
+// minting routes write both, rather than the store gaining an overflow column.
+// `routes/tenant_hierarchy.ts` now projects `projects` and `workspaces` into the
+// owning tenant's database through `@ferrogate/storage`'s tenant router
+// (`store/tenancy.ts`), and `store/api_keys.ts` reads a virtual key's
+// `scopes_json` back out of it, which retired the platform-limit marker that
+// used to live there. Note that this deliberately did NOT put the projection in
+// this store: the typed rows are in a DIFFERENT database from the document, so
+// they cannot share a `batch()` at all, and the ordering that makes the pair
+// safe is a route-level decision (see `store/tenancy.ts`).
 //
 //  1. `control_plane_resources` has no `tenant_id` column. Tenant isolation
 //     therefore runs through `json_extract(document_json, '$.tenant_id')`,
@@ -872,14 +958,16 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 //     statement above. The Rust schema did not need it because its D1 topology
 //     isolated tenants PHYSICALLY (one database per tenant); this Worker holds
 //     one control database, so the fence is logical.
-//  2. The typed tables (`tenants`, `api_key_directory`, `gateway_providers`,
-//     `gateway_models`, `quota_policies`, `plans`, `site_domains` in the
-//     control database; `projects`, `workspaces`, `api_keys`, `wallets` in the
-//     tenant databases) are not written by this store, because none of them has
-//     an overflow column for the open-ended admin document (see the file
-//     header). The data plane's durable key lookup reads `api_key_directory` /
-//     `api_keys` directly and the model resolver reads `gateway_providers` /
-//     `gateway_models`, so either those tables gain a `document_json` overflow
-//     column and this store projects into them in the same `batch()`, or the
-//     minting routes write both. That is a schema decision, so it is reported,
-//     not guessed.
+//  2. The REMAINING typed tables are still not written: `tenants`,
+//     `api_key_directory`, `gateway_providers`, `gateway_models`,
+//     `quota_policies`, `plans`, `site_domains` (control) and `api_keys`,
+//     `wallets` (tenant). `projects` and `workspaces` ARE now projected — see
+//     above — so the pattern is settled and the rest is mechanical rather than
+//     undecided. Two of them are load-bearing for OTHER Workers and belong to
+//     their slices, which is why they are reported here rather than guessed:
+//     the gateway's model resolver reads `gateway_providers`/`gateway_models`,
+//     and its key lookup reads `api_key_directory`/`api_keys` — this app can
+//     now WRITE the latter pair (the router makes the tenant half reachable),
+//     but minting a virtual key also mints a SECRET, and where that secret is
+//     surfaced to the operator is a contract decision the virtual-key routes
+//     own, not a storage one.
