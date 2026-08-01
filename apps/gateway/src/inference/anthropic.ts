@@ -66,7 +66,7 @@ function valueToString(value: unknown): string {
  * `system` is deliberately NOT in this list: Rust folds the Anthropic top-level
  * system prompt into `messages[0]` as a `system`-role turn.
  *
- * // PORT-TODO(inventory-request-path §3, issue #272): that means a
+ * // PORT_TODO(inventory-request-path §3, issue #272): that means a
  * // `/v1/messages` request routed to an ANTHROPIC upstream reaches the provider
  * // with `messages[0].role === "system"` and NO top-level `system` field,
  * // because `AnthropicAdapter::prepare_chat_completions` only lifts a `system`

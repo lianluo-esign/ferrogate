@@ -36,7 +36,7 @@
  * `src/transport.ts` implements both transport directions. The SDK stays a
  * declared dependency for the tenant-hosted MCP-server half (see below).
  *
- * PORT-TODO(inventory-edge-control §9.2): NOT a platform limit and NOT this
+ * PORT-TODO(P: inventory-edge-control §9.2): NOT a platform limit and NOT this
  * Worker's work — a SCOPE boundary, recorded so it is not lost. The other half
  * of the Rust crate, `mcp_worker_deploy.rs`, uploads a tenant's own hosted
  * MCP-server Worker (`FerroGateMcp extends McpAgent` at `/mcp` + `/sse` behind

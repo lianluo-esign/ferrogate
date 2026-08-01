@@ -3,7 +3,7 @@
  * config-load precedence, the `[control_api]`/`[admin_api]` alias migration, and
  * the Caddyfile intermediate -> `Config` bridge.
  *
- * PORT-TODO(inventory §5.8) — PLATFORM LIMIT, NOT CLOSED (plus one scope note).
+ * PORT-TODO(L: inventory §5.8) — PLATFORM LIMIT, NOT CLOSED (plus one scope note).
  *
  * PLATFORM LIMIT: workerd has NO FILESYSTEM. `Config::from_file` /
  * `from_toml_file` / `from_yaml_file` and `resolve_paths_relative_to` (which

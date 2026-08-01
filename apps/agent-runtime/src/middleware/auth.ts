@@ -241,7 +241,7 @@ export function transportPosture(raw: string | undefined): TransportPosture {
  *  - the bare `mutual_tls` marker is an unverified CLAIM (501) — better to
  *    reject than to accept an unverifiable claim as production-grade.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.4): what remains
+ * // PORT-TODO(L: inventory-edge-control §agent-worker §8.4): what remains
  * // unportable is the SERVER, not the decision. Rust's
  * // `self_hosted_mtls::SelfHostedMtlsServer` terminates mutual TLS itself,
  * // owning the CA bundle, the chain build and the revocation check in
@@ -420,6 +420,36 @@ export function depsOrThrow(c: Context<AgentRuntimeEnv>): AgentRuntimeDeps {
   return deps;
 }
 
+/**
+ * PORT-TODO(`gateway/auth.rs::finalize_auth`): the ADMISSION half of Rust's
+ * `authenticate()` is missing on this Worker, so the nine bearer operations it
+ * owns are rate-limit-free and spend-free.
+ *
+ * In the Rust tree `/v1/agent-runs`, `/v1/agent-jobs/**` and `/v1/agents/**`
+ * were served by the SAME process as `/v1/chat/completions` and went through
+ * the same `authenticate()` → `finalize_auth` chain, which charges, in order:
+ * `403 tenant_identity_required`, the lifecycle-suspension gate,
+ * `503 quota_resolution_unavailable`, `403 quota_scope_disabled`,
+ * `429 monthly_budget_exceeded`, `429 wallet_balance_exhausted`,
+ * `429 rate_limit_exceeded` (the per-key RPM counter) and
+ * `503 governance_counter_unavailable`.
+ *
+ * Splitting the data plane across Workers moved only the CREDENTIAL half here.
+ * `apps/gateway/src/ratelimit/` is the port of the admission half and it is
+ * mounted on the gateway alone: `grep -rn "rate_limit_exceeded\|
+ * monthly_budget_exceeded\|wallet_balance_exhausted" apps/agent-runtime/src
+ * apps/mcp/src` returns nothing. The suspension ladder below IS ported, so the
+ * gap is specifically MONEY AND RATE, not identity. Consequence: a tenant whose
+ * RPM cap and monthly budget stop it dead on `/v1/chat/completions` can submit
+ * unbounded agent jobs on the same key, and each job then spends real provider
+ * money through the gateway on the run's behalf.
+ *
+ * Not a platform limit. `rateLimit()` is ordinary Hono middleware over a DO
+ * counter and a D1 quota source; what it needs here is the SAME counter
+ * namespace as the gateway (a shared `RATE_LIMIT` DO binding or a Service
+ * Binding into the gateway), because a per-Worker counter would give each
+ * surface its own full quota rather than sharing one.
+ */
 /** The bearer leg. The ONLY consumer of the tenant API-key authority. */
 async function bearerAuth(c: Context<AgentRuntimeEnv>, operation: ApiOperation): Promise<void> {
   const presented = extractApiKey(c.req.raw.headers);

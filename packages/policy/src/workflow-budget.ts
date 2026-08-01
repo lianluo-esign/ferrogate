@@ -130,7 +130,7 @@ export type PreflightResult =
  * with the real token estimate, so a step that would breach `token_budget` is
  * refused before the provider is paid.
  *
- * ## PORT-TODO(inventory-policy-core §2.4d, issue #279) — TWO OF THE FOUR
+ * ## PORT-TODO(P: inventory-policy-core §2.4d, issue #279) — TWO OF THE FOUR
  * ## DIMENSIONS ARE STILL NOT DEBITED. NOT A PLATFORM LIMIT. NOT CLOSED.
  *
  * `cost` and `tool_calls` cannot be decided by a pure admission-time

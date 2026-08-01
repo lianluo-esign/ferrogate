@@ -23,7 +23,7 @@
  * | embeddings     | `input` only, pre-tokenized ids count 1   | 0 |
  * | images         | 0                                         | `n` (default 1, clamped to 100) generated images |
  *
- * ## PORT-TODO(inventory-request-path §1.6 "Budgets", issue #282): the local
+ * ## PORT-TODO(P: inventory-request-path §1.6 "Budgets", issue #282): the local
  * BPE count is NOT ported; this is the `chars/4` leg only.
  *
  * NOT a platform limit — `js-tiktoken` / `gpt-tokenizer` run fine in workerd,

@@ -40,7 +40,7 @@ export type SyncBridgeStrategy =
   | "scoped_current_thread"
   | "event_loop";
 
-// PORT-TODO(inventory §7) — PLATFORM LIMIT, NOT CLOSED.
+// PORT-TODO(L: inventory §7) — PLATFORM LIMIT, NOT CLOSED.
 //
 // The exact limitation: **workerd has no OS-thread scheduler to introspect.**
 // `Handle::try_current()` / `runtime_flavor()` ask a tokio runtime object which

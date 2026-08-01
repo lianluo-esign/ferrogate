@@ -386,7 +386,7 @@ export const SERVICE_NAME = "ferrogate-control-plane";
  * reads on its next config fetch. A deployment that has never promoted one
  * still reports `"unversioned"`, which is true rather than fabricated.
  *
- * PORT-TODO(inventory-edge-control §4) — PLATFORM LIMIT, sharpened, for the
+ * PORT-TODO(L: inventory-edge-control §4) — PLATFORM LIMIT, sharpened, for the
  * `observability()` feed ONLY. Rust reads recent request/latency series off its
  * in-process registry. The Workers equivalent is Analytics Engine, whose WRITE
  * side is a binding but whose READ side is the account-scoped

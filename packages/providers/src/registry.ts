@@ -5,7 +5,7 @@
  * {@link canonicalProviderAdapterFamily}, wraps every trait method, and — after
  * preparation — applies Cloudflare AI Gateway routing (issue #406).
  *
- * ## PORT-TODO(inventory-request-path §3.2 "Registry", issue #406) — THE
+ * ## PORT-TODO(P: inventory-request-path §3.2 "Registry", issue #406) — THE
  * ## CLOUDFLARE AI GATEWAY LEG OF THIS CLASS IS NOT MOUNTED. NOT A PLATFORM
  * ## LIMIT. NOT CLOSED.
  *

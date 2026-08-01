@@ -38,7 +38,7 @@
  * With neither configured the emitter is {@link NO_TELEMETRY} and every emit is
  * a no-op — the Rust posture for an empty `[observability] exporters` table.
  *
- * ## PORT-TODO(inventory-data-billing §4.5, `packages/observability/src/prometheus.ts`)
+ * ## PORT-TODO(L: inventory-data-billing §4.5, `packages/observability/src/prometheus.ts`)
  *
  * The one thing that genuinely does not port is metric ACCUMULATION. Rust holds
  * a process-lifetime counter bag and an exporter reads a CUMULATIVE snapshot

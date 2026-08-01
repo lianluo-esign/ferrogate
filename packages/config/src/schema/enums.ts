@@ -13,7 +13,7 @@
  * `guardrails[].sources` set so an unclassified content segment would not be
  * scanned. Copies of a vocabulary drift; imports do not.
  *
- * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION, NOT CLOSABLE YET (one leg).
+ * PORT-TODO(P: inventory §5.3) — PACKAGE RELOCATION, NOT CLOSABLE YET (one leg).
  * `McpTransport`/`McpAuthType` are owned by `ferrogate-mcp`, and there is no
  * `@ferrogate/mcp` PACKAGE to import them from — the MCP port lives in the
  * `apps/mcp` Worker, and a `packages/*` library must not depend on an app (that

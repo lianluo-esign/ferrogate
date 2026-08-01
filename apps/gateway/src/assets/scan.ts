@@ -47,6 +47,30 @@
  *    minisign CONTAINER format and the trusted-key store are what is unwritten.
  *  - **cross-tenant publish approval** — an approval-record store this app has
  *    no table for.
+ *
+ * ## PORT-TODO(`server/asset_security.rs::validate_asset_content`): gate (1) is missing
+ *
+ * `screen_asset_push` runs THREE gates and this tree ports the second and third
+ * (signature, scan) but not the first, which is the cheap synchronous one:
+ *
+ *  1. **the per-asset-type content-type allowlist** (`content_type_allowed`,
+ *     `asset_security.rs:107`) — `cli_tool` accepts 8 types, `mcp_manifest`
+ *     accepts `application/json` ALONE, `skill_bundle` 6, `static_site` a
+ *     web-safe set. Anything else is `422 asset_rejected`.
+ *  2. **the `mcp_manifest` stdio refusal** — a manifest whose declared
+ *     transport is `stdio` is refused outright, because "a stdio manifest
+ *     causes the CONSUMING agent's MCP client to spawn an arbitrary local
+ *     process". `validate_streamed_asset_content` (#259) goes further and
+ *     refuses a manifest too large to parse rather than admitting it with that
+ *     field unread — the check is deliberately not optional above a size.
+ *
+ * `grep -rn "content_type_allowed\|mcp_manifest\|stdio\|asset_rejected"
+ * apps/gateway/src/assets/` returns NOTHING, so today `putAsset` and
+ * `commitAssetUpload` accept any `content-type` for any `asset_type`, and a
+ * tenant can publish an `mcp_manifest` declaring `stdio` that a consuming agent
+ * will act on. It is a pure function of two strings and a byte buffer — no
+ * platform limit, no binding, no I/O — and it belongs ahead of the signature
+ * and scan gates here, exactly where Rust puts it.
  */
 import type {
   AssetScreener,

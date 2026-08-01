@@ -7,7 +7,7 @@
  * connection close) plus the server side of the Streamable-HTTP contract the
  * FerroGate ingress speaks.
  *
- * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — the stdio transport
+ * PORT-TODO(L: inventory-edge-control §MCP): PLATFORM LIMIT — the stdio transport
  * cannot exist in a Worker. Rust's `stdio_client.rs` spawns a CHILD PROCESS per
  * upstream, writes JSON-RPC to its stdin, reads from its stdout, and owns a
  * `dispatch_cleanup_handle` that kills the child on timeout. workerd has no
@@ -424,7 +424,7 @@ interface UpstreamSession {
  * Rust's `McpManager` holds a process-wide `HashMap<name, McpSession>` plus a
  * `health_check_and_reconnect()` loop. A Worker has no process, and this class
  * used to carry the map per ISOLATE, which was recorded as
- * `PORT-TODO(inventory-edge-control §MCP "session manager")` — explicitly not a
+ * `PORT_TODO(inventory-edge-control §MCP "session manager")` — explicitly not a
  * platform limit.
  *
  * That marker is now closed by `src/session.ts`: pass a
@@ -617,7 +617,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
       );
     }
     if (session.config.transport === "stdio") {
-      // PORT-TODO(inventory-edge-control §MCP): stdio transport requires Containers.
+      // PORT-TODO(L: inventory-edge-control §MCP): stdio transport requires Containers.
       throw new McpExecutionError(
         "mcp_server_unavailable",
         `MCP server ${session.config.name} uses the stdio transport, which Workers cannot host (no process spawn)`,

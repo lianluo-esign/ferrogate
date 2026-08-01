@@ -266,7 +266,7 @@ export interface GatewayDeps {
  * failure; `TENANCY_LIFECYCLE` is a DENY table, so it composes with
  * `denyIfEitherDenies` instead — a refusal from either source refuses.
  *
- * PORT-TODO(inventory-edge-control §5.2): `SELF_HOSTED_WORKER_REGISTRY` still
+ * PORT-TODO(P: inventory-edge-control §5.2): `SELF_HOSTED_WORKER_REGISTRY` still
  * carries a transport SECRET as a var. It moves to Cloudflare Secrets Store —
  * see the marker at the top of `./adapters.ts` for why that binding cannot be
  * exercised locally and what the shipped approximation is. It is now the ONLY

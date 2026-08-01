@@ -706,7 +706,7 @@ export const D1_BINDING_STRATEGIES = {
  * The D1 REST strategy in its **strictest posture**: the seam exists, and
  * `forTenant` refuses outright so REST cannot be reached by accident.
  *
- * PORT-TODO(inventory-data-billing §1.7 "per-tenant D1 binding at runtime") —
+ * PORT-TODO(L: inventory-data-billing §1.7 "per-tenant D1 binding at runtime") —
  * PLATFORM LIMIT, KEPT AND SHARPENED.
  *
  * THE LIMIT (unchanged, and not closable): **Cloudflare bindings resolve at

@@ -160,7 +160,7 @@ behavioural half of GW-E3/GW-T8. Treat any `.spec.ts` gate as escalation-only.
 | GW-C8 | `tenantDatabase(),` (line 232) — **ESCALATION (§5)** | `MUT-1 /^  tenantDatabase\(\),$/` | `grep -n 'tenantDatabase(),' src/index.ts` → nothing | `test/tenancy/mount.spec.ts` — **only under `bun run test`** | T1 |
 | GW-C9 | `const { app, router } = createGatewayApp({ modules: GATEWAY_ROUTE_MODULES, middleware: GATEWAY_MIDDLEWARE });` | `MUT-2 "modules: GATEWAY_ROUTE_MODULES,"→""` | `grep -n 'GATEWAY_ROUTE_MODULES,' src/index.ts` → nothing | `test/contract.test.ts` (all 31 ids registered on the real router) | T1 |
 | GW-C10 | `await usage.sweep({ env, ctx });` — the BODY of `gatewayScheduled` | `MUT-1 /await usage\.sweep\(\{ env, ctx \}\)/` | `grep -n 'usage.sweep' src/index.ts` → nothing | `test/metering/cron-mount.test.ts` — **the wave-13 finding: this was GREEN across 1711 tests before that gate existed** | T1 |
-| GW-C11 | `app.get("/version", (c) => c.json({ api: PUBLIC_API_MAJOR }));` | `MUT-1 /app\.get\("\/version"/` | `grep -n '"/version"' src/index.ts` → nothing | `test/health.test.ts` | T3 |
+| GW-C11 | `app.get("/version", (c) => c.json({ api: PUBLIC_API_MAJOR }));` | `MUT-1 /app\.get\("\/version"/` | `grep -n '"/version"' src/index.ts` → nothing | **NO GATE — corrected wave 15.** The cell said `test/health.test.ts`; the full pass found the mutation **GREEN** across all 1786 gateway tests, and `grep -rn "/version" apps/gateway/test` returns nothing. Deleting the route is invisible | T3 |
 
 ### 6.3 Route registration `apps/gateway/src/routes/index.ts` (`createGatewayApp`)
 
@@ -303,7 +303,7 @@ behavioural half of GW-E3/GW-T8. Treat any `.spec.ts` gate as escalation-only.
 | MCP-R1 | `router.register("getHealthz", …)` / `router.register("getReadyz", …)` (207-208) | `MUT-1 /router\.register\("get(Healthz\|Readyz)"/` | anchors gone | `test/health.test.ts` | T2 |
 | MCP-R2 | `module.register(router);` (222) | `MUT-1 /^    module\.register\(router\);$/` | anchor gone | `test/contract.test.ts` (all 6 owned ops vanish) | T1 |
 | MCP-R3 | `app.notFound((c) => { … })` (225) | `MUT-1 /app\.notFound\(\(c\) => \{/` (then repair the block) — simplest: `MUT-2` the envelope code string | `grep -n 'not_found' src/routes/index.ts` | `test/contract.test.ts` (404 control probe) | T2 |
-| MCP-R4 | `app.onError((error, c) => { … })` (230) | `MUT-2 "internal_error"→"MUTATED"` | `grep -n 'MUTATED' src/routes/index.ts` | `test/jsonrpc.test.ts` (500 envelope) | T2 |
+| MCP-R4 | `app.onError((error, c) => { … })` (230) | `MUT-2 "internal_error"→"MUTATED"` | `grep -n 'MUTATED' src/routes/index.ts` | **NO GATE — corrected wave 15.** The cell said `test/jsonrpc.test.ts`; the mutation is **GREEN** across all 359 mcp tests and `grep -rn internal_error apps/mcp/test` returns nothing. The 500 envelope code is asserted by nothing | T2 |
 
 ### 8.4 Ports `apps/mcp/src/ports.ts` (`resolvePorts`, 1716-1740)
 
@@ -351,7 +351,7 @@ committed file. Rows marked **DEPLOY-ONLY** below are therefore unproven locally
 | ID | Seam | Mutation | Confirm | Expected RED | Tier |
 |---|---|---|---|---|---|
 | AR-C1 | `app.onError(errorHandler);` (32) | `MUT-1 /app\.onError\(errorHandler\)/` | anchor gone | `test/contract.test.ts` (error envelope) | T2 |
-| AR-C2 | `app.notFound(notFoundHandler);` (33) | `MUT-1 /app\.notFound\(notFoundHandler\)/` | anchor gone | `test/contract.test.ts` (404 control probe) | T2 |
+| AR-C2 | `app.notFound(notFoundHandler);` (33) | `MUT-1 /app\.notFound\(notFoundHandler\)/` | anchor gone | **NO GATE — corrected wave 15.** **GREEN** across 325+43 tests. `contract.test.ts`'s 404 control probes never reach Hono's notFound: `src/middleware/auth.ts:574,585` throws the identical `404 not_found` for an undocumented path inside an owned prefix, so this line only fires OUTSIDE `/v1/*` — which nothing tests | T2 |
 | AR-C3 | `app.use("*", correlation);` (34) | `MUT-1 /app\.use\("\*", correlation\)/` | anchor gone | `test/contract.test.ts` (`x-request-id`) | T2 |
 | AR-C4 | `app.use("/v1/*", contractAuth);` (50) | `MUT-1 /app\.use\("\/v1\/\*", contractAuth\)/` | anchor gone | `test/isolation.test.ts`, `test/internal-auth.test.ts` (tenant-vs-worker credential split) | T1 |
 | AR-C5 | `app.route("/", runRoutes);` (52) | `MUT-1 /app\.route\("\/", runRoutes\)/` | anchor gone | `test/lifecycle.test.ts`, `test/contract.test.ts` | T2 |
@@ -430,7 +430,7 @@ PRODUCTION implementation can pass. Before wave 13 only `client` had one.
 | CLI-4 | `contextStorage: createFileContextStorage(io),` | `MUT-2 "createFileContextStorage(io)"→"createMemoryContextStorage()"` | mutated line present | `test/composition-root.test.ts` — `contextStorage.path()` must be `$FERROGATE_CLI_HOME/contexts.toml`, resolved through the runtime's OWN `io.env` | T2 |
 | CLI-5 | `configValidator: createFerrogateConfigValidator(),` | `MUT-2 "createFerrogateConfigValidator()"→"createStructuralConfigValidator()"` | mutated line present | `test/composition-root.test.ts` — "rejects a document the structural validator would ACCEPT" (+ accepts a real Caddyfile, so the refusal is not blanket) | T2 |
 | CLI-6 | `keyHasher: createNodeKeyHasher(),` | `MUT-2 "createNodeKeyHasher()"→"{ hash: async () => \"0\".repeat(128) }"` | mutated line present | `test/composition-root.test.ts` — "hash() reproduces the gateway's stored BLAKE2b-512 construction" | T1 |
-| CLI-7 | `const transport = { readFile: (path: string) => io.readFile(path) };` — the `--ca-bundle` TLS seam shared by both clients | `MUT-2 "{ readFile: (path: string) => io.readFile(path) }"→"{ readFile: async () => \"\" }"` | mutated line present | `test/transport.test.ts` (CA-bundle path) | T2 |
+| CLI-7 | `const transport = { readFile: (path: string) => io.readFile(path) };` — the `--ca-bundle` TLS seam shared by both clients | `MUT-2 "{ readFile: (path: string) => io.readFile(path) }"→"{ readFile: async () => \"\" }"` | mutated line present | **NO GATE — corrected wave 15.** **GREEN** across all 339 cli tests. `test/transport.test.ts:360,367` hands `createFetchControlPlaneClient` a transport it builds ITSELF and never calls `createDefaultRuntime()`, so the composition root's CA-bundle wiring is untested — the same factory-vs-mount confusion that made GW-A1 a fake mount | T2 |
 | CLI-8 | `if (entry !== undefined && (entry.endsWith("/index.ts") \|\| entry.endsWith("/ferrogate"))) { process.exit(await main(…)); }` | `MUT-2 "entry.endsWith(\"/ferrogate\")"→"false"` | mutated line present | **NO GATE** — the compiled-binary entry guard is not exercised by vitest (which imports `main` directly). Proof channel: `bun run build && ./dist/ferrogate --version`. Known gap | T2 |
 
 ---
@@ -618,3 +618,99 @@ The two mandatory full-pass triggers in §4 are unchanged, and after wave 14's
 findings a third is worth stating — **run the full pass whenever a `vitest.config.ts`
 changes**, because a pinned binding is exactly what turned three T1 config rows
 into no-ops without anyone editing the rows' file.
+
+---
+
+## 16. Wave-15 FULL PASS — the §4 mandatory pass, executed
+
+§4 names two triggers for a FULL pass over every row: before the single
+authorised live `wrangler deploy`, and **before deleting the Rust tree**. Wave 15
+is that gate, so the incremental policy of §4/§15 was suspended and **every row
+was re-proved by mutation**.
+
+### 16.1 Protocol and totals
+
+Run with the §2 protocol, mechanised: `cp` → `sha256sum` → mutate → **CONFIRM
+grep read back OFF DISK** → `bun run test` in the app dir → restore →
+`sha256sum -c`. A run whose CONFIRM grep did not fire was recorded as
+`CONFIRM-FAIL` and never counted as a proof; zero occurred in the final pass
+(five recipe defects were caught and repaired during a dry pass first — see
+16.4). Two extra guards were added on top of §2 because of the wave-14 lesson
+that a *semantically inert* mutation looks exactly like a proven seam:
+
+1. **Marker uniqueness.** Every `MUT-2` replacement carries a `/*MUT*/` token,
+   and the driver refuses to run a row whose replacement text ALREADY exists in
+   the pristine file — otherwise "the new text is present" confirms nothing.
+2. **Behaviour, not bytes.** Recipes that would only have produced a *syntax
+   error* (an orphaned block) were rewritten as `if (false as boolean) …`
+   guards, so the mutated tree still compiles and the RED is an assertion
+   failure rather than a parse failure. Every GREEN was then hand-checked to
+   confirm the mutation really did change behaviour (16.3).
+
+| Measure | Result |
+|---|---|
+| Inventory rows re-proved | **161 / 161** (156 of §12 + the 5 wave-14 rows of §15.4) |
+| Mutation runs executed | **163** (GW-A1/GW-A1b share one mutation; +3 `new_classes` substitution variants `MCP-T6b`, `MCP-T7b`, `AR-T5b`) |
+| **RED** | **150** |
+| **GREEN** | **13** |
+| CONFIRM-FAIL | **0** |
+| Restored byte-identical (`sha256sum -c`) | **163 / 163** |
+| Whole-tree check after the pass | **827 / 827** `.ts` + `.toml` files byte-identical to the pre-pass snapshot |
+
+### 16.2 The 13 GREEN rows — 9 expected, **4 newly-found unproven seams**
+
+| ID | Verdict | Reading |
+|---|---|---|
+| GW-T2, CP-T2, MCP-T2, TEL-T5 | **expected** | `compatibility_flags` — DEPLOY-ONLY, exactly as §15.3 corrected |
+| CP-T1, TEL-T1 | **expected** | `main = …` — DEPLOY-ONLY (`MCP-T1`/`AR-T1` are now gated and went RED, per §15.2) |
+| TEL-T4 | **expected** | `[observability]` — no local effect, row already says "none" |
+| MCP-P6 | **expected** | weakly gated, not dead — §15.1's ruling reconfirmed |
+| CLI-8 | **expected** | the compiled-binary entry guard, already **NO GATE** in the row |
+| **GW-C11** | **NEWLY UNPROVEN** | `/version` is asserted by nothing. Row corrected. T3 |
+| **MCP-R4** | **NEWLY UNPROVEN** | the `app.onError` 500 envelope code is asserted by nothing. Row corrected. T2 |
+| **AR-C2** | **NEWLY UNPROVEN** | `app.notFound(notFoundHandler)` is dead for every path the suite probes, because `middleware/auth.ts:574,585` throws the identical `404 not_found` first. Row corrected. T2 |
+| **CLI-7** | **NEWLY UNPROVEN** | the composition root's `--ca-bundle` transport. `test/transport.test.ts` builds its OWN transport and never calls `createDefaultRuntime()` — the same factory-vs-mount confusion that made GW-A1 a fake mount in wave 14. Row corrected. T2 |
+
+None of the four is money, auth or tenant isolation. All four are T2/T3.
+Three of them (GW-C11, AR-C2, CLI-7) sit in the set §15.5 recorded as SKIPPED by
+the wave-14 incremental policy — which is precisely the cost §4 warned that
+policy carries, now measured rather than asserted.
+
+### 16.3 Every GREEN was checked for semantic effect
+
+A GREEN only means "unproven" if the mutation genuinely changed behaviour.
+Checked individually:
+
+- **GW-C11** — the route is removed; `/version` then falls through to the
+  reverse-proxy fall-through. Real. `grep -rn "/version" apps/gateway/test` → 0.
+- **MCP-R4** — `"internal_error"` occurs exactly ONCE in the file (line 237), so
+  the single-occurrence `perl` replace hit the intended site; the wire code
+  changes. `grep -rn internal_error apps/mcp/test` → 0.
+- **AR-C2** — with the handler unmounted Hono answers a plain-text 404 instead
+  of the JSON envelope. Real, and confirmed unreachable-by-test by reading
+  `contract.test.ts:404-441` against `middleware/auth.ts:574`.
+- **CLI-7** — `readFile` returns `""`; `test/transport.test.ts:399` proves an
+  empty bundle is REJECTED, so the mutated runtime would fail at runtime. Real.
+
+### 16.4 Five recipes in this file were themselves defective — repaired
+
+Found by a dry pass (mutate → CONFIRM → restore, no test run) before the real
+sweep. Each would have produced a false result:
+
+| Row | Defect in the recorded recipe | Repair used |
+|---|---|---|
+| GW-A3 | the default `MUT-2` CONFIRM ("OLD absent") cannot fire: the replacement `rbac: configuredRbac,` still contains the OLD text's first line `rbac:` | CONFIRM on a unique `/*MUT*/`-marked replacement |
+| MCP-R3, TEL-A3, TEL-A5, TEL-A6 | recorded as `MUT-1` line deletions that orphan a multi-line block ⇒ a **parse error**, not a behaviour change | `if (false as boolean) …` guard, keeping the tree compilable |
+| GW-C7 | the recorded `((async()=>{}) as never) \|\| guardrails(…)` inserts a middleware that never calls `next()`, breaking every request rather than only guardrails | delete the whole `guardrails(...)` entry from `GATEWAY_MIDDLEWARE` |
+
+### 16.5 The wave-15 var-drift gates closed six §15.3 holes
+
+§15.3 recorded `GW-T18` and the `[vars]` families as GREEN — "no gate of any
+kind, behavioural or drift". The new `test/env-var-drift.test.ts` in all five
+Workers changes that: **GW-T17, GW-T18, GW-TS, CP-T5, AR-T9 and TEL-T3 now all
+go RED**, and `AR-T6`/`AR-T7`/`AR-T8` fail with an explicit
+*"explains every overridden var with an explicit pin in vitest.config.ts"*
+message. The gates remain **drift** gates, not behavioural ones — the pinned
+miniflare bindings still win over the committed values — but a deleted or
+renamed var is no longer invisible. Update §12's "deliberately weak" row from 5
+seams to **0 ungated var families**.

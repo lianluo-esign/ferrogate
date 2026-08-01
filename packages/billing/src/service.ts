@@ -2,7 +2,7 @@
  * Billing microservice HTTP boundary — clean-room port of
  * `ferrogate-billing`'s `service.rs`.
  *
- * PORT-TODO(§2.4 / §2.5) — PLATFORM LIMIT, NOT CLOSED (routes/auth/errors ARE).
+ * PORT-TODO(L: §2.4 / §2.5) — PLATFORM LIMIT, NOT CLOSED (routes/auth/errors ARE).
  *
  * The exact limitation: **a Worker cannot bind a listening socket.** The Rust
  * service is a hand-rolled blocking HTTP/1.1 server — `TcpListener::bind`,

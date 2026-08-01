@@ -349,7 +349,7 @@ export function extractTextDeltas(
 /**
  * `extract_function_call_deltas`.
  *
- * PORT-TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
+ * PORT_TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
  * GAP.** For `kind: "anthropic"` the Rust reads the tool-argument fragment from
  * `delta.text` — the same field a plain `text_delta` uses — so an Anthropic
  * *text* delta is emitted BOTH as `response.output_text.delta` and as

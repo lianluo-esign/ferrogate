@@ -185,7 +185,7 @@ export interface MeteringSinkOptions {
    * The gateway-settled cost for a request, when the data plane priced it
    * itself.
    *
-   * PORT-TODO(inventory-data-billing §2.3 "source-of-truth rule", issue #135) —
+   * PORT-TODO(P: inventory-data-billing §2.3 "source-of-truth rule", issue #135) —
    * a missing upstream feature, not a platform limit. The Rust gateway settles
    * `cost_usd` BEFORE dispatch because it enforces the tenant budget against
    * that figure, and `charge()` then treats it as authoritative.

@@ -458,7 +458,7 @@ export interface ControlPlaneDeps {
  * table and consults these only when the database has no matching row (see
  * `src/store/api_keys.ts`).
  *
- * PORT-TODO(inventory-edge-control §6) — PLATFORM LIMIT, sharpened: the admin
+ * PORT-TODO(L: inventory-edge-control §6) — PLATFORM LIMIT, sharpened: the admin
  * JWT signing secret cannot follow them into Secrets Store from inside this
  * app. A `[[secrets_store_secrets]]` binding is resolved at DEPLOY time and
  * `@ferrogate/secrets`' Cloudflare client needs an account-scoped token, so

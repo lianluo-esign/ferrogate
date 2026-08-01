@@ -47,6 +47,14 @@ import {
   scopeOf,
 } from "./resource.js";
 
+/**
+ * PORT-TODO(P: inventory-edge-control §4 config-backed collections) — the templates
+ * stored here are not the templates rendered.
+ * `apps/gateway/src/routes/prompts.ts` resolves `renderPromptTemplate` from the
+ * deploy-time `GATEWAY_PROMPT_TEMPLATES` var, not from these documents. See the
+ * full statement of the split (and the two ways to close it) on
+ * `routes/admin_agent_upstream.ts`.
+ */
 const PROMPT_TEMPLATES = "prompt-templates";
 
 /** `PromptTemplateStatus::Archived`. */

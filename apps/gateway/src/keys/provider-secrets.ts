@@ -47,7 +47,7 @@
  * caller appends it to its own message. It is built from binding NAMES and
  * scheme text only — no resolved value is ever put in it.
  *
- * ## PORT-TODO(inventory-policy-core §secrets, decision #423) — NOT CLOSED
+ * ## PORT-TODO(P: inventory-policy-core §secrets, decision #423) — NOT CLOSED
  *
  * Two distinct limits remain, and they are not the same kind of thing:
  *

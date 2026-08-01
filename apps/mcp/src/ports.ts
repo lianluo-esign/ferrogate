@@ -41,7 +41,7 @@
  * re-implement something that is already there. When you change a binding in
  * {@link resolvePorts}, change this row in the same edit.
  *
- * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio MCP upstreams
+ * PORT-TODO(L: inventory-edge-control §MCP): PLATFORM LIMIT — stdio MCP upstreams
  * are impossible in a Worker. The Rust host
  * (`crates/ferrogate-mcp/src/stdio_client.rs`) spawns a child process per
  * upstream and owns `dispatch_cleanup_handle` (timeout → kill the stdio child,
@@ -642,7 +642,7 @@ export class AutoApproval implements ApprovalPort {
 /**
  * In-memory asset catalog.
  *
- * PORT-TODO(inventory-edge-control §MCP) — KEPT, and RE-DIAGNOSED. The previous
+ * PORT-TODO(P: inventory-edge-control §MCP) — KEPT, and RE-DIAGNOSED. The previous
  * wording ("a deferral pending `@ferrogate/storage`'s asset surface") is no
  * longer true and would have sent the next reader to the wrong place: that
  * surface exists (`packages/storage/src/assets.ts`), and since `resolvePorts`
@@ -1103,7 +1103,7 @@ export class InMemoryUpstreams implements McpUpstreamPort {
       );
     }
     if (config.transport === "stdio") {
-      // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio requires
+      // PORT-TODO(L: inventory-edge-control §MCP): PLATFORM LIMIT — stdio requires
       // a process to spawn; workerd has none. KEPT, pinned end-to-end on the
       // deployed app by `test/stdio-limit.test.ts` (removing this branch turns
       // that suite red), and explained in full in `src/transport.ts`.
@@ -1348,7 +1348,7 @@ export interface McpEnv {
    * 32-byte AEAD key (base64 or hex) the stored grants are sealed under —
    * the Rust `FERROGATE_MCP_IDENTITY_KEY`.
    *
-   * // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — CF bindings,
+   * // PORT-TODO(L: inventory-edge-control §MCP): PLATFORM LIMIT — CF bindings,
    * // Secrets Store included, resolve at DEPLOY time. There is no runtime
    * // "open secret X by name/uuid" API, so this Worker cannot fetch its own
    * // key, cannot hold two key versions at once, and cannot rotate without a
@@ -1516,7 +1516,7 @@ function unboundOauthProvider(): OauthProviderPort {
 /**
  * AES-GCM envelope encryption over a per-isolate key.
  *
- * PORT-TODO(inventory-edge-control §MCP): the Rust implementation seals stored
+ * PORT-TODO(L: inventory-edge-control §MCP): the Rust implementation seals stored
  * grants with XChaCha20-Poly1305 under `FERROGATE_MCP_IDENTITY_KEY`. WebCrypto
  * in workerd has no XChaCha20; AES-256-GCM is the closest correct primitive
  * (AEAD, 96-bit random nonce, same AAD binding). The key MUST come from Secrets

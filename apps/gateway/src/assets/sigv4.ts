@@ -171,7 +171,7 @@ async function presignQuery(
  * `assetDepsFromEnv`; with a partial credential set no presigner is built at
  * all and the presign family keeps answering `503 asset_bucket_unavailable`.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Object storage"): the two secret
+ * PORT-TODO(P: inventory-request-path.md §1.6 "Object storage"): the two secret
  * halves (`ASSET_S3_ACCESS_KEY_ID` / `ASSET_S3_SECRET_ACCESS_KEY`) are Worker
  * SECRETS today (`wrangler secret put`) and belong in **Cloudflare Secrets
  * Store** once `@ferrogate/secrets` lands. Same platform constraint as the

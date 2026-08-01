@@ -24,7 +24,7 @@
  *
  * ## The ONE thing that genuinely does not port — and it is kept, not closed
  *
- * PORT-TODO(inventory-request-path §1.7 "Caches", issue #273): **PLATFORM
+ * PORT-TODO(L: inventory-request-path §1.7 "Caches", issue #273): **PLATFORM
  * LIMIT on the STORE's REACH, not on the algorithm.** Rust held one
  * `SemanticResponseCache` in `AppState` — a single process, so every request
  * the deployment served saw every entry. A Worker has no process. The exact

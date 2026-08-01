@@ -41,7 +41,7 @@ export interface AssetObjectPutOptions {
 /**
  * R2-shaped object store. A live `R2Bucket` is assignable to this type.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Object storage"): NOT a platform
+ * PORT-TODO(P: inventory-request-path.md §1.6 "Object storage"): NOT a platform
  * limit and NOT unfinished work — a deliberate product decision, recorded here
  * so it is not "fixed" by someone reading the Rust. `asset_bucket.rs` also
  * exposed multipart create/upload-part/complete, and R2's Workers API does have
@@ -499,7 +499,7 @@ export interface PresignedUpload {
 /**
  * Issues short-TTL presigned URLs for the direct client↔bucket transfer.
  *
- * PORT-TODO(inventory-request-path.md §1.6): PLATFORM LIMIT, and the reason
+ * PORT-TODO(L: inventory-request-path.md §1.6): PLATFORM LIMIT, and the reason
  * this port exists separately from {@link AssetObjectStore} at all. The Workers
  * `R2Bucket` binding has NO presign method and no way to derive one: R2
  * presigned URLs are an **S3-API** feature, signed with SigV4 over
@@ -612,7 +612,7 @@ export interface AssetScreeningRequest {
  * `FERROGATE_ASSET_REQUIRE_SIGNATURE`. With those unset the composition is the
  * identity, so the unconfigured posture is byte-for-byte what it was.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Clamd/HTTP malware scanner"): the
+ * PORT-TODO(P: inventory-request-path.md §1.6 "Clamd/HTTP malware scanner"): the
  * full Rust gate ALSO ran a cross-tenant publish-approval check and an
  * out-of-process ClamAV scanner. Those TWO are still unported (the third,
  * signature verification, is closed — see above). This port keeps the
@@ -786,7 +786,7 @@ export interface AssetAuditSink {
  * `screeningEvidence` here answers for a push only when the very same isolate
  * served it.
  *
- * PORT-TODO(inventory-data-billing §1.4.6, issues #263/#284 — RETENTION, and a
+ * PORT-TODO(P: inventory-data-billing §1.4.6, issues #263/#284 — RETENTION, and a
  * CROSS-APP boundary, not a platform limit): `audit_events` is append-only and
  * NOTHING prunes it. `packages/storage/src/retention.ts` ports
  * `planLogRetention` — pure, tested, and with no executor and no

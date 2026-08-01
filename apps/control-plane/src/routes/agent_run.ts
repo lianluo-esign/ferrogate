@@ -19,6 +19,27 @@
  */
 import { type GroupModule, crudGroup, readOnlyCollection, subListHandler } from "./resource.js";
 
+/**
+ * PORT-TODO(P: inventory-edge-control §agent-worker) — these three read document
+ * collections (`agent-runs`, `agent-run-events`, `self-hosted-runs`,
+ * `self-hosted-run-events`) that nothing writes, so the operator-facing run
+ * evidence is empty on every deployment.
+ *
+ * The runs are real, they just live somewhere this Worker cannot page: run state
+ * and its event log are held by `apps/agent-runtime`'s `AgentRunState` Durable
+ * Object, keyed `${tenant_id}:${run_id}` (`apps/agent-runtime/src/runs/do.ts`) —
+ * the CF-native replacement for Rust's `agent_runs` + `agent_run_events`
+ * Postgres tables. The control schema still declares both tables
+ * (`sql/d1-ts/control/0001_init_control.sql`) and neither has a writer or a
+ * reader in `apps/<app>/src`.
+ *
+ * A Durable Object is addressable but NOT queryable across instances, so
+ * "list every run for this tenant" cannot be served from the DO alone. The
+ * closing move is a projection: `AgentRunState` writes a summary row into
+ * `agent_runs` (and an append-only `agent_run_events` row per event) on each
+ * transition, and this group pages that table with the tenant fence. That is a
+ * cross-app change — `apps/agent-runtime` owns the write side.
+ */
 export const agentRunRoutes: GroupModule = crudGroup(
   "agent_run",
   [readOnlyCollection("agent-runs", "agent_run")],

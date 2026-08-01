@@ -515,7 +515,7 @@ export function terminalErrorFrames(
         sseFrame({ data: "[DONE]" }),
       ];
     case "openai.chat":
-      // PORT-TODO(inventory-request-path §1.6): NO RUST BYTE-SHAPE EXISTS to
+      // PORT-TODO(L: inventory-request-path §1.6): NO RUST BYTE-SHAPE EXISTS to
       // port. The Rust chat path evaluated the response guardrail only after
       // buffering, so a chat denial was always a BUFFERED 403 body and a
       // mid-stream chat block was unreachable. This port screens INCREMENTALLY

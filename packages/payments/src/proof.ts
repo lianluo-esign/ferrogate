@@ -28,7 +28,7 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
 export class SecretBytes {
   readonly #bytes: Uint8Array;
 
-  // PORT-TODO(inventory §3.2 "proof") — PLATFORM LIMIT, NOT CLOSED.
+  // PORT-TODO(L: inventory §3.2 "proof") — PLATFORM LIMIT, NOT CLOSED.
   //
   // The exact limitation: **JS has no deterministic destructor.** The Rust
   // `SecretBytes` implements `Drop` and zeroes its buffer the instant the value

@@ -2,7 +2,7 @@
  * Port of `ferrogate-config`'s `config/routing.rs` (inventory §5.4, "Routing"):
  * upstream-endpoint parsing and route-rule path rewriting / target-URI building.
  *
- * PORT-TODO(inventory §5.2/§5.8) — PACKAGE RELOCATION ONLY, BEHAVIOR IS CLOSED.
+ * PORT-TODO(P: inventory §5.2/§5.8) — PACKAGE RELOCATION ONLY, BEHAVIOR IS CLOSED.
  * `build_target_uri`/`normalize_host` are the
  * data-plane leg the Rust crate note flags for relocation to the gateway app
  * (#560); they are ported here to preserve the public surface and are re-used

@@ -30,7 +30,7 @@
  * Rust slices with `.chars()` (Unicode scalar values). `[...secret]` is the JS
  * equivalent; `secret.slice(0, 16)` is NOT — it splits surrogate pairs.
  *
- * PORT-TODO(inventory-edge-control §5.2) — KEPT, SCOPE LIMIT, NOT A PLATFORM
+ * PORT-TODO(P: inventory-edge-control §5.2) — KEPT, SCOPE LIMIT, NOT A PLATFORM
  * LIMIT. State the limit exactly, because it is unusual for this project:
  * BLAKE2b runs perfectly well on Workers (`apps/gateway/src/keys/blake2b.ts`
  * already does), so nothing about Cloudflare blocks this. What blocks it is

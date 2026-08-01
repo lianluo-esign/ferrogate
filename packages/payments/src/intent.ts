@@ -333,7 +333,7 @@ const PaymentIntentWireSchema = z.object({
   scheme: z.string(),
   network_caip2: z.string(),
   mint: z.string(),
-  // PORT-TODO(inventory §3.2 "intent") — LANGUAGE LIMIT, NARROWED TO THE
+  // PORT-TODO(L: inventory §3.2 "intent") — LANGUAGE LIMIT, NARROWED TO THE
   // INBOUND HALF, STILL NOT CLOSED. The OUTBOUND half IS now closed.
   //
   // The exact limitation, and it is INBOUND-ONLY: **the precision is already

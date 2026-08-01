@@ -27,7 +27,7 @@
  *                       `storage.list()`'s lexicographic order IS sequence
  *                       order, which is what makes the cursor feed cheap.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.2): PLATFORM LIMIT —
+ * // PORT-TODO(L: inventory-edge-control §agent-worker §8.2): PLATFORM LIMIT —
  * // this Durable Object owns run STATE, and it can never own run EXECUTION,
  * // because three of Rust's four isolation backends need kernel facilities
  * // workerd does not expose (KVM/vsock, process spawn, namespaces). The full

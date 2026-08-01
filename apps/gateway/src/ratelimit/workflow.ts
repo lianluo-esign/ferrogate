@@ -67,6 +67,48 @@ import {
 import { D1WorkflowBudgetStore, workflowRunBudgetId } from "@ferrogate/storage";
 import { gatewayTenantHandle } from "./wallet.js";
 
+/**
+ * PORT-TODO(`server/chat.rs::enforce_ai_workflow_policy`, `agent_runs.rs`):
+ * the workflow GRAPH gate is not ported — only the run BUDGET envelope below.
+ *
+ * `packages/config` parses `[[agent_workflows]]` in full
+ * (`schema/config.ts:72`, `validate/policies.ts:64` validates node/edge ids),
+ * and `grep -rn "agent_workflows\|agentWorkflows" apps/` returns NOTHING. So a
+ * declared workflow is a table the gateway loads, validates and then never
+ * consults. Rust refuses a model call from a workflow step it does not
+ * recognise, with thirteen distinct codes this tree has none of:
+ *
+ * | Rust code | status | what it stops |
+ * |---|---|---|
+ * | `workflow_not_found` | 400 | a step naming an unknown workflow/version |
+ * | `workflow_disabled` | 403 | a step in a disabled workflow |
+ * | `workflow_not_allowed` | 403 | a key/tenant not entitled to the workflow |
+ * | `workflow_node_required` | 400 | `workflow-id` without `workflow-node-id` |
+ * | `workflow_node_not_found` | 400 | a node id not in the graph |
+ * | `workflow_node_not_model` | 403 | a non-model node dispatching model traffic |
+ * | `workflow_model_not_allowed` | 403 | a node calling a model it is not pinned to |
+ * | `workflow_provider_not_allowed` | 403 | a node calling an unpinned provider |
+ * | `workflow_edge_not_allowed` | 403 | a step that is not a legal transition from the run's last node |
+ * | `workflow_model_call_limit_exceeded` | 429 | `max_model_calls` |
+ * | `workflow_iteration_limit_exceeded` | 429 | `max_iterations` |
+ * | `workflow_timeout_exceeded` | 429 | the workflow wall clock |
+ * | `workflow_token_budget_exceeded` | 429 | the workflow token budget |
+ *
+ * Two consequences beyond the missing refusals. First the HEADERS differ:
+ * Rust reads `x-ferrogate-workflow-{id,version,node-id,iteration}` and rejects a
+ * malformed set with `400 invalid_workflow_header`; this module reads
+ * `x-ferrogate-workflow-{id,version,run-id}` and answers
+ * `400 invalid_workflow_declaration`, so `node-id` and `iteration` have no
+ * reader at all and a Rust-shaped client is refused. Second, the edge gate is
+ * the only thing that makes a workflow a GRAPH rather than a budget: without it
+ * a caller inside a legitimate run can call any node's model in any order.
+ *
+ * Not a platform limit — it is a pure function of the config document plus the
+ * run's own event timeline, both of which are already available here
+ * (`AgentRunState` holds the timeline in `apps/agent-runtime`). It needs a
+ * cross-Worker read (or a Service Binding) for `workflow_edge_transition_error`,
+ * which is why it did not fall out of the budget slice.
+ */
 /** Header carrying `RequestContext.workflow_id`. */
 export const WORKFLOW_ID_HEADER = "x-ferrogate-workflow-id";
 /** Header carrying `RequestContext.workflow_version`. */

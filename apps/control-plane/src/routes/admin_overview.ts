@@ -36,7 +36,7 @@ import { registerSelfHostedWorkerHandler } from "./self_hosted_worker.js";
 /**
  * The admin console shell.
  *
- * PORT-TODO(inventory-edge-control §4) — KEPT, sharpened. This is NOT a platform
+ * PORT-TODO(P: inventory-edge-control §4) — KEPT, sharpened. This is NOT a platform
  * limit: Workers Assets and Pages both serve a built SPA perfectly well, and the
  * three anonymous routes below are already the right mount point for one. It is
  * a **product sequencing decision** — `docs/rewrite/PORT-PLAN.md` lists

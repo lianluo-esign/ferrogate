@@ -66,7 +66,7 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
    * carrying the `configSnapshotId` of what was promoted), which is the state a
    * data-plane isolate reads on its next config fetch.
    *
-   * PORT-TODO(inventory-edge-control §4) — PLATFORM LIMIT, sharpened: a Worker
+   * PORT-TODO(L: inventory-edge-control §4) — PLATFORM LIMIT, sharpened: a Worker
    * isolate cannot be told to swap an in-memory snapshot the way Rust's
    * `ArcSwap` + `reload_process_local` does. There is no process to signal:
    * isolates are created and evicted by the platform, an arbitrary number of

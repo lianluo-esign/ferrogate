@@ -279,7 +279,7 @@ function validateMcpOauthConfig(
 }
 
 /**
- * PORT-TODO(inventory §5.3) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: inventory §5.3) — PLATFORM LIMIT, NOT CLOSED.
  *
  * `ferrogate_mcp::tls::validate_mcp_tls_config` is a pre-flight that reads
  * `tls.ca_cert_path` off local disk and PEM-parses it, so that the rustls client

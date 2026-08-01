@@ -3,7 +3,7 @@
  * `admin-api serve` (deprecated), `billing serve`, and
  * `storage migrate-to-supabase`.
  *
- * PORT-TODO(inventory-edge-control.md §1.4) — KEPT, PLATFORM LIMIT, NOT
+ * PORT-TODO(L: inventory-edge-control.md §1.4) — KEPT, PLATFORM LIMIT, NOT
  * CLOSEABLE: **the CLI's identity as a process launcher does not survive the
  * port.**
  *

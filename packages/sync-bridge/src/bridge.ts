@@ -50,7 +50,7 @@ export type SyncBridgeFuture<T> = PromiseLike<T> | (() => T | PromiseLike<T>);
  *    because on the Workers event loop there is only ever the one cooperative
  *    executor.
  *
- * PORT-TODO(inventory §7) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: inventory §7) — PLATFORM LIMIT, NOT CLOSED.
  *
  * The exact limitation: **the synchronous `-> T` return is impossible on a JS
  * event loop.** Rust `block_on_sync_bridge` parks the calling THREAD until the

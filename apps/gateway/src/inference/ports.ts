@@ -692,7 +692,7 @@ export interface AnthropicTranslator {
 /**
  * `AppState::next_request_id`.
  *
- * PORT-TODO(inventory-request-path §"Cross-crate architecture" step 1):
+ * PORT-TODO(L: inventory-request-path §"Cross-crate architecture" step 1):
  * PLATFORM LIMIT — Rust formats a process-wide `AtomicU64` as `fg-{:016x}`, so
  * request ids are strictly increasing within one process and two ids can be
  * ORDERED by comparison.

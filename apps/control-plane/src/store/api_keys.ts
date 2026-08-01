@@ -31,7 +31,7 @@
  *
  * ## The durable NATIVE/virtual leg — CLOSED, and how
  *
- * This used to carry a `PORT-TODO(inventory-edge-control §5.2 /
+ * This used to carry a `PORT_TODO(inventory-edge-control §5.2 /
  * inventory-data-billing §1.7)` claiming a platform limit: Rust's
  * `StorageApiKeyAuthenticator` resolves a durable virtual key off the FULL
  * `api_keys` row (scopes, allow-lists, `monthly_token_budget`), those columns
@@ -63,7 +63,7 @@
  * (`401 invalid_api_key`, indistinguishable from an unknown key), which is the
  * same answer Rust gives when `StorageApiKeyAuthenticator` returns `None`.
  *
- * PORT-TODO(inventory-data-billing §1.7) — the residual, stated honestly and far
+ * PORT-TODO(L: inventory-data-billing §1.7) — the residual, stated honestly and far
  * narrower than what it replaced: routing a tenant still requires that tenant's
  * `[[d1_databases]]` stanza to have been deployed, so onboarding costs a
  * `wrangler deploy` and the tenant count is bounded by the Worker's binding

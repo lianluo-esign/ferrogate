@@ -116,7 +116,7 @@ function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
  * `message_delta` reports the final `usage.output_tokens` at the tail of the
  * stream. `total_tokens` is only synthesized when both halves are known.
  *
- * PORT-TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
+ * PORT_TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
  * GAP.** Anthropic's newer `cache_creation_input_tokens` /
  * `cache_read_input_tokens` counters are not read here.
  *

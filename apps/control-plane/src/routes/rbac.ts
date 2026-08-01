@@ -83,6 +83,33 @@ function bindingId(tenantId: string, roleId: string): string {
   return `${tenantId}:${roleId}`;
 }
 
+/**
+ * PORT-TODO(P: inventory-edge-control §5.1 RBAC) — the WRITE half of this group is
+ * not connected to the tables that authorize.
+ *
+ * All eleven operations here persist into `control_plane_resources` DOCUMENTS
+ * only. Every RBAC *reader* in the fleet queries the TYPED control tables
+ * instead:
+ *
+ *   - `src/adapters.ts::D1RbacAuthorizer`  — `tenant_role_bindings ⋈ roles`
+ *   - `apps/gateway/src/adapters.ts`       — same join (`RBAC_PERMISSIONS_SQL`)
+ *   - `apps/gateway/src/assets/entitlements.ts` — same join
+ *   - `apps/mcp/src/auth.ts`               — `ROLE_TABLE`/`TENANT_ROLE_BINDING_TABLE`
+ *
+ * `grep -rn "INSERT INTO \(roles\|permissions\|tenant_role_bindings\)"` over
+ * `apps/<app>/src` + `packages/<pkg>/src` returns ZERO hits; every insert in the tree is
+ * a test fixture. So `POST /admin/v1/roles` + `POST /admin/v1/tenant-roles/{t}`
+ * grant nothing, and `DELETE /admin/v1/tenant-roles/{t}/{r}` revokes nothing —
+ * the authorizers see `rows.length === 0` and fall back to the declarative
+ * `TENANT_RBAC_ACTIONS` var, which is why every suite stays green.
+ *
+ * This is the same shape `store/quota_registry.ts` (plans/tenants/quota
+ * policies), `store/virtual_keys.ts` and `store/worker_registry.ts` already
+ * closed for their families: add a `project` hook that upserts `roles`
+ * (`permission_keys_json`) and `tenant_role_bindings` (`id`, `tenant_id`,
+ * `role_id`) on the record the store committed, delete the typed row on unbind,
+ * and pin it with a test that provisions the grant ONLY through the admin API.
+ */
 export const rbacRoutes: GroupModule = crudGroup(
   "rbac",
   [

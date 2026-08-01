@@ -67,7 +67,7 @@ export function errorEnvelope(
  * gateway-originated response. `x-trace-id` deliberately mirrors the request id
  * exactly as the Rust code did.
  *
- * PORT-TODO(inventory-request-path §1.3): `apply_cors_headers` runs on EVERY
+ * PORT-TODO(P: inventory-request-path §1.3): `apply_cors_headers` runs on EVERY
  * Rust-originated response (`responses.rs`, 9 call sites — re-counted this pass,
  * still 9) and is **not ported anywhere in `apps/gateway`**.
  *

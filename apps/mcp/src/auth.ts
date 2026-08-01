@@ -70,6 +70,22 @@
  * hostile, corrupted or otherwise — can turn a tenant key into an operator key.
  * Rust's `durable_virtual_key_is_never_platform_root` invariant, structural
  * rather than checked.
+ *
+ * ## PORT-TODO(`gateway/auth.rs::finalize_auth`): no admission half
+ *
+ * The ladder above is the CREDENTIAL half of Rust's `authenticate()`. The
+ * ADMISSION half — `finalize_auth` — is absent on this Worker, exactly as it is
+ * on `apps/agent-runtime` (see the twin marker on its `bearerAuth`). In the
+ * Rust tree `POST /v1/mcp` and `POST /v1/mcp/tool/execute` shared a process with
+ * `/v1/chat/completions`, so both were charged `429 rate_limit_exceeded` (the
+ * per-key RPM counter), `429 monthly_budget_exceeded`,
+ * `429 wallet_balance_exhausted`, `403 quota_scope_disabled` and
+ * `503 quota_resolution_unavailable` before a tool ever ran.
+ * `grep -rn "rate_limit_exceeded\|monthly_budget_exceeded" apps/mcp/src`
+ * returns nothing, so a rate-limited or budget-exhausted key is still admitted
+ * here — and `tools/call` is a spend surface (it can reach a paid upstream and
+ * a paid asset pull). The fix is `apps/gateway/src/ratelimit/` mounted on a
+ * SHARED counter namespace, not a private one.
  */
 import {
   StorageError,

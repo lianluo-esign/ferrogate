@@ -63,6 +63,21 @@ export function adminDeleted(object: string, id: string): AdminDeleteResponse {
 /**
  * The single-item mutation envelope: `{ object: "<name>", "<name>": record }`
  * (Rust e.g. `AdminAgentScheduleMutationResponse { object, agent_schedule }`).
+ *
+ * PORT-TODO(P: inventory-edge-control §1.2 wire shape) — the "envelope key equals
+ * `object`" rule holds for most of the Rust structs but NOT for all of them, and
+ * three resources are wrong on the wire today:
+ *
+ * | resource | Rust envelope | this port |
+ * |---|---|---|
+ * | `/admin/v1/api-keys` | `{ object: "api_key", key }` (`responses.rs:1096`) | `{ object: "api_key", api_key }` |
+ * | `/admin/v1/mcp-servers` | `{ object: "mcp_server", server }` (`responses.rs:1900`, `local.rs:698`) | `{ object: "mcp_server", mcp_server }` |
+ * | `/admin/v1/tenant-accounts` | `{ object: "tenant_account", tenant }` (`server/virtual_keys.rs:320`) | `{ object: "tenant_account", tenant_account }` |
+ *
+ * Any client that reads `body.key` / `body.server` / `body.tenant` — which is
+ * what the Rust-era SDKs and the admin console did — gets `undefined`. The fix
+ * is a per-collection `envelopeKey` on `CollectionSpec` defaulting to `object`,
+ * not a rename of `object` (which is a separate, correct field).
  */
 export function adminItem(object: string, record: unknown): Record<string, unknown> {
   return { object, [object]: record };

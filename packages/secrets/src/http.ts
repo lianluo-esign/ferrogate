@@ -8,7 +8,7 @@
  * re-implementation is a thin wrapper over the platform `fetch`, which is the
  * idiomatic — and only — outbound HTTP primitive.
  *
- * PORT-TODO(4.8) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: 4.8) — PLATFORM LIMIT, NOT CLOSED.
  *
  * The exact limitation: **workerd exposes no TLS trust-store hook.** The Rust
  * client hand-rolls a blocking rustls TCP client precisely so it can install a
@@ -41,7 +41,7 @@ export interface HttpOptions {
   readonly timeoutMs?: number;
   /**
    * Custom CA cert path. Accepted for parity; IGNORED under `fetch` — workerd
-   * exposes no trust-store hook. See the module PORT-TODO(4.8).
+   * exposes no trust-store hook. See the module PORT_TODO(4.8).
    */
   readonly caCertPath?: string | null;
   /** Injectable `fetch` (test seam). Defaults to the platform `fetch`. */

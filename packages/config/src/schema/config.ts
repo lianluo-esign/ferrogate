@@ -96,7 +96,7 @@ export const configSchema = z.object({
   asset_lifecycle: sectionDefault(assetLifecycleConfigSchema),
   x402_sweeper: sectionDefault(x402SweeperConfigSchema),
   x402_reconciler: sectionDefault(x402ReconcilerConfigSchema),
-  // PORT-TODO(inventory §5.3) — DELIBERATE PRODUCT DECISION (x402 is
+  // PORT-TODO(D: inventory §5.3) — DELIBERATE PRODUCT DECISION (x402 is
   // deprioritized), not a platform gap. `X402ScopedSpendPolicy` is owned by the
   // (deprioritized) x402 policy surface in `@ferrogate/policy`; accepted as
   // opaque entries until that crate is ported. See `../x402-scope.ts`.

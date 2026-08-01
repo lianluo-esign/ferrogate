@@ -259,7 +259,7 @@ export const tlsAcmeConfigSchema = z.object({
 export type TlsAcmeConfig = z.infer<typeof tlsAcmeConfigSchema>;
 
 /**
- * PORT-TODO(inventory §5.8) — PLATFORM LIMIT, NOT CLOSED. Deliberately
+ * PORT-TODO(L: inventory §5.8) — PLATFORM LIMIT, NOT CLOSED. Deliberately
  * SCHEMA-ONLY: these two sections are decoded, and NOTHING validates them.
  *
  * Cloudflare terminates TLS at the edge BEFORE the Worker is invoked. There is

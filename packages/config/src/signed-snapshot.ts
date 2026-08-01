@@ -4,7 +4,7 @@
  * snapshot, the config-driven crypto builder, and the offline last-known-good
  * store.
  *
- * PORT-TODO(inventory §5.8) — PLATFORM LIMIT (API SHAPE ONLY), CRYPTO IS CLOSED.
+ * PORT-TODO(L: inventory §5.8) — PLATFORM LIMIT (API SHAPE ONLY), CRYPTO IS CLOSED.
  *
  * Rust used `ed25519-dalek` SYNCHRONOUSLY. workerd exposes Ed25519 only through
  * WebCrypto (`crypto.subtle`), which has no synchronous form and no synchronous

@@ -143,7 +143,7 @@ export const providerRecordSchema = z
  * `routing_strategy` and the two prices closed F6 and live on the model row /
  * every leg respectively — see {@link modelRecordSchema} and `strategy.ts`.
  *
- * PORT-TODO(`src/cache/config.ts` `aiCacheEnabled`, F11 residue): the ONE
+ * PORT-TODO(P: `src/cache/config.ts` `aiCacheEnabled`, F11 residue): the ONE
  * `ModelRegistryEntry` field still unrepresentable here is `cache_enabled`, the
  * per-model leg of `AppState::ai_cache_enabled`'s four-level opt-out (global,
  * profile, model, api-key). It is NOT missing behavior: the response cache

@@ -4,7 +4,7 @@
  * ## What this closes
  *
  * `src/durable.ts`'s `loadServerCatalog` carried
- * `PORT-TODO(inventory-edge-control §MCP "server catalog")`: the reader, the
+ * `PORT_TODO(inventory-edge-control §MCP "server catalog")`: the reader, the
  * decoder, `resolveUpstreams` and the `MCP_SESSION` Durable Object were all
  * implemented, mounted and green — against `mcp_servers` rows the TESTS insert,
  * because **nothing in this repo wrote one**. A deployed tenant therefore read

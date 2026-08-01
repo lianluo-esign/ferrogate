@@ -416,7 +416,7 @@ export interface CostDivergence {
  * Every hook is optional and every call site guards against a throwing hook,
  * so an observability bug can never become a billing bug.
  *
- * PORT-TODO(inventory-data-billing §"Observability/worker/audit analytics
+ * PORT-TODO(P: inventory-data-billing §"Observability/worker/audit analytics
  * families"): these become Analytics Engine `writeDataPoint` calls.
  *
  * NOT a platform limit — the opposite, and it was checked rather than assumed:

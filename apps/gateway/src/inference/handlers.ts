@@ -359,7 +359,7 @@ function planUpstream(
   //    `createGatewayApp` immediately before the routes, with the four-level
   //    `ai_cache_enabled` opt-out and the #233 guardrail-fingerprint rotation.
   //
-  // PORT-TODO(`state_routing.rs:262` `GatewayConfigResolveError`, `src/cache/`):
+  // PORT-TODO(P: `state_routing.rs:262` `GatewayConfigResolveError`, `src/cache/`):
   // two residues, neither of them in this directory, both stated precisely so
   // the next owner does not re-derive them from `crates/`.
   //

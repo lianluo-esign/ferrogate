@@ -297,7 +297,7 @@ export function guardrails(
       if (plan === "shadow_after_complete") {
         // Pass through untouched; the engine records `not_enforced` evidence.
         //
-        // PORT-TODO(inventory-request-path §streaming shadow): a DELIBERATE
+        // PORT-TODO(L: inventory-request-path §streaming shadow): a DELIBERATE
         // approximation, and the difference is observable in evidence only.
         // The Rust captured the whole streamed body and evaluated it ONCE at
         // completion. Reproducing that literally would mean buffering an SSE

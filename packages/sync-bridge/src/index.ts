@@ -14,14 +14,14 @@
  * contract — while preserving the runtime-flavor branch structure as a
  * documented, test-covered model rather than silently dropping it. The
  * OS-thread scheduling (`block_in_place` / scoped `current_thread` runtime) has
- * no CF equivalent and is flagged `// PORT-TODO(inventory §7)` in
+ * no CF equivalent and is flagged `// PORT_TODO(inventory §7)` in
  * `bridge.ts` / `runtime.ts`.
  *
  * Modules:
  *  - `bridge`  — `blockOnSyncBridge` + `SyncBridgeFuture`, the public surface.
  *  - `runtime` — `RuntimeFlavor` / strategy model mirroring tokio introspection.
  *
- * ## PORT-TODO(inventory-edge-control §7) — VERDICT: DELETE THIS PACKAGE.
+ * ## PORT-TODO(P: inventory-edge-control §7) — VERDICT: DELETE THIS PACKAGE.
  * ## See `docs/rewrite/parity-audit-dead-packages.md` §1.
  *
  * This package has ZERO importers in every app and package `src` tree, and

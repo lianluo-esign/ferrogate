@@ -706,7 +706,7 @@ export function runtimeConfigTextParsers(
  * A runtime that supplies no parser for the named format REFUSES the document
  * rather than guessing at it — validating a guessed parse would bless a
  * document the gateway never sees. `@ferrogate/config`'s own loader keeps its
- * `PORT-TODO(inventory §5.8)` marker because *there* the limit is real: a
+ * `PORT_TODO(inventory §5.8)` marker because *there* the limit is real: a
  * Worker has no filesystem, so on the edge TOML/YAML decoding is a build/deploy
  * step. It is not real here — `ferrogate` is a Bun process with both a
  * filesystem and `Bun.YAML`, which is why this leg is implemented rather than

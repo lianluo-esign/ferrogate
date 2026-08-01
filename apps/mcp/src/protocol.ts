@@ -84,7 +84,7 @@ export type McpProtocolDowngradeReason =
   | "http_400_unrecognized_response"
   | "http_404_unrecognized_response"
   | "http_405_unrecognized_response"
-  // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — the four `stdio_*`
+  // PORT-TODO(L: inventory-edge-control §MCP): PLATFORM LIMIT — the four `stdio_*`
   // downgrade reasons are UNPRODUCIBLE on Workers, because producing one means
   // having probed a child process (workerd cannot spawn one; see the stdio note
   // in `src/transport.ts`). `stdio_probe_process_exit` in particular names an

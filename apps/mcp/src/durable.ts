@@ -685,7 +685,7 @@ export function decodeServerRow(row: ServerRow): McpServerConfig | undefined {
  * because a tenant must never see another tenant's upstreams, and the filter is
  * a bound parameter rather than a caller-supplied SQL fragment.
  *
- * ## The former `PORT-TODO(inventory-edge-control §MCP "server catalog")` — CLOSED
+ * ## The former `PORT_TODO(inventory-edge-control §MCP "server catalog")` — CLOSED
  *
  * The marker read: **nothing in this repo writes a `mcp_servers` row.** The
  * reader, `decodeServerRow`, `resolveUpstreams` and the `MCP_SESSION` Durable

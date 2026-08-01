@@ -40,7 +40,7 @@
  *
  * ### Remaining call-site gap — ONE LINE, in a file this module does not own
  *
- * PORT-TODO(inventory-data-billing §2.5) — NOT a platform limit, a SCOPE
+ * PORT-TODO(P: inventory-data-billing §2.5) — NOT a platform limit, a SCOPE
  * boundary: the line below belongs to `src/inference/handlers.ts`, which this
  * module does not own and must not edit.
  *

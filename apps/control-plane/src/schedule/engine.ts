@@ -538,7 +538,7 @@ async function isDispatchUnacked(
  * shape, not chosen: every admin collection lives in the generic
  * `control_plane_resources` document table, so `next_fire_at_unix` is a JSON
  * field with no index — the same constraint `store/d1.ts`'s kept
- * `PORT-TODO(inventory-edge-control §9.3)` records for list filtering, and for
+ * `PORT_TODO(inventory-edge-control §9.3)` records for list filtering, and for
  * the same reason (pushing a predicate into SQL over `document_json` changes
  * its meaning). It is bounded by {@link SCHEDULER_DUE_BATCH}, and a backlog
  * drains over successive ticks.

@@ -16,7 +16,7 @@
  * `{id}` route in this group, so `contract.ts`'s specificity ranking is not
  * even exercised here; they are matched literally.
  *
- * PORT-TODO(x402): the x402/Solana payment family is deprioritized per the
+ * PORT-TODO(D: x402): the x402/Solana payment family is deprioritized per the
  * standing directive, so resolution and evaluation are implemented over the
  * stored policy rows only. The three routes exist, are guarded, and answer the
  * documented shapes; the settlement path lands with `@ferrogate/payments`.

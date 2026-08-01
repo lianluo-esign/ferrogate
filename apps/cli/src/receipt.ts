@@ -538,6 +538,40 @@ const OBJECT_VERSION_KEYS = [
 ] as const;
 const RESOURCE_ID_KEYS = ["id", "policy_id"] as const;
 
+/**
+ * PORT-TODO(P: inventory-edge-control §1.2 receipt harvesting) — this is only the
+ * FIRST of the two legs Rust `envelope_scalar` searches, and the missing leg is
+ * the one that matters in production.
+ *
+ * `crates/ferrogate-control-plane-client/src/receipt.rs:2238` looks at the
+ * envelope's top level AND THEN at `wrapped_resource(body)` — the single nested
+ * object beside `object` — because the control-plane contract puts the changed
+ * document THERE: `{ object: "project", project: { id, revision, … } }`
+ * (`apps/control-plane/src/responses.ts::adminItem`, used by every generic CRUD
+ * create/replace/merge and every `actionHandler`).
+ *
+ * This function reads only the top level, so against a REAL control-plane
+ * response every harvested field collapses to its absence code:
+ *   - `target.resource_id`      → `response_names_no_resource_id`
+ *   - `target.object_version`   → `response_carries_no_object_version`
+ *   - `audit_id` / `approval_id`→ their contract-absence codes
+ *   - the rollback pointer      → `response_carries_no_revision`, so a guardrail
+ *     revision mutation emits no reversal command at all
+ *
+ * The Rust doc comment on `attested_resource_id` names this exact regression as
+ * a bug it had already fixed ("`ctl projects create` used to leave this null …
+ * even though the response had already arrived carrying `proj_1`"). The port
+ * reintroduced it, and no test catches it because `test/ctl.test.ts` scripts the
+ * fake server with a BARE body (`{ id: "p9", name: "new" }`) — a shape the
+ * control plane never returns.
+ *
+ * Closing it: add the `wrapped_resource` fallback (single non-`object` object
+ * value; ambiguous when there are two, exactly as Rust returns `None`), and
+ * re-point the CLI fixtures at the real `adminItem` envelope so the assertion
+ * can fail. Do NOT restore a deep walk — Rust deleted that on purpose
+ * (`receipt.rs:2225`): it attested a nested rule's `version` as the changed
+ * object's.
+ */
 function lookupString(body: JsonValue, keys: readonly string[]): string | undefined {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return undefined;
   const map = body as Record<string, JsonValue>;

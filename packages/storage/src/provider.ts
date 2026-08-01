@@ -59,7 +59,7 @@ export type PostgresTlsMode = "disable" | "prefer" | "require" | "verify_ca" | "
 /**
  * Postgres/Supabase connection config (ports `PostgresStorageConfig`).
  *
- * PORT-TODO(§1.6) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: §1.6) — PLATFORM LIMIT, NOT CLOSED.
  *
  * The exact limitation: **a Worker isolate cannot hold a warm TCP connection
  * pool.** `deadpool-postgres`'s whole value is a set of long-lived, recycled

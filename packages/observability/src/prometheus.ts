@@ -2,7 +2,7 @@
  * Prometheus text-format rendering of the gateway metrics snapshot.
  * Clean-room port of `ferrogate-observability::prometheus`.
  *
- * PORT-TODO(§4.5) — PLATFORM LIMIT, NOT CLOSED (renderer itself is closed).
+ * PORT-TODO(L: §4.5) — PLATFORM LIMIT, NOT CLOSED (renderer itself is closed).
  *
  * The exact limitation: **a Worker has no long-lived process to accumulate a
  * `GatewayMetricsSnapshot` in.** The Rust gateway held its counters in process

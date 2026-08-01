@@ -69,6 +69,28 @@ import {
   scopeOf,
 } from "./resource.js";
 
+/**
+ * PORT-TODO(P: inventory-edge-control §sites) — verification is real; what it
+ * unlocks is not built, and the durable store for it is unmounted.
+ *
+ * The challenge/TXT/cooldown machinery below is a faithful port and is proven
+ * (`test/site-domain-cas.test.ts` races two callers through the CAS). What is
+ * missing is both ends of it:
+ *
+ *  - **Nothing serves a verified hostname.** Rust `server/sites.rs` +
+ *    `site_domains.rs` route an inbound request by verified custom hostname to
+ *    the tenant's static site. `grep -ri "site.domain" apps/gateway/src` → 0.
+ *    So a hostname can be verified and then does nothing.
+ *  - **The durable verification store is dead code.**
+ *    `packages/storage/src/d1/site-domain-d1.ts::D1SiteDomainVerificationStore`
+ *    is the only writer of the `site_domain_verifications` table and is imported
+ *    by no application module; this group keeps verification state as
+ *    `control_plane_resources` documents instead, and the `site_domains` control
+ *    table has no writer at all.
+ *
+ * These are two separable slices: mounting the durable store here is local to
+ * this app; hostname-routed site serving is an `apps/gateway` change.
+ */
 const SITE_DOMAINS = "site-domains";
 /** `site_domain_verifications` — EVIDENCE, keyed `(tenant_id, hostname)`. */
 const VERIFICATIONS = "site-domain-verifications";

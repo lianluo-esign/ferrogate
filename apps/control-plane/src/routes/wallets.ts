@@ -56,6 +56,28 @@ import {
 const WALLETS = "wallets";
 const LEDGER = "wallet-ledger";
 
+/**
+ * PORT-TODO(P: inventory-data-billing §2.5 wallets) — the balance this group moves
+ * is NOT the balance the data plane spends against.
+ *
+ * `adjust`/`charge` write `balance_cents` onto a `control_plane_resources`
+ * document in the CONTROL database. `apps/gateway/src/ratelimit/quota.ts`
+ * admits a request against `SELECT balance_credits FROM wallets WHERE
+ * tenant_id = ?` in the TENANT database (`sql/d1-ts/tenant/0001_init_tenant.sql`),
+ * minus the live `wallet_reservations` holds. Two databases, two tables, two
+ * units (cents vs credits) — so crediting a prepaid wallet through the admin API
+ * does not let the tenant spend, and charging it does not stop them.
+ *
+ * `payment-methods` has the same split: `payment_methods` is a tenant-database
+ * table this group never writes.
+ *
+ * Closing it is the `store/virtual_keys.ts` shape: a dual write through
+ * `deps.tenantDatabases`, ordered so the crash state is the safe one (TIGHTEN
+ * the enforced row first on `charge`, LOOSEN the document first on `adjust`),
+ * with the credit↔cent conversion taken from `apps/gateway/src/metering/credits.ts`
+ * rather than re-derived here.
+ */
+
 export const walletSchema = adminRecordSchema.extend({
   tenant_id: z.string().trim().min(1).optional(),
   balance_cents: z.number().int().optional(),

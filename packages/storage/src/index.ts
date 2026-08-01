@@ -19,11 +19,11 @@
  * single JS thread serializes writers exactly as the Postgres row lock / D1 atomic
  * batch does, giving the identical no-oversell / no-lost-update invariants.
  *
- * See the per-module `PORT-TODO(<inventory §>)` markers for the surfaces with no
+ * See the per-module `PORT_TODO(<inventory §>)` markers for the surfaces with no
  * clean CF equivalent (Postgres pool/RLS/FOR UPDATE, x402 payments, R2 blob move).
  *
  * ---------------------------------------------------------------------------
- * PORT-TODO(inventory-data-billing §1.7 "Proposed CF/TS mapping") — THE DURABLE
+ * PORT-TODO(P: inventory-data-billing §1.7 "Proposed CF/TS mapping") — THE DURABLE
  * HALF OF THIS PACKAGE IS MOUNTED IN PART. Seven exports are still dead.
  *
  * This marker used to say "not mounted on any Worker … ZERO importers". That is
@@ -82,7 +82,7 @@
  * turns this package RED and forces the marker to be corrected with it.
  * ---------------------------------------------------------------------------
  *
- * PORT-TODO(inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`)
+ * PORT-TODO(P: inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`)
  * — SHARPENED. The ENGINE is no longer absent; the TICK TRIGGER still is, and a
  * RIVAL ENGINE has landed in `apps/control-plane` in the meantime.
  *

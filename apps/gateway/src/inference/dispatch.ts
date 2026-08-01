@@ -32,7 +32,7 @@
 /**
  * `provider_transport_failure_class`, as far as workerd can discriminate.
  *
- * PORT-TODO(inventory-request-path §1.6 "provider dispatch", issue #384):
+ * PORT-TODO(L: inventory-request-path §1.6 "provider dispatch", issue #384):
  * PLATFORM LIMIT — reqwest exposes seven orthogonal predicates on its error
  * type (`is_connect`, `is_timeout`, `is_redirect`, `is_body`, `is_decode`,
  * `is_request`), so Rust can name the class structurally. The Workers `fetch`

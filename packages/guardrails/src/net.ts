@@ -18,7 +18,7 @@
  *     hostname and dropped every disallowed address *before the socket was
  *     opened*, so `evil.example.com. A 127.0.0.1` was refused at connect time.
  *
- * PORT-TODO(inventory-policy-core §guardrails/net) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: inventory-policy-core §guardrails/net) — PLATFORM LIMIT, NOT CLOSED.
  *
  * The exact limitation: **workerd exposes no DNS resolver hook and no
  * resolved-address callback.** The Rust `GuardrailDnsResolver` is a custom

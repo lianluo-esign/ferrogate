@@ -2,7 +2,7 @@
  * Inbound (merchant-side) fixed-price x402 monetization — partial clean-room
  * port of `ferrogate-billing`'s `x402_inbound.rs` (issue #356).
  *
- * PORT-TODO(§2.2 / §3 — x402 DEPRIORITIZED): the challenge-construction,
+ * PORT-TODO(D: §2.2 / §3 — x402 DEPRIORITIZED): the challenge-construction,
  * `expected_payment`, and settlement legs depend on the frozen #350 x402 wire
  * contract from `ferrogate-payments` (`parse_payment_required`,
  * `select_requirement`, `SolanaNetwork`, `SettlementEvidence`,
@@ -164,7 +164,7 @@ export interface InboundX402Endpoint {
 }
 
 /**
- * PORT-TODO(§3 — x402 DEPRIORITIZED): validate a fixed-price endpoint. Needs
+ * PORT-TODO(D: §3 — x402 DEPRIORITIZED): validate a fixed-price endpoint. Needs
  * `ferrogate-payments`' `SolanaNetwork::from_caip2`, `validate_solana_address`,
  * `MAX_TIMEOUT_SECONDS`, and `MAX_MEMO_BYTES`, which are stub-only in
  * `@ferrogate/payments`. Reinstate the field-by-field fail-closed checks when
@@ -178,7 +178,7 @@ export function validateInboundX402Endpoint(_endpoint: InboundX402Endpoint): nev
 }
 
 /**
- * PORT-TODO(§3 — x402 DEPRIORITIZED): couple a paid call's settlement evidence
+ * PORT-TODO(D: §3 — x402 DEPRIORITIZED): couple a paid call's settlement evidence
  * to a fixed-price endpoint. Needs the frozen #350 wire parser + challenge hash
  * from `ferrogate-payments`. Reinstate the fail-closed success/network/
  * signature/amount checks (see the Rust `settle_inbound_payment`) when revived.

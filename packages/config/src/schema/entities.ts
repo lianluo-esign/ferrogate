@@ -513,7 +513,7 @@ export const routeRuleSchema = z.object({
 });
 export type RouteRule = z.infer<typeof routeRuleSchema>;
 
-// PORT-TODO(inventory §5.3) — PACKAGE RELOCATION, NO OWNING PACKAGE EXISTS.
+// PORT-TODO(P: inventory §5.3) — PACKAGE RELOCATION, NO OWNING PACKAGE EXISTS.
 // `CloudflareConfig` was slated for `@ferrogate/cloudflare`; no such package was
 // ever created (the CF surface ended up spread across `apps/*` Workers and their
 // bindings), so there is nothing to import from and nothing this package can do

@@ -14,7 +14,7 @@
  * could not read (`slot.trim()` raised `TypeError`), so `cf://` worked only from
  * an injected map or a plain `[vars]` string, i.e. `env://` by another name.
  *
- * PORT-TODO(4.6/4.7) — PLATFORM LIMIT, NOT CLOSED (the RUNTIME-NAME half).
+ * PORT-TODO(L: 4.6/4.7) — PLATFORM LIMIT, NOT CLOSED (the RUNTIME-NAME half).
  *
  * The exact limitation that remains: **Cloudflare Secrets Store values are
  * WRITE-ONLY over the REST API, and the only read path is a

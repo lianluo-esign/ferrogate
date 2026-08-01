@@ -122,7 +122,7 @@ function normalizeHost(host: string): { host: string } | { error: string } {
 }
 
 /**
- * PORT-TODO(inventory §5.3) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: inventory §5.3) — PLATFORM LIMIT, NOT CLOSED.
  *
  * Two legs of `CapabilityTargetSelector::validate()` are filesystem pre-flights
  * that workerd cannot run, because a Worker isolate has NO filesystem at all —

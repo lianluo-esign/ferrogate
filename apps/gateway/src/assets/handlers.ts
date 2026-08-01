@@ -301,7 +301,7 @@ export function tenantRequiresDeclaredActionId(
  * absent) id. An id is NEVER fabricated — a synthesized correlation id would
  * make an unjoinable action look joined, which is worse than admitting the gap.
  *
- * PORT-TODO(inventory-request-path.md §governed actions): the low-cardinality
+ * PORT-TODO(P: inventory-request-path.md §governed actions): the low-cardinality
  * UNJOINABLE-ACTION METRIC (`record_unjoinable_action(tenant, surface)`) that
  * Rust increments on the absent-id branch is still deferred. Not a platform
  * limit — `@ferrogate/observability` already defines
@@ -891,6 +891,36 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         return render(await serviceFor(c).listAssets(await caller(c), params.asset_type));
       });
 
+      // PORT-TODO(`server/asset_egress.rs`, issue #262): the DOWNLOAD-SIDE
+      // egress gate + meter is not ported, and nothing in `apps/` reads the
+      // two quota fields that drive it.
+      //
+      // Rust `handle_asset_pull` (`server/assets.rs:1114`) runs two things this
+      // handler does not, using the RESOLVED object size:
+      //
+      //  1. `asset_egress_quota_denial` — fail-closed, BEFORE a byte is served:
+      //     the monthly egress BYTE budget (`monthly_egress_bytes_budget`,
+      //     read-only so an exhausted budget never burns an RPM token) then the
+      //     download RPM cap (`download_rpm_limit` / `download_rpm_limit_scope`).
+      //     Denials are `429 asset_egress_quota_exceeded` and
+      //     `429 asset_download_rate_limit_exceeded`, with
+      //     `503 governance_counter_unavailable` when the counter backend is
+      //     down. All three codes are absent from this tree.
+      //  2. `record_asset_egress` — meters the transferred bytes through the
+      //     billing outbox (priced by `asset_egress_price_per_gb`), accumulates
+      //     the monthly counter that backs gate 1, and writes the PULL-side
+      //     audit event that is symmetric with the push/delete audit this file
+      //     already records.
+      //
+      // Both quota fields ARE ported and durable —
+      // `src/ratelimit/quota.ts:178-179` parses them, `apps/control-plane`
+      // stores and serves them — but `grep -rn "monthlyEgressBytesBudget"
+      // apps/gateway/src` finds only that parse. So an operator can set an
+      // egress budget today, see it echoed back by the admin API, and have it
+      // enforce nothing: unlimited bandwidth is served and none of it is
+      // billed. Not a platform limit — the counter has the same shape as the
+      // inference RPM counter already running on the `RATE_LIMIT` DO, and
+      // `asset_egress_price_per_gb` is already in `packages/config`.
       on("getAsset", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const query = parseOrThrow(platformQuerySchema, c.req.query());

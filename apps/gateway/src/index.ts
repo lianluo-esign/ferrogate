@@ -158,7 +158,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  *    `routes/index.ts`; the adopted values are parked on the request context
  *    (`traceparent` / `tracestate` vars) for it.
  *
- * ## PORT-TODO(inventory-request-path §"Cross-crate architecture", steps 2/8)
+ * ## PORT-TODO(P: inventory-request-path §"Cross-crate architecture", steps 2/8)
  *
  * **`ClientActionTimeModule` and `run_pre_request_hooks`**
  * (`handlers.rs:29-41`, `handlers.rs:124`): signed action-time tokens on CLI

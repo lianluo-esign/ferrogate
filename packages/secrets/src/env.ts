@@ -8,7 +8,7 @@
  * when it exists, e.g. under Node/Bun/CLI), and callers inside a Worker pass
  * `c.env`.
  *
- * PORT-TODO(4.8) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: 4.8) — PLATFORM LIMIT, NOT CLOSED.
  *
  * The exact limitation: **workerd has no process environment.** There is no
  * `process.env`, no `getenv`, and no ambient global a module can read a

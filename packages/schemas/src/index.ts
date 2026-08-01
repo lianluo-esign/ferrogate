@@ -86,7 +86,7 @@ export type { GatewayErrorData, GatewayResult } from "@ferrogate/core";
  * Seeded with the cross-plane envelopes and the shared `ferrogate-core`
  * primitives.
  *
- * PORT-TODO(inventory §1.3/§1.4) — CROSS-SCOPE REGISTRATION, NOT A PLATFORM
+ * PORT-TODO(P: inventory §1.3/§1.4) — CROSS-SCOPE REGISTRATION, NOT A PLATFORM
  * LIMIT, NOT CLOSED HERE AND NOT CLOSABLE HERE.
  *
  * The remaining per-operation request/response shapes of the committed

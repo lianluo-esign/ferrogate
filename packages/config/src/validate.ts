@@ -325,7 +325,7 @@ export function validateCloudflareMcpServers(config: Config): void {
  * conventional `/mcp` (Streamable HTTP) or `/sse` on `*.workers.dev` — so an
  * ordinary Worker on `workers.dev` is NOT flagged as an MCP upstream.
  *
- * PORT-TODO(inventory §5.3) — PACKAGE RELOCATION, NO OWNING LIBRARY EXISTS.
+ * PORT-TODO(P: inventory §5.3) — PACKAGE RELOCATION, NO OWNING LIBRARY EXISTS.
  * BEHAVIOR IS CLOSED. The function belongs to `ferrogate-mcp`, whose TS port
  * lives in the `apps/mcp` WORKER — there is no `@ferrogate/mcp` library
  * package, and `packages/config` must not depend on an app (that edge points

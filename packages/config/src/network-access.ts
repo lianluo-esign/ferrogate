@@ -4,7 +4,7 @@
  * client-IP resolution (anti-spoof `X-Forwarded-For`-from-the-right), and the
  * per-source-IP flood limiter.
  *
- * PORT-TODO(inventory §5.8) — PLATFORM LIMIT, NOT CLOSED (two distinct ones).
+ * PORT-TODO(L: inventory §5.8) — PLATFORM LIMIT, NOT CLOSED (two distinct ones).
  *
  * 1. NO PEER ADDRESS. The Rust gate started from the TCP peer address it read
  *    off the pingora socket. A Worker never sees a socket: workerd hands the

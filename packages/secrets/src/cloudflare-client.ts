@@ -1,7 +1,7 @@
 /**
  * Minimal Cloudflare `client/v4` REST client with an injectable transport seam.
  *
- * PORT-TODO(4.6/4.7) — PACKAGE RELOCATION, NOT A PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(P: 4.6/4.7) — PACKAGE RELOCATION, NOT A PLATFORM LIMIT, NOT CLOSED.
  *
  * The Rust crate depends on the shared `ferrogate_cloudflare::CloudflareClient`
  * (issue #405 — auth, retries, envelope decode + error mapping written once).

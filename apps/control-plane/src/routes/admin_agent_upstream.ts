@@ -51,6 +51,30 @@ export const agentUpstreamSchema = adminRecordSchema.extend({
   capabilities: z.array(agentUpstreamCapabilitySchema).optional(),
 });
 
+/**
+ * PORT-TODO(P: inventory-edge-control §4 config-backed collections) — the CRUD here
+ * and the registry the data plane serves from are two disjoint systems.
+ *
+ * `apps/gateway/src/routes/agent-discovery.ts` builds `/.well-known/agent.json`
+ * (and the tenant-visibility filter over it) from the DEPLOY-TIME Worker var
+ * `GATEWAY_AGENT_UPSTREAMS` (`AGENT_UPSTREAMS_VAR`), never from this app's
+ * documents. So `POST /admin/v1/agent-upstreams` records an upstream that no
+ * agent discovery response will ever list, and removing one does not withdraw
+ * it — that needs a `wrangler.toml` edit and a redeploy. In Rust both were the
+ * one `[[agent_upstreams]]` table in the live config snapshot.
+ *
+ * The same split applies to `routes/prompt.ts` (`GATEWAY_PROMPT_TEMPLATES`),
+ * `routes/skill.ts`, `routes/admin_policy.ts`, `routes/admin_plugin.ts` and
+ * `routes/admin_agent_workflow.ts`: durable, audited, tenant-fenced CRUD whose
+ * documents have no reader outside this Worker.
+ *
+ * `routes/admin_mcp_server.ts` is the shape that closes it — `apps/mcp/src/catalog.ts`
+ * reads the `mcp-servers` documents straight out of `control_plane_resources`,
+ * so the admin write IS the data-plane source. Either the gateway grows the same
+ * read (a control-DB binding plus a cached catalog load), or these collections
+ * project into `gateway_providers`/`gateway_models`-style typed tables the
+ * gateway binds. Choosing is a cross-app decision; it cannot be made here alone.
+ */
 export const adminAgentUpstreamRoutes: GroupModule = crudGroup("admin_agent_upstream", [
   { segment: "agent-upstreams", object: "agent_upstream", body: agentUpstreamSchema },
 ]);

@@ -261,6 +261,32 @@ function readRevisionParam(revision: string, policyId: string): number {
   return parsed;
 }
 
+/**
+ * PORT-TODO(P: inventory-edge-control §guardrails) — the revision chain this group
+ * owns is not the one the data plane enforces.
+ *
+ * Every operation below reads and writes `control_plane_resources` documents
+ * (`guardrail-policies` / `guardrail-policy-revisions`). `apps/gateway` resolves
+ * the policy it actually applies from the TYPED control tables through
+ * `apps/gateway/src/guardrails/d1.ts::D1GuardrailPolicyStore`:
+ * `guardrail_policy_revisions(policy_id, revision, revision_json)` and
+ * `guardrail_policy_bindings(policy_id, active_revision, generation, binding_json)`
+ * — the same tables `apps/gateway/src/cache/fingerprint.ts` hashes to key the
+ * response cache. Nothing in this app writes either table.
+ *
+ * Consequence: `createGuardrailPolicyRevision` +
+ * `activateGuardrailPolicyRevision` produce a complete, audited, RBAC-gated
+ * revision history that no request is ever evaluated against, and
+ * `rollbackGuardrailPolicyRevision` rolls back a binding the gateway does not
+ * read. `dryRunGuardrailPolicyRevision` is the exception and is genuinely real —
+ * it evaluates the candidate in-process with `@ferrogate/guardrails`.
+ *
+ * The write half is a projection, exactly like `store/quota_registry.ts`:
+ * `create*` upserts the revision row, `activate`/`rollback` move
+ * `guardrail_policy_bindings.active_revision` under the SAME generation guard
+ * `binding.ts` already implements (D1 has no `SELECT … FOR UPDATE`, so the
+ * generation CAS is what makes two racing activations safe).
+ */
 export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", [], {
   /** Every policy's current head revision. */
   listGuardrailPolicyRevisions: async (c) => {

@@ -4,7 +4,7 @@
  * `ModelRegistry.resolve` sorts fallback routes by priority → weight (desc) →
  * provider → provider_model, matching the Rust `resolve` tiebreak exactly.
  *
- * ## PORT-TODO(inventory-request-path §3.2, §"routing/failover") — `ModelRegistry`
+ * ## PORT-TODO(P: inventory-request-path §3.2, §"routing/failover") — `ModelRegistry`
  * ## HAS NO CONSUMER, AND ITS ENUM IS NOW DECLARED TWICE. NOT A PLATFORM LIMIT.
  * ## NOT CLOSED.
  *

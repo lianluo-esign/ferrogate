@@ -126,6 +126,31 @@ async function rearmOutboxRow(
   }
 }
 
+/**
+ * PORT-TODO(P: inventory-data-billing §2.5) — the six READ feeds page document
+ * collections that the metering path never writes, and that breaks `replay`
+ * for the only rows that can actually need it.
+ *
+ * `apps/gateway/src/metering/d1.ts` writes `billing_events`, `billing_ledger`
+ * and `billing_report_outbox` (typed tables in the SAME control database this
+ * Worker binds). This group lists `metering-events`, `usage-aggregates`,
+ * `usage-reports`, `metering-export-status` and `billing-outbox-dead-letters` as
+ * `control_plane_resources` documents — a disjoint set, empty on every
+ * deployment. Rust `handle_admin_metering_events` pages
+ * `state.metering_events_page(...)`, the real store.
+ *
+ * The sharp edge is `replayBillingOutboxDeadLetter` below: it requires a
+ * `billing-outbox-dead-letters` DOCUMENT to exist before it will re-arm the
+ * physical row, and no document is ever created (the sweeper dead-letters the
+ * ROW). So a real dead letter answers 404 and can never be replayed, while the
+ * `rearmOutboxRow` half — which is correct, CAS-guarded and tested — is only
+ * ever reached from a hand-seeded document.
+ *
+ * Closing it: page the typed tables directly (`billing_events` for the metering
+ * feed, `billing_report_outbox WHERE dead_lettered_at_unix IS NOT NULL` for the
+ * dead letters) with the caller's tenant fence applied to the row's own tenant
+ * column, and make `replay` address the row rather than the document.
+ */
 export const billingRoutes: GroupModule = crudGroup(
   "billing",
   [

@@ -143,7 +143,7 @@ export function shadowMirrorFor(
 /**
  * The per-isolate budget ledger, used when `SHADOW_BUDGET` is not bound.
  *
- * PORT-TODO(`packages/routing/src/rollout.ts` `ShadowBudgetLedger`): PLATFORM
+ * PORT-TODO(L: `packages/routing/src/rollout.ts` `ShadowBudgetLedger`): PLATFORM
  * LIMIT, and **this arm is no longer the deployed one.** A cap of `N` becomes
  * `N` per LIVE ISOLATE here, because there is no process for a process-lifetime
  * counter to live in.

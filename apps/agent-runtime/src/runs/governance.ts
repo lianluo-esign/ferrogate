@@ -24,7 +24,7 @@
  *     allowlist. An EMPTY allowlist means SEALED: a forgotten configuration
  *     refuses egress rather than permitting it (#471).
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.2/§8.4): PLATFORM LIMIT
+ * // PORT-TODO(L: inventory-edge-control §agent-worker §8.2/§8.4): PLATFORM LIMIT
  * // — three of Rust's four isolation backends cannot exist on this platform,
  * // and the reason in each case is a kernel facility workerd does not expose:
  * //   * Firecracker microVM needs `/dev/kvm` and an AF_VSOCK channel to a
@@ -52,7 +52,7 @@
  * //
  * // Pinned by `test/isolation-grant.test.ts`.
  * //
- * // PORT-TODO(inventory-edge-control §agent-worker §8.3): PLATFORM LIMIT —
+ * // PORT-TODO(L: inventory-edge-control §agent-worker §8.3): PLATFORM LIMIT —
  * // Rust advertises per-backend SNAPSHOT support (pause/restore of a running
  * // microVM). Cloudflare has no primitive for it: neither Containers nor
  * // Durable Objects can checkpoint and restore a live process image.

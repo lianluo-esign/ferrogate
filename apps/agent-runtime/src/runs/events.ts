@@ -88,6 +88,29 @@ export function resumeCursor(headers: Headers, query: URLSearchParams): string |
 export const EVENT_PAGE_DEFAULT_LIMIT = 100;
 export const EVENT_PAGE_MAX_LIMIT = 500;
 
+/**
+ * PORT-TODO(`server/agent_jobs.rs::AgentJobEventCursor::from_query`): the
+ * parenthetical below is WRONG about Rust and the divergence is real.
+ *
+ * Rust does NOT silently clamp. `from_query` returns `Err` for a non-integer
+ * `limit` ("limit must be an unsigned integer") and for `limit=0` ("limit must
+ * be greater than zero"), and `handle_agent_job_events` turns either into
+ * `400 invalid_event_cursor`. Only the UPPER bound is clamped
+ * (`limit.min(EVENT_PAGE_MAX_LIMIT)`). This function folds both refusals into
+ * the default page size, so `?limit=0` and `?limit=abc` answer 200 with 100
+ * rows where Rust answers 400 — a client paginating on a typo'd cursor gets
+ * silently wrong pages instead of an error.
+ *
+ * Second, unrelated divergence in the same feed: Rust's resume token is
+ * `"<occurred_at_unix>:<event id>"` (`agent_job_event_cursor_token`, issue
+ * #474) precisely so a cursor survives the event it names being pruned by
+ * retention. `runs/do.ts::listEvents` emits the BARE event id — the pre-#474
+ * form — and falls back to `cursorReset: true` (restart from the oldest
+ * retained event) when it cannot find it, so a long-lived poll loop
+ * RE-DELIVERS its whole retained history after a retention pass instead of
+ * resuming. Neither is a platform limit; both are pure functions of data the
+ * Durable Object already stores.
+ */
 /** Clamp a caller-supplied `limit` (Rust: silently clamped, never rejected). */
 export function clampEventLimit(raw: string | null): number {
   if (raw === null || raw.trim() === "") return EVENT_PAGE_DEFAULT_LIMIT;

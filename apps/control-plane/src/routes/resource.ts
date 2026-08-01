@@ -172,7 +172,7 @@ export function raw(
  * fields instead of silently dropping operator data, which would be a real
  * behaviour regression.
  *
- * PORT-TODO(inventory-edge-control §4) — KEPT, sharpened. Tightening each
+ * PORT-TODO(P: inventory-edge-control §4) — KEPT, sharpened. Tightening each
  * collection to its per-resource Rust mutation struct (e.g.
  * `AdminAgentScheduleMutation`) is still the target, and it is blocked on a
  * DEPENDENCY, not on the platform: `@ferrogate/schemas` today exports only the

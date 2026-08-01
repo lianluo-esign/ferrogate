@@ -508,7 +508,7 @@ export class D1WalletStore {
    * A single guarded `UPDATE ... RETURNING`, so the sweep is itself atomic and a
    * hold cannot be swept twice.
    *
-   * PORT-TODO(inventory-data-billing §4 "x402"): the Postgres sweep carried a
+   * PORT-TODO(D: inventory-data-billing §4 "x402"): the Postgres sweep carried a
    * `NOT EXISTS (SELECT 1 FROM payment_attempts ...)` guard so a hold owned by
    * an in-flight payment attempt (whose stablecoin transfer may already be
    * on-chain) is never released (#396/#352). `payment_attempts` is not created

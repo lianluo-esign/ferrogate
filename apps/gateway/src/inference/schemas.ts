@@ -30,7 +30,7 @@
  *     (`build_messages_request_plan`). The element schema stays open (`role` is
  *     a free string, `content` may be a string, an array of parts, or null) so
  *     no legitimate OpenAI payload is rejected.
- *     // PORT-TODO(inventory-request-path §1.4) — **KEPT AS A STANDING
+ *     // PORT-TODO(P: inventory-request-path §1.4) — **KEPT AS A STANDING
  *     // CONSTRAINT, NOT A GAP.** Nothing is unported behind this marker: this
  *     // schema is STRICTER than the Rust extractor, deliberately, because
  *     // `docs/rewrite/TESTING.md` makes the edge 400 an invariant of the port.

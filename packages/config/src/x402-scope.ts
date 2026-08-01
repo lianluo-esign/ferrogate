@@ -4,7 +4,7 @@
  * scope-chain vocabulary, id normalization, precedence order, and the
  * duplicate/empty-scope load-time checks.
  *
- * PORT-TODO(inventory §5.2): the TYPED policy model (`X402SpendPolicy` +
+ * PORT-TODO(D: inventory §5.2): the TYPED policy model (`X402SpendPolicy` +
  * `validate()` + `X402PolicyConfigError`) and the full
  * `resolve_effective_x402_spend_policy` inheritance resolution live in
  * `@ferrogate/policy` (wave 2, and x402 is deprioritized). The
@@ -13,7 +13,7 @@
  * ported here. Each declared policy is carried as an opaque value until the
  * policy crate lands.
  *
- * PORT-TODO(inventory §5.2) — THE STATED BLOCKER ABOVE IS NOW STALE (parity
+ * PORT_TODO(inventory §5.2) — THE STATED BLOCKER ABOVE IS NOW STALE (parity
  * audit 2026-07-31, `docs/rewrite/parity-audit-policy-core.md`).
  *
  * `@ferrogate/policy` HAS landed the typed model: `packages/policy/src/x402/config.ts`
@@ -121,7 +121,7 @@ export function validateScopedX402SpendPolicies(
       return { type: "duplicate_scope", scope_type: entry.scope_type, scope_id: scopeId };
     }
     seen.add(key);
-    // PORT-TODO(inventory §5.2): delegate the policy-invariant check to
+    // PORT-TODO(D: inventory §5.2): delegate the policy-invariant check to
     // `@ferrogate/policy`'s `X402SpendPolicy.validate()` once ported.
   }
   return null;

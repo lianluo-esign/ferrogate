@@ -123,6 +123,34 @@ const LIST_ORDER = "ORDER BY created_at_unix ASC, rowid ASC";
  * rows. Every statement in this file — SELECT, UPDATE and DELETE alike —
  * appends it, so there is no "read by bare id" path to forget it on.
  */
+/**
+ * PORT-TODO(P: inventory-edge-control §5.1 tenant scope) — the predicate below is a
+ * deliberate WIDENING of Rust's filter, and the widening reaches the WRITE side
+ * where it was only ever argued for reads.
+ *
+ * Rust `auth::filter_by_tenant_scope` is strict equality
+ * (`tenant_id(row) == caller_tenant_id`), so a row with no tenant attribution is
+ * invisible to a tenant caller. Here an un-attributed row (`tenant_id` JSON
+ * `null` or absent) matches EVERY tenant. For reads that is defensible and is
+ * pinned on purpose (`test/store-conformance.test.ts` "shows an un-attributed
+ * platform row to every tenant") — it is how a global plan or a shared provider
+ * row stays visible.
+ *
+ * But the same predicate is appended to `#update`, `remove` and the `atomic`
+ * batch, and no test pins the write side. A tenant-scoped credential holding
+ * `admin.write` (a tenant administrator — a legitimate, intended configuration)
+ * can therefore PATCH, PUT or DELETE any un-attributed platform row: a global
+ * `role`, a `plan` every other tenant is billed against, a shared `policy`. That
+ * is a cross-tenant write that Rust's strict filter makes unreachable, and it is
+ * the opposite polarity to `routes/quota_policy.ts::authorizeScopedResource`,
+ * which fails CLOSED on exactly this ambiguity ("nonexistent means safe to
+ * touch" is explicitly the wrong default).
+ *
+ * The fix is to split the predicate: keep the `IS NULL` disjunct for SELECT,
+ * drop it for UPDATE/DELETE (a tenant caller may only mutate rows carrying its
+ * own `tenant_id`), and add the mutation test that a tenant caller gets 404 on
+ * `DELETE` of an un-attributed row.
+ */
 export function tenantScopeSql(scope: CallerScope): {
   readonly sql: string;
   readonly params: readonly string[];
@@ -243,7 +271,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // meaning (`json_extract` yields `1` for a JSON `true`, where the reference
     // compares against the string `"true"`).
     //
-    // PORT-TODO(inventory-edge-control §9.3) — KEPT, sharpened. This reads the
+    // PORT-TODO(L: inventory-edge-control §9.3) — KEPT, sharpened. This reads the
     // collection's tenant-visible rows into the isolate before filtering, and
     // that is NOT a shortcut that a cleverer predicate closes: pushing either
     // half into SQL over `document_json` CHANGES ITS MEANING, in both
@@ -926,7 +954,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 // Schema notes (reported rather than invented — see the slice report)
 // ---------------------------------------------------------------------------
 //
-// PORT-TODO(inventory-edge-control §9.3) — KEPT, sharpened: two gaps between
+// PORT-TODO(P: inventory-edge-control §9.3) — KEPT, sharpened: two gaps between
 // this port and `sql/d1-ts/control/0001_init_control.sql`.
 //
 // **Why these stay open rather than being fixed here:** both are DDL, and

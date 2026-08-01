@@ -2,7 +2,7 @@
  * x402 payment-attempt state alphabet + the single CAS transition seam
  * (ports the state machine from `ferrogate-storage::payment_attempt`).
  *
- * PORT-TODO(§1.4.5 / §1.5.4): x402/Solana payments are DEPRIORITIZED and the D1
+ * PORT-TODO(D: §1.4.5 / §1.5.4): x402/Solana payments are DEPRIORITIZED and the D1
  * backend defers `transition_payment_attempt` + payment methods. In the Rust
  * tree the state alphabet proper lives in `ferrogate-payments`
  * (`PaymentAttemptState`), which maps to `@ferrogate/payments`; this module keeps

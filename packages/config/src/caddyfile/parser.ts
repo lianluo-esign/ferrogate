@@ -4,7 +4,7 @@
  * Caddyfile compatibility subset, producing a `GatewayConfig` or throwing a
  * `CaddyfileDiagnostic` (inventory §5.6).
  *
- * PORT-TODO(inventory §5.8) — PLATFORM LIMIT (API SHAPE), NOT CLOSED.
+ * PORT-TODO(L: inventory §5.8) — PLATFORM LIMIT (API SHAPE), NOT CLOSED.
  *
  * The grammar itself is ported 1:1: every directive the Rust parser matches has
  * a case here, and a migrating operator's `Caddyfile` compiles to the same

@@ -152,7 +152,7 @@ async function methodDependentRequiredScope(
 
   const scope = methodDependentScope(operation.method, path, value);
   if (scope === undefined) {
-    // PORT-TODO(inventory-request-path §MCP): a CROSS-APP boundary, not a gap
+    // PORT-TODO(P: inventory-request-path §MCP): a CROSS-APP boundary, not a gap
     // in this file. For `POST /v1/mcp` the JSON-RPC-native answer to an unknown
     // `method` is error -32601 ("method not found") in a 200 envelope, and
     // `apps/mcp` — which owns the MCP dialect — may well want that. It cannot

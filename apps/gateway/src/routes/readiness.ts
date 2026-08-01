@@ -14,7 +14,7 @@
  * `readiness_reason` naming which condition failed. That decision table is
  * ported verbatim below; only its two INPUTS have Workers-specific sources.
  *
- * PORT-TODO(inventory-request-path §readiness): PLATFORM LIMIT on the drain
+ * PORT-TODO(L: inventory-request-path §readiness): PLATFORM LIMIT on the drain
  * input. In Rust `drain` is an `AtomicBool` inside the one long-lived process,
  * flipped at RUNTIME by an operator call and observed instantly by every
  * request the process serves. A Worker has no process: each request may run in
@@ -28,6 +28,23 @@
  * fast an operator can flip it (a deploy, not an API call).
  * Closing this properly means a `DRAIN` DO/KV binding plus the operator route
  * that writes it, which is a control-plane slice, not a routing one.
+ *
+ * PORT-TODO(`server/chat.rs:2862` `state.is_draining()`): the drain is READ by
+ * this endpoint and by nothing else, so it advertises a posture the data plane
+ * does not honour. In Rust `plan_ai_ingress` re-checks `is_draining()` for
+ * EVERY AI request and refuses a draining node
+ * `503 node_draining "gateway node is draining and is not accepting new AI
+ * requests"` — the same check guards `embeddings.rs:98`, `images.rs:115`,
+ * `messages.rs:145` and `governed_decision.rs:502`. Here `GATEWAY_DRAIN=true`
+ * flips `/readyz` to 503 and leaves `/v1/chat/completions` serving normally, so
+ * an operator draining a deployment before a migration still takes new billable
+ * traffic. `grep -rn "node_draining" apps/` returns nothing.
+ *
+ * This is NOT the platform limit described above: that one is about how fast the
+ * FLAG can be flipped; this is about the flag being read on one route out of 31.
+ * `drainStatus(env)` is already a pure synchronous env read, so the fix is one
+ * guard in the post-auth middleware chain — the flag it needs is the one this
+ * file already parses.
  *
  * The `ClusterStatus` members that describe a PEER TOPOLOGY — `cluster_id`,
  * `node_id`, `node_region`, `node_zone`, `state_backend`, `counter_backend`,

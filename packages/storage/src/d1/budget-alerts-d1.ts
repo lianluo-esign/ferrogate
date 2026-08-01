@@ -43,7 +43,7 @@
  * billing fact. The store therefore takes a plain `D1Database` — the control
  * handle — the same shape {@link ControlMonotonicUpserts} takes.
  *
- * PORT-TODO(inventory-data-billing §1.4.3, #170) — CROSS-SCOPE, NOT CLOSABLE
+ * PORT-TODO(P: inventory-data-billing §1.4.3, #170) — CROSS-SCOPE, NOT CLOSABLE
  * HERE. What remains is the COMPARISON: nothing yet measures committed spend
  * against `EffectiveQuota.alertThresholdPcts`
  * (`apps/gateway/src/ratelimit/quota.ts`) to decide that a threshold was

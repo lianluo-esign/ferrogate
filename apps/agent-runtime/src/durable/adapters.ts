@@ -232,7 +232,7 @@ export function d1ApiKeyPort(db: D1Database, options: D1ApiKeyPortOptions = {}):
  * spelling of `active` because Rust's stored row
  * (`StoredSelfHostedWorkerRegistration`) names it that way.
  *
- * ## The former `PORT-TODO(inventory-edge-control §agent-worker §8.1)` — CLOSED
+ * ## The former `PORT_TODO(inventory-edge-control §agent-worker §8.1)` — CLOSED
  *
  * It read "WRITE HALF NOT PORTED": this module READS the registry, and **no TS
  * code wrote this table**, so every deployment admitted NO worker on any of the

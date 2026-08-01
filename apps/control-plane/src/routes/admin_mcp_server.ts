@@ -7,7 +7,7 @@
  * across the tool namespace. `idField: "name"` makes the create body's `name`
  * the store key so `POST` then `GET /{name}` round-trips.
  *
- * ## The former `PORT-TODO(inventory-edge-control §MCP "server catalog")` — CLOSED
+ * ## The former `PORT_TODO(inventory-edge-control §MCP "server catalog")` — CLOSED
  *
  * This was the OTHER HALF of the marker on `apps/mcp/src/durable.ts`'s
  * `loadServerCatalog`. These six operations store a `control_plane_resources`

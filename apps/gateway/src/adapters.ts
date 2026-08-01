@@ -17,7 +17,7 @@
  * {@link depsFromEnv} — and note that the two GRANT tables compose by
  * fallback while the one DENY table composes by {@link denyIfEitherDenies}.
  *
- * PORT-TODO(inventory-edge-control §5.2): the SELF-HOSTED WORKER TRANSPORT
+ * PORT-TODO(P: inventory-edge-control §5.2): the SELF-HOSTED WORKER TRANSPORT
  * SECRET is the one credential still compared as a plaintext var here
  * (`SELF_HOSTED_WORKER_REGISTRY.transport_secret`, {@link
  * ConfiguredInternalTransport}). It moves to **Cloudflare Secrets Store** via
@@ -974,7 +974,7 @@ export const WORKER_TRANSPORT_HEADER = "x-ferrogate-worker-token";
  * key. This class has no reference to `ApiKeyAuthenticatorPort`, which is what
  * makes "a tenant bearer cannot reach an internal operation" structural.
  *
- * PORT-TODO(inventory-edge-control §self-hosted worker transport): the Rust
+ * PORT-TODO(P: inventory-edge-control §self-hosted worker transport): the Rust
  * transport is an AEAD-sealed frame (`read_self_hosted_transport_body`) whose
  * key is derived from the same provisioned secret; this adapter verifies the
  * secret and the identity binding but not yet the seal.

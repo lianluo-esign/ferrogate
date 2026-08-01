@@ -188,7 +188,7 @@ export function chunkText(payload: unknown): string | undefined {
 }
 
 /**
- * PORT-TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
+ * PORT_TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
  * GAP.** There is deliberately no Anthropic-events → OpenAI-chunks normalizer
  * here, because there is none in the Rust tree either.
  *

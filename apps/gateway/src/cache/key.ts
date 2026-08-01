@@ -47,7 +47,7 @@
  * served a body produced by a provider that a fresh request would not have
  * used. That is a fidelity gap, not an isolation gap — the tenant, key, model
  * and body all still match — and it is bounded by `cache.ttl_secs`.
- * // PORT-TODO(inventory-request-path §1.7 "Caches"): NOT a platform limit, and
+ * // PORT-TODO(P: inventory-request-path §1.7 "Caches"): NOT a platform limit, and
  * // NOT the one-liner an earlier revision of this note claimed. That revision
  * // said "one `c.set()` in `inference/route-module.ts` plus two fields here";
  * // it is wrong, and the correction is recorded rather than left to mislead.

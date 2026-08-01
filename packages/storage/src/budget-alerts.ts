@@ -19,7 +19,7 @@
  * specification of the rule, and `test/d1/budget-alerts-d1.test.ts` asserts the
  * two backends agree on the same observable outcomes.
  *
- * PORT-TODO(inventory-data-billing §1.4.3 `budget_alert_notifications`, #170) —
+ * PORT-TODO(P: inventory-data-billing §1.4.3 `budget_alert_notifications`, #170) —
  * CROSS-SCOPE, NOT CLOSABLE HERE. What is still missing is the DECISION and the
  * DELIVERY, both of which live on the request path in `apps/gateway`: nothing
  * compares committed spend against `quota_policies.alert_threshold_pcts_json`

@@ -233,7 +233,7 @@ function registerToolingRoutes(router: GatewayRouter): void {
     // plugin/extension registry (`ferrogate-runtime`) has no package yet, and
     // the MCP server registry lives in `apps/mcp`. Listing only one of the two
     // would understate what a tenant may call, which is worse than 501.
-    "PORT-TODO(inventory-request-path §tool catalog): scoped projection of the " +
+    "PORT-TODO(P: inventory-request-path §tool catalog): scoped projection of the " +
       "extension registry + registered MCP servers. Blocked on both registries " +
       "existing; not a platform limit.",
   );
@@ -242,7 +242,7 @@ function registerToolingRoutes(router: GatewayRouter): void {
     // Rust `handle_tool_execute_with_backend(ToolExecuteBackend::Extension)`:
     // approval record → governed chokepoint → extension dispatch. The governed
     // decision path and the approval store are unported.
-    "PORT-TODO(inventory-request-path §tool execution): governed native + MCP " +
+    "PORT-TODO(P: inventory-request-path §tool execution): governed native + MCP " +
       "tool dispatch (approval record, chokepoint allowlist, backend call). " +
       "Blocked on the extension registry and the governed-decision port.",
   );
@@ -253,7 +253,7 @@ function registerToolingRoutes(router: GatewayRouter): void {
     // `@cloudflare/sandbox`/containers, which `apps/agent-runtime` owns —
     // `apps/gateway` deliberately declares no container binding (see the
     // `compatibility_date` note in wrangler.toml).
-    "PORT-TODO(inventory-request-path §function execution): sandboxed function " +
+    "PORT-TODO(P: inventory-request-path §function execution): sandboxed function " +
       "dispatch. Belongs to apps/agent-runtime (containers/@cloudflare/sandbox), " +
       "not to this Worker.",
   );

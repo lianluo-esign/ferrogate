@@ -311,7 +311,7 @@ export type GovernanceDecision =
  * but the DECISION logic (capability envelope evaluation, fingerprint binding,
  * sealed-by-default egress) is preserved here rather than dropped.
  *
- * // PORT-TODO(inventory-edge-control §agent-worker §8.3): PLATFORM LIMIT —
+ * // PORT-TODO(L: inventory-edge-control §agent-worker §8.3): PLATFORM LIMIT —
  * // workerd has no Unix domain sockets and therefore no `SO_PEERCRED`, so
  * // there is no way for this Worker to learn the OS identity of its caller.
  * // The Rust authorizer's root of trust is a KERNEL fact ("the peer process
@@ -968,7 +968,7 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
  *  - `AGENT_RUN_STATE` / `WORKER_PLANE` — real Durable Objects, declared in
  *    `wrangler.toml` and re-exported from `src/worker.ts`.
  *
- * ## PORT-TODO(inventory-edge-control §8) — KEPT for `governance` ONLY
+ * ## PORT-TODO(P: inventory-edge-control §8) — KEPT for `governance` ONLY
  *
  * §7.1 of the audit found EVERY port in-memory in the committed deployment.
  * The two credential authorities above close that finding and are gated by

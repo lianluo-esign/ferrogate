@@ -3,7 +3,7 @@
  * placeholders"): `{env.NAME}` interpolation of uppercase/digit/`_` env-var
  * names, with hard errors on unterminated/invalid/unset placeholders.
  *
- * PORT-TODO(inventory §5.8) — PLATFORM LIMIT (API SHAPE), NOT CLOSED.
+ * PORT-TODO(L: inventory §5.8) — PLATFORM LIMIT (API SHAPE), NOT CLOSED.
  *
  * `std::env::var` has no workerd equivalent and cannot get one: a Worker's
  * environment is NOT ambient process state, it is the `env` object workerd hands

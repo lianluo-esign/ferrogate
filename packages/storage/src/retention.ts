@@ -7,7 +7,7 @@
  * channel-pinned version or one inside the grace window; GC never deletes a blob a
  * row references, one whose age is unknown, or one inside the grace window.
  *
- * PORT-TODO(inventory-data-billing §1.4.6 `retention_policies`) — SHARPENED, and
+ * PORT-TODO(P: inventory-data-billing §1.4.6 `retention_policies`) — SHARPENED, and
  * now only ONE leg wide: the CRON TRIGGER.
  *
  * CLOSED in this package: the STORAGE and the EXECUTOR both exist in

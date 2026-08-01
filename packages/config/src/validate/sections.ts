@@ -825,7 +825,7 @@ export function validateCloudflareAiGatewayProviders(config: Config): void {
  * `validate_x402_spend_policies` (issue #351): money config fails at load, never
  * at the first payment.
  *
- * PORT-TODO(inventory §5.2) — DELIBERATE PRODUCT DECISION, not a platform gap:
+ * PORT-TODO(D: inventory §5.2) — DELIBERATE PRODUCT DECISION, not a platform gap:
  * x402/Solana is deprioritized. The per-policy `X402SpendPolicy::validate()` leg is
  * owned by `@ferrogate/policy` (wave 2; x402 is deprioritized) — see
  * `../x402-scope.ts`. The scope-shape half (blank / duplicate `(scope_type,

@@ -4,7 +4,7 @@
  * ## What this closes
  *
  * `apps/agent-runtime/src/durable/adapters.ts` carried
- * `PORT-TODO(inventory-edge-control §agent-worker §8.1)`: `d1WorkerIdentityPort`
+ * `PORT_TODO(inventory-edge-control §agent-worker §8.1)`: `d1WorkerIdentityPort`
  * READS `self_hosted_worker_registrations` in the CONTROL database, and **no TS
  * code wrote that table**. So the six `auth.kind: "internal"`
  * `/v1/self-hosted-workers/*` callbacks admitted NOBODY on any deployment, and

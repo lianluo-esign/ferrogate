@@ -24,7 +24,7 @@
  * The one surface that CANNOT be ported is metric ACCUMULATION: a Worker has no
  * long-lived process to hold counters in, so a `/metrics` route must be fed
  * from a Durable Object or an Analytics Engine read. That is the remaining
- * `PORT-TODO(§4.5)` in `prometheus.ts`; the renderer itself is complete.
+ * `PORT_TODO(§4.5)` in `prometheus.ts`; the renderer itself is complete.
  *
  * ## THE "NO PRODUCER" MARKER IS CLOSED — do not re-add it
  *
@@ -55,7 +55,7 @@
  * un-noticed); the inference-specific LEG is not independently gated. That is
  * an `apps/gateway` test to tighten, not a defect in this package.
  *
- * ## PORT-TODO(inventory §4.5) — TWO SURFACES OF THIS PACKAGE STILL HAVE NO
+ * ## PORT-TODO(P: inventory §4.5) — TWO SURFACES OF THIS PACKAGE STILL HAVE NO
  * ## CONSUMER. NOT A PLATFORM LIMIT. NOT CLOSED.
  *
  * Narrowed to exactly what remains dead, so this marker cannot be read as

@@ -265,7 +265,7 @@ export function buildCheckEvidence(
  * returns `false` and the engine converts the request into
  * `guardrail_evidence_unavailable`.
  *
- * PORT-TODO(inventory-data-billing §guardrail_evaluations): durable evidence is
+ * PORT-TODO(P: inventory-data-billing §guardrail_evaluations): durable evidence is
  * D1 (`guardrail_evaluations` + `guardrail_check_evaluations`); the Postgres
  * RLS scoping is replaced by per-tenant database separation. This sink is the
  * offline/local implementation and the one the suite asserts non-persistence

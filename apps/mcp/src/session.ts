@@ -14,7 +14,7 @@
  * A Worker has no process to hang that map on. `HttpMcpUpstreams` therefore
  * held it per ISOLATE, which re-ran the handshake on every cold isolate and
  * meant an upstream outage was discovered once per isolate instead of once
- * globally. That was recorded as `PORT-TODO(inventory-edge-control §MCP
+ * globally. That was recorded as `PORT_TODO(inventory-edge-control §MCP
  * "session manager")` and explicitly NOT as a platform limit: Cloudflare has
  * the primitive.
  *

@@ -196,7 +196,7 @@ export interface RouteExclusion {
 /**
  * `route_exclusion_reasons`.
  *
- * PORT-TODO(model_routing.rs `allow_undeclared_capabilities`): PARTIAL — this
+ * PORT-TODO(P: model_routing.rs `allow_undeclared_capabilities`): PARTIAL — this
  * function is WIDER than Rust on THREE legs, not the two this marker used to
  * claim. Deviation 3 was found by re-reading `model_routing.rs:374` for this
  * pass and is stated below; the "these are the only two" sentence that stood

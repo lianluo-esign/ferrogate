@@ -314,7 +314,7 @@ export const NO_PROVIDER_CIRCUIT: ProviderCircuit = {
 /**
  * Per-ISOLATE {@link ProviderCircuit}.
  *
- * PORT-TODO(inventory-request-path §1.7 "reliability", F3): PARTIAL —
+ * PORT-TODO(L: inventory-request-path §1.7 "reliability", F3): PARTIAL —
  * approximation, and the direction of the error is the safe one but it is still
  * an error. A Worker is replicated across isolates with no shared mutable
  * state, so each isolate keeps its own failure streak: with a threshold of `N`

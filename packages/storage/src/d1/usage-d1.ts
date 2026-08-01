@@ -30,7 +30,7 @@ import { StorageError } from "../errors.js";
  * `controlDb.batch()` (inventory §1.5.8 item 8). Run it FIRST and accumulate
  * here only when it returns `recorded: true`.
  *
- * PORT-TODO(inventory-data-billing §1.5.8) — PLATFORM LIMIT, NOT CLOSED.
+ * PORT-TODO(L: inventory-data-billing §1.5.8) — PLATFORM LIMIT, NOT CLOSED.
  * **D1 has no transaction spanning two databases.** `batch()` is scoped to the
  * one `D1Database` whose `prepare()` produced the statements; there is no
  * cross-database `BEGIN`, no two-phase commit, and no distributed-transaction
@@ -424,11 +424,19 @@ export class D1UsageLedger {
    * `usage_aggregate_rollups`, which is what Rust's function sums. The
    * period-scoped question is a different read — {@link getUsageMonthlyRollup}.
    *
-   * PORT-TODO(inventory-data-billing §1.2, #330) — CROSS-SCOPE, NOT CLOSABLE
-   * HERE. What remains is the CALL: `apps/gateway/src/ratelimit/middleware.ts`
-   * enforces rpm/tpm and the monthly USD budget and still never invokes
-   * `reserveTokenBudget`, so the token budget is not yet enforced on a live
-   * request even though both halves now exist. That edit is in `apps/gateway`.
+   * The former PORT_TODO(inventory-data-billing §1.2, #330) — CLOSED, and
+   * removed here rather than left standing, because it had gone stale in the
+   * direction that matters: it claimed "`apps/gateway/src/ratelimit/
+   * middleware.ts` … still never invokes `reserveTokenBudget`, so the token
+   * budget is not yet enforced on a live request".
+   *
+   * It does now. `apps/gateway/src/ratelimit/middleware.ts` step 5b
+   * (`admitTokensPerMinute` → the `resolved.limiter.reserveTokenBudget(
+   * tokenBudgetCounterKey(apiKeyId), reading.committedTokens, reading.budget,
+   * estimatedTokens)` call) feeds this sum in through
+   * `src/ratelimit/token-budget.ts`, holds the reservation for the whole
+   * request and releases it in the middleware's `finally`. So both halves and
+   * the call between them exist on the deployed admission ladder.
    */
   async sumApiKeyCommittedTokens(apiKeyId: string): Promise<number> {
     try {
