@@ -153,8 +153,17 @@ becomes a property on `env`, and **there is no runtime API to open D1 database
 `<uuid>`**. This is the biggest architectural open question in the port
 (inventory §1.7), and it is why the Rust tree needed a `d1-proxy` Worker
 (#450): the D1 **REST** query API *can* address a database by uuid at runtime,
-but it **cannot run an atomic `batch()` and cannot return `RETURNING` rows** —
-the two primitives every money-path guard here is built on.
+but it **cannot run an atomic `batch()`** — the multi-statement primitive every
+money-path guard here is built on.
+
+> **Corrected.** This paragraph used to add "and cannot return `RETURNING`
+> rows". That is **wrong**: the `/query` response is
+> `{ result: [{ results, … }] }`, one entry per statement, and `results` is
+> exactly where a `RETURNING` clause's rows land — `D1RestDatabase` reads it and
+> `test/d1/rest-transport.test.ts` drives a guarded `UPDATE … RETURNING` through
+> it. The error mattered in the expensive direction: an engineer who believes a
+> single-statement CAS cannot report whether its guard held will replace it with
+> a SELECT-then-UPDATE, and that read-then-write *is* the oversell.
 
 ### The resolution
 
@@ -177,25 +186,38 @@ Encoded as `D1_BINDING_STRATEGIES` in `src/tenant-router.ts` and asserted by
 |---|---|---|---|---|---|
 | **`native_binding`** — one `[[d1_databases]]` stanza per tenant; `env[name]` selects it | yes | yes | **yes** | low hundreds | no |
 | **`proxy_service`** — a proxy Worker holds the bindings behind a `[[services]]` binding (the `d1-proxy` shape, minus the public HTTP hop) | yes | yes | yes, but only the proxy redeploys | low hundreds per proxy; shard beyond | yes |
-| **`rest`** — D1 HTTP query API, runtime uuid | **no** | **no** | **no** | unbounded | yes |
+| **`rest`** — D1 HTTP query API, runtime uuid | **no** | yes | **no** | unbounded | yes |
 
 **The honest tradeoff.** `native_binding` is what to deploy today, and its price
 is that onboarding a tenant requires a `wrangler deploy` and the tenant count is
 capped by the Worker's binding budget. `rest` is the only strategy with no
-deploy-time coupling — and it is **unusable for the money paths**. The REST API
-executes one statement per call with no transaction spanning calls, so the
-wallet reserve's 3-statement guard would become three independent round trips
-with a race window between the guard and the insert. That is not a slower
-reserve, it is an **oversell**. `D1RestTenantDatabaseRouter` therefore exists as
-a declared seam that **throws**, naming the missing primitives — a stub that
-"worked" for reads and silently lost atomicity on writes would be the more
-dangerous artifact.
+deploy-time coupling — and it is **unusable for the money paths**. There is no
+envelope over the query API that makes N statements one commit, so the wallet
+reserve's 3-statement guard would become three independent round trips with a
+race window between the guard and the insert. That is not a slower reserve, it
+is an **oversell**. Two postures ship, both fail-closed:
+
+- `D1RestTenantDatabaseRouter` (`src/tenant-router.ts`) **throws** on
+  `forTenant`. This is the "REST is not an option for this deployment" posture,
+  and the right default for anything touching money.
+- `NonAtomicD1RestTenantDatabaseRouter` (`src/tenant-rest.ts`) hands back a
+  handle with `supportsAtomicBatch: false`, so `requireAtomicBatch` — which
+  every guarded write in `src/d1/` calls first — turns the no-oversell reserve
+  into an **error** rather than a non-atomic read-then-write. Reads and
+  single-statement guarded writes go through.
+
+A stub that "worked" for reads and silently lost atomicity on writes would be
+the more dangerous artifact than either.
 
 `PORT-TODO(inventory-data-billing §1.7 "per-tenant D1 binding at runtime")`: the
-unresolved half is the path past a few hundred tenants. It needs either (i) REST
-restricted to read-only surfaces with every guarded write on a native/proxy
-handle, (ii) sharding across proxy Workers, or (iii) a D1 API offering a
-runtime-addressed transaction (evaluate `D1 Sessions` / `getByName` maturity).
+unresolved half is the path past a few hundred tenants. **(i) has landed** —
+`NonAtomicD1RestTenantDatabaseRouter` is REST restricted to what it can serve
+safely, mounted in `apps/gateway/src/tenancy/resolver.ts`. What remains is
+(ii) sharding across proxy Workers, or (iii) a D1 API offering a
+runtime-addressed transaction (evaluate `D1 Sessions` / `getByName` maturity,
+and the REST `/query` multi-statement `batch` form — see the OPEN QUESTION on
+the `rest` entry in `src/tenant-router.ts`, which is deliberately *not* asserted
+because it cannot be verified locally and guessing wrong is an oversell).
 
 ### Fail-closed is the invariant
 

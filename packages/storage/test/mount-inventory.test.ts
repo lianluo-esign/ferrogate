@@ -76,6 +76,12 @@ function importersOf(symbol: string): string[] {
 /** Exports the `src/index.ts` header claims are LIVE, with the app that mounts them. */
 const MOUNTED: [symbol: string, app: string][] = [
   ["EnvBindingTenantDatabaseRouter", "gateway"],
+  // The other two apps that route per-tenant. The header named them; only the
+  // gateway leg was gated, so `apps/control-plane` or `apps/mcp` could have
+  // dropped the router and this file would have stayed green — the exact
+  // silent-unmount this file exists to catch, one app over.
+  ["EnvBindingTenantDatabaseRouter", "control-plane"],
+  ["EnvBindingTenantDatabaseRouter", "mcp"],
   // NOT `ControlDatabaseTenantRegistry`: comment-stripping showed that all three
   // of its "importers" were prose. It reaches the request path only INSIDE
   // `EnvBindingTenantDatabaseRouter`, which constructs one — a transitive mount,
@@ -84,6 +90,12 @@ const MOUNTED: [symbol: string, app: string][] = [
   ["D1WorkflowBudgetStore", "gateway"],
   ["D1UsageLedger", "gateway"],
   ["D1ReferenceGuardedDeletes", "control-plane"],
+  // The two OTHER routers, both live in `apps/gateway/src/tenancy/resolver.ts`
+  // and both previously absent from this gate AND from the `src/index.ts`
+  // inventory — so they were neither claimed live nor claimed dead, which is
+  // the state in which a mount disappears without anything noticing.
+  ["NonAtomicD1RestTenantDatabaseRouter", "gateway"],
+  ["SharedDatabaseTenantRouter", "gateway"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */

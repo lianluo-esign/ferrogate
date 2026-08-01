@@ -191,13 +191,17 @@ describe("SharedDatabaseTenantRouter", () => {
 });
 
 describe("D1RestTenantDatabaseRouter", () => {
-  test("refuses to hand out a handle, naming the exact missing primitives", async () => {
+  test("refuses to hand out a handle, naming the exact missing primitive", async () => {
     const rest = new D1RestTenantDatabaseRouter(env.CONTROL_DB, {
       accountId: "acct",
       apiTokenRef: "secret://d1",
     });
+    // Was `/neither atomic batch\(\) nor RETURNING/`. RETURNING is not missing
+    // over REST (see `test/d1/rest-transport.test.ts`), and naming it as if it
+    // were pushed a reader toward SELECT-then-UPDATE — the race.
+    await expect(rest.forTenant(TENANT_A)).rejects.toThrow(/no transaction envelope/);
     await expect(rest.forTenant(TENANT_A)).rejects.toThrow(
-      /neither atomic batch\(\) nor RETURNING/,
+      /Single-statement guarded writes and their RETURNING rows DO\s+work/,
     );
   });
 
@@ -216,10 +220,12 @@ describe("D1_BINDING_STRATEGIES", () => {
     expect(D1_BINDING_STRATEGIES.native_binding.returning).toBe(true);
     expect(D1_BINDING_STRATEGIES.proxy_service.atomicBatch).toBe(true);
     // The honest half: REST is the only deploy-free strategy and the only one
-    // that cannot host a guard. If this ever flips, the README claim and
-    // `D1RestTenantDatabaseRouter`'s refusal both need revisiting.
+    // that cannot host a MULTI-STATEMENT guard. If this ever flips, the README
+    // claim and `D1RestTenantDatabaseRouter`'s refusal both need revisiting.
     expect(D1_BINDING_STRATEGIES.rest.atomicBatch).toBe(false);
-    expect(D1_BINDING_STRATEGIES.rest.returning).toBe(false);
+    // CORRECTED from `false`: RETURNING survives the /query response's
+    // per-statement `results`, and this package's own transport reads it.
+    expect(D1_BINDING_STRATEGIES.rest.returning).toBe(true);
     expect(D1_BINDING_STRATEGIES.rest.requiresDeployPerTenant).toBe(false);
   });
 });

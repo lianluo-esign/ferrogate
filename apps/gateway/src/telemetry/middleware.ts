@@ -40,6 +40,19 @@
  * the route module can know — because "remove it and a test goes red" is not
  * currently true and must not be claimed.
  *
+ * THE REDUNDANCY ITSELF IS NOW PINNED, so it is not a claim either. The
+ * "REDUNDANCY: two mounts on one inference request emit EXACTLY one batch pair"
+ * case in `test/telemetry/mount.test.ts` drives `/v1/chat/completions` (both
+ * emitters), waits past the settle window and requires the collector to have
+ * received exactly two batches carrying exactly one span, whose `request_id` is
+ * the `x-request-id` the client was served. That is the assertion the earlier
+ * `waitForCollected(2)` cases could not make — a `>=` check is satisfied by a
+ * doubled emission. It goes red if `emitRequestTelemetry`'s `EMITTED` guard is
+ * removed (observed: 5 batches, 6 telemetry cases fail) and it goes red if the
+ * two emissions ever disagree about the request id, since a different id is a
+ * different de-dup key and a second pair lands. In other words: the day the
+ * route-module emission becomes individually OBSERVABLE again, a test says so.
+ *
  * Like `meteringDrain`, it does its work on the way OUT — it wraps `await
  * next()` so it can see the final `Response` — which is why it belongs at the
  * TOP of the middleware array rather than the bottom.

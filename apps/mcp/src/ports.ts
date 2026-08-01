@@ -22,15 +22,24 @@
  * | `cipher`      | `identityCipherFrom(FERROGATE_MCP_IDENTITY_KEY)` — BOUND   |
  * | `upstreams`   | `HttpMcpUpstreams` + the `MCP_SESSION` DO — BOUND          |
  * | `auth`        | `D1McpAuth` over the CONTROL database (`src/auth.ts`) — BOUND |
+ * | `approvals`   | `D1ToolApprovals` over the CONTROL database — BOUND        |
  * | `oauth`       | {@link unboundOauthProvider} — NOT BOUND, fails closed     |
- * | `approvals`   | {@link AutoApproval} — NO durable queue exists (see below) |
  * | `assets`      | {@link InMemoryAssets} — isolate-local (see below)         |
  * | `audit`       | {@link InMemoryAuditSink} — isolate-local (see wrangler)   |
  *
- * `guardrails`, `secrets` and `auth` are each bound in EVERY posture that can
- * serve them, and each has a mount-gate test that goes red when the binding is
- * dropped (`test/guardrails.test.ts`, `test/secrets-mount.test.ts`,
- * `test/d1-auth.test.ts`).
+ * `guardrails`, `secrets`, `auth` and `approvals` are each bound in EVERY
+ * posture that can serve them, and each has a mount-gate test that goes red
+ * when the binding is dropped (`test/guardrails.test.ts`,
+ * `test/secrets-mount.test.ts`, `test/d1-auth.test.ts`,
+ * `test/approvals.test.ts`).
+ *
+ * This table is load-bearing documentation and it goes stale silently: it said
+ * `approvals` was {@link AutoApproval} with "NO durable queue exists" for a
+ * whole wave AFTER `src/approvals.ts` landed and {@link resolvePorts} bound it,
+ * which reads as "every non-auto-execute MCP tool still runs unapproved" — the
+ * exact opposite of the truth, and the kind of note that makes the next reader
+ * re-implement something that is already there. When you change a binding in
+ * {@link resolvePorts}, change this row in the same edit.
  *
  * PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio MCP upstreams
  * are impossible in a Worker. The Rust host
@@ -1094,7 +1103,10 @@ export class InMemoryUpstreams implements McpUpstreamPort {
       );
     }
     if (config.transport === "stdio") {
-      // PORT-TODO(inventory-edge-control §MCP): stdio transport requires Containers.
+      // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — stdio requires
+      // a process to spawn; workerd has none. KEPT, pinned end-to-end on the
+      // deployed app by `test/stdio-limit.test.ts` (removing this branch turns
+      // that suite red), and explained in full in `src/transport.ts`.
       throw new McpExecutionError(
         "mcp_server_unavailable",
         `MCP server ${config.name} uses the stdio transport, which Workers cannot host (no process spawn); move it to a Container or an HTTP transport`,

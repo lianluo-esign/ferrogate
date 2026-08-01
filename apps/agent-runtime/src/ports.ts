@@ -988,27 +988,32 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
  * three Rust backends (Firecracker microVM, Docker `--network none`, `unshare`
  * namespaces) that have no CF equivalent at any effort.
  *
- * ## WIRING — the exact `apps/agent-runtime/wrangler.toml` edits (integrate step)
+ * ## WIRING — the `apps/agent-runtime/wrangler.toml` edits (integrate step)
  *
- * ```toml
- * [[d1_databases]]
- * binding = "DB"                       # tenant schema: api_keys
- * database_name = "ferrogate-tenant"
- * database_id = "replace-at-deploy"
- * migrations_dir = "../../sql/d1-ts/tenant"
+ * Both D1 stanzas are already written out, commented, in `wrangler.toml`
+ * itself: UNCOMMENT them at deploy time (filling in the real `database_id`s)
+ * and DELETE the committed `FG_DEV_IN_MEMORY_PORTS = "1"` line, or move it into
+ * an `[env.dev]` block. Nothing else changes — `src/index.ts` and
+ * `src/worker.ts` need no edit at all, because the posture is chosen inside
+ * this function.
  *
- * [[d1_databases]]
- * binding = "CONTROL_DB"               # control schema: self_hosted_worker_registrations
- * database_name = "ferrogate-control"
- * database_id = "replace-at-deploy"
- * migrations_dir = "../../sql/d1-ts/control"
- * ```
+ * TWO EDITS THAT MUST NOT BE MADE AT DEVELOPMENT TIME, both measured rather
+ * than feared, and both explained at length in `wrangler.toml`:
  *
- * and in `[vars]`: DELETE the committed `FG_DEV_IN_MEMORY_PORTS = "1"` line
- * (or move it into an `[env.dev]` block), and add
- * `AGENT_UPSTREAMS = "[]"` as the operator catalog. Nothing else changes:
- * `src/index.ts` and `src/worker.ts` need no edit at all, because the posture
- * is chosen inside this function.
+ *  1. **Do not uncomment the D1 stanzas and leave them committed.**
+ *     `vitest.config.ts` loads `wrangler.toml` via `wrangler: { configPath }`,
+ *     so a committed stanza injects `env.DB` / `env.CONTROL_DB` into every unit
+ *     test, where miniflare provisions an EMPTY unmigrated database. The
+ *     durable-first rule above then routes the default suite onto schema-less
+ *     tables: 106 of 259 tests go red on a correct tree. The durable adapters
+ *     have their own harness (`test/durable/harness/vitest.config.ts`, chained
+ *     from `bun run test`) which binds and MIGRATES both databases.
+ *  2. **Do not add `AGENT_UPSTREAMS = "[]"`.** Absent and `"[]"` give a
+ *     deployment the identical empty catalog, so it buys nothing — but the
+ *     `??` below makes a committed value SHADOW `FG_DEV_AGENT_UPSTREAMS`, which
+ *     empties the catalog the harness seeds and turns 14 A2A dispatch tests
+ *     red. An operator states a real catalog by SETTING the var; leaving it out
+ *     is how the repo says "no upstreams" without leaking into the harness.
  */
 export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undefined {
   const dev = env.FG_DEV_IN_MEMORY_PORTS === "1";

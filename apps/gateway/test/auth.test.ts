@@ -136,8 +136,13 @@ describe("insufficient scope is 403", () => {
 
   it("lets the same key through on an operation it IS scoped for", async () => {
     // Positive control: the 403 above is about scope, not about the key.
+    // `/v1/skills` is a REAL handler now (`src/routes/skills.ts`), so "through"
+    // is a 200 rather than the old 501; this file declares no
+    // `GATEWAY_SKILL_PACKAGES`, so the catalog is legitimately empty. The
+    // assertion is on the shape, which only the real handler produces.
     const res = await SELF.fetch(`${BASE}/v1/skills`, { headers: bearer("fg_tenant_readonly") });
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ object: "list", data: [] });
   });
 
   it("honours a static operator key's implicit wildcard scope", async () => {
@@ -268,7 +273,11 @@ describe("contract dispatch", () => {
     const authorized = await SELF.fetch(`${BASE}/v1/skills/skill_1`, {
       headers: bearer("fg_tenant_readonly"),
     });
-    expect(authorized.status).toBe(501);
+    // Past the guard and into the handler: 404 because no skill package table
+    // is declared in this file, NOT 401/403. The distinction is the point —
+    // the guard ran and admitted, then the handler answered.
+    expect(authorized.status).toBe(404);
+    expect((await envelope(authorized)).error.code).toBe("skill_package_not_found");
   });
 });
 

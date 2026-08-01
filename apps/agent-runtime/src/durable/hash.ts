@@ -31,20 +31,32 @@
  * equivalent; `secret.slice(0, 16)` is NOT — it splits surrogate pairs.
  *
  * PORT-TODO(inventory-edge-control §5.2) — KEPT, SCOPE LIMIT, NOT A PLATFORM
- * LIMIT: Rust `verify_virtual_api_key_secret` accepts TWO stored-hash algorithm
- * tags, `sha256:` and `blake2b:`. Only `sha256:` is implemented here, and a
- * `blake2b:`-tagged row is REFUSED (fail closed — an unrecognised tag can only
- * ever deny), while `apps/gateway/src/keys/hash.ts` accepts both. That
- * divergence is deliberate and pinned by `test/durable/keys.spec.ts` so it
- * cannot change silently, but it is a divergence and it should be closed by
- * MOVING the primitive — sha256 + blake2b + the constant-time compare — into a
- * package both Workers import (`packages/core` is the obvious home), rather
- * than by pasting a third copy of BLAKE2b into this app. That move edits
- * `packages/*`, which this slice does not own.
+ * LIMIT. State the limit exactly, because it is unusual for this project:
+ * BLAKE2b runs perfectly well on Workers (`apps/gateway/src/keys/blake2b.ts`
+ * already does), so nothing about Cloudflare blocks this. What blocks it is
+ * ownership: the honest close is to MOVE the primitive — sha256 + blake2b + the
+ * constant-time compare — into a package both Workers import (`packages/core`
+ * is the obvious home), and `packages/*` is not this slice's to edit. Pasting a
+ * THIRD copy of BLAKE2b into this app would make the marker disappear while
+ * making the divergence worse, which is the fake this rule exists to forbid.
+ *
+ * The divergence, concretely: Rust `verify_virtual_api_key_secret` accepts two
+ * stored-hash tags, `sha256:` and `blake2b:`. Only `sha256:` is implemented
+ * here and a `blake2b:`-tagged row is REFUSED (fail closed — an unrecognised
+ * tag can only ever deny), while `apps/gateway/src/keys/hash.ts` accepts both.
+ *
+ * OPERATOR-VISIBLE CONSEQUENCE, which is why this is worth closing rather than
+ * tolerating: a key whose `api_keys` row was minted by the Rust tree with a
+ * `blake2b:` hash authenticates against `apps/gateway` and is rejected as
+ * `invalid_api_key` against `apps/agent-runtime` — one credential, two verdicts,
+ * with no error text that would explain why. It is not a security hole (the
+ * strict side is the refusing one) but it is a real inconsistency.
  *
  * FerroGate itself only ever MINTS `sha256:` ({@link hashVirtualApiKeySecret}),
- * so the refused case is a legacy row imported from the Rust tree, not a key
- * this system can produce.
+ * so the affected rows are exactly the ones imported from the Rust tree, not
+ * keys this system can produce. Pinned in BOTH directions by
+ * `test/durable/keys.spec.ts` so neither the refusal nor a future acceptance
+ * can land unnoticed.
  */
 
 /** Rust `VIRTUAL_API_KEY_PREFIX_CHARS`. */

@@ -1,0 +1,213 @@
+/**
+ * The parts of `wrangler.toml` that NO behavioural test in this suite can see.
+ *
+ * ## Why this file exists
+ *
+ * The wave-12 mount-mutation sweep removed each wired seam one at a time and
+ * required the suite to go red. THREE edits to the committed `wrangler.toml`
+ * left all 1610 gateway tests GREEN, which means that part of the deploy config
+ * was not mounted by anything — the exact "fake mount" shape this project keeps
+ * finding:
+ *
+ *  1. deleting `new_sqlite_classes = ["RateLimiterDurableObject"]` from the
+ *     `[[migrations]]` stanza. `@cloudflare/vitest-pool-workers` creates a
+ *     Durable Object namespace from the BINDING alone and never consults the
+ *     migration list, so the suite cannot tell. Cloudflare can: a
+ *     `[[durable_objects.bindings]]` whose `class_name` was never introduced by
+ *     a migration is rejected AT DEPLOY (`Cannot create binding for class
+ *     RateLimiterDurableObject because it is not currently defined`), so the
+ *     first `wrangler deploy` of the cloud verification would fail — and, worse,
+ *     a class introduced with `new_classes` instead of `new_sqlite_classes`
+ *     deploys fine and gives every counter the WRONG storage backend.
+ *  2. deleting the whole `[[services]] TELEMETRY_COLLECTOR` stanza. Every
+ *     telemetry test injects its own collector onto `env`, so none of them reads
+ *     the declared binding; without this file the gateway could ship with no
+ *     route to `apps/telemetry` at all and the suite would not notice.
+ *  3. deleting `GATEWAY_SKILL_PACKAGES` / `GATEWAY_PROMPT_TEMPLATES` from
+ *     `[vars]`. These are a weaker case and are treated as such below — see the
+ *     third `describe`.
+ *
+ * `TEST_WRANGLER_TOML` is the COMMITTED file, bound verbatim by
+ * `vitest.config.ts` (workerd has no filesystem). Asserting against a fixture
+ * copy would prove nothing.
+ */
+import { env } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+import { PROMPT_TEMPLATES_VAR } from "../src/routes/prompts.js";
+import { SKILL_PACKAGES_VAR } from "../src/routes/skills.js";
+import * as entry from "../src/worker.js";
+
+function wranglerToml(): string {
+  const raw = (env as unknown as { TEST_WRANGLER_TOML?: string }).TEST_WRANGLER_TOML;
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new Error(
+      "gateway binding gate: TEST_WRANGLER_TOML is not bound; restore it in apps/gateway/vitest.config.ts",
+    );
+  }
+  return raw;
+}
+
+/**
+ * The bodies of every `[[<header>]]` array-of-tables stanza, as line lists.
+ *
+ * Line-oriented on purpose, exactly as `cron-trigger.test.ts` argues: a TOML
+ * table ends at the next header, and a regex that spans headers is the kind of
+ * subtlety that makes a config gate quietly match nothing. Comment lines are
+ * dropped, so commenting a stanza out reads as deleting it — which is what it
+ * is, and what the mutation sweep does.
+ */
+function stanzas(header: string): string[][] {
+  const out: string[][] = [];
+  let current: string[] | null = null;
+  for (const line of wranglerToml().split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) continue;
+    if (/^\[/.test(trimmed)) {
+      if (current !== null) out.push(current);
+      current = trimmed === `[[${header}]]` ? [] : null;
+      continue;
+    }
+    if (current !== null && trimmed !== "") current.push(trimmed);
+  }
+  if (current !== null) out.push(current);
+  return out;
+}
+
+/** `key = "value"` out of a stanza body. */
+function value(body: readonly string[], key: string): string | undefined {
+  for (const line of body) {
+    const match = new RegExp(`^${key}\\s*=\\s*"([^"]*)"`).exec(line);
+    if (match !== null) return match[1];
+  }
+  return undefined;
+}
+
+/** Every class named by any migration, split by which storage backend it got. */
+function migratedClasses(): { sqlite: string[]; legacy: string[] } {
+  const sqlite: string[] = [];
+  const legacy: string[] = [];
+  for (const body of stanzas("migrations")) {
+    for (const line of body) {
+      const match = /^(new_sqlite_classes|new_classes)\s*=\s*\[([^\]]*)\]/.exec(line);
+      if (match === null) continue;
+      const target = match[1] === "new_sqlite_classes" ? sqlite : legacy;
+      for (const entryMatch of (match[2] ?? "").matchAll(/"([^"]+)"/g)) {
+        target.push(entryMatch[1] as string);
+      }
+    }
+  }
+  return { sqlite, legacy };
+}
+
+describe("every Durable Object binding is deployable", () => {
+  const bindings = stanzas("durable_objects.bindings");
+
+  it("declares at least the three classes this Worker exports", () => {
+    // A guard on the gate itself: if the parser ever stopped matching, every
+    // assertion below would pass vacuously over an empty list.
+    expect(bindings.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("introduces each bound class in a [[migrations]] new_sqlite_classes", () => {
+    const { sqlite, legacy } = migratedClasses();
+    for (const body of bindings) {
+      const className = value(body, "class_name");
+      expect(className, `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`)
+        .toBeDefined();
+      // `new_classes` is not an acceptable substitute: it deploys, and then the
+      // object gets the key-value backend instead of the SQLite one every
+      // counter/state class here assumes.
+      expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
+      expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);
+    }
+  });
+
+  it("resolves each bound class against the ENTRY module's exports", () => {
+    // workerd resolves `class_name` against `main`. The three named exports in
+    // `src/worker.ts` are held by their own mutation proofs; this closes the
+    // loop from the CONFIG side, so adding a fourth binding without its export
+    // fails here rather than at `wrangler dev`.
+    for (const body of stanzas("durable_objects.bindings")) {
+      const className = value(body, "class_name") as string;
+      expect(
+        typeof (entry as unknown as Record<string, unknown>)[className],
+        `class_name ${className} is not exported by src/worker.ts`,
+      ).toBe("function");
+    }
+  });
+});
+
+describe("the telemetry service binding", () => {
+  it("declares TELEMETRY_COLLECTOR against ferrogate-telemetry", () => {
+    const services = stanzas("services");
+    const collector = services.find((body) => value(body, "binding") === "TELEMETRY_COLLECTOR");
+    expect(collector, "no [[services]] stanza binds TELEMETRY_COLLECTOR").toBeDefined();
+    // The name is load-bearing: it is resolved by NAME at deploy time against
+    // the account's Workers, and `apps/telemetry/wrangler.toml` has `name =
+    // "ferrogate-telemetry"`. A rename on either side silently unbinds it.
+    expect(value(collector as string[], "service")).toBe("ferrogate-telemetry");
+  });
+
+  it("is actually READABLE at runtime, not merely declared", () => {
+    // The declaration is only half the answer to "is this binding real". The
+    // other half is that the runtime resolved it to something with a `fetch` —
+    // which is what production gets from the service binding and what
+    // `src/telemetry/emit.ts` calls. Under vitest this is the stub
+    // `vitest.config.ts` registers; the shape is the deployed one.
+    const collector = (env as unknown as { TELEMETRY_COLLECTOR?: { fetch?: unknown } })
+      .TELEMETRY_COLLECTOR;
+    expect(collector, "TELEMETRY_COLLECTOR is declared but did not resolve").toBeDefined();
+    expect(typeof collector?.fetch).toBe("function");
+  });
+});
+
+describe("the operator config tables the tooling routes read", () => {
+  /**
+   * A DELIBERATELY WEAKER gate than the two above, and it is worth being
+   * explicit about why.
+   *
+   * The committed value of both vars is the fail-closed EMPTY table, which is
+   * behaviourally identical to the var being absent (`parseSkillPackages` /
+   * `parsePromptTemplates` return `[]` for both). So no behavioural test can
+   * distinguish "declared empty" from "not declared", and the mount-mutation
+   * sweep correctly reports removing them as GREEN. That is not a fake mount —
+   * it is a var whose committed value is inert BY DESIGN, and it has to stay
+   * inert: `test/auth.test.ts` asserts `/v1/skills` answers an empty catalog,
+   * and vitest loads this same `wrangler.toml`, so a non-empty placeholder here
+   * would turn tests red on a correct tree.
+   *
+   * What IS worth pinning is the DRIFT: the deploy config must name the exact
+   * vars the handlers read (an operator who sets a mistyped var gets silence),
+   * and the committed value must stay the fail-closed empty.
+   */
+  function vars(): Map<string, string> {
+    const out = new Map<string, string>();
+    let inVars = false;
+    for (const line of wranglerToml().split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#")) continue;
+      if (/^\[/.test(trimmed)) {
+        inVars = trimmed === "[vars]";
+        continue;
+      }
+      const match = /^([A-Za-z0-9_]+)\s*=\s*"([^"]*)"/.exec(trimmed);
+      if (inVars && match !== null) out.set(match[1] as string, match[2] as string);
+    }
+    return out;
+  }
+
+  it("declares the skill-package and prompt-template vars the handlers read", () => {
+    const declared = vars();
+    expect([...declared.keys()], "the [vars] parser matched nothing").toContain("GATEWAY_MODELS");
+    expect(declared.has(SKILL_PACKAGES_VAR), `${SKILL_PACKAGES_VAR} is not declared`).toBe(true);
+    expect(declared.has(PROMPT_TEMPLATES_VAR), `${PROMPT_TEMPLATES_VAR} is not declared`).toBe(
+      true,
+    );
+  });
+
+  it("commits the fail-closed EMPTY table for both", () => {
+    const declared = vars();
+    expect(declared.get(SKILL_PACKAGES_VAR)).toBe("[]");
+    expect(declared.get(PROMPT_TEMPLATES_VAR)).toBe("[]");
+  });
+});

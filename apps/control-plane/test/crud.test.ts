@@ -698,3 +698,81 @@ describe("response headers", () => {
     });
   });
 });
+
+describe("KEPT MARKER: the open admin body keeps operator fields it cannot name", () => {
+  /**
+   * `routes/resource.ts` carries a sharpened `PORT-TODO(inventory-edge-control
+   * §4)`: the per-collection Rust mutation structs are blocked on
+   * `@ferrogate/schemas`, so the base body is `adminRecordSchema.passthrough()`.
+   * The marker calls `passthrough()` the SAFE approximation because `strip()`
+   * would silently DISCARD operator data and `strict()` would reject fields the
+   * Rust surface accepts.
+   *
+   * Nothing asserted that. Swapping `.passthrough()` for `.strip()` left all
+   * 442 tests green while every unrecognized operator field vanished on write —
+   * a silent data loss, discoverable only in production. These are the
+   * assertions that make the approximation observable, and they are exactly the
+   * ones a real per-resource schema will replace (a tightened schema REJECTS
+   * `weird_operator_field` rather than storing it, which is a deliberate
+   * behavior change, not a green-to-green refactor).
+   */
+  const EXTRA = { weird_operator_field: { nested: [1, 2, 3] }, another_one: "kept" };
+
+  it("stores an unrecognized field on create and returns it on read", async () => {
+    // `gateway-configs` is the purest case: its spec is the base body itself
+    // (`body: adminRecordSchema` in `routes/admin_gateway_config.ts`).
+    const created = await SELF.fetch(
+      `${BASE}/admin/v1/gateway-configs`,
+      jsonRequest(KEY, "POST", { id: "cfg_open", name: "candidate", ...EXTRA }),
+    );
+    expect(created.status).toBe(201);
+    expect((await created.json()) as { gateway_config: Record<string, unknown> }).toMatchObject({
+      gateway_config: EXTRA,
+    });
+
+    const read = await SELF.fetch(`${BASE}/admin/v1/gateway-configs/cfg_open`, {
+      headers: bearer(KEY),
+    });
+    // The round trip is what matters: a `strip()` body would answer 201 with a
+    // clean-looking record and lose the field between the two calls.
+    expect((await read.json()) as { gateway_config: Record<string, unknown> }).toMatchObject({
+      gateway_config: EXTRA,
+    });
+  });
+
+  it("keeps it through a collection that EXTENDS the base body too", async () => {
+    // `.extend()` on a passthrough object stays passthrough — assert it rather
+    // than assume it, since every real collection reaches the base this way.
+    const created = await SELF.fetch(
+      `${BASE}/admin/v1/plans`,
+      jsonRequest(KEY, "POST", { id: "plan_open", name: "pro", ...EXTRA }),
+    );
+    expect(created.status).toBe(201);
+
+    const patched = await SELF.fetch(
+      `${BASE}/admin/v1/plans/plan_open`,
+      jsonRequest(KEY, "PATCH", { enabled: false }),
+    );
+    expect(patched.status).toBe(200);
+    // A PATCH that names only a KNOWN field must not quietly rewrite the record
+    // without the fields the schema cannot name.
+    expect((await patched.json()) as { plan: Record<string, unknown> }).toMatchObject({
+      plan: { enabled: false, ...EXTRA },
+    });
+  });
+
+  it("CONTROL: the collections that DO have a real schema still reject unknowns", async () => {
+    // Without this, the two tests above would read as "this app validates
+    // nothing". The bespoke bodies are `strict()`, so the open base body is a
+    // scoped approximation and not a blanket one.
+    await SELF.fetch(
+      `${BASE}/admin/v1/guardrail-policies`,
+      jsonRequest(KEY, "POST", { policy_id: "gp_open" }),
+    );
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/guardrail-policies/gp_open/activate`,
+      jsonRequest(KEY, "POST", { revision: 1, weird_operator_field: true }),
+    );
+    expect(response.status).toBe(400);
+  });
+});

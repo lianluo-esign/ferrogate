@@ -516,15 +516,15 @@ export type CallerScope =
  * unit test stayed green. `test/inference/wiring.test.ts` is the assertion that
  * goes red if the wiring is removed again.
  *
- * `allowedModels` IS now populated from a real credential — `callerFromAuth`
- * copies `AuthContext.allowedModels`, which `keys/resolver.ts` reads off the
- * `api_keys` row. `deniedModels` and `regionAllowlist` are still only ever set
- * by an injected caller: neither has a column on that row, so populating them
- * would be inventing a policy rather than porting one. Both stay on the type
- * because {@link callerCanUseModel} and
- * `candidates.ts::routeExclusionReasons` implement the full Rust predicate for
- * them and are tested on both legs. See the PORT-TODO on `callerFromAuth` for
- * the provider allowlist, which is loaded and not yet consulted.
+ * `allowedModels` and `allowedProviders` ARE now populated from a real
+ * credential — `callerFromAuth` copies both off `AuthContext`, which
+ * `keys/resolver.ts` reads off the `api_keys` row (`allowed_models_json` /
+ * `allowed_providers_json`). `deniedModels`, `deniedProviders` and
+ * `regionAllowlist` are still only ever set by an injected caller: none has a
+ * column on that row, so populating them would be inventing a policy rather
+ * than porting one. All three stay on the type because {@link callerCanUseModel},
+ * {@link callerCanUseProvider} and `candidates.ts::routeExclusionReasons`
+ * implement the full Rust predicate for them and are tested on both legs.
  */
 export interface Caller {
   readonly scope: CallerScope;
@@ -534,6 +534,14 @@ export interface Caller {
   readonly allowedModels?: readonly string[] | undefined;
   /** `AuthContext.denied_models`. */
   readonly deniedModels?: readonly string[] | undefined;
+  /**
+   * `AuthContext.allowed_providers` — the per-key PROVIDER allowlist, read by
+   * {@link callerCanUseProvider} inside `reliability.ts::dispatchWithFailover`.
+   * Empty/absent means "no allowlist", exactly as for {@link allowedModels}.
+   */
+  readonly allowedProviders?: readonly string[] | undefined;
+  /** `AuthContext.denied_providers` — deny wins over the allowlist. */
+  readonly deniedProviders?: readonly string[] | undefined;
   /**
    * `AuthContext.region_allowlist` — the tenant's data-residency policy, read
    * by `candidates.ts::routeExclusionReasons`.
@@ -556,6 +564,38 @@ export function callerCanUseModel(caller: Caller, model: string): boolean {
   const allowed = caller.allowedModels;
   if (allowed !== undefined && allowed.length > 0) {
     return allowed.includes(model);
+  }
+  return true;
+}
+
+/**
+ * `AuthContext::can_use_provider` (`auth.rs:146`) — the same two-legged shape as
+ * {@link callerCanUseModel}, over the provider name rather than the model:
+ *
+ * ```rust
+ * !self.denied_providers.contains(provider)
+ *     && (self.allowed_providers.is_empty() || self.allowed_providers.contains(provider))
+ * ```
+ *
+ * The name compared is `ModelRoute.provider` — the PROVIDER-TABLE key
+ * (`state.providers.get(&model_route.provider)` then `provider.name`), not the
+ * provider FAMILY (`providerKind`). A deployment with two `openai`-kind rows
+ * `openai-us` / `openai-eu` is gated per row, which is the point of the field.
+ *
+ * Where it is CONSULTED is load-bearing and is not this file's choice: Rust
+ * evaluates it inside the `'routes:` loop, per candidate, immediately after the
+ * circuit-breaker check, and a refusal is TERMINAL (`return Ok(())` after a 403)
+ * rather than a fall-through to the next candidate. See
+ * `reliability.ts::dispatchWithFailover`, which reproduces both the position and
+ * the terminality.
+ */
+export function callerCanUseProvider(caller: Caller, provider: string): boolean {
+  if (caller.deniedProviders?.includes(provider)) {
+    return false;
+  }
+  const allowed = caller.allowedProviders;
+  if (allowed !== undefined && allowed.length > 0) {
+    return allowed.includes(provider);
   }
   return true;
 }

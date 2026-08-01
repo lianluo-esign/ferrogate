@@ -14,6 +14,7 @@ import {
   declaredAgentRunId,
   decodeMcpName,
   encodeMcpHeaderValue,
+  httpLegacyDowngradeReason,
   ingressErrorCode,
   ingressErrorData,
   ingressMode,
@@ -31,6 +32,12 @@ import {
   validateIngress,
   verifyRoutingHeaders,
 } from "../src/protocol.js";
+import {
+  DEFAULT_RECONNECT_POLICY,
+  type McpSessionState,
+  newSessionState,
+  statusOf,
+} from "../src/session.js";
 
 function rpc(method: string, params: unknown = {}, id: number | string = 1): McpIngressRequest {
   return { jsonrpc: "2.0", method, params, id };
@@ -333,5 +340,55 @@ describe("declared agent_run_id parsing (#522)", () => {
       false,
     );
     expect(declaredAgentRunId(headers({ "x-ferrogate-agent-run-id": "has space" })).ok).toBe(false);
+  });
+});
+
+describe("stdio downgrade evidence — the KEPT platform-limit vocabulary", () => {
+  /**
+   * `McpProtocolDowngradeReason` keeps four `stdio_*` variants this Worker can
+   * never produce (no process to probe). The marker in `src/protocol.ts` says
+   * they survive as the OPERATOR STATUS vocabulary shared with the Rust host,
+   * and these two assertions are what stop that claim from rotting:
+   *
+   *  1. nothing here fabricates one — the single producer answers only `http_*`;
+   *  2. nothing here swallows one — `statusOf` reports it verbatim.
+   */
+  const STDIO_REASONS = [
+    "stdio_method_not_found",
+    "stdio_unrecognized_error",
+    "stdio_probe_timeout",
+    "stdio_probe_process_exit",
+  ] as const;
+
+  it("never fabricates a stdio reason from an HTTP probe, on ANY status", () => {
+    const produced = new Set<string>();
+    for (let status = 100; status < 600; status += 1) {
+      const reason = httpLegacyDowngradeReason(status, undefined);
+      if (reason !== undefined) produced.add(reason);
+    }
+    // The whole producible vocabulary of this Worker, exhaustively.
+    expect([...produced].sort()).toEqual([
+      "http_400_unrecognized_response",
+      "http_404_unrecognized_response",
+      "http_405_unrecognized_response",
+    ]);
+    for (const reason of STDIO_REASONS) expect(produced.has(reason)).toBe(false);
+  });
+
+  it("reports a stdio reason VERBATIM on the status surface if a record carries one", () => {
+    for (const reason of STDIO_REASONS) {
+      const state: McpSessionState = {
+        ...newSessionState(DEFAULT_RECONNECT_POLICY),
+        connected: true,
+        negotiation: {
+          mode: "legacy",
+          version: MCP_LEGACY_PROTOCOL_VERSION,
+          downgradeReason: reason,
+        },
+      };
+      // Not normalised, not dropped, not mapped onto an `http_*` neighbour: an
+      // operator tool reading this Worker and the Rust host sees one vocabulary.
+      expect(statusOf("local", state).protocolDowngradeReason).toBe(reason);
+    }
   });
 });

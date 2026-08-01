@@ -133,9 +133,62 @@ export const ledgerEntryWireSchema = z
   }));
 
 /**
+ * The largest/smallest `i64` a JSON number can carry WITHOUT losing a unit.
+ * IEEE-754 doubles are exact on integers up to 2^53 - 1; past that, adjacent
+ * integers collapse onto the same double.
+ */
+const MAX_EXACT_WALLET_CREDITS = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_EXACT_WALLET_CREDITS = BigInt(Number.MIN_SAFE_INTEGER);
+
+/**
+ * Render one `i64` wallet field as a JSON number — Rust serde's shape — or
+ * REFUSE.
+ *
+ * Money is integer credits end to end and the wallet fields are `bigint`
+ * precisely so no arithmetic on them can drift. JSON has no integer type, so
+ * the wire hop is the one place that property could be dropped, and it was
+ * being dropped SILENTLY: a bare `Number(entry.wallet_balance_after_credits)`
+ * rounds anything past 2^53 to the nearest representable double and returns a
+ * number that looks perfectly ordinary.
+ *
+ * That is not merely a display defect, which is why this refuses instead of
+ * rounding. `ledgerEntryWireSchema` reads the field back with `BigInt(v)`, so a
+ * rounded value re-enters the domain as a WRONG balance; and
+ * {@link sameProviderAttemptSettlement} — the idempotency arbiter — compares
+ * bigint against number by widening both with `BigInt`. Two DIFFERENT balances that
+ * round to the same double therefore compare EQUAL, and a divergent replay is
+ * accepted as a no-op instead of raising `billing_idempotency_conflict`. A
+ * money field that quietly disagrees with itself across a serialize/parse hop
+ * is the worst available outcome; a loud `wallet_credits_unrepresentable` is
+ * the least bad one.
+ *
+ * The bound is not reachable by ordinary traffic — 2^53 credits is ~$9.0e9 at
+ * `credits_per_usd = 1e6` — so this is a guard, not a limit anyone will meet.
+ * The INBOUND direction cannot be guarded here and is not pretended to be:
+ * `JSON.parse` has already collapsed an over-large literal to a double before
+ * any schema sees it, so `ledgerEntryWireSchema` receives a number that is
+ * indistinguishable from an exactly-representable one. Rust's serde reads the
+ * `i64` from the JSON TEXT and has no such hop.
+ */
+function walletCreditsToWire(field: string, value: bigint): number {
+  if (value > MAX_EXACT_WALLET_CREDITS || value < MIN_EXACT_WALLET_CREDITS) {
+    throw new BillingError(
+      "wallet_credits_unrepresentable",
+      `${field} = ${value} cannot be rendered as a JSON number without losing ` +
+        `precision (|value| > ${Number.MAX_SAFE_INTEGER}); refusing rather than ` +
+        `silently rounding a money field`,
+    );
+  }
+  return Number(value);
+}
+
+/**
  * Serialize a {@link LedgerEntry} to a plain JSON-safe object with the
  * provider-attempt flattened and the `i64` wallet fields rendered as JSON
  * numbers (matching Rust serde), omitting `None`/`undefined` fields.
+ *
+ * @throws {BillingError} `wallet_credits_unrepresentable` when a wallet field
+ *   cannot survive the JSON-number hop — see {@link walletCreditsToWire}.
  */
 export function ledgerEntryToWire(entry: LedgerEntry): Record<string, unknown> {
   const out: Record<string, unknown> = {
@@ -158,9 +211,15 @@ export function ledgerEntryToWire(entry: LedgerEntry): Record<string, unknown> {
   if (entry.trace_id !== undefined) out.trace_id = entry.trace_id;
   if (entry.occurred_at_unix !== undefined) out.occurred_at_unix = entry.occurred_at_unix;
   if (entry.wallet_delta_credits !== undefined)
-    out.wallet_delta_credits = Number(entry.wallet_delta_credits);
+    out.wallet_delta_credits = walletCreditsToWire(
+      "wallet_delta_credits",
+      entry.wallet_delta_credits,
+    );
   if (entry.wallet_balance_after_credits !== undefined)
-    out.wallet_balance_after_credits = Number(entry.wallet_balance_after_credits);
+    out.wallet_balance_after_credits = walletCreditsToWire(
+      "wallet_balance_after_credits",
+      entry.wallet_balance_after_credits,
+    );
   return out;
 }
 

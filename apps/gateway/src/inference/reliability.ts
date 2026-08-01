@@ -431,6 +431,17 @@ export interface FailoverOptions {
   readonly candidates: readonly AttemptCandidate[];
   readonly circuit: ProviderCircuit;
   readonly settings: ReliabilitySettings;
+  /**
+   * `AuthContext::can_use_provider` for the candidate's provider.
+   *
+   * REQUIRED, deliberately. An optional predicate defaulting to "allow" is the
+   * `real ?? fallback` shape this repo keeps getting bitten by: every ladder
+   * test would pass with the gate unwired, because the fallback and a
+   * permissive credential are indistinguishable from the outside. Making it
+   * mandatory turns a missing wiring into a TypeScript error at the one call
+   * site that matters (`handlers.ts::dispatchCandidates`).
+   */
+  providerAllowed(provider: string): boolean;
   /** Perform ONE upstream attempt. Supplied by `handlers.ts::dispatchUpstream`. */
   attempt(candidate: AttemptCandidate): Promise<AttemptResult>;
   /** Discriminates the transport-rejection arm of {@link AttemptResult}. */
@@ -464,14 +475,30 @@ function discard(response: Response): void {
  *     open circuit with a next candidate SKIPS; an open circuit on the LAST
  *     candidate is `503 provider_circuit_open`, never a 502 — the operator has
  *     to be able to tell "we refused to try" from "we tried and it failed".
- *  2. **Attempt.** A transport failure records a provider failure and enters the
+ *  2. **The per-key provider allowlist, SECOND and TERMINAL.** `chat.rs:318`
+ *     (identically `messages.rs:302`, `embeddings.rs:252`, `images.rs:269`)
+ *     runs `auth.can_use_provider(&provider.name)` immediately after the
+ *     circuit check and answers `403 provider_not_allowed` with `return Ok(())`
+ *     — there is no `continue`, so a key that may not use the FIRST eligible
+ *     provider is refused even when a later fallback route names a provider it
+ *     may use. Both halves of that are observable and both are reproduced:
+ *       - the ORDER (circuit first) means a disallowed provider whose circuit is
+ *         OPEN, with a next candidate, skips to that candidate rather than
+ *         403ing — so the request can still succeed;
+ *       - the TERMINALITY means the same disallowed provider with a CLOSED
+ *         circuit ends the request at 403 even though that next candidate
+ *         exists.
+ *     Modelling this as a route EXCLUSION in `candidates.ts` instead (which is
+ *     what the marker on `identity.ts::callerFromAuth` used to propose) would
+ *     silently SERVE the second case. That is why the gate is here.
+ *  3. **Attempt.** A transport failure records a provider failure and enters the
  *     ladder with `retryable = true`.
- *  3. **Retryable status.** Recorded as a failure *only when retryable* — Rust
+ *  4. **Retryable status.** Recorded as a failure *only when retryable* — Rust
  *     guards `record_provider_failure` with `if retryable_status`
  *     (`chat.rs:927`), so a provider answering `400` to a malformed request
  *     never counts toward opening its circuit. That asymmetry is the whole
  *     reason the breaker does not trip on client errors.
- *  4. **Success** records a success, which clears the streak (`chat.rs:992`).
+ *  5. **Success** records a success, which clears the streak (`chat.rs:992`).
  *
  * A non-retryable error response is returned as `ok: true`: it is the
  * provider's own answer and the handler relays it verbatim, exactly as the Rust
@@ -480,7 +507,7 @@ function discard(response: Response): void {
 export async function dispatchWithFailover(
   options: FailoverOptions,
 ): Promise<FailoverOutcome> {
-  const { candidates, circuit, settings, attempt, isRejection } = options;
+  const { candidates, circuit, settings, providerAllowed, attempt, isRejection } = options;
   let attempts = 0;
   let lastRejection: InferenceRejection | null = null;
 
@@ -499,6 +526,22 @@ export async function dispatchWithFailover(
           503,
           "provider_circuit_open",
           `provider ${provider} circuit breaker is open`,
+        ),
+        attempts,
+      };
+    }
+
+    // `if !auth.can_use_provider(&provider.name) { ...403...; return Ok(()) }`.
+    // No `hasNext` arm on purpose — see step 2 of the doc block above. The
+    // message is the Rust string verbatim so an existing client's error
+    // matching keeps working.
+    if (!providerAllowed(provider)) {
+      return {
+        ok: false,
+        rejection: reject(
+          403,
+          "provider_not_allowed",
+          `API key is not allowed to use provider ${provider}`,
         ),
         attempts,
       };

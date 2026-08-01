@@ -196,13 +196,31 @@ export interface RouteExclusion {
 /**
  * `route_exclusion_reasons`.
  *
- * PORT-TODO(model_routing.rs `allow_undeclared_capabilities`): PARTIAL — the
- * legacy escape hatch is WIDER here than in Rust, on both the capability and
- * the context-window leg, and these are the only two deviations in the file.
- * Both follow ONE rule: **a gate is armed by the operator declaring the field,
- * never by omitting it.** That makes every deviation a narrowing — an armed
- * route is held to the exact Rust test, and an undeclared field can only ever
- * mean "this leg does not apply", never "this route wins by default".
+ * PORT-TODO(model_routing.rs `allow_undeclared_capabilities`): PARTIAL — this
+ * function is WIDER than Rust on THREE legs, not the two this marker used to
+ * claim. Deviation 3 was found by re-reading `model_routing.rs:374` for this
+ * pass and is stated below; the "these are the only two" sentence that stood
+ * here was wrong, which is exactly the rot a marker is supposed to prevent.
+ *
+ * Deviations 1 and 2 follow ONE rule: **a gate is armed by the operator
+ * declaring the field, never by omitting it.** An armed route is held to the
+ * exact Rust test, and an undeclared field can only ever mean "this leg does
+ * not apply", never "this route wins by default". Deviation 3 does NOT follow
+ * that rule and is a plain widening — see below.
+ *
+ * ## Why none of the three is closed here
+ *
+ * All three are portable in the sense that Cloudflare forbids nothing; what
+ * blocks each one is a file this slice does not own.
+ *
+ *  - 1 and 2 need `apps/gateway/wrangler.toml`'s `GATEWAY_MODELS` to start
+ *    declaring `capabilities` and `context_window` on every route before the
+ *    strict reading can be turned on, and **no agent may edit a `wrangler.toml`**
+ *    (the integrate step owns it). Turning on the Rust reading against today's
+ *    `GATEWAY_MODELS = "[]"` documented example — which omits both fields — 400s
+ *    every streaming request in the tree.
+ *  - 3 needs an existing green assertion to change its expected status, and
+ *    assertions may not be weakened or deleted. Named below.
  *
  *  1. **Capabilities.** Rust treats an empty `capabilities` as neutral only when
  *     `allow_undeclared_capabilities` holds (conversational endpoint, no explicit
@@ -221,6 +239,31 @@ export interface RouteExclusion {
  *     reading because its validator refuses to boot and the operator sees it at
  *     once; a Worker would instead 400 live traffic on a config that has been
  *     valid in this tree since the catalog landed.
+ *  3. **Unbounded media context — NEW, and NOT a narrowing.** `model_routing.rs:374`
+ *     is `if requirements.unbounded_media_context { reasons.push(MediaContextUnbounded) }`
+ *     — UNCONDITIONAL, per route, with no reference to `route.context_window`
+ *     and no legacy-neutral escape (`allow_undeclared_capabilities` is itself
+ *     forced false by `!unbounded_media_context` at line 110). So in Rust an
+ *     image-bearing chat request excludes EVERY candidate, `eligible_routes` is
+ *     empty, and `ModelRoutingDecision::rejection` answers
+ *     `400 invalid_request "no physical route for model X satisfies the request
+ *     requirements"`. Vision is unroutable in the Rust tree, full stop.
+ *     This port pushes the reason only when `route.contextWindow !== undefined`,
+ *     so a route that declares no window SERVES the image request. That is
+ *     strictly more permissive than Rust and it is not covered by the
+ *     declare-to-arm rule, because Rust's leg is not armed by a declaration.
+ *
+ *     Left as a deviation rather than corrected because
+ *     `test/inference/validation.test.ts` → "accepts the multimodal
+ *     content-part array form" asserts `200` on exactly this request against a
+ *     window-less route. Making the leg 1:1 turns that into `400`, i.e. it
+ *     requires changing a green assertion's expectation, which a porting slice
+ *     may not do unilaterally. It needs an explicit decision: reproduce Rust
+ *     (vision stops working) or keep the port's behavior (vision works, parity
+ *     broken on an edge Rust arguably got wrong). Either way it is a decision,
+ *     not a port. `test/inference/eligibility-deviations.test.ts` pins the
+ *     CURRENT behavior in both directions so it cannot drift further while the
+ *     decision is outstanding.
  *
  * Region is not deviated from at all: an empty allowlist is no gate in both
  * trees, and a non-empty one excludes an undeclared `region` in both.
@@ -251,10 +294,13 @@ export function routeExclusionReasons(
   }
 
   if (requirements.unboundedMediaContext) {
-    // Rust pushes this for EVERY route: an image-bearing prompt has no token
-    // upper bound, so no declared context window can be proven to fit it. The
-    // net effect is that a vision request only survives on a capability-neutral
-    // route or one that declares `vision` — and never on a context-window gate.
+    // DEVIATION 3 (see the marker above). Rust pushes this for EVERY route,
+    // unconditionally, so an image-bearing prompt has NO eligible route at all
+    // and 400s. This guard restricts the exclusion to routes that declared a
+    // context window, which lets a window-less route serve the request. The old
+    // comment here claimed the Rust net effect was "a vision request only
+    // survives on a capability-neutral route or one that declares `vision`" —
+    // that is not what `model_routing.rs:374` does; nothing survives.
     if (route.contextWindow !== undefined) {
       push("media_context_unbounded", "input_token_upper_bound=unbounded");
     }

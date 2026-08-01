@@ -30,8 +30,10 @@ import { networkAccess } from "../middleware/network.js";
 import { responseCache } from "../middleware/response-cache.js";
 import type { GatewayEnv } from "../ports.js";
 import { agentDiscoveryHandler } from "./agent-discovery.js";
+import { renderPromptTemplateHandler } from "./prompts.js";
 import { readinessResponse } from "./readiness.js";
 import { reverseProxyFallThrough } from "./reverse-proxy.js";
+import { getAgentSkillHandler, listAgentSkillsHandler } from "./skills.js";
 
 /** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
 export const SERVICE_NAME = "ferrogate-gateway";
@@ -188,28 +190,39 @@ function readyzHandler(c: Context<GatewayEnv>): Response {
 }
 
 /**
- * The tooling operations, as real ROUTES that answer 501.
+ * The tooling operations. FOUR are ported; THREE still answer 501.
  *
- * ## Why 501 and not a payload
+ * ## The split, and how it was decided
  *
- * Each of the six below is a projection of, or a dispatch into, a SUBSYSTEM
- * THAT DOES NOT EXIST IN THIS TREE YET — see the note on each. Answering an
- * empty list, or an invented tool result, would be a fake that papers over the
- * gap: a client cannot tell "this gateway has no tools registered" from "this
- * gateway cannot register tools", and the second is the truth today. 501 says
- * the second.
+ * The three that are ported all turned out to be pure projections of OPERATOR
+ * CONFIG with no I/O — `handle_agent_skills` reads `state.config.skill_packages`
+ * and `handle_prompt_template_render` reads `state.config.prompt_templates`.
+ * Their old 501 notes claimed a dependency on "the read model in
+ * `apps/control-plane`" that does not exist in the Rust path at all; re-reading
+ * the Rust rather than trusting the note is what closed them. They now live in
+ * `./skills.ts` and `./prompts.ts`, on `GATEWAY_SKILL_PACKAGES` /
+ * `GATEWAY_PROMPT_TEMPLATES`, exactly as `./agent-discovery.ts` reads
+ * `GATEWAY_AGENT_UPSTREAMS`.
+ *
+ * ## Why the remaining three are still 501 and not a payload
+ *
+ * Each is a projection of, or a dispatch into, a SUBSYSTEM THAT DOES NOT EXIST
+ * IN THIS TREE — see the note on each. Answering an empty list, or an invented
+ * tool result, would be a fake that papers over the gap: a client cannot tell
+ * "this gateway has no tools registered" from "this gateway cannot register
+ * tools", and the second is the truth today. 501 says the second.
  *
  * What IS real about them is everything the router owns. They are matched at
  * the contract's own path, guarded by `contractAuth`, and scope-checked, so an
  * anonymous caller gets `401 missing_api_key` and an under-scoped one
  * `403 scope_denied` — the 501 is only ever reached by a caller who was
  * entitled to the operation. `test/auth.test.ts` pins exactly that ladder
- * (401 / 403 / 501 on the same path), which is the test that keeps this
+ * (401 / 403 / 501 on `/v1/tools`), which is the test that keeps this
  * approximation honest: it fails if a stub ever starts answering before the
  * guard, and it is what will have to be updated when a real handler lands.
  *
- * NONE of these is a platform limit. Every one is a missing upstream:
- * Cloudflare can host all six.
+ * NONE of the three is a platform limit. Every one is a missing upstream:
+ * Cloudflare can host all of them.
  */
 function registerToolingRoutes(router: GatewayRouter): void {
   router.registerNotImplemented(
@@ -244,26 +257,13 @@ function registerToolingRoutes(router: GatewayRouter): void {
       "dispatch. Belongs to apps/agent-runtime (containers/@cloudflare/sandbox), " +
       "not to this Worker.",
   );
-  router.registerNotImplemented(
-    "listAgentSkills",
-    // Skill PACKAGES are control-plane rows (`skill_packages`, admin CRUD);
-    // this is their tenant-facing read projection.
-    "PORT-TODO(inventory-request-path §skills): skill-package catalog projection. " +
-      "Blocked on the skill_packages read model in apps/control-plane.",
-  );
-  router.registerNotImplemented(
-    "getAgentSkill",
-    "PORT-TODO(inventory-request-path §skills): skill detail. Same dependency as " +
-      "listAgentSkills.",
-  );
-  router.registerNotImplemented(
-    "renderPromptTemplate",
-    // Template rows plus the renderer. The renderer is pure TS and trivial on
-    // this platform; the rows are the missing half.
-    "PORT-TODO(inventory-request-path §prompts): prompt-template rendering. " +
-      "Blocked on the prompt_templates read model in apps/control-plane; the " +
-      "renderer itself has no platform obstacle.",
-  );
+  // Skill packages are the `[[skill_packages]]` OPERATOR CONFIG TABLE, not
+  // control-plane rows — `handle_agent_skills` reads `state.config`. Ported in
+  // `./skills.ts`; see the header there for why the old note was wrong.
+  router.register("listAgentSkills", listAgentSkillsHandler);
+  router.register("getAgentSkill", getAgentSkillHandler);
+  // Same story for `[[prompt_templates]]`, plus the renderer. `./prompts.ts`.
+  router.register("renderPromptTemplate", renderPromptTemplateHandler);
   // `/.well-known/agent.json` is a pure projection of the operator's
   // `[[agent_upstreams]]` table, so it is ported rather than stubbed. See
   // `./agent-discovery.ts`.

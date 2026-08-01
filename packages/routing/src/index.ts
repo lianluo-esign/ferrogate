@@ -44,24 +44,42 @@
  *    shadow cap is cross-isolate rather than N-per-isolate. Both halves are
  *    required by the workerd entry-module rule and both are present.
  *
- * ## PORT-TODO(inventory-request-path §1.3) — `RouteMatcher` HAS NO IMPLEMENTOR.
- * ## DEFERRED FEATURE, NOT A PLATFORM LIMIT, NOT A WIRING MISS, NOT CLOSED.
+ * ## THE "`RouteMatcher` HAS NO IMPLEMENTOR" MARKER IS CLOSED — do not re-add it
  *
- * `route.ts` ships `RouteMatch` + `RouteMatcher` and stops there, which is
- * FAITHFUL: the Rust crate `ferrogate-routing` also ships only the trait — the
- * concrete matcher lives in the gateway over `AppState`'s hot-reloadable
- * runtime route table (`state_routing.rs:816 match_runtime_route`). Adding a
- * concrete matcher to this package would diverge from the crate, not close the
- * gap, so it deliberately is not here.
+ * It read "`RouteMatcher` HAS NO IMPLEMENTOR … what is genuinely missing is the
+ * CONSUMER, and it is outside this package: the operator reverse-proxy
+ * fall-through marked at `apps/gateway/src/routes/index.ts:379`". That
+ * fall-through has since LANDED, so the marker's one factual claim is false and
+ * a stale marker is worse than none — it teaches the next reader that a shipped
+ * feature is missing.
  *
- * What is genuinely missing is the CONSUMER, and it is outside this package:
- * the operator reverse-proxy fall-through marked at
- * `apps/gateway/src/routes/index.ts:379`. Until it lands, an operator's
- * `[[routes]]`/`[[upstreams]]` config validates cleanly in `packages/config`
- * and proxies nothing — a request matching no route group 404s instead of
- * falling through. That implementor is what `RouteMatcher` exists for; the
- * upstream rotation it needs (`select_runtime_upstream_endpoint`) has no
- * counterpart here either.
+ * The implementor, checkable by file:line:
+ * `apps/gateway/src/routes/reverse-proxy.ts:133` declares
+ * `export class RuntimeRouteTable implements RouteMatcher`, with
+ * `matchRoute(host: string | undefined, path: string): RouteMatch | undefined`
+ * at `:179` — the exact signature `route.ts` fixes — built from the
+ * `GATEWAY_ROUTES` / `GATEWAY_UPSTREAMS` vars through `@ferrogate/config`'s
+ * `routeRuleSchema` / `upstreamSchema`, mounted on the app the Worker exports
+ * (`apps/gateway/src/routes/index.ts` → `src/index.ts`) and gated by
+ * `apps/gateway/test/routes/reverse-proxy.test.ts`. Rust's
+ * `select_runtime_upstream_endpoint` rotation landed there too, which is where
+ * it belongs: the Rust crate `ferrogate-routing` does not ship it either.
+ *
+ * What has NOT changed, and must not be "fixed": `route.ts` still ships only
+ * `RouteMatch` + `RouteMatcher`. That is FAITHFUL — the Rust crate also ships
+ * only the trait (`crates/ferrogate-routing/src/lib.rs`, 21 lines, `pub trait
+ * RouteMatcher` and nothing that implements it), because the concrete matcher
+ * needs `AppState`'s hot-reloadable route table. Adding a concrete matcher HERE
+ * would diverge from the crate, and would hand the gateway a second matcher to
+ * disagree with. `test/route.test.ts` pins what this package genuinely owes:
+ * that the interface is satisfiable by an ordinary object and that a miss is
+ * `undefined` rather than a throw or a fallback route — a fallback would
+ * silently send an unrouted request to some upstream.
+ *
+ * Note for whoever next reads the gateway side: its module docstring still
+ * calls the class `ConfigRouteMatcher`, which is the name it was written under;
+ * the exported class is `RuntimeRouteTable`. That rename is an `apps/gateway`
+ * edit, not a gap here.
  *
  * The bucketing must stay byte-exact against Rust (`fnv.ts` keeps the
  * `0xcbf29ce484222325` / `0x100000001b3` constants and the `salt\0key`

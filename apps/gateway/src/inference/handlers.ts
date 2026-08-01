@@ -68,6 +68,7 @@ import type { ShadowMirror } from "./shadow.js";
 import {
   adapterErrorMessage,
   callerCanUseModel,
+  callerCanUseProvider,
   scopeCanSeeModel,
 } from "./ports.js";
 import type {
@@ -539,10 +540,17 @@ async function dispatchCandidates(
     // for the five mechanisms that keep a mirror off the client's response.
     spawnShadowMirror(deps, planned.shadow, executionCtxOf(c));
   }
+  // `auth.can_use_provider` — the credential's PROVIDER allowlist. Read from the
+  // per-request caller (the same value `planUpstream` gates the model on) rather
+  // than captured in `deps`, because `deps` is built once per router and the
+  // allowlist is per credential. Passing a `deps`-level predicate here would
+  // make the gate answer for whichever key happened to warm the isolate.
+  const caller = c.get("inferenceCaller");
   const outcome = await dispatchWithFailover({
     candidates: planned.candidates,
     circuit: deps.circuit,
     settings: deps.reliability,
+    providerAllowed: (provider) => callerCanUseProvider(caller, provider),
     // `ProviderRoutingMetrics::record_request_log` — recorded HERE rather than
     // inside `dispatchWithFailover` because the ladder is a pure decision
     // procedure over an injected `attempt`, and because the classification is

@@ -5,6 +5,7 @@ import {
   CostSource,
   InMemoryLedgerSink,
   ledgerEntryId,
+  ledgerEntryToWire,
   modelPriceUsd,
   parseBillingEvent,
   priceEntry,
@@ -183,5 +184,83 @@ describe("InMemoryLedgerSink idempotency", () => {
     expect(sink.list({ organization_id: "nope" }, 0, 10)).toHaveLength(0);
     expect(sink.get(entry.id)!.request_id).toBe("req-4");
     expect(sink.get("missing")).toBeUndefined();
+  });
+});
+
+/**
+ * MONEY NO-DRIFT GATE — the wallet fields are `bigint` end to end precisely so
+ * no arithmetic on integer credits can drift, and JSON is the one hop where
+ * that property could be dropped. It WAS being dropped: `ledgerEntryToWire`
+ * rendered both fields with a bare `Number(...)`, which rounds past 2^53 and
+ * returns an ordinary-looking number.
+ *
+ * Every assertion below fails if the refusal is removed and the bare `Number()`
+ * comes back. The last one is the reason this is a correctness gate and not a
+ * display nicety: two DIFFERENT balances round to the SAME double, and
+ * `sameProviderAttemptSettlement` — the idempotency arbiter — widens number to
+ * bigint, so the divergent replay would be accepted as a no-op instead of
+ * raising `billing_idempotency_conflict`.
+ */
+describe("wallet credits survive the JSON-number hop, or the render refuses", () => {
+  function walletEntry(id: string, delta: bigint, balance: bigint) {
+    const e = event(id, "openai", "gpt-5.5");
+    e.wallet_delta_credits = delta;
+    e.wallet_balance_after_credits = balance;
+    return charge(book(), e);
+  }
+
+  it("renders exactly-representable credits as JSON numbers (Rust serde shape)", () => {
+    const wire = ledgerEntryToWire(walletEntry("req-w-ok", -35_000n, 465_000n));
+    expect(wire.wallet_delta_credits).toBe(-35_000);
+    expect(wire.wallet_balance_after_credits).toBe(465_000);
+    // The boundary itself is still exact and must NOT be refused.
+    const edge = ledgerEntryToWire(
+      walletEntry("req-w-edge", BigInt(Number.MIN_SAFE_INTEGER), BigInt(Number.MAX_SAFE_INTEGER)),
+    );
+    expect(edge.wallet_balance_after_credits).toBe(Number.MAX_SAFE_INTEGER);
+    expect(edge.wallet_delta_credits).toBe(Number.MIN_SAFE_INTEGER);
+  });
+
+  it("REFUSES a balance one unit past the exact range instead of rounding it", () => {
+    const overflowing = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    try {
+      ledgerEntryToWire(walletEntry("req-w-big", -1n, overflowing));
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BillingError);
+      expect((error as BillingError).code).toBe("wallet_credits_unrepresentable");
+      expect((error as BillingError).message).toContain("wallet_balance_after_credits");
+    }
+    // …and the delta field is guarded on its own, not only the balance.
+    try {
+      ledgerEntryToWire(walletEntry("req-w-big2", -(BigInt(Number.MAX_SAFE_INTEGER) + 1n), 1n));
+      throw new Error("expected throw");
+    } catch (error) {
+      expect((error as BillingError).code).toBe("wallet_credits_unrepresentable");
+      expect((error as BillingError).message).toContain("wallet_delta_credits");
+    }
+  });
+
+  it("the refusal is what stops a divergent replay from passing as a no-op", () => {
+    const a = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    const b = BigInt(Number.MAX_SAFE_INTEGER) + 2n;
+    // Two DIFFERENT i64 balances…
+    expect(a).not.toBe(b);
+    // …collapse onto ONE double, which is what the removed `Number()` produced.
+    expect(Number(a)).toBe(Number(b));
+    // So a round-trip through the wire would make them compare EQUAL.
+    expect(BigInt(Number(a)) === BigInt(Number(b))).toBe(true);
+    // The render therefore refuses both rather than emitting the collision.
+    for (const balance of [a, b]) {
+      expect(() => ledgerEntryToWire(walletEntry("req-w-collide", -1n, balance))).toThrow(
+        /wallet_credits_unrepresentable|losing/,
+      );
+    }
+  });
+
+  it("an entry with no wallet fields renders without them and never throws", () => {
+    const wire = ledgerEntryToWire(charge(book(), event("req-w-none", "openai", "gpt-5.5")));
+    expect(wire.wallet_delta_credits).toBeUndefined();
+    expect(wire.wallet_balance_after_credits).toBeUndefined();
   });
 });

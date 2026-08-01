@@ -28,48 +28,36 @@ import type { MeteringDiagnostics } from "./ports.js";
  * request can fan out into several provider dispatches (a failover retry), and
  * each is separately billable (issue #213).
  *
- * ## The marker this constant used to carry, corrected
+ * ## The marker that stood here is CLOSED. Both halves landed.
  *
- * It read "the TS data plane has no failover yet — `handlers.ts` dispatches
- * exactly once", and it listed two blockers: a failover ladder in
- * `@ferrogate/routing`, and the index being carried through `recordUsage`.
- * **The first has landed.** `handlers.ts::dispatchCandidates` walks
- * `reliability.ts::dispatchWithFailover` and CAN make several attempts per
- * request, so a note claiming a single dispatch is no longer true and must not
- * be left in place — that is how a stale marker becomes a shipped under-bill.
+ * It read "nothing SETS the field yet", named the two edits that would close it
+ * (`Usage.providerAttemptIndex` in `src/inference/ports.ts`, and
+ * `providerAttemptIndex: attempt.index` in `recordUsage`), and warned that until
+ * both landed a metered failover would collapse two attempts onto ONE
+ * `ledgerEntryId` and be absorbed by `ON CONFLICT DO NOTHING` as a healthy
+ * replay — a silent under-bill.
  *
- * ## What is closed here, and what is still open
+ * Both edits are now in the tree: `inference/ports.ts` declares
+ * `readonly providerAttemptIndex?: number` on `Usage`, and `handlers.ts` sets it
+ * from the dispatch loop's `attemptIndex` on all four metering call sites. This
+ * side was already ready — {@link providerAttemptIndexFor} reads the field and
+ * falls back to this constant only when the dispatcher does not supply one.
  *
- * CLOSED: this module no longer hard-codes the index. {@link providerAttemptIndexFor}
- * reads `providerAttemptIndex` off the usage record when the dispatcher supplies
- * one, and only falls back to this constant when it does not. So the moment the
- * inference slice threads the index, `ledgerEntryId` partitions on it correctly
- * with no further change here, and the failure mode below simply cannot arrive
- * silently.
+ * ## Why the closure is not taken on trust
  *
- * STILL OPEN — PORT-TODO(inventory-request-path §"routing/failover"), a SCOPE
- * boundary, not a platform limit: nothing SETS the field yet. `Usage` is
- * declared in `src/inference/ports.ts` and populated by
- * `src/inference/handlers.ts`, neither of which this module owns. The exact
- * remaining change, in those two files:
- *
- * ```ts
- * // src/inference/ports.ts — interface Usage
- * readonly providerAttemptIndex?: number;
- * // src/inference/handlers.ts — recordUsage(), from the dispatch loop
- * providerAttemptIndex: attempt.index,
- * ```
- *
- * The consequence while it is open is bounded and NOT currently live: usage is
- * recorded exactly once per request, from the attempt that produced the served
- * response, and abandoned attempts are never metered — so every recorded event
- * really is attempt 0 today. It becomes live the day a FAILED attempt is metered
- * for provider-cost attribution. At that point, without the field, two attempts
- * of one request collapse onto one `ledgerEntryId` and the second is absorbed by
- * `ON CONFLICT DO NOTHING` as a healthy replay — a silent under-bill, not a
- * crash. `test/metering/durable.test.ts` ("does not double-charge the SAME
- * request id") pins that absorption, so it reads as the description of the
- * failure this marker guards against.
+ * The threading lives in a file this module does not own, so "the marker is
+ * stale" is exactly the kind of claim that decays back into a defect. It is
+ * therefore pinned across the boundary by
+ * `test/metering/gateway.test.ts` → "the provider-attempt index reaches the
+ * ledger key": two candidates for one logical model, the priority-0 one answers
+ * 503, the ladder fails over, and the resulting CHARGE is required to carry
+ * `provider-attempt:1`. Because the fallback here is `0` — and `0` is precisely
+ * what an unfailed request produces — a served-by-attempt-1 request is the only
+ * observation that can distinguish threaded from unthreaded. Removing
+ * `providerAttemptIndex: attemptIndex` from `handlers.ts::recordUsage` was
+ * verified to turn that assertion red with `provider-attempt:0`, and a negative
+ * control in the same block pins the unfailed request at `0` so the gate cannot
+ * be satisfied by a constant.
  */
 export const SINGLE_PROVIDER_ATTEMPT_INDEX = 0;
 

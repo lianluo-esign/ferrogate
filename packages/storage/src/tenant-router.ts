@@ -11,8 +11,10 @@
  * one. That is the whole difficulty — and it is exactly why the Rust tree
  * needed a `d1-proxy` Worker (`workers/d1-proxy`, issue #450): the D1 **REST**
  * query API *can* address a database by uuid at runtime, but it **cannot run an
- * atomic `batch()` and cannot return `RETURNING` rows**, which are the two
- * primitives every money-path guard in this package is built on.
+ * atomic `batch()`** — the multi-statement primitive every money-path guard in
+ * this package is built on. (It CAN return `RETURNING` rows; this header used to
+ * claim otherwise. See the `rest` entry of {@link D1_BINDING_STRATEGIES} for why
+ * that correction matters and which direction the old claim failed in.)
  *
  * ## The resolution, and why it is not a workaround
  *
@@ -55,7 +57,11 @@ export type TenantDatabaseSource =
   | "native_binding"
   /** A `[[services]]` binding to a proxy Worker that holds the native binding. */
   | "proxy_service"
-  /** The D1 HTTP query API addressed by uuid. No atomic batch, no `RETURNING`. */
+  /**
+   * The D1 HTTP query API addressed by uuid. No atomic multi-statement batch —
+   * single-statement guarded writes and their `RETURNING` rows DO work, which is
+   * exactly the half {@link NonAtomicD1RestTenantDatabaseRouter} serves.
+   */
   | "rest"
   /**
    * One shared database standing in for every tenant. DEVELOPMENT AND
@@ -651,16 +657,45 @@ export const D1_BINDING_STRATEGIES = {
    * strategy with no deploy-time coupling at all, and the reason it is
    * tempting.
    *
-   * It is **not usable for the money paths**. The REST query API executes one
-   * statement per call with no transaction spanning calls, and does not return
-   * `RETURNING` rows. So the wallet reserve's 3-statement guard would become
-   * three independent round trips with a race window between the guard and the
-   * insert — that is an oversell, not a slower reserve. The Rust tree built
-   * `d1-proxy` for exactly this reason.
+   * It is **not usable for the money paths**, but the reason is narrower than
+   * this entry used to claim, and the correction matters because the two claims
+   * lead an engineer to opposite designs.
+   *
+   * CORRECTED (`returning: false` → `true`). The REST `/query` response is
+   * `{ result: [{ results, success, meta }, …] }` — one entry per statement,
+   * and `results` is where a `RETURNING` clause's rows land. `RETURNING` is
+   * therefore NOT lost over REST; {@link D1RestDatabase} reads exactly that
+   * field, and both `packages/storage/test/d1/rest-transport.test.ts` and
+   * `apps/gateway/test/tenancy/rest.spec.ts` drive a guarded
+   * `UPDATE … RETURNING` through it and get the row back. The old `false` was
+   * inherited from the pre-`d1-proxy` Rust marshalling, which lost the rows for
+   * its own reasons. Believing it costs money in the dangerous direction: an
+   * engineer who thinks a single-statement CAS cannot report whether its guard
+   * held will hand-roll a SELECT-then-UPDATE, and THAT is the race.
+   *
+   * What is genuinely missing is `atomicBatch`, i.e. an envelope that makes the
+   * wallet reserve's 3 statements one commit whose guard cannot be raced. One
+   * statement is its own implicit transaction in SQLite, so a single guarded
+   * `UPDATE … WHERE <cas> RETURNING` is a real CAS over REST; N statements
+   * issued as N calls are not, and issuing them that way is an oversell, not a
+   * slower reserve. The Rust tree built `d1-proxy` for exactly this reason.
+   *
+   * OPEN QUESTION, deliberately NOT resolved by assertion: Cloudflare's REST
+   * docs say the `sql` field "supports multiple statements, joined by
+   * semicolons, which will be executed as a batch", and the request body also
+   * accepts a `{ batch: [{ sql, params }] }` form. If that envelope carries the
+   * SAME all-or-nothing semantics as the binding's `batch()`, then
+   * {@link NonAtomicD1RestTenantDatabaseRouter} could serve the money paths and
+   * the deploy-per-tenant ceiling would stop being an architectural constraint.
+   * It is left `false` because that is unverifiable here — the local
+   * miniflare/workerd D1 does not implement the HTTP API at all, and this
+   * project is LOCAL-FIRST — and because the failure mode of guessing wrong is
+   * an oversell. Verify against a real account before flipping it, and prove it
+   * with a rolled-back mid-batch failure, not with a doc quote.
    */
   rest: {
     atomicBatch: false,
-    returning: false,
+    returning: true,
     requiresDeployPerTenant: false,
     tenantCeiling: "unbounded",
     extraNetworkHop: true,
@@ -668,16 +703,43 @@ export const D1_BINDING_STRATEGIES = {
 } as const;
 
 /**
- * **(b) in JOB 3, unresolved half** — the D1 REST strategy, declared so the
- * seam exists and refused so it cannot be used by accident.
+ * The D1 REST strategy in its **strictest posture**: the seam exists, and
+ * `forTenant` refuses outright so REST cannot be reached by accident.
  *
- * PORT-TODO(inventory-data-billing §1.7 "per-tenant D1 binding at runtime"):
- * this is the biggest architectural open question in the port. Implementing it
- * means either (i) restricting it to read-only surfaces and keeping every
- * guarded write on a native/proxy handle, or (ii) waiting on a D1 API that
- * offers a runtime-addressed transaction. Until one of those lands, every
- * method throws — a stub that "worked" for reads and silently lost atomicity on
- * writes is the more dangerous artifact.
+ * PORT-TODO(inventory-data-billing §1.7 "per-tenant D1 binding at runtime") —
+ * PLATFORM LIMIT, KEPT AND SHARPENED.
+ *
+ * THE LIMIT (unchanged, and not closable): **Cloudflare bindings resolve at
+ * DEPLOY time.** `env` is an ordinary object handed to the handler, populated
+ * from the stanzas in `wrangler.toml` at deploy; there is no
+ * `env.openD1("<uuid>")`, no runtime bind API, and no way for a Worker to
+ * acquire a native `D1Database` for a tenant that was not declared before the
+ * deploy. That is what makes "one database per tenant" cost a redeploy per
+ * tenant, and it is the single largest architectural constraint in this port.
+ *
+ * CLOSEST BEHAVIOR IMPLEMENTED: {@link TenantDatabaseRouter} — a runtime lookup
+ * by NAME over the deploy-time-declared set, driven by the control database's
+ * `tenant_databases` registry ({@link EnvBindingTenantDatabaseRouter}), which
+ * fails closed on every tenant it cannot resolve rather than falling back to the
+ * control database. It has real importers in `apps/{gateway,control-plane,mcp}`
+ * and `test/mount-inventory.test.ts` reddens if any of them drops it.
+ *
+ * WHAT THIS MARKER USED TO SAY, AND WHY IT WAS STALE: it read "Implementing it
+ * means either (i) restricting it to read-only surfaces … or (ii) waiting on a
+ * D1 API that offers a runtime-addressed transaction. Until one of those lands,
+ * every method throws." **(i) HAS landed** —
+ * {@link NonAtomicD1RestTenantDatabaseRouter} in `./tenant-rest.ts` serves
+ * runtime-uuid-addressed reads and single-statement guarded writes over the
+ * HTTP query API, reports `supportsAtomicBatch: false`, and is mounted in
+ * `apps/gateway/src/tenancy/resolver.ts`. So "every method throws" describes
+ * THIS class only, and it is now a deliberate posture rather than the state of
+ * the port: the safest default, for a deployment that wants REST to be
+ * unreachable, next to a fail-closed one for a tenant fleet too large for the
+ * binding budget. Both are kept; see `./tenant-rest.ts`.
+ *
+ * STILL OPEN: (ii). No strategy gives runtime addressing AND a multi-statement
+ * transaction — see the `rest` entry of {@link D1_BINDING_STRATEGIES} for the
+ * one experiment that could change that and the reason it is not asserted here.
  */
 export class D1RestTenantDatabaseRouter implements TenantDatabaseRouter {
   constructor(
@@ -690,13 +752,21 @@ export class D1RestTenantDatabaseRouter implements TenantDatabaseRouter {
   }
 
   async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+    // The message names the ONE primitive that is actually missing. It used to
+    // say "neither atomic batch() nor RETURNING", which was wrong about
+    // RETURNING (the /query response carries `results` per statement) and wrong
+    // in the expensive direction: an operator who believes a single guarded
+    // `UPDATE … RETURNING` cannot report its own guard over REST reaches for a
+    // SELECT-then-UPDATE, which is the race this refusal exists to prevent.
     throw StorageError.runtime(
       [
-        `D1 REST tenant routing is not implemented (tenant ${tenantId}, account`,
-        `${this.config.accountId}): the REST query API provides neither atomic batch() nor`,
-        "RETURNING, so the wallet no-oversell guard and the workflow-budget CAS cannot be",
-        "run over it. Use EnvBindingTenantDatabaseRouter, or a proxy Worker holding native",
-        "bindings behind a service binding.",
+        `D1 REST tenant routing is refused by this router (tenant ${tenantId}, account`,
+        `${this.config.accountId}): the REST query API has no transaction envelope that makes N`,
+        "statements one commit, so the wallet no-oversell guard and the workflow-budget CAS",
+        "cannot be run over it. Single-statement guarded writes and their RETURNING rows DO",
+        "work — use NonAtomicD1RestTenantDatabaseRouter if that is the half you need, or",
+        "EnvBindingTenantDatabaseRouter / a proxy Worker holding native bindings behind a",
+        "service binding for the money paths.",
       ].join(" "),
     );
   }

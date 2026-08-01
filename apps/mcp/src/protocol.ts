@@ -85,15 +85,26 @@ export type McpProtocolDowngradeReason =
   | "http_404_unrecognized_response"
   | "http_405_unrecognized_response"
   // PORT-TODO(inventory-edge-control §MCP): PLATFORM LIMIT — the four `stdio_*`
-  // downgrade reasons are UNREACHABLE on Workers, because reaching them means
+  // downgrade reasons are UNPRODUCIBLE on Workers, because producing one means
   // having probed a child process (workerd cannot spawn one; see the stdio note
   // in `src/transport.ts`). `stdio_probe_process_exit` in particular names an
   // event that has no analogue here at all.
   //
-  // They are KEPT in the union deliberately rather than deleted: this type is
-  // the wire contract for a downgrade reason, and a FerroGate deployment that
-  // runs stdio upstreams off-CF still emits them. Narrowing the type would make
-  // this Worker unable to even parse that evidence.
+  // RE-DIAGNOSED (the previous wording claimed this Worker would be "unable to
+  // parse that evidence", which was not true — nothing here parses an inbound
+  // downgrade reason). The real reason they are KEPT rather than deleted is the
+  // OUTBOUND direction: this union is the value type of
+  // `McpServerStatus.protocolDowngradeReason` (`src/session.ts`), the operator
+  // status surface that mirrors Rust's `McpServerStatus` JSON one-for-one. A
+  // FerroGate fleet can run the Rust host and this Worker side by side, so
+  // narrowing the vocabulary here would fork the contract an operator tool
+  // reads across both. It is also the shape of durable `McpSessionState` in the
+  // `MCP_SESSION` Durable Object, which outlives any single deploy.
+  //
+  // PINNED by `test/protocol.test.ts` ("stdio downgrade evidence"): the only
+  // producer in this Worker, `httpLegacyDowngradeReason`, can never return one
+  // of these for any HTTP status, and `statusOf` reports one VERBATIM if a
+  // record ever carries it rather than normalising it away.
   | "stdio_method_not_found"
   | "stdio_unrecognized_error"
   | "stdio_probe_timeout"

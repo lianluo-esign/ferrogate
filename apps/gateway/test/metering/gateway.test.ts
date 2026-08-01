@@ -17,7 +17,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
-import type { RequestIdFactory } from "../../src/inference/index.js";
+import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
 import {
   InMemoryLedgerStore,
   InMemoryMeteringOutbox,
@@ -36,7 +36,7 @@ import {
   providerSse,
   readBody,
 } from "../inference/provider-mock.js";
-import { FIXTURE_CREDITS, pricedBook } from "./fixtures.js";
+import { FIXTURE_CREDITS, PRICED_PROVIDER, pricedBook } from "./fixtures.js";
 
 const BASE = "https://gw.test";
 const ENV = {
@@ -65,7 +65,9 @@ interface Harness {
   call(path: string, init?: RequestInit): Promise<Response>;
 }
 
-function gateway(options: { ledger?: LedgerStore } = {}): Harness {
+function gateway(
+  options: { ledger?: LedgerStore; routes?: readonly PhysicalRoute[] } = {},
+): Harness {
   const ledger = new InMemoryLedgerStore();
   const outbox = new InMemoryMeteringOutbox();
   const scheduler = new TrackingScheduler();
@@ -80,7 +82,7 @@ function gateway(options: { ledger?: LedgerStore } = {}): Harness {
   const { app } = createGatewayApp({
     modules: [
       inferenceRouteModule({
-        models: new InMemoryModelResolver([OPENAI_ROUTE]),
+        models: new InMemoryModelResolver(options.routes ?? [OPENAI_ROUTE]),
         requestIds: incrementingRequestIds(),
         usage: sink,
       }),
@@ -406,5 +408,102 @@ describe("metering through the composed gateway — fail closed", () => {
     expect((await ledger.totals()).credits).toBe(0n);
     expect(sink.stats.priceNotFound).toBe(1);
     expect(sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
+  });
+});
+
+/**
+ * The provider-attempt index, end to end.
+ *
+ * `metering/event.ts` folds `Usage.providerAttemptIndex` into the
+ * `ledgerEntryId` / `provider_attempt` key because ONE logical request can fan
+ * out into several provider dispatches (issue #213). The marker on
+ * `SINGLE_PROVIDER_ATTEMPT_INDEX` used to say nothing SET that field — that
+ * changed when the inference slice landed `dispatchWithFailover`, and this is
+ * the test that keeps the closure honest across the ownership boundary.
+ *
+ * It is a REAL gate, not a restatement: the fallback in
+ * `providerAttemptIndexFor` is `0`, and `0` is exactly what a request with no
+ * failover produces, so the only way to observe the threading is a request that
+ * was actually served by attempt 1. Drop `providerAttemptIndex: attemptIndex`
+ * from `src/inference/handlers.ts::recordUsage`'s `base` and this goes red with
+ * `provider-attempt:0` — which is the under-bill the marker warned about.
+ */
+describe("the provider-attempt index reaches the ledger key", () => {
+  // `priority` ASC decides the order, so the failing route is unambiguously
+  // attempt 0 — without it `orderCandidates` falls back to a name tiebreak and
+  // the "backup" would be tried first, making the assertion below vacuous.
+  const PRIMARY: PhysicalRoute = { ...OPENAI_ROUTE, provider: "openai-primary", priority: 0 };
+  const BACKUP: PhysicalRoute = {
+    ...OPENAI_ROUTE,
+    provider: PRICED_PROVIDER,
+    baseUrl: "https://api.openai-backup.example/v1/",
+    priority: 1,
+  };
+
+  it("keys the charge on attempt 1 when the FIRST candidate failed over", async () => {
+    provider = interceptProviderFetch((request) =>
+      request.url.includes("openai-backup")
+        ? providerJson({
+            id: "chatcmpl-1",
+            object: "chat.completion",
+            model: "gpt-4o-mini",
+            choices: [{ index: 0, message: { role: "assistant", content: "hi" } }],
+            usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+          })
+        : providerJson({ error: "overloaded" }, 503),
+    );
+    const h = gateway({ routes: [PRIMARY, BACKUP] });
+
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTHED,
+      body: chatBody(false),
+    });
+    expect(response.status).toBe(200);
+    // The ladder really did walk two candidates — otherwise "attempt 1" below
+    // would be provable without any failover having happened.
+    expect(provider.requests).toHaveLength(2);
+    await h.scheduler.idle();
+
+    expect(h.ledger.size).toBe(1);
+    const charge = h.ledger.charges[0]!;
+    // The key that partitions a retried request from its first attempt.
+    expect(charge.entry.provider_attempt).toEqual({
+      provider_attempt_id: "fg-0000000000000001:provider-attempt:1",
+      provider_attempt_index: 1,
+    });
+    expect(charge.id.endsWith(":provider-attempt:1")).toBe(true);
+    // Attributed to the provider that actually served it.
+    expect(charge.entry.provider).toBe(PRICED_PROVIDER);
+    expect(charge.credits).toBe(FIXTURE_CREDITS);
+  });
+
+  it("keys an unfailed request on attempt 0 — the negative control", async () => {
+    provider = interceptProviderFetch(() =>
+      providerJson({
+        id: "chatcmpl-1",
+        object: "chat.completion",
+        model: "gpt-4o-mini",
+        choices: [{ index: 0, message: { role: "assistant", content: "hi" } }],
+        usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+      }),
+    );
+    const h = gateway();
+
+    expect(
+      (
+        await h.call("/v1/chat/completions", {
+          method: "POST",
+          headers: AUTHED,
+          body: chatBody(false),
+        })
+      ).status,
+    ).toBe(200);
+    await h.scheduler.idle();
+
+    expect(h.ledger.charges[0]?.entry.provider_attempt).toEqual({
+      provider_attempt_id: "fg-0000000000000001:provider-attempt:0",
+      provider_attempt_index: 0,
+    });
   });
 });

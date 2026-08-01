@@ -683,6 +683,49 @@ export function decodeServerRow(row: ServerRow): McpServerConfig | undefined {
  * The result feeds `new HttpMcpUpstreams(configs)`; the catalog is per-TENANT
  * because a tenant must never see another tenant's upstreams, and the filter is
  * a bound parameter rather than a caller-supplied SQL fragment.
+ *
+ * PORT-TODO(inventory-edge-control §MCP "server catalog") — NEW marker, and NOT
+ * a platform limit. **Nothing in this repo writes a `mcp_servers` row.** The
+ * reader below, `decodeServerRow`, `resolveUpstreams` and the `MCP_SESSION`
+ * Durable Object are all implemented and tested against rows the TESTS insert;
+ * a deployed Worker reads an empty table for every tenant, so the durable MCP
+ * tool plane serves ZERO tools in production. (Verified by grep across
+ * `apps/**` and `packages/**`: the only `INSERT INTO mcp_servers` is in
+ * `apps/mcp/test/`.) This is the repo's recurring defect class one level up —
+ * the code is mounted, the DATA path into it is not.
+ *
+ * The operator-facing surface that ought to feed it is `apps/control-plane`'s
+ * contract group `admin_mcp_server` (`GET/POST/PUT/PATCH/DELETE
+ * /admin/v1/mcp-servers`, `routes/admin_mcp_server.ts`), which stores each
+ * server as a `control_plane_resources` document of kind `mcp-servers` in the
+ * CONTROL database — the very database this Worker binds as `env.DB`.
+ *
+ * TO CLOSE IT, from inside `apps/mcp` alone and with NO new binding, mirroring
+ * exactly what `src/approvals.ts` did for the approval queue:
+ *
+ *  1. read `control_plane_resources WHERE resource_kind = 'mcp-servers' AND
+ *     json_extract(document_json, '$.tenant_id') = ?`;
+ *  2. decode each document with the SAME fail-closed rules as
+ *     {@link decodeServerRow} — unknown `auth_type`/`transport` REFUSES the row
+ *     rather than downgrading it, and an absent `tools_to_execute` is an EMPTY
+ *     allowlist (deny-by-default), never "all tools";
+ *  3. resolve the vocabulary drift that exists TODAY and is pinned below: the
+ *     admin schema's transport enum is `http | sse | stdio`
+ *     (`routes/admin_mcp_server.ts`) while this app's is
+ *     `streamable_http | sse | stdio`, so `http` must be mapped explicitly
+ *     (both are network HTTP; it is `stdio` that must never be coerced);
+ *  4. decide the SCOPE rule, which is the one real contract decision and the
+ *     reason this is recorded rather than guessed here: an admin document with
+ *     a null `tenant_id` is PLATFORM-scoped, and serving it to every tenant
+ *     would hand every tenant an upstream by default. Deny-by-default says
+ *     tenant-scoped documents only; that is a product call, not a port.
+ *
+ * CONSEQUENCE while it stands, and it is fail-CLOSED rather than fail-open:
+ * `resolveUpstreams` hands the request an `HttpMcpUpstreams` over an EMPTY
+ * catalog, so `tools/list` is empty and every `tools/call` is refused. It never
+ * falls back to the in-memory dev host for an authenticated tenant, and it
+ * never widens to another tenant's rows. `test/server-catalog-gap.test.ts`
+ * pins that, so a "fix" that makes the empty case permissive turns it red.
  */
 export async function loadServerCatalog(
   db: D1Database,

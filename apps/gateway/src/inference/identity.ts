@@ -73,21 +73,39 @@ import type { Caller } from "./ports.js";
  * legs — so the day a denylist column lands the only change is one more line
  * here. Absent means "no denylist", which is the Rust reading of an empty set.
  *
- * PORT-TODO(`auth.rs:146` `can_use_provider`): the sibling PROVIDER allowlist is
- * still unenforced. `AuthContext.allowedProviders` is loaded off the same row
- * and there is nowhere in the inference path that consults it, because
- * `can_use_provider` gates a PHYSICAL ROUTE and this function only builds the
- * caller. The right home is `candidates.ts::routeExclusionReasons` — a new
- * `provider_not_allowed` exclusion code beside `region_not_allowed`, since both
- * are tenant-policy refusals and `routingRejectionFor` already renders that
- * class as 403 rather than 400. Left undone rather than half-done: adding the
- * code without the eligibility leg would put a value in the vocabulary that
- * nothing can emit, and adding the leg needs `Caller` to carry the list, which
- * changes the shape every injected-caller test in the suite builds.
+ * ## The per-key PROVIDER allowlist (`auth.rs:146` `can_use_provider` — now wired)
+ *
+ * `AuthContext.allowedProviders` comes off the same `api_keys` row
+ * (`allowed_providers_json`) and had NO reader anywhere in the inference path,
+ * which is the same two-hop dead-seam the model allowlist had: `keys/store.ts`
+ * parsed it, `keys/resolver.ts` forwarded it, and every one of their tests
+ * stayed green while a key restricted to `openai` could dispatch to any
+ * provider in the catalog. It is now copied onto {@link Caller} here and read by
+ * `ports.ts::callerCanUseProvider` inside `reliability.ts::dispatchWithFailover`.
+ *
+ * The marker that stood here proposed putting the gate in
+ * `candidates.ts::routeExclusionReasons`, as a `provider_not_allowed` exclusion
+ * code beside `region_not_allowed`. **That proposal was wrong and is recorded
+ * here so it is not re-derived.** An EXCLUSION removes the route from the
+ * eligible list and the ladder then falls through to the next candidate, so a
+ * key allowed only `openai` calling a model whose primary is `anthropic` and
+ * whose fallback is `openai` would be SERVED. Rust refuses it: `chat.rs:318`
+ * (and the identical arms in `messages.rs:302`, `embeddings.rs:252`,
+ * `images.rs:269`) checks the SELECTED candidate inside the `'routes:` loop and
+ * answers `403 provider_not_allowed` with `return Ok(())` — no `continue`. The
+ * gate therefore lives in the ladder, at the exact position and with the exact
+ * terminality Rust gives it.
+ *
+ * `deniedProviders` is not forwarded, for the same reason `deniedModels` is not:
+ * Rust carries `denied_providers` as its own `HashSet`, `AuthContext` in
+ * `src/ports.ts` has no such field, and the row has no denylist COLUMN.
+ * `callerCanUseProvider` implements the full deny-wins-then-allowlist predicate
+ * and is tested on both legs, so the day the column lands this is one more line.
  */
 export function callerFromAuth(auth: AuthContext): Caller {
   const projectId = auth.tenancy.projectId;
   const allowedModels = auth.allowedModels;
+  const allowedProviders = auth.allowedProviders;
   return {
     // `callerScope` is the Rust `AuthContext::caller_scope`: platform-operator
     // ONLY when the credential declared it, and an unclassified credential is
@@ -100,6 +118,11 @@ export function callerFromAuth(auth: AuthContext): Caller {
     // direction on purpose: a credential source with no allowlist column must
     // never read as "this key may use nothing".
     ...(allowedModels !== undefined && allowedModels.length > 0 ? { allowedModels } : {}),
+    // Same rule, same direction: an empty `allowed_providers` is "no allowlist"
+    // in Rust (`allowed_providers.is_empty() || ...`), never "no provider".
+    ...(allowedProviders !== undefined && allowedProviders.length > 0
+      ? { allowedProviders }
+      : {}),
   };
 }
 

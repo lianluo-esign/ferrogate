@@ -138,6 +138,26 @@ async function waitForCollected(count: number): Promise<void> {
   );
 }
 
+/**
+ * Wait for `count` batches and then keep waiting, to prove no MORE arrive.
+ *
+ * `waitForCollected` is a `>=` check, so it cannot tell 2 batches from 4. This
+ * one can, and that is what makes the "mounted twice, emits once" case below a
+ * real assertion instead of a restatement of the comment.
+ */
+async function settleAtExactly(count: number): Promise<void> {
+  await waitForCollected(count);
+  for (let i = 0; i < 60; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  if (collected.length !== count) {
+    throw new Error(
+      `expected exactly ${count} OTLP request(s); the deployed Worker emitted ${collected.length} ` +
+        `(${collected.map((entry) => entry.path).join(", ")})`,
+    );
+  }
+}
+
 let restore: (() => void) | undefined;
 
 afterEach(() => {
@@ -207,6 +227,48 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
     expect(attributes["route"]).toBe("listTools");
     expect(attributes["path"]).toBe("/v1/tools");
     expect(attributes["status_code"]).toBe("501");
+  });
+
+  it("REDUNDANCY: two mounts on one inference request emit EXACTLY one batch pair", async () => {
+    // The other half of the mount story, and the reason it is asserted rather
+    // than asserted-about-in-a-comment.
+    //
+    // `/v1/chat/completions` passes through BOTH emitters — the inference route
+    // module's own `emitRequestTelemetry` and `src/telemetry/middleware.ts`.
+    // The middleware's docs state that this is safe because the emitter
+    // de-duplicates on the inbound `Request` object AND because both publish the
+    // same `x-request-id`. Neither claim was checked end to end: every other
+    // case here uses `waitForCollected`, a `>=` check that a doubled emission
+    // (4 batches) satisfies just as well as a de-duplicated one (2).
+    //
+    // So this case pins the redundancy itself. It goes RED if de-duplication
+    // breaks, and it goes RED if the two emissions ever start disagreeing about
+    // the request id — because a different id is a different de-dup outcome and
+    // a second pair lands. That is the ONLY way the route-module emission can
+    // become individually observable again, and this is the test that would say
+    // so instead of it being rediscovered.
+    restore = stubUpstream();
+    const response = await chat();
+    expect(response.status).toBe(200);
+    const servedRequestId = response.headers.get("x-request-id");
+
+    await settleAtExactly(2);
+    expect(collected.map((entry) => entry.path)).toEqual(["/v1/traces", "/v1/metrics"]);
+
+    const traces = collected[0]?.body as {
+      resourceSpans: [
+        { scopeSpans: [{ spans: { attributes: { key: string; value: { stringValue: string } }[] }[] }] },
+      ];
+    };
+    const spans = traces.resourceSpans[0].scopeSpans[0].spans;
+    // ONE span, not two: a single de-duplicated emission, not two emissions that
+    // happened to be batched together.
+    expect(spans).toHaveLength(1);
+    const attributes = Object.fromEntries(
+      spans[0]!.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]),
+    );
+    expect(attributes["request_id"]).toBe(servedRequestId);
+    expect(attributes["route"]).toBe("createChatCompletion");
   });
 
   it("the span names the operation the deployed router matched", async () => {

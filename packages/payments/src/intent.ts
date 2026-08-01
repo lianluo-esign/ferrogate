@@ -66,7 +66,14 @@ export type PaymentIntentErrorKind =
   | "invalid_body_hash"
   | "invalid_challenge_hash"
   | "timeout_out_of_range"
-  | "invalid_identity";
+  | "invalid_identity"
+  /**
+   * TS-ONLY, with no Rust counterpart BY CONSTRUCTION: Rust's `atomic_amount`
+   * is a `u64` and serde writes every one of its values exactly, so there is
+   * nothing there to refuse. In TS the wire field is a JSON number, and past
+   * 2^53 the render would have to round. See {@link PaymentIntent.toWire}.
+   */
+  | "amount_unrepresentable";
 
 function dbg(s: string): string {
   return JSON.stringify(s);
@@ -108,6 +115,15 @@ export class PaymentIntentError extends Error {
   }
   static zeroAmount(): PaymentIntentError {
     return new PaymentIntentError("zero_amount", "payment intent atomic amount is zero");
+  }
+  static amountUnrepresentable(value: bigint): PaymentIntentError {
+    return new PaymentIntentError(
+      "amount_unrepresentable",
+      `atomic amount ${value} cannot be written to the wire as a JSON number ` +
+        `without losing precision (> ${Number.MAX_SAFE_INTEGER}); refusing rather ` +
+        `than rounding an on-chain amount`,
+      "atomic_amount",
+    );
   }
   static invalidResourceUrl(value: string): PaymentIntentError {
     return new PaymentIntentError(
@@ -317,23 +333,37 @@ const PaymentIntentWireSchema = z.object({
   scheme: z.string(),
   network_caip2: z.string(),
   mint: z.string(),
-  // PORT-TODO(inventory §3.2 "intent") — LANGUAGE LIMIT, NOT CLOSED, and NOT
-  // closable at this layer.
+  // PORT-TODO(inventory §3.2 "intent") — LANGUAGE LIMIT, NARROWED TO THE
+  // INBOUND HALF, STILL NOT CLOSED. The OUTBOUND half IS now closed.
   //
-  // The exact limitation: **the precision is already gone before this schema
-  // runs.** `atomic_amount` is a `u64` in Rust serde — a bare JSON integer that
-  // `serde_json` parses exactly. `fromWire` takes an ALREADY-PARSED `unknown`,
-  // i.e. the caller has run `JSON.parse`, and `JSON.parse` materialises every
-  // number as an IEEE-754 double. `18446744073709551615` has become
-  // `18446744073709552000` by the time it reaches this line; no validator here
-  // can recover the original digits. Widening the type to `bigint` would move
-  // the corruption, not fix it.
+  // The exact limitation, and it is INBOUND-ONLY: **the precision is already
+  // gone before this schema runs.** `atomic_amount` is a `u64` in Rust serde —
+  // a bare JSON integer that `serde_json` parses exactly from the TEXT.
+  // `fromWire` takes an ALREADY-PARSED `unknown`, i.e. the caller has run
+  // `JSON.parse`, and `JSON.parse` materialises every number as an IEEE-754
+  // double. `18446744073709551615` has become `18446744073709552000` by the
+  // time it reaches this line, and — the reason no validator here can help —
+  // the rounded value is still a nonnegative integer, so it satisfies every
+  // constraint this schema can express. Widening the field type to `bigint`
+  // would move the corruption, not fix it.
   //
-  // A faithful fix has to happen at the JSON TEXT boundary — a bigint-aware
-  // reviver, or the field carried as a decimal string — which changes the
-  // signature of `fromWire`/`toWire` and the on-the-wire shape shared with the
-  // Rust producer. That is a wire-contract change, and x402/Solana is
-  // DEPRIORITIZED per project directive, so it is deliberately not made here.
+  // A faithful INBOUND fix has to happen at the JSON TEXT boundary — a
+  // bigint-aware reviver, or the field carried as a decimal string — which
+  // changes the signature of `fromWire`/`toWire` and the on-the-wire shape
+  // shared with the Rust producer. That is a wire-contract change, and
+  // x402/Solana is DEPRIORITIZED per project directive, so it is deliberately
+  // not made here.
+  //
+  // CLOSED IN THIS SLICE — the OUTBOUND half, which needed no contract change:
+  // `toWire()` previously wrote `Number(this.#atomicAmount)` and rounded past
+  // 2^53 in silence. It now throws `amount_unrepresentable` instead. That
+  // rounding was not cosmetic: `intentHashHex()` digests the exact bigint via
+  // `#atomicAmount.toString()`, so a rounded wire amount makes a verifier that
+  // re-derives the hash from the wire form disagree with the signer, and
+  // `equals()` compares `JSON.stringify(toWire())`, so two DIFFERENT amounts
+  // that round to one double compared as the SAME intent. Rust needs no such
+  // guard (a `u64` always serialises exactly), which is why
+  // `amount_unrepresentable` is a TS-only error kind.
   //
   // What holds today, and is pinned in `test/intent.test.ts`: the in-memory
   // domain type is `bigint` end to end (`PaymentIntent.atomicAmount()`,
@@ -619,8 +649,22 @@ export class PaymentIntent {
     return null;
   }
 
-  /** The JSON-serializable wire (serde) form. */
+  /**
+   * The JSON-serializable wire (serde) form.
+   *
+   * @throws {PaymentIntentError} `amount_unrepresentable` when the `u64` amount
+   *   is past 2^53. The OUTBOUND half of the `atomic_amount` marker: this is the
+   *   direction TS can still defend, and rounding here would be silent AND
+   *   self-contradictory — `intentHashHex()` digests `#atomicAmount.toString()`
+   *   (the exact bigint), so a rounded wire amount would make a verifier that
+   *   re-derives the hash from the wire form compute a DIFFERENT hash than the
+   *   signer, and `equals()` (which compares `JSON.stringify(toWire())`) would
+   *   report two different amounts as the same intent.
+   */
   toWire(): PaymentIntentWire {
+    if (this.#atomicAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw PaymentIntentError.amountUnrepresentable(this.#atomicAmount);
+    }
     return {
       x402_version: this.#x402Version,
       scheme: this.#scheme,

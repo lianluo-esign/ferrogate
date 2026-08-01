@@ -52,7 +52,7 @@ import {
   type WorkerIdentityFailure,
   resolveDeps,
 } from "../ports.js";
-import { readSealedFrame } from "../workers/frame.js";
+import { frameIdentityMismatch, readSealedFrame } from "../workers/frame.js";
 import { HttpError } from "./errors.js";
 
 // ---------------------------------------------------------------------------
@@ -314,13 +314,13 @@ export function workerIdentityError(failure: WorkerIdentityFailure): HttpError {
  * clear under the `mutual_tls` marker path. Both carry the identity envelope
  * this port reads.
  *
- * The AEAD frame IS implemented — `workers/frame.ts`, AES-256-GCM over the same
- * associated data, opened by the registry so the transport secret never leaves
- * it. A body carrying a `sealed` object is unsealed here and the PLAINTEXT is
- * what the handlers read; a cleartext body stays supported because Rust
- * supports it too on the `mutual_tls` marker path. The residual divergence from
- * Rust's XChaCha20-Poly1305 wire format, and why workerd forces it, is recorded
- * on {@link sealWorkerFrame}'s module.
+ * The AEAD frame IS implemented — `workers/frame.ts` — in BOTH shapes, and both
+ * are unsealed here before anything reads an identity: Rust's own
+ * XChaCha20-Poly1305 `encrypted_payload` document (so an unmodified Rust worker
+ * binary interoperates) and this port's `{sealed: …}` AES-256-GCM wrapper. The
+ * registry does the opening so the transport secret never leaves it, and the
+ * PLAINTEXT is what the handlers read. A cleartext body stays supported because
+ * Rust supports it too on the `mutual_tls` marker path.
  *
  * Note what the frame does and does not buy: the *credential* check
  * (`token_id` + constant-time `token_secret`) is what gates admission either
@@ -495,6 +495,23 @@ async function internalAuth(c: Context<AgentRuntimeEnv>): Promise<void> {
   }
 
   const envelope = requireIdentityEnvelope(document);
+  if (sealed !== undefined) {
+    // Rust `decode_json` → `validate_identity`: the CLEARTEXT header selected
+    // the registry row whose secret opened the frame, so the enclosed identity
+    // must be that same worker. Without this, a frame could be attributed to
+    // one worker and authorized by another's key schedule.
+    const mismatch = frameIdentityMismatch(
+      sealed.header,
+      envelope.identity as unknown as Record<string, unknown>,
+    );
+    if (mismatch !== null) {
+      throw new HttpError(
+        400,
+        "invalid_self_hosted_worker_transport",
+        `self-hosted worker encrypted frame identity does not match enclosed request: ${mismatch}`,
+      );
+    }
+  }
   // Rust security fix #113 (`validate_worker_identity`): identity expiry is
   // judged against the SERVER's trusted clock, so `observed_at_unix` is
   // overwritten UNCONDITIONALLY here. Honouring the caller's value would let a

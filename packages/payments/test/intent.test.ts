@@ -15,6 +15,17 @@ import { CAIP2_DEVNET, FEE_PAYER, OTHER_MERCHANT, PAY_TO, RESOURCE, USDC_DEVNET,
 const enc = new TextEncoder();
 
 function selected(atomic: number, recipient: string): SelectedPayment {
+  return selectedBig(BigInt(atomic), recipient);
+}
+
+/**
+ * The same builder over a `bigint`, so a `u64` amount past 2^53 can be
+ * constructed at all: `selected(Number(...))` would have rounded the amount in
+ * the TEST before the code under test ever saw it, which is exactly the vacuity
+ * the outbound guard exists to prevent. The amount travels through the
+ * `PAYMENT-REQUIRED` header as a DECIMAL STRING, so nothing here loses digits.
+ */
+function selectedBig(atomic: bigint, recipient: string): SelectedPayment {
   const doc = {
     x402Version: 2,
     resource: { url: RESOURCE, mimeType: "application/json" },
@@ -72,6 +83,73 @@ describe("PORT-TODO PIN — the money domain is bigint, the serde hop is not", (
     expect(typeof round.atomicAmount()).toBe("bigint");
     expect(round.atomicAmount()).toBe(2500n);
     expect(round.intentHashHex()).toBe(built.intentHashHex());
+  });
+
+  /**
+   * OUTBOUND HALF — CLOSED. `toWire()` used to write `Number(#atomicAmount)`
+   * and round in silence past 2^53. These fail if that bare cast comes back.
+   *
+   * The third assertion is why this is a correctness gate and not cosmetics:
+   * `intentHashHex()` digests the EXACT bigint, so a rounded wire amount makes
+   * a verifier that re-derives the hash from the wire form disagree with the
+   * signer, and `equals()` (JSON of `toWire()`) reports two DIFFERENT amounts
+   * as one intent.
+   */
+  test("toWire REFUSES an amount past 2^53 instead of rounding it", () => {
+    const over = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    const built = PaymentIntent.fromSelected(
+      selectedBig(over, PAY_TO),
+      "GET",
+      RESOURCE,
+      new Uint8Array(0),
+      identity(),
+    );
+    // The domain accepted it — a u64 amount is legal on chain…
+    expect(built.atomicAmount()).toBe(over);
+    // …the WIRE render is what refuses.
+    try {
+      built.toWire();
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PaymentIntentError);
+      expect((error as PaymentIntentError).kind).toBe("amount_unrepresentable");
+      expect((error as PaymentIntentError).field).toBe("atomic_amount");
+    }
+    // The exact boundary itself must still render.
+    const edge = PaymentIntent.fromSelected(
+      selectedBig(BigInt(Number.MAX_SAFE_INTEGER), PAY_TO),
+      "GET",
+      RESOURCE,
+      new Uint8Array(0),
+      identity(),
+    );
+    expect(edge.toWire().atomic_amount).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test("the refusal is what stops a rounded wire amount from breaking the hash binding", () => {
+    const a = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    const b = BigInt(Number.MAX_SAFE_INTEGER) + 2n;
+    // Two DIFFERENT on-chain amounts collapse onto ONE double…
+    expect(a).not.toBe(b);
+    expect(Number(a)).toBe(Number(b));
+    const mk = (amount: bigint) =>
+      PaymentIntent.fromSelected(
+        selectedBig(amount, PAY_TO),
+        "GET",
+        RESOURCE,
+        new Uint8Array(0),
+        identity(),
+      );
+    // …but the intent hash, digested from the exact bigint, does NOT.
+    expect(mk(a).intentHashHex()).not.toBe(mk(b).intentHashHex());
+    // So emitting the collapsed number would sign one amount and publish
+    // another. Both renders refuse.
+    for (const amount of [a, b]) {
+      expect(() => mk(amount).toWire()).toThrow(/amount_unrepresentable|losing precision/);
+    }
+    // …and `equals()`, which compares JSON of `toWire()`, cannot report them
+    // as the same intent, because it cannot produce that JSON at all.
+    expect(() => mk(a).equals(mk(b))).toThrow();
   });
 
   test("the number-domain hop is exactly the serde field, and it is exact below 2^53", () => {
