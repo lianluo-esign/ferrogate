@@ -283,9 +283,7 @@ describe("composite-key resource: /admin/v1/quota-policies/{scope_type}/{scope_i
  * to a revision that IS enforceable; every assertion in these cases is
  * unchanged.
  */
-function guardrailRevisionBody(
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+function guardrailRevisionBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     name: "crud fixture",
     checks: [
@@ -599,14 +597,28 @@ describe("cross-tenant isolation is a property of the store, not of each handler
 describe("operator actions with no resource behind them", () => {
   it("reads and sets the drain state", async () => {
     const initial = await SELF.fetch(`${BASE}/admin/v1/drain`, { headers: bearer(KEY) });
-    expect(await initial.json()).toEqual({ object: "drain", draining: false, reason: null });
+    expect(await initial.json()).toEqual({
+      object: "drain",
+      draining: false,
+      reason: null,
+      accepting_new_requests: true,
+    });
 
     const set = await SELF.fetch(
       `${BASE}/admin/v1/drain`,
       jsonRequest(KEY, "POST", { draining: true, reason: "deploy" }),
     );
     expect(set.status).toBe(200);
-    expect(await set.json()).toEqual({ object: "drain", draining: true, reason: "deploy" });
+    // `propagation` is the honest statement FC-1 forced: the fleet reads a
+    // durable row, so enforcement lands on each Worker's NEXT request rather
+    // than instantly as Rust's in-process `AtomicBool` did.
+    expect(await set.json()).toEqual({
+      object: "drain",
+      draining: true,
+      reason: "deploy",
+      accepting_new_requests: false,
+      propagation: "on_next_request_per_worker",
+    });
 
     const after = await SELF.fetch(`${BASE}/admin/v1/drain`, { headers: bearer(KEY) });
     expect((await after.json()) as { draining: boolean }).toMatchObject({ draining: true });

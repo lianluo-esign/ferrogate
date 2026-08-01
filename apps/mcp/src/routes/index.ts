@@ -33,6 +33,13 @@ import {
   SHARED_OPERATION_IDS,
   operationById,
 } from "../contract.js";
+import {
+  DRAIN_UNAVAILABLE_CODE,
+  type DrainBindings,
+  type DrainState,
+  NOT_DRAINING,
+  resolveDrain,
+} from "../drain.js";
 import { errorEnvelope, releaseAdmissionHolds, requestIdentity, respondError } from "../http.js";
 import { type McpEnv, portsBound } from "../ports.js";
 
@@ -197,6 +204,11 @@ export interface ReadinessReport {
   version: string;
   runtime: string;
   protocol: string;
+  /** Which conjunct failed. Same vocabulary as `apps/gateway` and `apps/agent-runtime`. */
+  readiness_reason: string;
+  /** The operator drain (`runtime-state/drain`), as of THIS request. */
+  draining: boolean;
+  accepting_new_requests: boolean;
   dependencies: { ready: boolean };
 }
 
@@ -219,8 +231,46 @@ export function healthReport(): HealthReport {
  * without it answers `503 mcp_auth_unavailable` on every authenticated surface,
  * so reporting `ready` there would make the probe lie to the load balancer.
  */
-export function readinessReport(env: McpEnv): { status: number; body: ReadinessReport } {
-  const ready = portsBound(env);
+export function readinessReport(
+  env: McpEnv,
+  operatorDrain: DrainState = NOT_DRAINING,
+): { status: number; body: ReadinessReport } {
+  // TWO conjuncts, exactly as `apps/gateway`'s `clusterStatus` ANDs them:
+  // `state_ready` (this Worker: the port bundle is bound) and `accepting` (the
+  // operator has not drained this deployment). Before FC-1 only the first
+  // existed here, so `POST /admin/v1/drain` left this probe answering `ready`
+  // from a Worker that would refuse every `tools/call` it was then sent — the
+  // "probe lies to the load balancer" failure this decision table exists for.
+  const dependenciesReady = portsBound(env);
+  // "The operator drained this deployment" and "the drain document could not be
+  // READ" are DIFFERENT FACTS and only one of them is a drain. Both refuse —
+  // fail-closed is non-negotiable, a probe that reports ready when its control
+  // could not be evaluated is the bypass again — but reporting `operator_drain`
+  // when `GET /admin/v1/drain` says the fleet is NOT draining is the
+  // incident-time lie `src/drain.ts` refused to ship on the DATA plane, and it
+  // must not be shipped on the PROBE either. `drainRefusal` already splits the
+  // two codes; this splits the same two reasons.
+  //
+  // Found by the wave-22 INTEGRATE boot proof, not by any suite: a fresh
+  // `wrangler dev --local` answered `503 not_ready` with
+  // `readiness_reason: "operator_drain"`, `draining: true`, on a deployment
+  // nobody had drained. The vitest harness migrates `DB`, so the arm was never
+  // reached there.
+  const unavailable = operatorDrain.source === "unavailable";
+  const draining = operatorDrain.draining && !unavailable;
+  const ready = dependenciesReady && !draining && !unavailable;
+  // Drain outranks dependencies in the REASON, as `clusterStatus` orders it: an
+  // operator who drained a node wants to be told that, not told about the
+  // dependencies a drained node was never going to serve from. An unevaluable
+  // drain outranks both, because it is the reason the other two cannot be
+  // trusted.
+  const readinessReason = unavailable
+    ? DRAIN_UNAVAILABLE_CODE
+    : draining
+      ? "operator_drain"
+      : dependenciesReady
+        ? "state_loaded"
+        : "revision_missing";
   return {
     status: ready ? 200 : 503,
     body: {
@@ -229,7 +279,15 @@ export function readinessReport(env: McpEnv): { status: number; body: ReadinessR
       version: SERVICE_VERSION,
       runtime: RUNTIME_NAME,
       protocol: MCP_PROTOCOL_REVISION,
-      dependencies: { ready },
+      readiness_reason: readinessReason,
+      draining,
+      // NOT `!draining`: an unevaluable drain is not a drain, and it is still a
+      // refusal. Reporting `accepting_new_requests: true` alongside
+      // `status: "not_ready"` would be self-contradictory in one document — a
+      // load balancer reading the field and an operator reading the status
+      // would act on opposite answers.
+      accepting_new_requests: !draining && !unavailable,
+      dependencies: { ready: dependenciesReady },
     },
   };
 }
@@ -238,8 +296,12 @@ function healthzHandler(c: Context<McpAppEnv>): Response {
   return c.json(healthReport());
 }
 
-function readyzHandler(c: Context<McpAppEnv>): Response {
-  const report = readinessReport(c.env);
+async function readyzHandler(c: Context<McpAppEnv>): Promise<Response> {
+  // The durable drain read happens HERE, on the readiness probe, and NOT on
+  // `/healthz`: liveness must have no backend dependency, or a control-database
+  // blip would make an orchestrator RESTART every node in the fleet — which
+  // destroys exactly the in-flight work a drain exists to let finish.
+  const report = readinessReport(c.env, await resolveDrain(c.env as DrainBindings));
   return c.json(report.body, report.status as 200);
 }
 

@@ -173,6 +173,25 @@ new_sqlite_classes = ["FerroGateMcpSession"]
 binding = "DB"
 database_name = "ferrogate-control"
 database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+# `migrations_dir` — ADDED WAVE 22, and it was a real hole, not tidiness.
+#
+# `apps/gateway` declares it for the same database (as `CONTROL_DB`) and
+# `apps/control-plane` declares it as `DB`; this stanza did not, so:
+#
+#  * `wrangler dev --local` provisioned an EMPTY local D1 with no schema. Every
+#    control this Worker resolves durably — the drain document, the tenancy
+#    lifecycle chain, the guardrail policy binding, the server catalog — then
+#    failed its lookup and this Worker ran, correctly, in its fail-CLOSED
+#    posture on a developer's machine. The wave-22 INTEGRATE boot proof caught
+#    it as `/readyz 503 drain_state_unavailable`;
+#  * `wrangler d1 migrations apply DB` had nowhere to read the schema FROM, so
+#    `CLOUD-VERIFICATION.md` §3's migration step had no mcp entry and could not
+#    have had one.
+#
+# It points at the CONTROL schema because `database_name` says so and
+# `src/ports.ts` says so ("`env.DB` already IS the control database"). Per-tenant
+# databases are resolved at runtime through `tenant_databases`, never bound here.
+migrations_dir = "../../sql/d1-ts/control"
 
 # ===========================================================================
 # NOT DECLARED — and why

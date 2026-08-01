@@ -278,6 +278,43 @@ export type {
   PolicyStreamingMode,
 } from "./policy.js";
 
+// The DURABLE activated-revision binding (FLEET-CONSISTENCY FC-3).
+//
+// `apps/mcp` and `apps/agent-runtime` screen from the SAME
+// `guardrail_policy_revisions` + `guardrail_policy_bindings` rows the gateway
+// merges. It lives in this package because no app may import another app's
+// module graph, so "every screening Worker reads the policy the same way" is
+// only expressible as a library — see `./binding.ts`.
+export {
+  GUARDRAIL_BINDING_LIST_SQL,
+  GUARDRAIL_BINDING_TABLE,
+  GUARDRAIL_REVISION_LIST_ALL_SQL,
+  GUARDRAIL_REVISION_TABLE,
+  GUARDRAIL_BINDING_POINTER_SQL,
+  GuardrailDetectorBuildError,
+  activatedGuardrailPolicies,
+  activatedPolicyFingerprint,
+  buildGuardrailDetector,
+  compileActivatedPolicies,
+  forgetActivatedGuardrailPolicies,
+  guardrailSecretsFromEnv,
+  loadActivatedPolicyPointers,
+  loadActivatedPolicyRevisions,
+  screenGuardrailPolicies,
+} from "./binding.js";
+export type {
+  ActivatedPolicyPointer,
+  GuardrailPolicySql,
+  CompiledGuardrailCheck,
+  CompiledGuardrailPolicy,
+  GuardrailDetectorBuildContext,
+  GuardrailPolicyDatabase,
+  GuardrailPolicyStatement,
+  GuardrailScreeningDecision,
+  GuardrailScreeningRequest,
+  GuardrailSecretResolver,
+} from "./binding.js";
+
 // Conformance + evaluation harnesses.
 export {
   MockAdapter,

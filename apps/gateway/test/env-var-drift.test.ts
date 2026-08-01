@@ -515,6 +515,58 @@ describe("every name wrangler.toml declares is read by the source", () => {
     expect(dead, "a binding is declared but nothing in src/ reads it").toEqual([]);
   });
 
+  it("FC-1's durable drain needed NO new binding — wave 22 is wrangler-INERT", () => {
+    // Stated as an assertion rather than as prose in a commit message, because
+    // "we added a binding and forgot the deploy config" is a failure mode that
+    // only appears in production. The gateway's drain now reads the durable
+    // `runtime-state/drain` document, and it does so through `CONTROL_DB` —
+    // a binding this Worker ALREADY declared and already reads for RBAC, the
+    // guardrail policy store and the agent-upstream registry.
+    //
+    // So there is nothing new to place in `CLOUD-VERIFICATION.md`: no stanza,
+    // no placeholder id, no `[[migrations]]` tag, no `src/worker.ts` re-export.
+    // If a future change moves that read onto a NEW binding, the two halves
+    // below disagree and this is red before the deploy is attempted.
+    expect(DECLARED.bindings.get("CONTROL_DB"), "CONTROL_DB stanza in wrangler.toml").toBe(
+      "[[d1_databases]]",
+    );
+    const readiness = [...CODE.entries()].find(([path]) => path.endsWith("routes/readiness.ts"));
+    expect(readiness, "src/routes/readiness.ts").toBeDefined();
+    const source = (readiness as [string, string])[1];
+    expect(source, "the drain resolver must read the DECLARED control binding").toMatch(
+      /CONTROL_DB/,
+    );
+    expect(source).toContain("control_plane_resources");
+    // And the whole read set stays inside what wrangler.toml knows about: no
+    // binding name appears in the drain modules that the deploy config does not
+    // declare (or explicitly except).
+    const drainReads = new Set<string>();
+    for (const path of ["routes/readiness.ts", "routes/drain.ts"]) {
+      const entry = [...CODE.entries()].find(([p]) => p.endsWith(path));
+      expect(entry, path).toBeDefined();
+      for (const [, name] of (entry as [string, string])[1].matchAll(
+        /\benv\??\.([A-Z][A-Z0-9_]{2,})\b/g,
+      )) {
+        drainReads.add(name as string);
+      }
+    }
+    // Non-vacuity first: an empty set would make the loop below assert nothing,
+    // which is the shape this repository keeps finding. BOTH drain sources must
+    // be visible here — the durable binding and the deploy-time override.
+    expect([...drainReads].sort(), "the drain's env read set").toEqual([
+      "CONTROL_DB",
+      "GATEWAY_DRAIN",
+    ]);
+    for (const name of drainReads) {
+      expect(
+        DECLARED.bindings.has(name) ||
+          DECLARED.vars.has(name) ||
+          (READ_INDIRECTLY as readonly string[]).includes(name),
+        `the drain reads env.${name}, which wrangler.toml does not declare`,
+      ).toBe(true);
+    }
+  });
+
   it("still finds a real reference for each indirectly-read name", () => {
     // Not vacuous: the loop proves nothing on an empty list.
     expect(READ_INDIRECTLY.length).toBeGreaterThan(0);

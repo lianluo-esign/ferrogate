@@ -23,6 +23,11 @@ import {
   envelopeFromText,
   flattenedText,
 } from "@ferrogate/guardrails";
+import {
+  type LifecycleStatus,
+  lifecycleStatusAllowsRequests,
+  parseLifecycleStatus,
+} from "@ferrogate/storage";
 
 import {
   type AdmissionBindings,
@@ -33,6 +38,7 @@ import {
 import { agentUpstreamPortFromEnv } from "./agents/registry.js";
 import { normalizedCapabilities } from "./capabilities.js";
 import { timingSafeEqualStrings } from "./crypto.js";
+import { durableA2aGuardrailPort } from "./guardrails.js";
 import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
 import { type WorkflowCatalogPort, workflowCatalogFromEnv } from "./runs/workflow.js";
 import { type FrameOpenResult, type SealedWorkerFrame, openWorkerFrame } from "./workers/frame.js";
@@ -420,6 +426,17 @@ export interface GuardrailDenial {
   /** The detector that matched — evidence, never the matched text itself. */
   readonly detector: string;
   readonly stage: GuardrailStage;
+  /**
+   * The refusal code the ROUTE reports, when the matching authority named one.
+   *
+   * Present only for a DURABLE activated revision (`src/guardrails.ts`), where
+   * it is the operator's own `PolicyAction.code`. That is what lets one
+   * activation refuse with the SAME code on every Worker that enforces it
+   * (`docs/rewrite/FLEET-CONSISTENCY.md` FC-3) instead of each Worker inventing
+   * a private one. Absent for the var-driven detector, whose refusals keep the
+   * route's historical `guardrail_blocked`.
+   */
+  readonly code?: string | undefined;
   readonly message: string;
 }
 
@@ -626,6 +643,281 @@ export interface DevApiKey {
    * column). `0` refuses every request; absent imposes no per-key cap.
    */
   readonly requestLimitPerMinute?: number;
+}
+
+// ---------------------------------------------------------------------------
+// THE TENANCY LIFECYCLE LEG  (FLEET-CONSISTENCY finding FC-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * ## What this closes
+ *
+ * This Worker could NAME `tenancy_suspended` — `src/middleware/auth.ts`
+ * renders it — and its DEPLOYED credential port could never PRODUCE it. The
+ * only implementation that returned that outcome was
+ * {@link inMemoryApiKeyPort}, reading the `FG_DEV_API_KEYS` var;
+ * `d1ApiKeyPort` (`src/durable/adapters.ts`), the port every real deployment
+ * mounts, returns exactly `unknown` / `key_suspended` / `resolved` /
+ * `unavailable` and nothing else.
+ *
+ * So the Worker had a PASSING suspension test that proved nothing about
+ * production — the `lifecycle-tenancy-scenario-neverrun` failure mode, and the
+ * reason `docs/rewrite/FLEET-CONSISTENCY.md` classifies this cell **M**
+ * (in-memory) rather than **D**. An operator suspending a tenant saw
+ * `/v1/chat/completions` refuse and `POST /v1/agents/{name}` keep dispatching
+ * on the same un-revoked credential.
+ *
+ * ## Why it is a DECORATOR and not an edit to `d1ApiKeyPort`
+ *
+ * Two reasons, and the first is the load-bearing one:
+ *
+ *  1. **It must apply to whichever port `resolveDeps` chose.** Wrapping the
+ *     resolved port means a lifecycle suspension bites the durable leg AND the
+ *     dev leg AND anything mounted later. Editing `d1ApiKeyPort` would gate
+ *     exactly one of them, which is the shape of the defect being closed.
+ *  2. `api_keys` is TENANT data and `tenants` is CONTROL data. A credential
+ *     resolver that reached across both databases would collapse the split
+ *     `src/durable/adapters.ts` draws deliberately.
+ *
+ * ## The authority, and the order
+ *
+ * `tenants.status` in `CONTROL_DB` plus `projects` / `workspaces` in `DB` —
+ * the SAME columns `apps/gateway/src/adapters.ts::D1TenancyLifecycleGate`
+ * reads and `apps/control-plane`'s lifecycle routes write. The gate runs
+ * inside credential resolution, therefore BEFORE `admission` in
+ * `src/middleware/auth.ts` — Rust's `finalize_auth` order, and the order is the
+ * control: a suspended tenant must never reach the step that authorizes spend.
+ *
+ * ## Fail closed
+ *
+ * A lookup that throws returns `unavailable` (503), never `resolved`. Rust
+ * `LifecycleGateError::Unavailable` states the reason: fail-open would make
+ * "flap the control plane" a suspension bypass. `src/admission/` argues the
+ * identical posture for spend.
+ *
+ * ## PORT-TODO(P: FLEET-CONSISTENCY §FC-2) — the ONE divergence, stated
+ *
+ * `apps/gateway` distinguishes `tenancy_suspended` / `tenancy_disabled` /
+ * `tenancy_deleted`; {@link ApiKeyResolution} here has a SINGLE inactive-tenancy
+ * arm, so all three collapse onto `tenancy_suspended` (403). Every inactive
+ * status still DENIES — the divergence is in the reason string a client is
+ * given, never in the decision — but a tenant told "suspended" when its project
+ * was `disabled` is being sent to the wrong remedy.
+ *
+ * NOT a platform limit and not blocked on a schema: it is one widened union
+ * plus one `switch` arm in `src/middleware/auth.ts::resolveOrThrow`, and that
+ * file is outside this slice's ownership. Adding a `code` field HERE that the
+ * middleware never reads would be worse than the gap — a dead field is this
+ * repo's dominant defect — so the vocabulary stays honest until both halves
+ * land together. Pinned by `test/durable/lifecycle.spec.ts`.
+ */
+
+/** The `tenants` read — CONTROL database. Exported so a test can pin it. */
+export const LIFECYCLE_TENANT_SQL = "SELECT id, status FROM tenants WHERE id = ?1";
+/** The `projects` read — TENANT database. */
+export const LIFECYCLE_PROJECT_SQL = "SELECT id, status, tenant_id FROM projects WHERE id = ?1";
+/** The `workspaces` read — TENANT database. */
+export const LIFECYCLE_WORKSPACE_SQL =
+  "SELECT id, status, tenant_id, project_id FROM workspaces WHERE id = ?1";
+
+/** A `tenants` / `projects` / `workspaces` row, narrowed to what the gate reads. */
+export interface LifecycleRow {
+  readonly id: string;
+  readonly status: string;
+  readonly tenant_id?: string | null;
+  readonly project_id?: string | null;
+}
+
+/**
+ * The three row reads the walk needs.
+ *
+ * An interface for the reason Rust makes it a trait: a test can implement a
+ * THROWING source and hold the fail-closed claim, which is the one property a
+ * healthy live binding cannot express.
+ */
+export interface LifecycleRowSource {
+  tenantRow(id: string): Promise<LifecycleRow | null>;
+  projectRow(id: string): Promise<LifecycleRow | null>;
+  workspaceRow(id: string): Promise<LifecycleRow | null>;
+}
+
+function asLifecycleRow(value: unknown): LifecycleRow | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.id !== "string") return null;
+  return {
+    id: row.id,
+    // A NULL/absent `status` is not a decision: `parseLifecycleStatus` reads it
+    // as `active`, the fail-OPEN READ default #514 chose so the decorative
+    // pre-#514 rows do not revoke every existing tenant.
+    status: typeof row.status === "string" ? row.status : "",
+    tenant_id: typeof row.tenant_id === "string" ? row.tenant_id : null,
+    project_id: typeof row.project_id === "string" ? row.project_id : null,
+  };
+}
+
+/**
+ * The two-database row source. `tenants` is CONTROL state, `projects` and
+ * `workspaces` are TENANT data — the split rule `sql/d1-ts/` draws and
+ * `apps/gateway` deploys.
+ *
+ * An UNBOUND database answers `null` for its tier rather than throwing: with no
+ * `CONTROL_DB` there is no tenant row to read, which is "absent", and absence
+ * is not suspension. It is the same degradation `apps/gateway`'s
+ * `lifecycleRowSourceFromEnv` performs, so the two Workers agree on a partial
+ * deployment as well as a complete one.
+ */
+export function d1LifecycleRowSource(
+  control: D1Database | undefined,
+  tenant: D1Database | undefined,
+): LifecycleRowSource {
+  return {
+    async tenantRow(id: string): Promise<LifecycleRow | null> {
+      if (control === undefined) return null;
+      return asLifecycleRow(await control.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+    },
+    async projectRow(id: string): Promise<LifecycleRow | null> {
+      if (tenant === undefined) return null;
+      return asLifecycleRow(await tenant.prepare(LIFECYCLE_PROJECT_SQL).bind(id).first());
+    },
+    async workspaceRow(id: string): Promise<LifecycleRow | null> {
+      if (tenant === undefined) return null;
+      return asLifecycleRow(await tenant.prepare(LIFECYCLE_WORKSPACE_SQL).bind(id).first());
+    },
+  };
+}
+
+/** Rust `present`: trim, and treat blank as absent. */
+function presentTenancyId(value: string | null | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+function pushUniqueId(ids: string[], candidate: string | null | undefined): void {
+  const value = presentTenancyId(candidate);
+  if (value === undefined || ids.includes(value)) return;
+  ids.push(value);
+}
+
+/** One resolved ancestor — Rust `LifecycleRef`. */
+export interface LifecycleRef {
+  readonly kind: "tenant" | "project" | "workspace";
+  readonly id: string;
+  readonly status: LifecycleStatus;
+}
+
+/**
+ * Rust `resolve_lifecycle_chain` — walk the HIERARCHY, not the caller's
+ * declaration, shallowest-first.
+ *
+ * That distinction is the bug Rust's second landing fixed, reproduced rather
+ * than re-derived: three lookups that check only the ids the CALLER named mean
+ * a credential carrying just a `project_id` yields `[project(active)]` and the
+ * suspended TENANT above it is never read. So the workspace row backfills its
+ * `project_id`/`tenant_id`, each project row backfills its `tenant_id`, and
+ * declared ids are UNIONed with derived ones — never substituted. There is no
+ * ordering in which a suspended ancestor is skipped.
+ *
+ * Shallowest-first is what makes the refusal name the ROOT cause when a tenant
+ * suspension cascades onto its children.
+ */
+export async function resolveLifecycleChain(
+  source: LifecycleRowSource,
+  tenancy: Tenancy,
+): Promise<LifecycleRef[]> {
+  const tenantIds: string[] = [];
+  const projectIds: string[] = [];
+  const workspaceRows: LifecycleRow[] = [];
+
+  pushUniqueId(tenantIds, tenancy.tenantId);
+  pushUniqueId(projectIds, tenancy.projectId);
+
+  const workspaceId = presentTenancyId(tenancy.workspaceId);
+  if (workspaceId !== undefined) {
+    const workspace = await source.workspaceRow(workspaceId);
+    if (workspace !== null) {
+      pushUniqueId(projectIds, workspace.project_id);
+      pushUniqueId(tenantIds, workspace.tenant_id);
+      workspaceRows.push(workspace);
+    }
+  }
+
+  const projectRows: LifecycleRow[] = [];
+  // Indexed, not `for…of`: a project may be reached only via the workspace
+  // above, and each project row appends tenant ids the caller never named.
+  for (let index = 0; index < projectIds.length; index += 1) {
+    const project = await source.projectRow(projectIds[index] as string);
+    if (project !== null) {
+      pushUniqueId(tenantIds, project.tenant_id);
+      projectRows.push(project);
+    }
+  }
+
+  const chain: LifecycleRef[] = [];
+  for (const tenantId of tenantIds) {
+    const tenant = await source.tenantRow(tenantId);
+    if (tenant !== null) {
+      chain.push({ kind: "tenant", id: tenant.id, status: parseLifecycleStatus(tenant.status) });
+    }
+  }
+  for (const project of projectRows) {
+    chain.push({ kind: "project", id: project.id, status: parseLifecycleStatus(project.status) });
+  }
+  for (const workspace of workspaceRows) {
+    chain.push({
+      kind: "workspace",
+      id: workspace.id,
+      status: parseLifecycleStatus(workspace.status),
+    });
+  }
+  return chain;
+}
+
+/**
+ * The first entry in the chain that forbids requests, or `null` when the whole
+ * chain is usable. Rust `check_lifecycle_chain` at the REQUEST seam — this
+ * Worker serves no lifecycle RECOVERY route, so `disabled` denies here.
+ */
+export function firstInactiveTenancy(chain: readonly LifecycleRef[]): LifecycleRef | null {
+  for (const reference of chain) {
+    if (!lifecycleStatusAllowsRequests(reference.status)) return reference;
+  }
+  return null;
+}
+
+/**
+ * Wrap an {@link ApiKeyPort} so a RESOLVED credential is additionally checked
+ * against its tenancy chain.
+ *
+ * Only `resolved` is post-processed: every other outcome is already a refusal
+ * and must reach `resolveOrThrow` untouched, or a suspended KEY (401) would
+ * start reporting a tenancy failure (403) and disclose that the credential
+ * exists. That asymmetry is the 401-vs-403 invariant, and it is preserved by
+ * construction here rather than by a check that could be forgotten.
+ */
+export function tenancyGatedApiKeyPort(inner: ApiKeyPort, source: LifecycleRowSource): ApiKeyPort {
+  return {
+    async resolve(presentedKey: string): Promise<ApiKeyResolution> {
+      const resolution = await inner.resolve(presentedKey);
+      if (resolution.outcome !== "resolved") return resolution;
+      // A platform operator carries no tenancy chain; Rust never gates it.
+      if (resolution.auth.platformOperator) return resolution;
+
+      let chain: readonly LifecycleRef[];
+      try {
+        chain = await resolveLifecycleChain(source, resolution.auth.tenancy);
+      } catch (error) {
+        // FAIL CLOSED. 503, never the `resolved` this function was handed.
+        return {
+          outcome: "unavailable",
+          detail: `tenancy lifecycle lookup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      return firstInactiveTenancy(chain) === null ? resolution : { outcome: "tenancy_suspended" };
+    },
+  };
 }
 
 /** In-memory {@link ApiKeyPort} over a static table. */
@@ -1179,12 +1471,34 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
 export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undefined {
   const dev = env.FG_DEV_IN_MEMORY_PORTS === "1";
 
-  const apiKeys: ApiKeyPort | undefined =
+  const resolvedApiKeys: ApiKeyPort | undefined =
     env.DB !== undefined
       ? d1ApiKeyPort(env.DB)
       : dev
         ? inMemoryApiKeyPort(parseJsonVar<DevApiKey[]>(env.FG_DEV_API_KEYS, []))
         : undefined;
+
+  /**
+   * THE TENANCY LIFECYCLE GATE (FC-2), composed OVER whichever credential port
+   * was chosen above — the durable one AND the dev one alike, which is the
+   * whole point: the shipped defect was a lifecycle outcome only the dev table
+   * could produce.
+   *
+   * Wrapped whenever EITHER database is bound, because either one carries a
+   * tier of the chain (`tenants` in CONTROL, `projects`/`workspaces` in the
+   * tenant database). Neither bound ⇒ no lifecycle authority exists to consult
+   * and the port is left alone: that is the offline default-suite posture, and
+   * a deployment in it has no `tenants` table to have suspended anything in.
+   * It is the same degradation `apps/gateway`'s `lifecycleRowSourceFromEnv`
+   * performs, so the two Workers agree on a partial deployment too.
+   *
+   * Deleting this wrap turns `test/durable/lifecycle.spec.ts` and
+   * `apps/mcp/test/fleet-tenancy-suspension.test.ts` red.
+   */
+  const apiKeys: ApiKeyPort | undefined =
+    resolvedApiKeys === undefined || (env.DB === undefined && env.CONTROL_DB === undefined)
+      ? resolvedApiKeys
+      : tenancyGatedApiKeyPort(resolvedApiKeys, d1LifecycleRowSource(env.CONTROL_DB, env.DB));
 
   const workerIdentities: WorkerIdentityPort | undefined =
     env.CONTROL_DB !== undefined
@@ -1230,12 +1544,22 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
         ),
       ),
     ),
-    guardrails: deterministicGuardrailPort(
-      parseJsonVar<{
-        keywords?: string[];
-        regex?: string[];
-        secretPatterns?: SecretPattern[];
-      }>(env.FG_DEV_A2A_GUARDRAILS, {}),
+    // FC-3. The DURABLE activated revision runs FIRST and the operator var is
+    // its fallback, so a `guardrail_policy_bindings` row the control plane
+    // activated screens A2A messages on the very next request — no redeploy —
+    // while a var-only deployment behaves exactly as it did. Dropping the
+    // wrapper here silently returns this Worker to the state
+    // `docs/rewrite/FLEET-CONSISTENCY.md` FC-3 describes: an operator activates
+    // a policy, sees it bound, and it covers one of three doors.
+    guardrails: durableA2aGuardrailPort(
+      env,
+      deterministicGuardrailPort(
+        parseJsonVar<{
+          keywords?: string[];
+          regex?: string[];
+          secretPatterns?: SecretPattern[];
+        }>(env.FG_DEV_A2A_GUARDRAILS, {}),
+      ),
     ),
     // Real in every posture: with no `CONTROL_DB` the operator var alone is the
     // table, which is exactly the offline harness's posture and a legitimate

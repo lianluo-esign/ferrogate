@@ -1,10 +1,24 @@
 # FLEET-CONSISTENCY — one capability, five Workers, one answer
 
-**Status: DERIVED FROM `src/` ON 2026-08-01 (wave 21).** Every cell below was
-produced by scanning comment-stripped source across all five deployed Workers,
-not by reading a design document. The scan is reproduced as an executable gate:
-`apps/gateway/test/fleet-consistency.test.ts` (31 assertions, 3 `test.todo`),
-mutation-proven eight ways in §7.
+**Status: DERIVED FROM `src/` ON 2026-08-01 (wave 21), MECHANISED AND FULLY
+CLOSED IN WAVE 22.** All five divergences the matrix found (FC-1 · FC-2 · FC-3 ·
+FC-4 · FC-5) are closed; FC-5 was never a live defect and its gate stays. Both
+gate files are green with no `test.todo` — see §9.7.
+Every cell below was produced by scanning comment-stripped source across all
+deployed Workers, not by reading a design document. Two executable gates hold it:
+
+* `apps/gateway/test/fleet-consistency.test.ts` — the **LEDGER**. Records each
+  finding as an exact table of Workers, fails in both directions, mutation-proven
+  eight ways in §7. Right shape for a finding.
+* `apps/gateway/test/fleet-control-matrix.test.ts` — the **MECHANICAL GATE**
+  (wave 22, §9). Names no Worker anywhere: the fleet, the role sets, every
+  control's source-of-truth class and the whole refusal table are COMPUTED, and
+  the assertions are properties over those computations. Right shape for the
+  CLASS — it re-derives itself when a Worker or a control is added, which is
+  precisely when a hand list stops being true and does not stop being green.
+
+Read the **Gate** column of §3 to see which cells each one holds, and §9.4 for
+the ten that neither holds mechanically — those are the cells that rot first.
 
 ---
 
@@ -81,92 +95,211 @@ no such concern.
 operator-issued collector token and owns no tenant state, so a control that
 restricts a TENANT has nothing to apply to on that Worker.
 
-| # | Capability / control | gateway | control-plane | mcp | agent-runtime | telemetry | Agree? |
-|---|---|---|---|---|---|---|---|
-| 1 | Credential resolution (`api_keys` / `static_api_keys`) | **D** | **D** | **D** | **D** | n/a | ✅ |
-| 2 | 401-vs-403 taxonomy (suspended key ⇒ 401) | **D** | **D** | **D** | **D** | n/a | ✅ |
-| 3 | Scope check (`403 scope_denied`) | **D** | **D** | **D** | **D** | n/a | ✅ |
-| 4 | Admission: quota scope (`403 quota_scope_disabled`) | **D** | n/a | **D** | **D** | n/a | ✅ |
-| 5 | Admission: monthly budget (`429`) | **D** | n/a | **D** | **D** | n/a | ✅ |
-| 6 | Admission: prepaid wallet (`429`) | **D** | n/a | **D** | **D** | n/a | ✅ |
-| 7 | Admission: RPM window (`429`) | **D** | n/a | **D** | **D** | n/a | ⚠️ **FC-5** |
-| 8 | **Tenancy lifecycle / suspension** | **D** | **D** | **—** | **M** | n/a | ❌ **FC-2** |
-| 9 | RBAC `rbac_action` | **D** | **D** | parsed, unread | parsed, unread | — | ⚠️ **FC-7** |
-| 10 | Tenant fencing on reads/writes | **D** | **D** | **D** | **D** | n/a | ✅ |
-| 11 | **Guardrail screening policy** | **D** | **D** (write half) | **V** | **V** | — | ❌ **FC-3** |
-| 12 | **Agent-upstream catalog** | **D** | **D** (write half) | n/a | **D** | n/a | ✅ *(FC-4, closed 2026-08-01)* |
-| 13 | MCP server catalog | n/a | **D** (write half) | **D** | n/a | n/a | ✅ |
-| 14 | **Operator drain** | **V** | **D** (write half) | **—** | **—** | — | ❌ **FC-1** |
-| 15 | Operator deny rules (`[[policies]]`) | **V** | — | — | — | — | ⚠️ **FC-6c** |
-| 16 | Metering / usage rollup WRITE | **D** | — | — | — | n/a | ✅ (single writer by design) |
-| 17 | Monthly-spend rollup READ | **D** | — | **D** | **D** | n/a | ✅ |
-| 18 | Response cache | **V** | n/a | n/a | n/a | n/a | ✅ single-Worker |
-| 19 | Pre-auth network gate (IP allowlist, unauth flood) | **V** | — | — | — | — | ✅ single-Worker |
-| 20 | Secrets resolution (`@ferrogate/secrets`) | ✔ | ✔ | ✔ | — | — | ✅ (see §6.4) |
-| 21 | Self-hosted-worker transport identity | **D** | **D** (write half) | n/a | **D** | n/a | ✅ |
-| 22 | Session / OAuth state | n/a | **D** (console) | **D** (per-user MCP) | n/a | n/a | ✅ distinct concerns |
-| 23 | Provider circuit breaker / shadow budget | **D** | n/a | n/a | n/a | n/a | ✅ single-Worker |
+The **Gate** column is the wave-22 addition and is the column to read first.
+`MECH` means the cell is derived and asserted MECHANICALLY by
+`apps/gateway/test/fleet-control-matrix.test.ts` — no Worker is named in that
+file, so the cell re-derives itself when a Worker is added, when a control moves
+its source of truth, or when a refusal changes status or wording. `LEDGER` means
+the cell is held only by `apps/gateway/test/fleet-consistency.test.ts`, whose
+tables are hand-written lists of Workers. `INSPECTION` means nothing but this
+document holds it.
 
-**Five cells diverge. Four are controls an operator applies. Three of those four
-are money or security.**
+> **The `LEDGER` and `INSPECTION` cells are the ones that will rot first, and
+> they will rot silently.** A hand list stays green while the fleet changes
+> underneath it; it only fails when someone edits the thing it happens to name.
+> §9.4 lists them in one place so the next wave can convert them rather than
+> rediscover them.
+
+| # | Capability / control | gateway | control-plane | mcp | agent-runtime | telemetry | Agree? | Gate |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Credential resolution (`api_keys` / `static_api_keys`) | **D** | **D** | **D** | **D** | n/a | ✅ | MECH §4.1 (wire answer); `api_keys` declared a non-control in §4.3 |
+| 2 | 401-vs-403 taxonomy (suspended key ⇒ 401) | **D** | **D** | **D** | **D** | n/a | ✅ | MECH §4.1 — `invalid_api_key` / `api_key_disabled` / `api_key_expired` must carry one status fleet-wide |
+| 3 | Scope check (`403 scope_denied`) | **D** | **D** | **D** | **D** | n/a | ✅ | MECH §4.1 |
+| 4 | Admission: quota scope (`403 quota_scope_disabled`) | **D** | n/a | **D** | **D** | n/a | ✅ | MECH §3 `admission` (all five properties) + §4.2 wording |
+| 5 | Admission: monthly budget (`429`) | **D** | n/a | **D** | **D** | n/a | ✅ | MECH §4.2 — emitters must equal the computed SPEND set |
+| 6 | Admission: prepaid wallet (`429`) | **D** | n/a | **D** | **D** | n/a | ✅ | MECH §4.2 |
+| 7 | Admission: RPM window (`429`) | **D** | n/a | **D** | **D** | n/a | ⚠️ **FC-5** | MECH §3 `rpm-counter` + §3.6 (one definer, borrowers pinned to `script_name`) |
+| 8 | **Tenancy lifecycle / suspension** | **D** | **D** | **D** | **D** | n/a | ✅ *(FC-2, closed 2026-08-01)* | MECH §3 `tenant-lifecycle` — the authority is the `status` COLUMN, not the `tenants` table |
+| 9 | RBAC `rbac_action` | **D** | **D** | parsed, unread | parsed, unread | — | ⚠️ **FC-7** | LEDGER (hand-listed) |
+| 10 | Tenant fencing on reads/writes | **D** | **D** | **D** | **D** | n/a | ✅ | INSPECTION |
+| 11 | **Guardrail screening policy** | **D** | **D** (write half) | **D** | **D** | — | ✅ *(FC-3, closed 2026-08-01)* | MECH §3 `guardrail-binding` |
+| 12 | **Agent-upstream catalog** | **D** | **D** (write half) | n/a | **D** | n/a | ✅ *(FC-4, closed 2026-08-01)* | MECH §3 `agent-upstream-catalog` + behavioural `routes/agent-upstream-fleet-withdrawal.test.ts` |
+| 13 | MCP server catalog | n/a | **D** (write half) | **D** | n/a | n/a | ✅ | INSPECTION (single reader today) |
+| 14 | **Operator drain** | **D** (+ V override) | **D** (write + read) | **D** | **D** | — | ✅ *(FC-1, all three legs closed 2026-08-01)* | MECH §3 `drain` + §5 behavioural |
+| 15 | Operator deny rules (`[[policies]]`) | **V** | — | — | — | — | ⚠️ **FC-6c** | MECH §3 `operator-deny-rules` (single-Worker pin) |
+| 16 | Metering / usage rollup WRITE | **D** | — | — | — | n/a | ✅ (single writer by design) | INSPECTION (`usage_monthly_rollups` declared a non-control in §4.3) |
+| 17 | Monthly-spend rollup READ | **D** | — | **D** | **D** | n/a | ✅ | MECH §3.4b — `usage_monthly_rollups` is an authority of `admission`, so every spend Worker must read it |
+| 18 | Response cache | **V** | n/a | n/a | n/a | n/a | ✅ single-Worker | LEDGER |
+| 19 | Pre-auth network gate (IP allowlist, unauth flood) | **V** | — | — | — | — | ✅ single-Worker | LEDGER |
+| 20 | Secrets resolution (`@ferrogate/secrets`) | ✔ | ✔ | ✔ | — | — | ✅ (see §6.4) | INSPECTION — and §6.4 records it as an unresolved question, not a verdict |
+| 21 | Self-hosted-worker transport identity | **D** | **D** (write half) | n/a | **D** | n/a | ✅ | INSPECTION (declared a non-control in §4.3) |
+| 22 | Session / OAuth state | n/a | **D** (console) | **D** (per-user MCP) | n/a | n/a | ✅ distinct concerns | INSPECTION |
+| 23 | Provider circuit breaker / shadow budget | **D** | n/a | n/a | n/a | n/a | ✅ single-Worker | INSPECTION |
+
+**No cell diverges. All five divergences the wave-21 matrix found are CLOSED,
+and four of the five (FC-1 · FC-2 · FC-3 · FC-4) are gated MECHANICALLY; FC-5
+is a live trap rather than a divergence and is gated too. Thirteen of the
+twenty-three rows are gated MECHANICALLY; ten are not, and §9.4 names them —
+those ten are the rot risk this document now carries.**
 
 ---
 
 ## 4. FINDINGS, ranked by blast radius
 
-### FC-1 — THE OPERATOR DRAIN IS APPLIED IN ONE WORKER AND ENFORCED IN ANOTHER
+### FC-1 — THE OPERATOR DRAIN **— CLOSED 2026-08-01, ALL THREE LEGS**
 
-**Blast radius: whole fleet. Money + availability. The API is a no-op.**
+**Blast radius: whole fleet. Money + availability. The API was a no-op.**
 
-*What the operator believes happened.* They call
+#### What it was
+
+*What the operator believed happened.* They call
 `POST /admin/v1/drain {"draining": true}` before a migration or during an
 incident. The control plane answers
 `200 {"object":"drain","draining":true,"reason":…}`. The fleet has stopped
 accepting new billable work.
 
-*What actually happens.* `apps/control-plane/src/routes/admin_config_ops.ts::setAdminDrain`
-writes the durable `runtime-state/drain` document — and **nothing reads it**
-except the control plane's own `GET /admin/v1/drain`, which faithfully echoes
-back the state that changed nothing. The gateway's drain is
+*What actually happened.* `apps/control-plane/src/routes/admin_config_ops.ts::setAdminDrain`
+wrote the durable `runtime-state/drain` document — and **nothing read it**
+except the control plane's own `GET /admin/v1/drain`, which faithfully echoed
+back the state that changed nothing. The gateway's drain was
 `apps/gateway/src/routes/readiness.ts::drainStatus`, a synchronous read of the
 deploy-time `GATEWAY_DRAIN` var; `apps/gateway/src/routes/drain.ts::nodeDrainGate`
-refuses five spend-producing operations off THAT value. `apps/mcp` and
-`apps/agent-runtime` have no drain gate on either source, so even a deployment
-drained the working way (a `wrangler versions` var flip) keeps admitting MCP
+refused five spend-producing operations off THAT value. `apps/mcp` and
+`apps/agent-runtime` had no drain gate on either source, so even a deployment
+drained the working way (a `wrangler versions` var flip) kept admitting MCP
 `tools/call` and `/v1/agent-jobs`.
 
-*How a tenant exploits the difference.* They do not need to. The failure is
-against the operator: they watch the load balancer take the node out of
-rotation, believe the deployment is quiescing, and it is spending the whole
+*How a tenant exploited the difference.* They did not need to. The failure was
+against the operator: they watched the load balancer take the node out of
+rotation, believed the deployment was quiescing, and it was spending the whole
 time. During an incident this is the difference between "we stopped the
 bleeding" and "we thought we did".
 
-*Why it was invisible.* Three suites, three green. `apps/control-plane` proves
-the document is written; `apps/gateway/test/routes/drain.test.ts` proves the var
+*Why it was invisible.* Three suites, three green. `apps/control-plane` proved
+the document is written; `apps/gateway/test/routes/drain.test.ts` proved the var
 is honoured on all five operations and flips it both ways inside one isolate.
-Neither can see that the two halves are different variables.
+Neither could see that the two halves were different variables.
 
-*What makes it especially sharp.* `readiness.ts` carries the marker
-`PORT-TODO(L: inventory-request-path §readiness)`, which says the proper fix is
-*"a `DRAIN` DO/KV binding plus the operator route that writes it, which is a
-control-plane slice, not a routing one."* **That control-plane slice has since
-been written.** Both halves now exist. They were never joined.
+#### What is closed
 
-*The fix.* `drainStatus` reads the durable `runtime-state/drain` document from
-`CONTROL_DB` with the var as the fallback — byte for byte the precedence
-`apps/gateway/src/routes/agent-upstreams.ts` already establishes for the
-upstream registry (durable when a control database is bound, var otherwise,
-fail-closed on a read error and specifically NOT back to the var). Then
-`apps/mcp` and `apps/agent-runtime` refuse their spend-producing operations with
-the identical `503 node_draining` and the identical message text.
+All three spend Workers now read the durable document **per request** and refuse
+the spend-producing operations with the same `503 node_draining` (status, code
+and message byte for byte). ONE admin write shuts all three doors.
 
-*Gate.* `describe("FC-1 …")` — 4 assertions + 1 `test.todo`. RED when a Worker
-joins drain state to drain enforcement (M1), and RED when a Worker grows a drain
-refusal without being classified (M8).
+| leg | module | mount | gate |
+|---|---|---|---|
+| `apps/mcp` | `src/drain.ts` | `src/http.ts::authenticateRequest` (a REQUIRED `SpendDeclaration` at all 5 authenticated surfaces) | `test/drain.test.ts`, `test/drain-fleet.test.ts` |
+| `apps/agent-runtime` | `src/drain.ts` | `src/middleware/auth.ts::bearerAuth`, keyed on `DRAIN_GUARDED_OPERATION_IDS` (5 of 15) | `test/durable/drain.spec.ts` |
+| `apps/control-plane` | `src/store/runtime_state.ts` | `routes/admin_config_ops.ts` builds the document with `drainDocument` and reads it back with the enforcers' `parseDrainDocument` | `test/drain.test.ts` |
+| **`apps/gateway`** (wave-22 INTEGRATE, the third and last leg) | `src/routes/readiness.ts::resolveDrainState` — `readDurableDrain` + `combineDrain`, the same parse and the same precedence the other two state | `src/routes/drain.ts::nodeDrainGate` (the 5 spend operations) AND `/readyz` through `readinessResponse`, both via the ONE resolver | `test/fleet-control-matrix.test.ts` §5 (behavioural, over `SELF`), `test/fleet-consistency.test.ts` FC-1, `test/env-var-drift.test.ts` |
+
+**THE FLEET GATES** are two, because no one of them can see what the other does.
+`apps/mcp/test/drain-fleet.test.ts` issues one admin write and requires the MCP
+and agent-runtime doors to shut in a single `it()` — the shape
+`agent-upstream-fleet-withdrawal.test.ts` established — and additionally holds
+the gateway's leg as TEXT (same table, same `resource_kind`, same `resource_id`,
+imported from `apps/control-plane`'s own WRITER so a rename on either side is
+red). `apps/gateway/test/fleet-control-matrix.test.ts` §5 holds the gateway's
+leg BEHAVIOURALLY, over `SELF`, because that bundle is that Worker and the mcp
+bundle is not.
+
+Observed **RED** on the unfixed tree (`apps/mcp tools/call while draining:
+expected 200 to be 503`; and, for the gateway leg, §5.1 *expected `{status:400,
+code:"invalid_request"}` to deeply equal `{status:503, code:"node_draining"}`*),
+GREEN after, and each mount re-proven by mutation — §7.2 and §7.4.
+
+#### Decisions taken
+
+- **Precedence: `durable OR deploy-var`, never "latest wins."** The durable
+  document is the runtime operator API; `GATEWAY_DRAIN` remains a DEPLOY-TIME
+  override and is declared only in `apps/gateway/wrangler.toml`. Either source
+  drains; neither cancels the other. Under "latest wins" a stale var would
+  silently un-drain a deployment an operator just drained by API, or a
+  `{"draining": false}` call would re-admit traffic to a deployment drained at
+  deploy time for a migration — FC-1 again, wearing the other half's clothes.
+  Stated once in `combineDrain`, tested directly (`apps/mcp/test/drain.test.ts`
+  §"the precedence rule").
+- **Fail closed, with an HONEST code.** A durable lookup that FAILS refuses with
+  `503 drain_state_unavailable`, not `node_draining`: refusing is
+  non-negotiable (a control that admits when its backend is unavailable
+  recreates the bypass), but claiming the node is draining while
+  `GET /admin/v1/drain` says otherwise is the incident-time lie this repo
+  refused to ship as `applied: true`. An UNBOUND control database is a
+  different fact and is not a refusal — such a deployment has no control plane
+  and already fails closed on every authenticated surface.
+- **`/healthz` 200, `/readyz` 503 `operator_drain`.** Liveness must not flip:
+  an orchestrator would RESTART the node and destroy the in-flight work the
+  drain exists to let finish. Readiness must flip, or the probe tells a load
+  balancer to keep sending traffic that every spend request then refuses. The
+  durable read therefore happens on `/readyz` and NOWHERE upstream of
+  `/healthz`.
+- **The drain is DEPLOYMENT state, so `setAdminDrain` is platform-operator
+  only.** The contract gives it `admin.write`, which a tenant administrator can
+  hold; harmless while nothing read the row, and a cross-tenant denial of
+  service now that every Worker resolves it by primary key. Two independent
+  defences: `403 tenant_scope_denied` at the route, and `tenant_id: null`
+  pinned by `drainDocument` with every enforcer IGNORING a tenant-attributed
+  drain document.
+- **What a drain does NOT stop**, because that is the point of draining: MCP
+  `tools/list` / `resources/list` / `initialize` (discovery — a client must be
+  able to learn where to fail over), the MCP identity operations (`revoke` in
+  particular must work during a credential incident), agent-job READS and
+  `cancelAgentJob`, and all six `auth.kind: "internal"` worker-plane callbacks
+  (in-flight work reporting back; refusing them would strand every running job).
+
+#### The last leg, as landed (wave-22 INTEGRATE)
+
+`apps/gateway/src/routes/readiness.ts::drainStatus` WAS
+`env?.GATEWAY_DRAIN?.trim().toLowerCase() === "true"` and nothing else, so
+`POST /admin/v1/drain` shut MCP and agent-runtime and left
+`/v1/chat/completions` serving. That file was outside the owned scope of the
+slice that closed the other two legs, so the integrate step closed it.
+
+*What changed.* `drainStatus` KEPT its identity as the deploy-time half — the
+var decision table is worth testing on its own and `test/routes/drain.test.ts`
+holds every spelling of it — and a new `resolveDrainState` reads the durable
+`runtime-state/drain` document from `CONTROL_DB` and ORs the two with a
+`combineDrain` restated byte-for-byte from `apps/mcp/src/drain.ts`. It is the
+same durable-plus-var shape `apps/gateway/src/routes/agent-upstreams.ts` already
+establishes for the upstream registry: fail-closed on a read error, and
+specifically NOT back to the var. `readinessResponse` and `nodeDrainGate` became
+`async`, which reached `readyzHandler`; both already ran in async contexts.
+
+*Three decisions inside it.*
+
+- **`/readyz` reads the document; `/healthz` does not.** Readiness must flip or
+  the probe keeps telling a load balancer to send traffic every spend request
+  then refuses. Liveness must NOT flip or an orchestrator restarts the node and
+  destroys the in-flight work the drain exists to let finish. Identical split to
+  `apps/mcp` and `apps/agent-runtime`.
+- **The amplification objection the old PORT-TODO raised was answered, not
+  inherited.** It said a per-request durable drain would have to happen on an
+  ANONYMOUS endpoint and would be a free amplification target. Three things
+  bound it: the read is ONE primary-key row on an indexed table (D1 is a
+  replicated SQLite read — none of the single-object serialization a DO drain
+  would have had); `/readyz` sits behind the pre-auth network gate; and the read
+  that actually stops spend happens after `contractAuth` and after admission,
+  where the caller has already paid for several control-database lookups. Only
+  the five guarded operations pay it — every other operation costs nothing.
+- **A bound-but-failing control database is `503 drain_state_unavailable`, not
+  `node_draining`,** and `/readyz` reports `readiness_reason:
+  "drain_state_unavailable"` rather than `operator_drain`. Refusing is
+  non-negotiable; claiming the node is draining while `GET /admin/v1/drain` says
+  otherwise is the incident-time lie this repo refused to ship. An UNBOUND
+  database leaves the var as the only source, which is the no-control-plane
+  posture the whole Worker already degrades to.
+
+*Gate.* `describe("FC-1 the operator drain, all three legs joined")` in
+`apps/gateway/test/fleet-consistency.test.ts` — 7 assertions, no `test.todo`.
+The two that RECORDED the divergence are inverted into the two that record its
+absence, in the same commit as the fix, which is the ratchet in §5. Plus
+`test/env-var-drift.test.ts`'s *"FC-1's durable drain needed NO new binding —
+wave 22 is wrangler-INERT"*, which asserts the deploy-config claim rather than
+writing it in a commit message.
 
 ---
 
-### FC-2 — TENANT SUSPENSION DOES NOT REACH TWO OF THE THREE WORKERS THAT SPEND
+### FC-2 — TENANT SUSPENSION REACHED ONE OF THE THREE WORKERS THAT SPEND **— CLOSED 2026-08-01**
 
 **Blast radius: every suspended tenant. Security + money. This is the wave-16
 admission bypass wearing a different control.**
@@ -174,7 +307,7 @@ admission bypass wearing a different control.**
 *What the operator believes happened.* A tenant is compromised, delinquent, or
 abusive. They suspend it in the control plane. Its credentials stop working.
 
-*What actually happens.*
+*What actually happened, before this wave.*
 
 | Worker | Behaviour |
 |---|---|
@@ -195,20 +328,43 @@ deploys with was never exercised for this outcome. That is the
 `lifecycle-tenancy-scenario-neverrun` failure mode this project has been bitten
 by before, one Worker over.
 
-*The fix.* Both Workers consult the same authority the gateway does —
-`tenants.status` on the control database, ancestors included — **before** the
-admission ladder. Ordering is not cosmetic: `finalize_auth` runs the lifecycle
-gate ahead of quota/wallet resolution precisely so a suspended tenant never
-reaches the step that authorizes spend. A lookup failure is `503`, never an
-admission: fail-open here makes "flap the control plane" a suspension bypass.
+*The fix, as landed.* Both Workers consult the same authority the gateway does —
+the `status` COLUMN of `tenants` on the control database, ancestors included —
+**before** the admission ladder. Ordering is not cosmetic: `finalize_auth` runs
+the lifecycle gate ahead of quota/wallet resolution precisely so a suspended
+tenant never reaches the step that authorizes spend. A lookup failure is `503`,
+never an admission: fail-open here makes "flap the control plane" a suspension
+bypass.
 
-*Gate.* `describe("FC-2 …")` — 4 assertions + 1 `test.todo`, including the
-computed exploit set `["mcp","agent-runtime"]`. RED when the gateway stops
-reading the authority (M2) and RED when another Worker starts (M2 inverse).
+| leg | module | mount |
+|---|---|---|
+| `apps/mcp` | `src/lifecycle.ts` (`TenancyLifecycleGatePort`) | `src/ports.ts::resolvePorts` — `lifecycle = durableLifecycle(env)`, consumed by `src/http.ts::authenticateRequest` ahead of `ports.admission.admit` |
+| `apps/agent-runtime` | `LIFECYCLE_*_SQL` + `tenancyGatedApiKeyPort` in `src/ports.ts` | `resolveDeps` composes the gate OVER whichever credential port was chosen — the durable one AND the dev one alike, which is the whole point: the shipped defect was a lifecycle outcome only the dev table could produce |
+
+Two decisions worth recording. **The gate wraps the CREDENTIAL PORT rather than
+sitting beside it** on agent-runtime, so it cannot be bypassed by a future
+caller that resolves a key some other way — the mistake the original defect was
+made of. And **`disabled` / `deleted` / `suspended` all collapse onto
+`403 tenancy_*` with the tier named**, matching what `apps/gateway` already
+answered, because a client that fails over from one spelling to another is
+looking at two products.
+
+*Gates.* `describe("FC-2 …")` in `fleet-consistency.test.ts` — 5 assertions, no
+`test.todo`, including the computed exploit set now required to be EMPTY and a
+MOUNT assertion on both composition roots (a lifecycle module that exists and is
+not wired is this repo's dominant defect). RED when the gateway stops reading
+the authority (M2) and RED when a spend Worker stops (§9.5 M2, §7.5 below).
+
+**THE FLEET GATE** is `apps/mcp/test/fleet-tenancy-suspension.test.ts`: ONE
+suspension through the control plane, then all three spend doors required to
+shut with the SAME status and code, in one `it()` — plus the inverse (lifting
+re-opens all three), the fail-closed 503, and the property that a suspended KEY
+stays `401 invalid_api_key` on all three rather than being swallowed by the new
+`403`.
 
 ---
 
-### FC-3 — AN ACTIVATED GUARDRAIL POLICY BINDS ONE WORKER AND NO OTHER
+### FC-3 — AN ACTIVATED GUARDRAIL POLICY BOUND ONE WORKER **— CLOSED 2026-08-01**
 
 **Blast radius: every tenant. Data exfiltration / prompt injection.**
 
@@ -216,7 +372,7 @@ reading the authority (M2) and RED when another Worker starts (M2 inverse).
 and call `POST /admin/v1/guardrail-policies/{policy_id}/activate`. Screening is
 live.
 
-*What actually happens.* Only `apps/gateway` merges the durable
+*What actually happened, before this wave.* Only `apps/gateway` merges the durable
 `guardrail_policy_revisions` + `guardrail_policy_bindings` rows into its
 detector source (`src/guardrails/d1.ts` + `config.ts::guardrailPolicySourceFromEnv`).
 The other two screening surfaces read a **deploy-time var**:
@@ -237,15 +393,93 @@ completion travels intact inside an MCP `tools/call` argument, inside a tool
 RESULT flowing back, or inside an A2A `message:send` body. The activated
 revision never sees it.
 
-*The fix.* Both Workers resolve their detector policy from the same
+*The fix, as landed.* Both Workers resolve their detector policy from the same
 `guardrail_policy_revisions` + `guardrail_policy_bindings` rows the gateway
-merges, keeping the var as the no-control-database fallback — the same
-precedence FC-1 and FC-4 use. The snapshot can be memoized per isolate exactly
-as `guardrails/config.ts` already does.
+merges, with the var surviving only as the no-control-database fallback — the
+same precedence FC-1 and FC-4 use. Five decisions in it are worth recording,
+because each was a place the obvious choice was the wrong one.
 
-*Gate.* `describe("FC-3 …")` — 3 assertions + 1 `test.todo`, including the
-disjointness of the durable set and the var set. RED when the gateway drops the
-durable read (M3).
+**1. The shared half is a LIBRARY, not a third copy.** No app may import another
+app's module graph (§6.1), so "MCP and agent-runtime read the policy the same
+way" is only expressible in a package both already depend on:
+`packages/guardrails/src/binding.ts` owns the projection, detector construction,
+scope selection, aggregation and the fail-closed postures. Writing that twice,
+once per app, would have recreated the divergence the finding is about — two
+implementations, one of which drifts.
+
+**2. The SQL is restated per Worker anyway, and that is deliberate.** The
+statements live in each app (`apps/mcp/src/guardrails.ts`,
+`apps/agent-runtime/src/guardrails.ts`) and are handed to the library, which
+defaults to its own identical constants. Two things depend on it: an operator
+grepping *"who reads `guardrail_policy_bindings`"* must find every reader — before
+this wave `apps/mcp` and `apps/agent-runtime` were absent from that grep and the
+answer was correct — and `fleet-control-matrix.test.ts` derives each control's
+source-of-truth class from the SQL literals in each Worker's own `src/`, so a
+Worker reaching the rows only through a helper is still scored VAR-ONLY. The
+drift that convention costs is bought back by assertion: the fleet gate requires
+each Worker's constants to equal the library's, character for character. (One
+byte of this is load-bearing and was found the hard way: the scanner reads a
+literal that carries the verb, so `"SELECT …" + "FROM x"` hides the table. The
+statements are written as ONE literal each.)
+
+**3. The snapshot is REVALIDATED, not memoized.** `guardrails/config.ts`
+snapshots once per isolate, which is defensible on the gateway. It is not here:
+the promise FC-3 makes to an operator is *"you activate a policy and the very
+next request is screened by it"*, and a process-lifetime memo silently downgrades
+that to *"…once this isolate recycles"* — the same class of half-applied control,
+and the exact regression FC-4's fleet gate catches by mutation on the sibling
+capability. So every screened request re-reads the binding POINTERS (one indexed
+scan of the smallest table in the schema) and recompiles only when
+`(policy_id, active_revision, generation)` moved. Revisions are immutable, so an
+unchanged pointer set provably denotes an unchanged policy set and the compiled
+detectors — with their semaphore and circuit state — are reused. `generation` is
+in the fingerprint and is not redundant: an archive-then-restore returns
+`active_revision` to where it was while advancing it.
+
+**4. Scope classes were NOT merged, and merging them would have been a
+regression.** `scopeMatches` requires a policy's `managed_action` selector and
+the request's managed-action context to be both present or both absent, because
+Rust's MCP tool guardrail passes `managed_action: Some(ManagedActionContext {
+class: Mcp, … })` (`server/managed_action_guardrail.rs:148`) while its A2A ingress
+passes `managed_action: None` (`server/local.rs:9993`). A model-content policy
+therefore does not police an MCP tool call and vice versa — that is parity, and a
+"fix" that made one revision cover both would change behaviour Rust never had.
+FC-3 was never "one scope should cover everything"; it was that a
+correctly-scoped activated revision reached one Worker and no other. Both
+directions are pinned.
+
+**5. Where the projection is narrower than the gateway's engine, it is narrower
+CLOSED.** `redact` and `quarantine` become `deny` `guardrail_invalid_redaction`,
+because an MCP tool argument and an A2A message have no document to patch — which
+is the gateway's own "a redact with no patch downgrades to deny" branch reached
+unconditionally. `require_approval` fails closed (#200). Shadow mode still never
+enforces, and `shadow_after_complete` on a streamed response still does not, both
+verbatim from the engine.
+
+*The streamed A2A leg was strengthened at the same time, and had to be.* The
+response stage of `message:stream` previously `tee()`d the body, buffered the
+whole teed branch and evaluated it — so a match could only be RECORDED, after
+every byte had already reached the caller. On the leg an exfiltration payload
+actually travels, that is a guardrail that takes notes.
+`apps/agent-runtime/src/agents/stream-screen.ts` now screens FRAME BY FRAME:
+only the frame being assembled is held, each complete frame is evaluated before
+any of its bytes are handed on, a frame that passes is enqueued byte for byte
+(so `ROUTE-MAP.md`'s framing requirement still holds), and a refused frame is
+never delivered — the stream is cut with one terminal
+`event: ferrogate.guardrail_blocked` frame carrying the operator's code and the
+upstream connection is cancelled. **The HTTP status was committed as 200 before
+the block and cannot be retracted, so that terminal frame is the only in-band
+signal and clients must handle it**; that contract is written out in full in the
+module's own header.
+
+*Gates.* Three, because no one of them can see what the others do.
+
+| Gate | What it holds |
+|---|---|
+| `apps/mcp/test/fleet-guardrail-activation.test.ts` (15) | THE FLEET EFFECT. Activates through `apps/control-plane`'s REAL writer (`projectGuardrailRevision` + the generation-guarded `projectGuardrailActivation`), then requires the GATEWAY's real durable reader, the DEPLOYED MCP Worker over `SELF`, and agent-runtime's real screening function to agree — inside one `it()`, with `FG_DEV_MCP_GUARDRAILS` pinned EMPTY for the whole file so nothing can be explained by the var |
+| `apps/agent-runtime/test/durable/guardrail-policy-activation.spec.ts` (7) | THE A2A DOOR, behaviourally, in the durable harness where `CONTROL_DB` is bound and no `FG_DEV_*` exists. Ordered: a refusal is `403` with the operator's code and the egress gate is never reached, versus `422 egress_host_not_governed` naming the upstream host when nothing screened |
+| `apps/agent-runtime/test/stream-screen.test.ts` (12) | THE INCREMENTAL CONTRACT: clean prefix byte for byte, refused frame and everything after it never delivered, one detector call per FRAME, upstream cancelled, and all three failure postures closed |
+| `describe("FC-3 …")` in `fleet-consistency.test.ts` (4) | THE SOURCE-TEXT FORWARD GATE: all four Workers read the durable tables, they name the same two, both borrowers MOUNT the durable screening in their composition root, and the var survives only as the fallback |
 
 ---
 
@@ -444,11 +678,19 @@ a secrets resolver, which is defensible and is not obviously wrong — but it wa
 not traced end to end in this pass and is not gated. Row 20 of §3 says `—`
 rather than claiming a verdict.
 
-**6.5 The three `test.todo`s are deliberate and are the FC-1/FC-2/FC-3 fixes.**
+**6.5 The remaining `test.todo`s are deliberate and are the open FC fixes.**
 Each carries the exact change and the exact assertion that replaces it, so the
 open findings stay visible in every run rather than living only here. This is
 the pattern MOUNT-SEAMS §3.2 established when a delivering agent cannot write a
 green assertion for a defect it is not allowed to fix.
+
+**EVERY `test.todo` IN THE LEDGER IS GONE** (2026-08-01). FC-1's went when two
+of its three legs landed and was replaced by two POSITIVE assertions recording
+the third; the wave-22 integrate step closed that third leg, which turned both
+of them RED — exactly as intended — and they are now inverted into assertions
+that the leg is joined. FC-2's went the same way in the same wave. A `todo`
+cannot go red when the thing it describes lands; a measured table can, and that
+is the whole ratchet.
 
 ---
 
@@ -489,22 +731,286 @@ and these two are the ones that matter for a SECURITY fix:
 Both restored; the named files re-run GREEN (13/13 and 5/5) and `git diff` is
 clean of both markers.
 
+### 7.2 FC-1's fix, mutation-proven (2026-08-01)
+
+**M1 and M8 above are SUPERSEDED by the fix they anticipated.** They were
+mutations that simulated FC-1's fix ARRIVING, against a ledger that recorded the
+divergence; the fix has now landed for two of the three legs, so the tables
+those two mutations turned red no longer exist in that form. They are left in
+place as the record of what the audit measured, not as live gates.
+
+These are the mutations run against the FIX. Each one changed BEHAVIOUR, was
+confirmed by grepping the file back **off disk**, and was restored.
+
+| # | Mutation | Confirmed off disk | Result |
+|---|---|---|---|
+| **M11** | `apps/mcp/src/http.ts` resolves the drain and then IGNORES the answer | `236: await resolveDrain(spend.env); // MUTATION-FC1-MCP` | **3 RED** in `apps/mcp/test/drain-fleet.test.ts` — *both doors are OPEN before the drain, and BOTH are shut after it*; *the REST tool transport shuts on the same one write*; *lifting the drain re-opens both doors* |
+| **M12** | `apps/agent-runtime/src/middleware/auth.ts` resolves the drain and drops the refusal | `510: // MUTATION-FC1-AR: resolve the drain and then IGNORE the answer` | **4 RED** in `apps/agent-runtime/test/durable/drain.spec.ts` — including *REFUSES the A2A ingress too, not just the job verb* |
+| **M13** | `apps/agent-runtime/src/routes/health.ts` drops the durable term from the readiness conjunction | `168: const draining = !runtimeEnabled(env); // MUTATION-FC1-READYZ` | **1 RED** — */readyz answers 503 not_ready with readiness_reason operator_drain* |
+| **M14** | `apps/mcp/src/routes/index.ts` calls `resolveDrain` on `/readyz` and discards it | `274: await resolveDrain(c.env as DrainBindings); // MUTATION-FC1-MCP-READYZ` | **1 RED** in `apps/mcp/test/drain.test.ts` — same probe assertion, on the other Worker |
+| **M15** | `apps/control-plane/src/routes/admin_config_ops.ts` drops the platform-operator fence on `setAdminDrain` | `248: if (false as boolean) { // MUTATION-FC1-CP` | **1 RED** in `apps/control-plane/test/drain.test.ts` — *REFUSES a tenant-scoped admin with 403 tenant_scope_denied* |
+
+The FLEET gate was additionally observed RED **before** any mount existed —
+`apps/mcp tools/call while draining: expected 200 to be 503` — which is the
+observation a test written after a fix can never make.
+
+### 7.3 Six run against FC-3's fix
+
+Each changed BEHAVIOUR — no semantic no-ops — was confirmed by grepping the file
+back **off disk**, and was restored and re-verified GREEN.
+
+Baseline before any mutation: `apps/mcp` fleet gate **15 passed**, the
+agent-runtime A2A spec **7 passed**, the stream contract **12 passed**.
+
+| # | Mutation | Confirmed off disk | Result |
+|---|---|---|---|
+| **M16** | `apps/mcp/src/ports.ts` drops the durable wrapper from `resolvePorts` — the pre-wave posture, i.e. the fix removed | `1823: const guardrails = /*MUT-FC3-M1*/ deterministicManagedActionGuardrails(`, and `grep -c 'durableManagedActionGuardrails('` → **0** | **2 RED** — *ONE managed-action activation shuts the MCP door AND is live on the gateway, same code*; *the SAME activation screens a matching tool RESULT* |
+| **M17** | `apps/agent-runtime/src/ports.ts` drops the durable wrapper from `resolveDeps` | `1554: guardrails: /*MUT-FC3-M2*/ ((_e: unknown, p: GuardrailPort) => p)(`, and `grep -c 'durableA2aGuardrailPort('` → **0** | **3 RED** in the A2A spec — including *ONE activation refuses the payload with the OPERATOR's code, before the forward* |
+| **M18** | `compileActivatedPolicies` DROPS an uncompilable policy instead of failing it closed — the fail-OPEN direction | `676: /*MUT-FC3-M3*/ continue;` | **1 RED on each Worker** — *a detector that cannot BUILD fails the policy CLOSED, not open*. The narrowest and most valuable of the six: everything else stays green |
+| **M19** | `activatedGuardrailPolicies` becomes a process-lifetime memo (constant fingerprint) — the FC-4 regression, on this capability | `355: const fingerprint = "MUT-FC3-M4";` | **5 RED** in the fleet gate + **3 RED** in the A2A spec. This is what a plain per-isolate snapshot would have shipped, and it is why the pointer revalidation is not an optimisation |
+| **M20** | `agents/ingress.ts` refuses with its own `guardrail_blocked` instead of the operator's `PolicyAction.code` | `299: /*MUT-FC3-M5*/ "guardrail_blocked",` | **3 RED** — the "same code on every door" property, isolated from the "it refuses at all" property |
+| **M21** | `stream-screen.ts` enqueues each frame BEFORE screening it — forward-then-scan, which is what the previous buffering shape effectively did | `156: controller.enqueue(encoder.encode(frame)); /*MUT-FC3-M6*/` | **8 RED of 12** — including *delivers the clean prefix, never the refused frame, never anything after* and *NEVER echoes the matched text* |
+
+Both gates were also observed RED **before** any mount existed — the MCP fleet
+gate at *"expected a JSON-RPC error object: expected undefined to be defined"*
+and the A2A spec at *"expected 422 to be 403"* with the body naming
+`guardrail-probe.upstream.invalid`, i.e. the payload had cleared every content
+control and was at the point of being forwarded. That is the observation a test
+written after a fix can never make.
+
+---
+
+### 7.4 FC-1's THIRD leg, mutation-proven by the wave-22 INTEGRATE step
+
+The integrate step does not take a delivering agent's mutation table on trust,
+and it wrote this leg itself, so it proved it itself. Each mutation changed
+BEHAVIOUR, was confirmed by grepping the file back **off disk**, was run, was
+restored, and the baseline re-confirmed.
+
+| # | Mutation | Confirmed off disk | Result |
+|---|---|---|---|
+| **M22** | `apps/gateway/src/routes/readiness.ts::resolveDrainState` performs the durable read and then IGNORES it (`combineDrain(NOT_DRAINING, …)`) — the var-only posture, i.e. the fix removed at the DECISION rather than at the read | `319: await readDurableDrain(env?.CONTROL_DB); // MUTATION-W22-FC1-GW: resolve and IGNORE` | **2 RED** — `fleet-control-matrix.test.ts` §5.1 (*the operator drained the fleet and the gateway kept accepting billable work*, `{status:400,code:"invalid_request"}` vs `{status:503,code:"node_draining"}`) and §5.2. **Every source-text gate stayed GREEN**, which is the finding: the file still NAMES `"runtime-state"`, so §3.3/§3.4, the ledger and `drain-fleet.test.ts` all pass a Worker that reads the document and throws the answer away. That is precisely why §5 is behavioural, and it is the strongest argument in this document for never gating a control on source text alone |
+| **M23** | The same file's `RESOURCE_TABLE` and `DRAIN_COLLECTION` are pointed at private names — the pre-wave-22 posture reconstructed at the AUTHORITY | `119: export const RESOURCE_TABLE = "mut_w22_private_drain";`, `121: … = "mut-w22-runtime";`, and `grep -c '"runtime-state"'` → **0** | **13 RED** across three gateway files + **1 RED** in `apps/mcp/test/drain-fleet.test.ts` (*the THIRD enforcer reads the SAME document*). Includes §3.3 *DURABLE on agent-runtime, control-plane, mcp and VAR on gateway*, §3.4, all four of §5, the three inverted ledger assertions and the wrangler-inertness gate. §5.3 goes red too and honestly: with the table renamed the durable read FAILS, and the fail-closed posture answers `503 drain_state_unavailable` rather than `node_draining` — a different fact, deliberately given a different code |
+| **M24** | `apps/mcp/src/http.ts` computes the drain refusal and discards it | `235: const refusal = /*MUT-W22-FC1-MCP*/ ((_r: unknown) => null)(` | **3 RED** in `test/drain-fleet.test.ts` — *both doors are OPEN before the drain, and BOTH are shut after it*; *the REST tool transport shuts on the same one write*; *lifting the drain re-opens both doors*. `test/drain.test.ts` also red-adjacent; the FLEET file is the one that names the fleet |
+| **M25** | `apps/agent-runtime/src/middleware/auth.ts` does the same | `515: const refusal = /*MUT-W22-FC1-AR*/ ((_r: unknown) => null)(` | **5 RED of 94** in the durable harness — the four `drain.spec.ts` cases including *REFUSES the A2A ingress too, not just the job verb*, plus a fail-closed dispatch case |
+
+### 7.5 FC-2 and FC-3, re-proven by the same step
+
+Not a re-run of the delivering agents' tables — different mutation SITES, chosen
+to break the MOUNT rather than the module, because "a module that exists and is
+not wired" is this repository's dominant defect and the one a delivering agent's
+own table is least likely to attack.
+
+| # | Mutation | Confirmed off disk | Result |
+|---|---|---|---|
+| **M26** | `apps/mcp/src/ports.ts::resolvePorts` binds `ALWAYS_ADMIT_LIFECYCLE` instead of `durableLifecycle(env)` — the module intact, the mount gone | `1831: const lifecycle = /*MUT-W22-FC2-MCP*/ ALWAYS_ADMIT_LIFECYCLE;`, `grep -c 'durableLifecycle(env)'` → **0** | **8 RED of 12** in `test/fleet-tenancy-suspension.test.ts` — including *shuts all three doors with the SAME status and code after ONE suspension*, *computes an EMPTY exploit set*, the ancestor case, the fail-closed 503 and *resolvePorts binds the durable lifecycle gate in the posture this Worker deploys* |
+| **M27** | `apps/agent-runtime/src/ports.ts::resolveDeps` drops the `tenancyGatedApiKeyPort` wrap | `1501: : /*MUT-W22-FC2-AR*/ resolvedApiKeys;`, `grep -c 'tenancyGatedApiKeyPort(resolvedApiKeys'` → **0** | **6 RED** in `test/durable/lifecycle.spec.ts` AND **7 RED** in the mcp FLEET gate. The second number is the one that matters: the fleet gate fails for a regression on ANOTHER Worker, which is the property no per-Worker suite has |
+| **M28** | `apps/mcp/src/ports.ts` drops the `durableManagedActionGuardrails` wrapper | `1823: const guardrails = /*MUT-W22-FC3-MCP*/ deterministicManagedActionGuardrails(`, `grep -c 'durableManagedActionGuardrails('` → **0** | **2 RED** in `test/fleet-guardrail-activation.test.ts` — *ONE managed-action activation shuts the MCP door AND is live on the gateway, same code*; *the SAME activation screens a matching tool RESULT* |
+| **M29** | `apps/agent-runtime/src/ports.ts` drops the `durableA2aGuardrailPort` wrapper | `1554: guardrails: /*MUT-W22-FC3-AR*/ ((_e: unknown, p2: GuardrailPort) => p2)(`, `grep -c 'durableA2aGuardrailPort('` → **0** | **3 RED** in `test/durable/guardrail-policy-activation.spec.ts` + **1 RED** in `fleet-consistency.test.ts` (*both borrowers MOUNT the durable screening in their composition root*). **The mcp FLEET gate stayed 15/15 GREEN** — see the gap below |
+
+**One gap, found by M29 and stated rather than smoothed over.**
+`apps/mcp/test/fleet-guardrail-activation.test.ts` reaches agent-runtime by
+importing its *screening function* as a leaf, not by driving its
+`resolveDeps` — so it proves the FUNCTION honours an activation and cannot see
+whether the deployed Worker still MOUNTS it. Removing that mount leaves the
+fleet gate fully green. The regression is caught, twice — by the A2A durable
+spec (3 RED) and by the ledger's mount assertion (1 RED) — so it is gated; but
+the file whose NAME says "fleet" is not the file that catches it. The
+equivalent for FC-1 does not have this shape (`drain-fleet.test.ts` drives
+agent-runtime's real resolver against the real database and the gateway's leg is
+held behaviourally in the gateway's own bundle), and the equivalent for FC-2
+does not either (M27 turned the fleet gate red). This one is the outlier and it
+should be closed by driving `resolveDeps` in the fleet file.
+
 ---
 
 ## 8. What the next wave should do with this
 
-1. **FC-1 first.** It is the only finding where the operator's action is a
-   complete no-op, and it is the cheapest: `drainStatus` gains a durable read
-   with the var as fallback, following the precedence `agent-upstreams.ts`
-   already proves. The two other spend Workers then honour the same answer.
-2. **FC-2 next.** Highest security value. It is the wave-16 bypass in a second
-   control, and the fix is mechanical: the lifecycle gate the gateway already
-   has, ahead of the admission ladder both other Workers already have.
-3. **FC-3 after that.** Larger, because the detector snapshot has to be
-   projected per isolate on two more Workers, but the design is settled — the
-   gateway's `loadGuardrailPolicyStore` is the template.
+1. **FC-1 — DONE (wave 22, all three legs).** Nothing left. The one thing to
+   carry forward is a DEPLOY hazard rather than a code one:
+   `apps/agent-runtime`'s two `[[d1_databases]]` stanzas are still committed
+   COMMENTED OUT for a measured test-harness reason (§FC-5's sibling problem),
+   so a deployment that leaves them commented drains two Workers of three — the
+   defect reintroduced by configuration. `CLOUD-VERIFICATION.md` **B11** and
+   **V-FC1** carry it.
+2. **FC-2 — DONE (wave 22).** Highest security value, and the fix was the
+   mechanical one: the lifecycle gate the gateway already had, composed over the
+   credential port both other Workers already had, ahead of their admission
+   ladders.
+3. **FC-3 — DONE (wave 22).** §4 records the five decisions inside it. The one
+   worth carrying forward: the gateway still snapshots its own guardrail source
+   ONCE per isolate (`guardrails/config.ts`), while the two Workers closed here
+   revalidate the binding pointers per request. That asymmetry is now the only
+   place in the fleet where "when does an activation take effect" has two
+   answers, and it should be collapsed onto the revalidating one rather than the
+   reverse.
 4. **FC-6c is a product decision, not an engineering task.** Route it to
    whoever owns the deny-rule semantics before someone "fixes" it into a
    fleet-wide deny and changes behaviour Rust never had.
 5. **Never delete FC-5.** It guards a thing that is not broken, which is exactly
    why it will look deletable.
+
+---
+
+## 9. THE MECHANICAL GATE (wave 22) — `apps/gateway/test/fleet-control-matrix.test.ts`
+
+**66 assertions. Baseline on 2026-08-01: 62 pass, 4 RED, and all four RED are
+FC-1's third leg.** Six mutations, all restored, in §9.5.
+
+### 9.1 Why a second fleet file, when §7 already mutation-proved the first
+
+`fleet-consistency.test.ts` is the LEDGER and stays. It records each finding as
+an exact table and fails in both directions, which is what makes a finding and
+its document move in one commit. That is the right shape for a finding.
+
+It is the wrong shape for a CLASS, for one reason: **every table in it is a
+hand-written list of Workers.** `expect(appsMatching(PROBE.emitsNodeDraining))
+.toEqual(["gateway"])` is true until someone adds a sixth Worker, at which point
+it is *still* green about the five it knows and blind to the new one. Wave 21
+enumerated 23 capabilities and found 5 divergences BY INSPECTION; inspection
+does not survive the next refactor.
+
+So the new file names **no Worker anywhere**. It computes:
+
+* **the fleet**, from `apps/{*}/wrangler.toml` — a `*` in the APP position, so a
+  sixth Worker enters every table below the moment it exists (`apps/cli` is
+  excluded by having no `wrangler.toml`, not by name);
+* **the role sets**, from behaviour: `CREDENTIAL` = the Workers that can answer
+  `401 invalid_api_key`, `SPEND` = the Workers that carry the wave-16 ladder's
+  `403 quota_scope_disabled`, `SCREENING` = the Workers that call a guardrail
+  detector. A new Worker that ports the ladder joins `SPEND` automatically and
+  is instantly required to honour the drain, the suspension and the quota;
+* **the source-of-truth class of every control on every Worker**, from the SQL
+  that Worker issues (resolved through its own table constants) and the vars it
+  reads;
+* **the whole refusal table** — every `(status, code, message)` any Worker can
+  emit, in all three spellings the repo uses.
+
+### 9.2 The five properties, demanded uniformly of every control
+
+The registry supplies TOKENS only — durable authority, deploy-time var,
+in-memory fallback, enforcement point, and which computed role set must enforce
+it. It contains no list of Workers and no expected verdict. Every row is then
+held to the same five:
+
+| | Property | What it catches |
+|---|---|---|
+| **3.1** | the probes are live | a renamed table or refusal code, which would otherwise make every assertion below compare empty sets and pass |
+| **3.2** | every Worker the ROLE SET requires actually enforces it | FC-2's original shape: a spend Worker with no lifecycle gate at all |
+| **3.3** | every enforcer resolves it from the SAME class | **the one sentence all four shipped defects share** — DURABLE on one Worker and VAR-ONLY or IN-MEMORY on another is a hard failure, and the message prints the whole row |
+| **3.4 / 3.4b** | a control APPLIED durably is OBSERVED by every enforcer, and by ALL of its authorities | FC-1 exactly (the admin API writes `runtime-state/drain`, the gateway refuses off `GATEWAY_DRAIN`); 3.4b catches the finer form where one of several authority tables is privatised |
+| **3.5** | the refusal is the same wire answer everywhere | a 429 on one surface and a 403 on another is the same admission bug wearing a different response |
+
+Plus §3.6, the FC-5 trap (one definer of `RateLimiterDurableObject`, every other
+SPEND Worker pinned to the deploy-time `script_name` stanza), computed over
+whichever Workers §2 put in SPEND.
+
+### 9.3 The ratchets — new controls are DISCOVERED, not declared
+
+* **§4.1** groups every refusal code the fleet declares and forbids two statuses
+  for one code. It found two live disagreements on its first run, both
+  legitimate and both now PINNED to their exact spelling so a change is red:
+  `governance_counter_unavailable` (429 at the gateway's asset-download site per
+  `server/assets.rs:1114`, 503 on every inference path) and `invalid_request`
+  (422 on the admin plane, 400 on the data plane). Anything NOT on that
+  two-entry list must agree, so a new shared code fails closed.
+* **§4.2** requires the admission ladder's emitters to equal the computed SPEND
+  set and its wording to be identical across it.
+* **§4.3** is the new-control ratchet: **every table two or more Workers touch
+  must be a registered control or an explicitly declared non-control.** A shared
+  table is a shared source of truth by definition, and "does a change to it
+  apply everywhere?" is the question nobody asked before either bypass shipped.
+  The declared-non-control list is the only hand-written list in the file and
+  its polarity is deliberate — the default for anything new is FAIL. It has
+  already earned its place: `tenant_databases` appeared as a new mcp read during
+  this wave and the gate demanded the decision (it is routing, not a control —
+  the day it grows a `status` column it becomes one).
+* **§4.4** is the inverse, against the registry rotting into fiction: every
+  authority table a control claims must be issued by some Worker.
+
+### 9.3.1 One deliberate widening, and why it is not a hole
+
+A correct fix can move the `SELECT` out of the Worker: `apps/mcp` and
+`apps/agent-runtime` resolve the activated guardrail revision through
+`@ferrogate/guardrails`, so the statement lives in `packages/`. A scan of
+`apps/{*}/src` alone scores both VAR-ONLY — **inventing the exact divergence the
+file exists to detect, on the commit that closes it.** A gate that cries wolf on
+a fix is a gate that gets deleted.
+
+Scanning `packages/` instead would be worse: every Worker that IMPORTS a package
+would score durable whether or not it MOUNTS the port, and "a module that exists
+and is not wired" is this repository's dominant defect. So the evidence demanded
+is on the WORKER — it names the authority table as a literal, in a file that
+also evidences a control-database read, **and that file issues no SQL of its
+own**. A module with its own SQL is scored on that SQL and nothing else, so
+pointing a `SELECT` at a private table cannot be masked by an untouched
+`const X_TABLE = "…"` sitting next to it. Mutation **M1** is that case, and it is
+RED.
+
+### 9.4 What is NOT mechanically gated — the cells that will rot first
+
+Ten of the twenty-three rows. Listed here rather than left implicit, because an
+ungated cell that nobody has written down is indistinguishable from a gated one:
+
+| Row | Capability | Held by | Why it is not MECH yet |
+|---|---|---|---|
+| 9 | RBAC `rbac_action` | LEDGER (`fleet-consistency.test.ts` FC-7) | the property is about the CONTRACT table, not about a source of truth; convertible |
+| 10 | Tenant fencing | INSPECTION | every Worker fences, but the fence is a SQL predicate rather than an authority, so §3's classifier cannot see it. **This is the most valuable conversion left** — a fence that weakens on one Worker is a cross-tenant read |
+| 13 | MCP server catalog | INSPECTION | one reader today; the day a second Worker resolves it, §4.3 will demand it be registered |
+| 16 | Metering WRITE | INSPECTION | declared a non-control in §4.3 (single writer by design) |
+| 18, 19 | Response cache, pre-auth network gate | LEDGER | pinned single-Worker in FC-6a/FC-6b |
+| 20 | Secrets resolution | INSPECTION | §6.4 records it as an unresolved question, not a verdict — gating it would pin an answer nobody has established |
+| 21 | Self-hosted-worker transport identity | INSPECTION | declared a non-control in §4.3 |
+| 22 | Session / OAuth state | INSPECTION | genuinely distinct concerns on the two Workers |
+| 23 | Provider circuit breaker | INSPECTION | single-Worker by design |
+
+### 9.5 Mutation proof
+
+Baseline before every mutation: **62 passed | 4 failed (66)**. Each mutation was
+applied, grepped back **off disk** to confirm the edit landed, run, restored,
+and the baseline re-confirmed. All six change BEHAVIOUR. M1 and M2 were re-run
+against the final classifier after §9.3.1's widening landed.
+
+| # | Mutation | Confirmed off disk | Result |
+|---|---|---|---|
+| **M1** | `apps/mcp/src/admission/quota.ts` points its quota `SELECT` at a private table (`FROM mcp_private_quota_policies`) while leaving the `QUOTA_POLICY_TABLE` constant intact | `358: … FROM mcp_private_quota_policies …/*MUT-M1*/`, and `grep -c "FROM quota_policies"` → **0** | **+2 RED** — §3.4b on BOTH `admission` and `quota-plan`: *`mcp does not read quota_policies`* |
+| **M2** | `apps/agent-runtime/src/ports.ts` drops the `status` column from `LIFECYCLE_TENANT_SQL` — the FC-2 fix removed | `715: … = "SELECT id FROM tenants WHERE id = ?1"; /*MUT-M2*/` | **+2 RED** — §3.3 *DURABLE on control-plane, gateway, mcp and IN-MEMORY on agent-runtime*, and §3.4 naming agent-runtime |
+| **M3** | `apps/mcp/src/admission/gate.ts` answers the wallet refusal `403` with different wording | `101: status: 403,` + `message: "prepaid credit balance is empty"` | **+2 RED** — §4.1 (status disagreement, discovered without the registry) and §4.2 (wording) |
+| **M4** | `apps/agent-runtime/src/ports.ts` issues SQL against `stored_assets`, a gateway-only table | `717: export const MUT_M4_SQL = "SELECT id FROM stored_assets …"; /*MUT-M4*/` | **+1 RED** — §4.3, the new-control ratchet: *a source of truth is shared by two Workers and nobody has asked whether a change to it applies to both* |
+| **M5** | `stripComments` regresses to eating string literals (the VACUITY probe) | `152: .replace(/"[^"]*"/g, '""') /*MUT-M5*/` | **32 RED of 66**, and the CANARY fails FIRST — *comment stripping preserves every line of top-level code, on every Worker*. A stripper regression can never present as "the fleet is consistent" |
+| **M6** | `apps/mcp/src/lifecycle.ts` stops naming the suspension refusal | `135: return "tenancy_inactive"; /*MUT-M6*/`, `grep -c '"tenancy_suspended"'` → **0** | **+1 RED** — §3.2 coverage: *these spend Workers cannot enforce it — an operator who applies it there changes nothing* — computed from the role set, not from a list |
+
+§3.6 is not re-mutated here: it is carried over unchanged from the ledger's
+`describe("FC-5 …")`, whose M5a/M5b in §7 broke exactly these assertions. Both
+require editing a `wrangler.toml`, which this wave does not own.
+
+`grep -rn "MUT-M[0-9]" apps/` is clean; every restore was verified by grepping
+the ORIGINAL text back off disk, not by trusting the write.
+
+### 9.6 How to read this suite RED at integrate time
+
+**HISTORICAL — all of these are now GREEN; §9.7 records how.** Kept because
+it is the record of a gate written to the INTENDED end state ahead of the fix,
+which is the only way a gate is ever observed red for the right reason. As
+written by the delivering agent, before the wave-22 integrate step:
+
+| File | RED | Meaning |
+|---|---|---|
+| `fleet-control-matrix.test.ts` | **4** — §3 `drain` 3.3 + 3.4, §5.1, §5.2 | **FC-1's third leg is genuinely open.** `apps/mcp` and `apps/agent-runtime` now read the durable `runtime-state/drain` document; `apps/gateway` still refuses off the deploy-time `GATEWAY_DRAIN` var, so the fleet is DURABLE on two Workers and VAR on one — the defect shape, now inverted. §5.1 states it behaviourally: the operator's `POST /admin/v1/drain` is written, and `/v1/chat/completions` answers `400`, not `503 node_draining`. **These four go green when `drainStatus` gains the durable read with the var as fallback, and NOT before.** |
+| `fleet-consistency.test.ts` | **5** — FC-2 ×3, FC-3 ×2 | **The ledger ratchet firing on a CLOSED divergence, exactly as §5 says it must.** FC-2 and FC-3 landed during this wave, so *"only the gateway reads the DURABLE lifecycle authority"* and *"only gateway and control-plane touch the durable policy tables"* are now false — which is the good news wearing a red. They belong to whoever lands those fixes, in the same commit. Do not "fix" them by widening the ledger without re-reading §3. |
+
+Everything else in `apps/gateway` was green at that point: **2005 passed | 9
+failed | 2 todo** across 114 files, plus 24/24 and 42/42 in the two escalated
+harnesses.
+
+### 9.7 The reds §9.6 predicted, resolved
+
+The four `fleet-control-matrix.test.ts` reds and the five
+`fleet-consistency.test.ts` reds §9.6 recorded were all real and are all closed.
+The matrix's four went green when the gateway's `resolveDrainState` landed and
+**not before**, exactly as §9.6 said they would. The ledger's five were the
+ratchet firing on CLOSED divergences (FC-2 ×3, FC-3 ×2, plus FC-1's two
+inverted assertions) and were resolved by rewriting the measured tables in the
+same commit as the fix, which is what §5 demands. Both files are now GREEN with
+no `test.todo`: **`fleet-consistency.test.ts` 35 passed (35)** and
+**`fleet-control-matrix.test.ts` 66 passed (66)**.

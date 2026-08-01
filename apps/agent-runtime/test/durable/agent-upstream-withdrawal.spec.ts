@@ -406,6 +406,26 @@ describe("the durable lookup fails CLOSED", () => {
     await env.CONTROL_DB.prepare(
       `ALTER TABLE ${RESOURCE_TABLE} RENAME TO ${RESOURCE_TABLE}_quarantined`,
     ).run();
+    // A stand-in table that the OPERATOR-DRAIN read can use and the REGISTRY
+    // read cannot, so this test breaks exactly one control.
+    //
+    // Why it is needed: since FC-1, `middleware/auth.ts` reads the durable
+    // `runtime-state/drain` document out of this same table on every guarded
+    // operation, and it fails closed too. Quarantining the whole table breaks
+    // BOTH controls, and the earlier one answers first — which is correct
+    // behaviour (an unresolvable control plane must not admit) but would leave
+    // the registry's own refusal unproven. This table carries the three columns
+    // the drain read touches (`resource_kind`, `resource_id`, `document_json`)
+    // and NOT `created_at_unix`, which `registry.ts`'s `LIST_ORDER` requires —
+    // so the drain resolves "no document, not draining" and the upstream lookup
+    // is the one that throws. It is also the more realistic outage of the two.
+    await env.CONTROL_DB.prepare(
+      `CREATE TABLE ${RESOURCE_TABLE} (
+         resource_kind TEXT NOT NULL,
+         resource_id TEXT NOT NULL,
+         document_json TEXT NOT NULL
+       )`,
+    ).run();
     try {
       const refused = await dispatch(id, KEY_LIVE);
       expect(refused.status, refused.body).toBe(503);
@@ -413,6 +433,24 @@ describe("the durable lookup fails CLOSED", () => {
       // NOT a 404: "the registry is unreadable" must stay distinguishable from
       // "the operator withdrew it", or an outage is silently reported as a
       // successful withdrawal.
+      expect(refused.body).not.toContain(hostFor(id));
+    } finally {
+      await env.CONTROL_DB.prepare(`DROP TABLE ${RESOURCE_TABLE}`).run();
+      await env.CONTROL_DB.prepare(
+        `ALTER TABLE ${RESOURCE_TABLE}_quarantined RENAME TO ${RESOURCE_TABLE}`,
+      ).run();
+    }
+
+    // …and when the WHOLE control table is unreachable, the FIRST control that
+    // cannot be evaluated refuses instead — the operator drain, with its own
+    // code. Two outages, two honest answers, and neither of them admits.
+    await env.CONTROL_DB.prepare(
+      `ALTER TABLE ${RESOURCE_TABLE} RENAME TO ${RESOURCE_TABLE}_quarantined`,
+    ).run();
+    try {
+      const refused = await dispatch(id, KEY_LIVE);
+      expect(refused.status, refused.body).toBe(503);
+      expect(refused.code).toBe("drain_state_unavailable");
       expect(refused.body).not.toContain(hostFor(id));
     } finally {
       await env.CONTROL_DB.prepare(

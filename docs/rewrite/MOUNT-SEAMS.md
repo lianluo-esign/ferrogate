@@ -470,7 +470,7 @@ wave 18 fixed it (§3.2).
 
 ---
 
-## 7. `apps/gateway` — 61 seams
+## 7. `apps/gateway` — 62 seams
 
 ### 7.1 Entry module `src/worker.ts` (6)
 
@@ -513,6 +513,7 @@ Four of these fifteen (**GW-R4, R8, R11, R14**) had never been a row in any wave
 | GW-R6 | `app.use("*", contractAuth(options.deps ?? depsFromEnv));` (407) `??` | `MUT-2 "contractAuth(options.deps ?? depsFromEnv)"→"async (_c, n) => await n()/*MUT*/"` | marker present | `test/auth.test.ts`; `test/rbac.test.ts` | DEF | T1 |
 | GW-R7 | `for (const middleware of options.middleware ?? []) { app.use("*", middleware); }` (411-413) | `MUT-1 /^    app\.use\("\*", middleware\);$/m` | anchor gone | `test/metering/wiring.test.ts` + every §7.2 middleware gate | DEF | T1 |
 | GW-R8 | `app.use("*", options.nodeDrain ?? nodeDrainGate());` (421) `??` — **NEW ROW** | `MUT-2 →"/*MUT*/ void nodeDrainGate;"` | marker present | `test/routes/drain.test.ts` — **3 RED** (503 `node_draining` on the five spend-producing ops) | DEF | T1 |
+| GW-R17 | **NEW, WAVE 22 (FC-1, the third and last leg).** The DURABLE half of the drain — `resolveDrainState` in `src/routes/readiness.ts` (`readDurableDrain` + `combineDrain`), which `nodeDrainGate` (GW-R8) and `readyzHandler` (GW-R10) both call. GW-R8 gates that the middleware is MOUNTED; this gates what it RESOLVES FROM. Before it, `POST /admin/v1/drain` shut `apps/mcp` and `apps/agent-runtime` and left `/v1/chat/completions` serving | `MUT-2` resolve the durable document and then IGNORE it: `await readDurableDrain(env?.CONTROL_DB); return combineDrain(NOT_DRAINING, drainStatus(env).draining);` — the var-only posture, broken at the DECISION rather than at the read | `MUTATION-W22-FC1-GW` present | `test/fleet-control-matrix.test.ts` — **2 RED** (§5.1 *the operator drained the fleet and the gateway kept accepting billable work*, `{status:400,code:"invalid_request"}` vs `{status:503,code:"node_draining"}`; §5.2 *lifting the drain lets work through again*). **Every source-text gate stays GREEN under that mutation** — the file still names `"runtime-state"` — which is why this row cites the BEHAVIOURAL file and not the ledger. The harder variant (point `RESOURCE_TABLE` / `DRAIN_COLLECTION` at private names) is **13 RED** across `fleet-control-matrix.test.ts`, `fleet-consistency.test.ts` and `env-var-drift.test.ts`, plus **1 RED** in `apps/mcp/test/drain-fleet.test.ts`. See `FLEET-CONSISTENCY.md` §7.4 M22/M23 | DEF | T1 |
 | GW-R9 | `app.use("*", options.responseCache ?? responseCache());` (431) `??` | `MUT-2 →"/*MUT*/ void responseCache;"` | marker present | `test/cache/deployed.test.ts`; `test/cache/middleware.test.ts` | DEF | T2 |
 | GW-R10 | `router.register("getHealthz", healthzHandler);` + `router.register("getReadyz", readyzHandler);` (436-437) | `MUT-1 /router\.register\("get(Healthz\|Readyz)".*$/m` | anchors gone | `test/health.test.ts`; `test/routes/readiness.test.ts` | DEF | T2 |
 | GW-R11 | `router.register("getMetrics", metricsHandler);` (445) — **NEW ROW** | `MUT-2 →"/*MUT*/ void metricsHandler;"` | marker present | `test/contract.test.ts` (31-op mount) + `test/routes/metrics.test.ts` — **5 RED** | DEF | T2 |
@@ -577,7 +578,7 @@ config gate of the five.
 
 ---
 
-## 8. `apps/control-plane` — 41 seams
+## 8. `apps/control-plane` — 42 seams
 
 ### 8.1 Entry module `src/worker.ts` (3)
 
@@ -610,6 +611,7 @@ config gate of the five.
 | CP-S5 | `DELETE FROM sso_pending_flows WHERE state = ? RETURNING *` — `src/identity/adapters.ts`. **NEW ROW, wave 18.** ONE statement: consume-and-read atomically. A `SELECT` then a `DELETE` reintroduces SAML/OIDC replay, and NO test in `packages/{sso,identity}` would notice — they exercise the in-memory map | `MUT-2 →` a `SELECT` | marker present | `test/sso-store-contract.test.ts` (the package's OWN exported contract, run against the durable twin) + `test/identity-mount.test.ts` — **5 RED** across the two | DEF | T1 |
 | CP-C10 | `export default withAliasCanonicalization(app);` (141) | `MUT-2 →"/*MUT*/ app;"` | `grep -nF 'export default /*MUT*/ app;'` | `test/alias.test.ts` (`/control/v1/*` → 404) | DEF | T2 |
 | CP-C11 | `export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES;` (98) | `MUT-2 "= GROUP_MODULES"→"= []/*MUT*/"` | marker present | `test/wiring.test.ts` / `test/contract.test.ts` (the anti-drift gate reads this) | DEF | T3 |
+| CP-P9 | **NEW, WAVE 22 (FC-1).** The platform-operator fence on `setAdminDrain` (`routes/admin_config_ops.ts`). The operator drain is DEPLOYMENT state that three Workers read by primary key, so a tenant-scoped `admin.write` holder minting it would drain the fleet for every other tenant | `MUT-2 "if (scope.kind !== \"platform_operator\")"→"if (false as boolean)"` | `MUTATION-FC1-CP` present | `test/drain.test.ts` — **1 RED** (*REFUSES a tenant-scoped admin with 403 tenant_scope_denied*). The second, independent defence — `tenant_id: null` pinned by `drainDocument`, and every enforcer ignoring a tenant-attributed document — is gated separately in the same file and in `apps/mcp/test/drain.test.ts` | DEF | T1 |
 
 ### 8.3 Route registration `src/routes/index.ts` (2)
 
@@ -650,7 +652,7 @@ they were derived by the §2 walk and had never been enumerated.
 
 ---
 
-## 9. `apps/mcp` — 29 seams
+## 9. `apps/mcp` — 33 seams
 
 ### 9.1 Entry module `src/worker.ts` (3)
 
@@ -667,6 +669,8 @@ they were derived by the §2 walk and had never been enumerated.
 | MCP-C1 | `ingressRouteModule(),` (61) in `MCP_ROUTE_MODULES` | `MUT-1 /^  ingressRouteModule\(\),$/m` | anchor gone | `test/contract.test.ts` (`mcpJsonRpc`, `executeMcpTool` unreachable) | DEF | T1 |
 | MCP-C2 | `identityRouteModule(),` (62) | `MUT-1 /^  identityRouteModule\(\),$/m` | anchor gone | `test/contract.test.ts`, `test/identity.test.ts` (4 identity ops) | DEF | T1 |
 | MCP-C3 | `const { app, router } = createMcpApp({ modules: MCP_ROUTE_MODULES });` (65) | `MUT-2 "{ modules: MCP_ROUTE_MODULES }"→"{}/*MUT*/"` | marker present | `test/contract.test.ts` | DEF | T1 |
+| MCP-P12 | **NEW, WAVE 22 (FC-1).** The operator-drain gate in `src/http.ts::authenticateRequest` — `if (spend.billable) { const refusal = drainRefusal(await resolveDrain(spend.env)); … }`. The durable `runtime-state/drain` document, re-read PER REQUEST | `MUT-2` resolve the drain and IGNORE the answer: `await resolveDrain(spend.env); // MUTATION-FC1-MCP` | marker present | `test/drain-fleet.test.ts` — **3 RED** (*both doors … BOTH are shut after it*, *the REST tool transport shuts on the same one write*, *lifting the drain re-opens both doors*). The FLEET gate, so it also fails if `apps/agent-runtime` regresses | DEF | T1 |
+| MCP-P13 | **NEW, WAVE 22 (FC-1).** The drain term in `/readyz` — `readinessReport(c.env, await resolveDrain(c.env as DrainBindings))` in `src/routes/index.ts` | `MUT-2` discard the resolved state: `await resolveDrain(…); const report = readinessReport(c.env);` | `MUTATION-FC1-MCP-READYZ` present | `test/drain.test.ts` — **1 RED** (*/readyz answers 503 not_ready with readiness_reason operator_drain*). `/healthz` is deliberately NOT gated on the drain: liveness must have no backend dependency | DEF | T1 |
 
 ### 9.3 Route registration `src/routes/index.ts` — `createMcpApp` (6)
 
@@ -689,7 +693,9 @@ The old table's `MCP-R4` (`app.onError`) is **MCP-R6** here, and it is now gated
 | MCP-P1 | `const auth = durableAuth(env);` → `new D1McpAuth(env.DB, …)` | `MUT-2 "if (env.DB === undefined) return new UnboundAuth();"→"return new UnboundAuth();/*MUT*/"` | marker present | `test/d1-auth.test.ts` | DEF | T1 |
 | MCP-P2 | `const approvals = durableApprovals(env);` → `new D1ToolApprovals(env.DB)` | `MUT-2 "return new D1ToolApprovals(env.DB);"→"return new AutoApproval();/*MUT*/"` | marker present | `test/approvals.test.ts` | DEF | T1 |
 | MCP-P3 | `const secrets = secretResolverOverride ?? workerSecretResolver(env);` `??` | `MUT-2 "workerSecretResolver(env)"→"{ resolve: async () => undefined }/*MUT*/"` | marker present | `test/secrets-mount.test.ts` (the file that exists BECAUSE this was the stub) | DEF | T1 |
-| MCP-P4 | `const guardrails = deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS));` | `MUT-2 "parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS)"→"{}/*MUT*/"` | marker present | `test/guardrails.test.ts` | DEF | T2 |
+| MCP-P4 | the VAR leg of the tool guardrail — `deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS))`, now passed as `durableManagedActionGuardrails`' fallback argument (**rewritten wave 22**, MCP-P8 is the durable leg) | `MUT-2 "parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS)"→"{}/*MUT*/"` | marker present | `test/guardrails.test.ts`. The default project binds `DB` but activates no policy, so the durable half resolves to an empty set and the recipe still bites | DEF | T2 |
+| MCP-P8 | `const guardrails = durableManagedActionGuardrails(env, deterministicManagedActionGuardrails(…));` — the DURABLE leg, **NEW ROW** (wave 22, FLEET-CONSISTENCY FC-3) | `MUT-2 "const guardrails = durableManagedActionGuardrails(\n    env,\n    deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS)),\n  );"→"const guardrails = /*MUT*/ deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS));"` — i.e. drop the durable wrapper and keep only the var, which is the pre-wave-22 posture | `grep -c 'durableManagedActionGuardrails(' src/ports.ts` → **0** (import only) | `test/fleet-guardrail-activation.test.ts` — **2 RED of 15**, both naming the operator's own activated code: *ONE managed-action activation shuts the MCP door AND is live on the gateway, same code*, and *the SAME activation screens a matching tool RESULT*. Unmounted, a tenant moves the payload into an MCP `tools/call` argument or reads it back out of a tool RESULT and the activated revision never sees it — the fleet-consistency defect class (`FLEET-CONSISTENCY.md` FC-3). The gate pins `FG_DEV_MCP_GUARDRAILS = ""` for the whole file, so nothing in it can be satisfied by the var | DEF | T1 |
+| MCP-P14 | `const lifecycle = durableLifecycle(env);` — the TENANCY LIFECYCLE gate, **NEW ROW** (wave 22, FLEET-CONSISTENCY FC-2). Consumed by `src/http.ts::authenticateRequest` AHEAD of `ports.admission.admit`, which is not cosmetic: a suspended tenant must not reach the step that authorizes spend | `MUT-2 "const lifecycle = durableLifecycle(env);"→"const lifecycle = /*MUT*/ ALWAYS_ADMIT_LIFECYCLE;"` — the module intact, the MOUNT gone, which is this repo's dominant defect shape | `grep -c 'durableLifecycle(env)' src/ports.ts` → **0** | `test/fleet-tenancy-suspension.test.ts` — **8 RED of 12**, incl. *shuts all three doors with the SAME status and code after ONE suspension*, *computes an EMPTY exploit set*, the suspended-ANCESTOR case, the fail-closed 503, and *resolvePorts binds the durable lifecycle gate in the posture this Worker deploys*. Unmounted, a tenant the operator suspended keeps its still-valid credential and spends through MCP `tools/call` — wave 16's admission bypass in a second control. See `FLEET-CONSISTENCY.md` §7.5 M26 | DEF | T1 |
 | MCP-P7 | `const admission = durableAdmission(env);` — **NEW ROW** (task #114) | `MUT-2 →"const admission = /*MUT*/ undefined as never;"` | marker present | `test/admission.test.ts`, `test/d1-auth.test.ts`, `test/server-catalog.test.ts` — **12 RED** (per-key RPM, TOK-12 `request_limit_per_minute`, monthly budget, the D1 catalog + auth ladder) | DEF | T1 |
 | MCP-P5 | `credentials: new DurableCredentialStore(env.MCP_OAUTH_KV, env.DB, … DurableOauthFlowStore(env.MCP_OAUTH_FLOWS))` | `MUT-2 "if (durableIdentityBound(env)) {"→"if (false) {/*MUT*/"` | marker present | `test/durable-identity.test.ts` | DEF | T1 |
 | MCP-P6 | `cipher: identityCipherFrom(env.FERROGATE_MCP_IDENTITY_KEY) as IdentityCipherPort,` | `MUT-1 /cipher: identityCipherFrom\(/` | anchor gone | `test/durable-identity.test.ts` §the wave-17 case sealing with `identityCipherFrom(KEY_HEX)` and opening with the cipher `resolvePorts` chose. **Before it: GREEN — the base bundle already sets `cipher: webCryptoIdentityCipher()` (src/ports.ts:1404), so the mutation swapped the operator's configured AEAD key for an ephemeral per-isolate one and every stored OAuth grant became undecryptable on isolate recycle, invisibly** | DEF | T1 |
@@ -720,7 +726,7 @@ its own, because MCP-P4 already gates the value's consumer.
 
 ---
 
-## 10. `apps/agent-runtime` — 34 seams
+## 10. `apps/agent-runtime` — 38 seams
 
 ### 10.1 Entry module `src/worker.ts` (3)
 
@@ -749,6 +755,8 @@ supersedes it.
 | AR-C7 | `app.route("/", workerRoutes);` (59) — the six `auth.kind: "internal"` callbacks | `MUT-1` | anchor gone | `test/internal-auth.test.ts`, `test/isolation-grant.test.ts` | DEF | T1 |
 | AR-C9 | `export { AgentRunState } …` / `export { WorkerPlane } …` in **index.ts** (64-65) — duplicates AR-E2/E3 | `MUT-1` both, **and** the identity variant `MUT-2 "export { AgentRunState } from \"./runs/do.js\";"→"export { WorkerPlane as AgentRunState } from \"./workers/plane.js\"; /*MUT*/"` | anchors gone / marker present | `test/wrangler-bindings.test.ts` §"keeps the composition root's duplicate DO exports IDENTICAL to the entry module's (AR-C9)" (**wave 21**) — **1 RED** on deletion (`src/index.ts no longer re-exports AgentRunState`), **1 RED** on the identity variant (`is a DIFFERENT class than src/worker.ts's`). **The old cell's justification was WRONG**: `main` CANNOT point at `src/index.ts` — it exports `OWNED_OPERATIONS`, an array, and workerd rejects a non-function named export on the entry module (`src/worker.ts`'s own docblock says so). These two lines therefore never resolve a `class_name` in any configuration; what the gate pins is that the two candidate modules AGREE, which nothing asserted before | DEF · NOT-MUTABLE | T3 |
 | AR-C11 | `export default app;` (67) | `MUT-2 →"/*MUT*/ void app;"` | marker present | `test/health.test.ts` — **1 RED**, `TypeError: apps/agent-runtime/src/worker.ts does not export a default entrypoint` (AR-E1 re-exports this, so the failure surfaces on the ENTRY module). A runtime refusal, not a bundler error — §5 rule 4 holds. One file is named so the row is provable NARROWLY (wave 21) | DEF | T1 |
+| AR-P10 | **NEW, WAVE 22 (FC-1).** The operator-drain gate in `src/middleware/auth.ts::bearerAuth`, keyed on `isDrainGuardedOperation(operation.operationId)` (5 of the 15 owned operations). On the BEARER leg only, which is structurally why the six `auth.kind: "internal"` callbacks keep serving while draining | `MUT-2` resolve the drain and drop the refusal: `// MUTATION-FC1-AR: resolve the drain and then IGNORE the answer` | marker present | `test/durable/drain.spec.ts` — **4 RED**, incl. *REFUSES the A2A ingress too, not just the job verb*. **ESC**: the app's own default project has no `CONTROL_DB`, so the durable leg is only reachable under `test/durable/harness/` | DEF · ESC | T1 |
+| AR-P11 | **NEW, WAVE 22 (FC-1).** The durable term in the `/readyz` conjunction — `!runtimeEnabled(env) \|\| operatorDrain.draining` in `src/routes/health.ts` | `MUT-2 →"const draining = !runtimeEnabled(env);"` | `MUTATION-FC1-READYZ` present | `test/durable/drain.spec.ts` — **1 RED** (*/readyz answers 503 not_ready with readiness_reason operator_drain*) | DEF · ESC | T1 |
 
 ### 10.3 Ports `src/ports.ts` — `resolveDeps` (9)
 
@@ -761,7 +769,9 @@ supersedes it.
 | AR-P4 | `governance: inMemoryGovernancePort({ governedEgressHosts: parseGovernedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS) }),` (the old `AR-G1` is the same line; merged) | `MUT-2 "parseGovernedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS)"→"[]/*MUT*/"`. **The wave-13 recipe `→ ["*"]` is a NO-OP**: egress is matched with `allowedHosts.has(host)`, exact membership, so `"*"` is a wildcard for `grantableCapabilities` and a literal hostname for egress | marker present | `test/governance-mount.test.ts` (wave 14). **NOT** ~~`test/isolation-grant.test.ts`~~ (citation WITHDRAWN) — that file builds the port by hand eleven times and never calls `resolveDeps`, so #471's sealed-by-default guarantee was proven for the POLICY and not for the MOUNT | DEF | T1 |
 | AR-P5 | the VAR leg of the upstream registry — `inMemoryAgentUpstreamPort(parseJsonVar(env.AGENT_UPSTREAMS ?? (dev ? env.FG_DEV_AGENT_UPSTREAMS : undefined), []))`, now passed as `agentUpstreamPortFromEnv`'s fallback argument (**rewritten wave 21**, AR-P9 is the durable leg) | `MUT-2 "env.AGENT_UPSTREAMS ?? (dev ? env.FG_DEV_AGENT_UPSTREAMS : undefined)"→"env.AGENT_UPSTREAMS/*MUT*/"` | marker present | `test/agents.test.ts` (14 A2A dispatch cases). The default project binds no `CONTROL_DB`, so `agentUpstreamPortFromEnv` returns exactly this port and the recipe still bites | DEF | T2 |
 | AR-P9 | `upstreams: agentUpstreamPortFromEnv(env, inMemoryAgentUpstreamPort(…)),` — the DURABLE leg, **NEW ROW** (wave 21, cutover A3 leg 2) — **ESC** | `MUT-2 "agentUpstreamPortFromEnv(\n      env,\n      "→"((_e: unknown, p: AgentUpstreamPort) => p)(\n      env,\n      /*MUT*/ "` — i.e. drop the durable port and keep only the var fallback, which is the pre-wave-21 posture | `grep -nF 'agentUpstreamPortFromEnv' src/ports.ts` → import only | `test/durable/agent-upstream-withdrawal.spec.ts` — **10 RED of 13** under `bunx vitest run --config test/durable/harness/vitest.config.ts test/durable/agent-upstream-withdrawal.spec.ts`, and **the app's own main project stays GREEN — measured, 434/434** — which is why this row is ESC and not DEF. Two of the RED are the defect stated exactly: after the document is deleted, the dispatch is `422 egress_host_not_governed` naming `durable-and-var.upstream.invalid`, i.e. the var half resurrected an upstream the operator withdrew. The harness binds a MIGRATED `CONTROL_DB` and commits `AGENT_UPSTREAMS = "[]"`, whose inertness the spec asserts directly rather than in prose. Unmounted, a withdrawn upstream stays reachable for A2A dispatch — the fleet-consistency defect class (`FLEET-CONSISTENCY.md` §1, shipped defect #2). The FLEET EFFECT of the same withdrawal — both doors, one assertion path — is `apps/gateway/test/routes/agent-upstream-fleet-withdrawal.test.ts` (wave 21 INTEGRATE), which is where a regression on EITHER door lands in one test | ESC | T1 |
-| AR-P6 | `guardrails: deterministicGuardrailPort(parseJsonVar(env.FG_DEV_A2A_GUARDRAILS, {})),` | `MUT-2 "env.FG_DEV_A2A_GUARDRAILS"→"undefined/*MUT*/"` | marker present | `test/guardrails.test.ts` | DEF | T2 |
+| AR-P6 | the VAR leg of the A2A guardrail — `deterministicGuardrailPort(parseJsonVar(env.FG_DEV_A2A_GUARDRAILS, {}))`, now passed as `durableA2aGuardrailPort`'s fallback argument (**rewritten wave 22**, AR-P10 is the durable leg) | `MUT-2 "env.FG_DEV_A2A_GUARDRAILS"→"undefined/*MUT*/"` | marker present | `test/guardrails.test.ts`. The default project binds no `CONTROL_DB`, so the durable half short-circuits to `allow` and the recipe still bites | DEF | T2 |
+| AR-P12 | `guardrails: durableA2aGuardrailPort(env, deterministicGuardrailPort(…)),` — the DURABLE leg, **NEW ROW** (wave 22, FLEET-CONSISTENCY FC-3) — **ESC** | `MUT-2 "guardrails: durableA2aGuardrailPort(\n      env,\n      "→"guardrails: ((_e: unknown, p: GuardrailPort) => p)(\n      env,\n      /*MUT*/ "` — drop the durable port and keep only the var fallback, the pre-wave-22 posture | `grep -c 'durableA2aGuardrailPort(' src/ports.ts` → **0** (import only) | `test/durable/guardrail-policy-activation.spec.ts` — **3 RED of 7** under `bunx vitest run --config test/durable/harness/vitest.config.ts test/durable/guardrail-policy-activation.spec.ts`, and **the app's own main project stays GREEN — measured, 446/446** — which is why this row is ESC and not DEF. The RED states the defect exactly: an activated policy that should refuse `403 <operator code>` instead answers `422 egress_host_not_governed` naming `guardrail-probe.upstream.invalid`, i.e. the payload cleared every content control and was at the point of being forwarded. The harness binds a MIGRATED `CONTROL_DB` and commits `FG_DEV_A2A_GUARDRAILS = ""`, so nothing in the spec can be satisfied by the var | ESC | T1 |
+| AR-P13 | `apiKeys: tenancyGatedApiKeyPort(resolvedApiKeys, d1LifecycleRowSource(env.CONTROL_DB, env.DB))` — the TENANCY LIFECYCLE gate, **NEW ROW** (wave 22, FLEET-CONSISTENCY FC-2) — **ESC**. It WRAPS the credential port rather than sitting beside it, so the durable leg AND the dev leg are both gated; the shipped defect was a lifecycle outcome only the dev table could produce | `MUT-2 ": tenancyGatedApiKeyPort(resolvedApiKeys, d1LifecycleRowSource(env.CONTROL_DB, env.DB));"→": /*MUT*/ resolvedApiKeys;"` | `grep -c 'tenancyGatedApiKeyPort(resolvedApiKeys' src/ports.ts` → **0** | `test/durable/guardrail-policy-activation.spec.ts`' sibling `test/durable/lifecycle.spec.ts` — **6 RED** under `bunx vitest run --config test/durable/harness/vitest.config.ts`, AND **7 RED in `apps/mcp/test/fleet-tenancy-suspension.test.ts`**. The second number is the one that matters: the FLEET gate fails for a regression on ANOTHER Worker, which is the property no per-Worker suite has. **ESC** because the app's default project binds no `CONTROL_DB`. See `FLEET-CONSISTENCY.md` §7.5 M27 | ESC | T1 |
 | AR-P7 | `config: inMemoryConfigPort(configFromEnv(env)),` | `MUT-2 "configFromEnv(env)"→"configFromEnv({} as never/*MUT*/)"` | marker present | `test/budget.test.ts` (`AGENT_JOB_MAX_OPEN_PER_TENANT`, `…_DISPATCH_TTL_SECS`) | DEF | T2 |
 
 ### 10.4 Deploy config `wrangler.toml` (11)
@@ -853,16 +863,31 @@ and the reason the tool now EXITS NON-ZERO when the two disagree.
 
 | App | Seams | T1 | T2 | T3 |
 |---|---:|---:|---:|---:|
-| `apps/gateway` | 61 | 43 | 16 | 2 |
-| `apps/control-plane` | 41 | 25 | 11 | 5 |
-| `apps/mcp` | 29 | 23 | 4 | 2 |
-| `apps/agent-runtime` | 34 | 22 | 10 | 2 |
+| `apps/gateway` | 62 | 44 | 16 | 2 |
+| `apps/control-plane` | 42 | 26 | 11 | 5 |
+| `apps/mcp` | 33 | 27 | 4 | 2 |
+| `apps/agent-runtime` | 38 | 26 | 10 | 2 |
 | `apps/telemetry` | 17 | 9 | 3 | 5 |
 | `apps/cli` | 8 | 3 | 5 | 0 |
-| **Total** | **190** | **125** | **49** | **16** |
+| **Total** | **200** | **135** | **49** | **16** |
 
 Plus **1 RETIRED tombstone** (`GW-C11`, §3.2), which is a row but not a seam and
-is excluded from every total above. 191 ID-bearing lines, 190 seams.
+is excluded from every total above. 201 ID-bearing lines, 200 seams.
+
+**Wave 22 added TEN rows, all T1.** Five are FC-1 (the operator drain, joined
+across the fleet): `MCP-P12`/`MCP-P13`, `AR-P10`/`AR-P11` and `CP-P9` — see
+`docs/rewrite/FLEET-CONSISTENCY.md` §7.2 for their five mutations. Two are FC-3
+(an activated guardrail policy reaching every screening door): `MCP-P8` and
+`AR-P12`, the DURABLE legs that now wrap the pre-existing var legs `MCP-P4` and
+`AR-P6` — whose recipes were re-checked and still bite, so both were rewritten
+rather than retired. See §7.3 for their mutations. Every one of the seven was
+proven by mutation before this table was touched.
+
+The wave-22 **INTEGRATE** step added the remaining three, and proved each one
+itself rather than taking a delivering agent's table on trust: `GW-R17` (FC-1's
+third and last leg — the gateway's own durable drain resolver) and `MCP-P14` /
+`AR-P13` (FC-2's two mounts, which the delivering slice landed and did not
+register). `FLEET-CONSISTENCY.md` §7.4 and §7.5 carry their eight mutations.
 
 Wave 18's INTEGRATE step added **five** control-plane rows (`CP-S1`…`CP-S5`, all
 T1 — the enterprise-identity mounts) and moved `GW-C11` to `GW-R16` when it fixed

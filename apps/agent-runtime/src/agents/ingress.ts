@@ -28,15 +28,24 @@
  * ## The response stage on a STREAMED reply
  *
  * Rust buffers the whole A2A reply and evaluates the response-stage envelope
- * before writing a byte, so a match can still BLOCK. That is not available
- * here, and the reason is a project requirement rather than a platform one:
- * `docs/rewrite/ROUTE-MAP.md` requires `message:stream` to preserve upstream
- * SSE framing byte for byte AND incrementally, which buffering the reply
- * destroys. So the streamed leg `tee()`s the body — one branch goes to the
- * client untouched, the other is buffered and evaluated — and a match on a
- * streamed reply is DETECT-ONLY: it is recorded as evidence and cannot retract
- * bytes already flushed. The unary leg has no such conflict and DOES block
- * (403), identically to Rust.
+ * before writing a byte, so a match can BLOCK. Buffering is not available here:
+ * `docs/rewrite/ROUTE-MAP.md` requires `message:stream` to preserve upstream SSE
+ * framing byte for byte AND incrementally, which holding the reply destroys.
+ *
+ * The answer is neither of the two obvious ones. The streamed leg screens the
+ * body **frame by frame** (`./stream-screen.ts`): only the frame currently
+ * being assembled is held, each complete frame is evaluated BEFORE any of its
+ * bytes are handed on, a frame that passes is enqueued unmodified, and a frame
+ * a policy refuses is never delivered — the stream is cut with one terminal
+ * `event: ferrogate.guardrail_blocked` frame carrying the operator's own code,
+ * and the upstream connection is cancelled. `stream-screen.ts` documents that
+ * caller-visible shape in full, including the fact that the HTTP status was
+ * already committed as 200 and cannot be retracted.
+ *
+ * This is a STRENGTHENING of the previous behaviour, which `tee()`d the body,
+ * buffered the whole teed branch, and could only RECORD a match after every
+ * byte had already reached the caller. The unary leg is unchanged and blocks
+ * exactly as Rust does.
  */
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -46,6 +55,7 @@ import type { AgentRuntimeDeps, AgentRuntimeEnv, AgentUpstream, AuthContext } fr
 import { runStateStub } from "../runs/addressing.js";
 import { SSE_HEADERS } from "../runs/events.js";
 import { declaredAgentRunId, declaredParentActionFingerprint } from "../runs/governance.js";
+import { type StreamBlock, screenSseStream } from "./stream-screen.js";
 
 /** Rust `A2A_ROUTE`. */
 export const A2A_ROUTE = "a2a.message";
@@ -132,19 +142,21 @@ export function a2aReplyText(body: string, stream = false): string {
 }
 
 /**
- * Drain the teed branch of a streamed reply and evaluate the response stage.
+ * Record a mid-stream guardrail block on the declared run's timeline.
  *
- * Runs under `waitUntil`, so it never delays the client's first byte. A match
- * here is DETECT-ONLY (see the module docs): the evidence is recorded on the
- * run timeline, which is where an investigator looks, but the bytes are gone.
+ * `enforced: true`, and that is a factual change rather than a cosmetic one:
+ * under the previous buffering shape the bytes were already gone when the match
+ * was found, so the row honestly said `enforced: false`. Frame-by-frame
+ * screening means the offending frame was never delivered, so an investigator
+ * reading this row is being told the truth about what the caller received.
  *
- * Errors are swallowed deliberately — this runs after the response has been
+ * Errors are swallowed deliberately: this runs after the response has been
  * committed, so throwing could only produce an unhandled rejection, never a
- * refusal the caller would see.
+ * refusal the caller would see. The BLOCK itself does not depend on this
+ * succeeding — the stream is already cut by the time it runs.
  */
-async function evaluateStreamedReply(
-  deps: AgentRuntimeDeps,
-  branch: ReadableStream<Uint8Array>,
+async function recordStreamBlock(
+  block: StreamBlock,
   context: {
     readonly tenantId: string;
     readonly agentId: string;
@@ -155,28 +167,17 @@ async function evaluateStreamedReply(
     readonly nowUnix: number;
   },
 ): Promise<void> {
+  if (context.runStateStub === null || context.agentRunId === null) return;
   try {
-    const body = await new Response(branch).text();
-    const verdict = await deps.guardrails.evaluate({
-      stage: "response",
-      tenantId: context.tenantId,
-      agentId: context.agentId,
-      streaming: true,
-      text: a2aReplyText(body, true),
-    });
-    if (verdict.outcome === "allow") return;
-    if (context.runStateStub === null || context.agentRunId === null) return;
     await context.runStateStub.appendEvent(context.tenantId, {
       kind: "guardrail_match",
       body: {
         route: A2A_ROUTE,
         agent_id: context.agentId,
-        stage: verdict.denial.stage,
-        detector: verdict.denial.detector,
-        // DETECT-ONLY, and said so on the record: the reply was already
-        // streamed, so this evidence is not a block.
-        enforced: false,
-        message: verdict.denial.message,
+        stage: block.stage,
+        detector: block.code,
+        enforced: true,
+        message: block.message,
       },
       nowUnix: context.nowUnix,
       source: "control_plane",
@@ -288,7 +289,16 @@ async function handleAgentIngress(
     text: collectA2aText(payload).join("\n"),
   });
   if (requestVerdict.outcome === "deny") {
-    throw new HttpError(403, "guardrail_blocked", requestVerdict.denial.message);
+    // The OPERATOR's own code when a DURABLE activated revision matched, and
+    // the route's historical `guardrail_blocked` otherwise. That is what makes
+    // ONE activation refuse with the SAME code on every Worker that enforces it
+    // (`docs/rewrite/FLEET-CONSISTENCY.md` FC-3) rather than each Worker
+    // inventing a private one.
+    throw new HttpError(
+      403,
+      requestVerdict.denial.code ?? "guardrail_blocked",
+      requestVerdict.denial.message,
+    );
   }
 
   // The egress gate: an A2A forward must not become an unsupervised egress
@@ -351,23 +361,36 @@ async function handleAgentIngress(
     if (forwarded.body === null) {
       throw new HttpError(502, "upstream_error", "agent upstream returned no stream");
     }
-    // Byte-for-byte passthrough: the body is never re-encoded, so the upstream
-    // SSE framing survives exactly as `ROUTE-MAP.md` requires. `tee()` is what
-    // lets the response-stage detector see the same bytes WITHOUT buffering
-    // them out of the client's path.
-    const [toClient, toDetector] = forwarded.body.tee();
-    c.executionCtx.waitUntil(
-      evaluateStreamedReply(deps, toDetector, {
-        tenantId,
-        agentId,
-        runStateStub: agentRunId === null ? null : runStateStub(c.env, tenantId, agentRunId),
-        agentRunId,
-        parentActionFingerprint,
-        requestId,
-        nowUnix: deps.clock.nowUnix(),
-      }),
-    );
-    return new Response(toClient, {
+    // INCREMENTAL response-stage screening. Each complete SSE frame is
+    // evaluated before any of its bytes are handed on, and a frame that passes
+    // is enqueued unmodified — so the upstream framing survives byte for byte
+    // exactly as `ROUTE-MAP.md` requires, while content an activated policy
+    // forbids never leaves this Worker. See `./stream-screen.ts` for what a
+    // mid-stream block looks like to the caller.
+    const evidence = {
+      tenantId,
+      agentId,
+      runStateStub: agentRunId === null ? null : runStateStub(c.env, tenantId, agentRunId),
+      agentRunId,
+      parentActionFingerprint,
+      requestId,
+      nowUnix: deps.clock.nowUnix(),
+    };
+    const screened = screenSseStream(forwarded.body, {
+      textOf: (frame) => a2aReplyText(frame, true),
+      screen: (text) =>
+        deps.guardrails.evaluate({
+          stage: "response",
+          tenantId,
+          agentId,
+          streaming: true,
+          text,
+        }),
+      onBlock: (block) => {
+        c.executionCtx.waitUntil(recordStreamBlock(block, evidence));
+      },
+    });
+    return new Response(screened, {
       status: forwarded.status,
       headers: { ...SSE_HEADERS },
     });
@@ -386,7 +409,11 @@ async function handleAgentIngress(
     text: a2aReplyText(body),
   });
   if (responseVerdict.outcome === "deny") {
-    throw new HttpError(403, "guardrail_blocked", responseVerdict.denial.message);
+    throw new HttpError(
+      403,
+      responseVerdict.denial.code ?? "guardrail_blocked",
+      responseVerdict.denial.message,
+    );
   }
 
   return new Response(body, {

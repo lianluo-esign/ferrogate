@@ -295,100 +295,226 @@ describe("the scan is real", () => {
 // FC-1 — the operator drain
 // ---------------------------------------------------------------------------
 
-describe("FC-1 the operator drain is applied in one Worker and enforced in another", () => {
+describe("FC-1 the operator drain, all three legs joined", () => {
   /**
-   * `POST /admin/v1/drain {"draining": true}` answers
-   * `200 {"object":"drain","draining":true}` and writes the durable
-   * `runtime-state/drain` document. NOTHING on the data plane reads that
-   * document: `apps/gateway` refuses the five spend-producing operations off
-   * the deploy-time `GATEWAY_DRAIN` var, and `apps/mcp` /
-   * `apps/agent-runtime` have no drain gate on either source.
+   * ## What FC-1 was
    *
-   * Recorded as MEASURED. When the join lands — the gateway reading the
-   * durable document, and the two other spend Workers honouring the same
-   * answer — every table here changes and this block is RED until the ledger
-   * and `FLEET-CONSISTENCY.md` are updated with it.
+   * `POST /admin/v1/drain {"draining": true}` answered
+   * `200 {"object":"drain","draining":true}` and wrote the durable
+   * `runtime-state/drain` document. NOTHING on the data plane read that
+   * document: `apps/gateway` refused its five spend-producing operations off
+   * the deploy-time `GATEWAY_DRAIN` var, and `apps/mcp` / `apps/agent-runtime`
+   * had no drain gate on either source. One writer, zero readers, and two of
+   * the three spend Workers taking new billable traffic on a drained
+   * deployment.
+   *
+   * ## What it is now — CLOSED 2026-08-01 (wave 22 INTEGRATE)
+   *
+   * All three spend Workers read the durable document PER REQUEST and refuse
+   * the spend-producing operations with the same `503 node_draining`
+   * (`apps/gateway/src/routes/readiness.ts::resolveDrainState` feeding
+   * `routes/drain.ts::nodeDrainGate`, `apps/mcp/src/drain.ts`,
+   * `apps/agent-runtime/src/drain.ts`). ONE admin write shuts all three doors.
+   *
+   * The gateway's leg was the third and last, and it landed here rather than in
+   * the delivering slice because `src/routes/readiness.ts` was outside that
+   * slice's owned scope. The two assertions that RECORDED the divergence have
+   * been inverted into the two that record its absence — which is the ratchet
+   * in §5 doing exactly what it is for: a closed divergence had to go RED and
+   * force this block and `FLEET-CONSISTENCY.md` to move in one commit.
+   *
+   * ## The one asymmetry that is DESIGN, not drift
+   *
+   * `GATEWAY_DRAIN` still exists and is still read — by the gateway only. It is
+   * the DEPLOY-TIME override, OR-ed with the durable document by
+   * `combineDrain`, never "latest wins": either source drains and neither
+   * cancels the other. It is how a deployment with no control database bound is
+   * drained at all. `apps/mcp` and `apps/agent-runtime` express the identical
+   * precedence rule and pass `false`, so adding a var to either is one line at
+   * a call site rather than a second, divergent copy of the rule.
    */
-  it("only the gateway can refuse with node_draining", () => {
-    expect(appsMatching(PROBE.emitsNodeDraining)).toEqual(["gateway"]);
+  it("all three spend Workers can now refuse with node_draining", () => {
+    expect(appsMatching(PROBE.emitsNodeDraining)).toEqual(["gateway", "mcp", "agent-runtime"]);
   });
 
-  it("only the gateway reads the drain VAR", () => {
-    expect(appsMatching(PROBE.readsDrainVar)).toEqual(["gateway"]);
+  it("no spend Worker is left without a drain gate", () => {
+    const withoutDrain = SPEND_WORKERS.filter(
+      (app) => !CODE[app].some(([, code]) => PROBE.emitsNodeDraining.test(code)),
+    );
+    expect(withoutDrain).toEqual([]);
   });
 
-  it("only the control plane owns the drain DOCUMENT the admin API writes", () => {
-    expect(appsMatching(PROBE.ownsDurableDrainState)).toEqual(["control-plane"]);
-  });
-
-  it("no Worker joins the two, which is the defect", () => {
-    // The sharp statement: the set of Workers that both hold the durable drain
-    // state and enforce a drain refusal is EMPTY, so the operator action and
-    // the enforcement point share no source of truth. Closing FC-1 makes this
-    // set non-empty and turns the assertion RED.
+  it("every spend Worker holds the durable drain state AND enforces off it", () => {
+    // The sharp statement, inverted twice. Before the join this set was EMPTY —
+    // the operator action and every enforcement point shared no source of
+    // truth. After the first two legs it was `["mcp","agent-runtime"]`, which
+    // was FC-1's own shape re-drawn: durable on two Workers, var on the third.
+    // It is now every Worker that can spend.
     const joined = FLEET.filter(
       (app) =>
         CODE[app].some(([, code]) => PROBE.ownsDurableDrainState.test(code)) &&
         CODE[app].some(([, code]) => PROBE.emitsNodeDraining.test(code)),
     );
-    expect(joined, "FC-1: a Worker now joins drain state to drain enforcement").toEqual([]);
-  });
-
-  it("two of the three spend Workers have no drain gate at all", () => {
-    const withoutDrain = SPEND_WORKERS.filter(
-      (app) => !CODE[app].some(([, code]) => PROBE.emitsNodeDraining.test(code)),
+    expect(joined).toEqual(["gateway", "mcp", "agent-runtime"]);
+    expect(joined, "every spend Worker must be joined").toEqual(
+      expect.arrayContaining([...SPEND_WORKERS]),
     );
-    expect(withoutDrain).toEqual(["mcp", "agent-runtime"]);
   });
 
-  it.todo(
-    "FC-1 FIX: apps/gateway/src/routes/readiness.ts::drainStatus reads the durable " +
-      "`runtime-state/drain` document from CONTROL_DB (var as the fallback, exactly as " +
-      "routes/agent-upstreams.ts resolves the upstream registry), and apps/mcp + " +
-      "apps/agent-runtime refuse spend-producing operations with the same 503 node_draining",
-  );
+  it("the durable drain document is read by its writer and every enforcer", () => {
+    // Before the join this was `["control-plane"]` — one writer, zero readers.
+    expect(appsMatching(PROBE.ownsDurableDrainState)).toEqual([
+      "gateway",
+      "control-plane",
+      "mcp",
+      "agent-runtime",
+    ]);
+  });
+
+  it("the deploy-time var survives as a gateway-only OVERRIDE, not as a second truth", () => {
+    // `GATEWAY_DRAIN` is declared in `apps/gateway/wrangler.toml` and nowhere
+    // else, so it is the only Worker that CAN read it. This is no longer a
+    // divergence because that Worker ALSO reads the durable document — the
+    // assertion below is what makes the difference, and the two are read
+    // together. The name appears in the other Workers' files only as prose,
+    // which is why this probe reads comment-stripped code.
+    expect(appsMatching(PROBE.readsDrainVar)).toEqual(["gateway"]);
+  });
+
+  it("CLOSED: the gateway reads the durable document its operator writes", () => {
+    // THE LAST LEG OF FC-1, landed. The evidence demanded is on the gateway's
+    // OWN drain modules, not merely somewhere on the Worker: a
+    // `"runtime-state"` literal anywhere in `src/` would be satisfied by a
+    // module nobody mounts, and "a module that exists and is not wired" is this
+    // repository's dominant defect. `test/fleet-control-matrix.test.ts` §5
+    // holds the behaviour (one admin write, `/v1/chat/completions` refuses).
+    const gatewayReadsDurableDrain = CODE.gateway.some(
+      ([path, code]) =>
+        /routes\/(?:drain|readiness)\.ts$/.test(path) && PROBE.ownsDurableDrainState.test(code),
+    );
+    expect(
+      gatewayReadsDurableDrain,
+      "FC-1 last leg regressed: the gateway stopped reading the durable drain, so " +
+        "POST /admin/v1/drain leaves /v1/chat/completions serving",
+    ).toBe(true);
+  });
+
+  it("the gateway resolves BOTH sources through one parse, and the gate calls it", () => {
+    // The property that stops the leg being re-opened by a refactor rather than
+    // by a deletion: `/readyz` and `nodeDrainGate` must not grow two answers.
+    // `resolveDrainState` is the single resolver and `drain.ts` calls it.
+    const readiness = CODE.gateway.find(([path]: readonly [string, string]) =>
+      path.endsWith("routes/readiness.ts"),
+    );
+    const gate = CODE.gateway.find(([path]: readonly [string, string]) =>
+      path.endsWith("routes/drain.ts"),
+    );
+    expect(readiness, "apps/gateway/src/routes/readiness.ts").toBeDefined();
+    expect(gate, "apps/gateway/src/routes/drain.ts").toBeDefined();
+    expect((readiness as [string, string])[1]).toMatch(/export async function resolveDrainState/);
+    expect((gate as [string, string])[1]).toMatch(/resolveDrainState\(/);
+    // And the gate must NOT have re-derived the var read for itself.
+    expect((gate as [string, string])[1]).not.toMatch(/GATEWAY_DRAIN/);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // FC-2 — tenant suspension
 // ---------------------------------------------------------------------------
 
-describe("FC-2 tenant suspension does not reach every Worker that spends on the credential", () => {
+describe("FC-2 one suspension reaches every Worker that spends on the credential", () => {
   /**
-   * The wave-16 defect wearing a different control. `apps/gateway` resolves
-   * the tenant → project → workspace lifecycle chain out of `tenants.status`
-   * on the CONTROL database and answers `403 tenancy_suspended`;
-   * `apps/control-plane` has its own durable gate. `apps/agent-runtime` can
-   * NAME the refusal but only its in-memory `FG_DEV_API_KEYS` table produces
-   * it — `d1ApiKeyPort`, the port a real deployment uses, returns exactly
-   * `unknown` / `key_suspended` / `resolved` / `unavailable` and never
-   * `tenancy_suspended`. `apps/mcp` has no lifecycle check in any posture.
+   * The wave-16 defect wearing a different control — **CLOSED 2026-08-01**, and
+   * now a FORWARD gate rather than a record of a divergence.
+   *
+   * ## What it was
+   *
+   * `apps/gateway` resolved the tenant → project → workspace lifecycle chain
+   * out of `tenants.status` on the CONTROL database and answered
+   * `403 tenancy_suspended`; `apps/control-plane` had its own durable gate.
+   * `apps/agent-runtime` could NAME the refusal and could not produce it — only
+   * its in-memory `FG_DEV_API_KEYS` table returned that outcome, while
+   * `d1ApiKeyPort`, the port a real deployment uses, returned exactly
+   * `unknown` / `key_suspended` / `resolved` / `unavailable`. `apps/mcp` had no
+   * lifecycle check in any posture. The exploit was wave 16's, verbatim: the
+   * suspended tenant's credential still RESOLVES, so `/v1/chat/completions` was
+   * 403 and MCP `tools/call` and `POST /v1/agent-jobs` admitted it and spent.
+   *
+   * ## What it is now
+   *
+   * All four credential Workers consult the same authority — the `status`
+   * COLUMN of `tenants` on the control database, ancestors included — BEFORE
+   * the admission ladder, and answer the identical `403 tenancy_suspended`.
+   * Ordering is not cosmetic: `finalize_auth` runs the lifecycle gate ahead of
+   * quota/wallet resolution precisely so a suspended tenant never reaches the
+   * step that authorizes spend.
+   *
+   * The three assertions below were `["gateway","control-plane","agent-runtime"]`,
+   * `["gateway"]` and `["mcp","agent-runtime"]` when the divergence was open.
+   * They are inverted here in the same commit as the fix, which is the ratchet
+   * in §5 working: a CLOSED divergence must go red too, or this file keeps
+   * asserting a fleet that no longer exists and reads as coverage.
+   *
+   * The EFFECT — one control-plane suspension, all three spend Workers refusing
+   * with the same status and code — is
+   * `apps/mcp/test/fleet-tenancy-suspension.test.ts`. A source-text gate cannot
+   * see a behaviour; this one holds the shape the behaviour needs.
    */
-  it("records which Workers emit the suspension refusal", () => {
+  it("every credential Worker emits the suspension refusal", () => {
     expect(appsMatching(PROBE.emitsTenancySuspended)).toEqual([
       "gateway",
       "control-plane",
+      "mcp",
       "agent-runtime",
     ]);
   });
 
-  it("only the gateway reads the DURABLE lifecycle authority", () => {
+  it("every spend Worker reads the DURABLE lifecycle authority", () => {
     // `tenants.status`. `apps/mcp` and `apps/agent-runtime` both join `tenants`
     // for the PLAN lookup in their quota chain, so the probe is the status
-    // column read specifically — joining a table is not consulting a control.
-    expect(appsMatching(PROBE.readsLifecycleAuthority)).toEqual(["gateway"]);
+    // COLUMN read specifically — joining a table is not consulting a control,
+    // and a matrix built on tables alone is how FC-2 survived one audit.
+    expect(appsMatching(PROBE.readsLifecycleAuthority)).toEqual([
+      "gateway",
+      "mcp",
+      "agent-runtime",
+    ]);
     expect(filesMatching("gateway", PROBE.readsLifecycleAuthority)).toEqual([
       expect.stringContaining("adapters.ts"),
     ]);
   });
 
-  it("names the spend Workers a suspension cannot stop", () => {
-    // The exploit set. A tenant suspended by the operator keeps its still-valid
-    // credential and calls one of these instead.
+  it("the exploit set is EMPTY — no spend Worker a suspension cannot stop", () => {
+    // This list WAS the exploit: a tenant suspended by the operator kept its
+    // still-valid credential and called one of these instead. It must stay
+    // empty, and it widens by itself the day a sixth Worker starts spending.
     const cannotBeStopped = SPEND_WORKERS.filter(
       (app) => !CODE[app].some(([, code]) => PROBE.readsLifecycleAuthority.test(code)),
     );
-    expect(cannotBeStopped, "FC-2 exploit set").toEqual(["mcp", "agent-runtime"]);
+    expect(cannotBeStopped, "FC-2 exploit set").toEqual([]);
+  });
+
+  it("both joined Workers MOUNT the lifecycle gate in their composition root", () => {
+    // A lifecycle module that exists and is not wired is this repo's dominant
+    // defect, and the one a source-text gate catches cheaply. `resolvePorts` /
+    // `resolveDeps` must actually build the durable gate — not merely import a
+    // module that could. This is the FC-3 mount assertion's shape, on FC-2's
+    // capability.
+    const mount = [
+      ["mcp", /lifecycle\s*=\s*durableLifecycle\(/],
+      ["agent-runtime", /tenancyGatedApiKeyPort\(\s*resolvedApiKeys/],
+    ] as const;
+    for (const [app, pattern] of mount) {
+      const ports = CODE[app].find(([path]: readonly [string, string]) =>
+        path.endsWith("/src/ports.ts"),
+      );
+      expect(ports, `${app} src/ports.ts`).toBeDefined();
+      expect(
+        (ports as [string, string])[1],
+        `${app} does not MOUNT the durable tenancy lifecycle gate — the module exists and the ` +
+          "composition root ignores it, which is FC-2 with an extra file",
+      ).toMatch(pattern);
+    }
   });
 
   it("every credential Worker that enforces the admission ladder is checked here", () => {
@@ -406,49 +532,90 @@ describe("FC-2 tenant suspension does not reach every Worker that spends on the 
     }
   });
 
-  it.todo(
-    "FC-2 FIX: apps/mcp and apps/agent-runtime consult the same tenant lifecycle authority " +
-      "the gateway does (tenants.status on the CONTROL database, ancestors included) BEFORE " +
-      "the admission ladder, answering the identical 403 tenancy_suspended — a suspended " +
-      "tenant must not reach quota/wallet resolution, which is where spend is authorized",
-  );
 });
 
 // ---------------------------------------------------------------------------
 // FC-3 — guardrail policy
 // ---------------------------------------------------------------------------
 
-describe("FC-3 an activated guardrail policy binds one Worker and no other", () => {
+describe("FC-3 one activation reaches EVERY screening door", () => {
   /**
+   * The wave-21 finding, and the shape of its fix — a FORWARD gate now that all
+   * three doors read the same rows.
+   *
    * `POST /admin/v1/guardrail-policies/{policy_id}/activate` writes
-   * `guardrail_policy_bindings` and the gateway merges those rows into its
-   * screening source. `apps/mcp` screens MCP tool arguments and tool results
-   * from `FG_DEV_MCP_GUARDRAILS` and `apps/agent-runtime` screens A2A messages
-   * from `FG_DEV_A2A_GUARDRAILS` — two deploy-time vars, one of them committed
-   * EMPTY, both documented in their own source as DEV/TEST ONLY.
+   * `guardrail_policy_bindings`, and until this wave only `apps/gateway` merged
+   * those rows into its screening source. `apps/mcp` screened MCP tool
+   * arguments and tool RESULTS from `FG_DEV_MCP_GUARDRAILS` — committed as `""`,
+   * which parses to `{}`, which matches nothing, which allows everything — and
+   * `apps/agent-runtime` screened A2A messages from `FG_DEV_A2A_GUARDRAILS`,
+   * which `wrangler.toml` does not commit at all. Both files said so about
+   * themselves; the honesty was never the problem, the gap was. An operator
+   * activated a policy, saw it bound, and it covered one of three doors: move
+   * the payload to another surface and the activated revision never saw it.
+   *
+   * All three now resolve from the same
+   * `guardrail_policy_revisions` + `guardrail_policy_bindings` rows, with the
+   * var surviving only as the no-control-database fallback. These assertions
+   * are what stops any one of them drifting back to a private source — the
+   * regression would be invisible to every Worker's own suite, which is how the
+   * sibling defects shipped twice.
+   *
+   * The EFFECT — one activation, the gateway's compiled policy set and the MCP
+   * and A2A refusals agreeing on the operator's own code — is
+   * `apps/mcp/test/fleet-guardrail-activation.test.ts`, driven over `SELF` into
+   * the deployed MCP Worker, and
+   * `apps/agent-runtime/test/durable/guardrail-policy-activation.spec.ts` for
+   * the A2A door. A source-text gate cannot see a behaviour; a behavioural gate
+   * in one Worker cannot see the fleet. Both are needed.
    */
-  it("only gateway and control-plane touch the durable policy tables", () => {
-    expect(appsMatching(PROBE.readsDurableGuardrailPolicy)).toEqual(["gateway", "control-plane"]);
+  it("every screening Worker reads the durable policy tables", () => {
+    expect(appsMatching(PROBE.readsDurableGuardrailPolicy)).toEqual([
+      "gateway",
+      "control-plane",
+      "mcp",
+      "agent-runtime",
+    ]);
   });
 
-  it("the two other screening Workers read a deploy-time dev var instead", () => {
+  it("they name the SAME two tables, in the statements they issue", () => {
+    // Two Workers that each re-derived the table name would drift silently, and
+    // the drift would be "the activation did not apply here" rather than a test
+    // failure. Compared as text because no app may import another.
+    for (const app of ["gateway", "mcp", "agent-runtime"] as const) {
+      const hits = CODE[app].filter(([, code]) => PROBE.readsDurableGuardrailPolicy.test(code));
+      expect(hits.length, `${app} guardrail policy module`).toBeGreaterThan(0);
+      const joined = hits.map(([, code]) => code).join("\n");
+      expect(joined, `${app} revision table`).toContain("guardrail_policy_revisions");
+      expect(joined, `${app} binding table`).toContain("guardrail_policy_bindings");
+    }
+  });
+
+  it("both borrowers MOUNT the durable screening in their composition root", () => {
+    // A screening module that exists but is not wired is this repo's dominant
+    // defect, and it is the one a source-text gate is uniquely able to catch
+    // cheaply. `resolvePorts` / `resolveDeps` must WRAP the var-driven port.
+    const mount = [
+      ["mcp", /guardrails\s*=\s*durableManagedActionGuardrails\(/],
+      ["agent-runtime", /guardrails:\s*durableA2aGuardrailPort\(/],
+    ] as const;
+    for (const [app, pattern] of mount) {
+      const ports = CODE[app].find(([path]: readonly [string, string]) =>
+        path.endsWith("/src/ports.ts"),
+      );
+      expect(ports, `${app} src/ports.ts`).toBeDefined();
+      const [, code] = ports as [string, string];
+      expect(code, `${app} no longer mounts the durable guardrail policy`).toMatch(pattern);
+    }
+  });
+
+  it("the var survives only as the no-control-database fallback", () => {
+    // It must still be READ — dropping the operator's own configured detectors
+    // the day a control database is bound would be the fail-OPEN direction —
+    // and it must no longer be the ONLY authority, which the first assertion
+    // above is what pins.
     expect(appsMatching(PROBE.readsGuardrailDevVar)).toEqual(["mcp", "agent-runtime"]);
   });
-
-  it("the two sets are disjoint, so no activated revision reaches MCP or A2A", () => {
-    const durable = new Set(appsMatching(PROBE.readsDurableGuardrailPolicy));
-    const varOnly = appsMatching(PROBE.readsGuardrailDevVar);
-    expect(
-      varOnly.filter((app) => durable.has(app)),
-      "FC-3 overlap",
-    ).toEqual([]);
-  });
-
-  it.todo(
-    "FC-3 FIX: apps/mcp and apps/agent-runtime resolve their detector policy from the same " +
-      "guardrail_policy_revisions + guardrail_policy_bindings rows the gateway merges, keeping " +
-      "the var as the no-control-database fallback",
-  );
 });
 
 // ---------------------------------------------------------------------------

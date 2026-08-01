@@ -82,8 +82,14 @@ import {
   admissionFromEnv,
 } from "./admission/index.js";
 import { D1ToolApprovals } from "./approvals.js";
+import { durableManagedActionGuardrails } from "./guardrails.js";
 import { D1McpAuth, type D1McpAuthOptions } from "./auth.js";
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
+import {
+  D1McpTenancyLifecycleGate,
+  type TenancyLifecycleGatePort,
+  UnboundLifecycleGate,
+} from "./lifecycle.js";
 import type { ParsedToolDef } from "./jsonrpc.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
 // TYPE-ONLY. `./session.js` imports `McpTool` back out of this module, also
@@ -901,6 +907,21 @@ export interface McpPorts {
    * order, which is the order Rust runs them in.
    */
   admission: AdmissionPort;
+  /**
+   * The TENANCY LIFECYCLE gate — `src/lifecycle.ts`, `docs/rewrite/
+   * FLEET-CONSISTENCY.md` finding FC-2.
+   *
+   * Distinct from {@link AuthPort} for the same reason `apps/gateway` keeps
+   * them apart: that port answers "is this credential live", this one answers
+   * "is the TENANCY behind it still allowed to transact". A perfectly healthy
+   * key belonging to a suspended tenant resolves and is then refused here —
+   * `403 tenancy_suspended`, never the 401 a dead key gets.
+   *
+   * It runs BETWEEN the credential and {@link admission}, which is Rust's order
+   * in `finalize_auth` and is the control rather than a convenience: a
+   * suspended tenant must never reach the step that authorizes spend.
+   */
+  lifecycle: TenancyLifecycleGatePort;
   entitlements: EntitlementPort;
   upstreams: McpUpstreamPort;
   guardrails: GuardrailsPort;
@@ -1418,6 +1439,22 @@ export interface McpEnv {
   FERROGATE_MCP_IDENTITY_KEY?: string;
 }
 
+/**
+ * The in-memory bundle's lifecycle default.
+ *
+ * Deliberately NOT the fail-closed {@link UnboundLifecycleGate}: this value is
+ * only ever reached by a hand-built bundle in a unit test, which has no control
+ * database and no tenancy to gate, and refusing there would make every such
+ * test a 503. Every DEPLOYED posture is chosen by {@link resolvePorts}, which
+ * never returns this object's `lifecycle` field.
+ */
+const ALWAYS_ADMIT_LIFECYCLE: TenancyLifecycleGatePort = {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async admit() {
+    return { admitted: true } as const;
+  },
+};
+
 let devPorts: InMemoryMcpPorts | undefined;
 
 /**
@@ -1442,6 +1479,13 @@ export function inMemoryPorts(): InMemoryMcpPorts {
     // only so a unit test that builds the bundle by hand is not forced to
     // provide a quota backend.
     admission: ADMIT_ALL,
+    // Same reasoning as `admission` above, and the same guarantee: the deployed
+    // Worker's lifecycle gate is NEVER this one, because `resolvePorts`
+    // overrides it in every posture (`env.DB` is bound in all of them, and the
+    // no-database posture gets `UnboundLifecycleGate`, which refuses). It
+    // exists so a unit test that builds the bundle by hand is not forced to
+    // provide a control database.
+    lifecycle: ALWAYS_ADMIT_LIFECYCLE,
     entitlements: new InMemoryEntitlements(),
     upstreams: new InMemoryUpstreams(),
     // The singleton default is an UNCONFIGURED detector — it matches nothing,
@@ -1752,10 +1796,12 @@ export function parseGuardrailVar(raw: string | undefined): ManagedActionGuardra
  * KV's non-indivisible `get`+`delete`.
  *
  * The GUARDRAIL is bound in EVERY posture, including the fail-closed one. It is
- * this Worker's composition root for {@link deterministicManagedActionGuardrails},
- * so dropping the binding here silently un-scans every MCP tool argument and
- * every tool result while leaving the whole suite green — the exact defect
- * `test/guardrails.test.ts` drives over `SELF` to prevent.
+ * this Worker's composition root for {@link durableManagedActionGuardrails}
+ * over {@link deterministicManagedActionGuardrails}, so dropping the binding
+ * here silently un-scans every MCP tool argument and every tool result while
+ * leaving the whole suite green — the exact defect `test/guardrails.test.ts`
+ * (the var half) and `test/fleet-guardrail-activation.test.ts` (the DURABLE
+ * half, FC-3) drive over `SELF` to prevent.
  *
  * The SECRET SEAM is bound in EVERY posture for the same reason: an upstream's
  * `client_secret_ref` must resolve wherever the OAuth exchange can run, and the
@@ -1767,16 +1813,25 @@ export function parseGuardrailVar(raw: string | undefined): ManagedActionGuardra
  * credential — `test/secrets-mount.test.ts` drives that over `SELF`.
  */
 export function resolvePorts(env: McpEnv): McpPorts {
-  const guardrails = deterministicManagedActionGuardrails(
-    parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS),
+  // FC-3. The DURABLE activated revision runs FIRST and the operator var is its
+  // fallback, so an activated `guardrail_policy_bindings` row screens MCP tool
+  // arguments and tool results on the very next call — no redeploy, no cache to
+  // flush — while a var-only deployment behaves exactly as it did. Dropping the
+  // wrapper here silently returns this Worker to the state
+  // `docs/rewrite/FLEET-CONSISTENCY.md` FC-3 describes: an operator activates a
+  // policy, sees it bound, and it covers one of three doors.
+  const guardrails = durableManagedActionGuardrails(
+    env,
+    deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS)),
   );
   const secrets = secretResolverOverride ?? workerSecretResolver(env);
   const auth = durableAuth(env);
   const approvals = durableApprovals(env);
   const admission = durableAdmission(env);
+  const lifecycle = durableLifecycle(env);
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
-    return { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission };
-  const ports = { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission };
+    return { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission, lifecycle };
+  const ports = { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission, lifecycle };
   if (durableIdentityBound(env)) {
     return {
       ...ports,
@@ -1855,6 +1910,35 @@ function durableAuth(env: McpEnv): AuthPort {
  * The router is the SAME construction `durableAuth` uses, so the credential and
  * its spend are always read out of one tenant's database.
  */
+/**
+ * Choose the {@link TenancyLifecycleGatePort} for this env — the control an
+ * operator applies once and every spending Worker must honour (FC-2).
+ *
+ * `env.DB` bound ⇒ {@link D1McpTenancyLifecycleGate} over `tenants.status` in
+ * the CONTROL database — the SAME rows `apps/gateway` reads and
+ * `apps/control-plane`'s lifecycle routes write — with the tenant-routed
+ * database supplying the `projects` / `workspaces` tiers of the walk. Absent ⇒
+ * {@link UnboundLifecycleGate}, a 503 and never an open door.
+ *
+ * The router is the SAME construction `durableAuth` and `durableAdmission` use,
+ * so a credential, its spend and its tenancy status are always read out of one
+ * tenant's database.
+ *
+ * Bound in the DEV posture too, for the provability reason the other two ports
+ * state: the offline suite can only drive the deployed app end to end there, so
+ * a gate mounted anywhere else would be untestable over `SELF` — the
+ * "implemented, tested, never mounted" defect this project keeps repeating.
+ * Deleting the `lifecycle` entry in {@link resolvePorts} turns
+ * `test/fleet-tenancy-suspension.test.ts` red.
+ */
+function durableLifecycle(env: McpEnv): TenancyLifecycleGatePort {
+  if (env.DB === undefined) return new UnboundLifecycleGate();
+  return new D1McpTenancyLifecycleGate(
+    env.DB,
+    new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
+  );
+}
+
 function durableAdmission(env: McpEnv): AdmissionPort {
   if (env.DB === undefined) return ADMIT_ALL;
   return admissionFromEnv(

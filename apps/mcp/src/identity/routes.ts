@@ -22,6 +22,7 @@
  */
 import type { Context } from "hono";
 
+import type { DrainBindings } from "../drain.js";
 import { authenticateRequest, errorEnvelope, requestIdentity, respondError } from "../http.js";
 import { resolvePorts } from "../ports.js";
 import {
@@ -113,7 +114,13 @@ export function identityRouteModule(): RouteModule {
         const { requestId } = requestIdentity(c.req.raw);
         if (!validServerSegment(serverName)) return notFound(c, requestId);
 
-        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.execute", "mcp");
+        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.execute", "mcp", {
+          // FC-1: starting an OAuth authorization flow reaches the identity
+          // provider, not a paid upstream, and it is how an operator repairs a
+          // broken connection. It keeps serving while draining.
+          billable: false,
+          env: c.env as DrainBindings,
+        });
         if (!authenticated.ok) return respondError(c, authenticated.status, authenticated.body);
         const context = authenticated.context;
         const target = `mcp:${serverName}/identity`;
@@ -156,7 +163,12 @@ export function identityRouteModule(): RouteModule {
         const { requestId } = requestIdentity(c.req.raw);
         if (!validServerSegment(serverName)) return notFound(c, requestId);
 
-        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.read", "mcp");
+        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.read", "mcp", {
+          // FC-1: a connection-status READ. No spend, and refusing it during a
+          // drain would hide the state an operator is draining to inspect.
+          billable: false,
+          env: c.env as DrainBindings,
+        });
         if (!authenticated.ok) return respondError(c, authenticated.status, authenticated.body);
 
         try {
@@ -177,7 +189,14 @@ export function identityRouteModule(): RouteModule {
         const { requestId } = requestIdentity(c.req.raw);
         if (!validServerSegment(serverName)) return notFound(c, requestId);
 
-        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.execute", "mcp");
+        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.execute", "mcp", {
+          // FC-1: a REVOCATION. It must keep working while draining — an
+          // operator draining a deployment during a credential incident still
+          // has to be able to revoke, and a revoke removes access rather than
+          // spending on it.
+          billable: false,
+          env: c.env as DrainBindings,
+        });
         if (!authenticated.ok) return respondError(c, authenticated.status, authenticated.body);
         const context = authenticated.context;
 

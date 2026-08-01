@@ -27,11 +27,27 @@ import {
 } from "@ferrogate/config";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
+import {
+  DRAIN_COLLECTION,
+  DRAIN_ID,
+  drainDocument,
+  parseDrainDocument,
+} from "../store/runtime_state.js";
 import { type GroupModule, crudGroup, json, readJson, scopeOf } from "./resource.js";
 
-/** State row backing `GET`/`POST /admin/v1/drain`, keyed by a singleton id. */
-const DRAIN_COLLECTION = "runtime-state";
-const DRAIN_ID = "drain";
+/**
+ * State row backing `GET`/`POST /admin/v1/drain`, keyed by a singleton id.
+ *
+ * The names and the document shape come from `../store/runtime_state.ts` rather
+ * than being spelled here, because THREE Workers now read this row —
+ * `apps/mcp` and `apps/agent-runtime` enforce the drain off it per request, and
+ * `apps/gateway` refuses off `GATEWAY_DRAIN`. Before FC-1 the constants lived
+ * only in this file and nothing read the row at all; a shared definition is
+ * what makes "the operator applied it here" and "the enforcer reads it there"
+ * the same fact. `apps/mcp/test/drain-fleet.test.ts` writes with
+ * {@link drainDocument} and requires both enforcers to shut.
+ */
+export { DRAIN_COLLECTION, DRAIN_ID };
 /** The singleton row naming which gateway-config snapshot is currently active. */
 const ACTIVE_CONFIG_ID = "active-config";
 
@@ -182,31 +198,80 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
     }
   },
 
+  /**
+   * The state the whole fleet enforces off.
+   *
+   * Parsed with the SAME {@link parseDrainDocument} `apps/mcp` and
+   * `apps/agent-runtime` use, so what an operator is TOLD and what the
+   * enforcers DO cannot diverge — the FC-1 defect in miniature. A row that the
+   * enforcers ignore (tenant-attributed, or `draining` not the JSON boolean
+   * `true`) must therefore read back here as "not draining" too.
+   */
   getAdminDrain: async (c) => {
     const record = await c.get("deps").store.get(DRAIN_COLLECTION, scopeOf(c), DRAIN_ID);
+    const state = parseDrainDocument(record as Record<string, unknown> | null);
     return json(c, 200, {
       object: "drain",
-      draining: record?.draining === true,
-      reason: record?.reason ?? null,
+      draining: state.draining,
+      reason: state.reason,
+      accepting_new_requests: state.accepting_new_requests,
     });
   },
 
+  /**
+   * Enter or leave the operator drain — the ONE write three Workers read.
+   *
+   * ## Why this operation is PLATFORM-OPERATOR ONLY
+   *
+   * The contract gives it `admin.write`, which a TENANT administrator can hold.
+   * That was harmless while nothing read the row. It is not harmless now: every
+   * Worker resolves `runtime-state/drain` by primary key, so a tenant-scoped
+   * caller who could mint it would take the entire DEPLOYMENT out of service
+   * for every other tenant — a cross-tenant denial of service reachable from an
+   * intended, correctly-scoped credential. Two independent defences, because
+   * one of them being bypassed must not be enough:
+   *
+   *  1. this fence — a non-platform caller is `403 tenant_scope_denied` and
+   *     never reaches the store;
+   *  2. `tenant_id: null` is PINNED by {@link drainDocument}, and every enforcer
+   *     IGNORES a drain document that carries a tenant
+   *     (`parseDrainDocument`). So even a row written by some other path cannot
+   *     drain the fleet from inside one tenant.
+   *
+   * `403` and not `404`: the caller is authenticated and the operation exists;
+   * what they lack is the scope. That is the same answer `bearerAuth` gives a
+   * credential that names no tenant, and it does not disclose deployment state.
+   */
   setAdminDrain: async (c) => {
     const deps = c.get("deps");
     const scope = scopeOf(c);
+    if (scope.kind !== "platform_operator") {
+      throw new HttpError(
+        403,
+        "tenant_scope_denied",
+        "the operator drain is deployment-wide state; a tenant-scoped credential cannot set it",
+      );
+    }
     const body = await readJson(c, drainRequestSchema);
-    const fields = {
+    const document = drainDocument({
       draining: body.draining,
       reason: body.reason ?? null,
-      changed_at: Math.floor(Date.now() / 1000),
-    };
+      changedAt: Math.floor(Date.now() / 1000),
+    });
+    const { id: _id, ...fields } = document;
     const merged = await deps.store.merge(DRAIN_COLLECTION, scope, DRAIN_ID, fields);
-    const record =
-      merged ?? (await deps.store.create(DRAIN_COLLECTION, scope, { id: DRAIN_ID, ...fields }));
+    const record = merged ?? (await deps.store.create(DRAIN_COLLECTION, scope, { ...document }));
+    const state = parseDrainDocument(record as Record<string, unknown>);
     return json(c, 200, {
       object: "drain",
-      draining: record.draining === true,
-      reason: record.reason ?? null,
+      draining: state.draining,
+      reason: state.reason,
+      accepting_new_requests: state.accepting_new_requests,
+      // Rust flipped an in-process `AtomicBool` and every request saw it
+      // instantly. Here the fleet reads a durable row, so the honest statement
+      // is that enforcement lands on each Worker's NEXT request — not that it
+      // has already landed everywhere.
+      propagation: "on_next_request_per_worker",
     });
   },
 });

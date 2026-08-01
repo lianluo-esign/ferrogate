@@ -387,6 +387,13 @@ describe("the deployed Worker serves every operation it owns", () => {
       version: "0.0.0",
       runtime: "workers",
       protocol: "2026-07-28",
+      // FC-1: readiness is now TWO conjuncts, and the probe reports both — the
+      // dependency state AND the operator drain (`runtime-state/drain`). A
+      // probe that answered `ready` on a drained deployment would send the load
+      // balancer traffic every `tools/call` then refuses with 503.
+      readiness_reason: "state_loaded",
+      draining: false,
+      accepting_new_requests: true,
       // The probe reports real dependency state, so it cannot claim readiness
       // on an isolate whose ports are unbound.
       dependencies: { ready: true },

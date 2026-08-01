@@ -9,14 +9,16 @@
 import type { Context } from "hono";
 
 import { type WalletHold, releaseAll } from "./admission/index.js";
-import { declaredAgentRunId, MCP_ORIGINAL_BEARER_HEADER } from "./protocol.js";
+import { type DrainBindings, drainRefusal, resolveDrain } from "./drain.js";
+import { lifecycleRefusal } from "./lifecycle.js";
 import {
-  isAuthError,
   type AuthContext,
   type AuthError,
   type DispatchContext,
   type McpPorts,
+  isAuthError,
 } from "./ports.js";
+import { MCP_ORIGINAL_BEARER_HEADER, declaredAgentRunId } from "./protocol.js";
 
 /** Maximum request body this Worker reads. Port of `limits().tool_body_max_bytes()`. */
 export const TOOL_BODY_MAX_BYTES = 1024 * 1024;
@@ -59,6 +61,24 @@ export async function readCappedBody(
 export type AuthOutcome =
   | { ok: true; context: DispatchContext }
   | { ok: false; status: number; body: ErrorEnvelope };
+
+/**
+ * What a call site must state about the request it is about to serve, so the
+ * operator drain can be enforced on it (FLEET-CONSISTENCY FC-1).
+ *
+ * Both fields are REQUIRED and the whole object is a required parameter of
+ * {@link authenticateRequest}, which is the structural half of the fix: a new
+ * authenticated surface cannot be added without deciding whether it spends. A
+ * default of `billable: false` would make "forgot to think about it" and
+ * "deliberately keeps serving while draining" the same code, and the first of
+ * those is how FC-1 shipped.
+ */
+export interface SpendDeclaration {
+  /** Does this request produce NEW billable work (an upstream/tool call)? */
+  readonly billable: boolean;
+  /** The Worker env, for the durable `runtime-state/drain` lookup. */
+  readonly env: DrainBindings | undefined;
+}
 
 /**
  * Reservations taken during admission, per in-flight request.
@@ -116,12 +136,30 @@ export function pendingAdmissionHolds(request: Request): number {
  * `surface` labels the unjoinable-action metric. An absent declaration is the
  * "unjoinable action" signal: it is counted per authenticated tenant and
  * surface, and NEVER fabricated.
+ *
+ * ## The third half: THE OPERATOR DRAIN (FLEET-CONSISTENCY FC-1)
+ *
+ * `spend` is REQUIRED, and required precisely so no call site can forget it.
+ * Every one of the five authenticated MCP surfaces has to state whether the
+ * request it is about to serve produces new billable work; the ones that do are
+ * refused `503 node_draining` while the operator has this deployment drained.
+ * See `./drain.ts` for the durable source, the precedence rule and the list of
+ * operations deliberately left serving.
+ *
+ * It runs LAST, after the credential ladder and after admission, which is where
+ * Rust puts it: `plan_ai_ingress`'s `state.is_draining()` check sits inside the
+ * handler, i.e. after `finalize_auth` has already charged the RPM and quota
+ * windows. Moving it earlier would be defensible on cost grounds and WRONG on
+ * parity grounds — a drained node would stop charging counters Rust still
+ * charges, and the counter state an operator sees after a drain would diverge
+ * between `apps/gateway` and this Worker.
  */
 export async function authenticateRequest(
   ports: McpPorts,
   request: Request,
   requiredScope: string,
   surface: string,
+  spend: SpendDeclaration,
 ): Promise<AuthOutcome> {
   const { requestId, traceId } = requestIdentity(request);
 
@@ -146,6 +184,28 @@ export async function authenticateRequest(
     };
   }
 
+  // THE TENANCY LIFECYCLE HALF (FC-2), and it runs HERE — after the credential
+  // resolves, BEFORE admission — because that is `finalize_auth`'s order and
+  // the order is the control: a suspended tenant must never reach the step that
+  // authorizes spend. Deleting this block re-opens the defect
+  // `docs/rewrite/FLEET-CONSISTENCY.md` records: an operator suspends a tenant,
+  // `apps/gateway` answers `403 tenancy_suspended`, and this Worker keeps
+  // executing paid tools on the same un-revoked credential.
+  //
+  // `403` for a suspended tenancy, `503 lifecycle_status_unavailable` when the
+  // authority cannot be read — never an admission, because fail-open here makes
+  // "flap the control plane" a suspension bypass.
+  // `test/fleet-tenancy-suspension.test.ts` drives one control-plane write and
+  // requires all THREE spending Workers to shut.
+  const lifecycle = lifecycleRefusal(await ports.lifecycle.admit(authenticated));
+  if (lifecycle !== null) {
+    return {
+      ok: false,
+      status: lifecycle.status,
+      body: errorEnvelope(lifecycle.code, lifecycle.message, requestId),
+    };
+  }
+
   // THE ADMISSION HALF. Deleting this block re-opens the bypass recorded as
   // finding D1 in `docs/rewrite/CUTOVER-READINESS.md`: a credential at its RPM
   // ceiling, over its monthly budget or with an empty prepaid wallet is refused
@@ -161,6 +221,27 @@ export async function authenticateRequest(
   }
   if (admitted.holds.length > 0) {
     inFlightHolds.set(request, [...(inFlightHolds.get(request) ?? []), ...admitted.holds]);
+  }
+
+  // THE OPERATOR DRAIN (FC-1). Deleting this block re-opens the defect
+  // `docs/rewrite/FLEET-CONSISTENCY.md` records: `POST /admin/v1/drain` writes
+  // the durable `runtime-state/drain` document, `apps/gateway` stops serving,
+  // and this Worker keeps executing paid tools on the same credential. The
+  // durable document is re-read on EVERY guarded request — never memoised —
+  // because a boot-cached flag makes draining useless exactly when it matters.
+  // `test/drain-fleet.test.ts` drives one admin write and requires BOTH doors
+  // to shut; `test/drain.test.ts` mutation-proves this mount over `SELF`.
+  if (spend.billable) {
+    const refusal = drainRefusal(await resolveDrain(spend.env));
+    if (refusal !== null) {
+      // The holds this request just took are released by `routes/index.ts`'s
+      // `finally` (keyed on the Request), exactly as for an admission refusal.
+      return {
+        ok: false,
+        status: refusal.status,
+        body: errorEnvelope(refusal.code, refusal.message, requestId),
+      };
+    }
   }
 
   if (agentRunId.value === undefined) {

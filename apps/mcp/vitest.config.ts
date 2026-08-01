@@ -83,5 +83,10 @@ export default defineConfig({
       },
     }),
   ],
-  test: { include: ["test/**/*.test.ts"] },
+  // `setup-d1.ts` MIGRATES both databases before every file. It is not
+  // convenience: the FC-2 lifecycle gate fails closed on an unreadable
+  // `tenants` table, so a bound-but-unmigrated control database would 503 the
+  // whole suite. See that file for why the fail-closed posture is the one that
+  // must not be relaxed to make tests pass.
+  test: { include: ["test/**/*.test.ts"], setupFiles: ["./test/setup-d1.ts"] },
 });

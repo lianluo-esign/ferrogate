@@ -78,6 +78,13 @@
  * Seam row **AR-C10** in `docs/rewrite/MOUNT-SEAMS.md`.
  */
 import { Hono } from "hono";
+import {
+  DRAIN_UNAVAILABLE_CODE,
+  type DrainBindings,
+  type DrainState,
+  NOT_DRAINING,
+  resolveDrain,
+} from "../drain.js";
 import type { AgentRuntimeBindings, AgentRuntimeEnv } from "../ports.js";
 import { configFromEnv, resolveDeps } from "../ports.js";
 
@@ -148,23 +155,48 @@ export function healthReport(): HealthReport {
  * of the request being served, and a probe answering from a snapshot taken on
  * some earlier request is the same class of lie the flat `{ok:true}` was.
  */
-export function readinessReport(env: AgentRuntimeBindings | undefined): {
+export function readinessReport(
+  env: AgentRuntimeBindings | undefined,
+  operatorDrain: DrainState = NOT_DRAINING,
+): {
   readonly status: 200 | 503;
   readonly body: ReadinessReport;
 } {
-  const draining = !runtimeEnabled(env);
+  // TWO drain sources, ORed (`src/drain.ts::combineDrain` argues the rule):
+  // `AGENT_RUNTIME_ENABLED=0` is the deploy-time operator switch this Worker
+  // already honoured, and `operatorDrain` is the durable `runtime-state/drain`
+  // document `POST /admin/v1/drain` writes at RUNTIME. Neither cancels the
+  // other. Before FC-1 only the first existed here, so a fleet-wide operator
+  // drain left this probe answering `ready` — "a load balancer pointed at
+  // agent-runtime's /readyz gets ready from a Worker that will refuse every
+  // spend request it sends", which is the same certification verdict that made
+  // this decision table exist in the first place.
+  // "The operator drained this deployment" and "the drain document could not be
+  // READ" are DIFFERENT FACTS and only one of them is a drain. Both refuse —
+  // a probe that reports ready when its control could not be evaluated is the
+  // bypass again — but reporting `operator_drain` when `GET /admin/v1/drain`
+  // says the fleet is NOT draining is the incident-time lie `src/drain.ts`
+  // refused to ship on the data plane (`drainRefusal` splits the two codes), so
+  // the probe splits the same two reasons. `apps/mcp` and `apps/gateway` answer
+  // identically; found by the wave-22 INTEGRATE boot proof, which is the only
+  // place the arm is reachable — every vitest harness migrates the database.
+  const drainUnavailable = operatorDrain.source === "unavailable";
+  const draining = (!runtimeEnabled(env) || operatorDrain.draining) && !drainUnavailable;
   const stateReady = env !== undefined && resolveDeps(env) !== undefined;
-  const acceptingNewRequests = !draining;
+  const acceptingNewRequests = !draining && !drainUnavailable;
   const ready = stateReady && acceptingNewRequests;
 
   // Drain outranks state in the REASON, exactly as `clusterStatus` orders it:
   // an operator who drained a node wants to be told that, not told about the
-  // state a drained node was never going to serve from.
-  const readinessReason = draining
-    ? "operator_drain"
-    : stateReady
-      ? "state_loaded"
-      : "revision_missing";
+  // state a drained node was never going to serve from. An UNEVALUABLE drain
+  // outranks both, because it is the reason the other two cannot be trusted.
+  const readinessReason = drainUnavailable
+    ? DRAIN_UNAVAILABLE_CODE
+    : draining
+      ? "operator_drain"
+      : stateReady
+        ? "state_loaded"
+        : "revision_missing";
 
   return {
     status: ready ? 200 : 503,
@@ -194,8 +226,14 @@ export const healthRoutes = new Hono<AgentRuntimeEnv>();
 
 healthRoutes.get("/healthz", (c) => c.json(healthReport()));
 
-healthRoutes.get("/readyz", (c) => {
-  const report = readinessReport(c.env);
+healthRoutes.get("/readyz", async (c) => {
+  // The durable read happens HERE, on the probe, and nowhere upstream of it:
+  // `/healthz` must stay a pure liveness answer with no backend dependency, or
+  // a control-database blip would make an orchestrator RESTART every node in
+  // the fleet — destroying exactly the in-flight work a drain exists to let
+  // finish. `/readyz` is the probe whose whole job is to reflect backend state,
+  // so it is the one that pays for the row read.
+  const report = readinessReport(c.env, await resolveDrain(c.env as DrainBindings));
   return c.json(report.body, report.status);
 });
 

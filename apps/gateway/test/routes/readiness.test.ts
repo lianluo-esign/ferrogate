@@ -112,6 +112,36 @@ describe("ClusterStatus::new decision table", () => {
   it("drain wins over a loaded revision", () => {
     expect(clusterStatus({ activeRevision: "abc", draining: true }).ready).toBe(false);
   });
+
+  it("an UNEVALUABLE drain is drain_state_unavailable, NOT operator_drain", () => {
+    // FC-1, wave 22. The gateway's drain is now the durable
+    // `runtime-state/drain` document OR the var, and a control database that is
+    // BOUND and FAILS is a third state. Refusing is non-negotiable — a probe
+    // that reports ready when its control could not be evaluated is the bypass
+    // again — but naming a drain nobody performed, while `GET /admin/v1/drain`
+    // says the fleet is not draining, is the incident-time lie
+    // `routes/drain.ts::drainRefusal` splits into two codes on the data plane.
+    // `apps/mcp` and `apps/agent-runtime` answer identically; the boot proof
+    // caught both of them collapsing it.
+    const unavailable = clusterStatus({
+      activeRevision: "abc",
+      draining: false,
+      drainUnavailable: true,
+    });
+    expect(unavailable.ready).toBe(false);
+    expect(unavailable.readiness_reason).toBe("drain_state_unavailable");
+    expect(unavailable.readiness_reason).not.toBe("operator_drain");
+    // NOT draining — the operator drained nothing.
+    expect(unavailable.draining).toBe(false);
+    // Still refusing: this field must agree with `ready`, or one document tells
+    // a load balancer and an operator opposite things.
+    expect(unavailable.accepting_new_requests).toBe(false);
+
+    // The ordinary drain still reports itself; the split is not a rename.
+    const drained = clusterStatus({ activeRevision: "abc", draining: true });
+    expect(drained.readiness_reason).toBe("operator_drain");
+    expect(drained.draining).toBe(true);
+  });
 });
 
 describe("Workers-specific inputs", () => {

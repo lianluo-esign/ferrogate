@@ -44,7 +44,12 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
-import { type ReadinessBindings, drainStatus } from "./readiness.js";
+import {
+  DRAIN_UNAVAILABLE_CODE,
+  type DrainState,
+  type ReadinessBindings,
+  resolveDrainState,
+} from "./readiness.js";
 
 /** Rust `node_draining`'s message, byte for byte — operators grep for it. */
 export const NODE_DRAINING_MESSAGE =
@@ -68,9 +73,39 @@ export const DRAIN_GUARDED_OPERATION_IDS: readonly string[] = [
   "createImage",
 ];
 
-/** Is this deployment draining, as of THIS request? */
-export function isDraining(env: unknown): boolean {
-  return drainStatus(env as ReadinessBindings | undefined).draining;
+/**
+ * Is this deployment draining, as of THIS request?
+ *
+ * ASYNC since wave 22 (FC-1's third leg): the answer is the durable
+ * `runtime-state/drain` document OR the `GATEWAY_DRAIN` var, resolved by
+ * `./readiness.ts::resolveDrainState` — this file's ONE call into that parse,
+ * not a second copy of it, so `/readyz` and the data plane can never disagree
+ * about whether a deployment is draining.
+ */
+export async function isDraining(env: unknown): Promise<boolean> {
+  const state = await resolveDrainState(env as ReadinessBindings | undefined);
+  return state.draining;
+}
+
+/**
+ * The refusal a drain state produces, or `null` when the request may proceed.
+ *
+ * Two codes, both 503 and both refusals, identical to
+ * `apps/mcp/src/drain.ts::drainRefusal`: `node_draining` is Rust's answer for
+ * "the operator drained this deployment", `drain_state_unavailable` is "the
+ * control could not be evaluated". Collapsing them would tell an operator the
+ * node is draining while `GET /admin/v1/drain` says it is not.
+ */
+export function drainRefusal(state: DrainState): HttpError | null {
+  if (state.source === "unavailable") {
+    return new HttpError(
+      503,
+      DRAIN_UNAVAILABLE_CODE,
+      `operator drain state is unavailable: ${state.detail ?? "control database lookup failed"}`,
+    );
+  }
+  if (!state.draining) return null;
+  return new HttpError(503, "node_draining", NODE_DRAINING_MESSAGE);
 }
 
 /**
@@ -95,9 +130,12 @@ export function nodeDrainGate(
   return async function nodeDrainGateMiddleware(c, next): Promise<void> {
     const operation = (c as Context<GatewayEnv>).get("operation");
     if (operation !== null && operation !== undefined && guarded.has(operation.operationId)) {
-      if (isDraining(c.env)) {
-        throw new HttpError(503, "node_draining", NODE_DRAINING_MESSAGE);
-      }
+      // ONE durable read, and only on the five guarded operations — every other
+      // operation costs nothing, which is what keeps this affordable on the hot
+      // path. The caller has already paid for the credential and admission
+      // lookups by the time this line runs.
+      const refusal = drainRefusal(await resolveDrainState(c.env as ReadinessBindings));
+      if (refusal !== null) throw refusal;
     }
     await next();
   };

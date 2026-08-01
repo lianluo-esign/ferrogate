@@ -15,6 +15,7 @@
  * shape the anti-drift gate cross-checks.
  */
 import { dispatchMcpRequest, planIngress } from "../dispatch.js";
+import { type DrainBindings, isDrainGuardedRpcMethod } from "../drain.js";
 import {
   authenticateRequest,
   errorEnvelope,
@@ -67,11 +68,21 @@ export function ingressRouteModule(): RouteModule {
         const planned = planIngress(c.req.raw.headers, body.body);
         if (!planned.ok) return respondJsonRpc(c.req.raw, planned.status, planned.response);
 
+        // FC-1: the JSON-RPC endpoint is ONE contract operation carrying many
+        // methods, so billability is decided per METHOD. `tools/call`,
+        // `resources/read` and `prompts/get` reach a remote server and spend;
+        // `initialize`, `ping`, `tools/list` and `resources/list` are handshake
+        // and discovery, and a draining node must keep answering them or a
+        // client cannot learn where to fail over to. See `../drain.ts`.
         const authenticated = await authenticateRequest(
           ports,
           c.req.raw,
           planned.plan.scope,
           "mcp",
+          {
+            billable: isDrainGuardedRpcMethod(planned.plan.request.method),
+            env: c.env as DrainBindings,
+          },
         );
         if (!authenticated.ok) return respondError(c, authenticated.status, authenticated.body);
 
@@ -109,7 +120,12 @@ export function ingressRouteModule(): RouteModule {
         const ports = resolvePorts(c.env);
         const { requestId } = requestIdentity(c.req.raw);
 
-        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.execute", "mcp");
+        // FC-1: the REST transport of the same governed tool chokepoint
+        // `tools/call` runs, so it spends and stops on the same operator drain.
+        const authenticated = await authenticateRequest(ports, c.req.raw, "tools.execute", "mcp", {
+          billable: true,
+          env: c.env as DrainBindings,
+        });
         if (!authenticated.ok) return respondError(c, authenticated.status, authenticated.body);
         const context = authenticated.context;
 

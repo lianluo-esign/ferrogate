@@ -44,6 +44,12 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { type ApiOperation, allowedMethods, isOwnedPath, matchOperation } from "../contract.js";
 import {
+  type DrainBindings,
+  drainRefusal,
+  isDrainGuardedOperation,
+  resolveDrain,
+} from "../drain.js";
+import {
   type AgentRuntimeDeps,
   type AgentRuntimeEnv,
   type ApiKeyResolution,
@@ -484,6 +490,33 @@ async function bearerAuth(c: Context<AgentRuntimeEnv>, operation: ApiOperation):
   // in a `finally`, which is this language's `Drop`.
   const grant = await deps.admission.admit({ auth, requestId: c.get("requestId") ?? "" });
   c.set("admissionGrant", grant);
+
+  // THE OPERATOR DRAIN (FLEET-CONSISTENCY FC-1). Deleting this block re-opens
+  // the defect FLEET-CONSISTENCY records: `POST /admin/v1/drain` writes the
+  // durable `runtime-state/drain` document, `apps/gateway` stops serving, and
+  // this Worker keeps accepting agent runs and agent jobs on the same
+  // credential — each of which then spends real provider money through the
+  // gateway for minutes or hours after the operator drained the deployment.
+  //
+  // It runs AFTER admission, which is where Rust puts it (`plan_ai_ingress`'s
+  // `is_draining()` check sits inside the handler, after `finalize_auth` has
+  // charged the RPM and quota windows): a drained node that stopped charging
+  // counters Rust still charges would diverge from `apps/gateway` in the state
+  // an operator inspects after a drain.
+  //
+  // It is on the BEARER leg only. That is the structural reason the six
+  // worker-plane callbacks keep serving while draining — they are in-flight
+  // work reporting back, and refusing them would strand every running job.
+  //
+  // The document is re-read on EVERY guarded request, never memoised: a
+  // boot-cached flag makes draining useless exactly when it matters.
+  // `test/durable/drain.spec.ts` flips it both ways inside one isolate.
+  if (isDrainGuardedOperation(operation.operationId)) {
+    const refusal = drainRefusal(await resolveDrain(c.env as DrainBindings));
+    if (refusal !== null) {
+      throw new HttpError(refusal.status, refusal.code, refusal.message);
+    }
+  }
 
   c.set("auth", auth);
 }

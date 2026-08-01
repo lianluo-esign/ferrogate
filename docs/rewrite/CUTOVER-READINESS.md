@@ -1,6 +1,6 @@
 # CUTOVER READINESS — the decision document
 
-**Date:** 2026-08-01 · **Wave 19 decision, amended by wave 20 (§0.3) and wave 21 (§0.4)** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 19 decision, amended by wave 20 (§0.3), wave 21 (§0.4) and wave 22 (§0.5)** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
 
@@ -311,6 +311,10 @@ in B4 itself, and as verification step **V-A3**.
 
 ### 0.4.2 OPENED — the fleet-consistency audit, and it is the largest finding since MODULE-OWNERSHIP
 
+> **ALL THREE OF FC-1, FC-2 AND FC-3 WERE CLOSED IN WAVE 22 — see §0.5.** The
+> table below is the wave-21 measurement and is kept verbatim as the record of
+> what was open, not as a live list.
+
 `docs/rewrite/FLEET-CONSISTENCY.md` is the first enumeration this project has
 ever had of **which capabilities exist in more than one Worker**. The defect
 class it names has now shipped **twice** (wave 16's admission bypass, wave 20's
@@ -393,6 +397,97 @@ citation was executed from the citing app's directory (AR-P9). Both are fixed in
 `scripts/seam-proof.mjs`. This is worth more than the three rows it recovered:
 the wave-20 inventory repair reconciled `--list` and never ran `--run`, and a
 runner that cries wolf is how the next real RED gets waved through.
+
+---
+
+## 0.5 WAVE 22 — the three fleet divergences are CLOSED and the class is GATED. The verdict is NOT changed.
+
+**Wave 21 opened FC-1, FC-2 and FC-3 as new CLASS A candidates (§0.4.3). All
+three are closed. The verdict is unchanged, deliberately: a fix wave does not
+move a verdict — only a fresh certification does, which is what §0 says and what
+five waves of amendment-creep already cost this document once.**
+
+### 0.5.1 CLOSED — all three, with the fleet effect proven by the integrate step itself
+
+| # | What was open | What closed it | The FLEET effect, proven here by mutation |
+|---|---|---|---|
+| **FC-1** | `POST /admin/v1/drain` wrote a durable document **nothing read**. The gateway refused off an unrelated deploy-time var; mcp and agent-runtime had no drain gate at all | Wave 22's delivering slice joined `apps/mcp` + `apps/agent-runtime`; **this integrate step wrote the gateway's third and last leg** (`routes/readiness.ts::resolveDrainState` — durable document OR var, fail-closed, per request) | ONE `POST /admin/v1/drain` → **all three spend Workers refuse `503 node_draining`, same status, same code, same message.** Neutralising the gateway's decision: **2 RED** in `fleet-control-matrix.test.ts` §5 (`{400,invalid_request}` vs `{503,node_draining}`); neutralising its AUTHORITY: **13 RED** + 1 RED in the mcp fleet gate; neutralising mcp's mount: **3 RED**; agent-runtime's: **5 RED**. All restored GREEN |
+| **FC-2** | A suspended tenant kept a valid credential and spent through MCP `tools/call` and `POST /v1/agent-jobs` — wave 16's admission bypass in a second control. `apps/agent-runtime` could NAME `tenancy_suspended` and only its dev table could produce it | Both Workers now read the `status` COLUMN of `tenants` on the control database, ancestors included, BEFORE the admission ladder | ONE suspension → **all three refuse `403 tenancy_suspended`**, and a suspended KEY still answers `401 invalid_api_key` on all three (the taxonomy survived the new gate). Unmounting mcp's gate: **8 RED of 12** in the fleet gate. Unmounting agent-runtime's: **6 RED** in its own spec AND **7 RED in the mcp fleet gate** — a regression on one Worker failing the file that names the fleet, which is the property no per-Worker suite has |
+| **FC-3** | An activated guardrail revision bound `apps/gateway` only; mcp screened from `FG_DEV_MCP_GUARDRAILS` (committed `""` ⇒ matches nothing) and agent-runtime from `FG_DEV_A2A_GUARDRAILS` (not committed at all) | Both resolve from the same `guardrail_policy_revisions` + `guardrail_policy_bindings` rows through `packages/guardrails/src/binding.ts`, revalidated per request rather than memoised | ONE activation → the payload the gateway blocks is **also blocked on MCP `tools/call` and on the A2A path, with the OPERATOR's own code**. Unmounting mcp: **2 RED**; unmounting agent-runtime: **3 RED** in the A2A spec + **1 RED** in the ledger's mount assertion |
+
+**One honest gap inside FC-3, found by mutation and not smoothed over.**
+`apps/mcp/test/fleet-guardrail-activation.test.ts` reaches agent-runtime by
+importing its screening FUNCTION as a leaf rather than by driving `resolveDeps`,
+so removing agent-runtime's mount leaves that file **15/15 GREEN**. The
+regression is still gated — twice — but the file whose name says "fleet" is not
+the file that catches it. FC-1's and FC-2's fleet gates do not have this shape.
+Recorded in `FLEET-CONSISTENCY.md` §7.5; it is a gate-quality item, not a live
+divergence.
+
+### 0.5.2 The class is now GATED, not just the three instances
+
+`apps/gateway/test/fleet-control-matrix.test.ts` (66 assertions) **names no
+Worker anywhere**: the fleet, the role sets, every control's source-of-truth
+class and the whole refusal table are COMPUTED from `apps/{*}/wrangler.toml` and
+from the SQL and vars each Worker issues. A sixth Worker that ports the
+admission ladder joins `SPEND` automatically and is immediately required to
+honour the drain, the suspension and the quota. **Would it catch a NEW
+divergence introduced tomorrow? For 13 of the 23 capabilities, yes,
+mechanically. For the other 10, no** — `FLEET-CONSISTENCY.md` §9.4 names them
+one by one, and row 10 (tenant fencing, a SQL predicate rather than an
+authority) is the most valuable conversion left.
+
+### 0.5.3 A defect the BOOT PROOF found that no suite could
+
+`apps/mcp` and `apps/agent-runtime` collapsed *"the drain document could not be
+READ"* onto `readiness_reason: "operator_drain"`, so a fresh
+`wrangler dev --local` answered `503 not_ready`, `draining: true`, on a
+deployment **nobody had drained** — and mcp additionally answered
+`accepting_new_requests: true` in the same `not_ready` document. Every vitest
+harness migrates its database, so the arm was unreachable from any suite. Both
+now answer `drain_state_unavailable` with `draining: false` and
+`accepting_new_requests: false`, matching the split `drainRefusal` already made
+on the data plane and the gateway's own `clusterStatus`. Three new gates, one
+per Worker, each mutation-proven RED. Two adjacent composition-root holes closed
+with it: `apps/mcp/wrangler.toml`'s `[[d1_databases]] DB` declared **no
+`migrations_dir`**, so `wrangler d1 migrations apply DB` had nowhere to read the
+control schema from and `CLOUD-VERIFICATION.md` §3 could not have had an mcp
+entry.
+
+### 0.5.4 Does a NEW BLOCKER appear? NO
+
+This wave opened nothing. It closed the three CLASS A candidates wave 21 opened,
+gated the class they belong to, and closed one probe-honesty defect found by the
+boot proof. **§0.2's exit criterion is unchanged**, and the CLASS A list in §2 is
+three rows shorter — but the criterion is a *fresh certification*, not a count,
+and this wave did not run one. The reading a future certification should carry
+forward: wave 21 closed one CLASS A item and opened three; wave 22 closed three
+and opened none. That is the first wave in six where the curve moved the right
+way, and one data point is not a trend.
+
+### 0.5.5 Wave-22 gate results, first-hand
+
+| Gate | Result |
+|---|---|
+| `bun install` | clean, no changes |
+| `bun run typecheck` | **exit 0**, all projects, zero diagnostics |
+| `bun run test`, every `packages/*` and `apps/*` (chained harnesses included) | **6,986 passed · 0 failed · 9 todo** (baseline 6,810; +176) |
+| Seam pass — every T1 row plus every row whose file this wave touched (run as ALL 200) | **200 rows run: 198 GREEN, 0 RED, 2 `NO-GATE` by design** (`AR-T11`, `CP-C13b`) |
+| Seam inventory reconciliation (`--list`) | **CLAIMED 200 · PARSED 200 · GATED 198 + 2 `NONE` by design · 0 ungated**, exit 0. Ten rows added this wave, three of them by this integrate step |
+| Own verification of FC-1 | **PROVEN by mutation**, 4 mutations across 3 Workers (§0.5.1); all restored, `grep -rn "MUT-W22" apps/ packages/` clean |
+| Own verification of FC-2 | **PROVEN by mutation**, 2 mutations at the MOUNT rather than the module |
+| Own verification of FC-3 | **PROVEN by mutation**, 2 mutations at the MOUNT — and the one gap it exposed is recorded in §0.5.1 |
+| Real boot: `bunx wrangler dev --local` × 5, distinct ports | **5 / 5 "Ready on" + 5 / 5 `/healthz` 200 + 5 / 5 `/readyz` 200** |
+| Fleet health-document shape | **1 distinct shape across all five**, `{status, service, version, runtime}` |
+| `bunx playwright test` | **22 / 22 passed** (5.1 s; 22 before) |
+
+**The most valuable single result is not in the table.** Neutralising the
+gateway's drain DECISION while leaving its source text intact turned **2**
+behavioural assertions red and left **every source-text gate GREEN** — the
+ledger, the matrix's §3 classifier and the mcp fleet gate all passed a Worker
+that reads the operator's document and throws the answer away. That is the
+sharpest argument in this repository for never gating a control on source text
+alone, and it is written up in `FLEET-CONSISTENCY.md` §7.4 (M22).
 
 ---
 

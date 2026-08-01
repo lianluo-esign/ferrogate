@@ -211,10 +211,11 @@ function healthzHandler(c: Context<GatewayEnv>): Response {
   });
 }
 
-function readyzHandler(c: Context<GatewayEnv>): Response {
+function readyzHandler(c: Context<GatewayEnv>): Promise<Response> {
   // The readiness decision table (config revision loaded ∧ not draining →
-  // 200/503) lives in `./readiness.ts`, together with the marker naming the one
-  // input the platform constrains.
+  // 200/503) lives in `./readiness.ts`. ASYNC since wave 22: the drain input is
+  // now the durable `runtime-state/drain` document OR the `GATEWAY_DRAIN` var,
+  // so `POST /admin/v1/drain` flips readiness without a deploy (FC-1).
   return readinessResponse(c, SERVICE_NAME, RUNTIME_NAME);
 }
 
@@ -435,9 +436,15 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // OPERATOR DRAIN (Rust `plan_ai_ingress`'s `state.is_draining()` check, plus
   // its four siblings) → `503 node_draining` on the five spend-producing
   // operations. Mounted HERE — after admission, before the cache and the routes
-  // — because that is where the Rust check sits relative to `finalize_auth`.
-  // Inert unless `GATEWAY_DRAIN` is the exact string `"true"`, which is the
-  // same value and the same parse `/readyz` uses. See `./drain.ts`.
+  // — because that is where the Rust check sits relative to `finalize_auth`,
+  // and because by this point the caller has already paid for the credential
+  // and admission lookups, so the one durable row read below is not a new
+  // amplification surface.
+  // Inert unless the durable `runtime-state/drain` document says `true` or
+  // `GATEWAY_DRAIN` is the exact string `"true"` — the same two sources and the
+  // same parse `/readyz` uses (`./readiness.ts::resolveDrainState`), which is
+  // what makes ONE `POST /admin/v1/drain` stop this Worker, `apps/mcp` and
+  // `apps/agent-runtime` together. See `./drain.ts` and FLEET-CONSISTENCY FC-1.
   app.use("*", options.nodeDrain ?? nodeDrainGate());
 
   // The exact-match AI response cache (Rust `AiResponseCache`, consulted at
