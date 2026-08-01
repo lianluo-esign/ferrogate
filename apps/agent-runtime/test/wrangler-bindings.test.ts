@@ -37,6 +37,7 @@
  */
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import * as compositionRoot from "../src/index.js";
 import * as entry from "../src/worker.js";
 
 function wranglerToml(): string {
@@ -106,8 +107,10 @@ describe("every Durable Object binding is deployable", () => {
     const { sqlite, legacy } = migratedClasses();
     for (const body of bindings) {
       const className = value(body, "class_name");
-      expect(className, `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`)
-        .toBeDefined();
+      expect(
+        className,
+        `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`,
+      ).toBeDefined();
       expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
       expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);
     }
@@ -120,6 +123,40 @@ describe("every Durable Object binding is deployable", () => {
         typeof (entry as unknown as Record<string, unknown>)[className],
         `class_name ${className} is not exported by src/worker.ts`,
       ).toBe("function");
+    }
+  });
+
+  /**
+   * AR-C9 — `src/index.ts:64-65` re-exports `AgentRunState` and `WorkerPlane`
+   * a second time, duplicating AR-E2/AR-E3 on `src/worker.ts`. MOUNT-SEAMS
+   * carried this row with *Expected RED: none* through every wave, on the
+   * stated grounds that it is "genuinely redundant … kept because
+   * `vitest.config.ts` can point `main` at either" module.
+   *
+   * Half of that is wrong, and the source says so. `src/worker.ts`'s own
+   * docblock records that `main` CANNOT point at `src/index.ts`: workerd treats
+   * every named export of the entry module as a service entrypoint and rejects
+   * one that is not a function / handler / class, and `src/index.ts` exports
+   * `OWNED_OPERATIONS`, an array. So there is no configuration in which these
+   * two lines are the ones workerd resolves `class_name` against.
+   *
+   * What they still are is a claim — that the two candidate modules agree on
+   * which class each name means. That claim was asserted by nothing, so
+   * deleting both lines, or pointing either at a different class, was invisible.
+   * This asserts IDENTITY, not mere presence: a same-named stub class would
+   * satisfy `typeof … === "function"` and still be a different Durable Object.
+   */
+  it("keeps the composition root's duplicate DO exports IDENTICAL to the entry module's (AR-C9)", () => {
+    const names = bindings.map((body) => value(body, "class_name") as string);
+    expect(names.length).toBeGreaterThanOrEqual(2);
+    for (const className of names) {
+      const fromRoot = (compositionRoot as unknown as Record<string, unknown>)[className];
+      const fromEntry = (entry as unknown as Record<string, unknown>)[className];
+      expect(fromRoot, `src/index.ts no longer re-exports ${className}`).toBeDefined();
+      expect(
+        fromRoot,
+        `src/index.ts's ${className} is a DIFFERENT class than src/worker.ts's`,
+      ).toBe(fromEntry);
     }
   });
 });

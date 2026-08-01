@@ -220,7 +220,28 @@ async function handleAgentIngress(
     throw new HttpError(404, "agent_not_found", "agent endpoint not found");
   }
 
-  const upstream = await deps.upstreams.lookup(agentId);
+  // THE REACH SET, resolved per dispatch and fenced to this caller. With
+  // `CONTROL_DB` bound this is the durable `agent-upstreams` table
+  // (`./registry.ts`), so an upstream withdrawn through
+  // `DELETE /admin/v1/agent-upstreams/{id}` is unreachable on the very next
+  // request — no redeploy, no cache to flush.
+  const resolved = await deps.upstreams.lookup(agentId, {
+    tenantId: auth.platformOperator ? null : tenantId,
+  });
+  // FAIL CLOSED, and distinguishably. A registry this Worker cannot read must
+  // REFUSE the forward: admitting on a lookup failure would re-open every
+  // withdrawn upstream the moment the control database blinked, which is the
+  // wave-16 bypass in a new form. 503 rather than 404 so an outage is never
+  // reported as a successful withdrawal — the posture
+  // `apps/gateway/src/ratelimit/quota.ts` argues for the admission ladder.
+  if (resolved.outcome === "unavailable") {
+    throw new HttpError(
+      503,
+      "agent_upstream_unavailable",
+      `agent upstream registry is unavailable: ${resolved.detail}`,
+    );
+  }
+  const upstream = resolved.outcome === "found" ? resolved.upstream : undefined;
   if (upstream === undefined || !upstream.enabled) {
     throw new HttpError(404, "agent_not_found", `agent upstream ${agentId} was not found`);
   }

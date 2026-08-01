@@ -30,6 +30,7 @@ import {
   type AdmissionPort,
   admissionFromEnv,
 } from "./admission/index.js";
+import { agentUpstreamPortFromEnv } from "./agents/registry.js";
 import { normalizedCapabilities } from "./capabilities.js";
 import { timingSafeEqualStrings } from "./crypto.js";
 import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
@@ -79,6 +80,14 @@ export interface AgentRuntimeBindings {
    * was TOML configuration in Rust too, exactly as `GATEWAY_PROVIDERS` /
    * `GATEWAY_MODELS` are vars in `apps/gateway`. Absent ⇒ no upstream resolves
    * ⇒ every `/v1/agents/*` dispatch is 404, which is fail-closed.
+   *
+   * **READ ONLY WHEN `CONTROL_DB` IS UNBOUND.** With a control database the
+   * durable `control_plane_resources` documents of kind `agent-upstreams` are
+   * the WHOLE registry (`src/agents/registry.ts`), so one
+   * `DELETE /admin/v1/agent-upstreams/{id}` withdraws an upstream from this
+   * Worker's dispatch path and from `apps/gateway`'s discovery document
+   * together. The var is NOT merged over them: a union would keep dispatching
+   * to an id declared in both after the document is deleted.
    */
   readonly AGENT_UPSTREAMS?: string;
   /**
@@ -462,8 +471,44 @@ export interface AgentUpstream {
   readonly operatorOnly: boolean;
 }
 
+/**
+ * The caller the registry is fenced to.
+ *
+ * `tenantId === null` is a PLATFORM OPERATOR: no row-ownership predicate. It is
+ * a separate member rather than an empty string so "operator" can never be
+ * produced by a credential that merely names no tenant — that caller is already
+ * refused `403 tenant_scope_denied` by `tenantIdOf`, and conflating the two
+ * would hand it the operator's view of the table.
+ */
+export interface AgentUpstreamScope {
+  readonly tenantId: string | null;
+}
+
+/**
+ * The outcome of one registry lookup.
+ *
+ * `unavailable` is a THIRD member on purpose. Collapsing it onto `not_found`
+ * would make a registry outage indistinguishable from a withdrawal — the
+ * dispatch would be refused either way, but an operator watching this surface
+ * would read "the upstream is gone" and stop looking, and any later decision to
+ * fail open would have nothing left to branch on. `src/agents/registry.ts`
+ * states the full argument; `apps/gateway/src/ratelimit/quota.ts` makes the
+ * same shape for the admission ladder.
+ */
+export type AgentUpstreamLookup =
+  | { readonly outcome: "found"; readonly upstream: AgentUpstream }
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "unavailable"; readonly detail: string };
+
 export interface AgentUpstreamPort {
-  lookup(agentId: string): Promise<AgentUpstream | undefined>;
+  /**
+   * Resolve `agentId` for `scope`.
+   *
+   * The scope is a PARAMETER rather than something the port closes over,
+   * because the durable implementation binds it into the SQL fence and a
+   * per-request value must not be captured in a per-isolate object.
+   */
+  lookup(agentId: string, scope: AgentUpstreamScope): Promise<AgentUpstreamLookup>;
 }
 
 // ---------------------------------------------------------------------------
@@ -953,12 +998,28 @@ export function isCanonicalActionFingerprint(value: string): boolean {
   return /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
-/** In-memory {@link AgentUpstreamPort}. */
+/**
+ * In-memory {@link AgentUpstreamPort} over the deploy-time `AGENT_UPSTREAMS`
+ * table.
+ *
+ * It applies NO tenancy predicate, and that is not an oversight: the var is a
+ * single operator-authored file with no `tenant_id` column to fence on — Rust's
+ * `[[agent_upstreams]]` is likewise one global table. The per-upstream
+ * `visibleToTenantIds` / `operatorOnly` filter still applies, in
+ * `agents/ingress.ts::upstreamVisibleTo`, exactly as it did before. The ROW
+ * ownership fence exists only where rows have owners, i.e. in
+ * `agents/registry.ts` over `control_plane_resources`.
+ *
+ * It also never reports `unavailable`: an in-memory map cannot fail to be read,
+ * so the fail-closed branch has no meaning here and inventing one would be an
+ * assertion that can never fire.
+ */
 export function inMemoryAgentUpstreamPort(upstreams: readonly AgentUpstream[]): AgentUpstreamPort {
   const byId = new Map(upstreams.map((upstream) => [upstream.id, upstream]));
   return {
-    async lookup(agentId: string): Promise<AgentUpstream | undefined> {
-      return byId.get(agentId);
+    async lookup(agentId: string): Promise<AgentUpstreamLookup> {
+      const upstream = byId.get(agentId);
+      return upstream === undefined ? { outcome: "not_found" } : { outcome: "found", upstream };
     },
   };
 }
@@ -1054,9 +1115,15 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
  *
  * ## The remaining ports
  *
- *  - `upstreams` — operator config, from `AGENT_UPSTREAMS` (falling back to the
- *    dev var). A catalog of A2A endpoints was TOML configuration in Rust too;
- *    a var is the faithful port, not a stub. Empty ⇒ every dispatch 404s.
+ *  - `upstreams` — the A2A REACH SET, and durable-first for the same reason the
+ *    credential authorities are. `CONTROL_DB` bound ⇒ the
+ *    `control_plane_resources` documents of kind `agent-upstreams`
+ *    ({@link agentUpstreamPortFromEnv}), the SAME rows `apps/gateway` publishes
+ *    discovery from, so ONE `DELETE /admin/v1/agent-upstreams/{id}` withdraws a
+ *    compromised upstream from BOTH reach paths. Unbound ⇒ `AGENT_UPSTREAMS`
+ *    (falling back to the dev var), which is a faithful port of the Rust TOML
+ *    table, not a stub. Empty ⇒ every dispatch 404s. The two sources do not
+ *    merge — see `src/agents/registry.ts`.
  *  - `guardrails` — the REAL `@ferrogate/guardrails` deterministic detector.
  *  - `config`, `clock` — real; `configFromEnv` reads operator vars.
  *  - `AGENT_RUN_STATE` / `WORKER_PLANE` — real Durable Objects, declared in
@@ -1143,10 +1210,24 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
     governance: inMemoryGovernancePort({
       governedEgressHosts: parseGovernedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS),
     }),
-    upstreams: inMemoryAgentUpstreamPort(
-      parseJsonVar<AgentUpstream[]>(
-        env.AGENT_UPSTREAMS ?? (dev ? env.FG_DEV_AGENT_UPSTREAMS : undefined),
-        [],
+    // THE A2A REACH SET. `CONTROL_DB` bound ⇒ the durable
+    // `control_plane_resources` documents of kind `agent-upstreams` — the SAME
+    // rows `apps/control-plane`'s `admin_agent_upstream` group writes and
+    // `apps/gateway`'s discovery surface reads — so ONE
+    // `DELETE /admin/v1/agent-upstreams/{id}` withdraws the upstream from BOTH
+    // reach paths. Absent ⇒ the deploy-time var alone, which is the offline
+    // harness's posture and a legitimate var-only deployment's.
+    //
+    // The durable table REPLACES the var rather than merging with it: a union
+    // would keep dispatching to an id the operator configured twice and then
+    // deleted. See `src/agents/registry.ts`.
+    upstreams: agentUpstreamPortFromEnv(
+      env,
+      inMemoryAgentUpstreamPort(
+        parseJsonVar<AgentUpstream[]>(
+          env.AGENT_UPSTREAMS ?? (dev ? env.FG_DEV_AGENT_UPSTREAMS : undefined),
+          [],
+        ),
       ),
     ),
     guardrails: deterministicGuardrailPort(

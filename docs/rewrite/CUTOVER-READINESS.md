@@ -1,6 +1,6 @@
 # CUTOVER READINESS — the decision document
 
-**Date:** 2026-08-01 · **Wave 19 decision, amended by wave 20 (§0.3)** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 19 decision, amended by wave 20 (§0.3) and wave 21 (§0.4)** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
 
@@ -261,6 +261,138 @@ first went RED because commenting a line inside an object literal made the modul
 unparseable — a **RED-by-parse-error is not a proof**, and `MOUNT-SEAMS.md` §5
 already records this exact mistake twice. All three were redone as value
 substitutions that still compile, and the driver now flags the condition.
+
+---
+
+## 0.4 WAVE 21 — the A3 residue is CLOSED; the fleet audit OPENED three blockers. The verdict is NOT changed.
+
+**This section does not move the verdict.** It records what wave 21 closed,
+what it opened, and what a later wave must decide. The verdict in §0 (GO on
+merging `main-ts` → `main`, NO-GO on deleting `crates/**`) stands as written;
+everything below makes the NO-GO half *more* firmly evidenced, not less.
+
+### 0.4.1 CLOSED — the A3 residue named in §0.3.3 and §0.3.4 item 1
+
+§0.3.4 demanded this be classified explicitly rather than left to drift. It is
+**CLASS A**, and it is now **closed**:
+
+- `apps/agent-runtime/src/agents/registry.ts` resolves the A2A dispatch reach
+  set from the durable `control_plane_resources` documents of kind
+  `agent-upstreams` — the SAME rows the gateway's discovery surface reads and
+  the SAME rows `DELETE /admin/v1/agent-upstreams/{id}` removes — read **once
+  per dispatch with no cache**, tenant-fenced by the control plane's own
+  predicate, and **fail-closed** (`503 agent_upstream_unavailable`, never a
+  fall back to the var and never a `404` that would make an outage
+  indistinguishable from a withdrawal);
+- the durable table **replaces** the deploy-time `AGENT_UPSTREAMS` var rather
+  than merging with it, because a union would keep dispatching to any id an
+  operator configured in both places after the document was deleted — the same
+  defect, one misconfiguration away;
+- `resolveDeps` MOUNTS it (`MOUNT-SEAMS.md` row **AR-P9**, new this wave).
+
+**Verified by this integration step, not accepted from the delivering agent.**
+Removing the mount and keeping only the var — the pre-wave-21 posture, i.e. the
+fix deleted — takes `test/durable/agent-upstream-withdrawal.spec.ts` to **10 RED
+of 13**, including a `422` that names the withdrawn upstream's host on the
+request AFTER the delete. **The app's own default project stayed 434/434
+GREEN**, which is why the seam is `ESC` and why "agent-runtime is green" was
+never evidence about this.
+
+The FLEET EFFECT — the property neither per-Worker suite can fail for — is now
+gated in ONE assertion path by
+`apps/gateway/test/routes/agent-upstream-fleet-withdrawal.test.ts`: one row, both
+doors observed holding it, ONE `DELETE`, both doors observed having lost it.
+Giving the durable lookup a process-lifetime memo leaves the gateway's own
+withdrawal suite at **14/14 GREEN** and takes that file to **2 RED** on *still
+DISPATCHABLE after withdrawal*. **`CONTROL_DB` on agent-runtime remains a
+deploy-time PLACEHOLDER (blocker B4)** — the fix is inert until that binding
+exists, which `CLOUD-VERIFICATION.md` now states in the `AGENT_UPSTREAMS` row,
+in B4 itself, and as verification step **V-A3**.
+
+### 0.4.2 OPENED — the fleet-consistency audit, and it is the largest finding since MODULE-OWNERSHIP
+
+`docs/rewrite/FLEET-CONSISTENCY.md` is the first enumeration this project has
+ever had of **which capabilities exist in more than one Worker**. The defect
+class it names has now shipped **twice** (wave 16's admission bypass, wave 20's
+half-withdrawal), and both times every per-Worker suite was green because every
+Worker was individually correct.
+
+Of 23 capabilities, **18 exist on more than one Worker**. **5 cells diverge.
+4 of those are CONTROLS an operator applies. 3 of the 4 are live money or
+security.** The search key that found them is worth quoting, because it will
+find the next one too:
+
+> A control that is DURABLE on one Worker and VAR-ONLY on another is the exact
+> shape of both shipped defects.
+
+**Three new CLASS A candidates**, stated as such and NOT self-approved:
+
+| # | Finding | Why CLASS A | Blast radius |
+|---|---|---|---|
+| **FC-1** | The operator drain is WRITTEN by the control plane (`runtime-state/drain`) and ENFORCED by the gateway off a different source (the `GATEWAY_DRAIN` var). Nothing reads the document. `apps/mcp` and `apps/agent-runtime` have no drain gate at all | Rust drained one process; the API existed and worked. Here `POST /admin/v1/drain` answers `200` and is a **complete no-op** | Money + availability, whole fleet. The operator believes the deployment is quiescing while it spends |
+| **FC-2** | Tenant suspension reaches the gateway and the control plane and **neither** `apps/mcp` nor the durable path of `apps/agent-runtime`. That Worker can RENDER `tenancy_suspended` and its deployed `d1ApiKeyPort` can never PRODUCE it | Rust's `finalize_auth` ran the lifecycle gate ahead of quota/wallet in one process | Security + money. Wave 16's bypass in a second control: suspend a compromised tenant, it is 403 on `/v1/chat/completions` and ADMITTED on MCP `tools/call` and `POST /v1/agent-jobs`, spending against quota that was never zeroed |
+| **FC-3** | An activated guardrail policy binds `apps/gateway` only. `apps/mcp` screens tool arguments and tool RESULTS from `FG_DEV_MCP_GUARDRAILS` (committed `""` ⇒ matches nothing) and `apps/agent-runtime` screens A2A messages from `FG_DEV_A2A_GUARDRAILS` (not committed at all) | Rust screened from one policy set in one process | Security. Move the payload to a surface the activated revision does not reach |
+
+Two further rows are recorded and are **not** blockers today: **FC-5** (the
+shared RPM counter is a deploy-time uncomment in two files — nothing is wrong
+today, and the gate exists to stop the "just define a local
+`RateLimiterDurableObject`" fix that would hand each Worker its own full quota)
+and **FC-7** (`rbac_action` is parsed by four Workers and consulted by two;
+harmless only because all 12 rbac-guarded operations are on admin paths those
+two do not serve). **FC-6c is a PRODUCT question**, not an engineering task: a
+subject-only `[[policies]]` deny reads to an operator as "deny this tenant
+everything" and stops nothing outside inference — Rust had the same shape, so
+it is parity, and it should be *decided* rather than inherited or silently
+"fixed".
+
+### 0.4.3 Does a NEW BLOCKER appear? YES — three, and they do not change the verdict
+
+FC-1, FC-2 and FC-3 are new CLASS A candidates that did not exist on any prior
+wave's list, because no prior wave asked the question that finds them. Under
+§0's own rule — *the behaviour was COMPLETE, WIRED and REACHABLE in Rust, and
+the TypeScript port dropped or broke it* — all three qualify: each was a single
+in-process control in Rust and is a partially-applied control here.
+
+They do not move the verdict because the verdict already separates the two acts:
+
+- **merging `main-ts` → `main` stays GO.** Every gate this wave ran is green
+  (§0.4.4), and none of these three is a regression *against `main`* — `main`
+  is the Rust tree and is not the deployment target. Withholding the merge does
+  not fix them and blocks everything that would;
+- **deleting `crates/**` stays NO-GO, and is now better evidenced than it was.**
+  Each of the three fixes is specified by Rust: `finalize_auth`'s ordering for
+  FC-2, the drain's single-process semantics for FC-1, the screening policy set
+  for FC-3. Deleting the reference before they are ported makes them
+  unappealable, which is exactly the argument §0 already makes.
+
+**The exit criterion in §0.2 is unchanged and now has three more rows against
+it.** The honest reading of wave 21 is that the curve has still not flattened:
+this wave closed one CLASS A item and opened three, and the three were found by
+asking a question nobody had asked before rather than by finishing a known list.
+
+### 0.4.4 Wave-21 gate results, first-hand
+
+| Gate | Result |
+|---|---|
+| `bun install` | clean, no changes |
+| `bun run typecheck` | **exit 0**, all projects, zero diagnostics |
+| `bun run test`, every `packages/*` and `apps/*` | **6,810 passed · 0 failed · 12 todo** (baseline 6,758; +52) |
+| Seam pass — every **T1** row plus every row in every app this wave touched | **125 T1 rows: 124 GREEN, 0 RED, 1 `NO-GATE` by design**; full `agent-runtime` (34), `telemetry` (17) and `gateway` (61) passes all GREEN — **163 distinct rows of 190** |
+| Seam inventory reconciliation (`--list`) | **CLAIMED 190 · PARSED 190 · GATED 188 + 2 `NONE` by design · 0 ungated**, exit 0 |
+| Own verification of the SECURITY fix | **PROVEN by mutation** (§0.4.1): 10/13 RED with the fix removed, restored GREEN 13/13, `grep` confirmed both edits landed and both restores are clean |
+| Fleet-effect assertion | **PROVEN by mutation**: 2 RED on a memoised lookup while the gateway's own suite stayed 14/14 GREEN |
+| Real boot: `bunx wrangler dev --local` × 5, distinct ports | **5 / 5 "Ready on" + 5 / 5 `/healthz` 200** |
+| Fleet health-document shape | **1 distinct shape across all five**, `{status, service, version, runtime}` |
+| `bunx playwright test` | **22 / 22 passed** (5.2 s; 22 before) |
+
+**Two runner defects found by RUNNING the seam pass rather than listing it**, both
+producing **FALSE RED on correct code** (`MOUNT-SEAMS.md` §13.4): `.test.ts`
+files inside a chained directory were routed to a `*.spec.ts`-only config
+(GW-E3, GW-C6, GW-W2 — 0 tests collected, non-zero exit), and a cross-app FLEET
+citation was executed from the citing app's directory (AR-P9). Both are fixed in
+`scripts/seam-proof.mjs`. This is worth more than the three rows it recovered:
+the wave-20 inventory repair reconciled `--list` and never ran `--run`, and a
+runner that cries wolf is how the next real RED gets waved through.
 
 ---
 

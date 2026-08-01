@@ -37,6 +37,11 @@ export const BASE = "https://agent-runtime-durable.test";
 const LONG_AGO = 1_000_000_000;
 const FAR_FUTURE = 4_000_000_000;
 
+/** The tenant every legacy fixture in this file belongs to. */
+export const TENANT_A = "tenant-a";
+/** A second, unrelated tenant — the other side of every tenancy fence. */
+export const TENANT_B = "tenant-b";
+
 // ---------------------------------------------------------------------------
 // Tenant credentials — seeded into `api_keys` in the TENANT database
 // ---------------------------------------------------------------------------
@@ -55,6 +60,21 @@ export const KEY_EXPIRED = "fg_durable_expired_0key";
 export const KEY_BLAKE2B = "fg_durable_blake2b_hash";
 /** Live, but `tenant_id` is blank: authenticated, yet cannot address tenancy. */
 export const KEY_NO_TENANT = "fg_durable_no_tenant_ky";
+/**
+ * Live and fully scoped, but seeded under a SECOND tenant.
+ *
+ * It exists so a cross-tenant refusal can be shown to be a FENCE rather than an
+ * empty table: `agent-upstream-withdrawal.spec.ts` reaches a row with this key
+ * and is refused the same row with {@link KEY_LIVE}. Without the positive half
+ * the negative half would pass against a Worker that resolves no upstream at
+ * all — the vacuous shape this repository keeps catching.
+ *
+ * The first 16 characters are deliberately NOT `KEY_LIVE`'s: `key_prefix` is a
+ * 16-char index seek (`VIRTUAL_API_KEY_PREFIX_CHARS`), and two fixtures sharing
+ * a prefix would make this suite depend on the multi-candidate branch of the
+ * resolver instead of on the tenancy fence it is about.
+ */
+export const KEY_TENANT_B = "fg_durable_beta_tenant1";
 /** Never seeded. The negative control for every positive assertion. */
 export const KEY_UNKNOWN = "fg_durable_never_seeded1";
 
@@ -74,6 +94,7 @@ interface SeedKey {
 
 const SEED_KEYS: readonly SeedKey[] = [
   { id: "key_live", secret: KEY_LIVE, scopes: AGENT_SCOPES },
+  { id: "key_tenant_b", secret: KEY_TENANT_B, tenantId: TENANT_B, scopes: AGENT_SCOPES },
   { id: "key_readonly", secret: KEY_READONLY, scopes: ["agent.runs.read"] },
   { id: "key_disabled", secret: KEY_DISABLED, scopes: AGENT_SCOPES, enabled: false },
   { id: "key_revoked", secret: KEY_REVOKED, scopes: AGENT_SCOPES, revokedAtUnix: LONG_AGO },
@@ -182,7 +203,7 @@ export async function setupDurablePorts(): Promise<void> {
       .bind(
         row.id,
         "ws-a",
-        row.tenantId ?? "tenant-a",
+        row.tenantId ?? TENANT_A,
         "proj-a",
         row.id,
         virtualApiKeyPrefix(secret),

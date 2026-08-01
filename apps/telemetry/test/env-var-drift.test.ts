@@ -297,6 +297,56 @@ describe("the deploy config's unobservable lines", () => {
   it("points main at the ENTRY module, not the composition root (TEL-T1)", () => {
     expect(WRANGLER_TOML).toMatch(/^main\s*=\s*"src\/worker\.ts"/m);
   });
+
+  /**
+   * TEL-T4 — the `[observability]` block. Carried by MOUNT-SEAMS as
+   * *"DEPLOY-ONLY, no gate"* through waves 15, 18, 19 and 20, on the reasoning
+   * that Workers Logs configuration has no local effect. True, and beside the
+   * point: what it means in practice is that deleting the whole block was GREEN
+   * across every telemetry suite, so the one Worker whose entire job is
+   * observability could silently ship with its own logs and traces OFF and
+   * nothing in the repo would say so. An operator debugging a dropped OTLP
+   * batch would have no invocation record to read.
+   *
+   * The behavioural half genuinely cannot be proven locally — that stays
+   * DEPLOY-ONLY. The half that CAN be proven is that the committed bytes still
+   * say what the deploy needs them to say, which is the same drift channel
+   * TEL-T3 uses. Each assertion below is one of the three ways this block rots:
+   * removed outright, silently disabled, or flipped to bill for invocation logs
+   * this Worker deliberately declined.
+   */
+  it("keeps Workers Logs and Traces enabled on the observability Worker (TEL-T4)", () => {
+    expect(WRANGLER_TOML).toMatch(/^\[observability\]\s*$/m);
+    expect(WRANGLER_TOML).toMatch(/^\[observability\.logs\]\s*$/m);
+    expect(WRANGLER_TOML).toMatch(/^\[observability\.traces\]\s*$/m);
+
+    // `enabled = true` under each of the three headers, and nowhere a stray
+    // `enabled = false` that a header-only check would sail past.
+    const lines = WRANGLER_TOML.split(/\r?\n/);
+    const start = lines.findIndex((line) => line.trim() === "[observability]");
+    expect(start, "no [observability] block to read").toBeGreaterThanOrEqual(0);
+    let end = start + 1;
+    while (
+      end < lines.length &&
+      !(lines[end]?.startsWith("[") === true && !lines[end]?.startsWith("[observability"))
+    ) {
+      end += 1;
+    }
+    const body = lines
+      .slice(start, end)
+      .filter((line) => !line.trim().startsWith("#"))
+      .join("\n");
+    expect(body.match(/^enabled = true$/gm)?.length).toBe(3);
+    expect(body).not.toMatch(/^enabled = false$/m);
+  });
+
+  it("declines invocation_logs, the billing decision the block records (TEL-T4)", () => {
+    // Committed OFF on purpose: invocation logs roughly double an ingest
+    // Worker's billable log events while duplicating the ingest summary line
+    // this Worker already emits. Flipping it on is a cost regression no
+    // behavioural test can see.
+    expect(WRANGLER_TOML).toMatch(/^invocation_logs = false$/m);
+  });
 });
 
 describe("every var the source reads is declared or explicitly excepted", () => {

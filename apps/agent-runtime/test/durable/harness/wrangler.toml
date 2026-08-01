@@ -79,6 +79,20 @@ AGENT_JOB_MAX_OPEN_PER_TENANT = "200"
 AGENT_JOB_DISPATCH_TTL_SECS = "86400"
 FG_DEV_A2A_GUARDRAILS = ""
 
-# The OPERATOR A2A upstream catalog (Rust `config.agent_upstreams`), read by
-# `resolveDeps` in every posture. Empty is fail-closed: no upstream resolves.
+# The OPERATOR A2A upstream catalog (Rust `config.agent_upstreams`).
+#
+# INERT IN THIS HARNESS, and deliberately left declared to say so: `CONTROL_DB`
+# is bound above, and with a control database the durable
+# `control_plane_resources` documents of kind `agent-upstreams` are the WHOLE
+# registry (`src/agents/registry.ts`) — the var is not merged over them, because
+# a union would keep dispatching to an id the operator deleted. So every
+# upstream `test/durable/agent-upstream-withdrawal.spec.ts` reaches came out of
+# D1, and the empty value here cannot be what makes a withdrawal look effective.
+#
+# THAT CLAIM IS ASSERTED, NOT LEFT AS PROSE. This comment is not a gate — if the
+# var half were still consulted, the empty value would keep every positive
+# assertion in that spec green while making every NEGATIVE one prove the wrong
+# thing. `describe("nothing committed to the harness wrangler.toml reaches this
+# suite")` therefore puts a LIVE upstream in the var whose document was never
+# written to D1 and requires the dispatch to resolve nothing.
 AGENT_UPSTREAMS = "[]"
