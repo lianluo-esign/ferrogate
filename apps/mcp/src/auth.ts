@@ -71,21 +71,22 @@
  * Rust's `durable_virtual_key_is_never_platform_root` invariant, structural
  * rather than checked.
  *
- * ## PORT-TODO(`gateway/auth.rs::finalize_auth`): no admission half
+ * ## The ADMISSION half lives next door, and is now mounted
  *
  * The ladder above is the CREDENTIAL half of Rust's `authenticate()`. The
- * ADMISSION half — `finalize_auth` — is absent on this Worker, exactly as it is
- * on `apps/agent-runtime` (see the twin marker on its `bearerAuth`). In the
- * Rust tree `POST /v1/mcp` and `POST /v1/mcp/tool/execute` shared a process with
- * `/v1/chat/completions`, so both were charged `429 rate_limit_exceeded` (the
- * per-key RPM counter), `429 monthly_budget_exceeded`,
- * `429 wallet_balance_exhausted`, `403 quota_scope_disabled` and
- * `503 quota_resolution_unavailable` before a tool ever ran.
- * `grep -rn "rate_limit_exceeded\|monthly_budget_exceeded" apps/mcp/src`
- * returns nothing, so a rate-limited or budget-exhausted key is still admitted
- * here — and `tools/call` is a spend surface (it can reach a paid upstream and
- * a paid asset pull). The fix is `apps/gateway/src/ratelimit/` mounted on a
- * SHARED counter namespace, not a private one.
+ * ADMISSION half — `finalize_auth`: `403 quota_scope_disabled`,
+ * `429 monthly_budget_exceeded`, `429 wallet_balance_exhausted`,
+ * `429 rate_limit_exceeded`, `503 quota_resolution_unavailable` — used to be
+ * absent from this Worker entirely, so a credential refused on
+ * `/v1/chat/completions` was ADMITTED on MCP `tools/call`, which spends real
+ * provider money (`docs/rewrite/CUTOVER-READINESS.md` finding D1).
+ *
+ * It is now `src/admission/`, called by `src/http.ts::authenticateRequest`
+ * immediately after this file resolves the credential — the same position
+ * `finalize_auth` occupies inside Rust's `authenticate()`. The one thing THIS
+ * file owes it is {@link AuthContext.requestLimitPerMinute}: the TOK-12 per-key
+ * cap lives on the tenant `api_keys` row, so the leg that opens that row is the
+ * only place it can be read.
  */
 import {
   StorageError,
@@ -269,10 +270,20 @@ interface TenantKeyRow {
   readonly scopes_json: string | null;
   readonly expires_at_unix: number | null;
   readonly revoked_at_unix: number | null;
+  /**
+   * TOK-12 `api_keys.request_limit_per_minute` — the per-CREDENTIAL RPM cap,
+   * independent of the `quota_policies` chain.
+   *
+   * Read here because this is the only place the row is opened. Dropping it
+   * (which this file did until the admission gate landed) leaves the column
+   * inert: an operator sets a per-key rate limit, the admin API echoes it back,
+   * and nothing on the request path ever counts against it.
+   */
+  readonly request_limit_per_minute: number | null;
 }
 
 const TENANT_KEY_SQL = `SELECT id, project_id, workspace_id, enabled, scopes_json,
-          expires_at_unix, revoked_at_unix
+          expires_at_unix, revoked_at_unix, request_limit_per_minute
    FROM ${TENANT_API_KEY_TABLE} WHERE key_hash = ?`;
 
 const ROLE_PERMISSIONS_SQL = `SELECT r.permission_keys_json AS permission_keys_json
@@ -540,10 +551,10 @@ function isActive(
  */
 export function virtualKeyContext(
   directory: Pick<DirectoryRow, "id" | "tenant_id" | "project_id" | "workspace_id">,
-  row: Pick<TenantKeyRow, "scopes_json">,
+  row: Pick<TenantKeyRow, "scopes_json"> & Partial<Pick<TenantKeyRow, "request_limit_per_minute">>,
   permissions: readonly string[],
 ): AuthContext {
-  return {
+  const context: AuthContext = {
     apiKeyId: directory.id,
     organizationId: directory.tenant_id,
     projectId: directory.project_id,
@@ -552,6 +563,12 @@ export function virtualKeyContext(
     permissions,
     platformOperator: false,
   };
+  // `0` is a REAL Rust value meaning "refuse every request", so the field is
+  // carried on an explicit null/undefined check and never on a falsy one —
+  // `?? undefined` on a `0` would silently unlimit a deliberately frozen key.
+  const perKeyRpm = row.request_limit_per_minute;
+  if (perKeyRpm !== null && perKeyRpm !== undefined) context.requestLimitPerMinute = perKeyRpm;
+  return context;
 }
 
 function isAuthErrorValue(value: unknown): value is AuthError {

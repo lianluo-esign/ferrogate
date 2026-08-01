@@ -33,7 +33,7 @@ import {
   SHARED_OPERATION_IDS,
   operationById,
 } from "../contract.js";
-import { errorEnvelope, requestIdentity, respondError } from "../http.js";
+import { errorEnvelope, releaseAdmissionHolds, requestIdentity, respondError } from "../http.js";
 import { type McpEnv, portsBound } from "../ports.js";
 
 /** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
@@ -94,14 +94,31 @@ export class McpRouter {
     return operation;
   }
 
-  /** Mount a handler at the contract's own path + method. */
+  /**
+   * Mount a handler at the contract's own path + method.
+   *
+   * Every registered operation is wrapped in ONE `finally` that releases the
+   * admission reservations `src/http.ts` parked for this request. That is the
+   * TS replacement for Rust's `Drop`-released `WalletCreditReservation`, and it
+   * lives HERE rather than in each handler for the reason a per-handler
+   * `finally` fails: a new operation added later would silently strand credits
+   * for a whole TTL, and nothing would go red. `release()` never throws (see
+   * `src/admission/quota.ts`), so a settlement problem cannot turn an
+   * already-computed response into a 500.
+   */
   register(operationId: string, handler: OperationHandler): this {
     const operation = McpRouter.operationOrThrow(operationId);
     if (this.#registered.has(operationId)) {
       throw new Error(`operation_id ${operationId} is already registered`);
     }
     const method: HttpMethod = operation.method;
-    this.app.on(method, operation.honoPath, (c) => handler(c as Context<McpAppEnv>));
+    this.app.on(method, operation.honoPath, async (c) => {
+      try {
+        return await handler(c as Context<McpAppEnv>);
+      } finally {
+        await releaseAdmissionHolds(c.req.raw);
+      }
+    });
     this.#registered.add(operationId);
     return this;
   }

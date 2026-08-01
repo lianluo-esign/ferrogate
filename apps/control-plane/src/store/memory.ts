@@ -40,7 +40,7 @@ import {
   type StoreMutation,
   type StoreRecord,
 } from "../ports.js";
-import { pageOf, visibleTo } from "./query.js";
+import { pageOf, visibleTo, writableBy } from "./query.js";
 
 export interface MemoryStoreSeed {
   readonly [collection: string]: readonly StoreRecord[];
@@ -86,6 +86,18 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     return Promise.resolve(record);
   }
 
+  /**
+   * The row a MUTATION may address, which is strictly narrower than the row a
+   * read may: see `query.ts::writableBy`. Every write path below resolves its
+   * target through this rather than through {@link get}, so an un-attributed
+   * platform row is readable by a tenant and not writable by one.
+   */
+  #writable(collection: string, scope: CallerScope, id: string): StoreRecord | null {
+    const record = this.#bucket(collection).get(id);
+    if (record === undefined || !writableBy(record, scope)) return null;
+    return record;
+  }
+
   // `async` on purpose: a durable store can only REJECT on a conflict, and a
   // synchronous `throw` here would mean `store.create(...).catch(...)` worked
   // against D1 and blew up against memory. The conformance suite holds both to
@@ -108,7 +120,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     id: string,
     record: Omit<StoreRecord, "id">,
   ): Promise<StoreRecord | null> {
-    const existing = await this.get(collection, scope, id);
+    const existing = this.#writable(collection, scope, id);
     if (existing === null) return null;
     const stored: StoreRecord = { ...record, id, tenant_id: existing.tenant_id ?? null };
     this.#bucket(collection).set(id, stored);
@@ -121,7 +133,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     id: string,
     patch: Readonly<Record<string, unknown>>,
   ): Promise<StoreRecord | null> {
-    const existing = await this.get(collection, scope, id);
+    const existing = this.#writable(collection, scope, id);
     if (existing === null) return null;
     // `id` and `tenant_id` are structural, never patchable.
     const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
@@ -159,8 +171,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     patch: Readonly<Record<string, unknown>>,
     precondition: (current: StoreRecord) => boolean,
   ): Promise<MergeIfOutcome> {
-    const existing = this.#bucket(collection).get(id);
-    if (existing === undefined || !visibleTo(existing, scope)) return { kind: "not_found" };
+    const existing = this.#writable(collection, scope, id);
+    if (existing === null) return { kind: "not_found" };
     if (!precondition(existing)) return { kind: "precondition_failed", current: existing };
     const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
     const stored: StoreRecord = {
@@ -174,7 +186,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   }
 
   async remove(collection: string, scope: CallerScope, id: string): Promise<boolean> {
-    const existing = await this.get(collection, scope, id);
+    const existing = this.#writable(collection, scope, id);
     if (existing === null) return false;
     return this.#bucket(collection).delete(id);
   }
@@ -205,7 +217,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     const resolved = new Map<number, StoreRecord>();
     for (const [index, mutation] of mutations.entries()) {
       if (mutation.kind !== "merge") continue;
-      const existing = await this.get(mutation.collection, scope, mutation.id);
+      const existing = this.#writable(mutation.collection, scope, mutation.id);
       if (existing === null) return null;
       resolved.set(index, existing);
     }

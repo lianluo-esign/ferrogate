@@ -243,6 +243,28 @@ export interface CollectionSpec {
    * document store it is running on is not durable either.
    */
   readonly project?: (db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>;
+  /**
+   * Remove the TYPED row {@link CollectionSpec.project} wrote, on DELETE.
+   *
+   * Declaring `project` without this is the defect it exists to prevent, one
+   * verb over: `DELETE` answers `200 {"deleted": true}`, the document goes, the
+   * typed row the other Worker reads stays, and the operator is told a change
+   * took effect that did not.
+   *
+   * **It runs BEFORE the document is removed**, which is the opposite of
+   * {@link CollectionSpec.project}'s ordering and is deliberate: for a GRANT
+   * (`roles`, `tenant_role_bindings`) a residual typed row is a permission that
+   * still applies, so the authority row must go first and a crash in between
+   * must leave the caller with LESS access, not more. Collections whose typed
+   * row is a LIMIT rather than a grant fail closed the other way and keep their
+   * bespoke delete override (see `store/quota_registry.ts`).
+   *
+   * The tenancy fence lives in the store, so {@link deleteHandler} resolves the
+   * row for the caller's scope FIRST and skips the whole path on a 404 —
+   * without that, "delete the typed row before the document" would itself be an
+   * unfenced cross-tenant write.
+   */
+  readonly unproject?: (db: D1Database, id: string, record: StoreRecord) => Promise<void>;
 }
 
 interface ResolvedSpec {
@@ -255,6 +277,7 @@ interface ResolvedSpec {
   readonly project:
     | ((db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>)
     | null;
+  readonly unproject: ((db: D1Database, id: string, record: StoreRecord) => Promise<void>) | null;
 }
 
 function resolveSpec(spec: CollectionSpec): ResolvedSpec {
@@ -267,6 +290,7 @@ function resolveSpec(spec: CollectionSpec): ResolvedSpec {
     body,
     patch: spec.patch ?? body,
     project: spec.project ?? null,
+    unproject: spec.unproject ?? null,
   };
 }
 
@@ -364,7 +388,21 @@ export function mergeHandler(spec: ResolvedSpec, param: string): Handler {
 export function deleteHandler(spec: ResolvedSpec, param: string): Handler {
   return async (c) => {
     const id = pathParam(c, param);
-    const removed = await depsOf(c).store.remove(spec.collection, scopeOf(c), id);
+    const deps = depsOf(c);
+    const scope = scopeOf(c);
+
+    const db = deps.controlDatabase;
+    if (spec.unproject !== null && db !== null) {
+      // The store is where the tenancy fence lives, so the row is resolved for
+      // THIS caller's scope before its authority row is touched; a row the
+      // caller cannot see is a 404 and nothing is written. Then the typed row
+      // goes first — see `CollectionSpec.unproject`.
+      const visible = await deps.store.get(spec.collection, scope, id);
+      if (visible === null) throw notFound(spec, id);
+      await spec.unproject(db, id, visible);
+    }
+
+    const removed = await deps.store.remove(spec.collection, scope, id);
     if (!removed) throw notFound(spec, id);
     return json(c, 200, adminDeleted(spec.object, id));
   };

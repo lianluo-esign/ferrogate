@@ -8,6 +8,7 @@
  */
 import type { Context } from "hono";
 
+import { type WalletHold, releaseAll } from "./admission/index.js";
 import { declaredAgentRunId, MCP_ORIGINAL_BEARER_HEADER } from "./protocol.js";
 import {
   isAuthError,
@@ -60,8 +61,57 @@ export type AuthOutcome =
   | { ok: false; status: number; body: ErrorEnvelope };
 
 /**
- * Authenticate, then build the {@link DispatchContext} — including the
+ * Reservations taken during admission, per in-flight request.
+ *
+ * The TS stand-in for Rust's `Drop`: `finalize_auth` took a
+ * `WalletCreditReservation` and the guard released it when it fell out of
+ * scope, whatever the outcome. JS has no destructor, so the holds are parked
+ * here against the `Request` object and drained by ONE `finally` in
+ * `src/routes/index.ts`, which wraps every registered operation. Keying on the
+ * request (rather than returning them for each handler to remember) is what
+ * makes the release impossible to forget at a call site.
+ *
+ * A `WeakMap` so a request that never reaches the drain — one that throws
+ * before the router's `finally`, which cannot happen today — is collected
+ * rather than leaked. The durable hold additionally carries an
+ * `expires_at_unix`, which is the second release for the case a `finally`
+ * cannot cover at all: an isolate that dies mid-request.
+ */
+const inFlightHolds = new WeakMap<Request, WalletHold[]>();
+
+/** Release and forget every admission hold this request took. Never throws. */
+export async function releaseAdmissionHolds(request: Request): Promise<void> {
+  const holds = inFlightHolds.get(request);
+  if (holds === undefined) return;
+  inFlightHolds.delete(request);
+  await releaseAll(holds);
+}
+
+/** Test seam: how many holds are still parked against a request. */
+export function pendingAdmissionHolds(request: Request): number {
+  return inFlightHolds.get(request)?.length ?? 0;
+}
+
+/**
+ * Authenticate, ADMIT, then build the {@link DispatchContext} — including the
  * validated `x-ferrogate-agent-run-id` (#522).
+ *
+ * The two halves are Rust's two halves of `authenticate()`, in Rust's order:
+ *
+ *  1. `ports.auth` resolves the CREDENTIAL — 401 for anything unknown,
+ *     disabled, revoked or expired; 403 only for a resolved caller missing the
+ *     operation's scope.
+ *  2. `ports.admission` is `auth.rs::finalize_auth` — 403 `quota_scope_disabled`,
+ *     429 `monthly_budget_exceeded` / `wallet_balance_exhausted` /
+ *     `rate_limit_exceeded`, 503 on any lookup failure.
+ *
+ * Running admission SECOND is the control, not a convenience: an under-scoped
+ * caller must be refused without charging a counter, or a client with the wrong
+ * scope could drain the RPM budget of the calls that ARE allowed.
+ *
+ * This function is called by all five authenticated MCP surfaces, which is what
+ * makes the gate un-bypassable — in the Rust tree the equivalent property came
+ * from `finalize_auth` living inside `authenticate()` itself.
  *
  * `surface` labels the unjoinable-action metric. An absent declaration is the
  * "unjoinable action" signal: it is counted per authenticated tenant and
@@ -94,6 +144,23 @@ export async function authenticateRequest(
       status: authenticated.status,
       body: errorEnvelope(authenticated.code, authenticated.message, requestId),
     };
+  }
+
+  // THE ADMISSION HALF. Deleting this block re-opens the bypass recorded as
+  // finding D1 in `docs/rewrite/CUTOVER-READINESS.md`: a credential at its RPM
+  // ceiling, over its monthly budget or with an empty prepaid wallet is refused
+  // on `/v1/chat/completions` and admitted here — and `tools/call` spends real
+  // provider money. `test/admission.test.ts` drives that over `SELF`.
+  const admitted = await ports.admission.admit(authenticated, requestId);
+  if (!admitted.ok) {
+    return {
+      ok: false,
+      status: admitted.error.status,
+      body: errorEnvelope(admitted.error.code, admitted.error.message, requestId),
+    };
+  }
+  if (admitted.holds.length > 0) {
+    inFlightHolds.set(request, [...(inFlightHolds.get(request) ?? []), ...admitted.holds]);
   }
 
   if (agentRunId.value === undefined) {

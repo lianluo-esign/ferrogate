@@ -1,8 +1,17 @@
 # CUTOVER READINESS — the decision document
 
-**Date:** 2026-08-01 · **Wave 15** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 15**, amended by **wave 16** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
+
+> **Wave-16 amendment (2026-08-01).** Wave 16 fixed defects this document
+> found. **§0.1 records exactly which findings are CLOSED and which are not.**
+> The verdict below is UNCHANGED and was not re-litigated: closing findings is
+> not the same as re-certifying, this document's own §6.6 requires all three
+> parity certifications and the full seam pass to be re-run before the verdict
+> moves, and the argument for NO-GO was never only the finding list — it was the
+> shape of the evidence (sixteen specification-bearing items; a discovery curve
+> that had not flattened). Only a fresh certification can change it.
 
 ---
 
@@ -62,6 +71,49 @@ None of them is *sufficient*, because all of them measure whether the TypeScript
 does what the TypeScript's own tests say it should — not whether that matches the
 Rust. The three parity certifications are the only documents that ask the second
 question, and all three answer no.
+
+---
+
+## 0.1 WAVE 16 — which findings are CLOSED, and which are not
+
+Wave 16 took §6 items 1–4. Everything below was verified by the integrate step
+**independently of the delivering agents**: for each fix, the fix was reverted or
+neutralised in place, a `grep` confirmed the edit had actually landed (a
+concurrent write silently reverting a mutation is a known failure mode here), the
+named test was required to go RED, the file was restored and required to go
+GREEN again. A fix whose test was never *seen* red is not recorded as closed.
+
+### CLOSED
+
+| Finding | What landed | RED-before / GREEN-after, observed by the integrate step |
+|---|---|---|
+| **D1 — admission bypass** (the live control bypass; 20 of 54 data-plane ops) | The `finalize_auth` admission ladder — quota-scope chain, monthly USD budget, prepaid-wallet no-oversell hold, RPM window — ported onto `apps/mcp` (`src/admission/`, called from `src/http.ts::authenticateRequest`) and `apps/agent-runtime` (`src/admission/`, called from `src/middleware/auth.ts`). Both import `@ferrogate/policy`'s `QuotaScopeSelector.counterKey` rather than re-deriving it, so the counter key cannot drift between Workers | MCP: neutralising the `ports.admission.admit` call ⇒ **6 RED** in `apps/mcp/test/admission.test.ts`, restored **33/33 GREEN**. agent-runtime: neutralising `deps.admission.admit` ⇒ **6 RED** in `test/admission.test.ts` **and 4 RED** in `test/durable/admission.spec.ts` (real migrated D1), restored **8/8 + 8/8 GREEN**. Gateway leg re-proved on the same run: removing `rateLimit()` from `GATEWAY_MIDDLEWARE` ⇒ **16 RED** in the deployed-app suites |
+| **D1 cross-Worker consistency** — the half that three green suites cannot show | `apps/gateway/test/admission-consistency.test.ts` (new, 7 cases): the three Workers' refusal tables must agree on status, on message text, and on every code two of them share; and all three must derive the counter key from the ONE `@ferrogate/policy` site | Proven RED by two mutations: MCP `quota_scope_disabled` 403→429 ⇒ **2 RED**; agent-runtime `rate_limit_exceeded` message reworded ⇒ **1 RED**. Restored **7/7 GREEN** |
+| **D4 — asset egress** (money) | `apps/gateway/src/assets/egress.ts`: the fail-closed monthly egress BYTE budget and the download-RPM cap ahead of any byte served, then `recordAssetEgress` metering + the pull-side audit row. Wired through `AssetService`, so a `206` bills its slice and a `304`/`416`/`HEAD` bills nothing | Neutralising `#egressDenial`'s refusal ⇒ **4 RED** in `test/assets/egress.test.ts` (over-budget pull, over-RPM pull, the range request gated on FULL object size, the presigned-URL issuance). Restored **24/24 GREEN** |
+| **D5 — asset publish gate 1** (security; the `mcp_manifest` **stdio** refusal) | `apps/gateway/src/assets/content-gate.ts`, called DIRECTLY by `AssetService` on `putAsset` and `commitUpload` ahead of the screener — deliberately not as an `AssetScreener` decorator, so no operator configuration and no injected test double can switch it off | Neutralising `#contentGate`'s rejection ⇒ **7 RED** in `test/assets/content-gate.test.ts`, including "REFUSES a stdio manifest", "refuses regardless of case" and "is NOT disableable through the screener seam". Restored **17/17 GREEN** |
+| **Control plane — `rbac` write half** (a granted role authorized nothing; `DELETE` answered 200 and revoked nothing) | `apps/control-plane/src/store/rbac_registry.ts` + the route projections, ordered so a crash mid-write leaves a visible-but-unauthorizing binding rather than an invisible grant, and revokes the GRANT before the document | Neutralising `projectTenantRoleBinding` ⇒ **8 RED** in `test/rbac-write-half.test.ts`, incl. "DELETE stops authorizing on the very next request". Restored **12/12 GREEN** |
+| **Control plane — `admin_api_key` write half** (the group could neither mint a working credential nor revoke one; both answered 200) | `apps/control-plane/src/store/static_keys.ts` + mint/revoke projection, with the minted key clamped so it can never exceed the caller that minted it | Neutralising `projectStaticApiKey` ⇒ **13 RED** in `test/api-keys-write-half.test.ts`, incl. "the minted secret authenticates on the very next request" and "the secret stops authenticating on the very next request". Restored **14/14 GREEN** |
+| **Control plane — the tenant WRITE fence** (a tenant admin holding `admin.write` could PATCH or DELETE any un-attributed PLATFORM row) | `tenantWriteScopeSql` (D1) and `query.ts::writableBy` (memory) split from the READ predicate: strict `tenant_id = ?`, no `IS NULL` disjunct. Reads keep the disjunct, which `resolved-defaults` depends on | Both implementations mutated back to the read predicate, separately. D1 ⇒ **4 RED** in `test/tenant-write-fence.test.ts` (8/8 restored); memory ⇒ **6 RED** in `test/store-conformance.test.ts` (98/98 restored). The first mutation of `writableBy` left `tenant-write-fence.test.ts` GREEN — that file drives the D1 store — which is why both twins were mutated rather than one |
+| **Guardrail evidence-fingerprint keying** (test-only; two real mutations used to leave 407/407 + 112/112 green) | `packages/guardrails/test/fingerprint-keying.test.ts` (32 cases) over all four fingerprint sites, checked against an INDEPENDENT `node:crypto` oracle rather than the package's own `hash.ts` | key → empty bytes at `hmacEvidenceFingerprint` ⇒ **12 RED**; key → a hard-coded constant in `DeterministicDetector#hmacFingerprint` ⇒ **3 RED**. Both restored **32/32 GREEN** |
+
+### NOT closed — carried forward unchanged
+
+| Finding | Why it is still open |
+|---|---|
+| **D1's shared counter, on the RPM leg only** | The four other legs (quota scope, monthly budget, wallet hold, and the counter-KEY derivation) are shared and durable across all three Workers today. The RPM WINDOW is not: it needs `apps/gateway`'s `RateLimiterDurableObject` bound cross-script into the other two, and **workerd cannot resolve a `script_name` binding offline**. Committed uncommented, `apps/mcp`'s suite collapses to 0 collected tests / 23 errors on a correct tree and `wrangler dev --local` never reaches "Ready on" (measured this wave). The stanza is therefore written out IN FULL but COMMENTED in both `wrangler.toml`s, pinned by both apps' `env-var-drift` gates (status, `script_name`, and the absence of a migration claiming the class), and is a **DEPLOY-ONLY** seam. Until it is uncommented the RPM cap is enforced per isolate — 60 rpm becomes 60·N across N isolates — versus **none** of the five legs enforced before this wave |
+| **Control plane — `guardrail_policy` write half** (10 ops) | Deliberately NOT projected, and the reason is now written into `routes/guardrail_policy.ts`: `binding.ts::policySourceFromStore` calls `compilePolicyChecks` EAGERLY at construction with no `try`/`catch`, so projecting today's partially-validated revision documents would take the gateway's whole guardrail source down **at boot**. Closing it requires tightening the ADMISSION (a revision the data plane could never enforce must be a 400, not a 201 followed by silence), which is a behaviour change to two create operations and moves existing accepted cases with it |
+| **Control plane — `wallets` write half** (10 ops) | Untouched. Admin writes `balance_cents` in the CONTROL db; the reader is `wallets.balance_credits` + `wallet_reservations` in the TENANT db. Crediting a wallet still does not fund a request |
+| **D2, D3, D6, D7**, the three MISSING ops, `/metrics`, `/healthz` `version`, agent-runtime `/readyz` | Untouched by this wave |
+| **`ferrogate-cloudflare` — the 21st crate** (§6 item 5) | Untouched. Still the single strongest argument against deleting the Rust: four slices with no TS equivalent anywhere and no `PORT-PLAN.md` row |
+| **The other §2.2 DURABLE-BUT-UNREAD groups**, §2.3's AI-Gateway routing (#406), `sync-bridge`, the credits `number`/`bigint` boundary, §2.4's IN-MEMORY-ONLY postures | Untouched |
+| **§4.1 — everything only a real deploy can settle** | Unchanged, and now one row longer: the cross-script `RATE_LIMIT` binding above |
+| **§6 items 6, 7, 8** — re-run all three parity certifications and the full seam pass; scope `ferrogate-auth-service`'s 11,474 unported lines; the four newly-unproven seams | Untouched. **Item 6 is what gates the verdict**, and it has not been done |
+
+**Net effect on the verdict: none, by design.** Wave 16 closed the four §6 items
+that were nominated as closable, and did not touch the two arguments the NO-GO
+actually rests on — the sixteen specification-bearing items, and a
+defect-discovery curve that had not flattened. Wave 16 is itself weak evidence
+about the curve: it was a *fix* wave, not an *audit* wave, so it was not looking.
 
 ---
 
@@ -167,11 +219,11 @@ and `cutover-parity-libraries.md`. Nothing is summarised away.
 
 | ID | Finding | Ops | Blast radius |
 |---|---|---:|---|
-| **D1** | **The admission half of `authenticate()` did not cross the Worker split.** `403 tenant_identity_required` · lifecycle suspension · `503 quota_resolution_unavailable` · `403 quota_scope_disabled` · `429 monthly_budget_exceeded` · `429 wallet_balance_exhausted` · `429 rate_limit_exceeded` are mounted on `apps/gateway` only. `grep -rn "rate_limit_exceeded\|monthly_budget_exceeded" apps/mcp/src apps/agent-runtime/src` → nothing | **20** | **CRITICAL — money + abuse.** Rate limits and spend caps bypassable by calling a different verb on the same key. Exploitable with no special knowledge. Not a platform limit; the fix needs all three Workers to share ONE counter namespace, or a per-Worker counter hands each surface a full quota (a different bug) |
+| **D1** | **CLOSED (wave 16) except the shared RPM counter — see §0.1.** **The admission half of `authenticate()` did not cross the Worker split.** `403 tenant_identity_required` · lifecycle suspension · `503 quota_resolution_unavailable` · `403 quota_scope_disabled` · `429 monthly_budget_exceeded` · `429 wallet_balance_exhausted` · `429 rate_limit_exceeded` are mounted on `apps/gateway` only. `grep -rn "rate_limit_exceeded\|monthly_budget_exceeded" apps/mcp/src apps/agent-runtime/src` → nothing | **20** | **CRITICAL — money + abuse.** Rate limits and spend caps bypassable by calling a different verb on the same key. Exploitable with no special knowledge. Not a platform limit; the fix needs all three Workers to share ONE counter namespace, or a per-Worker counter hands each surface a full quota (a different bug) |
 | **D2** | **The workflow GRAPH gate is unported.** `[[agent_workflows]]` is parsed and validated by `packages/config` and read by nothing (`grep -rn "agent_workflows\|agentWorkflows" apps/` → nothing). 13 Rust refusal codes absent. Header set also renamed (`…-node-id`/`…-iteration` have no reader; `…-run-id` is new and required) | 5 | **HIGH — policy bypass.** Node pinning, edge transitions, iteration/model-call limits and workflow timeout all stop being enforced while the config is accepted. A Rust-shaped workflow client is refused `400` outright |
 | **D3** | `x-ferrogate-agent-run-id` is read on assets and MCP but **not** on the inference path (`grep -rn "agent-run-id" apps/gateway/src/inference/ apps/gateway/src/metering/` → nothing) | 5 | **MEDIUM — evidence.** Model spend cannot be joined to the agent run that caused it. Cost attribution has a hole exactly where the cost is |
-| **D4** | **Asset egress: no quota gate, no metering, no pull audit.** `monthly_egress_bytes_budget` / `download_rpm_limit` are parsed, persisted and served by the admin API and read by nothing; `asset_egress_price_per_gb` has no consumer | 1 | **HIGH — money.** Unlimited bandwidth served and none of it billed. An operator can configure an egress budget, see it echoed back, and have it enforce nothing |
-| **D5** | **Asset publish gate 1 unported**: the per-`asset_type` content-type allowlist, and the `mcp_manifest` **stdio refusal** | 2 | **HIGH — security.** Any byte stream publishable under any asset type; a tenant can publish an `mcp_manifest` declaring `stdio`, which makes a *consuming* agent spawn an arbitrary local process. Pure function of two strings and a buffer — no platform limit |
+| **D4** | **CLOSED (wave 16) — see §0.1.** **Asset egress: no quota gate, no metering, no pull audit.** `monthly_egress_bytes_budget` / `download_rpm_limit` are parsed, persisted and served by the admin API and read by nothing; `asset_egress_price_per_gb` has no consumer | 1 | **HIGH — money.** Unlimited bandwidth served and none of it billed. An operator can configure an egress budget, see it echoed back, and have it enforce nothing |
+| **D5** | **CLOSED (wave 16) — see §0.1.** **Asset publish gate 1 unported**: the per-`asset_type` content-type allowlist, and the `mcp_manifest` **stdio refusal** | 2 | **HIGH — security.** Any byte stream publishable under any asset type; a tenant can publish an `mcp_manifest` declaring `stdio`, which makes a *consuming* agent spawn an arbitrary local process. Pure function of two strings and a buffer — no platform limit |
 | **D6** | `503 node_draining` is advertised by `/readyz` and honoured by nothing (`grep -rn "node_draining" apps/` → nothing). Rust re-checks the flag per AI request on 5 handlers | 5 | **MEDIUM — operational.** Draining a deployment before a migration still takes new billable traffic |
 | **D7** | Agent-job event feed, three divergences: `object` is `"list"` not `"agent_job_event_page"`; `?limit=0` / `?limit=abc` answer 200 with 100 rows where Rust answers `400 invalid_event_cursor`; the resume cursor regressed to the bare event id, so a poll loop **re-delivers its whole retained history** after a retention pass. Plus `getAgentJobResult` drops `work_products` | 2 | **MEDIUM — correctness.** Pagination clients break three ways |
 | **MISSING** | `listTools`, `executeTool`, `executeFunction` answer **501** | 3 | Contract operations that do not exist. `executeFunction` additionally needs Containers (paid-plan prerequisite) |
@@ -188,10 +240,10 @@ authorized, audited, tenant-fenced — and writing to a store nothing reads.
 
 | Group | Ops | The reader looks somewhere else | Blast radius |
 |---|---:|---|---|
-| `rbac` | 11 | `tenant_role_bindings ⋈ roles`, read by 4 modules across 3 Workers | **HIGH — security.** A granted role authorizes nothing; **`DELETE /admin/v1/tenant-roles/{t}/{r}` answers 200 and revokes nothing** |
+| `rbac` **— CLOSED (wave 16)** | 11 | `tenant_role_bindings ⋈ roles`, read by 4 modules across 3 Workers | **HIGH — security.** A granted role authorizes nothing; **`DELETE /admin/v1/tenant-roles/{t}/{r}` answers 200 and revokes nothing** |
 | `wallets` | 10 | `wallets.balance_credits` + `wallet_reservations` in the TENANT db (admin writes `balance_cents` in the CONTROL db) | **HIGH — money.** Crediting a wallet does not fund a request |
-| `guardrail_policy` | 10 | `guardrail_policy_revisions` / `guardrail_policy_bindings` | **HIGH — safety.** An activated policy is never evaluated |
-| `admin_api_key` | 6 | `static_api_keys` — and no secret is minted at all | **HIGH — security.** The group cannot produce a working credential and cannot revoke one; both answer 200 |
+| `guardrail_policy` **— STILL OPEN; blocker documented in place, §0.1** | 10 | `guardrail_policy_revisions` / `guardrail_policy_bindings` | **HIGH — safety.** An activated policy is never evaluated |
+| `admin_api_key` **— CLOSED (wave 16)** | 6 | `static_api_keys` — and no secret is minted at all | **HIGH — security.** The group cannot produce a working credential and cannot revoke one; both answer 200 |
 | `admin_request_log` | 5 | `request_logs` has no writer at all | MEDIUM — evidence |
 | `admin_provider` / `admin_model` | 4 | Rust reads live config + dispatches a catalog per provider | MEDIUM |
 | `agent_run` | 3 | the `AgentRunState` Durable Object | MEDIUM — evidence |
@@ -201,7 +253,7 @@ authorized, audited, tenant-fenced — and writing to a store nothing reads.
 
 Plus three PARTIAL findings that are not "unread":
 
-- **The tenant WRITE fence is wider than Rust.** `tenantScopeSql` is
+- **CLOSED (wave 16) — see §0.1.** ~~The tenant WRITE fence is wider than Rust.~~ The write fence is now `tenant_id = ?` in both the D1 and the memory store, split from the read predicate and mutation-pinned in both. The original finding, for the record: `tenantScopeSql` is
   `tenant_id IS NULL OR tenant_id = ?`. For SELECT the widening is deliberate,
   argued and pinned. **It is also on `#update`, `remove` and the `atomic` batch,
   and no test pins the write side** — so a tenant-scoped credential holding
@@ -235,7 +287,7 @@ What is not there:
 | Finding | Blast radius |
 |---|---|
 | **`ferrogate-cloudflare` is the 21st crate and appears in NO row of `PORT-PLAN.md`.** Four slices have no TS equivalent anywhere: (1) per-tenant R2 bucket provisioning; (2) minting SCOPED temporary R2 S3 credentials; (3) the required token-permission-group list + the `preflight` GET that names WHICH group is missing; (4) the shared retry/backoff honouring Cloudflare's ~1,200 req/5 min API limit plus the typed auth/missing-scope code mapping | **The single strongest argument against deleting the Rust.** These are account-MANAGEMENT operations, so no request path misses them — which is exactly why they would be most painful to re-derive. There are instead **three independent partial Cloudflare v4 clients**, each decoding the `{success,errors,result}` envelope itself |
-| **Guardrail evidence-fingerprint KEYING is held by nothing.** Two semantically-real mutations (key → empty bytes; key → the constant `"FIXED"`) both left **407/407 guardrails + 112/112 gateway guardrail tests GREEN**. Every assertion is the SHAPE `/^hmac-sha256:[0-9a-f]{64}$/`, which an *unkeyed* SHA-256 also satisfies | **Security, test-integrity.** An unkeyed digest of a short secret is reversible by dictionary attack. Removing the key is precisely the regression the keying exists to prevent. **Test-only to close; hours of work** |
+| **CLOSED (wave 16) — see §0.1.** **Guardrail evidence-fingerprint KEYING is held by nothing.** Two semantically-real mutations (key → empty bytes; key → the constant `"FIXED"`) both left **407/407 guardrails + 112/112 gateway guardrail tests GREEN**. Every assertion is the SHAPE `/^hmac-sha256:[0-9a-f]{64}$/`, which an *unkeyed* SHA-256 also satisfies | **Security, test-integrity.** An unkeyed digest of a short secret is reversible by dictionary attack. Removing the key is precisely the regression the keying exists to prevent. **Test-only to close; hours of work** |
 | **Cloudflare AI Gateway routing (#406) is unreachable in production.** `packages/providers` applies it; `apps/gateway/src/inference/adapters.ts` builds its own registry and never goes through that class. Not even *configurable* — `providerRecordSchema` is `.strict()` with no `cloudflare_ai_gateway` key, so a provider carrying the Rust block is REJECTED | MEDIUM — a live product feature (free caching, rate-limiting, observability) is off for every tenant. The textbook instance of this project's defect class, correctly identified and still open |
 | `packages/sync-bridge` — zero importers, inventory target is literally `Deleted` | Recommend deleting the package. No risk |
 | `packages/storage` carries credit amounts as `number`, `packages/billing` as `bigint`. Nothing asserts the boundary | LOW — unreachable below ~9.0e15 credits, but the two layers do not share an integer type |
@@ -433,19 +485,42 @@ down before any GO is reconsidered, not after.
 Ordered by what unblocks the decision, not by size. Items 1–5 are the cutover
 gate; the rest is ordinary work that can proceed alongside.
 
-1. **Close D1** — mount the admission ladder on `apps/mcp` and
-   `apps/agent-runtime`, over ONE shared counter namespace. This is the only
-   finding that is a live control bypass rather than a fidelity gap.
-2. **Close D4 and D5** — asset egress quota + metering; the content-type
-   allowlist and the `mcp_manifest` stdio refusal. Money and security, both pure
-   functions, neither a platform limit.
+> **Wave-16 status line.** Items 1–4 are **DONE except one leg of item 1 and two
+> of the four groups in item 3**; see §0.1 for exactly what was closed, and for
+> the RED-before/GREEN-after each closure was verified with. **Item 6 is what
+> gates the verdict and has not been started.** Items marked DONE below are kept
+> in place rather than deleted, because the list is also the record of what the
+> cutover gate WAS.
+
+1. ~~**Close D1**~~ — **DONE except the shared RPM counter (wave 16).** The
+   ladder is mounted on `apps/mcp` and `apps/agent-runtime`, and the quota
+   chain, monthly budget, wallet hold and the counter-KEY derivation are one
+   shared, durable answer across all three Workers. The RPM WINDOW is not yet
+   one counter: it needs `apps/gateway`'s `RateLimiterDurableObject` bound
+   cross-script, which **workerd cannot resolve offline**, so the stanza is
+   committed COMMENTED in both `wrangler.toml`s and is DEPLOY-ONLY. Per-isolate
+   RPM until then. This was the only finding that is a live control bypass
+   rather than a fidelity gap, and the bypass itself is closed.
+2. ~~**Close D4 and D5**~~ — **DONE (wave 16).** Asset egress quota + metering
+   (`src/assets/egress.ts`); the content-type allowlist and the `mcp_manifest`
+   stdio refusal (`src/assets/content-gate.ts`, enforced ahead of the screener
+   and not through it).
 3. **Close the control-plane write half for `rbac`, `admin_api_key`,
    `guardrail_policy` and `wallets`** (37 ops) — the four groups where a 200
    response means "nothing happened" on a security or money surface. Plus the
    one-line `tenantScopeSql` write-fence split, with a mutation test.
-4. **Close the guardrail evidence-fingerprint keying gap** — test-only, hours:
-   assert two detectors with DIFFERENT keys produce DIFFERENT fingerprints for
-   the same input, plus the same-key reproducibility control.
+   **PARTLY DONE (wave 16): `rbac` (11) and `admin_api_key` (6) are closed and
+   mutation-pinned, and the write fence is split in BOTH stores. `wallets` (10)
+   is untouched. `guardrail_policy` (10) is deliberately still open — projecting
+   today's partially-validated revisions would take the gateway's guardrail
+   source down at boot, because `policySourceFromStore` compiles checks eagerly
+   with no `try`/`catch`; closing it means tightening the create-revision
+   ADMISSION first. The reason is written into `routes/guardrail_policy.ts` so
+   it is not rediscovered.**
+4. ~~**Close the guardrail evidence-fingerprint keying gap**~~ — **DONE
+   (wave 16).** `packages/guardrails/test/fingerprint-keying.test.ts`, 32 cases
+   over all four fingerprint sites, checked against an independent `node:crypto`
+   oracle. No source change was needed; the code was always correct, only unheld.
 5. **Extract the four `ferrogate-cloudflare` slices** into `@ferrogate/cloudflare`
    or into a document that survives the deletion, and add the missing 21st-crate
    row to `PORT-PLAN.md`.
@@ -477,3 +552,14 @@ against a pre-pass snapshot. No test was weakened, skipped or deleted.
 
 The cutover itself remains a separate, human-gated decision. This document is
 evidence for it, not an execution of it.
+
+**Wave 16 (the amendment in §0.1): local only, on the same terms.** No
+`wrangler deploy`, no live Cloudflare resource, no real upstream LLM call, and no
+`crates/**` or `workers/**` file created, modified or deleted. Every fix
+verification in §0.1 was a mutation that was reverted and re-verified GREEN, and
+every mutation was `grep`-confirmed to have landed before its RED was believed.
+No test was weakened, skipped or deleted; the two `env-var-drift` exception lists
+that changed were made STRICTER (a name moved from "not even mentioned in
+`wrangler.toml`" to "mentioned but undeclared", and three new assertions were
+added pinning the `RATE_LIMIT` stanza's commented state, its `script_name`, and
+the absence of a migration claiming a class the script does not export).

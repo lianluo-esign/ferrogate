@@ -116,40 +116,23 @@ const UPDATE_ATTEMPTS = 3;
 const LIST_ORDER = "ORDER BY created_at_unix ASC, rowid ASC";
 
 /**
- * THE tenant isolation guard.
+ * THE tenant isolation guard, READ side.
  *
  * A platform operator gets no predicate (it sees every row); a tenant-scoped
- * caller gets one that admits only its own rows and un-attributed platform
- * rows. Every statement in this file — SELECT, UPDATE and DELETE alike —
- * appends it, so there is no "read by bare id" path to forget it on.
- */
-/**
- * PORT-TODO(P: inventory-edge-control §5.1 tenant scope) — the predicate below is a
- * deliberate WIDENING of Rust's filter, and the widening reaches the WRITE side
- * where it was only ever argued for reads.
+ * caller gets one that admits its own rows AND un-attributed platform rows.
+ * Every SELECT in this file appends it, so there is no "read by bare id" path
+ * to forget it on.
  *
- * Rust `auth::filter_by_tenant_scope` is strict equality
- * (`tenant_id(row) == caller_tenant_id`), so a row with no tenant attribution is
- * invisible to a tenant caller. Here an un-attributed row (`tenant_id` JSON
- * `null` or absent) matches EVERY tenant. For reads that is defensible and is
- * pinned on purpose (`test/store-conformance.test.ts` "shows an un-attributed
- * platform row to every tenant") — it is how a global plan or a shared provider
- * row stays visible.
+ * The `IS NULL` disjunct is a deliberate widening of Rust
+ * `auth::filter_by_tenant_scope` (strict equality, `auth.rs:428`), argued for
+ * READS only and pinned on purpose (`test/store-conformance.test.ts` "shows an
+ * un-attributed platform row to every tenant"): it is how a global plan or a
+ * shared provider row stays visible to the tenant it applies to, which
+ * `GET /admin/v1/tenant-accounts/{id}/resolved-defaults` depends on.
  *
- * But the same predicate is appended to `#update`, `remove` and the `atomic`
- * batch, and no test pins the write side. A tenant-scoped credential holding
- * `admin.write` (a tenant administrator — a legitimate, intended configuration)
- * can therefore PATCH, PUT or DELETE any un-attributed platform row: a global
- * `role`, a `plan` every other tenant is billed against, a shared `policy`. That
- * is a cross-tenant write that Rust's strict filter makes unreachable, and it is
- * the opposite polarity to `routes/quota_policy.ts::authorizeScopedResource`,
- * which fails CLOSED on exactly this ambiguity ("nonexistent means safe to
- * touch" is explicitly the wrong default).
- *
- * The fix is to split the predicate: keep the `IS NULL` disjunct for SELECT,
- * drop it for UPDATE/DELETE (a tenant caller may only mutate rows carrying its
- * own `tenant_id`), and add the mutation test that a tenant caller gets 404 on
- * `DELETE` of an un-attributed row.
+ * It stops at the read. {@link tenantWriteScopeSql} is what every UPDATE and
+ * DELETE appends, and it is Rust's strict equality — see its docblock for the
+ * cross-tenant WRITE that the single shared predicate used to allow.
  */
 export function tenantScopeSql(scope: CallerScope): {
   readonly sql: string;
@@ -158,6 +141,35 @@ export function tenantScopeSql(scope: CallerScope): {
   if (scope.kind === "platform_operator") return { sql: "", params: [] };
   return {
     sql: " AND (json_extract(document_json, '$.tenant_id') IS NULL OR json_extract(document_json, '$.tenant_id') = ?)",
+    params: [scope.tenantId],
+  };
+}
+
+/**
+ * The same fence for a MUTATION — strictly narrower, and the SQL half of
+ * `query.ts::writableBy`.
+ *
+ * {@link tenantScopeSql} keeps the `IS NULL` disjunct so a tenant can READ the
+ * deployment's un-attributed platform rows (`resolved-defaults` depends on it).
+ * That disjunct must not survive into an `UPDATE`/`DELETE`: with it, a
+ * tenant-scoped caller holding `admin.write` — a tenant administrator, an
+ * intended configuration — could edit or delete any platform row: a global
+ * `role`, a shared `policy`, a `plan` other tenants are billed against. Rust
+ * `filter_by_tenant_scope` (`auth.rs:428`) is strict equality and makes that
+ * unreachable; this restores it.
+ *
+ * `json_extract` yields SQL `NULL` for both a JSON `null` and an absent key, and
+ * `NULL = ?` is `NULL` (never true), so an un-attributed row simply fails to
+ * match — which is exactly `writableBy`'s `record.tenant_id === scope.tenantId`
+ * over `undefined`/`null`. The two agree by construction.
+ */
+export function tenantWriteScopeSql(scope: CallerScope): {
+  readonly sql: string;
+  readonly params: readonly string[];
+} {
+  if (scope.kind === "platform_operator") return { sql: "", params: [] };
+  return {
+    sql: " AND json_extract(document_json, '$.tenant_id') = ?",
     params: [scope.tenantId],
   };
 }
@@ -310,8 +322,23 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     return loaded === null ? null : loaded.record;
   }
 
-  async #load(collection: string, scope: CallerScope, id: string): Promise<LoadedRecord | null> {
-    const tenant = tenantScopeSql(scope);
+  /**
+   * Resolve one row for a caller.
+   *
+   * `fence` picks which tenant predicate is appended: `"read"` lets a tenant see
+   * the deployment's un-attributed platform rows, `"write"` does not. Every
+   * mutation below loads with `"write"` so the guarded `UPDATE`/`DELETE` that
+   * follows cannot match a row this load did not — otherwise a tenant's PATCH of
+   * a platform row would load it, fail the narrowed UPDATE, and burn the retry
+   * loop into a 500 instead of the 404 it must be.
+   */
+  async #load(
+    collection: string,
+    scope: CallerScope,
+    id: string,
+    fence: "read" | "write" = "read",
+  ): Promise<LoadedRecord | null> {
+    const tenant = fence === "write" ? tenantWriteScopeSql(scope) : tenantScopeSql(scope);
     const row = await this.#db
       .prepare(
         `SELECT document_json, revision FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
@@ -418,11 +445,11 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     patch: Readonly<Record<string, unknown>>,
     precondition: (current: StoreRecord) => boolean,
   ): Promise<MergeIfOutcome> {
-    const tenant = tenantScopeSql(scope);
+    const tenant = tenantWriteScopeSql(scope);
     const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
 
     for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
-      const existing = await this.#load(collection, scope, id);
+      const existing = await this.#load(collection, scope, id, "write");
       if (existing === null) return { kind: "not_found" };
       if (!precondition(existing.record)) {
         return { kind: "precondition_failed", current: existing.record };
@@ -463,8 +490,8 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // Loaded first so the audit row can name the tenant the deleted row
     // actually belonged to (which, for a platform operator deleting a global
     // row, is not the caller's).
-    const existing = await this.#load(collection, scope, id);
-    const tenant = tenantScopeSql(scope);
+    const existing = await this.#load(collection, scope, id, "write");
+    const tenant = tenantWriteScopeSql(scope);
     const result = await this.#db
       .prepare(
         `DELETE FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
@@ -555,7 +582,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     mutations: readonly StoreMutation[],
   ): Promise<readonly StoreRecord[] | null> {
     if (mutations.length === 0) return [];
-    const tenant = tenantScopeSql(scope);
+    const tenant = tenantWriteScopeSql(scope);
 
     // (4) above: two `create`s of the same id in one unit.
     const mintedIds = new Set<string>();
@@ -585,7 +612,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       }[] = [];
       for (const [index, mutation] of mutations.entries()) {
         if (mutation.kind !== "merge") continue;
-        const existing = await this.#load(mutation.collection, scope, mutation.id);
+        const existing = await this.#load(mutation.collection, scope, mutation.id, "write");
         // A missing/invisible merge target aborts the WHOLE unit before a
         // single statement runs — "nothing was written" has to be true on this
         // path too, not just on the transaction's.
@@ -819,7 +846,10 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     let raced = false;
     for (const [index, mutation] of mutations.entries()) {
       if (mutation.kind !== "merge") continue;
-      const current = await this.#load(mutation.collection, scope, mutation.id);
+      // The WRITE fence, like the load that built `loaded`: this re-read has to
+      // ask the same question the batch asked, or a row the unit could never
+      // have mutated would be explained as a race instead of as missing.
+      const current = await this.#load(mutation.collection, scope, mutation.id, "write");
       if (current === null) return "missing";
       if (current.revision !== loaded.get(index)?.revision) raced = true;
     }
@@ -869,9 +899,9 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     action: AuditAction,
     build: (existing: StoreRecord) => StoreRecord,
   ): Promise<StoreRecord | null> {
-    const tenant = tenantScopeSql(scope);
+    const tenant = tenantWriteScopeSql(scope);
     for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
-      const existing = await this.#load(collection, scope, id);
+      const existing = await this.#load(collection, scope, id, "write");
       if (existing === null) return null;
 
       const next = build(existing.record);

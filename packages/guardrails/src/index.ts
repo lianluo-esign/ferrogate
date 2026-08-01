@@ -23,43 +23,43 @@
  * fail-closed on truncation/disable/error; patch application is narrowly scoped
  * to mutable text paths.
  *
- * ## PORT-TODO(cutover-parity-libraries §4.4) — THE *KEYING* OF EVIDENCE
- * ## FINGERPRINTS IS NOT HELD BY ANY TEST. NOT A PLATFORM LIMIT. NOT CLOSED.
+ * ## PORT_TODO(cutover-parity-libraries §4.4) — CLOSED 2026-08-01. Epitaph only;
+ * ## no longer a marker. Kept because the *reason* the hole existed recurs.
  *
- * The implementation is correct: all three fingerprint sites HMAC under the
- * configured `fingerprint_secret_ref` key —
- * `adapters/transport.ts::hmacEvidenceFingerprint` (used by `adapters/llm_guard.ts`
- * and `adapters/workers_ai_llama_guard.ts`) and the private
- * `deterministic.ts::DeterministicDetector#hmacFingerprint`. What is missing is
- * the ASSERTION. Every fingerprint assertion in this package's suite and in
- * `apps/gateway/test/guardrails/` is a SHAPE assertion
- * (`/^hmac-sha256:[0-9a-f]{64}$/`), which cannot distinguish a keyed digest from
- * an unkeyed one.
+ * The finding was never that the code was wrong. All three per-finding
+ * fingerprint sites HMAC under the configured `fingerprint_secret_ref` key —
+ * `adapters/transport.ts::hmacEvidenceFingerprint` (used by `adapters/presidio.ts`,
+ * `adapters/llm_guard.ts` and `adapters/workers_ai_llama_guard.ts`) and the
+ * private `deterministic.ts::DeterministicDetector#hmacFingerprint`. What was
+ * missing was the ASSERTION: every fingerprint assertion in this package's suite
+ * and in `apps/gateway/test/guardrails/` was a SHAPE assertion
+ * (`/^hmac-sha256:[0-9a-f]{64}$/`), and an *unkeyed* SHA-256 satisfies that shape
+ * exactly as well as a keyed HMAC does. Measured, not suspected: two
+ * semantically-real mutations (key → `new Uint8Array(0)`; key → a hard-coded
+ * constant) each left **407/407** guardrails tests and **112/112**
+ * `apps/gateway/test/guardrails/` tests GREEN.
  *
- * Measured, not suspected (2026-08-01 cutover audit, two independent mutations):
- *  1. replacing `key.asBytes()` with `new Uint8Array(0)` in
- *     `hmacEvidenceFingerprint` — i.e. downgrading keyed evidence to a plain
- *     SHA-256 of the sensitive value — left **407/407** guardrails tests GREEN;
- *  2. replacing the key with a hard-coded constant in
- *     `DeterministicDetector#hmacFingerprint` left **407/407** guardrails tests
- *     AND **112/112** `apps/gateway/test/guardrails/` tests GREEN.
+ * Why it mattered: an unkeyed digest of a short, low-entropy value (an API-key
+ * fragment, a name, an account number, a prompt) is reversible by
+ * dictionary/rainbow attack, which is exactly the property the keying exists to
+ * remove.
  *
- * Why it matters: an unkeyed digest of a short secret (an API key fragment, a
- * name, an account number) is reversible by dictionary/rainbow attack, which is
- * exactly the property the keying exists to remove. Rust's own config guard
- * (`policy.rs`: an empty `fingerprint_secret_ref` is rejected) is ported and IS
- * tested — the gap is only that nothing proves the key is subsequently USED.
+ * The gate is `test/fingerprint-keying.test.ts` (32 tests, test-only — no source
+ * change was needed or made). It covers all four fingerprint sites and pins,
+ * against an INDEPENDENT `node:crypto` oracle rather than this package's own
+ * `hash.ts`: different keys ⇒ different fingerprints; the same key ⇒ the same
+ * fingerprint; the fingerprint is neither the unkeyed SHA-256 nor the empty-key
+ * HMAC of the input; a detector with no key emits `null`, never a bare digest;
+ * and evidence is not persisted (`matched_text` null, raw value and key absent
+ * from the serialized result). Proven RED by five mutations — key→empty (12
+ * failed), key→constant (3), HMAC→plain SHA-256 at both sites (16),
+ * `matched_text`→the matched secret (3), adapter findings→carrying the projected
+ * text (2) — each restored byte-identical and re-verified GREEN at 439/439.
  *
- * To close (test-only; no source change): assert that two detectors configured
- * with DIFFERENT `fingerprintKey`s produce DIFFERENT fingerprints for the SAME
- * input, and that the same key reproduces the same fingerprint. The negative
- * control matters — the equality half alone passes for an unkeyed digest.
- *
- * Contrast: `apps/gateway/src/guardrails/evidence.ts::envelopeFingerprint` (the
- * envelope-level, evidence-row fingerprint) IS gated — it fails closed to the
- * literal `hmac-sha256:unavailable` when no key is configured, and
- * `apps/gateway/test/guardrails/evidence.test.ts:103` pins that. Only the
- * per-FINDING fingerprints produced in this package are unheld.
+ * Related and separately gated: `apps/gateway/src/guardrails/evidence.ts::envelopeFingerprint`
+ * (the envelope-level, evidence-row fingerprint) fails closed to the literal
+ * `hmac-sha256:unavailable` when no key is configured, pinned by
+ * `apps/gateway/test/guardrails/evidence.test.ts:103`.
  */
 
 // Byte + hash primitives.

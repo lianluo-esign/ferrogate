@@ -13,7 +13,9 @@
     "zod": "^3.25.76",
     "@ferrogate/core": "workspace:*",
     "@ferrogate/guardrails": "workspace:*",
+    "@ferrogate/policy": "workspace:*",
     "@ferrogate/schemas": "workspace:*",
+    "@ferrogate/storage": "workspace:*",
     "agents": "^0.0.109",
     "@cloudflare/sandbox": "^0.12.4"
   }

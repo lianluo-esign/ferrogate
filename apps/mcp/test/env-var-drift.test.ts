@@ -256,11 +256,27 @@ const DECLARED = declared();
 const SECRETS = ["FERROGATE_MCP_IDENTITY_KEY"] as const;
 
 /**
- * Vars deliberately left out of `[vars]` but NAMED in the config's prose, so an
- * operator can still discover them. None here today — asserted empty rather
- * than omitted, because "none" is a claim that can become false.
+ * Vars and BINDINGS deliberately left out of the committed config, each NAMED
+ * in its prose so an operator can still discover it.
+ *
+ *  - `RATE_LIMIT` — the SHARED admission counter namespace `src/admission/`
+ *    charges the per-minute request window against. Its stanza is written out
+ *    IN FULL but COMMENTED in `wrangler.toml`, and it must carry
+ *    `script_name = "ferrogate-gateway"`: the counter has to be the SAME
+ *    Durable Object namespace `apps/gateway` charges, or `/v1/mcp` gets its own
+ *    full RPM quota — a quieter version of the admission bypass wave 16 closes.
+ *    It is commented for a MEASURED reason: `vitest.config.ts` loads
+ *    `wrangler.toml`, and workerd refuses to start at all with a cross-script
+ *    binding whose target script is not in the session ("binding RATE_LIMIT
+ *    refers to a service core:user:ferrogate-gateway, but no such service is
+ *    defined") — the whole suite collapses to 0 tests / 23 collection errors on
+ *    a correct tree, and `wrangler dev --local` never reaches "Ready on". So
+ *    the seam is DEPLOY-ONLY (`docs/rewrite/MOUNT-SEAMS.md` §1), uncommenting
+ *    is a deploy step, and until then `limiterForEnv` falls back to a
+ *    per-isolate counter: the RPM leg becomes 60·N across N isolates while the
+ *    quota-scope, monthly-budget and prepaid-wallet legs stay durable.
  */
-const DOCUMENTED_BUT_UNDECLARED: readonly string[] = [];
+const DOCUMENTED_BUT_UNDECLARED: readonly string[] = ["RATE_LIMIT"];
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.
@@ -273,6 +289,7 @@ const DOCUMENTED_BUT_UNDECLARED: readonly string[] = [];
  * it is pinned here rather than papered over.
  */
 const UNDOCUMENTED = ["FG_DEV_MCP_DURABLE_UPSTREAMS"] as const;
+
 
 /**
  * Declared names read through a renamed parameter, invisible to the
@@ -334,9 +351,33 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
+    // Not vacuous: one entry today. An empty list would make the loop below
+    // assert nothing at all, which is how this class of gate dies.
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(1);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name)).toBe(true);
     }
+  });
+
+  it("keeps RATE_LIMIT commented, CROSS-SCRIPT, and claimed by no migration", () => {
+    // The admission counter must be the SAME Durable Object namespace
+    // `apps/gateway` charges, or `/v1/mcp` and `/v1/mcp/tool/execute` silently
+    // get their own full RPM quota — the quiet re-opening of the bypass wave 16
+    // closed. Three separate ways that can rot, all pinned:
+    //
+    //  1. uncommenting it: workerd then refuses to start this Worker offline
+    //     (no `ferrogate-gateway` service in the session), so the whole suite
+    //     collapses to 0 collected tests. It is a DEPLOY-ONLY seam.
+    expect(DECLARED.bindings.has("RATE_LIMIT")).toBe(false);
+    expect(WRANGLER_TOML).toContain('#   name = "RATE_LIMIT"');
+    //  2. dropping `script_name`: deploys cleanly, creates a SECOND private
+    //     namespace, doubles every credential's RPM allowance.
+    expect(WRANGLER_TOML).toContain('#   script_name = "ferrogate-gateway"');
+    //  3. adding a migration for it here: this script does not export the
+    //     class, so claiming to introduce it is rejected at deploy.
+    expect(WRANGLER_TOML).not.toMatch(
+      /^\s*#?\s*new_(?:sqlite_)?classes\s*=.*RateLimiterDurableObject/m,
+    );
   });
 
   it("pins the exact set of reads wrangler.toml does not even mention", () => {

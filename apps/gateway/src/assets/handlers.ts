@@ -43,8 +43,21 @@ import type { Context } from "hono";
 import type { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
+import {
+  type QuotaBindings,
+  quotaPolicySourceFromEnv,
+  resolveQuotaWindows,
+  subjectFor,
+} from "../ratelimit/index.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import { assetAuditSinkFromEnv, assetMetadataStoreFromEnv } from "./d1.js";
+import {
+  type AssetEgressQuota,
+  NO_ASSET_EGRESS_METER,
+  assetEgressCountersFromEnv,
+  assetEgressMeterFromEnv,
+  assetEgressPricePerGb,
+} from "./egress.js";
 import { D1AssetEntitlements } from "./entitlements.js";
 import {
   type AssetAuthFailure,
@@ -58,11 +71,6 @@ import {
   isAuthFailure,
 } from "./ports.js";
 import { type AssetScannerBindings, assetScreenerFromEnv } from "./scan.js";
-import {
-  type SignaturePolicyBindings,
-  withSignatureVerification,
-} from "./signature-screener.js";
-import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
 import {
   assetChannelParamsSchema,
   assetNameParamsSchema,
@@ -85,6 +93,8 @@ import {
   AssetService,
   type AssetServiceDeps,
 } from "./service.js";
+import { type SignaturePolicyBindings, withSignatureVerification } from "./signature-screener.js";
+import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
 import { SigV4Presigner } from "./sigv4.js";
 
 // ---------------------------------------------------------------------------
@@ -215,6 +225,7 @@ export function defaultCallerResolver(entitlements?: AssetEntitlementsPort): Ass
     const tenantId = auth.tenancy.tenantId ?? "";
     const port = entitlements ?? entitlementsFromEnv(c.env);
     const grants = tenantId === "" ? NO_ASSET_HOSTING : await port.resolve(tenantId);
+    const apiKeyId = auth.subject ?? "";
     return {
       tenantId,
       projectId: auth.tenancy.projectId ?? undefined,
@@ -222,8 +233,47 @@ export function defaultCallerResolver(entitlements?: AssetEntitlementsPort): Ass
       assetStorageQuotaBytes: grants.assetStorageQuotaBytes,
       assetMaxObjectBytes: grants.assetMaxObjectBytes,
       assetHostingEnabled: grants.assetHostingEnabled,
+      apiKeyId,
+      effectiveQuota: await resolveEgressQuota(c, apiKeyId),
     };
   };
+}
+
+/**
+ * The egress half of the caller's resolved quota (issue #262, finding D4).
+ *
+ * The MERGE is not re-implemented: `resolveQuotaWindows` +
+ * `@ferrogate/policy`'s `resolveEffectiveQuota` already own min-across-the-chain
+ * and the plan floor, and `subjectFor` already owns the chain projection. This
+ * only decides WHEN to ask.
+ *
+ * Why it is resolved here rather than read off the context: `rateLimit()` (the
+ * middleware that resolves the same quota for the inference path) does not
+ * publish its resolution on `GatewayVariables`, and `src/ports.ts` is not this
+ * slice's to extend. Resolving again costs one policy lookup on the asset
+ * surface only — memoized by the caller's own D1 source per env — and it keeps
+ * the egress gate working even for a deployment that mounts the asset module
+ * without the rate-limit middleware.
+ *
+ * A FAILED lookup yields `{}`, i.e. no egress limits. That is deliberate and is
+ * NOT a fail-open on a configured budget: the same lookup failing on the
+ * inference path is already a hard `503 quota_resolution_unavailable` from
+ * `rateLimit()`, which runs first and would have refused the request before it
+ * ever reached a handler. Duplicating that refusal here would let an asset
+ * READ start failing for a reason the middleware had already adjudicated.
+ */
+async function resolveEgressQuota(
+  c: Context<AssetEnv>,
+  apiKeyId: string,
+): Promise<AssetEgressQuota> {
+  if (apiKeyId === "") return {};
+  const subject = subjectFor(c as unknown as Context<GatewayEnv>);
+  if (subject === null) return {};
+  const resolution = await resolveQuotaWindows(
+    quotaPolicySourceFromEnv(c.env as unknown as QuotaBindings),
+    subject,
+  );
+  return resolution.ok ? resolution.quota : {};
 }
 
 // ---------------------------------------------------------------------------
@@ -598,12 +648,24 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   const metadata = assetMetadataStoreFromEnv(env);
   const audit = assetAuditSinkFromEnv(env);
   const objectStoreEnabled = objects !== undefined || devInMemoryPortsEnabled(env);
+  // #262 egress governance (finding D4). ALWAYS supplied, never conditional on
+  // a binding: the deny gate is what enforces a configured byte budget, and
+  // making it depend on `BILLING_DB` would mean an operator who has not wired
+  // billing gets unmetered AND uncapped bandwidth — the exact defect D4 named.
+  // Only the METER degrades without a billing database.
+  const pricePerGb = assetEgressPricePerGb();
+  const egress = {
+    counters: assetEgressCountersFromEnv(env),
+    meter: assetEgressMeterFromEnv(env) ?? NO_ASSET_EGRESS_METER,
+    ...(pricePerGb !== undefined ? { pricePerGb } : {}),
+  };
   return {
     ...(objects !== undefined ? { objects } : {}),
     ...(metadata !== null ? { metadata } : {}),
     ...(audit !== null ? { audit } : {}),
     ...(presigner !== null ? { presigner } : {}),
     ...(screener !== null ? { screener } : {}),
+    egress,
     limits: {
       objectStoreEnabled,
       ...(objects !== undefined && presigner !== null ? { presignEnabled: true } : {}),
@@ -891,36 +953,21 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         return render(await serviceFor(c).listAssets(await caller(c), params.asset_type));
       });
 
-      // PORT-TODO(`server/asset_egress.rs`, issue #262): the DOWNLOAD-SIDE
-      // egress gate + meter is not ported, and nothing in `apps/` reads the
-      // two quota fields that drive it.
+      // #262 egress governance (data-plane certification finding D4) — LIVE.
       //
-      // Rust `handle_asset_pull` (`server/assets.rs:1114`) runs two things this
-      // handler does not, using the RESOLVED object size:
+      // Rust `handle_asset_pull` (`server/assets.rs:1114-1136`) runs the deny
+      // gate and the meter around the download, and both are now ported into
+      // `AssetService.pullAsset` (`egress.ts` + `service.ts#egressDenial` /
+      // `#recordEgress`) rather than into this handler, so the presigned
+      // download path gets the same gate rather than a second copy of it.
       //
-      //  1. `asset_egress_quota_denial` — fail-closed, BEFORE a byte is served:
-      //     the monthly egress BYTE budget (`monthly_egress_bytes_budget`,
-      //     read-only so an exhausted budget never burns an RPM token) then the
-      //     download RPM cap (`download_rpm_limit` / `download_rpm_limit_scope`).
-      //     Denials are `429 asset_egress_quota_exceeded` and
-      //     `429 asset_download_rate_limit_exceeded`, with
-      //     `503 governance_counter_unavailable` when the counter backend is
-      //     down. All three codes are absent from this tree.
-      //  2. `record_asset_egress` — meters the transferred bytes through the
-      //     billing outbox (priced by `asset_egress_price_per_gb`), accumulates
-      //     the monthly counter that backs gate 1, and writes the PULL-side
-      //     audit event that is symmetric with the push/delete audit this file
-      //     already records.
+      // The composition is `assetDepsFromEnv`, which supplies
+      // `egress: { counters, meter, pricePerGb }` UNCONDITIONALLY — see the
+      // comment there for why the gate must not depend on a billing binding.
       //
-      // Both quota fields ARE ported and durable —
-      // `src/ratelimit/quota.ts:178-179` parses them, `apps/control-plane`
-      // stores and serves them — but `grep -rn "monthlyEgressBytesBudget"
-      // apps/gateway/src` finds only that parse. So an operator can set an
-      // egress budget today, see it echoed back by the admin API, and have it
-      // enforce nothing: unlimited bandwidth is served and none of it is
-      // billed. Not a platform limit — the counter has the same shape as the
-      // inference RPM counter already running on the `RATE_LIMIT` DO, and
-      // `asset_egress_price_per_gb` is already in `packages/config`.
+      // `requestContext(c)` is threaded in below because the meter writes the
+      // PULL-side audit row (`asset.pull`), which carries the request id and
+      // the #522 `agent_run_id` correlation exactly as the push/delete rows do.
       on("getAsset", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         const query = parseOrThrow(platformQuerySchema, c.req.query());
@@ -933,6 +980,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
               headers: c.req.raw.headers,
               method: c.req.method,
             },
+            requestContext(c),
           ),
         );
       });

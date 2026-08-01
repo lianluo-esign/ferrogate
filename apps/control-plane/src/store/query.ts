@@ -53,6 +53,29 @@ export function visibleTo(record: StoreRecord, scope: CallerScope): boolean {
   return owner === scope.tenantId;
 }
 
+/**
+ * A tenant-scoped caller may only MUTATE rows attributed to its own tenant.
+ *
+ * Strictly narrower than {@link visibleTo}, and the difference is the whole
+ * point: an un-attributed row is PLATFORM data — a global `role`, a shared
+ * `policy`, a `plan` other tenants are billed against — which every tenant may
+ * read (hiding it would break `resolved-defaults`) and none may write. Rust
+ * `filter_by_tenant_scope` (`auth.rs:428`) is strict equality on both sides;
+ * this port widened it for reads deliberately and, until the wave-15
+ * certification, had carried the widened predicate onto `replace`, `merge`,
+ * `mergeIf`, `remove` and the `atomic` batch as well. A tenant administrator
+ * holding `admin.write` — an intended configuration — could therefore edit or
+ * delete any platform row.
+ *
+ * The refusal is `null`/`false`, i.e. a 404 indistinguishable from "no such
+ * row", for the same reason the cross-tenant case is: a distinct status would
+ * confirm the row exists.
+ */
+export function writableBy(record: StoreRecord, scope: CallerScope): boolean {
+  if (scope.kind === "platform_operator") return true;
+  return record.tenant_id === scope.tenantId;
+}
+
 /** True when a query narrows nothing beyond the collection itself. */
 export function isUnfilteredQuery(query: ListQuery): boolean {
   return query.search === null && Object.keys(query.filters).length === 0;

@@ -73,6 +73,104 @@ const DEV_API_KEYS = [
     scopes: ["*"],
     state: "suspended",
   },
+  // ------------------------------------------------------------------------
+  // ADMISSION fixtures (`test/admission.test.ts`) — the port of the Rust
+  // `finalize_auth` ladder. Each one lives in ITS OWN TENANT and carries its
+  // own `subject`, because the counter key is `"key:{subject}"` (per-key caps)
+  // or `"{scope}:{id}"` (quota-chain caps): sharing either id across tests
+  // would make one test's charges another's, and a suite that shares a rate
+  // limit window is a suite that flakes.
+  // ------------------------------------------------------------------------
+  // TOK-12 `api_keys.request_limit_per_minute` — a per-CREDENTIAL cap that
+  // needs no quota policy at all.
+  {
+    key: "sk-rpm-perkey",
+    subject: "key-rpm-perkey",
+    tenantId: "tenant-rpm",
+    workspaceId: "ws-rpm",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+    requestLimitPerMinute: 2,
+  },
+  // The same cap at 1, spent on a READ: admission is charged on every
+  // authenticated request, not only on the write verb.
+  {
+    key: "sk-rpm-read",
+    subject: "key-rpm-read",
+    tenantId: "tenant-rpm-read",
+    workspaceId: "ws-rpm",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+    requestLimitPerMinute: 1,
+  },
+  // A TENANT-scope `rpm_limit` from the quota chain: one aggregate window
+  // shared by every key beneath the tenant.
+  {
+    key: "sk-quota-rpm",
+    subject: "key-quota-rpm",
+    tenantId: "tenant-quota-rpm",
+    workspaceId: "ws-q",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+  },
+  // The SECOND key under that same tenant. It proves the aggregate really is
+  // shared: charging it must exhaust the same window the first key charged.
+  {
+    key: "sk-quota-rpm-sibling",
+    subject: "key-quota-rpm-sibling",
+    tenantId: "tenant-quota-rpm",
+    workspaceId: "ws-q",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+  },
+  // `enabled = false` anywhere in the chain — a hard 403, never a throttle.
+  {
+    key: "sk-quota-disabled",
+    subject: "key-quota-disabled",
+    tenantId: "tenant-quota-disabled",
+    workspaceId: "ws-q",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+  },
+  // `rpm_limit = 0` is a real Rust value meaning "refuse every request", NOT
+  // "unlimited". A `??`/`||` fallback anywhere in the port turns it into the
+  // latter, so it gets its own credential.
+  {
+    key: "sk-quota-zero",
+    subject: "key-quota-zero",
+    tenantId: "tenant-quota-zero",
+    workspaceId: "ws-q",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+  },
+  // A KEY-scope policy: the window must be `"key:{api_key_id}"`, never the
+  // bare, tenant-controllable id. See `src/admission/keys.ts`.
+  {
+    key: "sk-quota-keyscope",
+    subject: "key-quota-keyscope",
+    tenantId: "tenant-quota-keyscope",
+    workspaceId: "ws-q",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+  },
+  // Ungoverned: no per-key cap, no policy row anywhere in its chain. The
+  // negative control — every refusal above must NOT fire for this one.
+  {
+    key: "sk-admission-free",
+    subject: "key-admission-free",
+    tenantId: "tenant-admission-free",
+    workspaceId: "ws-q",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+  },
+];
+
+/**
+ * DEV/TEST quota policies (`FG_DEV_QUOTA_POLICIES`), in the snake_case wire
+ * shape `StoredQuotaPolicy` rows use. The DURABLE source is `CONTROL_DB`'s
+ * `quota_policies` table (`test/durable/admission.spec.ts` proves that leg);
+ * this var is the dev fallback, exactly as `FG_DEV_API_KEYS` is for `api_keys`.
+ *
+ * NOTHING is declared for `tenant-a` / `tenant-b`, so every pre-existing test
+ * in this suite keeps running under an unlimited quota.
+ */
+const DEV_QUOTA_POLICIES = [
+  { scope_type: "tenant", scope_id: "tenant-quota-rpm", rpm_limit: 1 },
+  { scope_type: "tenant", scope_id: "tenant-quota-disabled", enabled: false },
+  { scope_type: "tenant", scope_id: "tenant-quota-zero", rpm_limit: 0 },
+  { scope_type: "key", scope_id: "key-quota-keyscope", rpm_limit: 1 },
 ];
 
 const DEV_SELF_HOSTED_WORKERS = [
@@ -146,6 +244,7 @@ export default defineConfig({
           FG_DEV_API_KEYS: JSON.stringify(DEV_API_KEYS),
           FG_DEV_SELF_HOSTED_WORKERS: JSON.stringify(DEV_SELF_HOSTED_WORKERS),
           FG_DEV_AGENT_UPSTREAMS: JSON.stringify(DEV_AGENT_UPSTREAMS),
+          FG_DEV_QUOTA_POLICIES: JSON.stringify(DEV_QUOTA_POLICIES),
         },
       },
     }),

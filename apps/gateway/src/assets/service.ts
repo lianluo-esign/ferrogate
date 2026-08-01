@@ -23,6 +23,20 @@
  * `handlers.ts` renders it into the gateway error envelope. That is what keeps
  * the status/code taxonomy assertable without a Worker.
  */
+import {
+  ASSET_REJECTED_CODE,
+  ASSET_REJECTED_STATUS,
+  assetContentRejection,
+} from "./content-gate.js";
+import {
+  type AssetEgressCounters,
+  type AssetEgressMeter,
+  InMemoryAssetEgressCounters,
+  NO_ASSET_EGRESS_METER,
+  assetEgressQuotaDenial,
+  assetPullAuditMessage,
+  recordAssetEgress,
+} from "./egress.js";
 import { sha256Hex } from "./hash.js";
 import {
   type AssetObjectRef,
@@ -43,8 +57,8 @@ import {
   type AssetMetadataStore,
   type AssetObjectStore,
   type AssetPresigner,
-  type AssetScreeningRequest,
   type AssetScreener,
+  type AssetScreeningRequest,
   type AssetVisibility,
   PresignUnavailableError,
   type PresignedUpload,
@@ -340,6 +354,21 @@ export interface WithheldListInput {
   readonly limit?: number | undefined;
 }
 
+/**
+ * The download-side governance seam (issue #262, certification finding D4).
+ *
+ * Absent ⇒ the {@link DEFAULT_ASSET_EGRESS} posture: per-isolate counters and a
+ * meter that drops charges. That is a deliberate DEGRADATION, not a bypass —
+ * the deny gate still runs against whatever budget the caller's quota carries,
+ * so a configured budget is enforced with or without a billing sink.
+ */
+export interface AssetEgressDeps {
+  readonly counters: AssetEgressCounters;
+  readonly meter: AssetEgressMeter;
+  /** `asset_egress_price_per_gb`. Absent ⇒ metered but not priced. */
+  readonly pricePerGb?: number | undefined;
+}
+
 export interface AssetServiceDeps {
   readonly objects: AssetObjectStore;
   readonly metadata: AssetMetadataStore;
@@ -349,6 +378,8 @@ export interface AssetServiceDeps {
   readonly limits?: Partial<AssetLimits> | undefined;
   /** Injected clock, in unix seconds. */
   readonly now?: (() => number) | undefined;
+  /** Egress quota + metering (issue #262). See {@link AssetEgressDeps}. */
+  readonly egress?: AssetEgressDeps | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +521,7 @@ export class AssetService {
   readonly #audit: AssetAuditSink;
   readonly #limits: AssetLimits;
   readonly #now: () => number;
+  readonly #egress: AssetEgressDeps;
 
   constructor(deps: AssetServiceDeps) {
     this.#objects = deps.objects;
@@ -499,6 +531,10 @@ export class AssetService {
     this.#audit = deps.audit;
     this.#limits = { ...DEFAULT_ASSET_LIMITS, ...(deps.limits ?? {}) };
     this.#now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+    this.#egress = deps.egress ?? {
+      counters: new InMemoryAssetEgressCounters(this.#now),
+      meter: NO_ASSET_EGRESS_METER,
+    };
   }
 
   get limits(): AssetLimits {
@@ -595,6 +631,82 @@ export class AssetService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Gate 1 of the Rust publish screening (`asset_security.rs`, finding D5) —
+   * the per-`asset_type` content-type allowlist and the `mcp_manifest` stdio
+   * refusal.
+   *
+   * Called DIRECTLY here, ahead of `#screener.screen`, on both write paths.
+   * Routing it through the screener seam instead would make a control against
+   * publishing remote-code-execution manifests disableable by configuration
+   * (`assetScreenerFromEnv`) or by an injected test double — see
+   * `content-gate.ts` for why that is not acceptable for this particular gate.
+   */
+  #contentGate(assetType: string, contentType: string, content: Uint8Array): AssetFailure | null {
+    const rejection = assetContentRejection(assetType, contentType, content);
+    return rejection === undefined
+      ? null
+      : fail(ASSET_REJECTED_STATUS, ASSET_REJECTED_CODE, rejection);
+  }
+
+  /**
+   * The fail-closed egress admission gate (Rust `asset_egress_quota_denial`,
+   * finding D4). `sizeBytes` is the RESOLVED OBJECT SIZE, never a served slice.
+   */
+  async #egressDenial(caller: AssetCaller, sizeBytes: number): Promise<AssetFailure | null> {
+    const denial = await assetEgressQuotaDenial({
+      quota: caller.effectiveQuota ?? {},
+      apiKeyId: caller.apiKeyId ?? "",
+      tenantId: caller.tenantId,
+      bytes: sizeBytes,
+      counters: this.#egress.counters,
+    });
+    return denial === null ? null : fail(denial.status, denial.code, denial.message);
+  }
+
+  /**
+   * The egress meter + monthly counter + PULL-side audit event (Rust
+   * `record_asset_egress`).
+   *
+   * `servedBytes` is what this response actually put on the wire, so a `206`
+   * bills its slice and a `304`/`416`/`HEAD` bills nothing. It runs BEFORE the
+   * body is handed back to the router, which is what makes a client that
+   * disconnects mid-download still billed for what was served.
+   */
+  async #recordEgress(
+    caller: AssetCaller,
+    context: AssetRequestContext,
+    asset: { assetType: string; name: string; version: string },
+    servedBytes: number,
+  ): Promise<void> {
+    const charge = await recordAssetEgress({
+      quota: caller.effectiveQuota ?? {},
+      apiKeyId: caller.apiKeyId ?? "",
+      tenantId: caller.tenantId,
+      projectId: caller.projectId,
+      requestId: context.requestId,
+      agentRunId: context.agentRunId,
+      assetType: asset.assetType,
+      name: asset.name,
+      version: asset.version,
+      bytes: servedBytes,
+      pricePerGb: this.#egress.pricePerGb,
+      counters: this.#egress.counters,
+      meter: this.#egress.meter,
+      nowUnix: this.#now(),
+    });
+    if (charge === null) return;
+    const id = storedAssetId(caller.tenantId, asset.assetType, asset.name, asset.version);
+    this.#record(
+      context,
+      caller,
+      "asset.pull",
+      id,
+      "served",
+      assetPullAuditMessage(id, servedBytes),
+    );
   }
 
   /** All variant rows across every version of one `{asset_type}/{name}`. */
@@ -740,6 +852,23 @@ export class AssetService {
     }
 
     const id = storedAssetVariantId(caller.tenantId, ref.assetType, ref.name, ref.version, variant);
+
+    // Gate (1) of the Rust screening order (`asset_security.rs`, finding D5):
+    // the content-type allowlist and the `mcp_manifest` stdio refusal, ahead of
+    // the signature and scan gates and ahead of every durable effect.
+    const contentRejected = this.#contentGate(ref.assetType, contentType, input.content);
+    if (contentRejected) {
+      this.#record(
+        context,
+        caller,
+        "asset.push",
+        id,
+        "rejected_commit",
+        `asset ${id} rejected by trust screening (${contentRejected.code}): ${contentRejected.message}`,
+      );
+      return contentRejected;
+    }
+
     const contentHash = await sha256Hex(input.content);
     const now = this.#now();
 
@@ -890,6 +1019,7 @@ export class AssetService {
     caller: AssetCaller,
     ref: AssetName & { readonly reference: string },
     input: AssetPullInput,
+    context: AssetRequestContext = { requestId: "" },
   ): Promise<AssetPullResult> {
     const denied = this.#requireTenant(caller);
     if (denied) return denied;
@@ -949,6 +1079,13 @@ export class AssetService {
       extra["x-ferrogate-asset-yanked"] = "true";
     }
 
+    // #262 egress quota (finding D4): the fail-closed deny gate, BEFORE a byte
+    // is read or served, charged the RESOLVED OBJECT SIZE exactly as Rust does
+    // (`assets.rs:1114` passes `selected.size_bytes`, never a range slice, so a
+    // caller cannot drain an exhausted budget one `Range` header at a time).
+    const egressDenied = await this.#egressDenial(caller, selected.size_bytes);
+    if (egressDenied) return egressDenied;
+
     const loaded = await this.#loadAssetContent(selected, caller.tenantId);
     if (!loaded.ok) return loaded;
     const content = loaded.body;
@@ -993,10 +1130,22 @@ export class AssetService {
         };
       case "range": {
         const slice = content.slice(outcome.start, outcome.end + 1);
+        const body = isHead ? null : slice;
+        // #262 egress metering: the SLICE, not the object. Two ranges that
+        // together cover an object bill it exactly once, so a RESUMED download
+        // is never double-billed. Recorded before the body is handed back, so
+        // a client that disconnects mid-download is still billed for what was
+        // actually served.
+        await this.#recordEgress(
+          caller,
+          context,
+          { assetType: ref.assetType, name: ref.name, version: resolved.version },
+          body === null ? 0 : body.byteLength,
+        );
         return {
           ok: true,
           status: 206,
-          bytes: isHead ? null : slice,
+          bytes: body,
           headers: {
             ...validators,
             "content-type": selected.content_type,
@@ -1005,17 +1154,25 @@ export class AssetService {
           },
         };
       }
-      case "full":
+      case "full": {
+        const body = isHead ? null : content;
+        await this.#recordEgress(
+          caller,
+          context,
+          { assetType: ref.assetType, name: ref.name, version: resolved.version },
+          body === null ? 0 : body.byteLength,
+        );
         return {
           ok: true,
           status: 200,
-          bytes: isHead ? null : content,
+          bytes: body,
           headers: {
             ...validators,
             "content-type": selected.content_type,
             "content-length": String(content.byteLength),
           },
         };
+      }
     }
   }
 
@@ -1634,7 +1791,24 @@ export class AssetService {
     }
 
     const now = this.#now();
-    // 3. The SAME trust screening the inline path runs, over the FINAL verified
+    // 3a. Gate (1) of the Rust screening order over the FINAL verified bytes
+    // (finding D5). A presigned upload is exactly how a tenant would smuggle a
+    // stdio `mcp_manifest` past an inline-only gate, so it runs here too.
+    const contentRejected = this.#contentGate(ref.assetType, contentType, bytes);
+    if (contentRejected) {
+      await this.#bestEffortDelete(stagingKey, caller.tenantId);
+      this.#record(
+        context,
+        caller,
+        "asset.push",
+        id,
+        "rejected_commit",
+        `asset ${id} upload ${request.upload_id} failed trust screening (${contentRejected.code}): ${contentRejected.message}`,
+      );
+      return contentRejected;
+    }
+
+    // 3b. The SAME trust screening the inline path runs, over the FINAL verified
     // bytes (#366). Before that issue a presigned upload silently bypassed the
     // signature requirement, the approval gate, and the malware scanner.
     const screening = await this.#screener.screen({
@@ -1895,6 +2069,14 @@ export class AssetService {
       );
     }
 
+    // #262 egress quota (finding D4): gate the presigned path too. The bytes
+    // leave the bucket DIRECTLY and the gateway never observes them, so URL
+    // issuance is the only moment at which this download can be refused —
+    // leaving it ungated would make the presign endpoint a complete bypass of
+    // the byte budget the inline pull enforces.
+    const egressDenied = await this.#egressDenial(caller, asset.size_bytes);
+    if (egressDenied) return egressDenied;
+
     let url: string;
     try {
       url = await this.#presigner.presignGet(
@@ -1914,6 +2096,16 @@ export class AssetService {
       id,
       "issued",
       `issued a ${this.#limits.presignTtlSeconds}s presigned download URL for asset ${id}`,
+    );
+
+    // Rust `asset_presign.rs:1629`: the presigned direct path bills at ISSUANCE
+    // using the object size, since the bytes never traverse the gateway hot
+    // path and there is no later moment at which they could be counted.
+    await this.#recordEgress(
+      caller,
+      context,
+      { assetType: ref.assetType, name: ref.name, version: ref.version },
+      asset.size_bytes,
     );
 
     return {

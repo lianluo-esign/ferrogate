@@ -333,10 +333,11 @@ committed file. Rows marked **DEPLOY-ONLY** below are therefore unproven locally
 | MCP-T7 | `[[migrations]] tag = "v2"` / `new_sqlite_classes = ["FerroGateMcpSession"]` | `MUT-1 /new_sqlite_classes = \["FerroGateMcpSession"\]/` | anchor gone | **DEPLOY-ONLY — NO GATE** (as MCP-T6) | T1 |
 | MCP-T8 | `[[d1_databases]] binding = "DB"` (no `migrations_dir` — deliberate? unverified) | `MUT-4 [d1_databases]` | anchor gone | `test/d1-auth.test.ts`, `test/approvals.test.ts` | T1 |
 | MCP-T9 | `[vars] FG_DEV_IN_MEMORY_PORTS = "1"` — **a dev flag COMMITTED to the deploy config** | `MUT-2 "FG_DEV_IN_MEMORY_PORTS = \"1\""→"FG_DEV_IN_MEMORY_PORTS = \"0\""` | mutated line present | `test/fixtures.ts`-seeded suites go red. **`docs/rewrite/CLOUD-VERIFICATION.md` §B1 requires overriding this to `"0"` for the live deploy — a deploy that inherits `"1"` runs the in-memory port bundle in production** | T1 |
+| MCP-T10 | the COMMENTED cross-script counter stanza: `#   name = "RATE_LIMIT"` / `#   class_name = "RateLimiterDurableObject"` / `#   script_name = "ferrogate-gateway"` (wave 16) | `MUT-1 /#   script_name = "ferrogate-gateway"/` | `grep -n 'script_name' wrangler.toml` → nothing | `test/env-var-drift.test.ts` §"keeps RATE_LIMIT commented, CROSS-SCRIPT, and claimed by no migration". **The BINDING itself is DEPLOY-ONLY and cannot be otherwise** — workerd refuses to start with an unresolvable `script_name` (`binding "RATE_LIMIT" refers to a service "core:user:ferrogate-gateway", but no such service is defined`), so uncommenting it takes the suite to 0 collected tests and `wrangler dev --local` to no boot. What IS gated locally is the three ways the stanza can rot: uncommented, `script_name` dropped (⇒ a SECOND private counter namespace and double the RPM allowance), or a `new_sqlite_classes` added here for a class this script does not export | T1 |
 
 ---
 
-## 9. `apps/agent-runtime` — 28 seams
+## 9. `apps/agent-runtime` — 29 seams
 
 ### 9.1 Entry module `apps/agent-runtime/src/worker.ts`
 
@@ -390,6 +391,7 @@ DEPLOY-ONLY here means *no local proof channel at all*.
 | AR-T7 | `[vars] FG_REQUIRE_PRODUCTION_MTLS = "0"` | `MUT-2 "\"0\""→"\"1\""` on that line | mutated line present | `test/mtls.test.ts`. **Committed OFF — must be `"1"` in production** | T1 |
 | AR-T8 | `[vars] CONTAINER_GOVERNED_EGRESS_HOSTS = ""` (sealed by default, #471) | `MUT-2 "CONTAINER_GOVERNED_EGRESS_HOSTS = \"\""→"…= \"*\""` | mutated line present | `test/isolation-grant.test.ts` | T1 |
 | AR-T9 | `[vars] AGENT_RUNTIME_ENABLED`, `AGENT_JOB_MAX_OPEN_PER_TENANT`, `AGENT_JOB_DISPATCH_TTL_SECS`, `FG_DEV_A2A_GUARDRAILS` | `MUT-1 /^AGENT_(RUNTIME_ENABLED\|JOB_)/` | anchors gone | `test/budget.test.ts` (limits fall back to defaults — **weak: absent ≈ default, so drift is invisible; no name-drift gate**) | T2 |
+| AR-T10 | the COMMENTED cross-script counter stanza: `#   name = "RATE_LIMIT"` / `#   class_name = "RateLimiterDurableObject"` / `#   script_name = "ferrogate-gateway"` (wave 16) | `MUT-1 /#   script_name = "ferrogate-gateway"/` | `grep -n 'script_name' wrangler.toml` → nothing | `test/env-var-drift.test.ts` §"keeps RATE_LIMIT commented, CROSS-SCRIPT, and claimed by no migration" — same three rot-directions and the same DEPLOY-ONLY reason as MCP-T10. A `RateLimiterDurableObject` defined in THIS Worker instead would compile, deploy and pass every test while handing `/v1/agent-jobs` its own full RPM quota, which is a quieter version of the admission bypass wave 16 closed | T1 |
 
 ---
 

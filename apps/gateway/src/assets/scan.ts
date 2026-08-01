@@ -48,29 +48,20 @@
  *  - **cross-tenant publish approval** — an approval-record store this app has
  *    no table for.
  *
- * ## PORT-TODO(`server/asset_security.rs::validate_asset_content`): gate (1) is missing
+ * ## Gate (1) lives in `content-gate.ts`, NOT here — CLOSED
  *
- * `screen_asset_push` runs THREE gates and this tree ports the second and third
- * (signature, scan) but not the first, which is the cheap synchronous one:
+ * `screen_asset_push` runs THREE gates. This file is gates (2)/(3); gate (1) —
+ * the per-`asset_type` content-type allowlist and the `mcp_manifest` **stdio
+ * refusal** — is `./content-gate.ts`, and `AssetService` calls it DIRECTLY,
+ * ahead of any `AssetScreener`, on both `putAsset` and `commitUpload`.
  *
- *  1. **the per-asset-type content-type allowlist** (`content_type_allowed`,
- *     `asset_security.rs:107`) — `cli_tool` accepts 8 types, `mcp_manifest`
- *     accepts `application/json` ALONE, `skill_bundle` 6, `static_site` a
- *     web-safe set. Anything else is `422 asset_rejected`.
- *  2. **the `mcp_manifest` stdio refusal** — a manifest whose declared
- *     transport is `stdio` is refused outright, because "a stdio manifest
- *     causes the CONSUMING agent's MCP client to spawn an arbitrary local
- *     process". `validate_streamed_asset_content` (#259) goes further and
- *     refuses a manifest too large to parse rather than admitting it with that
- *     field unread — the check is deliberately not optional above a size.
- *
- * `grep -rn "content_type_allowed\|mcp_manifest\|stdio\|asset_rejected"
- * apps/gateway/src/assets/` returns NOTHING, so today `putAsset` and
- * `commitAssetUpload` accept any `content-type` for any `asset_type`, and a
- * tenant can publish an `mcp_manifest` declaring `stdio` that a consuming agent
- * will act on. It is a pure function of two strings and a byte buffer — no
- * platform limit, no binding, no I/O — and it belongs ahead of the signature
- * and scan gates here, exactly where Rust puts it.
+ * It is deliberately not a screener and must not be folded into one. Everything
+ * in THIS file is selected by `assetScreenerFromEnv` and replaceable by an
+ * injected double; gate (1) refuses a manifest that would make a CONSUMING
+ * agent spawn a local process, and a control of that kind must not be reachable
+ * through a configuration seam. `test/assets/content-gate.test.ts` pins that
+ * with a screener that admits everything and is never even consulted for a
+ * gate-1 refusal.
  */
 import type {
   AssetScreener,

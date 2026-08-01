@@ -24,6 +24,12 @@ import {
   flattenedText,
 } from "@ferrogate/guardrails";
 
+import {
+  type AdmissionBindings,
+  type AdmissionGrant,
+  type AdmissionPort,
+  admissionFromEnv,
+} from "./admission/index.js";
 import { normalizedCapabilities } from "./capabilities.js";
 import { timingSafeEqualStrings } from "./crypto.js";
 import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
@@ -74,6 +80,16 @@ export interface AgentRuntimeBindings {
    * ⇒ every `/v1/agents/*` dispatch is 404, which is fail-closed.
    */
   readonly AGENT_UPSTREAMS?: string;
+  /**
+   * `apps/gateway`'s `RateLimiterDurableObject` namespace, bound with
+   * `script_name = "ferrogate-gateway"` so BOTH Workers charge ONE window per
+   * counter key (`src/admission/counter.ts`). Absent ⇒ a per-isolate counter.
+   *
+   * Typed as `unknown` here rather than `DurableObjectNamespace` because the
+   * class lives in another Worker's script: there is no type to import, and
+   * `counterFromEnv` probes the binding for its RPC surface before using it.
+   */
+  readonly RATE_LIMIT?: unknown;
   /** DEV/TEST ONLY: install the in-memory port bundle. Absent ⇒ fail closed. */
   readonly FG_DEV_IN_MEMORY_PORTS?: string;
   /** `"1"` selects the Rust `RequireProductionMtls` transport posture. */
@@ -92,6 +108,14 @@ export interface AgentRuntimeBindings {
   readonly FG_DEV_API_KEYS?: string;
   /** DEV/TEST ONLY: JSON array of `AgentUpstream` rows. */
   readonly FG_DEV_AGENT_UPSTREAMS?: string;
+  /**
+   * DEV/TEST ONLY: JSON array of `quota_policies` rows in the snake_case wire
+   * shape. The DURABLE source is `CONTROL_DB`'s `quota_policies` table, which
+   * WINS whenever it is bound — same durable-first rule as the two credential
+   * authorities. Absent ⇒ no policy restricts, which can only leave a limit
+   * unset, never raise one.
+   */
+  readonly FG_DEV_QUOTA_POLICIES?: string;
   /**
    * DEV/TEST ONLY: JSON `{ keywords?, regex?, secretPatterns? }` configuring
    * the A2A deterministic guardrail. ABSENT ⇒ no detector is configured ⇒
@@ -120,6 +144,12 @@ export interface AgentRuntimeEnv {
      * so a sealed request is not silently seen as `{ sealed: … }`.
      */
     workerEnvelope?: Record<string, unknown>;
+    /**
+     * The wallet holds admission took for this request, released by
+     * `contractAuth`'s `finally`. Absent for an internal (worker-plane)
+     * operation and for any request refused before admission ran.
+     */
+    admissionGrant?: AdmissionGrant;
     /** The matched contract operation. */
     operationId?: string;
     deps?: AgentRuntimeDeps;
@@ -146,6 +176,16 @@ export interface AuthContext {
   /** Granted scopes. `"*"` is the wildcard. */
   readonly scopes: readonly string[];
   readonly platformOperator: boolean;
+  /**
+   * TOK-12 `api_keys.request_limit_per_minute` — the per-CREDENTIAL RPM cap,
+   * independent of the quota-policy chain. Rust
+   * `AuthContext.request_limit_per_minute`.
+   *
+   * `undefined` means the credential imposes no cap of its own. `0` is a REAL
+   * value meaning "refuse every request", which is why every consumer tests for
+   * `undefined` explicitly and never writes `limit ?? fallback`.
+   */
+  readonly requestLimitPerMinute?: number | undefined;
 }
 
 /**
@@ -448,6 +488,16 @@ export interface ClockPort {
 
 export interface AgentRuntimeDeps {
   readonly apiKeys: ApiKeyPort;
+  /**
+   * The ADMISSION half of Rust's `authenticate()` — quota scope, monthly
+   * budget, wallet balance, RPM. See `src/admission/index.ts`.
+   *
+   * It sits in the SAME bundle as the credential authorities on purpose:
+   * `finalize_auth` was one function with `authenticate` in Rust, and a
+   * deployment that cannot consult its credential authority cannot consult its
+   * spend controls either. Both fail closed together.
+   */
+  readonly admission: AdmissionPort;
   readonly workerIdentities: WorkerIdentityPort;
   readonly governance: GovernancePort;
   readonly upstreams: AgentUpstreamPort;
@@ -490,6 +540,11 @@ export interface DevApiKey {
   /** Operator-authored static config key: reports 403 when disabled/expired. */
   readonly staticState?: "disabled" | "expired";
   readonly tenancySuspended?: boolean;
+  /**
+   * TOK-12 per-credential RPM cap (the `api_keys.request_limit_per_minute`
+   * column). `0` refuses every request; absent imposes no per-key cap.
+   */
+  readonly requestLimitPerMinute?: number;
 }
 
 /** In-memory {@link ApiKeyPort} over a static table. */
@@ -512,6 +567,9 @@ export function inMemoryApiKeyPort(keys: readonly DevApiKey[]): ApiKeyPort {
           tenancy: { tenantId: row.tenantId, workspaceId: row.workspaceId ?? null },
           scopes: row.scopes ?? [],
           platformOperator: row.platformOperator ?? false,
+          // Explicit `undefined`, never `?? 0` / `|| undefined`: `0` is the
+          // Rust "refuse everything" cap and must survive the round trip.
+          requestLimitPerMinute: row.requestLimitPerMinute,
         },
       };
     },
@@ -1040,6 +1098,11 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
 
   return {
     apiKeys,
+    // The admission ladder reads `CONTROL_DB` (quota policies), `DB` (monthly
+    // spend + prepaid wallet) and `RATE_LIMIT` (the shared RPM counter). All
+    // three are OPTIONAL and each degrades in the tightening direction only —
+    // see `src/admission/index.ts`.
+    admission: admissionFromEnv(env as AdmissionBindings),
     workerIdentities,
     governance: inMemoryGovernancePort({
       governedEgressHosts: parseGovernedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS),

@@ -308,6 +308,99 @@ describe.each(BACKENDS)("ControlPlaneStore contract: $name", (backend) => {
   });
 
   // -------------------------------------------------------------------------
+  // The tenant fence is ASYMMETRIC: readable ≠ writable
+  // -------------------------------------------------------------------------
+  //
+  // A row with no `tenant_id` is PLATFORM data — a global `role`, a shared
+  // `policy`, a `plan` other tenants are billed against. Every tenant may READ
+  // it ("shows an un-attributed platform row to every tenant", above), because
+  // it is the deployment's own configuration and hiding it would break
+  // `resolved-defaults`.
+  //
+  // It must NOT be WRITABLE by a tenant. The wave-15 certification found the
+  // same predicate (`tenant_id IS NULL OR tenant_id = ?`) on `#update`,
+  // `remove` and the `atomic` batch as on the SELECT, and no test pinning the
+  // write side — so a tenant administrator holding `admin.write` (an intended
+  // configuration) could PATCH or DELETE any platform row. Rust's
+  // `filter_by_tenant_scope` (`auth.rs:428`) is strict equality and makes that
+  // unreachable.
+  //
+  // The refusal is `null`/`false` — a 404, indistinguishable from absent —
+  // rather than a 403, for the same reason the cross-tenant case is: a distinct
+  // status would confirm the row exists.
+
+  it("refuses a tenant's REPLACE of an un-attributed platform row", async () => {
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    expect(await store.replace("plans", TENANT_A, "global", { name: "hijacked" })).toBeNull();
+    expect((await store.get("plans", OPERATOR, "global"))?.name).toBe("platform");
+  });
+
+  it("refuses a tenant's MERGE of an un-attributed platform row", async () => {
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    expect(await store.merge("plans", TENANT_A, "global", { name: "hijacked" })).toBeNull();
+    expect((await store.get("plans", OPERATOR, "global"))?.name).toBe("platform");
+  });
+
+  it("refuses a tenant's MERGE-IF of an un-attributed platform row", async () => {
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    const outcome = await store.mergeIf(
+      "plans",
+      TENANT_A,
+      "global",
+      { name: "hijacked" },
+      () => true,
+    );
+    expect(outcome.kind).toBe("not_found");
+    expect((await store.get("plans", OPERATOR, "global"))?.name).toBe("platform");
+  });
+
+  it("refuses a tenant's DELETE of an un-attributed platform row", async () => {
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    expect(await store.remove("plans", TENANT_A, "global")).toBe(false);
+    expect(await store.get("plans", OPERATOR, "global")).not.toBeNull();
+  });
+
+  it("refuses an ATOMIC unit that merges an un-attributed platform row", async () => {
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    const applied = await store.atomic(TENANT_A, [
+      { kind: "merge", collection: "plans", id: "global", patch: { name: "hijacked" } },
+    ]);
+    expect(applied).toBeNull();
+    expect((await store.get("plans", OPERATOR, "global"))?.name).toBe("platform");
+  });
+
+  it("still lets a tenant write ITS OWN rows, and the operator write the platform's", async () => {
+    // The narrowing must not be a blanket denial — that would pass the four
+    // cases above while breaking every tenant-scoped write in the product.
+    await store.create("plans", TENANT_A, { id: "mine", name: "old" });
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    expect(await store.merge("plans", TENANT_A, "mine", { name: "new" })).toMatchObject({
+      name: "new",
+    });
+    expect(await store.remove("plans", TENANT_A, "mine")).toBe(true);
+    expect(await store.merge("plans", OPERATOR, "global", { name: "renamed" })).toMatchObject({
+      name: "renamed",
+    });
+    expect(await store.remove("plans", OPERATOR, "global")).toBe(true);
+  });
+
+  it("keeps the platform row READABLE by the tenant that may not write it", async () => {
+    // The asymmetry itself, in one case: the same row, same caller, read yes /
+    // write no. A "fix" that hid the row instead would break
+    // `resolved-defaults` and is caught here.
+    await store.create("plans", OPERATOR, { id: "global", name: "platform" });
+
+    expect(await store.get("plans", TENANT_A, "global")).not.toBeNull();
+    expect(await store.remove("plans", TENANT_A, "global")).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
   // list
   // -------------------------------------------------------------------------
 

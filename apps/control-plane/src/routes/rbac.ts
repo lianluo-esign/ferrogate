@@ -29,6 +29,14 @@ import { HttpError } from "../middleware/errors.js";
 import { type CallerScope, StoreConflictError } from "../ports.js";
 import { adminDeleted, listResponse, parseListQuery } from "../responses.js";
 import {
+  projectPermission,
+  projectRole,
+  projectTenantRoleBinding,
+  unprojectPermission,
+  unprojectRole,
+  unprojectTenantRoleBinding,
+} from "../store/rbac_registry.js";
+import {
   type GroupModule,
   adminRecordSchema,
   crudGroup,
@@ -84,37 +92,40 @@ function bindingId(tenantId: string, roleId: string): string {
 }
 
 /**
- * PORT-TODO(P: inventory-edge-control §5.1 RBAC) — the WRITE half of this group is
- * not connected to the tables that authorize.
+ * The typed-row projections, and why they are on the SPEC.
  *
- * All eleven operations here persist into `control_plane_resources` DOCUMENTS
- * only. Every RBAC *reader* in the fleet queries the TYPED control tables
- * instead:
+ * Every RBAC reader in the fleet — `src/adapters.ts::D1RbacAuthorizer`,
+ * `apps/gateway/src/adapters.ts`, `apps/gateway/src/assets/entitlements.ts`,
+ * `apps/mcp/src/auth.ts` — authorizes on `tenant_role_bindings ⋈ roles` in the
+ * control database, never on the `control_plane_resources` documents this group
+ * used to write alone. While the write half was missing, `POST /roles` +
+ * `POST /tenant-roles/{t}` granted nothing and
+ * `DELETE /tenant-roles/{t}/{r}` answered `200 {"deleted": true}` and revoked
+ * nothing; the authorizers saw `rows.length === 0`, fell back to the
+ * declarative `TENANT_RBAC_ACTIONS`, and every suite stayed green.
+ * `store/rbac_registry.ts` carries the statements and the ordering rule.
  *
- *   - `src/adapters.ts::D1RbacAuthorizer`  — `tenant_role_bindings ⋈ roles`
- *   - `apps/gateway/src/adapters.ts`       — same join (`RBAC_PERMISSIONS_SQL`)
- *   - `apps/gateway/src/assets/entitlements.ts` — same join
- *   - `apps/mcp/src/auth.ts`               — `ROLE_TABLE`/`TENANT_ROLE_BINDING_TABLE`
- *
- * `grep -rn "INSERT INTO \(roles\|permissions\|tenant_role_bindings\)"` over
- * `apps/<app>/src` + `packages/<pkg>/src` returns ZERO hits; every insert in the tree is
- * a test fixture. So `POST /admin/v1/roles` + `POST /admin/v1/tenant-roles/{t}`
- * grant nothing, and `DELETE /admin/v1/tenant-roles/{t}/{r}` revokes nothing —
- * the authorizers see `rows.length === 0` and fall back to the declarative
- * `TENANT_RBAC_ACTIONS` var, which is why every suite stays green.
- *
- * This is the same shape `store/quota_registry.ts` (plans/tenants/quota
- * policies), `store/virtual_keys.ts` and `store/worker_registry.ts` already
- * closed for their families: add a `project` hook that upserts `roles`
- * (`permission_keys_json`) and `tenant_role_bindings` (`id`, `tenant_id`,
- * `role_id`) on the record the store committed, delete the typed row on unbind,
- * and pin it with a test that provisions the grant ONLY through the admin API.
+ * `project` / `unproject` are declared on the collection rather than called
+ * from a bespoke handler so they cannot be wired on POST and forgotten on
+ * PUT/DELETE — which is the shape of the original defect.
  */
 export const rbacRoutes: GroupModule = crudGroup(
   "rbac",
   [
-    { segment: "permissions", object: "permission", body: permissionSchema },
-    { segment: "roles", object: "role", body: roleSchema },
+    {
+      segment: "permissions",
+      object: "permission",
+      body: permissionSchema,
+      project: projectPermission,
+      unproject: (db, id) => unprojectPermission(db, id),
+    },
+    {
+      segment: "roles",
+      object: "role",
+      body: roleSchema,
+      project: projectRole,
+      unproject: (db, id) => unprojectRole(db, id),
+    },
   ],
   {
     listTenantRoles: async (c) => {
@@ -143,6 +154,13 @@ export const rbacRoutes: GroupModule = crudGroup(
           id,
           tenant_id: tenantId,
         });
+        // Document first, then the GRANT: a crash between them leaves a binding
+        // the operator can see that does not yet authorize. The inverse would
+        // publish an invisible grant. See `store/rbac_registry.ts`.
+        const db = deps.controlDatabase;
+        if (db !== null) {
+          await projectTenantRoleBinding(db, tenantId, body.role_id, Math.floor(Date.now() / 1000));
+        }
         return json(c, 201, { object: "tenant_role", tenant_role: stored });
       } catch (error) {
         if (error instanceof StoreConflictError) {
@@ -164,6 +182,22 @@ export const rbacRoutes: GroupModule = crudGroup(
       authorizeTenantPath(scope, tenantId);
 
       const id = bindingId(tenantId, roleId);
+      const db = deps.controlDatabase;
+      if (db !== null) {
+        // Resolve the binding for THIS caller before anything is deleted, so a
+        // binding the caller cannot see is a 404 that writes nothing; then the
+        // GRANT goes before the document, because a residual grant is the one
+        // residue that is not survivable — the operator has been told the role
+        // is revoked. `store/rbac_registry.ts` has the ordering table.
+        if ((await deps.store.get(TENANT_ROLES_COLLECTION, scope, id)) === null) {
+          throw new HttpError(
+            404,
+            "not_found",
+            `role ${roleId} is not bound to tenant ${tenantId}`,
+          );
+        }
+        await unprojectTenantRoleBinding(db, tenantId, roleId);
+      }
       if (!(await deps.store.remove(TENANT_ROLES_COLLECTION, scope, id))) {
         throw new HttpError(404, "not_found", `role ${roleId} is not bound to tenant ${tenantId}`);
       }

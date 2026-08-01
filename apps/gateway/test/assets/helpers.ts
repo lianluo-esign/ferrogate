@@ -20,6 +20,7 @@ import {
   type PresignedUpload,
 } from "../../src/assets/ports.js";
 import {
+  type AssetEgressDeps,
   type AssetLimits,
   type AssetRequestContext,
   AssetService,
@@ -86,6 +87,8 @@ export interface HarnessOptions {
   readonly limits?: Partial<AssetLimits>;
   readonly screener?: AssetScreener;
   readonly objects?: InMemoryAssetObjectStore;
+  /** Egress counters/meter (issue #262). Absent ⇒ the service's own default. */
+  readonly egress?: AssetEgressDeps;
 }
 
 export const START_UNIX = 1_700_000_000;
@@ -104,6 +107,7 @@ export function harness(options: HarnessOptions = {}): Harness {
     audit,
     limits: { presignEnabled: true, presignTtlSeconds: 900, ...(options.limits ?? {}) },
     now: () => clock,
+    ...(options.egress !== undefined ? { egress: options.egress } : {}),
   });
   return {
     service,

@@ -13,6 +13,7 @@
  * `new AssetService({ objects: env.ASSETS, ... })` is the production wiring and
  * {@link InMemoryAssetObjectStore} is the offline one.
  */
+import type { AssetEgressQuota } from "./egress.js";
 import type { AssetObjectRef } from "./keys.js";
 import { storedAssetVariantId } from "./keys.js";
 
@@ -708,6 +709,25 @@ export interface AssetCaller {
   readonly assetMaxObjectBytes?: number | undefined;
   /** Plan/role entitlement to host assets at all (Rust `tenant_can_host`). */
   readonly assetHostingEnabled: boolean;
+  /**
+   * The presented credential's id — Rust `AuthContext.api_key_id`.
+   *
+   * Read ONLY through `QuotaScopeSelector.counterKey`, which namespaces it as
+   * `key:{id}`, so a tenant-chosen id can never address another scope's
+   * counter. `""` when the credential carries none, matching Rust's
+   * `unwrap_or("")`.
+   */
+  readonly apiKeyId?: string | undefined;
+  /**
+   * The egress half of the resolved `EffectiveQuota` — Rust
+   * `AuthContext.effective_quota` (issue #262).
+   *
+   * Absent ⇒ no egress budget and no download cap govern this caller, which is
+   * the correct reading of "no policy set one". It is NOT read as "deny": a
+   * credential source with no quota chain must not become a source that
+   * refuses every download.
+   */
+  readonly effectiveQuota?: AssetEgressQuota | undefined;
 }
 
 /** An auth refusal, already shaped as the wire error the handler writes. */

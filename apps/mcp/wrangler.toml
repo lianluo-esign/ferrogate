@@ -216,3 +216,63 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 #   unimplemented target turns every call into a runtime error instead of a
 #   clean 503, so the gateway / control-plane hops stay `fetch()` for now.
 # ===========================================================================
+
+# ===========================================================================
+# DURABLE OBJECTS — the SHARED admission counter (wave 16, finding D1)
+#
+# WRITTEN OUT AND COMMENTED, exactly like the D1 stanzas in
+# `apps/agent-runtime/wrangler.toml`, for a measured harness reason (below).
+# UNCOMMENT AT DEPLOY TIME.
+#
+#   [[durable_objects.bindings]]
+#   name = "RATE_LIMIT"
+#   class_name = "RateLimiterDurableObject"
+#   script_name = "ferrogate-gateway"
+#
+# Read as `env.RATE_LIMIT` by `src/admission/counters.ts::limiterForEnv`. This
+# is NOT a class this script defines: `script_name` names `apps/gateway`'s
+# already-deployed `RateLimiterDurableObject`, so `idFromName("key:<id>")` here
+# addresses the SAME instance the gateway addresses. That sharing IS the fix —
+# a credential at 60 rpm is charged ONE window across `/v1/chat/completions`,
+# `/v1/mcp` and `/v1/mcp/tool/execute`. A private class here would compile,
+# deploy, pass every test, and hand this Worker its own full quota: a quieter
+# version of the admission bypass this wave closes.
+#
+# NO `[[migrations]]` stanza belongs here, now or when it is uncommented. A
+# migration INTRODUCES a class and the class is introduced by the script that
+# DEFINES it — `apps/gateway`, whose `new_sqlite_classes =
+# ["RateLimiterDurableObject"]` already exists. A second `new_sqlite_classes`
+# here would claim to define a class this script does not export and `wrangler
+# deploy` rejects it. For the same reason there is no `src/worker.ts`
+# re-export: this Worker BINDS the class, it does not define it. (If the class
+# is ever MOVED into this app, the stanza must be `new_sqlite_classes`, never
+# `new_classes` — the latter deploys cleanly and silently swaps SQLite for the
+# key-value storage backend.)
+#
+# DEPLOY ORDER: `ferrogate-gateway` FIRST. A `script_name` binding to a script
+# that does not exist yet fails at deploy.
+#
+# WHY IT IS COMMENTED — measured on 2026-08-01, not feared. `vitest.config.ts`
+# loads this file through `wrangler: { configPath }`, and neither
+# `@cloudflare/vitest-pool-workers` nor `wrangler dev --local` can resolve a
+# cross-script DO binding: workerd refuses to START the Worker with
+#
+#   Worker "core:user:vitest-pool-workers-runner-"'s binding "RATE_LIMIT"
+#   refers to a service "core:user:ferrogate-gateway", but no such service is
+#   defined.
+#
+# Committed uncommented, the whole MCP suite goes to 0 tests / 23 collection
+# errors on a correct tree, and `bunx wrangler dev --local` never reaches
+# "Ready on". This seam is therefore DEPLOY-ONLY in the sense of
+# `docs/rewrite/MOUNT-SEAMS.md` §1: it cannot be proven by any offline gate,
+# and pretending otherwise by deleting the sharing is the worse trade.
+#
+# WHILE IT IS COMMENTED, `limiterForEnv` falls back to the per-isolate
+# `InMemoryMcpRateLimiter`: the quota-scope chain, the monthly USD budget and
+# the prepaid-wallet no-oversell hold are ALL still enforced and ALL durable;
+# only the RPM window is counted per isolate (a 60 rpm cap is 60·N across N
+# isolates). One of five legs degraded, versus none of five enforced before.
+# `test/env-var-drift.test.ts` pins `RATE_LIMIT` as read-but-undeclared so this
+# cannot be forgotten, and `docs/rewrite/CLOUD-VERIFICATION.md` carries the
+# human deploy step.
+# ===========================================================================

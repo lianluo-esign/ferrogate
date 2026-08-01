@@ -13,6 +13,7 @@
     "zod": "^3.25.76",
     "@ferrogate/core": "workspace:*",
     "@ferrogate/guardrails": "workspace:*",
+    "@ferrogate/policy": "workspace:*",
     "@ferrogate/schemas": "workspace:*",
     "@ferrogate/secrets": "workspace:*",
     "@ferrogate/storage": "workspace:*",

@@ -163,6 +163,54 @@ FG_DEV_A2A_GUARDRAILS = ""
 #   migrations_dir = "../../sql/d1-ts/control"
 # ---------------------------------------------------------------------------
 
+# ===========================================================================
+# DURABLE OBJECTS — the SHARED admission counter (wave 16, finding D1)
+#
+# WRITTEN OUT AND COMMENTED for the same measured harness reason as the D1
+# stanzas above. UNCOMMENT AT DEPLOY TIME.
+#
+#   [[durable_objects.bindings]]
+#   name = "RATE_LIMIT"
+#   class_name = "RateLimiterDurableObject"
+#   script_name = "ferrogate-gateway"
+#
+# Read as `env.RATE_LIMIT` by `src/admission/counter.ts::counterFromEnv`. NOT a
+# class this script defines: `script_name` names `apps/gateway`'s deployed
+# `RateLimiterDurableObject`, so `idFromName("key:<id>")` here addresses the
+# SAME instance the gateway addresses. That sharing IS the fix — a credential
+# at 60 rpm is charged ONE window across `/v1/chat/completions` and
+# `/v1/agent-jobs`. A `RateLimiterDurableObject` defined HERE would compile,
+# deploy and pass every test while creating a SECOND, independent namespace,
+# handing this Worker its own full RPM quota: a quieter version of the very
+# bypass this wave closes.
+#
+# NO `[[migrations]]` entry belongs to it, now or when uncommented. A migration
+# INTRODUCES a class; this class is introduced by `apps/gateway/wrangler.toml`
+# (`new_sqlite_classes = ["RateLimiterDurableObject"]`). Claiming to define a
+# class this script does not export is rejected at deploy. Same reason there is
+# no `src/worker.ts` re-export line. DEPLOY `ferrogate-gateway` FIRST — a
+# `script_name` binding to a script that does not exist yet fails.
+#
+# WHY COMMENTED — measured 2026-08-01. `vitest.config.ts` loads this file
+# through `wrangler: { configPath }`, and neither
+# `@cloudflare/vitest-pool-workers` nor `wrangler dev --local` can resolve a
+# cross-script DO binding; workerd refuses to START:
+#
+#   binding "RATE_LIMIT" refers to a service "core:user:ferrogate-gateway",
+#   but no such service is defined.
+#
+# Committed uncommented that is 0 tests / 23 collection errors on a correct
+# tree and no "Ready on" from `wrangler dev --local`. The seam is therefore
+# DEPLOY-ONLY (`docs/rewrite/MOUNT-SEAMS.md` §1).
+#
+# WHILE COMMENTED, `counterFromEnv` falls back to `InMemoryRequestCounter`:
+# correct arithmetic, per-isolate blast radius. The quota-scope chain, the
+# monthly USD budget and the prepaid-wallet no-oversell hold remain enforced
+# and durable — four of five legs shared, one degraded, versus none of five
+# enforced before. `test/env-var-drift.test.ts` pins `RATE_LIMIT` as
+# read-but-undeclared so it cannot be forgotten.
+# ===========================================================================
+
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.
 #   [[durable_objects.bindings]]  name = "CONTAINER_SANDBOX", class_name = "AgentSandbox"

@@ -273,29 +273,62 @@ const SECRETS: readonly string[] = [];
  *    and a committed empty would SHADOW the dev fallback the A2A tests seed.
  *  - `FG_DEV_AGENT_UPSTREAMS` — the dev fallback itself, named in that same
  *    block.
+ *  - `RATE_LIMIT` — the SHARED admission counter namespace `src/admission/
+ *    counter.ts` charges the per-minute request window against. Its stanza is
+ *    written out IN FULL but COMMENTED, and it MUST carry
+ *    `script_name = "ferrogate-gateway"`: a `RateLimiterDurableObject` defined
+ *    in THIS Worker would compile, deploy and pass every test while creating a
+ *    SECOND namespace that hands `/v1/agent-jobs` its own full RPM quota — a
+ *    quieter version of the bypass wave 16 closes. Commented for a MEASURED
+ *    reason: `vitest.config.ts` loads `wrangler.toml`, and workerd refuses to
+ *    START with a cross-script binding whose target script is not in the
+ *    session ("binding RATE_LIMIT refers to a service
+ *    core:user:ferrogate-gateway, but no such service is defined") — 0 tests
+ *    collected on a correct tree, and no "Ready on" from `wrangler dev
+ *    --local`. DEPLOY-ONLY per `docs/rewrite/MOUNT-SEAMS.md` §1. Until it is
+ *    uncommented `counterFromEnv` falls back to `InMemoryRequestCounter`:
+ *    correct arithmetic, per-isolate blast radius, while the quota-scope,
+ *    monthly-budget and wallet legs stay durable and shared.
  */
 const DOCUMENTED_BUT_UNDECLARED = [
   "AGENT_UPSTREAMS",
   "CONTROL_DB",
   "DB",
   "FG_DEV_AGENT_UPSTREAMS",
+  "RATE_LIMIT",
 ] as const;
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.
  *
- * The honest residue. Both are dev fallbacks that `resolveDeps` consults when
- * `FG_DEV_IN_MEMORY_PORTS = "1"` — which IS the committed posture — so on a
- * plain `wrangler deploy` of this file they are the API-key and self-hosted-
- * worker directories the auth ladder actually uses, and the deploy config names
- * neither. Their sibling `FG_DEV_AGENT_UPSTREAMS` IS documented, so an operator
- * reading the config would reasonably conclude the list is complete.
+ * The honest residue.
  *
- * Fixing that is a `wrangler.toml` edit — the integrate step's file — so this
+ * `FG_DEV_API_KEYS`, `FG_DEV_QUOTA_POLICIES` and `FG_DEV_SELF_HOSTED_WORKERS`
+ * are dev fallbacks that `resolveDeps` consults when
+ * `FG_DEV_IN_MEMORY_PORTS = "1"` — which IS the committed posture — so on a
+ * plain `wrangler deploy` of this file they are the API-key directory, the
+ * quota-policy table and the self-hosted-worker registry the auth and admission
+ * ladders actually use, and the deploy config names none of them. Their sibling
+ * `FG_DEV_AGENT_UPSTREAMS` IS documented, so an operator reading the config
+ * would reasonably conclude the list is complete. Each is DELIBERATELY not
+ * committed to `[vars]`: `vitest.config.ts` loads `wrangler.toml`, so a
+ * committed value would be injected into every unit test and shadow the
+ * fixtures the harness seeds — the measured failure mode behind the commented
+ * D1 stanzas (106 of 259 tests) and the `AGENT_UPSTREAMS = "[]"` incident
+ * (14 A2A tests).
+ *
+ * All three are `wrangler.toml` edits, i.e. the integrate step's file, so this
  * list is pinned rather than papered over. `CLOUD-VERIFICATION.md` row B1 is
- * the human step that turns the posture off for a deploy.
+ * the human step that turns the dev posture off for a deploy. (`RATE_LIMIT`,
+ * the fourth read this list carried while the admission slice was in flight, is
+ * now WRITTEN OUT in `wrangler.toml` and has moved up to
+ * `DOCUMENTED_BUT_UNDECLARED`.)
  */
-const UNDOCUMENTED = ["FG_DEV_API_KEYS", "FG_DEV_SELF_HOSTED_WORKERS"] as const;
+const UNDOCUMENTED = [
+  "FG_DEV_API_KEYS",
+  "FG_DEV_QUOTA_POLICIES",
+  "FG_DEV_SELF_HOSTED_WORKERS",
+] as const;
 
 /**
  * Declared names read through a renamed parameter, invisible to the
@@ -350,9 +383,10 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
-    // Not vacuous: four entries today, including the two commented-out D1
-    // stanzas whose whole justification lives in that prose.
-    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(4);
+    // Not vacuous: five entries today — the two commented-out D1 stanzas, the
+    // two upstream-catalog knobs, and the commented cross-script RATE_LIMIT
+    // binding, each of whose whole justification lives in that prose.
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(5);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name), `${name} is read but no longer documented`).toBe(true);
     }
@@ -372,6 +406,27 @@ describe("every var the source reads is declared or explicitly excepted", () => 
     expect(DECLARED.bindings.has("CONTROL_DB")).toBe(false);
     expect(WRANGLER_TOML).toContain('#   binding = "DB"');
     expect(WRANGLER_TOML).toContain('#   binding = "CONTROL_DB"');
+  });
+
+  it("keeps RATE_LIMIT commented, CROSS-SCRIPT, and claimed by no migration", () => {
+    // The admission counter must be the SAME Durable Object namespace
+    // `apps/gateway` charges, or `/v1/agent-jobs` silently gets its own full
+    // RPM quota — the quiet re-opening of the bypass wave 16 closed. Three
+    // separate ways that can rot, all pinned:
+    //
+    //  1. uncommenting it: workerd then refuses to start this Worker offline
+    //     (no `ferrogate-gateway` service in the session), so the whole suite
+    //     collapses to 0 collected tests. It is a DEPLOY-ONLY seam.
+    expect(DECLARED.bindings.has("RATE_LIMIT")).toBe(false);
+    expect(WRANGLER_TOML).toContain('#   name = "RATE_LIMIT"');
+    //  2. dropping `script_name`: deploys cleanly, creates a SECOND private
+    //     namespace, doubles every credential's RPM allowance.
+    expect(WRANGLER_TOML).toContain('#   script_name = "ferrogate-gateway"');
+    //  3. adding a migration for it here: this script does not export the
+    //     class, so claiming to introduce it is rejected at deploy.
+    expect(WRANGLER_TOML).not.toMatch(
+      /^\s*#?\s*new_(?:sqlite_)?classes\s*=.*RateLimiterDurableObject/m,
+    );
   });
 
   it("pins every dynamic env[…] lookup site", () => {

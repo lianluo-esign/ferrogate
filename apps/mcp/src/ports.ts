@@ -22,6 +22,7 @@
  * | `cipher`      | `identityCipherFrom(FERROGATE_MCP_IDENTITY_KEY)` — BOUND   |
  * | `upstreams`   | `HttpMcpUpstreams` + the `MCP_SESSION` DO — BOUND          |
  * | `auth`        | `D1McpAuth` over the CONTROL database (`src/auth.ts`) — BOUND |
+ * | `admission`   | `McpAdmissionGate` (`src/admission/`) — BOUND              |
  * | `approvals`   | `D1ToolApprovals` over the CONTROL database — BOUND        |
  * | `oauth`       | {@link unboundOauthProvider} — NOT BOUND, fails closed     |
  * | `assets`      | {@link InMemoryAssets} — isolate-local (see below)         |
@@ -71,6 +72,15 @@ import { EnvBindingTenantDatabaseRouter } from "@ferrogate/storage";
 // `./auth.js` imports the AuthPort TYPES back out of this module. The cycle is
 // safe for the same reason `./durable.js`'s is: every reference on both sides is
 // inside a function body, so nothing is evaluated at module-load time.
+// `./admission/` is a LEAF as far as this module is concerned: it declares the
+// identity it reads structurally (`AdmissionIdentity`) rather than importing
+// `AuthContext` back out of here, so there is no cycle in either direction.
+import {
+  ADMIT_ALL,
+  type AdmissionPort,
+  type RateLimiterNamespace,
+  admissionFromEnv,
+} from "./admission/index.js";
 import { D1ToolApprovals } from "./approvals.js";
 import { D1McpAuth, type D1McpAuthOptions } from "./auth.js";
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
@@ -207,6 +217,15 @@ export interface AuthContext {
   permissions: readonly string[];
   /** A declared platform operator names no tenant and is entitlement-exempt (#515). */
   platformOperator: boolean;
+  /**
+   * TOK-12 `api_keys.request_limit_per_minute` — Rust
+   * `AuthContext.request_limit_per_minute`, the per-CREDENTIAL RPM cap that is
+   * independent of the `quota_policies` chain.
+   *
+   * `undefined` means the row set no cap. `0` is a REAL value ("refuse every
+   * request"), so no consumer may treat this field as falsy-means-absent.
+   */
+  requestLimitPerMinute?: number;
 }
 
 /** Narrowing helper: a JSON object (not `null`, not an array). */
@@ -872,6 +891,16 @@ export interface IdentityCipherPort {
 
 export interface McpPorts {
   auth: AuthPort;
+  /**
+   * The ADMISSION half of Rust's `authenticate()` (`auth.rs::finalize_auth`):
+   * quota scope, monthly budget, prepaid wallet, per-minute request window.
+   *
+   * Separate from {@link AuthPort} because the two answer different questions —
+   * "who is this" versus "may they spend" — and because a credential that is
+   * perfectly valid can still be refused here. `src/http.ts` runs them in that
+   * order, which is the order Rust runs them in.
+   */
+  admission: AdmissionPort;
   entitlements: EntitlementPort;
   upstreams: McpUpstreamPort;
   guardrails: GuardrailsPort;
@@ -1316,6 +1345,25 @@ export interface McpEnv {
   DB?: D1Database;
 
   /**
+   * The SHARED rate-limit counter namespace — `apps/gateway`'s
+   * `RateLimiterDurableObject`, bound here CROSS-SCRIPT.
+   *
+   * This is what makes the admission gate's RPM window one budget across every
+   * FerroGate surface rather than one budget per Worker. A per-Worker counter
+   * would hand each surface a full quota, which is a different bug from the one
+   * `src/admission/` closes — see the wiring block in `src/admission/index.ts`
+   * for the exact `[[durable_objects.bindings]]` stanza (with `script_name`,
+   * and deliberately WITHOUT a `[[migrations]]` entry: the class belongs to the
+   * gateway script, which already declares it under `new_sqlite_classes`).
+   *
+   * OPTIONAL, and its absence is a stated degradation rather than a failure:
+   * `limiterForEnv` falls back to a per-isolate counter, so the RPM leg becomes
+   * 60·N across N isolates while the quota-scope, budget and wallet legs stay
+   * fully durable.
+   */
+  RATE_LIMIT?: RateLimiterNamespace;
+
+  /**
    * Durable Object namespace holding the SHARED upstream-MCP session — the
    * Cloudflare shape of Rust's `McpManager` HashMap (`src/session.ts`). One
    * instance per `(tenant, server)`, so the negotiated protocol revision, the
@@ -1389,6 +1437,11 @@ export interface InMemoryMcpPorts extends McpPorts {
 export function inMemoryPorts(): InMemoryMcpPorts {
   devPorts ??= {
     auth: new InMemoryAuth(),
+    // The singleton default admits everything; `resolvePorts` overrides it in
+    // every posture, so the deployed Worker's gate is never this one. It exists
+    // only so a unit test that builds the bundle by hand is not forced to
+    // provide a quota backend.
+    admission: ADMIT_ALL,
     entitlements: new InMemoryEntitlements(),
     upstreams: new InMemoryUpstreams(),
     // The singleton default is an UNCONFIGURED detector — it matches nothing,
@@ -1720,9 +1773,10 @@ export function resolvePorts(env: McpEnv): McpPorts {
   const secrets = secretResolverOverride ?? workerSecretResolver(env);
   const auth = durableAuth(env);
   const approvals = durableApprovals(env);
+  const admission = durableAdmission(env);
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
-    return { ...inMemoryPorts(), guardrails, secrets, auth, approvals };
-  const ports = { ...inMemoryPorts(), guardrails, secrets, auth, approvals };
+    return { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission };
+  const ports = { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission };
   if (durableIdentityBound(env)) {
     return {
       ...ports,
@@ -1776,5 +1830,35 @@ function durableAuth(env: McpEnv): AuthPort {
   return new D1McpAuth(
     env.DB,
     env.FG_DEV_IN_MEMORY_PORTS === "1" ? { ...options, fallback: inMemoryPorts().auth } : options,
+  );
+}
+
+/**
+ * Choose the {@link AdmissionPort} for this env — the ADMISSION half of Rust's
+ * `authenticate()`.
+ *
+ * `env.DB` bound ⇒ the real ladder: the CONTROL database's `quota_policies` +
+ * `plans` chain merged by `@ferrogate/policy`, the tenant-routed
+ * `usage_monthly_rollups` / `wallets` spend store, and the RPM window on the
+ * SHARED `RATE_LIMIT` namespace when one is bound. Absent ⇒ `ADMIT_ALL`, the
+ * honest reading of "this deployment has no `quota_policies` table, so no
+ * policy could have been configured" — which is why binding `DB` can only ever
+ * TIGHTEN admission.
+ *
+ * Bound in the DEV posture too, for the same provability reason the auth port
+ * is: the offline suite can only drive the deployed app end to end there, so a
+ * gate mounted anywhere else would be untestable over `SELF` — the
+ * "implemented, tested, never mounted" defect this project keeps repeating.
+ * Deleting the `admission` line in {@link resolvePorts} turns
+ * `test/admission.test.ts` red.
+ *
+ * The router is the SAME construction `durableAuth` uses, so the credential and
+ * its spend are always read out of one tenant's database.
+ */
+function durableAdmission(env: McpEnv): AdmissionPort {
+  if (env.DB === undefined) return ADMIT_ALL;
+  return admissionFromEnv(
+    env,
+    new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
   );
 }

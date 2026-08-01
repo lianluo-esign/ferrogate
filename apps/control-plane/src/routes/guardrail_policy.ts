@@ -281,11 +281,41 @@ function readRevisionParam(revision: string, policyId: string): number {
  * read. `dryRunGuardrailPolicyRevision` is the exception and is genuinely real —
  * it evaluates the candidate in-process with `@ferrogate/guardrails`.
  *
- * The write half is a projection, exactly like `store/quota_registry.ts`:
- * `create*` upserts the revision row, `activate`/`rollback` move
+ * The write half is a projection, in the shape `store/rbac_registry.ts` and
+ * `store/static_keys.ts` now use for their families: `create*` appends the
+ * revision row, `activate`/`rollback` move
  * `guardrail_policy_bindings.active_revision` under the SAME generation guard
- * `binding.ts` already implements (D1 has no `SELECT … FOR UPDATE`, so the
- * generation CAS is what makes two racing activations safe).
+ * `apps/gateway/src/guardrails/binding.ts` already implements (D1 has no
+ * `SELECT … FOR UPDATE`, so the generation CAS is what makes two racing
+ * activations safe), and a delete/archive fails CLOSED — the enforcement row
+ * is the one a residue must not leave live.
+ *
+ * **It is NOT a straight document copy, and that is why this is still open.**
+ * Verified against the reader this wave:
+ *
+ *  1. `revision_json` has to decode as a COMPLETE `PolicyRevision`.
+ *     `@ferrogate/guardrails`' `policyRevisionSchema` gives defaults for
+ *     `scope`/`aggregation`/`execution`/`mode`/`streaming`/`deadline_ms`, but
+ *     `name`, `checks`, `on_pass`, `on_fail` and `on_error` have NONE — and
+ *     `validatePolicyRevision` additionally requires a non-empty `created_by`
+ *     and `checks.length > 0`. `guardrailRevisionSchema` above makes every one
+ *     of those OPTIONAL, so today's documents are not projectable as they stand.
+ *  2. A malformed row is not skipped, it is FATAL.
+ *     `binding.ts::policySourceFromStore` iterates the bindings and calls
+ *     `compilePolicyChecks(revision, context)` eagerly at construction with no
+ *     `try`/`catch` — deliberately, so a detector-configuration error is a
+ *     startup failure rather than a per-request one. Projecting a partial
+ *     revision would therefore take the gateway's whole guardrail source down
+ *     on boot, which is strictly worse than the current inert state.
+ *
+ * So the slice has to tighten the ADMISSION as well as add the projection: a
+ * revision the data plane could never enforce must be a `400` here, not a `201`
+ * followed by silence. That is a deliberate behaviour change to
+ * `createGuardrailPolicyRevision` / `createNextGuardrailPolicyRevision`, and the
+ * existing cases that post partial revisions (`test/guardrail-dry-run.test.ts`,
+ * `test/crud.test.ts`) state the current acceptance and have to move with it.
+ * It is called out rather than guessed at because the failure direction of
+ * getting it wrong is a Worker that does not boot.
  */
 export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", [], {
   /** Every policy's current head revision. */

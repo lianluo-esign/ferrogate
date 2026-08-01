@@ -69,7 +69,8 @@ import { verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
  */
 const FIND_KEYS_BY_PREFIX_SQL =
   "SELECT id, tenant_id, workspace_id, project_id, key_hash, last4, enabled, " +
-  "scopes_json, expires_at_unix, revoked_at_unix FROM api_keys WHERE key_prefix = ?";
+  "scopes_json, request_limit_per_minute, expires_at_unix, revoked_at_unix " +
+  "FROM api_keys WHERE key_prefix = ?";
 
 /** A row of `api_keys` as D1 hands it back. */
 interface ApiKeyRow {
@@ -81,6 +82,8 @@ interface ApiKeyRow {
   readonly last4: string | null;
   readonly enabled: number | null;
   readonly scopes_json: string | null;
+  /** TOK-12 per-credential RPM cap. NULL ⇒ the credential imposes none. */
+  readonly request_limit_per_minute: number | null;
   readonly expires_at_unix: number | null;
   readonly revoked_at_unix: number | null;
 }
@@ -147,6 +150,15 @@ function authContextFromRow(row: ApiKeyRow): AuthContext {
     },
     scopes: parseScopes(row.scopes_json),
     platformOperator: false,
+    // The column that made this a live control rather than dead schema: before
+    // the admission ladder existed, `D1ApiKeyResolver` read the row and DROPPED
+    // this value, so `api_keys.request_limit_per_minute` was inert on this
+    // Worker. `undefined` (no cap) and `0` (refuse everything) are different
+    // answers, so NULL is mapped explicitly rather than through `?? 0`.
+    requestLimitPerMinute:
+      row.request_limit_per_minute === null || row.request_limit_per_minute === undefined
+        ? undefined
+        : Number(row.request_limit_per_minute),
   };
 }
 
