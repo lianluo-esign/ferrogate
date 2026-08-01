@@ -1064,3 +1064,66 @@ describe("validate_x402_spend_policies (issue #351)", () => {
     expectAccepted({});
   });
 });
+
+/**
+ * `normalize_listen_addr` — the HOST HALF IS AN IP LITERAL.
+ *
+ * `std::net::SocketAddr`'s `FromStr` parses an address and never resolves a
+ * name, so a DNS name, an out-of-range octet, an octal-looking octet and an
+ * unbracketed IPv6 are all REFUSED by Rust at config-load time. The TS helper
+ * used to accept any non-empty host, which silently loaded configs Rust
+ * rejects. Every row below is the accept/reject decision, asserted through the
+ * real validator so the field path travels with it.
+ */
+describe("listen addresses are IP literals", () => {
+  const rejected: [string, string][] = [
+    ["a DNS name", "example.com:8080"],
+    ["a bare hostname", "gateway:8080"],
+    ["localhost without the helper's exact prefix", "localhost.localdomain:8080"],
+    ["an out-of-range octet", "999.1.1.1:80"],
+    ["a leading-zero octet (std refuses octal-looking octets)", "127.0.0.01:80"],
+    ["a three-octet IPv4", "127.0.1:80"],
+    ["a five-octet IPv4", "127.0.0.1.5:80"],
+    ["an unbracketed IPv6", "::1:8080"],
+    ["a bracketed non-address", "[nonsense]:8080"],
+    ["an IPv6 with two elisions", "[::1::2]:8080"],
+    ["an IPv6 with nine groups", "[1:2:3:4:5:6:7:8:9]:8080"],
+    ["an IPv6 with a zone id (std has no zone parser)", "[fe80::1%eth0]:8080"],
+    ["a port above u16", "127.0.0.1:65536"],
+    ["a six-digit port", "127.0.0.1:000080"],
+    ["a signed port", "127.0.0.1:+80"],
+    ["no port at all", "127.0.0.1"],
+    ["an empty port", "127.0.0.1:"],
+    ["a non-numeric localhost port", "localhost:abc"],
+  ];
+  test.each(rejected)("rejects %s", (_name, listen) => {
+    expect(firstError({ admin_api: { listen } })).toBe(
+      `field admin_api.listen: invalid listen address ${listen}`,
+    );
+  });
+
+  const accepted: [string, string][] = [
+    ["a v4 socket address", "127.0.0.1:8095"],
+    ["the wildcard v4 bind", "0.0.0.0:80"],
+    ["port zero (ask the OS)", "127.0.0.1:0"],
+    ["the max port", "127.0.0.1:65535"],
+    ["a zero-padded port under six digits", "127.0.0.1:00080"],
+    ["the `localhost:` spelling the Rust helper rewrites", "localhost:8095"],
+    ["a bracketed v6 loopback", "[::1]:8080"],
+    ["the bracketed v6 wildcard", "[::]:8080"],
+    ["a full eight-group v6", "[2001:0db8:0000:0000:0000:ff00:0042:8329]:443"],
+    ["a v6 with an embedded dotted quad", "[::ffff:127.0.0.1]:8080"],
+  ];
+  test.each(accepted)("accepts %s", (_name, listen) => {
+    expectAccepted({ admin_api: { listen } });
+  });
+
+  test("the same rule guards the data-plane `listen` and `admin.listen`", () => {
+    expect(firstError({ listen: "example.com:8080" })).toBe(
+      "field listen: invalid listen address example.com:8080",
+    );
+    expect(firstError({ admin: { listen: "example.com:9090" } })).toBe(
+      "field admin.listen: invalid admin listen address example.com:9090",
+    );
+  });
+});

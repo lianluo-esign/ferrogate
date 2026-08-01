@@ -574,6 +574,23 @@ export interface AssetScreeningRequest {
   readonly content: Uint8Array;
   readonly contentSha256: string;
   readonly nowUnix: number;
+  /**
+   * The detached publisher signature presented with the push, if any — Rust
+   * `AssetPushScreeningRequest.signature`.
+   *
+   * `undefined` means UNSIGNED, which is a labeled state and not an error;
+   * `SignatureVerifyingScreener` (`./signature-screener.ts`) turns it into a
+   * refusal only when the deployment requires signed assets. Typed as
+   * `unknown`-free but structural so this port keeps declaring no dependency on
+   * `./signature.ts`'s implementation.
+   */
+  readonly signature?:
+    | {
+        readonly format: "minisign" | "ed25519";
+        readonly material: string;
+        readonly keyId?: string | undefined;
+      }
+    | undefined;
 }
 
 /**
@@ -586,29 +603,41 @@ export interface AssetScreeningRequest {
  * `ASSET_SCANNER*` vars. With those vars unset the deployment keeps
  * {@link BuiltinEicarScreener} below, which is the Rust unconfigured posture.
  *
- * PORT-TODO(inventory-request-path.md §1.6 "Clamd/HTTP malware scanner"): the
- * full Rust gate ALSO ran detached minisign/Ed25519 signature verification, a
- * cross-tenant publish-approval check, and an out-of-process ClamAV scanner.
- * Those three are still unported. This port keeps the *decision shape* (and the
- * fail-closed default) so the read-path withholding of #366 is real today —
- * `test/assets/r2.test.ts` pins it against the live R2 bucket: an EICAR push is
- * STORED (202) and the pull still answers 404, so "unproven" is
- * indistinguishable from "absent" — and the richer detectors drop in behind
- * this same interface.
+ * The SIGNATURE half is now PORTED and WIRED too: `./signature.ts` carries the
+ * minisign container format (both the legacy `Ed` and the modern
+ * BLAKE2b-512-prehashed `ED` variants) and the bare-Ed25519/cosign path,
+ * `./signature-screener.ts` runs it as Rust's stage (2) in front of whichever
+ * scanner is selected, and `assetDepsFromEnv` composes it from the two
+ * `FERROGATE_ASSET_PUBLISHER_*_KEYS` vars plus
+ * `FERROGATE_ASSET_REQUIRE_SIGNATURE`. With those unset the composition is the
+ * identity, so the unconfigured posture is byte-for-byte what it was.
  *
- * Only ONE of the three is platform-constrained, and it is not the one it looks
- * like:
- *  - Ed25519 verification is `crypto.subtle.verify("Ed25519", …)`, supported in
- *    workerd. The minisign CONTAINER format (its own base64 envelope + trusted
- *    comment + global-key store) is what is unwritten, not the primitive.
+ * PORT-TODO(inventory-request-path.md §1.6 "Clamd/HTTP malware scanner"): the
+ * full Rust gate ALSO ran a cross-tenant publish-approval check and an
+ * out-of-process ClamAV scanner. Those TWO are still unported (the third,
+ * signature verification, is closed — see above). This port keeps the
+ * *decision shape* (and the fail-closed default) so the read-path withholding
+ * of #366 is real today — `test/assets/r2.test.ts` pins it against the live R2
+ * bucket: an EICAR push is STORED (202) and the pull still answers 404, so
+ * "unproven" is indistinguishable from "absent" — and the richer detectors drop
+ * in behind this same interface.
+ *
+ * Of the two that remain, exactly ONE is platform-constrained:
  *  - the cross-tenant publish approval needs an approval-record store; no D1
  *    migration in this tree declares one (`sql/d1-ts/**` is not this app's).
+ *    Rust reads a durable `tool_approvals` record and NEVER a client-asserted
+ *    status, so a header-only port would be a security fiction, not a subset.
  *  - the `clamd` DAEMON is the constrained one: a Worker cannot fork or exec, so
  *    the in-process/sidecar `clamscan` the Rust could use has no analogue. The
  *    closest reachable form is an INSTREAM client over `connect()` from
  *    `cloudflare:sockets` against a clamd the operator hosts — which is a
  *    different deployment contract (an exposed clamd, not a local socket) and
  *    must be its own slice, not a silent substitution here.
+ *
+ * What the signature port itself could NOT take from the platform is named in
+ * `./signature.ts`: WebCrypto has Ed25519 but no BLAKE2b-512, so the prehashed
+ * minisign variant borrows `../keys/blake2b.ts` (RFC 7693, already in this app)
+ * at ~125 ms per MiB, bounded by the 10 MiB inline push cap.
  */
 export interface AssetScreener {
   screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict | AssetScreeningRejection>;

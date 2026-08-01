@@ -266,9 +266,23 @@ export function contractAuth(deps: DepsResolver): MiddlewareHandler<GatewayEnv> 
       );
     }
 
-    // Tenancy lifecycle: a suspended/deleted TENANT is authenticated-but-
-    // forbidden (403 `tenancy_suspended`), distinct from a suspended KEY (401).
+    // Tenancy lifecycle: a suspended/deleted TENANT — or any suspended ANCESTOR
+    // in the tenant → project → workspace chain — is authenticated-but-forbidden
+    // (403 `tenancy_suspended`), distinct from a suspended KEY (401).
+    //
+    // A lifecycle lookup that FAILS is 503, never an admission: Rust
+    // `LifecycleGateError::Unavailable`. Fail-open here would make "flap the
+    // control plane" a suspension bypass, so it is checked before `!admitted`
+    // (the string `"unavailable"` is truthy, and reading it as "admitted" is
+    // exactly the bug this ordering forbids).
     const lifecycle = await ports.lifecycle.admit(auth, operation);
+    if (lifecycle.admitted === "unavailable") {
+      throw new HttpError(
+        503,
+        "lifecycle_status_unavailable",
+        `tenancy lifecycle lookup failed: ${lifecycle.detail}`,
+      );
+    }
     if (!lifecycle.admitted) {
       throw new HttpError(403, lifecycle.code, lifecycle.message);
     }

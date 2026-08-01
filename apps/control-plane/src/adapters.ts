@@ -720,6 +720,20 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
   return new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
 }
 
+/**
+ * The CONTROL database handle, for the surfaces that must write a TYPED table
+ * another Worker reads by name (see {@link ControlPlaneDeps.controlDatabase}).
+ *
+ * Gated on the SAME `CONTROL_PLANE_STORE` switch as the store, the RBAC
+ * authorizer and the tenant router: `"memory"` means "run this deployment
+ * without the control database", and a handle that kept writing to it there
+ * would make one surface durable in a posture where nothing else is.
+ */
+export function resolveControlDatabase(env: ControlPlaneBindings): D1Database | null {
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return null;
+  return env.DB ?? null;
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -733,6 +747,7 @@ export function resolveDeps(
     rbac: resolveRbac(env),
     store,
     tenantDatabases: resolveTenantDatabases(env),
+    controlDatabase: resolveControlDatabase(env),
     runtime: new StoreRuntimeStatus(store),
     txtResolver: resolveTxtResolver(env),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does

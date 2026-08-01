@@ -99,12 +99,23 @@ function parseIp(raw: string): { value: bigint; isV6: boolean } | null {
   return value === null ? null : { value, isV6: false };
 }
 
+/**
+ * Rust `Ipv4Addr::from_str`. Four decimal octets, each 1–3 digits and <= 255,
+ * with **no leading zeros**: std refuses `010.0.0.1` deliberately, because an
+ * octal-looking octet is read as 10 by one parser and 8 by another, and that
+ * disagreement is the classic allowlist-bypass / SSRF primitive. This is the
+ * parser behind BOTH {@link IpCidr} (the pre-auth allowlist) and
+ * {@link resolveClientIp}'s `X-Forwarded-For` / `X-Real-IP` scan, so accepting
+ * a spelling Rust rejects would mean an attacker-supplied `010.0.0.1` is taken
+ * as a client identity here and discarded there.
+ */
 function parseIpv4(s: string): bigint | null {
   const parts = s.split(".");
   if (parts.length !== 4) return null;
   let value = 0n;
   for (const part of parts) {
     if (!/^\d{1,3}$/.test(part)) return null;
+    if (part.length > 1 && part.startsWith("0")) return null;
     const octet = Number.parseInt(part, 10);
     if (octet > 255) return null;
     value = (value << 8n) | BigInt(octet);

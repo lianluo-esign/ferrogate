@@ -79,12 +79,15 @@
  * A row without `binding_name` is "provisioned but not yet routable" and is
  * REFUSED, not fallen back — that is deliberate; see `./ports.ts`.
  *
- * ### The gate this wiring owes
+ * ### The gate this wiring owes — LANDED
  *
- * `test/tenancy/mount.spec.ts` carries the probe that goes green when line (1)
- * lands: it imports `GATEWAY_MIDDLEWARE` from `src/index.ts` and asserts an
+ * Wiring (1) is in `src/index.ts` (`GATEWAY_MIDDLEWARE`, after `guardrails()`),
+ * so the probe in `test/tenancy/mount.spec.ts` is a LIVE `test`, not the
+ * `test.todo` an earlier revision of this note asked a future commit to flip:
+ * it imports `GATEWAY_MIDDLEWARE` from `src/index.ts` and asserts an
  * unprovisioned tenant is refused rather than served from the shared database.
- * Flip its `test.todo` to `test` in the same commit as the wiring.
+ * Steps (2) and (3) stay deploy-time work, because a `[[d1_databases]]` stanza
+ * per tenant cannot be committed with real ids.
  * ===========================================================================
  */
 export {

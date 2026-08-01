@@ -36,6 +36,9 @@ import { describe, expect, it } from "vitest";
 import { PROMPT_TEMPLATES_VAR } from "../src/routes/prompts.js";
 import { SKILL_PACKAGES_VAR } from "../src/routes/skills.js";
 import * as entry from "../src/worker.js";
+import { BuiltinEicarScreener } from "../src/assets/ports.js";
+import { withSignatureVerification } from "../src/assets/signature-screener.js";
+
 
 function wranglerToml(): string {
   const raw = (env as unknown as { TEST_WRANGLER_TOML?: string }).TEST_WRANGLER_TOML;
@@ -209,5 +212,82 @@ describe("the operator config tables the tooling routes read", () => {
     const declared = vars();
     expect(declared.get(SKILL_PACKAGES_VAR)).toBe("[]");
     expect(declared.get(PROMPT_TEMPLATES_VAR)).toBe("[]");
+  });
+});
+
+describe("the asset publisher-signature policy vars", () => {
+  /**
+   * Wave 13 added `src/assets/signature-screener.ts` in front of the asset
+   * scanner. Its three bindings have the SAME inert-by-design shape as the
+   * skill/prompt tables above — with all three blank
+   * `withSignatureVerification` returns the inner screener by identity, so no
+   * behavioural test in `test/assets/**` can distinguish "declared blank" from
+   * "not declared", and the mount-mutation sweep reports removing them GREEN.
+   *
+   * So they are pinned HERE, on the two things that can actually rot:
+   *
+   *  1. DRIFT — the deploy config must name the exact three vars the code
+   *     reads. An operator who sets a var this Worker does not read gets a
+   *     signature gate that is silently off, which is the worst possible
+   *     failure mode for this particular feature.
+   *  2. POSTURE — the committed values must stay blank. `vitest` loads THIS
+   *     `wrangler.toml`, so a non-empty placeholder would start refusing or
+   *     relabeling pushes in the unit suite on a correct tree.
+   *
+   * The third case is the one that makes this a real gate rather than a
+   * spelling test: it feeds each DECLARED name back into the actual
+   * `withSignatureVerification` and requires it to change the composition.
+   * Rename the var in `src/` without renaming it here (or vice versa) and this
+   * goes red.
+   */
+  const SIGNATURE_VARS = [
+    "FERROGATE_ASSET_REQUIRE_SIGNATURE",
+    "FERROGATE_ASSET_PUBLISHER_ED25519_KEYS",
+    "FERROGATE_ASSET_PUBLISHER_MINISIGN_KEYS",
+  ] as const;
+
+  /**
+   * The `[vars]` table, re-parsed here rather than shared with the describe
+   * above so this gate keeps working if that one is ever reorganised.
+   */
+  function declaredSignatureVars(): Map<string, string> {
+    const out = new Map<string, string>();
+    let inVars = false;
+    for (const line of wranglerToml().split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#")) continue;
+      if (/^\[/.test(trimmed)) {
+        inVars = trimmed === "[vars]";
+        continue;
+      }
+      const match = /^(FERROGATE_ASSET_[A-Za-z0-9_]+)\s*=\s*"([^"]*)"/.exec(trimmed);
+      if (inVars && match !== null) out.set(match[1] as string, match[2] as string);
+    }
+    return out;
+  }
+
+  it("declares the exact three vars src/assets/signature*.ts reads", () => {
+    const declared = declaredSignatureVars();
+    expect([...declared.keys()].sort()).toEqual([...SIGNATURE_VARS].sort());
+  });
+
+  it("commits the inert OFF posture for all three", () => {
+    for (const name of SIGNATURE_VARS) {
+      expect(declaredSignatureVars().get(name), `${name} must be committed blank`).toBe("");
+    }
+  });
+
+  it("proves each DECLARED name is one the screener composition actually reads", () => {
+    const declared = [...declaredSignatureVars().keys()];
+    // Not vacuous: the loop below proves nothing on an empty list.
+    expect(declared.length).toBe(SIGNATURE_VARS.length);
+    const inner = new BuiltinEicarScreener();
+    expect(withSignatureVerification(inner, {})).toBe(inner);
+    for (const name of declared) {
+      // The switch takes a boolean word; the two key tables take key material.
+      const value = name.endsWith("REQUIRE_SIGNATURE") ? "1" : "publisher-a=AAAA";
+      const composed = withSignatureVerification(inner, { [name]: value });
+      expect(composed, `${name} is declared but nothing in src/ reads it`).not.toBe(inner);
+    }
   });
 });

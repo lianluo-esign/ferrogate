@@ -47,10 +47,26 @@
  * served a body produced by a provider that a fresh request would not have
  * used. That is a fidelity gap, not an isolation gap — the tenant, key, model
  * and body all still match — and it is bounded by `cache.ttl_secs`.
- * // PORT-TODO(inventory-request-path §1.7 "Caches"): close it by having
- * // `src/inference/` publish the RESOLVED provider + provider model onto the
- * // request context before dispatch, and fold both into this key. The seam is
- * // one `c.set()` in `inference/route-module.ts` plus two fields here.
+ * // PORT-TODO(inventory-request-path §1.7 "Caches"): NOT a platform limit, and
+ * // NOT the one-liner an earlier revision of this note claimed. That revision
+ * // said "one `c.set()` in `inference/route-module.ts` plus two fields here";
+ * // it is wrong, and the correction is recorded rather than left to mislead.
+ * //
+ * // A `c.set()` published by the inference module happens AFTER this
+ * // middleware has already run — `src/index.ts` mounts `responseCache` ahead
+ * // of the route handler (rate limit → guardrails → tenancy → CACHE → validate
+ * // → dispatch), which is the only order in which a cache can serve a HIT
+ * // without dispatching. So a variable written during dispatch cannot be an
+ * // input to the key that decided whether to dispatch at all.
+ * //
+ * // Closing it means moving model RESOLUTION (registry lookup + canary/shadow
+ * // selection + failover eligibility) ahead of the cache middleware, so the
+ * // physical provider is known before the lookup. That is a request-pipeline
+ * // reordering across two modules, with its own cost (a resolution on every
+ * // cached request) and its own risk (the reliability layer's breaker state is
+ * // read at resolution time), which is why it is a slice and not a line.
+ * // `registryFingerprint` covers every CONFIGURED rotation in the meantime;
+ * // the residue is runtime failover only, exactly as described above.
  *
  * ## What is ADDED to the Rust field set, and why
  *

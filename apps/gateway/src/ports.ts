@@ -167,11 +167,19 @@ export interface ApiKeyAuthenticatorPort {
  * Rust `ferrogate-storage/src/lifecycle_gate.rs`. Distinct from key suspension:
  * a *tenant/project/workspace* whose lifecycle status is suspended or deleted is
  * an authenticated-but-forbidden caller → **403**, with a code that names the
- * root cause (`tenancy_suspended` / `tenancy_deleted`).
+ * root cause (`tenancy_suspended` / `tenancy_deleted` / `tenancy_disabled`).
+ *
+ * The third variant is `LifecycleGateError::Unavailable` — a **503**, never a
+ * silent admission. Rust states the reason at the enum: "Fail-open here would
+ * hand every suspended tenant a trivial bypass (make the control plane flap and
+ * keep serving)." It is spelled the same way as {@link RbacDecision}'s
+ * `"unavailable"` so both outage arms read alike at the call site in
+ * `middleware/auth.ts`.
  */
 export type LifecycleDecision =
   | { readonly admitted: true }
-  | { readonly admitted: false; readonly code: string; readonly message: string };
+  | { readonly admitted: false; readonly code: string; readonly message: string }
+  | { readonly admitted: "unavailable"; readonly detail: string };
 
 export interface TenancyLifecycleGatePort {
   admit(auth: AuthContext, operation: ApiOperation): Promise<LifecycleDecision>;
@@ -248,19 +256,21 @@ export interface GatewayDeps {
  * Worker bindings this app reads. Deliberately tiny: real bindings (D1, KV, R2,
  * DO, Secrets Store) arrive with the adapters that back the ports above.
  *
- * The durable halves have landed for two of the four tables: the virtual-key
- * store is D1 `api_keys` on `DB` (`./keys/`) and the RBAC grant graph is D1
+ * The durable halves have landed for THREE of the four tables: the virtual-key
+ * store is D1 `api_keys` on `DB` (`./keys/`), the RBAC grant graph is D1
  * `permissions`/`roles`/`tenant_role_bindings` on `CONTROL_DB`
- * (`D1RbacAuthorizer`, `./adapters.ts`). In both cases the var below became the
+ * (`D1RbacAuthorizer`, `./adapters.ts`), and the tenancy lifecycle chain is
+ * `tenants` on `CONTROL_DB` + `projects`/`workspaces` on `DB`
+ * (`D1TenancyLifecycleGate`). For the two GRANT tables the var below became the
  * FALLBACK, consulted only on a durable not-found and never on a durable
- * failure.
+ * failure; `TENANCY_LIFECYCLE` is a DENY table, so it composes with
+ * `denyIfEitherDenies` instead — a refusal from either source refuses.
  *
  * PORT-TODO(inventory-edge-control §5.2): `SELF_HOSTED_WORKER_REGISTRY` still
  * carries a transport SECRET as a var. It moves to Cloudflare Secrets Store —
  * see the marker at the top of `./adapters.ts` for why that binding cannot be
- * exercised locally and what the shipped approximation is.
- * `TENANCY_LIFECYCLE` is the other var with no durable leg yet; the marker on
- * `ConfiguredTenancyLifecycleGate` names the tables it needs.
+ * exercised locally and what the shipped approximation is. It is now the ONLY
+ * var here with no durable leg.
  */
 export interface GatewayBindings {
   /** JSON array of durable/native virtual keys (see `adapters.ts`). */

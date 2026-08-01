@@ -43,6 +43,7 @@ import {
   type AssetMetadataStore,
   type AssetObjectStore,
   type AssetPresigner,
+  type AssetScreeningRequest,
   type AssetScreener,
   type AssetVisibility,
   PresignUnavailableError,
@@ -144,6 +145,29 @@ export interface AssetLimits {
    * silently routing bytes through the gateway.
    */
   readonly presignEnabled: boolean;
+  /**
+   * Whether the object store this service holds is a REAL bucket.
+   *
+   * `false` refuses the two operations that move object BYTES — the inline push
+   * and the inline pull — with the same `503 asset_bucket_unavailable` the
+   * presign family already answers. It exists because the failure it prevents
+   * is silent and permanent: with no `[[r2_buckets]] ASSETS` binding the
+   * service falls back to {@link InMemoryAssetObjectStore}, whose contents die
+   * with the isolate, while the METADATA row is written to D1 and survives. A
+   * push then reports 201 and every later pull answers "the stored asset object
+   * is missing from the object bucket" — a durable row pointing at bytes that
+   * no longer exist anywhere.
+   *
+   * `true` by default, because a service built with explicit `deps` (every unit
+   * suite, and `wrangler dev --local`, where miniflare really does emulate R2)
+   * has a store that works. Only `assetDepsFromEnv` — the composition root's
+   * half, the one that can observe an ABSENT binding — turns it off.
+   *
+   * The presign family is NOT gated on this separately: `presignEnabled`
+   * already requires the bucket binding AND the five `ASSET_S3_*` values, so it
+   * is false whenever this one is.
+   */
+  readonly objectStoreEnabled: boolean;
 }
 
 export const DEFAULT_ASSET_LIMITS: AssetLimits = {
@@ -151,6 +175,7 @@ export const DEFAULT_ASSET_LIMITS: AssetLimits = {
   presignMaxObjectBytes: 5 * 1024 * 1024 * 1024,
   presignTtlSeconds: 900,
   presignEnabled: false,
+  objectStoreEnabled: true,
 };
 
 /**
@@ -291,6 +316,12 @@ export interface AssetPushInput {
   readonly content: Uint8Array;
   /** `?channel=` — an optional channel move folded into the same request. */
   readonly channel?: string | undefined;
+  /**
+   * The `x-asset-signature*` detached publisher signature, when one was
+   * presented. Passed straight through to the screener, which owns the
+   * decision — the service never interprets it.
+   */
+  readonly signature?: AssetScreeningRequest["signature"];
 }
 
 export interface AssetPullInput {
@@ -722,6 +753,7 @@ export class AssetService {
       content: input.content,
       contentSha256: contentHash,
       nowUnix: now,
+      ...(input.signature !== undefined ? { signature: input.signature } : {}),
     });
     if (isScreeningRejection(screening)) {
       this.#record(
@@ -755,6 +787,15 @@ export class AssetService {
     const candidateKey = newAssetObjectKey(objectRef);
     const guard = this.#guardKey(candidateKey, caller.tenantId);
     if (guard) return guard;
+
+    // No bucket ⇒ refuse HERE: after content screening (a security gate a
+    // config error must never be able to skip) and immutability, but before the
+    // FIRST durable effect. The `put` below and the `createAssetWithinQuota`
+    // after it land in two different stores, and with no bucket only one of
+    // them survives the isolate — see `AssetLimits.objectStoreEnabled` for why
+    // a 201 there is worse than a 503 here.
+    if (!this.#limits.objectStoreEnabled) return objectStoreUnavailable();
+
     await this.#objects.put(candidateKey, bufferOf(input.content), {
       httpMetadata: { contentType },
     });
@@ -1962,6 +2003,11 @@ export class AssetService {
     }
     const guard = this.#guardKey(asset.storage_uri, tenantId);
     if (guard) return guard;
+    // With no bucket bound, `get` would consult an isolate-local Map and report
+    // the row's bytes "missing from the object bucket" — true, but it names the
+    // wrong cause and invites an operator to hunt for a deleted object. The
+    // bucket is not missing an object; there is no bucket.
+    if (!this.#limits.objectStoreEnabled) return objectStoreUnavailable();
     const object = await this.#objects.get(asset.storage_uri);
     if (object === null) {
       return fail(
@@ -1996,6 +2042,23 @@ function bucketUnavailable(): AssetFailure {
     503,
     "asset_bucket_unavailable",
     "the presigned large-file path requires an asset bucket to be configured",
+  );
+}
+
+/**
+ * The same Rust code for the INLINE family, with the cause named.
+ *
+ * Deliberately the same `asset_bucket_unavailable` code as the presign refusal:
+ * from the client's side it is one condition — this deployment has no object
+ * bucket — and splitting it would make a client handle two codes for one cause.
+ * The MESSAGE differs because the remedy is read by an operator, not a client.
+ */
+function objectStoreUnavailable(): AssetFailure {
+  return fail(
+    503,
+    "asset_bucket_unavailable",
+    "no asset object bucket is configured on this deployment; declare the ASSETS R2 binding " +
+      "before pushing or pulling asset bytes",
   );
 }
 

@@ -30,16 +30,8 @@
  * this app — they serve static HTML and read nothing.
  */
 import { z } from "zod";
-import {
-  type GroupModule,
-  type Handler,
-  createHandler,
-  crudGroup,
-  json,
-  raw,
-  resolveSpec,
-} from "./resource.js";
-import { SELF_HOSTED_WORKER_SPEC } from "./self_hosted_worker.js";
+import { type GroupModule, type Handler, crudGroup, json, raw } from "./resource.js";
+import { registerSelfHostedWorkerHandler } from "./self_hosted_worker.js";
 
 /**
  * The admin console shell.
@@ -83,10 +75,17 @@ const dashboard: Handler = (c) => raw(c, 200, "text/html; charset=utf-8", ADMIN_
 
 /**
  * `POST /admin/v1/status` — self-hosted worker registration, delegated to the
- * same collection `POST /admin/v1/self-hosted-workers` writes, so the two entry
+ * SAME handler `POST /admin/v1/self-hosted-workers` uses, so the two entry
  * points cannot diverge.
+ *
+ * It used to be a bare `createHandler` over the shared collection spec, which
+ * wrote only the document. That is now a real divergence rather than a cosmetic
+ * one: registration mints a transport credential and projects the typed
+ * `self_hosted_worker_registrations` row `apps/agent-runtime` authenticates
+ * against, so a worker registered through THIS alias would have been visible in
+ * the admin listing and able to authenticate nobody.
  */
-const registerWorker = createHandler(resolveSpec(SELF_HOSTED_WORKER_SPEC));
+const registerWorker = registerSelfHostedWorkerHandler;
 
 export const adminOverviewRoutes: GroupModule = crudGroup(
   "admin_overview",

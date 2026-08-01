@@ -232,15 +232,34 @@ export function d1ApiKeyPort(db: D1Database, options: D1ApiKeyPortOptions = {}):
  * spelling of `active` because Rust's stored row
  * (`StoredSelfHostedWorkerRegistration`) names it that way.
  *
- * PORT-TODO(inventory-edge-control §agent-worker §8.1) — KEPT, WRITE HALF NOT
- * PORTED: this module READS the registry. The control-plane registration /
- * rotation / deactivation verbs that WRITE it (Rust
- * `state_agent_runtime.rs::upsert_self_hosted_worker_registration`, reached
- * from the `/admin/v1/self-hosted-workers/*` surface) belong to
- * `apps/control-plane`, which this slice does not own, and no TS code writes
- * this table yet. Until they land, rows are provisioned out of band. The read
- * side is complete and fails closed on an empty table: an unprovisioned
- * deployment admits NO worker rather than any caller.
+ * ## The former `PORT-TODO(inventory-edge-control §agent-worker §8.1)` — CLOSED
+ *
+ * It read "WRITE HALF NOT PORTED": this module READS the registry, and **no TS
+ * code wrote this table**, so every deployment admitted NO worker on any of the
+ * six internal callbacks and rows had to be provisioned out of band.
+ *
+ * `apps/control-plane/src/store/worker_registry.ts` is the write half.
+ * `POST /admin/v1/self-hosted-workers` (and its `POST /admin/v1/status` alias)
+ * now mints a transport credential — Rust `generate_transport_token_secret`,
+ * 256 CSPRNG bits, hex — stores the admin document WITHOUT the secret, and
+ * projects the typed row read below into the same control database this Worker
+ * binds as `CONTROL_DB`. `/rotate` mints a FRESH secret (so a leak stops
+ * working) and `/heartbeat` re-projects `active` while PRESERVING the
+ * credential. The field names in {@link RegistrationDocument} are the contract
+ * between the two apps and are asserted from the writer's side by
+ * `apps/control-plane/test/worker-registry.test.ts`.
+ *
+ * The read side is unchanged and still fails closed on an empty table: an
+ * unprovisioned deployment admits NO worker rather than any caller.
+ *
+ * What is NOT ported, and is not a platform limit: there is no
+ * DEACTIVATION verb. The contract declares no `DELETE`/`PATCH` for
+ * `/admin/v1/self-hosted-workers`, so `active: false` is reachable only by
+ * registering with `status: "draining"`/`"inactive"`. Rust reaches it the same
+ * way (status is a field on the registration it upserts), so this is a contract
+ * surface gap rather than a port gap — closing it means adding the operation to
+ * `docs/openapi/runtime-api-contract.json`, which the anti-drift gate makes a
+ * deliberate act.
  */
 interface RegistrationDocument {
   readonly tenant_id?: unknown;

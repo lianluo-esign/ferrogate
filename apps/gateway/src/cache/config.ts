@@ -250,7 +250,7 @@ export function responseCachePolicyFromEnv(
     env?.GATEWAY_CACHE_DISABLED_MODELS ?? "",
     env?.GATEWAY_CACHE_DISABLED_API_KEYS ?? "",
     env?.GATEWAY_CACHE_DISABLED_PROFILES ?? "",
-  ].join(" ");
+  ].join("\0");
   const cached = POLICY_CACHE.get(key);
   if (cached !== undefined) return cached;
   const policy = responseCachePolicy(env);

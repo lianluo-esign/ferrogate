@@ -17,10 +17,56 @@
  * reproduced: the manage plane needs neither, and a half-implemented retry is a
  * duplicated-write hazard on a write-only API.
  *
- * This is a nothing-lost deferral, not a behavior gap: the surface below is
+ * FOR THIS PACKAGE this is a nothing-lost deferral: the surface below is
  * complete and tested for every call the backend makes. When
  * `@ferrogate/cloudflare` lands, this file becomes a re-export and the marker
  * is deleted.
+ *
+ * ## TREE-WIDE, HOWEVER, IT IS NOT NOTHING-LOST — recorded here because this is
+ * ## the only marker in the repo that names `ferrogate-cloudflare` at all
+ *
+ * That earlier "nothing-lost" claim was scoped to this file and read as though
+ * it covered the crate. It does not. A census of the TS tree
+ * (`grep -rn 'api.cloudflare.com' packages/ apps/`) finds exactly THREE
+ * independent partial clients and no shared one:
+ *   - this file (Secrets Store manage plane),
+ *   - `@ferrogate/storage`'s `tenant-rest.ts` (the D1 query API — on the request
+ *     path, as the fail-closed router for a tenant fleet larger than the
+ *     binding budget),
+ *   - `@ferrogate/providers`' `registry-cloudflare` surface (AI Gateway).
+ * Each decodes the `{success, errors, result}` envelope itself.
+ *
+ * MOST of the Rust crate is CORRECTLY absent, and it is worth writing down why
+ * so nobody "ports" it back: `ferrogate-cloudflare` exists because the Rust
+ * gateway ran OUTSIDE Cloudflare and had to reach every product over REST. This
+ * port runs INSIDE it, so `d1.rs`/`d1_proxy.rs` are superseded by the native D1
+ * binding (and, where a runtime-addressed uuid is unavoidable, by
+ * `tenant-rest.ts`), the Workers AI and AI Gateway calls by their bindings, and
+ * the agent memory/schedule/container REST hops by Durable Objects. Deleting a
+ * REST hop in favour of a binding is the POINT of the rewrite, not a gap.
+ *
+ * What is genuinely UNPORTED — no TS equivalent anywhere, and no other marker
+ * tracking it — is the slice a Worker still cannot do with a binding, because
+ * these are account-management operations rather than data-plane ones:
+ *   - `r2.rs` — per-tenant R2 bucket provisioning (`r2_bucket_name_for_tenant`,
+ *     create-bucket, the already-exists reconciliation codes);
+ *   - `r2_token.rs` — minting SCOPED, temporary R2 S3 credentials (the
+ *     read/write permission-group ids, jurisdiction), i.e. how a tenant gets
+ *     credentials narrower than the account token;
+ *   - `scopes.rs` + `CloudflareClient::preflight` — the required
+ *     token-permission-group list and the cheap GET that tells an operator
+ *     WHICH permission group is missing instead of failing at first use;
+ *   - the shared retry/backoff honoring Cloudflare's global ~1,200 req / 5 min
+ *     API limit, and the typed `AUTHENTICATION_CODES` / `MISSING_SCOPE_CODES`
+ *     error taxonomy, which all three clients above currently approximate.
+ *
+ * It is NOT closed here on purpose. Closing it means creating
+ * `packages/cloudflare` and giving those surfaces a real consumer; writing them
+ * into this package instead would add a fourth partial client, and writing them
+ * with no consumer would add exactly the implemented-tested-never-mounted dead
+ * code this port keeps getting bitten by. The R2 legs in particular have no
+ * caller in the TS tree today (no app provisions a bucket), so they must land
+ * WITH their control-plane call site or not at all.
  */
 import { z } from "zod";
 

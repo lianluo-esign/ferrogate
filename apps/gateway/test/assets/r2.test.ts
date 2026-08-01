@@ -22,9 +22,13 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import { assetDepsFromEnv, sigV4PresignerFromEnv } from "../../src/assets/index.js";
+import {
+  assetDepsFromEnv,
+  assetRouteModule,
+  sigV4PresignerFromEnv,
+} from "../../src/assets/index.js";
 import { GATEWAY_ROUTE_MODULES } from "../../src/index.js";
-import { ASSET_OPERATION_IDS } from "../../src/routes/index.js";
+import { ASSET_OPERATION_IDS, createGatewayApp } from "../../src/routes/index.js";
 
 const bindings = env as unknown as Record<string, unknown>;
 
@@ -167,14 +171,32 @@ describe("the presign family without S3 credentials", () => {
     expect(sigV4PresignerFromEnv(credentials)).not.toBeNull();
 
     // Credentials but no bucket binding: a presigned upload would stage bytes
-    // the commit step could never find, so the flag stays off.
-    expect(assetDepsFromEnv({ ...credentials }).limits).toBeUndefined();
-    // Bucket but no credentials: nothing can be signed at all.
-    expect(assetDepsFromEnv({ ASSETS: assetsBucket() }).limits).toBeUndefined();
+    // the commit step could never find, so the flag stays off — AND the inline
+    // family is off too, because the store it would fall back to is an
+    // isolate-local Map (see `AssetLimits.objectStoreEnabled`).
+    expect(assetDepsFromEnv({ ...credentials }).limits).toEqual({
+      objectStoreEnabled: false,
+    });
+    // Bucket but no credentials: nothing can be SIGNED, but the bucket really
+    // holds bytes, so the inline family stays on.
+    expect(assetDepsFromEnv({ ASSETS: assetsBucket() }).limits).toEqual({
+      objectStoreEnabled: true,
+    });
     // Both: on.
     expect(assetDepsFromEnv({ ...credentials, ASSETS: assetsBucket() }).limits).toEqual({
+      objectStoreEnabled: true,
       presignEnabled: true,
     });
+    // The developer escape hatch, and ONLY for the exact string "1".
+    expect(assetDepsFromEnv({ FG_DEV_IN_MEMORY_PORTS: "1" }).limits).toEqual({
+      objectStoreEnabled: true,
+    });
+    for (const value of ["0", "true", "yes", "", " 1 "]) {
+      expect(
+        assetDepsFromEnv({ FG_DEV_IN_MEMORY_PORTS: value }).limits,
+        `FG_DEV_IN_MEMORY_PORTS=${JSON.stringify(value)} must not open the in-memory store`,
+      ).toEqual({ objectStoreEnabled: false });
+    }
   });
 
   test("the deployed env presigns nothing until an operator binds credentials", async () => {
@@ -205,5 +227,139 @@ describe("composition root — the asset module is wired to the bindings", () =>
     // binding, so removing `depsFromEnv: assetDepsFromEnv` from `src/index.ts`
     // is caught even if somebody later makes the fallback store durable.
     expect(assetDepsFromEnv(bindings).objects).toBe(bindings.ASSETS);
+  });
+});
+
+/**
+ * THE UNCONFIGURED-BUCKET POSTURE — what a deployment does with NO `ASSETS`.
+ *
+ * This is not hypothetical. `docs/rewrite/CLOUD-VERIFICATION.md` §B2 offers
+ * exactly this as a resolution for the single authorised live deploy: "delete
+ * the `[[r2_buckets]]` stanza for this one verification", on the stated
+ * expectation that "the 18 asset ops answer `503 asset_bucket_unavailable`".
+ *
+ * Before this file, only FOUR of them did — the presign family, gated on
+ * `presignEnabled`. The inline push fell back to `InMemoryAssetObjectStore`
+ * and answered **200**, while its metadata row went to D1 and survived; every
+ * later pull then reported the object "missing from the object bucket". A
+ * durable pointer to bytes that never existed anywhere is strictly worse than
+ * a refusal, and no test held the difference, because every suite either binds
+ * the real bucket or substitutes a working store.
+ *
+ * These tests run the app the composition root builds (`assetRouteModule({
+ * depsFromEnv: assetDepsFromEnv })`, verbatim from `src/index.ts`) against an
+ * env with no `ASSETS`, which is the ONE thing `SELF.fetch` cannot express —
+ * `wrangler.toml` declares the binding, so the deployed app always has it.
+ */
+describe("no ASSETS binding ⇒ 503, never a 200 whose bytes evaporate", () => {
+  const ENV = {
+    GATEWAY_NATIVE_API_KEYS: JSON.stringify([
+      {
+        key: "fg_nobucket",
+        id: "key_nobucket",
+        tenant_id: "tenant_nb",
+        scopes: ["assets.read", "assets.write"],
+      },
+    ]),
+    ASSET_ENTITLEMENTS: JSON.stringify({ tenant_nb: { asset_hosting_enabled: true } }),
+  };
+
+  function call(
+    path: string,
+    init: RequestInit,
+    overrides: Record<string, unknown> = {},
+  ): Promise<Response> {
+    const { app } = createGatewayApp({
+      modules: [assetRouteModule({ depsFromEnv: assetDepsFromEnv })],
+    });
+    return Promise.resolve(
+      app.request(
+        `${BASE}${path}`,
+        {
+          ...init,
+          headers: new Headers({
+            authorization: "Bearer fg_nobucket",
+            ...(init.headers as Record<string, string> | undefined),
+          }),
+        },
+        { ...ENV, ...overrides },
+      ),
+    );
+  }
+
+  test("the inline PUSH refuses with asset_bucket_unavailable", async () => {
+    const response = await call("/v1/assets/skill/nb/1.0.0", {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: "bytes that must not be accepted",
+    });
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("asset_bucket_unavailable");
+    expect(body.error.message).toContain("ASSETS");
+  });
+
+  test("and it wrote NO metadata row — the refusal is before any durable effect", async () => {
+    await call("/v1/assets/skill/nb_row/1.0.0", {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: "bytes",
+    });
+    // Same env, so the same (in-memory) metadata store: a row created by the
+    // push above would be listed here. Nothing may be.
+    const listed = await call("/v1/assets/skill", { method: "GET" });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ object: "list", data: [] });
+  });
+
+  test("content screening still runs FIRST — a config error cannot skip a security gate", async () => {
+    // EICAR under `BuiltinEicarScreener` is quarantined rather than refused
+    // (see `assets/ports.ts`), so what this pins is the ORDER: were the bucket
+    // check placed at the top of `putAsset`, an infected push would be answered
+    // by the missing bucket instead of by the scanner, and a deployment whose
+    // R2 binding lapsed would stop screening entirely.
+    const eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    const response = await call("/v1/assets/skill/nb_eicar/1.0.0", {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: eicar,
+    });
+    expect(response.status).toBe(503);
+    // The scanner ran (the quarantine verdict is not a refusal), and the bucket
+    // check is what refused — proven by the code, which only it produces.
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "asset_bucket_unavailable",
+    );
+  });
+
+  test("FG_DEV_IN_MEMORY_PORTS=1 restores the local-dev in-memory store", async () => {
+    // The escape hatch a developer running `wrangler dev` with no bindings
+    // needs, and the var `CLOUD-VERIFICATION.md` §B1 already requires be set to
+    // "0" for the live deploy. It is opt-IN: nothing above set it.
+    const response = await call(
+      "/v1/assets/skill/nb_dev/1.0.0",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream" },
+        body: "bytes",
+      },
+      { FG_DEV_IN_MEMORY_PORTS: "1" },
+    );
+    expect(response.status).toBe(200);
+  });
+
+  test("CONTROL: a BOUND bucket in the same shape is accepted", async () => {
+    // Without this arm the 503s above would prove only that this bespoke app
+    // refuses everything.
+    const response = await call(
+      "/v1/assets/skill/nb_bound/1.0.0",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream" },
+        body: "bytes",
+      },
+      { ASSETS: assetsBucket() },
+    );
+    expect(response.status).toBe(200);
   });
 });

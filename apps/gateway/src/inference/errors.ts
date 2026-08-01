@@ -68,9 +68,22 @@ export function errorEnvelope(
  * exactly as the Rust code did.
  *
  * PORT-TODO(inventory-request-path §1.3): `apply_cors_headers` runs on EVERY
- * Rust-originated response (`responses.rs`, 9 call sites) and is **not ported
- * anywhere in `apps/gateway`** — re-checked, and the handoff this comment used
- * to describe as done has not been taken.
+ * Rust-originated response (`responses.rs`, 9 call sites — re-counted this pass,
+ * still 9) and is **not ported anywhere in `apps/gateway`**.
+ *
+ * ## THE ONE GENUINELY MISSING BEHAVIOR IN THIS POCKET
+ *
+ * Re-verified wave 5: `grep -rl "access-control-allow-origin" apps/**\/*.ts`
+ * returns `apps/control-plane/src/middleware/cors.ts` (+ its test) and THIS
+ * comment. Nothing under `apps/gateway/src/` emits a CORS header.
+ *
+ * This is NOT a platform limit and NOT a reproduced-Rust quirk — Workers do
+ * this trivially, and `apps/control-plane` already does it. It is the only
+ * marker in `inference/` + `streaming/` that names real, portable, unwritten
+ * work, and it has now survived five burndown waves for ONE reason: every
+ * agent that could write it is scoped to a directory that must not own it.
+ * Consequence, stated plainly: a browser cannot call this gateway
+ * cross-origin at all.
  *
  * Still correct that it does not belong here: CORS is app-wide, it must also
  * cover the ~245 non-inference operations, and it needs an `OPTIONS` preflight

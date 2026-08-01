@@ -89,6 +89,8 @@ const STATUS_BY_CODE: Readonly<Record<string, number>> = {
   inactive_self_hosted_worker: 403,
   tenancy_suspended: 403,
   tenancy_deleted: 403,
+  tenancy_disabled: 403,
+  tenancy_inactive: 403,
   guardrail_rbac_denied: 403,
   // --- 4xx: request shape ---------------------------------------------------
   invalid_request: 400,
@@ -103,6 +105,7 @@ const STATUS_BY_CODE: Readonly<Record<string, number>> = {
   network_access_misconfigured: 503,
   external_auth_unavailable: 503,
   guardrail_rbac_unavailable: 503,
+  lifecycle_status_unavailable: 503,
   upstream_error: 502,
   internal_error: 500,
 };

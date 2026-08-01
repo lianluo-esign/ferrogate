@@ -282,10 +282,10 @@ export interface McpSessionStorePort {
  * The tenant id is part of the name, so two tenants configuring an upstream
  * with the SAME `name` never share a session — the cross-tenant isolation
  * property, enforced by addressing rather than by a check that can be
- * forgotten. ` ` separates the fields because it cannot appear in either.
+ * forgotten. `\0` separates the fields because it cannot appear in either.
  */
 export function sessionKey(tenantId: string, serverName: string): string {
-  return `${tenantId} ${serverName}`;
+  return `${tenantId}\0${serverName}`;
 }
 
 /**

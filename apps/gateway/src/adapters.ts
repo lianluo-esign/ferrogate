@@ -9,10 +9,13 @@
  * today, and they are swapped for D1/Secrets-Store-backed adapters — with no
  * change to `middleware/auth.ts` — as soon as the wave-2 packages land.
  *
- * Two of the four ports have since grown a DURABLE leg in this file, each in
- * front of its config table: {@link D1RbacAuthorizer} (CONTROL D1
- * Permission → Role → TenantRoleBinding) and, from `./keys/`,
- * `d1ApiKeyResolverFromEnv` (TENANT D1 `api_keys`). See {@link depsFromEnv}.
+ * THREE of the four ports have since grown a DURABLE leg, each in front of its
+ * config table: {@link D1RbacAuthorizer} (CONTROL D1
+ * Permission → Role → TenantRoleBinding), {@link D1TenancyLifecycleGate} (the
+ * full tenant → project → workspace `status` walk across CONTROL + TENANT D1)
+ * and, from `./keys/`, `d1ApiKeyResolverFromEnv` (TENANT D1 `api_keys`). See
+ * {@link depsFromEnv} — and note that the two GRANT tables compose by
+ * fallback while the one DENY table composes by {@link denyIfEitherDenies}.
  *
  * PORT-TODO(inventory-edge-control §5.2): the SELF-HOSTED WORKER TRANSPORT
  * SECRET is the one credential still compared as a plaintext var here
@@ -29,6 +32,13 @@
  * differs from Secrets Store in blast radius and rotation story, not in the
  * comparison itself.
  */
+import {
+  type LifecycleStatus as LifecycleStatusValue,
+  lifecycleStatusAllowsRecovery,
+  lifecycleStatusAllowsRequests,
+  parseLifecycleStatus,
+} from "@ferrogate/storage";
+import type { ApiOperation } from "./contract.js";
 import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
 import type {
   ApiKeyAuthenticatorPort,
@@ -291,68 +301,462 @@ export class ConfiguredApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
 // Tenancy lifecycle gate
 // ---------------------------------------------------------------------------
 
-export type LifecycleStatus = "active" | "suspended" | "deleted" | "disabled";
+/**
+ * Re-exported from `@ferrogate/storage` so this file has ONE vocabulary.
+ *
+ * It used to be a private copy of the same four strings. That is exactly the
+ * duplication that lets one half of a decision drift from the other, and the
+ * chain walk below reads statuses out of three different tables — so the parse
+ * and the three seam predicates all come from the crate that owns the column.
+ */
+export type { LifecycleStatus } from "@ferrogate/storage";
 
 /**
- * Rust `ferrogate-storage/src/lifecycle_gate.rs`, narrowed to the tenant tier.
- * Refusals name the ROOT cause so "your account is suspended, pay the bill" is
- * distinguishable from "you pointed a key at something that does not exist".
+ * Which #514 seam an authentication runs — Rust `LifecycleAdmission`
+ * (`auth.rs:1159`) over `ferrogate_storage::LifecycleSeam`.
  *
- * PORT-TODO(inventory-data-billing §lifecycle): walk the full
- * tenant → project → workspace chain from D1, and honour the `Permissive`
- * admission the lifecycle status PUT/PATCH routes use to turn a hierarchy back
- * on. This adapter reads the TENANT tier only.
+ * `"request"` is every ordinary route: `suspended`, `disabled` and `deleted`
+ * all deny. `"recovery"` is the handful of routes that exist to turn an OFF
+ * hierarchy back ON, where `disabled` — the tenant's own self-service switch —
+ * is admitted and nothing else is.
  *
- * Not a platform limit; blocked on the CHAIN, and it is a widening-risk
- * decision rather than a mechanical one. The CONTROL migration has `tenants`,
- * but the per-tier `lifecycle_status` columns and the project/workspace rows
- * this needs are a `sql/d1-ts` + `packages/storage` slice, neither of which is
- * this app's to write. The consequence of the gap is stated precisely so it is
- * not mistaken for parity: a SUSPENDED PROJECT inside an ACTIVE TENANT is
- * admitted today, where Rust refuses it with `403 tenancy_suspended`. It fails
- * OPEN for the sub-tenant tiers and CLOSED for the tenant tier, which is why
- * the tenant tier was ported first.
+ * Rust carries it as a parameter chosen at the CALL SITE rather than derived
+ * inside the gate, because `finalize_auth` is reached from every auth source
+ * and knows nothing about routing. This port has the opposite shape: the guard
+ * is table-driven off the contract and already holds the matched
+ * {@link ApiOperation}, so the same choice is expressed as a table of
+ * `operation_id`s. Same decision, same three routes, read from the contract
+ * instead of from three hand-edited handler bodies.
+ */
+export type LifecycleSeam = "request" | "recovery";
+
+/**
+ * The contract operations that run the RECOVERY seam.
+ *
+ * Rust calls `authenticate_for_lifecycle_recovery` from exactly three handler
+ * arms (`server/virtual_keys.rs:435/1194/1819`), each of which serves
+ * `Method::PUT | Method::PATCH` on a tenant-account / project / workspace row.
+ * The TS contract splits every PUT/PATCH pair into two operation ids, so three
+ * Rust arms are the four ids below plus the tenant-account pair, which the
+ * runtime contract does not publish on this Worker (`/admin/v1/tenants` is
+ * list-only here) — naming an id that does not exist would be a lie, so the set
+ * carries what the contract actually has.
+ *
+ * Why the carve-out is scoped to these and not to the whole deny set: the
+ * alternative — dropping `disabled` from the request-time deny list entirely —
+ * would let a disabled project keep serving `/v1/chat/completions`, which is
+ * the whole point of the switch. Scoping it to the reversal routes keeps the
+ * switch real AND keeps it reversible; without it a tenant that disabled the
+ * project its console key is scoped to could never reach the PUT that undoes
+ * it (a one-way door out of a reversible state — Rust #514 finding 5).
+ */
+export const LIFECYCLE_RECOVERY_OPERATIONS: ReadonlySet<string> = new Set([
+  "replaceProject",
+  "updateProject",
+  "replaceWorkspace",
+  "updateWorkspace",
+]);
+
+/** Rust `LifecycleAdmission::seam`, resolved from the matched operation. */
+export function lifecycleSeamFor(operation: ApiOperation | undefined): LifecycleSeam {
+  return operation !== undefined && LIFECYCLE_RECOVERY_OPERATIONS.has(operation.operationId)
+    ? "recovery"
+    : "request";
+}
+
+/** Rust `LifecycleSeam::allows`. */
+export function lifecycleSeamAllows(seam: LifecycleSeam, status: LifecycleStatusValue): boolean {
+  return seam === "recovery"
+    ? lifecycleStatusAllowsRecovery(status)
+    : lifecycleStatusAllowsRequests(status);
+}
+
+/** One resolved ancestor in the chain — Rust `LifecycleRef`. */
+export interface LifecycleRef {
+  /** `"tenant"` / `"project"` / `"workspace"`, used verbatim in the message. */
+  readonly kind: "tenant" | "project" | "workspace";
+  readonly id: string;
+  readonly status: LifecycleStatusValue;
+}
+
+/**
+ * Rust `LifecycleRejection::code` — distinguishable per state, so a client can
+ * tell "your account is suspended, pay the bill" from "this project is off".
+ *
+ * The `Attach` seam's `inactive_tenancy_reference` is deliberately absent: that
+ * seam is row CREATION (minting a key under an existing hierarchy), which this
+ * Worker's request-time guard never runs.
+ */
+export function lifecycleRejectionCode(status: LifecycleStatusValue): string {
+  switch (status) {
+    case "suspended":
+      return "tenancy_suspended";
+    case "disabled":
+      return "tenancy_disabled";
+    case "deleted":
+      return "tenancy_deleted";
+    default:
+      // Unreachable: an active status never produces a rejection. Kept total
+      // rather than thrown so a future variant cannot turn this into a 500.
+      return "tenancy_inactive";
+  }
+}
+
+/** Rust `LifecycleRejection::message` for the Request/Recovery seams. */
+export function lifecycleRejectionMessage(reference: LifecycleRef): string {
+  return (
+    `${reference.kind} ${reference.id} is ${reference.status}; ` +
+    "requests authenticated against this tenancy chain are refused"
+  );
+}
+
+/**
+ * Rust `check_lifecycle_chain`.
+ *
+ * `chain` MUST be ordered shallowest-first (tenant, then project, then
+ * workspace) so the rejection names the ROOT cause: when an operator suspends a
+ * tenant and the cascade marks its project and workspace too, the caller is
+ * told the TENANT is suspended rather than being sent chasing the workspace.
+ * {@link resolveLifecycleChain} is the only supported way to build one.
+ */
+export function checkLifecycleChain(
+  seam: LifecycleSeam,
+  chain: readonly LifecycleRef[],
+): LifecycleDecision {
+  for (const reference of chain) {
+    if (!lifecycleSeamAllows(seam, reference.status)) {
+      return {
+        admitted: false,
+        code: lifecycleRejectionCode(reference.status),
+        message: lifecycleRejectionMessage(reference),
+      };
+    }
+  }
+  return { admitted: true };
+}
+
+/**
+ * The `tenant → project → workspace` ids a caller declares — Rust
+ * `TenancyRefs`. Passed as one value rather than three positional strings that
+ * are trivially transposed at a call site.
+ */
+export interface TenancyRefs {
+  readonly tenantId?: string | null | undefined;
+  readonly projectId?: string | null | undefined;
+  readonly workspaceId?: string | null | undefined;
+}
+
+/** Rust `present`: trim, and treat blank as absent. */
+function presentId(value: string | null | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+function pushUnique(ids: string[], candidate: string | null | undefined): void {
+  const value = presentId(candidate);
+  if (value === undefined || ids.includes(value)) return;
+  ids.push(value);
+}
+
+/** A `projects` / `workspaces` / `tenants` row, narrowed to what the gate reads. */
+interface LifecycleRow {
+  readonly id: string;
+  readonly status: string;
+  readonly tenant_id?: string | null;
+  readonly project_id?: string | null;
+}
+
+/**
+ * The three row reads {@link resolveLifecycleChain} needs — Rust
+ * `LifecycleRowSource`, a trait for the same reason it is an interface here: a
+ * test can implement a FAILING source to hold the fail-closed claim. Rust says
+ * outright that, as originally landed, no test held it (swapping the error
+ * mapping for `unwrap_or_default()` changed no assertion), so
+ * `test/lifecycle-chain.test.ts` implements a throwing source and mutation is
+ * what proves it bites.
+ */
+export interface LifecycleRowSource {
+  tenantRow(id: string): Promise<LifecycleRow | null>;
+  projectRow(id: string): Promise<LifecycleRow | null>;
+  workspaceRow(id: string): Promise<LifecycleRow | null>;
+}
+
+/**
+ * Rust `resolve_lifecycle_chain` — resolve the status of every row in the
+ * caller's tenancy chain, shallowest first, **walking the hierarchy rather than
+ * the caller's declaration**.
+ *
+ * That distinction is the whole bug Rust's second landing fixed, and it is
+ * reproduced rather than re-derived: three independent lookups that push only
+ * the rows the caller NAMED mean a credential declaring only a `project_id`
+ * (entirely legal — a native key's tenant id is optional) yields the chain
+ * `[project(active)]` and the suspended TENANT above it is never read. So:
+ *
+ *  1. resolve the declared workspace; its row carries `project_id` and
+ *     `tenant_id`, so its ancestors join the chain even when the caller named
+ *     neither;
+ *  2. resolve every candidate project — the declared one AND the workspace's
+ *     parent — each of which carries `tenant_id`;
+ *  3. resolve every candidate tenant — the declared one AND every ancestor
+ *     discovered above.
+ *
+ * Declared and derived ids are UNIONed, never substituted: when a caller names
+ * a tenant that disagrees with the row's own parent, BOTH are checked and
+ * either one being inactive denies. There is no ordering in which a suspended
+ * ancestor is skipped.
+ *
+ * An id that is absent, blank, or names no row is SKIPPED — absence is not
+ * suspension. Inventing a denial there would make a typo indistinguishable from
+ * a suspension, and the api-key tenancy rules already treat a dangling
+ * reference as "resolves to nothing".
+ */
+export async function resolveLifecycleChain(
+  source: LifecycleRowSource,
+  refs: TenancyRefs,
+): Promise<LifecycleRef[]> {
+  const tenantIds: string[] = [];
+  const projectIds: string[] = [];
+  const workspaceRows: LifecycleRow[] = [];
+
+  pushUnique(tenantIds, refs.tenantId);
+  pushUnique(projectIds, refs.projectId);
+
+  const workspaceId = presentId(refs.workspaceId);
+  if (workspaceId !== undefined) {
+    const workspace = await source.workspaceRow(workspaceId);
+    if (workspace !== null) {
+      // Backfill from the row itself: this is what makes the walk a walk.
+      pushUnique(projectIds, workspace.project_id);
+      pushUnique(tenantIds, workspace.tenant_id);
+      workspaceRows.push(workspace);
+    }
+  }
+
+  const projectRows: LifecycleRow[] = [];
+  // Indexed, not `for…of`: step 2 appends tenant ids discovered from a project
+  // row, and a project row may itself be reached only via the workspace above.
+  for (let index = 0; index < projectIds.length; index += 1) {
+    const project = await source.projectRow(projectIds[index] as string);
+    if (project !== null) {
+      pushUnique(tenantIds, project.tenant_id);
+      projectRows.push(project);
+    }
+  }
+
+  const chain: LifecycleRef[] = [];
+  for (const tenantId of tenantIds) {
+    const tenant = await source.tenantRow(tenantId);
+    if (tenant !== null) {
+      chain.push({ kind: "tenant", id: tenant.id, status: parseLifecycleStatus(tenant.status) });
+    }
+  }
+  for (const project of projectRows) {
+    chain.push({ kind: "project", id: project.id, status: parseLifecycleStatus(project.status) });
+  }
+  for (const workspace of workspaceRows) {
+    chain.push({
+      kind: "workspace",
+      id: workspace.id,
+      status: parseLifecycleStatus(workspace.status),
+    });
+  }
+  return chain;
+}
+
+/**
+ * The operator-authored `[vars]` lifecycle table — the TENANT tier only.
+ *
+ * Rust has no config-file lifecycle table at all; this is a port-local
+ * bootstrap in the same role `GATEWAY_STATIC_API_KEYS` plays for credentials,
+ * and {@link D1TenancyLifecycleGate} is the faithful leg. It is composed with
+ * {@link denyIfEitherDenies}, so it can only ever ADD a refusal — never
+ * authorize past a durable one.
  */
 export class ConfiguredTenancyLifecycleGate implements TenancyLifecycleGatePort {
-  readonly #statuses: Readonly<Record<string, LifecycleStatus>>;
+  readonly #statuses: Readonly<Record<string, LifecycleStatusValue>>;
 
-  constructor(statuses: Readonly<Record<string, LifecycleStatus>>) {
+  constructor(statuses: Readonly<Record<string, LifecycleStatusValue>>) {
     this.#statuses = statuses;
   }
 
   static fromEnv(env: GatewayBindings): ConfiguredTenancyLifecycleGate {
     return new ConfiguredTenancyLifecycleGate(
-      parseJsonVar<Record<string, LifecycleStatus>>(env.TENANCY_LIFECYCLE, {}),
+      parseJsonVar<Record<string, LifecycleStatusValue>>(env.TENANCY_LIFECYCLE, {}),
     );
   }
 
-  async admit(auth: AuthContext): Promise<LifecycleDecision> {
+  async admit(auth: AuthContext, operation?: ApiOperation): Promise<LifecycleDecision> {
     const scope = callerScope(auth);
     if (scope.kind === "platform_operator") return { admitted: true };
-    const status = this.#statuses[scope.tenantId];
-    switch (status) {
-      case "suspended":
-        return {
-          admitted: false,
-          code: "tenancy_suspended",
-          message: `tenant ${scope.tenantId} is suspended`,
-        };
-      case "deleted":
-        return {
-          admitted: false,
-          code: "tenancy_deleted",
-          message: `tenant ${scope.tenantId} is deleted`,
-        };
-      case "disabled":
-        return {
-          admitted: false,
-          code: "tenancy_disabled",
-          message: `tenant ${scope.tenantId} is disabled`,
-        };
-      default:
-        return { admitted: true };
-    }
+    const raw = this.#statuses[scope.tenantId];
+    if (raw === undefined) return { admitted: true };
+    return checkLifecycleChain(lifecycleSeamFor(operation), [
+      { kind: "tenant", id: scope.tenantId, status: parseLifecycleStatus(raw) },
+    ]);
   }
+}
+
+/** Binding name of the TENANT D1 holding `projects` / `workspaces`. */
+export const TENANT_DATABASE_BINDING = "DB";
+
+/** The three statements the durable gate issues. Exported so a test can pin them. */
+export const LIFECYCLE_TENANT_SQL = "SELECT id, status FROM tenants WHERE id = ?1";
+export const LIFECYCLE_PROJECT_SQL = "SELECT id, status, tenant_id FROM projects WHERE id = ?1";
+export const LIFECYCLE_WORKSPACE_SQL =
+  "SELECT id, status, tenant_id, project_id FROM workspaces WHERE id = ?1";
+
+/** The `D1Database` subset the lifecycle reads need. A live binding fits. */
+export interface LifecycleDatabase {
+  prepare(sql: string): {
+    bind(...values: unknown[]): { first(): Promise<unknown> };
+  };
+}
+
+function isLifecycleDatabase(value: unknown): value is LifecycleDatabase {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as LifecycleDatabase).prepare === "function"
+  );
+}
+
+function asLifecycleRow(value: unknown): LifecycleRow | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.id !== "string") return null;
+  return {
+    id: row.id,
+    // A NULL/absent `status` is not a decision — `parseLifecycleStatus` reads
+    // it as `active` (the fail-OPEN read default #514 chose deliberately, so
+    // the decorative pre-#514 rows do not revoke every existing tenant).
+    status: typeof row.status === "string" ? row.status : "",
+    tenant_id: typeof row.tenant_id === "string" ? row.tenant_id : null,
+    project_id: typeof row.project_id === "string" ? row.project_id : null,
+  };
+}
+
+/**
+ * The two-database row source: `tenants` lives in CONTROL, `projects` and
+ * `workspaces` are TENANT data (see the split rule in `sql/d1-ts/`).
+ */
+export class D1LifecycleRowSource implements LifecycleRowSource {
+  readonly #control: LifecycleDatabase | undefined;
+  readonly #tenant: LifecycleDatabase | undefined;
+
+  constructor(control: LifecycleDatabase | undefined, tenant: LifecycleDatabase | undefined) {
+    this.#control = control;
+    this.#tenant = tenant;
+  }
+
+  async tenantRow(id: string): Promise<LifecycleRow | null> {
+    if (this.#control === undefined) return null;
+    return asLifecycleRow(await this.#control.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+  }
+
+  async projectRow(id: string): Promise<LifecycleRow | null> {
+    if (this.#tenant === undefined) return null;
+    return asLifecycleRow(await this.#tenant.prepare(LIFECYCLE_PROJECT_SQL).bind(id).first());
+  }
+
+  async workspaceRow(id: string): Promise<LifecycleRow | null> {
+    if (this.#tenant === undefined) return null;
+    return asLifecycleRow(await this.#tenant.prepare(LIFECYCLE_WORKSPACE_SQL).bind(id).first());
+  }
+}
+
+/**
+ * Rust `check_usable_tenancy` over D1 — the full tenant → project → workspace
+ * walk, at the request-time seam.
+ *
+ * Three departures, all stated:
+ *
+ *  - a **platform operator** is waved through before any query, matching every
+ *    Rust call site (an operator key carries no tenancy chain, so Rust never
+ *    gates it either);
+ *  - a **lookup failure** answers `admitted: "unavailable"` → 503
+ *    `lifecycle_status_unavailable`, and does NOT fall through to the config
+ *    table. This is `LifecycleGateError::Unavailable`, and Rust names the
+ *    reason: fail-open would hand every suspended tenant a trivial bypass;
+ *  - the `projects` / `workspaces` reads go to the DEFAULT `DB` binding. Under
+ *    `GATEWAY_TENANT_DB_ROUTING = "off"` (the shipped posture) that IS the
+ *    tenant database and the walk is complete. Under per-tenant routing the
+ *    rows live in the tenant's own database, which `src/tenancy/` resolves
+ *    only AFTER this guard has run — deliberately, since the router refuses an
+ *    unprovisioned tenant and running it inside the auth guard would turn "not
+ *    yet provisioned" into an authentication failure. See
+ *    {@link lifecycleRowSourceFromEnv} for the one line that changes when the
+ *    order is revisited.
+ */
+export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
+  readonly #source: LifecycleRowSource;
+
+  constructor(source: LifecycleRowSource) {
+    this.#source = source;
+  }
+
+  /** `null` when NEITHER database is bound, so the caller keeps its config path. */
+  static fromEnv(env: Record<string, unknown>): D1TenancyLifecycleGate | null {
+    const source = lifecycleRowSourceFromEnv(env);
+    return source === null ? null : new D1TenancyLifecycleGate(source);
+  }
+
+  async admit(auth: AuthContext, operation?: ApiOperation): Promise<LifecycleDecision> {
+    const scope = callerScope(auth);
+    if (scope.kind === "platform_operator") return { admitted: true };
+
+    let chain: readonly LifecycleRef[];
+    try {
+      chain = await resolveLifecycleChain(this.#source, {
+        tenantId: auth.tenancy.tenantId,
+        projectId: auth.tenancy.projectId,
+        workspaceId: auth.tenancy.workspaceId,
+      });
+    } catch (error) {
+      return {
+        admitted: "unavailable",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+    return checkLifecycleChain(lifecycleSeamFor(operation), chain);
+  }
+}
+
+/** `null` when neither `CONTROL_DB` nor `DB` is bound. */
+export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): LifecycleRowSource | null {
+  const control = env[CONTROL_DATABASE_BINDING];
+  const tenant = env[TENANT_DATABASE_BINDING];
+  const controlDb = isLifecycleDatabase(control) ? control : undefined;
+  const tenantDb = isLifecycleDatabase(tenant) ? tenant : undefined;
+  if (controlDb === undefined && tenantDb === undefined) return null;
+  return new D1LifecycleRowSource(controlDb, tenantDb);
+}
+
+/**
+ * Compose two lifecycle gates so a refusal from EITHER refuses, and an outage
+ * from either is an outage.
+ *
+ * This is deliberately NOT the `durable-first, fall back on not-found` shape
+ * that {@link D1RbacAuthorizer} and the key resolver use, and the asymmetry is
+ * the point: RBAC and credentials are GRANT tables, where a second source can
+ * only widen, so consulting the fallback on a miss is safe. A lifecycle table
+ * is a DENY table. "Fall back when the durable leg admitted" would mean the
+ * `TENANCY_LIFECYCLE` var could never suspend a tenant that D1 says is active,
+ * and "stop when the durable leg admitted" would mean the var could never
+ * suspend anything at all once `CONTROL_DB` is bound — silently disarming the
+ * operator's own kill switch the day a binding lands.
+ */
+export function denyIfEitherDenies(
+  ...gates: readonly TenancyLifecycleGatePort[]
+): TenancyLifecycleGatePort {
+  return {
+    async admit(auth: AuthContext, operation: ApiOperation): Promise<LifecycleDecision> {
+      for (const gate of gates) {
+        const decision = await gate.admit(auth, operation);
+        if (decision.admitted !== true) return decision;
+      }
+      return { admitted: true };
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +839,11 @@ export interface RbacDatabase {
 }
 
 function isRbacDatabase(value: unknown): value is RbacDatabase {
-  return typeof value === "object" && value !== null && typeof (value as RbacDatabase).prepare === "function";
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as RbacDatabase).prepare === "function"
+  );
 }
 
 /**
@@ -678,13 +1086,26 @@ export class ConfiguredInternalTransport implements InternalTransportPort {
  *
  * In BOTH cases the fallback is consulted only on a durable NOT-FOUND, never on
  * a durable FAILURE: an outage answers 503 and stops there.
+ *
+ * `lifecycle` composes rather than falls back, because it is a DENY table and
+ * not a grant table — see {@link denyIfEitherDenies} for why the two shapes
+ * must not be confused. With neither D1 bound the durable leg is `null` and the
+ * composition is exactly the config gate, so a binding-free deployment behaves
+ * as it did before this leg existed.
  */
 export function depsFromEnv(env: GatewayBindings): GatewayDeps {
   const configured = ConfiguredApiKeyAuthenticator.fromEnv(env);
   const configuredRbac = ConfiguredRbacAuthorizer.fromEnv(env);
+  const configuredLifecycle = ConfiguredTenancyLifecycleGate.fromEnv(env);
+  const durableLifecycle = D1TenancyLifecycleGate.fromEnv(
+    env as unknown as Record<string, unknown>,
+  );
   return {
     apiKeys: d1ApiKeyResolverFromEnv(env, { fallback: configured }) ?? configured,
-    lifecycle: ConfiguredTenancyLifecycleGate.fromEnv(env),
+    lifecycle:
+      durableLifecycle === null
+        ? configuredLifecycle
+        : denyIfEitherDenies(durableLifecycle, configuredLifecycle),
     rbac:
       D1RbacAuthorizer.fromEnv(env as unknown as Record<string, unknown>, {
         fallback: configuredRbac,

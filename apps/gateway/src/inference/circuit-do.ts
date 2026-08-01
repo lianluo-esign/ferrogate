@@ -28,54 +28,53 @@
  * Rust process memory.
  *
  * ## ===========================================================================
- * ## WIRING — three edits, none of them in this directory
+ * ## WIRING — LANDED. This class is MOUNTED, not inert.
  * ## ===========================================================================
  *
- * This class is inert until the composition root mounts it. Until then
- * `defaults.ts::providerCircuitFor` falls back to the per-isolate breaker, which
- * is why that fallback is marked and not silent.
+ * This block used to read "three edits, none of them in this directory" and
+ * open with "this class is inert until the composition root mounts it". Both
+ * sentences are now false, and leaving them standing was the worse direction of
+ * error: a reader would conclude the deployed breaker was a per-isolate `Map`.
+ * Verified in the tree:
  *
- * **1. `apps/gateway/src/worker.ts`** — workerd resolves a DO binding's
- * `class_name` against the ENTRY module, so without this line the Worker fails
- * AT STARTUP with "Durable Object class ProviderCircuitDurableObject not
- * found". `@cloudflare/vitest-pool-workers` does NOT reproduce that check:
- * the whole unit suite stays green on an unbootable Worker, which is exactly
- * how the same mistake shipped once already.
+ *  1. `apps/gateway/src/worker.ts:87` —
+ *     `export { ProviderCircuitDurableObject } from "./inference/index.js";`
+ *     workerd resolves a DO binding's `class_name` against the ENTRY module, so
+ *     without this line the Worker fails AT STARTUP.
+ *     `@cloudflare/vitest-pool-workers` does NOT reproduce that check — the
+ *     whole unit suite stays green on an unbootable Worker, which is exactly
+ *     how the same mistake shipped once already.
+ *  2. `apps/gateway/wrangler.toml:768-773` — the binding plus migration
+ *     `tag = "v2"` with **`new_sqlite_classes`**. Not `new_classes`: that
+ *     variant deploys cleanly and then hands the breaker the wrong storage
+ *     backend. vitest never reads `[[migrations]]`, so the assertion that holds
+ *     this lives in `test/wrangler-bindings.test.ts`, which parses the TOML.
+ *  3. `apps/gateway/src/ports.ts:383` —
+ *     `readonly PROVIDER_CIRCUIT?: DurableObjectNamespace;` on `GatewayBindings`
+ *     (and `GATEWAY_RELIABILITY?: string` at `:399`).
  *
- * ```ts
- * export { ProviderCircuitDurableObject } from "./inference/index.js";
- * ```
- *
- * **2. `apps/gateway/wrangler.toml`** — the binding plus a NEW migration tag.
- * The existing `[[migrations]] tag = "v1"` block must not be edited (a shipped
- * migration is immutable); append a second one:
- *
- * ```toml
- * [[durable_objects.bindings]]
- * name = "PROVIDER_CIRCUIT"
- * class_name = "ProviderCircuitDurableObject"
- *
- * [[migrations]]
- * tag = "v2"
- * new_sqlite_classes = ["ProviderCircuitDurableObject"]
- * ```
- *
- * and, in the same file's `[vars]`, the reliability settings — WITHOUT this the
- * breaker stays disabled even with the DO bound, because
- * {@link ReliabilitySettings} defaults reproduce Rust's "both fields unset ⇒ no
- * breaker" exactly:
+ * The DO being MOUNTED is not the same as the breaker being ON, and the
+ * distinction is deliberate. `apps/gateway/wrangler.toml:286` commits
+ * `GATEWAY_RELIABILITY = "{}"` — an EMPTY policy, so
+ * {@link ReliabilitySettings}' defaults apply and `providerCircuitFor` takes
+ * arm 1 and returns `NO_PROVIDER_CIRCUIT`. That reproduces Rust's
+ * "`provider_circuit_config == None` ⇒ no breaker" exactly, so a deployed
+ * gateway behaves identically to the pre-wiring single dispatch until an
+ * operator fills the policy in. Committing real thresholds here would BOTH
+ * invent an operator policy the Rust tree does not ship AND leak into every
+ * unit test, since `vitest.config.ts` loads `wrangler.toml`. Turning it on is
+ * a deploy-time decision:
  *
  * ```toml
  * GATEWAY_RELIABILITY = '{"provider_circuit_breaker_failure_threshold":5,"provider_circuit_breaker_cooldown_secs":30,"provider_dispatch_max_retries":1}'
  * ```
  *
- * **3. `apps/gateway/src/ports.ts`** — add
- * `PROVIDER_CIRCUIT?: DurableObjectNamespace` and
- * `GATEWAY_RELIABILITY?: string` to `GatewayBindings`.
- *
- * Nothing in `src/index.ts` changes: the inference router already reads its
- * ports out of the per-request `env`, so `providerCircuitFor` picks the DO up
- * the moment the binding exists.
+ * Nothing in `src/index.ts` changes: the inference router reads its ports out
+ * of the per-request `env`, so `providerCircuitFor` picks the DO up from the
+ * binding alone. `test/inference/reliability-mount.test.ts` is the gate — it
+ * drives `SELF.fetch` and then reads the breaker state back out of the real
+ * `PROVIDER_CIRCUIT` namespace, which is what distinguishes "a breaker ran"
+ * from "THE Durable Object breaker ran".
  */
 import { DurableObject } from "cloudflare:workers";
 import {

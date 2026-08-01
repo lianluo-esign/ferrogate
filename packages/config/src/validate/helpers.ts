@@ -314,8 +314,74 @@ export function usesRegexCrateUnsupportedSyntax(pattern: string): boolean {
 // --- listen addresses -------------------------------------------------------
 
 /**
+ * Rust `Ipv4Addr::from_str`: exactly four dot-separated decimal octets, each
+ * 1–3 digits, value <= 255, and **no leading zeros** (`127.0.0.01` is REFUSED
+ * by std, deliberately, so an octal-looking octet can never be misread).
+ */
+function isIpv4Literal(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  for (const part of parts) {
+    if (part.length === 0 || part.length > 3) return false;
+    if (!/^\d+$/.test(part)) return false;
+    if (part.length > 1 && part.startsWith("0")) return false;
+    if (Number.parseInt(part, 10) > 255) return false;
+  }
+  return true;
+}
+
+/**
+ * Rust `Ipv6Addr::from_str`: up to eight groups of 1–4 hex digits, at most one
+ * `::` elision, optionally ending in a dotted-quad that occupies the last two
+ * groups. std's parser accepts **no** zone/scope id (`%eth0`), so neither does
+ * this.
+ */
+function isIpv6Literal(value: string): boolean {
+  if (value.includes("%")) return false;
+  const elisions = value.split("::").length - 1;
+  if (elisions > 1) return false;
+
+  const readGroups = (text: string): number | null => {
+    // Returns the number of 16-bit groups the text occupies, or null if invalid.
+    if (text.length === 0) return 0;
+    const pieces = text.split(":");
+    let groups = 0;
+    for (let index = 0; index < pieces.length; index += 1) {
+      const piece = pieces[index]!;
+      if (index === pieces.length - 1 && piece.includes(".")) {
+        if (!isIpv4Literal(piece)) return null;
+        groups += 2; // an embedded IPv4 fills the low 32 bits
+        continue;
+      }
+      if (!/^[0-9a-fA-F]{1,4}$/.test(piece)) return null;
+      groups += 1;
+    }
+    return groups;
+  };
+
+  if (elisions === 1) {
+    const at = value.indexOf("::");
+    const head = readGroups(value.slice(0, at));
+    const tail = readGroups(value.slice(at + 2));
+    if (head === null || tail === null) return false;
+    // `::` must stand for AT LEAST one elided group.
+    return head + tail <= 7;
+  }
+  return readGroups(value) === 8;
+}
+
+/**
  * `normalize_listen_addr`: a `SocketAddr`, with `localhost:<port>` rewritten to
  * `127.0.0.1:<port>` first (the Rust helper's one extra spelling).
+ *
+ * The HOST HALF IS AN IP LITERAL, NOT A NAME. `std::net::SocketAddr`'s
+ * `FromStr` parses an address, never a hostname — it performs no resolution —
+ * so Rust REFUSES `example.com:8080`, `999.1.1.1:80` and an unbracketed
+ * `::1:8080`, and accepts an IPv6 address only in brackets (`[::1]:8080`). This
+ * used to accept any non-empty host, which let a config Rust rejects at load
+ * time load here instead: an operator who wrote a DNS name for a bind address
+ * got silence rather than the Rust diagnostic. Pinned by
+ * `validate-sections.test.ts` > "listen addresses are IP literals".
  */
 export function isValidSocketAddr(value: string): boolean {
   let v = value;
@@ -324,10 +390,14 @@ export function isValidSocketAddr(value: string): boolean {
   if (lastColon === -1) return false;
   const host = v.slice(0, lastColon);
   const portStr = v.slice(lastColon + 1);
-  if (!/^\d+$/.test(portStr)) return false;
-  const port = Number.parseInt(portStr, 10);
-  if (port > 65535) return false;
-  return host.length > 0;
+  // Rust's port scanner reads at most five decimal digits and then demands
+  // end-of-input, so `:000080` is refused while `:00080` is 80.
+  if (!/^\d{1,5}$/.test(portStr)) return false;
+  if (Number.parseInt(portStr, 10) > 65535) return false;
+  if (host.startsWith("[") && host.endsWith("]")) {
+    return isIpv6Literal(host.slice(1, -1));
+  }
+  return isIpv4Literal(host);
 }
 
 // --- misc -------------------------------------------------------------------

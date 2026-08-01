@@ -46,6 +46,8 @@ export * from "./entitlements.js";
 export * from "./service.js";
 export * from "./ports.js";
 export * from "./scan.js";
+export * from "./signature.js";
+export * from "./signature-screener.js";
 export * from "./keys.js";
 export * from "./registry.js";
 export * from "./schemas.js";

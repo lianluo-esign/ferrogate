@@ -328,6 +328,17 @@ export const NO_PROVIDER_CIRCUIT: ProviderCircuit = {
  * the DO whenever the `PROVIDER_CIRCUIT` binding is present and falls back here
  * when it is not. Do NOT "fix" this by widening the Map's lifetime — there is
  * no wider lifetime on the platform than the isolate.
+ *
+ * **This arm is NOT the deployed one.** `apps/gateway/wrangler.toml:768-773`
+ * binds `PROVIDER_CIRCUIT` (migration `v2`, `new_sqlite_classes`) and
+ * `src/worker.ts:87` re-exports the class, so a configured breaker on the
+ * deployed gateway is the Durable Object. This class is reached only by a
+ * caller whose `env` lacks the binding — i.e. an operator who set
+ * `GATEWAY_RELIABILITY` on a deployment without the DO. That combination is
+ * why it is shipped rather than deleted: shedding late beats never shedding.
+ * `test/inference/reliability-mount.test.ts` is the gate that keeps the two
+ * arms distinguishable — it reads breaker state back out of the real namespace,
+ * which a per-isolate `Map` cannot satisfy.
  */
 export class InMemoryProviderCircuit implements ProviderCircuit {
   readonly #circuits = new Map<string, ProviderCircuitState>();

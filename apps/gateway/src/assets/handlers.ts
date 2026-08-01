@@ -59,6 +59,11 @@ import {
 } from "./ports.js";
 import { type AssetScannerBindings, assetScreenerFromEnv } from "./scan.js";
 import {
+  type SignaturePolicyBindings,
+  withSignatureVerification,
+} from "./signature-screener.js";
+import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
+import {
   assetChannelParamsSchema,
   assetNameParamsSchema,
   assetTypeParamsSchema,
@@ -333,6 +338,29 @@ function requestContext(c: Context<AssetEnv>): AssetRequestContext {
   return { requestId: c.get("requestId") ?? "", agentRunId };
 }
 
+/**
+ * The three `x-asset-signature*` headers → an {@link AssetSignatureInput},
+ * ported from `server/assets.rs:638-651`.
+ *
+ * Absent `x-asset-signature` means an UNSIGNED publish, which is a labeled
+ * state rather than a refusal. An unrecognised `x-asset-signature-format`
+ * falls back to `minisign` exactly as Rust's `.unwrap_or(Minisign)` does — NOT
+ * to "skip verification", which is the shape that would let a typo in a header
+ * turn a signed publish into an unsigned one.
+ */
+function assetSignatureFromHeaders(headers: Headers): AssetSignatureInput | undefined {
+  const material = headers.get("x-asset-signature");
+  if (material === null || material.trim() === "") return undefined;
+  const declaredFormat = headers.get("x-asset-signature-format");
+  const keyId = headers.get("x-asset-signature-key-id")?.trim();
+  return {
+    format:
+      (declaredFormat === null ? undefined : parseSignatureFormat(declaredFormat)) ?? "minisign",
+    material,
+    ...(keyId !== undefined && keyId !== "" ? { keyId } : {}),
+  };
+}
+
 /** Zod-validate a path/query bag, or answer the Rust `400 invalid_request`. */
 function parseOrThrow<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
   const parsed = schema.safeParse(value);
@@ -551,17 +579,55 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   const bindings = env as AssetObjectBindings;
   const objects = isAssetObjectStore(bindings.ASSETS) ? bindings.ASSETS : undefined;
   const presigner = sigV4PresignerFromEnv(bindings);
-  const screener = assetScreenerFromEnv(env as AssetScannerBindings);
+  // Stage (4) of the Rust screening order, then stage (2) IN FRONT of it:
+  // `withSignatureVerification` wraps whichever scanner was selected, so a
+  // `require_signature` refusal happens before the scanner is consulted, which
+  // is the Rust ordering. With neither publisher keys nor the requirement set
+  // it returns its argument by identity, so this line is inert by default —
+  // and `?? new BuiltinEicarScreener()` matches `buildAssetService`'s own
+  // fallback, so the composed screener is never built over a DIFFERENT inner
+  // one than the service would have used.
+  const scanScreener = assetScreenerFromEnv(env as AssetScannerBindings);
+  const inner = scanScreener ?? new BuiltinEicarScreener();
+  const composed = withSignatureVerification(inner, env as SignaturePolicyBindings);
+  // `withSignatureVerification` returns its argument BY IDENTITY when neither
+  // publisher keys nor the requirement are configured. That case falls back to
+  // the existing `null ⇒ buildAssetService supplies the default` contract, so
+  // the default screener keeps living in exactly one place.
+  const screener = composed === inner ? scanScreener : composed;
   const metadata = assetMetadataStoreFromEnv(env);
   const audit = assetAuditSinkFromEnv(env);
+  const objectStoreEnabled = objects !== undefined || devInMemoryPortsEnabled(env);
   return {
     ...(objects !== undefined ? { objects } : {}),
     ...(metadata !== null ? { metadata } : {}),
     ...(audit !== null ? { audit } : {}),
     ...(presigner !== null ? { presigner } : {}),
     ...(screener !== null ? { screener } : {}),
-    ...(objects !== undefined && presigner !== null ? { limits: { presignEnabled: true } } : {}),
+    limits: {
+      objectStoreEnabled,
+      ...(objects !== undefined && presigner !== null ? { presignEnabled: true } : {}),
+    },
   };
+}
+
+/**
+ * The repo's existing "this is a developer's machine" switch —
+ * `FG_DEV_IN_MEMORY_PORTS`, the same var `apps/mcp` and `apps/agent-runtime`
+ * declare, and which `docs/rewrite/CLOUD-VERIFICATION.md` §B1 requires be
+ * overridden to `"0"` for the live deploy.
+ *
+ * Exactly `"1"` opens the in-memory object store; anything else (including
+ * absent, which is the gateway's committed posture — this Worker declares no
+ * such var) leaves an unbound `ASSETS` binding refusing with
+ * `503 asset_bucket_unavailable`.
+ *
+ * The polarity is the point. It is NOT read as "is this production?" — it is
+ * read as "did somebody SAY in-memory is acceptable here?", so forgetting to
+ * set anything yields the safe answer rather than the convenient one.
+ */
+function devInMemoryPortsEnabled(env: Record<string, unknown>): boolean {
+  return String((env as { FG_DEV_IN_MEMORY_PORTS?: unknown }).FG_DEV_IN_MEMORY_PORTS ?? "") === "1";
 }
 
 /**
@@ -858,6 +924,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
               contentType: c.req.header("content-type") ?? undefined,
               content,
               channel: query.channel,
+              signature: assetSignatureFromHeaders(c.req.raw.headers),
             },
             context,
           ),

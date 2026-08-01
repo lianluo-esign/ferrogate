@@ -408,6 +408,25 @@ export interface ControlPlaneDeps {
    * is load-bearing — see its docblock.
    */
   readonly tenantDatabases: TenantDatabaseRouter;
+  /**
+   * The CONTROL database itself, or `null` when this deployment is running
+   * without one (`CONTROL_PLANE_STORE = "memory"`, or no `DB` binding).
+   *
+   * Distinct from {@link ControlPlaneDeps.store} on purpose: the store is a
+   * DOCUMENT abstraction over `control_plane_resources` and is deliberately
+   * swappable, while a handful of surfaces must also write the TYPED tables in
+   * the same database that OTHER Workers read by name. Today that is
+   * `self_hosted_worker_registrations` — the row
+   * `apps/agent-runtime`'s `d1WorkerIdentityPort` authenticates the six
+   * `/v1/self-hosted-workers/*` internal callbacks against (see
+   * `src/store/worker_registry.ts`).
+   *
+   * `null` is not a silent downgrade: the routes that need it answer `503`
+   * rather than writing only the document, because a worker that appears
+   * registered and can authenticate nobody is the failure this seam exists to
+   * remove.
+   */
+  readonly controlDatabase: D1Database | null;
   readonly runtime: RuntimeStatusPort;
   /**
    * The DNS seam `POST /admin/v1/site-domains/{hostname}/verify` resolves the

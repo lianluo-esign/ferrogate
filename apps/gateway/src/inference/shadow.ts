@@ -143,13 +143,21 @@ export function shadowMirrorFor(
 /**
  * The per-isolate budget ledger, used when `SHADOW_BUDGET` is not bound.
  *
- * PORT-TODO(`packages/routing/src/rollout.ts` `ShadowBudgetLedger`): a cap of
- * `N` becomes `N` per LIVE ISOLATE on this arm, because there is no process for
- * a process-lifetime counter to live in. This is the UNBOUND fallback only —
- * {@link shadowBudgetFor} selects `DurableObjectShadowBudgetLedger` whenever
- * the binding exists, and that arm holds the cap globally. The three edits that
- * bind it are listed on {@link shadowBudgetFor}; none of them is in this
- * directory, so this arm stays marked rather than silently loose.
+ * PORT-TODO(`packages/routing/src/rollout.ts` `ShadowBudgetLedger`): PLATFORM
+ * LIMIT, and **this arm is no longer the deployed one.** A cap of `N` becomes
+ * `N` per LIVE ISOLATE here, because there is no process for a process-lifetime
+ * counter to live in.
+ *
+ * The wiring that binds `SHADOW_BUDGET` HAS LANDED — see {@link shadowBudgetFor},
+ * where the three edits are listed as done with their anchors. So the deployed
+ * gateway holds the cap globally in the Durable Object, and this arm is now only
+ * reachable from a caller that builds an `env` WITHOUT the binding (tests, and
+ * any future embedding of this module). It is kept, and kept marked, because it
+ * is still the only answer available when the binding is absent, and because
+ * "cap per isolate" must never be mistaken for "cap".
+ *
+ * Do NOT "fix" this by widening the ledger's lifetime: module scope IS the
+ * isolate, and there is no wider lifetime on the platform short of the DO.
  */
 const ISOLATE_SHADOW_BUDGET = new ShadowBudgetLedger();
 
@@ -173,38 +181,38 @@ const isolateShadowBudget: AsyncShadowBudgetLedger = {
  * factor, an absent one over-spends without bound.
  *
  * ## ========================================================================
- * ## WIRING — three edits, none of them in this directory
+ * ## WIRING — LANDED. All three edits are in the tree.
  * ## ========================================================================
  *
- * **1. `apps/gateway/src/worker.ts`** — workerd resolves a DO binding's
- * `class_name` against the ENTRY module, so without this line the Worker fails
- * AT STARTUP with "Durable Object class ShadowBudgetDurableObject not found".
- * `@cloudflare/vitest-pool-workers` does NOT run that check, so the whole unit
- * suite stays green on an unbootable Worker:
+ * This block used to read "three edits, none of them in this directory" and
+ * list them as outstanding. They are done, and leaving that text standing was
+ * actively misleading: a reader would conclude the DO arm was inert and that
+ * the deployed gateway capped shadow spend per isolate. Verified in the tree:
  *
- * ```ts
- * export { ShadowBudgetDurableObject } from "@ferrogate/routing/durable-objects";
- * ```
- *
- * **2. `apps/gateway/wrangler.toml`** — the binding plus a NEW migration tag
- * (a shipped `[[migrations]]` block is immutable; append, never edit):
- *
- * ```toml
- * [[durable_objects.bindings]]
- * name = "SHADOW_BUDGET"
- * class_name = "ShadowBudgetDurableObject"
- *
- * [[migrations]]
- * tag = "v3"
- * new_sqlite_classes = ["ShadowBudgetDurableObject"]
- * ```
- *
- * **3. `apps/gateway/src/ports.ts`** — add
- * `SHADOW_BUDGET?: DurableObjectNamespace` to `GatewayBindings`.
+ *  1. `apps/gateway/src/worker.ts:103` —
+ *     `export { ShadowBudgetDurableObject } from "@ferrogate/routing/durable-objects";`
+ *     workerd resolves a DO binding's `class_name` against the ENTRY module, so
+ *     without this line the Worker fails AT STARTUP.
+ *     `@cloudflare/vitest-pool-workers` does NOT run that check, so the unit
+ *     suite would stay green on an unbootable Worker —
+ *     `test/wrangler-bindings.test.ts` is what actually holds it.
+ *  2. `apps/gateway/wrangler.toml:794-799` — the binding plus migration
+ *     `tag = "v3"` with **`new_sqlite_classes`** (NOT `new_classes`: the
+ *     `new_classes` variant deploys fine and then gives the counter the wrong
+ *     storage backend). vitest never reads migrations at all;
+ *     `test/wrangler-bindings.test.ts` parses the TOML and asserts the variant.
+ *  3. `apps/gateway/src/ports.ts:437` —
+ *     `readonly SHADOW_BUDGET?: DurableObjectNamespace;` on `GatewayBindings`.
  *
  * Nothing in `src/index.ts` changes: the inference router resolves its ports
- * out of the per-request `env`, so this function picks the DO up the moment the
- * binding exists.
+ * out of the per-request `env`, so this function picks the DO up from the
+ * binding alone.
+ *
+ * MUTATION-PROVEN (wave 5): replacing `env["SHADOW_BUDGET"]` below with
+ * `undefined` — so the binding is never read and the cap silently degrades to
+ * per-isolate — turns `test/inference/shadow-budget-binding.test.ts` and
+ * `test/inference/shadow.test.ts` RED (2 failed / 13 passed). The DO arm is the
+ * one the deployed path takes.
  */
 export function shadowBudgetFor(env: InferenceBindings): AsyncShadowBudgetLedger {
   const namespace = env["SHADOW_BUDGET"];
