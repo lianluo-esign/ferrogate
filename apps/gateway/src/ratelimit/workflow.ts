@@ -115,6 +115,14 @@ export const WORKFLOW_ID_HEADER = "x-ferrogate-workflow-id";
 export const WORKFLOW_VERSION_HEADER = "x-ferrogate-workflow-version";
 /** Header carrying the run whose execution budget this request spends. */
 export const WORKFLOW_RUN_ID_HEADER = "x-ferrogate-workflow-run-id";
+/**
+ * Rust's run identity — `build_ai_ingress_plan`'s `request.agent_run_id`, the
+ * same correlation id `src/assets/handlers.ts` and `apps/mcp/src/protocol.ts`
+ * read (#305/#522) and the one `src/inference/workflow.ts`'s graph gate keys
+ * on. Accepted here as an ALIAS for {@link WORKFLOW_RUN_ID_HEADER}; see
+ * {@link workflowDeclarationFrom}.
+ */
+export const AGENT_RUN_ID_HEADER = "x-ferrogate-agent-run-id";
 
 /** Bindings this module reads. */
 export interface WorkflowBudgetBindings {
@@ -146,7 +154,32 @@ export type WorkflowDeclarationResult =
 export function workflowDeclarationFrom(headers: Headers): WorkflowDeclarationResult {
   const workflowId = headers.get(WORKFLOW_ID_HEADER)?.trim() ?? "";
   const rawVersion = headers.get(WORKFLOW_VERSION_HEADER)?.trim() ?? "";
-  const runId = headers.get(WORKFLOW_RUN_ID_HEADER)?.trim() ?? "";
+  // THE RUN-ID ALIAS (wave 17 integrate step, applied verbatim from the
+  // recipe in `src/inference/workflow.ts`'s "One residue" note).
+  //
+  // The graph gate takes the run identity from Rust's
+  // `x-ferrogate-agent-run-id`; this budget envelope invented
+  // `x-ferrogate-workflow-run-id` and required it. A pure reference-shaped
+  // client (`-id` + `-version` + `-node-id` + `-agent-run-id`) therefore met
+  // THIS middleware first and was answered `400 invalid_workflow_declaration`
+  // before the graph gate could run — the graph gate was unreachable for
+  // exactly the clients it was ported for. Measured, not assumed: the
+  // SELF-driven `test/inference/workflow-mount.test.ts` returned
+  // `invalid_workflow_declaration` for every one of its cases before this line.
+  //
+  // Preferring the TypeScript header keeps every existing budget row's primary
+  // key (`workflowRunBudgetId`) stable; falling back to the reference header
+  // makes both controls measure ONE run rather than two.
+  //
+  // The `workflowId === ""` guard is LOAD-BEARING: a plain request carrying
+  // `x-ferrogate-agent-run-id` purely for correlation (assets, MCP, #305/#522)
+  // must stay `absent`, and an unguarded alias would turn every one of them
+  // into a partial declaration, i.e. a 400.
+  const workflowRunId = headers.get(WORKFLOW_RUN_ID_HEADER)?.trim() ?? "";
+  const runId =
+    workflowRunId !== "" || workflowId === ""
+      ? workflowRunId
+      : (headers.get(AGENT_RUN_ID_HEADER)?.trim() ?? "");
 
   const present = [workflowId, rawVersion, runId].filter((value) => value !== "");
   if (present.length === 0) return { kind: "absent" };

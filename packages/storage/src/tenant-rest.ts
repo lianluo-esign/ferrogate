@@ -56,6 +56,14 @@
  * running non-atomically. `batch()` itself throws for the same reason, so even
  * a caller that skipped `requireAtomicBatch` cannot get a half-applied reserve.
  */
+import {
+  type Clock,
+  type RetryPolicy,
+  executeWithRetry,
+  isRetryableStatus,
+  systemClock,
+} from "@ferrogate/cloudflare";
+
 import { StorageError } from "./errors.js";
 import {
   ControlDatabaseTenantRegistry,
@@ -78,6 +86,16 @@ export interface D1RestTransportConfig {
   readonly fetch?: FetchLike;
   /** Defaults to {@link D1_REST_API_BASE}. */
   readonly baseUrl?: string;
+  /**
+   * Overrides the shared Cloudflare retry schedule from
+   * `@ferrogate/cloudflare` (4 retries, 1s base, 60s cap, `Retry-After` wins).
+   */
+  readonly retryPolicy?: RetryPolicy;
+  /**
+   * The sleep seam. Injected so a test can assert the EXACT backoff schedule
+   * without a real sleep; defaults to the platform clock (`scheduler.wait`).
+   */
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
 /** The `result[]` element the D1 query API returns per statement. */
@@ -158,6 +176,48 @@ export class D1RestPreparedStatement {
 }
 
 /**
+ * Parse a delta-SECONDS `Retry-After`. The HTTP-date form is deliberately not
+ * honoured (Cloudflare emits delta-seconds for its API rate limit), and an
+ * unparseable value yields `undefined` so the caller falls back to the
+ * exponential schedule rather than sleeping for a garbage duration.
+ */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const trimmed = header.trim();
+  const seconds = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(seconds) || seconds < 0 || String(seconds) !== trimmed) return undefined;
+  return seconds * 1_000;
+}
+
+/**
+ * Whether a statement provably cannot mutate state — the gate on retrying an
+ * AMBIGUOUS 5xx. See {@link D1RestDatabase} for why the question is asked.
+ *
+ * Conservative by construction: anything not provably read-only is treated as
+ * a write, because the cost of the two errors is not symmetric. Refusing to
+ * retry a `SELECT` costs one avoidable failure; retrying an `INSERT` that
+ * already applied corrupts data.
+ *
+ * The rules, all of which must hold:
+ *  - the statement starts with `SELECT` (`WITH` is excluded even though a
+ *    read-only CTE is common, because a leading `WITH` can be followed by a
+ *    mutating statement and proving which would mean parsing SQL);
+ *  - it contains no `RETURNING`, and no `INSERT`/`UPDATE`/`DELETE` keyword
+ *    anywhere — a sub-statement or a stacked statement after a `;` would
+ *    otherwise slip through;
+ *  - it is a SINGLE statement (no `;` other than a trailing one), since the
+ *    query API executes semicolon-joined statements as a batch.
+ */
+function isReadOnlySql(sql: string): boolean {
+  const normalized = sql.replace(/\s+/g, " ").trim();
+  if (!/^select\b/i.test(normalized)) return false;
+  if (/\b(insert|update|delete|replace|returning|pragma|attach|vacuum)\b/i.test(normalized)) {
+    return false;
+  }
+  return !normalized.replace(/;\s*$/, "").includes(";");
+}
+
+/**
  * A `D1Database`-shaped client bound to ONE database uuid over the REST query
  * API. See the file docblock for the atomicity table this class implements.
  */
@@ -165,6 +225,8 @@ export class D1RestDatabase {
   readonly #url: string;
   readonly #apiToken: string;
   readonly #fetch: FetchLike;
+  readonly #retryPolicy: RetryPolicy | undefined;
+  readonly #clock: Clock;
 
   constructor(
     readonly databaseUuid: string,
@@ -174,6 +236,8 @@ export class D1RestDatabase {
     this.#url = `${base}/accounts/${config.accountId}/d1/database/${databaseUuid}/query`;
     this.#apiToken = config.apiToken;
     this.#fetch = config.fetch ?? ((input, init) => fetch(input, init));
+    this.#retryPolicy = config.retryPolicy;
+    this.#clock = config.sleep === undefined ? systemClock : { sleep: config.sleep };
   }
 
   /**
@@ -238,17 +302,70 @@ export class D1RestDatabase {
     );
   }
 
+  /**
+   * Issue one statement, under the shared Cloudflare retry schedule.
+   *
+   * ## Why there is a retry here at all
+   *
+   * Cloudflare's global API limit is ~1,200 requests / 5 min / user, and this
+   * class is on the REQUEST path for any deployment whose tenant fleet exceeds
+   * the Worker binding budget. Until `@ferrogate/cloudflare` landed there was
+   * no retry, no backoff and no `Retry-After` handling here, so one 429 — or
+   * one transient 502 — was a hard, user-visible `StorageError` on a read that
+   * would have succeeded a moment later. The schedule is the ported
+   * `ferrogate_cloudflare::RetryPolicy`: 4 retries, 1s base, 60s cap,
+   * `Retry-After` wins, no jitter.
+   *
+   * ## Why the retry is NARROWER than the shared default
+   *
+   * The D1 HTTP query API is a **POST for every statement**, including
+   * `INSERT`/`UPDATE`/`DELETE`. So "retryable status" is not the whole rule:
+   *
+   *  - a **429** is an outright REJECTION — Cloudflare refused the request
+   *    before it reached the database, so re-issuing it cannot double-apply
+   *    anything. Always retried;
+   *  - a **5xx** is AMBIGUOUS: the statement may have executed and only the
+   *    response was lost. Re-issuing an `INSERT` on that evidence is a
+   *    duplicate write, which is the same class of harm as the retried token
+   *    mint that made retry opt-in upstream. So a 5xx is retried ONLY for a
+   *    statement that cannot mutate state.
+   *
+   * {@link isReadOnlySql} is the gate, and it is deliberately conservative:
+   * anything it cannot prove is read-only is treated as a write.
+   *
+   * A transport THROW is left exactly as it was — unretried — because it is
+   * ambiguous in the same way a 5xx is and carries no status to reason from.
+   */
   async #query(sql: string, params: readonly unknown[]): Promise<D1RestQueryResult> {
+    const readOnly = isReadOnlySql(sql);
     let response: Response;
     try {
-      response = await this.#fetch(this.#url, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${this.#apiToken}`,
-          "content-type": "application/json",
+      const { outcome } = await executeWithRetry(
+        async () => {
+          const attempt = await this.#fetch(this.#url, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${this.#apiToken}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ sql, params: [...params] }),
+          });
+          return {
+            status: attempt.status,
+            ...(parseRetryAfterMs(attempt.headers.get("retry-after")) === undefined
+              ? {}
+              : { retryAfterMs: parseRetryAfterMs(attempt.headers.get("retry-after")) }),
+            response: attempt,
+          };
         },
-        body: JSON.stringify({ sql, params: [...params] }),
-      });
+        {
+          ...(this.#retryPolicy === undefined ? {} : { policy: this.#retryPolicy }),
+          clock: this.#clock,
+          isRetryableOutcome: ({ status }) =>
+            status === 429 || (readOnly && isRetryableStatus(status)),
+        },
+      );
+      response = outcome.response;
     } catch (error) {
       throw StorageError.runtime(
         `D1 REST query to database ${this.databaseUuid} failed: ${

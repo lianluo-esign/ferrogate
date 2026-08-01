@@ -120,6 +120,10 @@
         "zod": "^3.25.76",
       },
     },
+    "packages/cloudflare": {
+      "name": "@ferrogate/cloudflare",
+      "version": "0.0.0",
+    },
     "packages/config": {
       "name": "@ferrogate/config",
       "version": "0.0.0",
@@ -209,14 +213,11 @@
       "name": "@ferrogate/storage",
       "version": "0.0.0",
       "dependencies": {
+        "@ferrogate/cloudflare": "workspace:*",
         "@ferrogate/core": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
         "zod": "^3.25.76",
       },
-    },
-    "packages/sync-bridge": {
-      "name": "@ferrogate/sync-bridge",
-      "version": "0.0.0",
     },
   },
   "packages": {
@@ -346,6 +347,8 @@
 
     "@ferrogate/cli": ["@ferrogate/cli@workspace:apps/cli"],
 
+    "@ferrogate/cloudflare": ["@ferrogate/cloudflare@workspace:packages/cloudflare"],
+
     "@ferrogate/config": ["@ferrogate/config@workspace:packages/config"],
 
     "@ferrogate/core": ["@ferrogate/core@workspace:packages/core"],
@@ -369,8 +372,6 @@
     "@ferrogate/secrets": ["@ferrogate/secrets@workspace:packages/secrets"],
 
     "@ferrogate/storage": ["@ferrogate/storage@workspace:packages/storage"],
-
-    "@ferrogate/sync-bridge": ["@ferrogate/sync-bridge@workspace:packages/sync-bridge"],
 
     "@hono/node-server": ["@hono/node-server@2.0.12", "", { "peerDependencies": { "hono": "^4" } }, "sha512-eWpQYr67tqJLeaSUl0Q+TquuYfUdTibpOJlUMV2FfUP7+KqCC5TufnwnlXL6mobZBJbGAYRd7ZvEBDCbLInjhg=="],
 

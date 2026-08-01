@@ -15,6 +15,7 @@
     "test:d1": "vitest run --config vitest.d1.config.ts"
   },
   "dependencies": {
+    "@ferrogate/cloudflare": "workspace:*",
     "@ferrogate/core": "workspace:*",
     "@ferrogate/schemas": "workspace:*",
     "zod": "^3.25.76"

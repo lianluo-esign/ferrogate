@@ -10,6 +10,12 @@
  *  - `policy-engine`   — `BasicPolicyEngine`, `PolicyRule`, `PolicySubject`, `PolicyDecision`.
  *  - `quota`           — `resolveEffectiveQuota`, `EffectiveQuota`, `QuotaScopeSelector`.
  *  - `workflow-budget` — envelope composition, budget pre-flight, node dispatch.
+ *  - `workflow-graph`  — `enforce_ai_workflow_policy`'s thirteen refusals: node
+ *                        pinning, edge transitions, iteration/model-call limits,
+ *                        the workflow timeout and the token budgets. A DIFFERENT
+ *                        control from `workflow-budget`: the graph gate decides
+ *                        whether a step is a legal move, the budget decides
+ *                        whether the run can afford it.
  *  - `stored-types`    — storage records the layer reads, re-exported from
  *                        `@ferrogate/storage` (the authoritative home, as in Rust).
  *  - `x402/*`          — x402 spend policy + payment-authorization decision. The
@@ -24,6 +30,7 @@
 export * from "./policy-engine.js";
 export * from "./quota.js";
 export * from "./workflow-budget.js";
+export * from "./workflow-graph.js";
 export * from "./stored-types.js";
 export * from "./schemas.js";
 

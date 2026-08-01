@@ -237,7 +237,9 @@ const REACHABILITY_PROBES: Record<OwnedOperationId, ReachabilityProbe> = {
       return await get(`/v1/agent-jobs/${runId}/events`, bearer(TENANT_A_KEY));
     },
     expectStatus: [200],
-    expectObject: "list",
+    // Rust `agent_jobs.rs:838`; was `"list"` (cutover finding D7.1) until
+    // wave 17.
+    expectObject: "agent_job_event_page",
   },
   getAgentJobResult: {
     method: "GET",
@@ -480,11 +482,29 @@ describe("routing refusals", () => {
   });
 
   it("the anonymous probes every Worker implements are reachable", async () => {
+    // Wave 17 (cutover certification ops 53 + 54): these two used to answer a
+    // flat `{ok:true}` — "a different document entirely" from gateway/mcp, and
+    // a `/readyz` that could never answer 503. They now serve the shared
+    // contract documents out of `src/routes/health.ts`; the full decision table
+    // is in `test/routes/health-contract.test.ts`. Asserted here too so the
+    // contract suite cannot go green on a Worker that regressed to `{ok:true}`.
     for (const path of ["/healthz", "/readyz"]) {
       const response = await SELF.fetch(`${BASE}${path}`);
       expect(response.status, path).toBe(200);
-      expect(await response.json()).toEqual({ ok: true });
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body, path).not.toEqual({ ok: true });
+      expect(body.service, path).toBe("ferrogate-agent-runtime");
+      expect(body.runtime, path).toBe("workers");
+      expect(body.version, path).toBe("0.0.0");
     }
+    expect(await (await SELF.fetch(`${BASE}/healthz`)).json()).toMatchObject({ status: "ok" });
+    expect(await (await SELF.fetch(`${BASE}/readyz`)).json()).toMatchObject({
+      status: "ready",
+      ready: true,
+      readiness_reason: "state_loaded",
+    });
+    // `/health` is the one probe no client contract describes; it stays terse.
+    expect(await (await SELF.fetch(`${BASE}/health`)).json()).toEqual({ ok: true });
   });
 });
 

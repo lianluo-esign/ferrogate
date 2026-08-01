@@ -134,6 +134,13 @@ export class MemoryWalletStore {
    * Idempotent, no-oversell balance settlement by `settlementId` (ports
    * `settle_wallet_balance`). A replay with a changed tenant or amount is a
    * conflict; a fresh id applies the delta and records the durable settlement.
+   *
+   * A tenant with NO wallet row is `not_found`, and nothing is recorded — the
+   * same refusal `D1WalletStore.settleWalletBalance` makes, for the same
+   * reason. Recording the settlement while `adjustWalletBalance` moved nothing
+   * would lose the credit AND burn its idempotency key, so the retry that
+   * should repair it would report itself as an already-applied replay. The two
+   * backends have to agree here or the reference twin stops being a reference.
    */
   settleWalletBalance(
     settlementId: string,
@@ -149,6 +156,11 @@ export class MemoryWalletStore {
         );
       }
       return { settlement: { ...existing }, newlyApplied: false };
+    }
+    if (!this.wallets.has(tenantId)) {
+      throw StorageError.notFound(
+        `tenant ${tenantId} has no wallet row; settlement ${settlementId} was not applied`,
+      );
     }
     const balanceAfter = this.adjustWalletBalance(tenantId, deltaCredits, nowUnix)?.balanceCredits;
     const settlement: StoredWalletSettlement = {
@@ -237,10 +249,16 @@ export class MemoryWalletStore {
           `wallet reservation ${reservationId} is settled but its settlement is missing`,
         );
       }
-      return { reservation: { ...reservation }, settlement: { ...settlement }, newlyApplied: false };
+      return {
+        reservation: { ...reservation },
+        settlement: { ...settlement },
+        newlyApplied: false,
+      };
     }
     if (reservation.status === WALLET_RESERVATION_RELEASED) {
-      throw StorageError.conflict(`wallet reservation ${reservationId} was released; cannot settle`);
+      throw StorageError.conflict(
+        `wallet reservation ${reservationId} was released; cannot settle`,
+      );
     }
     if (reservation.expiresAtUnix <= nowUnix) {
       reservation.status = WALLET_RESERVATION_RELEASED;

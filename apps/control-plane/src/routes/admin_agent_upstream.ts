@@ -64,16 +64,36 @@ export const agentUpstreamSchema = adminRecordSchema.extend({
  * one `[[agent_upstreams]]` table in the live config snapshot.
  *
  * The same split applies to `routes/prompt.ts` (`GATEWAY_PROMPT_TEMPLATES`),
- * `routes/skill.ts`, `routes/admin_policy.ts`, `routes/admin_plugin.ts` and
- * `routes/admin_agent_workflow.ts`: durable, audited, tenant-fenced CRUD whose
- * documents have no reader outside this Worker.
+ * `routes/skill.ts` (`GATEWAY_SKILL_PACKAGES`, read by
+ * `apps/gateway/src/routes/skills.ts:152,168`), `routes/admin_policy.ts` and
+ * `routes/admin_plugin.ts`: durable, audited, tenant-fenced CRUD whose documents
+ * have no reader outside this Worker.
  *
- * `routes/admin_mcp_server.ts` is the shape that closes it — `apps/mcp/src/catalog.ts`
- * reads the `mcp-servers` documents straight out of `control_plane_resources`,
- * so the admin write IS the data-plane source. Either the gateway grows the same
- * read (a control-DB binding plus a cached catalog load), or these collections
- * project into `gateway_providers`/`gateway_models`-style typed tables the
- * gateway binds. Choosing is a cross-app decision; it cannot be made here alone.
+ * ## The decision is no longer open — it has been made twice, the same way
+ *
+ * This used to end "choosing is a cross-app decision". It has since been chosen,
+ * in two different Workers, and both picked the SAME shape: **the data plane
+ * reads `control_plane_resources` directly, so the admin write IS the
+ * data-plane source.**
+ *
+ *  1. `apps/mcp/src/catalog.ts` reads the `mcp-servers` documents
+ *     (`routes/admin_mcp_server.ts`).
+ *  2. `apps/gateway/src/inference/workflow.ts:89` + `:326` read
+ *     `control_plane_resources` of kind `agent-workflows`
+ *     (`routes/admin_agent_workflow.ts`) when `CONTROL_DB` is bound, falling
+ *     back to the var when it is not — landed by the D2 workflow-gate slice, and
+ *     the reason `admin_agent_workflow` has come OFF this list.
+ *
+ * So the remaining four are no longer a design question, only unstarted work,
+ * and each is the same three-line change in the gateway: a `CONTROL_DB` source
+ * ahead of the var, defaulting to the var when the binding is absent. The wiring
+ * is `apps/gateway`'s to land and its composition root is owned by the integrate
+ * step, so it cannot be done from here — but nothing is being decided any more.
+ *
+ * **Blast radius, unchanged and worth restating:** the operator is told `201` /
+ * `200` and nothing takes effect until someone edits `wrangler.toml` and
+ * redeploys. For `agent-upstreams` specifically that includes DELETE: removing a
+ * compromised upstream through the admin API does not withdraw it.
  */
 export const adminAgentUpstreamRoutes: GroupModule = crudGroup("admin_agent_upstream", [
   { segment: "agent-upstreams", object: "agent_upstream", body: agentUpstreamSchema },

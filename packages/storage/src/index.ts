@@ -131,6 +131,7 @@ export * from "./provider.js";
 export * from "./ids.js";
 export * from "./quota.js";
 export * from "./wallet.js";
+export * from "./credits.js";
 export * from "./workflow-budget.js";
 export * from "./guardrail-binding.js";
 export * from "./assets.js";

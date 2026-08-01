@@ -716,3 +716,77 @@ message. The gates remain **drift** gates, not behavioural ones — the pinned
 miniflare bindings still win over the committed values — but a deleted or
 renamed var is no longer invisible. Update §12's "deliberately weak" row from 5
 seams to **0 ungated var families**.
+
+---
+
+## 17. Wave-17 incremental re-proof — results, corrections and new rows
+
+Run under the §4(a)/(b) policy: every seam whose FILE wave 17 touched, plus
+**every T1 row unconditionally**. Each mutation was applied with `perl -0777`,
+CONFIRMED by grepping the marker back OFF DISK, run against the row's named
+*Expected RED* test file(s), then restored and `sha256sum`-verified.
+
+**Scoping note, stated because it is a trade:** each row was run against its own
+*Expected RED* file(s) rather than the app's whole `bun run test`. That is
+sufficient to prove the NAMED gate holds and it is what made a 100-row pass fit
+in one wave, but it does not re-discover a row whose gate has silently migrated
+to some other file. The full-suite form remains mandatory for the §4 exception-2
+pass before the Rust tree is deleted.
+
+### 17.1 Result
+
+**100 T1/touched rows re-proved. 90 RED on the first correct recipe; 10 GREEN.**
+All ten GREENs were real unproven seams, not recipe errors — each was confirmed
+off disk and each is now closed by a new gate (§17.2). Every file restored
+byte-identical.
+
+### 17.2 TEN ROWS WERE GREEN — corrections, and the gates that close them
+
+| Row | What the table claimed | What was measured | Gate added |
+|---|---|---|---|
+| **GW-T2** | *Expected RED:* "whole suite (hono + WebCrypto/SigV4 fail to resolve)" | **GREEN.** `@cloudflare/vitest-pool-workers` supplies its own runtime flags; commenting `compatibility_flags` out changed nothing in 1875 tests | `apps/gateway/test/wrangler-bindings.test.ts` §"the runtime contract at the top of the file" |
+| **CP-T2** | as GW-T2 | **GREEN** across 587 tests | `apps/control-plane/test/env-var-drift.test.ts` §"the deploy config's unobservable lines" |
+| **AR-T2** | as GW-T2 | **GREEN** across 383 tests | `apps/agent-runtime/test/wrangler-bindings.test.ts` §"the runtime contract at the top of the file" |
+| **MCP-T2** | as GW-T2 | **GREEN** across 359 tests | `apps/mcp/test/env-var-drift.test.ts` §"the deploy config's unobservable lines" |
+| **TEL-T5** | as GW-T2 | **GREEN** across 104 tests | `apps/telemetry/test/env-var-drift.test.ts` §"the deploy config's unobservable lines" |
+| **GW-T8** | `test/wrangler-bindings.test.ts`; `durable-object.spec.ts` (escalation) | **GREEN.** The bindings test asserts `class_name` only, never `name`; the escalation spec runs under `test/ratelimit/harness/vitest.config.ts`, which points at **`harness/wrangler.toml`, a different file**. Renaming the deployed binding is invisible to both | new `it("binds each namespace under the NAME src/ reads it by")`, covering GW-T8/T10/T12 together |
+| **MCP-T6 / MCP-T7** | already recorded **NO GATE, DEPLOY-ONLY** | confirmed GREEN | migration gate ported into `apps/mcp/test/env-var-drift.test.ts`, incl. the `new_classes`-is-not-a-substitute arm |
+| **MCP-T1 / CP-T1 / TEL-T1** | recorded **DEPLOY-ONLY** | confirmed GREEN | the `main = "src/worker.ts"` NAME is assertable even though workerd's entrypoint-shape check is not; added to each app's drift file. Downgrades "the Worker will not boot" to "a test fails" |
+| **MCP-P6** | `test/durable-identity.test.ts` ("malformed key material fails CLOSED") | **GREEN.** That file asserts `ports.credentials` and `durableIdentityBound`; nothing asserted `ports.cipher`. Deleting the line silently swaps the operator's configured AEAD key for `webCryptoIdentityCipher()`'s ephemeral per-isolate one — every stored OAuth grant undecryptable on isolate recycle | new case sealing with `identityCipherFrom(KEY_HEX)` and opening with the cipher `resolvePorts` chose |
+
+Recipe corrections carried forward: **AR-E1**'s `MUT-1` must DELETE
+`export { default } from "./index.js"` — appending a named export beside it is a
+no-op and reads as a false GREEN. **AR-T7**'s Expected RED is
+`test/wrangler-bindings.test.ts` + `test/env-var-drift.test.ts` (the pinned-var
+gates), **not** `test/mtls.test.ts`, which pins its own binding.
+
+### 17.3 New rows
+
+| ID | File | Seam (exact code) | Mutation | Confirm | Expected RED | Tier |
+|---|---|---|---|---|---|---|
+| **AR-C10** | `apps/agent-runtime/src/index.ts` | `app.route("/", healthRoutes);` — the three shared anonymous probes; must stay AHEAD of `app.use("/v1/*", contractAuth)` | `MUT-1 /app\.route\("\/", healthRoutes\);/` | anchor gone | `test/routes/health-contract.test.ts` §"the deployed Worker serves the contract probes" (drives `SELF`) **and** `test/contract.test.ts` — **5 RED measured** | T2 |
+| **GW-W1** | `apps/gateway/src/inference/defaults.ts` | `deps.workflows ?? workflowCatalogFromEnv(env as WorkflowGateBindings)` `??` — the D2 graph gate's catalog at the composition root | `MUT-2` the fallback → an always-empty catalog | `grep -n 'workflowCatalogFromEnv' src/inference/defaults.ts` → import only | `test/inference/workflow-mount.test.ts` (SELF-driven, **6 RED**) + `test/inference/workflow-ledger.test.ts` §"the mount" (1 RED). **Before `workflow-mount.test.ts` existed this mutation was 1 RED of 1866 — no HTTP-level proof at all** | T1 |
+| **GW-W2** | `apps/gateway/src/ratelimit/workflow.ts` | the run-id alias in `workflowDeclarationFrom` (`workflowRunId !== "" \|\| workflowId === "" ? … : AGENT_RUN_ID_HEADER`) — without it the D2 gate is unreachable for reference-shaped clients | `MUT-2 "const runId =\n    workflowRunId !== \"\" …"→"const runId = workflowRunId;"` | mutated line present | `test/inference/workflow-mount.test.ts` — **6 RED**. `test/ratelimit/guards.test.ts` green either way, by design | T1 |
+
+### 17.4 The two traps, as they actually presented
+
+Both traps §1 warns about fired in this wave, in their exact documented forms:
+
+1. **The chained harness that builds its own Worker.** `test/ratelimit/harness/`
+   has its own `wrangler.toml` AND its own `worker.ts`. It is cited as the
+   escalation gate for GW-T8 and it cannot see the deployed config at all. The
+   same shape made the whole D2 gate provable-but-unmounted: every workflow
+   test drove `fixtures.ts::harness` → `createInferenceRouter`, so a real HTTP
+   request through `src/worker.ts` was asserted by nothing.
+   **Rule for future waves: a gate that constructs its own app or its own
+   `wrangler.toml` proves the FACTORY, never the MOUNT. Every T1 row needs at
+   least one `SELF.fetch` assertion or an explicit note saying why it cannot.**
+2. **The predicate with two implementations.** Checked, twice, and clean both
+   times: `MemoryWalletStore` vs `D1WalletStore` — no app constructs the memory
+   twin; `InMemoryGuardrailPolicyStore` vs `D1GuardrailPolicyStore` — the D1 leg
+   has its own gate (`test/guardrails/d1.test.ts`, 3 RED when unmounted).
+   A third instance was found in the *test* configuration rather than the source:
+   `packages/storage`'s `vitest.config.ts` EXCLUDES `test/d1/**`, which runs
+   under `vitest.d1.config.ts`. A mutation run with a bare `bunx vitest run`
+   reports "No test files found" and looks like a pass. Always run the package's
+   own `bun run test`, or pass the chained config explicitly.

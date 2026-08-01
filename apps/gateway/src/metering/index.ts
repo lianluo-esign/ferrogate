@@ -135,6 +135,14 @@ export {
 
 export { attributionFrom, meteringDrain } from "./middleware.js";
 
+// #305/#522 — the agent-run correlation the model spend is joined on.
+export {
+  AGENT_RUN_ID_HEADER,
+  AGENT_RUN_ID_PATTERN,
+  agentRunIdFor,
+  chargeWithAgentRun,
+} from "./agent-run.js";
+
 export {
   type MeteringAttribution,
   type MeteringDrainContext,

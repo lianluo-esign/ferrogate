@@ -339,6 +339,32 @@ describe("the env-var drift gate itself", () => {
   });
 });
 
+/**
+ * The deploy-config lines this app had NO gate for — measured GREEN under
+ * mutation during the wave-17 seam pass (CP-T1, CP-T2), and both
+ * deploy-blocking.
+ */
+describe("the deploy config's unobservable lines", () => {
+  it("keeps nodejs_compat in compatibility_flags (CP-T2)", () => {
+    // `@cloudflare/vitest-pool-workers` supplies its own runtime flags, so
+    // commenting this line out left all 587 control-plane tests green while the
+    // deployed Worker would fail to resolve `node:` builtins.
+    expect(WRANGLER_TOML).toMatch(/^compatibility_flags\s*=\s*\[[^\]]*"nodejs_compat"/m);
+  });
+
+  it("pins a compatibility_date", () => {
+    expect(WRANGLER_TOML).toMatch(/^compatibility_date\s*=\s*"\d{4}-\d{2}-\d{2}"/m);
+  });
+
+  it("points main at the ENTRY module, not the composition root (CP-T1)", () => {
+    // `src/index.ts` exports `MOUNTED_ROUTES` (an array), and workerd rejects a
+    // non-handler named export on the entry module AT STARTUP. That check is
+    // DEPLOY-ONLY; the NAME is assertable here, which downgrades "the Worker
+    // will not boot" to "a test fails".
+    expect(WRANGLER_TOML).toMatch(/^main\s*=\s*"src\/worker\.ts"/m);
+  });
+});
+
 describe("every var the source reads is declared or explicitly excepted", () => {
   const declaredNames = new Set([...DECLARED.vars.keys(), ...DECLARED.bindings.keys()]);
   const undeclared = [...READS.named.keys()].filter((n) => !declaredNames.has(n)).sort();

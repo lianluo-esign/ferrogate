@@ -328,6 +328,46 @@ describe("the env-var drift gate itself", () => {
   });
 });
 
+/**
+ * The deploy-config lines this app had NO gate for at all — ported from
+ * `apps/gateway/test/wrangler-bindings.test.ts` during the wave-17 seam pass,
+ * where MCP-T2/T6/T7 were measured GREEN under every mutation.
+ *
+ * All three are deploy-blocking and none of them is observable to
+ * `@cloudflare/vitest-pool-workers`, which builds a Durable Object namespace
+ * from the BINDING alone and never reads `[[migrations]]`, and which supplies
+ * its own runtime flags regardless of `compatibility_flags`.
+ */
+describe("the deploy config's unobservable lines", () => {
+  it("keeps nodejs_compat in compatibility_flags (MCP-T2)", () => {
+    expect(WRANGLER_TOML).toMatch(/^compatibility_flags\s*=\s*\[[^\]]*"nodejs_compat"/m);
+  });
+
+  it("points main at the ENTRY module (MCP-T1)", () => {
+    expect(WRANGLER_TOML).toMatch(/^main\s*=\s*"src\/worker\.ts"/m);
+  });
+
+  it("introduces every bound DO class in a new_sqlite_classes migration (MCP-T6/T7)", () => {
+    // Cloudflare rejects at deploy: "Cannot create binding for class X because
+    // it is not currently defined". `new_classes` is NOT an acceptable
+    // substitute — it deploys and hands the object the key-value backend.
+    const sqlite = [...WRANGLER_TOML.matchAll(/new_sqlite_classes\s*=\s*\[([^\]]*)\]/g)]
+      .flatMap((m) => [...(m[1] ?? "").matchAll(/"([^"]+)"/g)].map((e) => e[1] as string));
+    const legacy = [...WRANGLER_TOML.matchAll(/new_classes\s*=\s*\[([^\]]*)\]/g)]
+      .flatMap((m) => [...(m[1] ?? "").matchAll(/"([^"]+)"/g)].map((e) => e[1] as string));
+    // Only the LIVE stanzas: the cross-script `RATE_LIMIT` block is commented
+    // out on purpose (MCP-T10) and this Worker must claim no migration for it.
+    const bound = WRANGLER_TOML.split("\n")
+      .filter((line) => /^class_name\s*=/.test(line))
+      .map((line) => (/"([^"]+)"/.exec(line)?.[1] ?? "") as string);
+    expect(bound.sort()).toEqual(["FerroGateMcpSession", "McpOauthFlowClaim"]);
+    for (const className of bound) {
+      expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
+      expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);
+    }
+  });
+});
+
 describe("every var the source reads is declared or explicitly excepted", () => {
   const declaredNames = new Set([...DECLARED.vars.keys(), ...DECLARED.bindings.keys()]);
   const undeclared = [...READS.named.keys()].filter((n) => !declaredNames.has(n)).sort();

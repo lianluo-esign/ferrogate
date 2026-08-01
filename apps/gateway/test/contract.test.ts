@@ -32,6 +32,7 @@ import {
   ASSET_OPERATION_IDS,
   GATEWAY_OWNED_OPERATION_IDS,
   INFERENCE_OPERATION_IDS,
+  OBSERVABILITY_OPERATION_IDS,
   PENDING_MODULE_OPERATION_IDS,
   SHARED_OPERATION_IDS,
   createGatewayApp,
@@ -277,11 +278,33 @@ describe("route registration", () => {
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 31 owned + the 2 shared health ops,
-    // so a stray registration is caught in the same breath.
+    // ...and the registry is exactly the 31 owned + the 2 shared health ops +
+    // `getMetrics`, so a stray registration is caught in the same breath.
+    //
+    // `getMetrics` is deliberately its OWN list rather than a 32nd owned
+    // operation or a third "shared" one. ROUTE-MAP assigns the operation to
+    // `apps/control-plane`; the cutover certification found that leaving it
+    // ONLY there means the 47 `ferrogate_*` series a dashboard queries have no
+    // producer, because the counters live in this Worker. Mounting it here is
+    // an addition with a reason, and this line is where that reason has to be
+    // re-stated if anyone ever adds another.
     expect(new Set(registered)).toEqual(
-      new Set([...SHARED_OPERATION_IDS, ...GATEWAY_OWNED_OPERATION_IDS]),
+      new Set([
+        ...SHARED_OPERATION_IDS,
+        ...OBSERVABILITY_OPERATION_IDS,
+        ...GATEWAY_OWNED_OPERATION_IDS,
+      ]),
     );
+  });
+
+  it("does not smuggle getMetrics into the OWNED or SHARED lists", () => {
+    // The exact-set assertion above would still pass if `getMetrics` were
+    // quietly appended to either list, and the distinction is the whole
+    // argument: `SHARED_OPERATION_IDS` means "every Worker implements this",
+    // and `apps/mcp` / `apps/telemetry` do not.
+    expect(GATEWAY_OWNED_OPERATION_IDS).not.toContain("getMetrics");
+    expect([...SHARED_OPERATION_IDS]).not.toContain("getMetrics");
+    expect([...OBSERVABILITY_OPERATION_IDS]).toEqual(["getMetrics"]);
   });
 
   it("builds the production registry from the module list src/index.ts exports", () => {

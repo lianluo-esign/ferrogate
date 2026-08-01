@@ -530,6 +530,30 @@ describe("resolvePorts binding postures", () => {
     expect(ports.credentials).toBeInstanceOf(DurableCredentialStore);
   });
 
+  it("keys the CIPHER on the operator's material, not a per-isolate random key", async () => {
+    // MCP-P6, corrected in wave 17. Every assertion in this block was about
+    // `ports.credentials`; NONE was about `ports.cipher`. Measured: deleting
+    // `cipher: identityCipherFrom(env.FERROGATE_MCP_IDENTITY_KEY)` from
+    // `resolvePorts` left all 359 mcp tests GREEN — and left the durable
+    // credential store sealing grants under `webCryptoIdentityCipher()`'s
+    // EPHEMERAL fallback, a fresh 32 random bytes per isolate. Every stored
+    // OAuth grant would then be undecryptable the moment the isolate recycled,
+    // while the operator's configured key sat unread.
+    //
+    // The property asserted is interoperability with the configured key, which
+    // an ephemeral one cannot fake: seal with a cipher built from KEY_HEX
+    // directly, open with the one `resolvePorts` chose.
+    const configured = identityCipherFrom(KEY_HEX);
+    expect(configured, "the fixture key must be valid material").toBeDefined();
+    const aad = new TextEncoder().encode("mcp-identity-mount-probe");
+    const plaintext = new TextEncoder().encode("refresh-token-value");
+    const sealed = await (configured as NonNullable<typeof configured>).encrypt(plaintext, aad);
+
+    const mounted = resolvePorts(base).cipher;
+    const opened = await mounted.decrypt(sealed.nonce, sealed.ciphertext, aad);
+    expect(new TextDecoder().decode(opened)).toBe("refresh-token-value");
+  });
+
   it("does NOT bind the durable store when the key is malformed", () => {
     const ports = resolvePorts({ ...base, FERROGATE_MCP_IDENTITY_KEY: "short" });
     expect(ports.credentials).not.toBeInstanceOf(DurableCredentialStore);

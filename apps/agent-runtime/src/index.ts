@@ -24,6 +24,7 @@ import { EXPECTED_OWNED_OPERATION_COUNT, OPERATIONS } from "./contract.js";
 import { contractAuth } from "./middleware/auth.js";
 import { correlation, errorHandler, notFoundHandler } from "./middleware/errors.js";
 import type { AgentRuntimeEnv } from "./ports.js";
+import { healthRoutes } from "./routes/health.js";
 import { runRoutes } from "./runs/lifecycle.js";
 import { workerRoutes } from "./workers/callbacks.js";
 
@@ -34,9 +35,13 @@ app.notFound(notFoundHandler);
 app.use("*", correlation);
 
 // --- Shared anonymous probes (`ROUTE-MAP.md`: implemented in EVERY Worker) ---
-app.get("/healthz", (c) => c.json({ ok: true }));
-app.get("/readyz", (c) => c.json({ ok: true }));
-app.get("/health", (c) => c.json({ ok: true }));
+// `./routes/health.ts` carries the contract documents and the Rust readiness
+// decision table; this line is the mount seam. Deleting it takes
+// `test/routes/health-contract.test.ts` ("the deployed Worker serves the
+// contract probes") RED — that block drives `SELF`, so it cannot be satisfied
+// by the module merely existing. It must stay AHEAD of `contractAuth` and of
+// the three `app.route("/", …)` groups: all three probes are `anonymous`.
+app.route("/", healthRoutes);
 app.get("/version", (c) =>
   c.json({ api: PUBLIC_API_MAJOR, operations: EXPECTED_OWNED_OPERATION_COUNT }),
 );

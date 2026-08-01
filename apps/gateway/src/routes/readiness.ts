@@ -29,22 +29,27 @@
  * Closing this properly means a `DRAIN` DO/KV binding plus the operator route
  * that writes it, which is a control-plane slice, not a routing one.
  *
- * PORT-TODO(`server/chat.rs:2862` `state.is_draining()`): the drain is READ by
- * this endpoint and by nothing else, so it advertises a posture the data plane
- * does not honour. In Rust `plan_ai_ingress` re-checks `is_draining()` for
- * EVERY AI request and refuses a draining node
- * `503 node_draining "gateway node is draining and is not accepting new AI
- * requests"` — the same check guards `embeddings.rs:98`, `images.rs:115`,
- * `messages.rs:145` and `governed_decision.rs:502`. Here `GATEWAY_DRAIN=true`
- * flips `/readyz` to 503 and leaves `/v1/chat/completions` serving normally, so
- * an operator draining a deployment before a migration still takes new billable
- * traffic. `grep -rn "node_draining" apps/` returns nothing.
+ * ## The `node_draining` marker that stood here is CLOSED (cutover D6)
  *
- * This is NOT the platform limit described above: that one is about how fast the
- * FLAG can be flipped; this is about the flag being read on one route out of 31.
- * `drainStatus(env)` is already a pure synchronous env read, so the fix is one
- * guard in the post-auth middleware chain — the flag it needs is the one this
- * file already parses.
+ * It read: "the drain is READ by this endpoint and by nothing else, so it
+ * advertises a posture the data plane does not honour", and it was right —
+ * `GATEWAY_DRAIN=true` flipped `/readyz` to 503 and left
+ * `/v1/chat/completions` serving, so an operator draining a deployment before a
+ * migration still took new billable traffic.
+ *
+ * `./drain.ts` now mounts the guard the marker specified: `nodeDrainGate()`,
+ * mounted by `createGatewayApp` after the post-auth middleware chain, refuses
+ * the five spend-producing operations with Rust's exact
+ * `503 node_draining "gateway node is draining and is not accepting new AI
+ * requests"` (`chat.rs:2862`, `embeddings.rs:98`, `images.rs:115`,
+ * `messages.rs:145`). It calls {@link drainStatus} — this file's parse, not a
+ * second one — so the endpoint and the data plane can never disagree about
+ * whether a deployment is draining, and `test/routes/drain.test.ts` asserts
+ * that agreement directly over every spelling of the var.
+ *
+ * That was never the platform limit described above: THAT one is about how fast
+ * the FLAG can be flipped, and it stands. This was about the flag being read on
+ * one route out of 31, and it is now read on six.
  *
  * The `ClusterStatus` members that describe a PEER TOPOLOGY — `cluster_id`,
  * `node_id`, `node_region`, `node_zone`, `state_backend`, `counter_backend`,

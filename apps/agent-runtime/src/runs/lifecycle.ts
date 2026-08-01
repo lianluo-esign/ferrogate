@@ -28,7 +28,7 @@ import { HttpError } from "../middleware/errors.js";
 import type { AgentRuntimeEnv } from "../ports.js";
 import type { SelfHostedRunDispatch } from "../workers/plane.js";
 import { runStateStub, workerPlaneStub } from "./addressing.js";
-import { SSE_HEADERS, clampEventLimit, resumeCursor, wantsEventStream } from "./events.js";
+import { SSE_HEADERS, parseEventLimit, resumeCursor, wantsEventStream } from "./events.js";
 import {
   authorizeOrThrow,
   declaredAgentRunId,
@@ -387,13 +387,18 @@ runRoutes.get("/v1/agent-jobs/:run_id/events", async (c) => {
 
   const page = await runStateStub(c.env, tenantId, run.run_id).listEvents(tenantId, {
     afterEventId: cursor,
-    limit: clampEventLimit(url.searchParams.get("limit")),
+    // `400 invalid_event_cursor` on a non-integer or zero limit — see
+    // `./events.ts::parseEventLimit`. Only the upper bound is clamped.
+    limit: parseEventLimit(url.searchParams.get("limit")),
   });
   if (page === undefined) {
     throw new HttpError(404, "agent_job_not_found", "agent job was not found");
   }
   return c.json({
-    object: "list",
+    // Rust `AgentJobEventPage.object` (`agent_jobs.rs:838`). NOT `"list"`: a
+    // client discriminating on `object` cannot tell this page from any other
+    // collection if it is, which is cutover finding D7.1.
+    object: "agent_job_event_page",
     run_id: run.run_id,
     data: page.data,
     limit: page.limit,
@@ -404,6 +409,102 @@ runRoutes.get("/v1/agent-jobs/:run_id/events", async (c) => {
     request_id: c.get("requestId") ?? "",
   });
 });
+
+/**
+ * Timeline `kind` a work-product envelope rides on, and the discriminator
+ * INSIDE its payload — `coding_agent::WORK_PRODUCT_ARTIFACT_EVENT_KIND` /
+ * `WORK_PRODUCT_ARTIFACT_OBJECT`, verbatim.
+ *
+ * A work product is not given its own event kind: it shares `"artifact"` with
+ * every other evidence row and is distinguished by the payload discriminator,
+ * so the storage layer never has to learn about it.
+ */
+const WORK_PRODUCT_EVENT_KIND = "artifact";
+const WORK_PRODUCT_OBJECT = "coding_agent.work_product";
+
+/**
+ * `WorkProductView::from_timeline_events` — the #472 coding-agent work products
+ * carried by a run's own artifact events.
+ *
+ * ## Why this exists (cutover finding D7, the aside)
+ *
+ * The certification recorded that `getAgentJobResult` "drops Rust's
+ * `work_products` and substitutes a raw `artifacts` array". Reading
+ * `agent_jobs.rs:876-905` shows the substitution never happened: Rust emits
+ * BOTH keys, and this handler simply had no `work_products` at all — so a
+ * client that reads it saw the field vanish, and one that skipped an unfamiliar
+ * artifact envelope had nowhere else to look.
+ *
+ * ## What IS ported, exactly
+ *
+ * The three things that are pure functions of the timeline this DO already
+ * stores, and that carry the security-relevant part of the Rust behaviour:
+ *
+ *  1. the FILTER — `kind === "artifact"` AND payload `object` equal to the
+ *     discriminator. An unrecognised artifact is SKIPPED, never an error: "a
+ *     run's timeline legitimately carries artifacts that are not work
+ *     products", and failing the whole result read on one would be worse.
+ *  2. the un-parseable payload is skipped for the same reason (Rust's `parse`
+ *     returns `Option`, never `Result`).
+ *  3. `attribution_verified` — RE-DERIVED here against the `run_id` in the
+ *     PATH, never copied from the payload. That is the whole point of the Rust
+ *     projection existing ("`run_id` is the caller's, not the payload's"), and
+ *     it is the half a relabelled envelope would otherwise fake.
+ *
+ * ## PORT-TODO(`ferrogate-runtime::coding_agent`): the RE-DERIVED half
+ *
+ * `WorkProductView::from_artifact` also re-derives `product_id` from the
+ * product's own fields and reports `repo_verified` /
+ * `published.matches_work_product` from that derivation
+ * (`extract.rs::id_is_consistent`, `work_product_artifact.rs::receipt_publishes`).
+ * Those need the `WorkProduct` / `RepoCoordinates` / `WriteBackReceipt` model,
+ * and `crates/ferrogate-runtime/src/coding_agent/` has NO TypeScript port
+ * anywhere in this tree — it is not in `PORT-PLAN.md` either. Inventing the
+ * derivation here would produce a verdict with nothing behind it, which is
+ * strictly worse than not reporting one, so the evidence is carried WITHOUT
+ * those two verdicts rather than with fabricated ones. This is an under-claim,
+ * not a wrong claim, and it is why the payload is passed through verbatim under
+ * `work_product` rather than flattened into `WorkProductView`'s field set.
+ *
+ * NOTHING in this tree writes such an envelope today, so the array is `[]` for
+ * every job it can currently produce — which is also Rust's answer for every
+ * non-coding job.
+ */
+export function workProductsFor(
+  events: readonly { readonly kind: string; readonly event_json: string }[],
+  runId: string,
+): readonly Record<string, unknown>[] {
+  const products: Record<string, unknown>[] = [];
+  for (const event of events) {
+    if (event.kind !== WORK_PRODUCT_EVENT_KIND) continue;
+    let payload: unknown;
+    try {
+      payload = JSON.parse(event.event_json);
+    } catch {
+      continue;
+    }
+    if (typeof payload !== "object" || payload === null) continue;
+    const envelope = payload as Record<string, unknown>;
+    if (envelope.object !== WORK_PRODUCT_OBJECT) continue;
+
+    const product = envelope.work_product;
+    const declaredRun =
+      typeof product === "object" && product !== null
+        ? (product as { run?: { run_id?: unknown } }).run?.run_id
+        : undefined;
+    products.push({
+      object: "coding_agent_work_product",
+      run_id: runId,
+      work_product: product ?? null,
+      ...(envelope.write_back === undefined ? {} : { write_back: envelope.write_back }),
+      // Re-derived against the PATH run id. A payload claiming another run is
+      // reported `false`, not filtered out — the evidence is still on this
+      // run's timeline and hiding it would lose the anomaly.
+      attribution_verified: declaredRun === runId,
+    });
+  }
+  return products;
+}
 
 /**
  * `GET /v1/agent-jobs/{run_id}/result` — `getAgentJobResult`,
@@ -447,6 +548,11 @@ runRoutes.get("/v1/agent-jobs/:run_id/result", async (c) => {
     output_recorded: run.output !== null,
     // `null` is honest absence — nothing is fabricated.
     output: run.output,
+    // Rust carries BOTH: the raw `artifacts` evidence rows AND the decoded
+    // `work_products` projection (`agent_jobs.rs:890`). The certification read
+    // this as "`work_products` was replaced by `artifacts`"; the truth is that
+    // the projection was simply absent, so a client saw the key disappear.
+    work_products: workProductsFor(page?.data ?? [], run.run_id),
     artifacts,
     completed_at_unix: run.completed_at_unix,
     request_id: c.get("requestId") ?? "",

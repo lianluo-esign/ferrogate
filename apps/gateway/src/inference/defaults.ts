@@ -45,6 +45,8 @@ import type {
 } from "./ports.js";
 import { ProviderRoutingMetrics } from "./strategy.js";
 import type { RoutingMetrics } from "./strategy.js";
+import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
+import type { WorkflowGateBindings } from "./workflow.js";
 
 /**
  * `config.limits` defaults.
@@ -398,5 +400,20 @@ export function resolveDeps(
     // score every provider `NO_ROUTING_OBSERVATIONS` forever — a metric with no
     // reader, which is the exact defect shape this wave exists to remove.
     routingMetrics: deps.routingMetrics ?? isolateRoutingMetrics,
+    // The workflow GRAPH gate (certification finding D2). Env-resolved like
+    // `circuit` and `shadowBudget`, and DEFAULT-ON: with `CONTROL_DB` bound the
+    // gate reads the admin `agent-workflows` documents, with only
+    // `GATEWAY_SKILL_PACKAGES` set it reads the packages' own workflows, and
+    // with neither it gates nothing — which is the behaviour of a deployment
+    // that has declared no workflows, not a switch an operator can flip.
+    workflows:
+      typeof deps.workflows === "function"
+        ? deps.workflows(env)
+        : (deps.workflows ?? workflowCatalogFromEnv(env as WorkflowGateBindings)),
+    workflowHistory:
+      typeof deps.workflowHistory === "function"
+        ? deps.workflowHistory(env)
+        : (deps.workflowHistory ?? workflowHistoryFromEnv(env as WorkflowGateBindings)),
+    nowUnixSeconds: deps.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
   };
 }

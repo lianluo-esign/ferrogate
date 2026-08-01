@@ -75,6 +75,18 @@ export interface MeteringAttribution {
   readonly projectId?: string | undefined;
   readonly workspaceId?: string | undefined;
   readonly apiKeyId?: string | undefined;
+  /**
+   * `x-ferrogate-agent-run-id` (#305/#522) — the agent run whose work produced
+   * this spend, as declared on the request.
+   *
+   * Here for the SAME reason `apiKeyId` is: `Usage` (`src/inference/ports.ts`)
+   * does not carry one and that file belongs to another slice, so the drain —
+   * which holds the `Context` — is the only place it can be read. Applied by
+   * `./agent-run.ts::chargeWithAgentRun` under the same request-id guard, and
+   * for the same reason: a drain pass can settle an earlier request's outbox
+   * row, and stamping this request's run onto it would be mis-attribution.
+   */
+  readonly agentRunId?: string | undefined;
 }
 
 /**

@@ -124,6 +124,21 @@ describe("every Durable Object binding is deployable", () => {
   });
 });
 
+describe("the runtime contract at the top of the file", () => {
+  it("keeps nodejs_compat in compatibility_flags (AR-T2)", () => {
+    // Corrected in wave 17. The MOUNT-SEAMS row's *Expected RED* was "whole
+    // suite"; measured, commenting the line out left every agent-runtime suite
+    // GREEN, because `@cloudflare/vitest-pool-workers` supplies its own runtime
+    // flags. The line whose absence stops the deployed Worker starting had no
+    // gate at all.
+    expect(wranglerToml()).toMatch(/^compatibility_flags\s*=\s*\[[^\]]*"nodejs_compat"/m);
+  });
+
+  it("pins a compatibility_date (AR-T2)", () => {
+    expect(wranglerToml()).toMatch(/^compatibility_date\s*=\s*"\d{4}-\d{2}-\d{2}"/m);
+  });
+});
+
 describe("the entry module the deploy config points at", () => {
   it("names src/worker.ts as main, not the composition root", () => {
     // `src/index.ts` default-exports the Hono app; `AgentRunState` and

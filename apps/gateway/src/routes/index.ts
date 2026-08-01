@@ -30,15 +30,18 @@ import { networkAccess } from "../middleware/network.js";
 import { responseCache } from "../middleware/response-cache.js";
 import type { GatewayEnv } from "../ports.js";
 import { agentDiscoveryHandler } from "./agent-discovery.js";
+import { nodeDrainGate } from "./drain.js";
+import { metricsHandler, requestMetrics } from "./metrics.js";
+import { RUNTIME_NAME, SERVICE_NAME, SERVICE_VERSION } from "./service.js";
 import { renderPromptTemplateHandler } from "./prompts.js";
 import { readinessResponse } from "./readiness.js";
 import { reverseProxyFallThrough } from "./reverse-proxy.js";
 import { getAgentSkillHandler, listAgentSkillsHandler } from "./skills.js";
 
-/** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
-export const SERVICE_NAME = "ferrogate-gateway";
-/** Rust reports `runtime: "pingora"`; the Pingora data plane is eliminated. */
-export const RUNTIME_NAME = "workers";
+// Service identity — `./service.ts`, re-exported here so every existing
+// importer is unchanged. It is a separate module because `./metrics.ts` needs
+// `SERVICE_NAME` and this file mounts `./metrics.ts`.
+export { RUNTIME_NAME, SERVICE_NAME, SERVICE_VERSION } from "./service.js";
 
 // ---------------------------------------------------------------------------
 // Ownership tables
@@ -46,6 +49,24 @@ export const RUNTIME_NAME = "workers";
 
 /** `/healthz` + `/readyz` — implemented in EVERY Worker, not owned by one app. */
 export const SHARED_OPERATION_IDS = ["getHealthz", "getReadyz"] as const;
+
+/**
+ * `GET /metrics` — the Prometheus exposition, mounted HERE and not (only) on
+ * `apps/control-plane`.
+ *
+ * `ROUTE-MAP.md` assigns the operation to the control plane, and that is where
+ * the ADMIN projection of it belongs. But the cutover certification found the
+ * consequence of leaving it there alone: the control plane measures none of the
+ * 47 `ferrogate_*` series, emits two gauges, and every dashboard that queries
+ * the rest breaks at cutover. Its own note names the remedy — *"the counters
+ * live in `apps/gateway`; exposing them means a gateway-side `/metrics`"*.
+ *
+ * It is kept OUT of {@link SHARED_OPERATION_IDS} deliberately: that list means
+ * "implemented in every Worker", and this is not — `apps/mcp` and
+ * `apps/telemetry` measure nothing worth exposing. Being its own list is what
+ * makes `test/contract.test.ts`'s exact-registry assertion say so out loud.
+ */
+export const OBSERVABILITY_OPERATION_IDS = ["getMetrics"] as const;
 
 /** The 6 inference operations. Owned by the inference agent this wave. */
 export const INFERENCE_OPERATION_IDS = [
@@ -179,7 +200,14 @@ export interface RouteModule {
 // ---------------------------------------------------------------------------
 
 function healthzHandler(c: Context<GatewayEnv>): Response {
-  return c.json({ status: "ok", service: SERVICE_NAME, runtime: RUNTIME_NAME });
+  // All four `HealthResponse` fields, in Rust's own order. `version` was the
+  // one the certification found missing — see {@link SERVICE_VERSION}.
+  return c.json({
+    status: "ok",
+    service: SERVICE_NAME,
+    version: SERVICE_VERSION,
+    runtime: RUNTIME_NAME,
+  });
 }
 
 function readyzHandler(c: Context<GatewayEnv>): Response {
@@ -332,6 +360,18 @@ export interface CreateGatewayAppOptions {
    * empty table is exactly `404 not_found`.
    */
   readonly reverseProxy?: MiddlewareHandler<GatewayEnv>;
+  /**
+   * Override the operator-drain gate (`./drain.ts`).
+   *
+   * Production never passes this: the default reads `GATEWAY_DRAIN` — the same
+   * var, with the same parse, that `/readyz` reports — and is inert unless it
+   * is the exact string `"true"`. It exists so a test can narrow or widen the
+   * guarded operation set without restating the mount.
+   *
+   * NOT nullable, for the same reason as the three above: there is no way to
+   * ask for "no drain gate", only for a gate whose flag is off.
+   */
+  readonly nodeDrain?: MiddlewareHandler<GatewayEnv>;
 }
 
 /** The assembled Worker plus the registry the anti-drift test inspects. */
@@ -346,6 +386,14 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   app.onError(gatewayErrorHandler);
   app.notFound(gatewayNotFoundHandler);
   app.use("*", requestId);
+
+  // The producer behind `ferrogate_request_logs_total` /
+  // `ferrogate_request_errors_total` / `ferrogate_request_status_total`.
+  // AHEAD of the network gate on purpose: an `ip_denied` flood is exactly the
+  // traffic the counters have to show, and counting behind the gate would
+  // report an attack as silence. It does its work on the way OUT, so being
+  // outermost costs nothing and still observes the client's final status.
+  app.use("*", requestMetrics());
 
   // PRE-AUTH network gate (Rust `check_network_access`, issue #166). Mounted
   // HERE — after the request id is minted so a refusal still carries one, and
@@ -364,6 +412,14 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
     app.use("*", middleware);
   }
 
+  // OPERATOR DRAIN (Rust `plan_ai_ingress`'s `state.is_draining()` check, plus
+  // its four siblings) → `503 node_draining` on the five spend-producing
+  // operations. Mounted HERE — after admission, before the cache and the routes
+  // — because that is where the Rust check sits relative to `finalize_auth`.
+  // Inert unless `GATEWAY_DRAIN` is the exact string `"true"`, which is the
+  // same value and the same parse `/readyz` uses. See `./drain.ts`.
+  app.use("*", options.nodeDrain ?? nodeDrainGate());
+
   // The exact-match AI response cache (Rust `AiResponseCache`, consulted at
   // `server/chat.rs:481`). LAST in the chain and immediately before the routes,
   // which is the same place the Rust seam sits inside the handler: after the
@@ -379,6 +435,14 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // Shared health/readiness (contract `anonymous`, present in every Worker).
   router.register("getHealthz", healthzHandler);
   router.register("getReadyz", readyzHandler);
+
+  // `GET /metrics` — the Prometheus exposition over THIS isolate's counters.
+  // Registered through the router, so `contractAuth` gives it the contract's
+  // own `bearer` + `admin.read` ladder rather than a bespoke guard: an
+  // anonymous scrape is `401 missing_api_key` and a data-plane key is
+  // `403 scope_denied`. See `./metrics.ts` and
+  // {@link OBSERVABILITY_OPERATION_IDS}.
+  router.register("getMetrics", metricsHandler);
 
   registerToolingRoutes(router);
 

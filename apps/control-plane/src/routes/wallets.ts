@@ -38,10 +38,27 @@
  * was never charged), and a concurrent movement could compute both new balances
  * from the same old one and lose a charge entirely.
  */
+import {
+  type TenantDatabaseHandle,
+  bindCredits,
+  centsToCredits,
+  creditsToCents,
+} from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import type { CallerScope, StoreRecord } from "../ports.js";
-import { adminItem, listResponse, parseListQuery } from "../responses.js";
+import { type CallerScope, StoreConflictError, type StoreRecord } from "../ports.js";
+import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
+import { tenantDatabaseFor, tenantOf } from "../store/tenancy.js";
+import {
+  openingCreditsOf,
+  paymentMethodProjectable,
+  projectPaymentMethod,
+  projectWalletMovement,
+  unprojectPaymentMethod,
+  walletBalanceForMovement,
+  walletLedgerEntryId,
+  walletMirrorFields,
+} from "../store/wallet_projection.js";
 import {
   type GroupModule,
   type Handler,
@@ -55,27 +72,31 @@ import {
 
 const WALLETS = "wallets";
 const LEDGER = "wallet-ledger";
+const PAYMENT_METHODS = "payment-methods";
 
 /**
- * PORT-TODO(P: inventory-data-billing §2.5 wallets) — the balance this group moves
- * is NOT the balance the data plane spends against.
+ * MARKER CLOSED — the `inventory-data-billing §2.5 wallets` PORT-TODO that
+ * stood here read: "the balance this group moves is NOT the balance the data
+ * plane spends against … `adjust`/`charge` write `balance_cents` onto a
+ * `control_plane_resources` document in the CONTROL database [while]
+ * `apps/gateway/src/ratelimit/quota.ts` admits a request against `SELECT
+ * balance_credits FROM wallets WHERE tenant_id = ?` in the TENANT database …
+ * so crediting a prepaid wallet through the admin API does not let the tenant
+ * spend, and charging it does not stop them."
  *
- * `adjust`/`charge` write `balance_cents` onto a `control_plane_resources`
- * document in the CONTROL database. `apps/gateway/src/ratelimit/quota.ts`
- * admits a request against `SELECT balance_credits FROM wallets WHERE
- * tenant_id = ?` in the TENANT database (`sql/d1-ts/tenant/0001_init_tenant.sql`),
- * minus the live `wallet_reservations` holds. Two databases, two tables, two
- * units (cents vs credits) — so crediting a prepaid wallet through the admin API
- * does not let the tenant spend, and charging it does not stop them.
+ * Both halves are now connected through `store/wallet_projection.ts`, which
+ * carries the whole argument: which balance is authoritative (the tenant one),
+ * where the single cents→credits conversion lives (`@ferrogate/storage`'s
+ * `centsToCredits`, in `bigint`), the ordering that makes a crash between the
+ * two databases repairable, and the fact that this is an idempotent OUTBOX and
+ * not a cross-database transaction, because D1 has neither.
  *
- * `payment-methods` has the same split: `payment_methods` is a tenant-database
- * table this group never writes.
- *
- * Closing it is the `store/virtual_keys.ts` shape: a dual write through
- * `deps.tenantDatabases`, ordered so the crash state is the safe one (TIGHTEN
- * the enforced row first on `charge`, LOOSEN the document first on `adjust`),
- * with the credit↔cent conversion taken from `apps/gateway/src/metering/credits.ts`
- * rather than re-derived here.
+ * The marker's own closing instruction named
+ * `apps/gateway/src/metering/credits.ts` as the home of the conversion. It is
+ * not: that module converts USD→credits for the metering settlement and lives
+ * in an app `apps/control-plane` cannot import. The cents→credits conversion
+ * did not exist anywhere, so it was written once, in the package BOTH apps
+ * already depend on.
  */
 
 export const walletSchema = adminRecordSchema.extend({
@@ -129,13 +150,16 @@ function balanceOf(record: StoreRecord): number {
 }
 
 /**
- * The shared movement path: authorize the tenant, load the wallet, then append
- * the ledger entry and move the balance in ONE atomic unit.
+ * The shared movement path: authorize the tenant, decide the movement against
+ * the money that ACTUALLY exists, then write the two legs in the order that
+ * makes a crash between them repairable.
  *
- * The overdraft refusal is computed from the balance the unit is guarded on, so
- * a wallet that another movement drained in between does not settle against a
- * stale balance: the guard fails, the store retries against the new state, and
- * the second `charge` sees the balance the first one left.
+ * The CONTROL leg — the ledger entry and the balance it explains — is still ONE
+ * `store.atomic` unit, i.e. one D1 `batch()` guarded on the revision the read
+ * saw, so a concurrent movement makes the guard fail and the store re-decides
+ * against the state that writer left. The TENANT leg is one `batch()` of its
+ * own inside `settleWalletBalance`. There is deliberately no claim that the two
+ * are one transaction; `store/wallet_projection.ts` states the window.
  */
 function movement(options: {
   readonly entryKind: "adjustment" | "charge";
@@ -152,9 +176,54 @@ function movement(options: {
     if (wallet === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
 
     const body = (await readJson(c, options.schema)) as Record<string, unknown>;
-    const delta = options.delta(body);
-    const next = balanceOf(wallet) + delta;
-    if (next < 0) {
+    const deltaCents = options.delta(body);
+    // The ONE conversion. `bigint` from here down — see `store/wallet_projection.ts`.
+    const deltaCredits = centsToCredits(deltaCents);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Throws 503 for a tenant that HAS a provisioned database this deployment
+    // cannot reach; `null` means document-only, which is the posture this
+    // surface has always had and keeps exactly.
+    const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantId);
+
+    /**
+     * The balance the movement is decided against.
+     *
+     * With a tenant database this is `wallets.balance_credits` — the money the
+     * gateway spends — NOT the document's running total, which the metering
+     * settlement has been silently debiting past. Without one it is the
+     * document, unchanged.
+     */
+    const baseCredits =
+      handle === null
+        ? centsToCredits(balanceOf(wallet))
+        : await walletBalanceForMovement(
+            handle,
+            tenantId,
+            openingCreditsOf(wallet.balance_cents),
+            now,
+          );
+
+    // A `reference` makes the ids deterministic, which is what makes a
+    // double-submission apply once. See `walletLedgerEntryId`.
+    const entryId = walletLedgerEntryId(tenantId, body.reference);
+    const prior =
+      typeof body.reference === "string" && body.reference.trim() !== ""
+        ? await deps.store.get(LEDGER, scope, entryId)
+        : null;
+    if (prior !== null && prior.amount_cents !== deltaCents) {
+      // The same idempotency key for a DIFFERENT amount is an operator error,
+      // and applying it would be the double-charge the key exists to prevent.
+      throw new HttpError(
+        409,
+        "conflict",
+        `wallet ${tenantId} already has a movement for reference ` +
+          `${String(body.reference)} of a different amount`,
+      );
+    }
+
+    const nextCredits = prior === null ? baseCredits + deltaCredits : baseCredits;
+    if (nextCredits < 0n) {
       throw new HttpError(
         409,
         "conflict",
@@ -162,35 +231,73 @@ function movement(options: {
       );
     }
 
-    const now = Math.floor(Date.now() / 1000);
-    const applied = await deps.store.atomic(scope, [
-      {
-        kind: "create",
-        collection: LEDGER,
-        record: {
-          id: crypto.randomUUID(),
-          wallet_id: tenantId,
-          tenant_id: tenantId,
-          kind: options.entryKind,
-          amount_cents: delta,
-          balance_after_cents: next,
-          reason: typeof body.reason === "string" ? body.reason : null,
-          reference: typeof body.reference === "string" ? body.reference : null,
-          recorded_at: now,
+    /**
+     * The CONTROL leg. Skipped on a replay — the entry is already there — so a
+     * retry drives the OTHER leg forward instead of 409-ing and leaving a
+     * half-applied movement stuck forever.
+     */
+    const controlLeg = async (): Promise<StoreRecord> => {
+      if (prior !== null) {
+        const current = await deps.store.get(WALLETS, scope, tenantId);
+        if (current === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
+        return current;
+      }
+      const applied = await deps.store.atomic(scope, [
+        {
+          kind: "create",
+          collection: LEDGER,
+          record: {
+            id: entryId,
+            wallet_id: tenantId,
+            tenant_id: tenantId,
+            kind: options.entryKind,
+            amount_cents: deltaCents,
+            amount_credits: bindCredits(deltaCredits),
+            balance_after_cents: Number(creditsToCents(nextCredits)),
+            balance_after_credits: bindCredits(nextCredits),
+            reason: typeof body.reason === "string" ? body.reason : null,
+            reference: typeof body.reference === "string" ? body.reference : null,
+            recorded_at: now,
+          },
         },
-      },
-      {
-        kind: "merge",
-        collection: WALLETS,
-        id: tenantId,
-        patch: { balance_cents: next, updated_at: now },
-      },
-    ]);
-    // `null` means the wallet went away between the read and the write. It is
-    // the same 404 the read would have produced, and — the point of the unit —
-    // no ledger entry was written for a movement that did not happen.
-    if (applied === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
-    return json(c, 200, adminItem("wallet", applied[1]));
+        {
+          kind: "merge",
+          collection: WALLETS,
+          id: tenantId,
+          patch: walletMirrorFields(nextCredits, now),
+        },
+      ]);
+      // `null` means the wallet went away between the read and the write. It is
+      // the same 404 the read would have produced, and — the point of the unit
+      // — no ledger entry was written for a movement that did not happen.
+      if (applied === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
+      return applied[1] as StoreRecord;
+    };
+
+    /** The TENANT leg: the money the data plane can actually spend. */
+    const tenantLeg = async (h: TenantDatabaseHandle): Promise<void> => {
+      await projectWalletMovement(h, {
+        settlementId: entryId,
+        tenantId,
+        deltaCredits,
+        nowUnix: now,
+      });
+    };
+
+    if (handle === null) return json(c, 200, adminItem("wallet", await controlLeg()));
+
+    // ORDER. A DEBIT tightens, so the enforced row goes first and a crash
+    // leaves money already taken with its entry outstanding. A CREDIT loosens,
+    // so the ledger claim goes first and a crash leaves the customer
+    // under-funded rather than funded with nothing to explain it. Both residues
+    // are repaired by re-submitting with the same `reference`.
+    if (deltaCredits < 0n) {
+      await tenantLeg(handle);
+      return json(c, 200, adminItem("wallet", await controlLeg()));
+    }
+    const stored = await controlLeg();
+    await tenantLeg(handle);
+    return json(c, 200, adminItem("wallet", stored));
   };
 }
 
@@ -236,6 +343,65 @@ export const walletsRoutes: GroupModule = crudGroup(
       // A charge always DEBITS, whatever sign the body used.
       delta: (body) => -Math.abs(typeof body.amount_cents === "number" ? body.amount_cents : 0),
     }),
+
+    /**
+     * `POST /admin/v1/payment-methods` — the document PLUS the tenant
+     * `payment_methods` row.
+     *
+     * The generic `CollectionSpec.project` hook cannot serve this: it is handed
+     * the CONTROL database, and this table lives in the tenant's OWN one. The
+     * create semantics below are the generic handler's, unchanged — an explicit
+     * `id` wins, otherwise a UUID; a duplicate id is a 409.
+     */
+    createPaymentMethod: async (c) => {
+      const deps = c.get("deps");
+      const scope = scopeOf(c);
+      const body = (await readJson(c, paymentMethodSchema)) as Record<string, unknown>;
+      const declared = body.id;
+      const id =
+        typeof declared === "string" && declared.trim() !== ""
+          ? declared.trim()
+          : crypto.randomUUID();
+      let stored: StoreRecord;
+      try {
+        stored = await deps.store.create(PAYMENT_METHODS, scope, { ...body, id });
+      } catch (error) {
+        if (error instanceof StoreConflictError) {
+          throw new HttpError(409, "conflict", `payment_method ${id} already exists`);
+        }
+        throw error;
+      }
+      // LOOSEN: the document first, so a crash in between leaves an instrument
+      // the operator can see that the recharge path cannot yet charge.
+      const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantOf(stored));
+      if (handle !== null && paymentMethodProjectable(stored)) {
+        await projectPaymentMethod(handle, stored, Math.floor(Date.now() / 1000));
+      }
+      return json(c, 201, adminItem("payment_method", stored));
+    },
+
+    /**
+     * `DELETE /admin/v1/payment-methods/{id}` — the tenant row FIRST.
+     *
+     * A residual row is an instrument that can still be charged after the
+     * operator was told it was removed, which is the one residue that is not
+     * survivable here. Resolving the document for THIS caller's scope first is
+     * what keeps "delete the tenant row before the document" from being an
+     * unfenced cross-tenant write.
+     */
+    deletePaymentMethod: async (c) => {
+      const deps = c.get("deps");
+      const scope = scopeOf(c);
+      const id = pathParam(c, "payment_method_id");
+      const visible = await deps.store.get(PAYMENT_METHODS, scope, id);
+      if (visible === null) {
+        throw new HttpError(404, "not_found", `payment_method ${id} not found`);
+      }
+      const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantOf(visible));
+      if (handle !== null) await unprojectPaymentMethod(handle, id);
+      await deps.store.remove(PAYMENT_METHODS, scope, id);
+      return json(c, 200, adminDeleted("payment_method", id));
+    },
 
     listWalletLedger: async (c) => {
       const deps = c.get("deps");

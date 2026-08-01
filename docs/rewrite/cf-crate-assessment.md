@@ -1,15 +1,113 @@
 # `ferrogate-cloudflare` — the 21st crate: assessment and verdict
 
-**Date:** 2026-08-01 · **Wave 16** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 16**, implemented by **wave 17** · **Branch:** `main-ts`
 **Answers:** `cutover-parity-libraries.md` §6.1 and `CUTOVER-READINESS.md` §6 item 5
 — *"`ferrogate-cloudflare` appears in NO row of `PORT-PLAN.md` and has four
 slices with no TS equivalent anywhere."*
 
 **Scope of this document:** a per-slice verdict — what it does, whether it is
 still NEEDED now that the runtime is Workers, and where it should live if it is.
-**No port is implemented in this wave.** Everything below was read from
-`crates/ferrogate-cloudflare/**` as READ-ONLY reference; no Rust was compiled,
-imported or executed, and no live Cloudflare resource was touched.
+Everything below was read from `crates/ferrogate-cloudflare/**` as READ-ONLY
+reference; no Rust was compiled, imported or executed, and no live Cloudflare
+resource was touched.
+
+> ## WAVE-17 AMENDMENT — the port is IMPLEMENTED. Read §0.0 first.
+>
+> Wave 16 wrote this assessment and implemented nothing. **Wave 17 built
+> `packages/cloudflare` and ported every STILL-NEEDED slice with tests**, added
+> the missing `PORT-PLAN.md` row, and closed the one live-path defect §S4
+> identified. §0.0 records exactly what landed and what is still deferred; the
+> per-slice sections below are unchanged and remain the rationale.
+
+---
+
+## 0.0 WAVE 17 — what was implemented
+
+`packages/cloudflare` (`@ferrogate/cloudflare`) now exists. **146 tests, 8
+suites**, plain vitest (every test drives an injected transport + injected
+clock: no network, no real sleep, no live account). Every slice this document
+marked STILL NEEDED is ported.
+
+| Slice | Module | Status | Mounted? |
+|---|---|---|---|
+| **S4** retry/backoff + typed taxonomy + envelope | `src/retry.ts`, `src/errors.ts`, `src/envelope.ts` | **PORTED** | **YES** — `@ferrogate/storage`'s `D1RestDatabase` (request path) |
+| **S3** preflight + required permission groups | `src/client.ts` `preflight()`, `src/scopes.ts` | **PORTED** | not yet — needs a CLI command (`apps/cli` is not this task's scope) |
+| **S5** D1 database lifecycle | `src/d1.ts` (`D1LifecycleClient`) | **PORTED** | not yet — needs a control-plane onboarding handler |
+| **S1** R2 bucket provisioning + injective naming | `src/r2.ts` (`R2Client`) | **PORTED** | not yet — gated on a bucket-per-tenant decision **and** R2 being enabled on the account |
+| **S2** bucket-scoped R2 credential mint | `src/r2-token.ts` (`R2TokenClient`) | **PORTED** | not yet — same gate as S1 |
+| — D1 `/query`, `d1_proxy`, AI-Gateway REST, `cf://` resolver, `ReqwestTransport`/`TokioClock` | — | **OBSOLETE, not ported** | superseded by bindings — see §2 "What is correctly absent" |
+
+### The one live defect this closed
+
+§S4 recorded that `packages/storage/src/tenant-rest.ts` — the D1 REST tenant
+router, **on the request path** for any deployment whose tenant fleet exceeds
+the Worker binding budget — had zero retry, zero backoff and zero `Retry-After`
+handling, so one 429 or one transient 502 was a hard user-visible
+`StorageError`. It now imports the ported schedule. The regression test
+(`packages/storage/test/d1/rest-retry.test.ts`) was written FIRST and observed
+RED against the unfixed tree.
+
+**One deliberate narrowing over the Rust, new in wave 17.** The D1 query API is
+a **POST for every statement**, including `INSERT`/`UPDATE`/`DELETE`, so
+"retryable status" is not the whole rule:
+
+* a **429** is an outright REJECTION — it never reached the database — so it is
+  always safe to re-issue. Retried unconditionally.
+* a **5xx** is AMBIGUOUS: the statement may have executed and only the response
+  was lost. Retried **only for a statement provably incapable of mutating
+  state** (`isReadOnlySql`, conservative by construction).
+
+This is the same reasoning that makes the S2 token mint non-retryable, applied
+to a second call site. Blanket 5xx retry on that path would have converted a
+missing-retry bug into a duplicate-write bug.
+
+### Deliberate divergences from the Rust, all tested
+
+1. **Retry is opt-in per call.** Rust retried EVERY method on a 5xx. Here
+   `idempotent` defaults to `method === "GET"` and each non-GET caller states
+   its own answer. `createScopedToken` passes `false` explicitly and a test
+   proves a 500 is issued exactly once — a retried mint creates a second
+   credential whose secret Cloudflare returns once and can never read back.
+2. **`r2BucketNameForTenant` is async**, because `crypto.subtle` is the
+   platform's hash. Byte-for-byte the same derivation: the empty-tenant digest
+   `8785c455…` quoted in the Rust module docs is reproduced exactly, and the
+   test's expected digests were computed with `sha256sum` OUTSIDE this codebase
+   so they are golden values, not a restatement of the implementation.
+3. **The transport contract is enforced at runtime, not by the type system.**
+   Rust's `HttpTransport` trait restricted `execute` to returning
+   `Err(CloudflareError::Transport)` and the retry loop leaned on it. TS cannot,
+   so the client normalises any non-`CloudflareError` throw at the boundary.
+
+### Mutation evidence (7 mutants, 7 killed)
+
+Each was applied, `grep`-ed back off disk to confirm the edit landed, then
+`bun run test` was run — never `bunx vitest run`, because `@ferrogate/storage`
+chains a second suite behind `vitest.d1.config.ts` and the two wiring mutants
+below only fail in that chained half.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | drop the **length prefix** from the canonical tenant identity (the injectivity-bearing detail) | 6 tests RED |
+| M2 | widen already-exists to absorb **any 409** | 3 tests RED |
+| M3 | re-add the **`10013`** numeric rate-limit match (TRAP 1) | 3 tests RED |
+| M4 | make the **credential mint retryable** | 2 tests RED |
+| M5 | drop one row from the required permission-group table | 1 test RED |
+| M6 | **unmount** the retry from the D1 REST request path | 5 tests RED |
+| M7 | treat every statement as read-only (retry an `INSERT` on a 5xx) | 2 tests RED |
+
+### What is still open after wave 17
+
+* **S1/S2/S5/S3 have no call site.** They are ported capabilities, not mounted
+  features. Each module's docblock states the EXACT wiring line and the gate
+  that must open first. Composition roots are the integrate step's to own, and
+  the bucket-per-tenant decision and the R2 account enablement are not
+  engineering choices this wave can make.
+* **The deploy-time binding constraint is unchanged.** S5 makes creating a
+  tenant D1 database programmable; **binding** it still needs a
+  `[[d1_databases]]` stanza and a deploy.
+* **§5 is still the transcription that must survive deletion.** It is now
+  partly redundant with the code, but not wholly: the migration procedure in
+  §5.1 and the pre-injective algorithm's collision families exist nowhere else.
 
 ---
 

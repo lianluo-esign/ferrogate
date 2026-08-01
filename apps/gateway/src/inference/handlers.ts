@@ -65,6 +65,9 @@ import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
 import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
+import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
+import type { WorkflowGateOutcome } from "./workflow.js";
+import type { WorkflowProviderConstraint } from "@ferrogate/policy";
 import {
   adapterErrorMessage,
   callerCanUseModel,
@@ -328,6 +331,7 @@ function planUpstream(
   stream: boolean,
   body: Record<string, unknown>,
   estimated?: EstimatedUsage,
+  workflowConstraint: WorkflowProviderConstraint | null = null,
 ): PlannedRequest | InferenceRejection {
   const inputTokenUpperBound = estimated?.promptTokens ?? 0;
   const metadataReason = validateRequestMetadata(metadata);
@@ -427,6 +431,19 @@ function planUpstream(
     return reject(rejection.status, rejection.code, rejection.message);
   }
 
+  // `chat.rs::apply_workflow_provider_constraint`, at the Rust position: the
+  // node's provider pin is intersected with the ELIGIBLE routes — after
+  // eligibility, before strategy ordering — so a node pinned to `anthropic-eu`
+  // cannot be served by `anthropic-us` even when both are healthy and eligible.
+  // `403 workflow_provider_not_allowed` when nothing survives, which is the
+  // thirteenth refusal and the only one that cannot be decided before routing.
+  const narrowed = narrowByWorkflowProviders(
+    workflowConstraint,
+    logicalModel,
+    decision.eligible,
+  );
+  if (!narrowed.ok) return narrowed.rejection;
+
   // `candidate_model_routes`'s `match model.routing_strategy` — applied to the
   // SURVIVORS, after eligibility and before the first socket, which is the whole
   // point of the Rust ordering ("an incompatible cheap/healthy route therefore
@@ -434,8 +451,8 @@ function planUpstream(
   // ENTRY, so every leg carries the same value and the first survivor is as good
   // a place to read it as any; absent ⇒ `"priority"`, the pre-strategy order.
   const ordered = orderCandidatesByStrategy(
-    decision.eligible,
-    (decision.eligible[0] as PhysicalRoute).routingStrategy ?? DEFAULT_ROUTING_STRATEGY,
+    narrowed.routes,
+    (narrowed.routes[0] as PhysicalRoute).routingStrategy ?? DEFAULT_ROUTING_STRATEGY,
     { estimatedUsage: estimated, metrics: deps.routingMetrics },
   );
 
@@ -785,6 +802,96 @@ function admissionHandle(
   return admitted === null || isRejection(admitted) ? null : admitted;
 }
 
+// ---------------------------------------------------------------------------
+// Steps 31-32 (Rust numbering) — the workflow GRAPH gate
+// ---------------------------------------------------------------------------
+
+/**
+ * `chat.rs::decide_ai_workflow_admission`, at the Rust call site.
+ *
+ * Placement, and why each half of it is the reference's:
+ *
+ *  - BEFORE `planUpstream`, because a step that is not a legal move in the
+ *    graph must be refused whatever the routing table says, and because the
+ *    PROVIDER constraint it returns has to be in hand before candidates are
+ *    narrowed. Rust runs the same ladder while building the request plan.
+ *  - BEFORE `admitTokens`, so a refused step never spends a minute's tokens on
+ *    a call it was never allowed to make.
+ *
+ * A request that declares no workflow header at all is `ungated` after one
+ * header read and no I/O, so this costs an ordinary inference request nothing.
+ */
+async function admitWorkflowStep(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  caller: Caller,
+  logicalModel: string,
+  estimated: EstimatedUsage | undefined,
+): Promise<WorkflowGateOutcome | InferenceRejection> {
+  const outcome = await enforceWorkflowGate(deps.workflows, deps.workflowHistory, {
+    headers: c.req.raw.headers,
+    requestId: c.get("requestId"),
+    caller,
+    logicalModel,
+    estimatedTotalTokens: estimated?.totalTokens ?? 0,
+    nowUnixSeconds: deps.nowUnixSeconds(),
+  });
+  if (outcome.kind === "refused") return outcome.rejection;
+  if (outcome.kind === "admitted") {
+    // Written at ADMISSION, with `succeeded: false`: the model-call counter and
+    // the run's start time must include a step that was allowed even if the
+    // provider then failed, or a caller could exhaust `max_model_calls`'
+    // worth of provider attempts by ensuring each one errors. The edge gate
+    // reads only SUCCEEDED rows, so a failed step still does not advance the
+    // graph.
+    await deps.workflowHistory.recordStep({
+      ...outcome.step,
+      requestId: c.get("requestId"),
+      occurredAtUnix: deps.nowUnixSeconds(),
+      totalTokens: estimated?.totalTokens ?? 0,
+      succeeded: false,
+    });
+  }
+  return outcome;
+}
+
+/**
+ * Settle an admitted workflow step: mark it succeeded and replace the
+ * pre-dispatch estimate with the provider's real usage.
+ *
+ * Rust derives `workflow_token_usage` from SETTLED metering events, so leaving
+ * the estimate in the ledger would gate the token budget on a number no
+ * provider ever produced. Never allowed to fail a response — the call has
+ * already happened and the caller is entitled to it.
+ */
+function settleWorkflowStep(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  gate: WorkflowGateOutcome,
+  succeeded: boolean,
+  actualTokens: number | undefined,
+): void {
+  if (gate.kind !== "admitted") return;
+  void (async (): Promise<void> => {
+    try {
+      await deps.workflowHistory.recordStep({
+        ...gate.step,
+        requestId: c.get("requestId"),
+        occurredAtUnix: deps.nowUnixSeconds(),
+        totalTokens: actualTokens ?? 0,
+        succeeded,
+      });
+    } catch {
+      // Same contract as `recordUsage`.
+    }
+  })();
+}
+
+/** The provider constraint an admitted step carries, if any. */
+function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstraint | null {
+  return gate.kind === "admitted" ? gate.constraint : null;
+}
+
 /** Record a metering event; never allowed to fail the response. */
 function recordUsage(
   deps: ResolvedInferenceDeps,
@@ -1036,6 +1143,11 @@ async function handleOpenAiInference(
   // both surfaces go through `build_chat_completion_request_plan`.
   const estimated = estimateChatCompletionUsage(request, logicalModel);
 
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
   const planned = planUpstream(
     deps,
     caller,
@@ -1045,6 +1157,7 @@ async function handleOpenAiInference(
     stream,
     request,
     estimated,
+    workflowConstraintOf(gate),
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -1090,6 +1203,7 @@ async function handleOpenAiInference(
       (usage) => {
         recordUsage(deps, meterBase, usage);
         settleTokensDetached(c, admission, usage?.totalTokens);
+        settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
     );
   }
@@ -1100,6 +1214,10 @@ async function handleOpenAiInference(
   }
   if (!upstreamResponse.ok) {
     recordUsage(deps, meterBase, undefined);
+    // An upstream ERROR settles the step as un-succeeded: it still counted
+    // against `max_model_calls` (it was admitted), but it must not advance the
+    // graph's edge gate.
+    settleWorkflowStep(c, deps, gate, false, undefined);
     return rawUpstreamResponse(
       upstreamResponse.status,
       upstreamResponse.headers.get("content-type") ?? "application/json",
@@ -1112,6 +1230,7 @@ async function handleOpenAiInference(
   const usage = usageFromResponseBody(usageDialect, parsed);
   recordUsage(deps, meterBase, usage);
   await settleTokens(c, admission, usage?.totalTokens);
+  settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   return rawUpstreamResponse(
     upstreamResponse.status,
     upstreamResponse.headers.get("content-type") ?? "application/json",
@@ -1158,6 +1277,11 @@ async function handleMessages(
   // the system prompt out of the reservation entirely.
   const estimated = estimateMessagesUsage(translated.body, logicalModel);
 
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
   const planned = planUpstream(
     deps,
     caller,
@@ -1167,6 +1291,7 @@ async function handleMessages(
     stream,
     translated.body,
     estimated,
+    workflowConstraintOf(gate),
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -1214,6 +1339,7 @@ async function handleMessages(
       (usage) => {
         recordUsage(deps, meterBase, usage);
         settleTokensDetached(c, admission, usage?.totalTokens);
+        settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
     );
   }
@@ -1224,6 +1350,10 @@ async function handleMessages(
   }
   if (!upstreamResponse.ok) {
     recordUsage(deps, meterBase, undefined);
+    // An upstream ERROR settles the step as un-succeeded: it still counted
+    // against `max_model_calls` (it was admitted), but it must not advance the
+    // graph's edge gate.
+    settleWorkflowStep(c, deps, gate, false, undefined);
     return rawUpstreamResponse(
       upstreamResponse.status,
       upstreamResponse.headers.get("content-type") ?? "application/json",
@@ -1236,6 +1366,7 @@ async function handleMessages(
   const usage = usageFromResponseBody(usageDialect, parsed);
   recordUsage(deps, meterBase, usage);
   await settleTokens(c, admission, usage?.totalTokens);
+  settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   // An Anthropic upstream answered natively → passed through unchanged; an
   // OpenAI-family upstream is reshaped so a Claude client sees a native Message
   // either way.
@@ -1263,6 +1394,11 @@ async function handleEmbeddings(
   // unlimited embedding tokens straight past this gate (issue #207).
   const estimated = estimateEmbeddingsUsage(request, logicalModel);
 
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
   const planned = planUpstream(
     deps,
     caller,
@@ -1272,6 +1408,7 @@ async function handleEmbeddings(
     false,
     request,
     estimated,
+    workflowConstraintOf(gate),
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -1308,6 +1445,10 @@ async function handleEmbeddings(
 
   if (!upstreamResponse.ok) {
     recordUsage(deps, meterBase, undefined);
+    // An upstream ERROR settles the step as un-succeeded: it still counted
+    // against `max_model_calls` (it was admitted), but it must not advance the
+    // graph's edge gate.
+    settleWorkflowStep(c, deps, gate, false, undefined);
     return rawUpstreamResponse(
       upstreamResponse.status,
       upstreamResponse.headers.get("content-type") ?? "application/json",
@@ -1320,6 +1461,7 @@ async function handleEmbeddings(
   const usage = usageFromResponseBody("openai", parsed);
   recordUsage(deps, meterBase, usage);
   await settleTokens(c, admission, usage?.totalTokens);
+  settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
 
   // `translate_embeddings_response`: `undefined` means "pass the upstream body
   // through byte-for-byte" — correct for the OpenAI-compatible family, whose
@@ -1361,6 +1503,11 @@ async function handleImages(
   // leaves the context-window eligibility leg exactly as unarmed as it was.
   const estimated = estimateImagesUsage(request);
 
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
   const planned = planUpstream(
     deps,
     caller,
@@ -1370,6 +1517,7 @@ async function handleImages(
     false,
     request,
     estimated,
+    workflowConstraintOf(gate),
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -1423,6 +1571,11 @@ async function handleImages(
   // length, falling back to the pre-dispatch estimate when the body carries no
   // countable envelope — never the caller's `n`.
   await settleTokens(c, admission, imageCount);
+  // `/v1/images` has no token usage at all — it settles on images — so the
+  // workflow step keeps the pre-dispatch estimate rather than inventing a token
+  // count from an image count. The step's SUCCESS is what the edge gate reads,
+  // and that is recorded truthfully.
+  settleWorkflowStep(c, deps, gate, upstreamResponse.ok, estimated.totalTokens);
 
   return rawUpstreamResponse(
     upstreamResponse.status,

@@ -28,6 +28,9 @@
  * whose `scope` matches — in `selectPolicyRevisions` order.
  */
 import {
+  ALL_CONTENT_SOURCES,
+  DetectorError,
+  type GuardrailDetector,
   type PolicyRevision,
   type PolicySelectionContext,
   administrativeRank,
@@ -37,7 +40,11 @@ import {
 } from "@ferrogate/guardrails";
 import { compilePolicyChecks } from "./detectors.js";
 import type { DetectorBuildContext } from "./detectors.js";
-import type { GuardrailPolicyRuntime, GuardrailPolicySource } from "./ports.js";
+import type {
+  GuardrailCheckRuntime,
+  GuardrailPolicyRuntime,
+  GuardrailPolicySource,
+} from "./ports.js";
 
 /** The single mutable pointer row. */
 export interface GuardrailPolicyBinding {
@@ -233,18 +240,119 @@ export class InMemoryGuardrailPolicyStore implements GuardrailPolicyStore {
 // ---------------------------------------------------------------------------
 
 /**
+ * A check that cannot be evaluated because its policy did not COMPILE.
+ *
+ * Not a placeholder and not a disabled check: it is `enabled`, it is selected,
+ * and every evaluation raises `DetectorError(unavailable)`. The engine turns
+ * that into `CheckOutcome::Error` → `AggregateOutcome::Error` → the revision's
+ * `on_error` actions, which `validatePolicyRevision` forbids from being empty
+ * and which default to `block`.
+ *
+ * That is what "fail this policy CLOSED" means here, and the alternative is the
+ * trap: DROPPING an uncompilable policy from the source would leave the traffic
+ * it fences screened by nothing at all, silently, with every suite green — the
+ * fail-OPEN direction, and the exact defect class this wave is closing
+ * elsewhere.
+ */
+function uncompilableCheck(policyId: string, detail: string): GuardrailCheckRuntime {
+  const id = `${policyId}:uncompilable`;
+  const detector: GuardrailDetector = {
+    descriptor: () => ({
+      id,
+      version: "uncompilable",
+      supports_request: true,
+      supports_response: true,
+      supports_transform: false,
+      supported_sources: [...ALL_CONTENT_SOURCES],
+      credential: "none",
+      data_residency: "in_repo",
+      max_payload_bytes: 0,
+      declared_failure_modes: ["unavailable"],
+    }),
+    health: () => ({
+      circuit_open: true,
+      consecutive_failures: 1,
+      in_flight: 0,
+      request_total: 0,
+      success_total: 0,
+      failure_total: 1,
+    }),
+    evaluate: () =>
+      Promise.reject(
+        DetectorError.new(
+          "unavailable",
+          `guardrail policy ${policyId} could not be compiled: ${detail}`,
+        ),
+      ),
+  };
+  return {
+    id,
+    enabled: true,
+    stage: "request",
+    sources: [...ALL_CONTENT_SOURCES],
+    detector,
+    detectorId: "uncompilable",
+    detectorConfigDigest: "uncompilable",
+  };
+}
+
+export interface PolicySourceOptions {
+  /**
+   * Policies whose compilation failure must NOT take the boot down.
+   *
+   * Empty by DEFAULT, and that polarity is the whole safety of this option: an
+   * uncompilable policy is a hard startup failure unless someone has named it,
+   * so nothing becomes silently survivable by omission.
+   *
+   * `guardrails/config.ts` fills it with exactly the policy ids
+   * {@link loadGuardrailPolicyStore} read out of the DURABLE control tables.
+   * Those are runtime input written by another Worker; a policy declared in
+   * THIS deployment's own `GATEWAY_GUARDRAIL_POLICIES` var is not, and stays a
+   * hard failure — an operator who mistypes a `fingerprint_secret_ref` in their
+   * deploy config must be told at boot, not left with a policy that refuses
+   * every request (`test/guardrails/binding.test.ts`, "a detector whose
+   * fingerprint secret does not resolve is a HARD failure").
+   */
+  readonly failClosedPolicyIds?: ReadonlySet<string> | undefined;
+}
+
+/**
  * Resolve every binding's ACTIVE revision, compile it once, and answer scope
  * queries from the compiled set.
  *
- * Compilation is done eagerly at construction so a detector-configuration error
- * is a startup failure, not a per-request one, and so the semaphore + circuit
+ * Compilation is eager at construction so a detector-configuration error
+ * surfaces at startup rather than per-request, and so the semaphore + circuit
  * state inside a `CustomHttpDetector` is shared across requests in the isolate
  * (the Rust held one `Arc<dyn GuardrailDetector>` per check in `AppState`).
+ *
+ * ## Why the `try` is here, and why it is not a loosening
+ *
+ * Until wave 17 this function had no `catch`, and that was the stated reason
+ * `apps/control-plane` was not allowed to project its guardrail revisions at
+ * all: ONE row the gateway could not compile took the WHOLE guardrail source
+ * down at boot — `guardrailDepsFromEnv` lets the throw propagate, so every
+ * request answers 503, including the ones no guardrail policy applies to.
+ *
+ * Admission is now tightened at the source (`@ferrogate/guardrails`'
+ * `admitPolicyRevision`, run by the control plane on both create operations and
+ * again before an activate), so a NEW unenforceable revision cannot reach the
+ * table. Two classes remain and neither is reachable from admission:
+ *
+ *  - rows written BEFORE the tightening;
+ *  - a revision whose `secret_ref` / `fingerprint_secret_ref` is well-formed but
+ *    resolves to nothing in THIS Worker's bindings. The control plane cannot see
+ *    the gateway's secrets, so it can only check the ref is non-empty.
+ *
+ * For those — and ONLY those, see {@link PolicySourceOptions.failClosedPolicyIds}
+ * — the blast radius is reduced from "the fleet" to "this policy", and the
+ * policy that failed still refuses (see {@link uncompilableCheck}).
  */
 export function policySourceFromStore(
   store: GuardrailPolicyStore,
   context: DetectorBuildContext = {},
+  options: PolicySourceOptions = {},
 ): GuardrailPolicySource {
+  const failClosed = options.failClosedPolicyIds;
   const runtimes: GuardrailPolicyRuntime[] = [];
   for (const binding of store.listBindings()) {
     if (binding.activeRevision === null) {
@@ -256,7 +364,22 @@ export function policySourceFromStore(
     if (revision === undefined) {
       continue;
     }
-    runtimes.push({ revision, checks: compilePolicyChecks(revision, context) });
+    try {
+      runtimes.push({ revision, checks: compilePolicyChecks(revision, context) });
+    } catch (error) {
+      if (failClosed === undefined || !failClosed.has(binding.policyId)) {
+        throw error;
+      }
+      runtimes.push({
+        revision,
+        checks: [
+          uncompilableCheck(
+            binding.policyId,
+            error instanceof Error ? error.message : String(error),
+          ),
+        ],
+      });
+    }
   }
   return policySourceFromRuntimes(runtimes);
 }

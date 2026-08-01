@@ -66,6 +66,15 @@ export async function resetTenantD1(): Promise<void> {
       handle.prepare("DELETE FROM api_keys"),
       handle.prepare("DELETE FROM workspaces"),
       handle.prepare("DELETE FROM projects"),
+      // The prepaid-money tables. `wallet_settlements` in particular MUST be
+      // cleared: it is the idempotency ledger, so a leftover row from a
+      // previous test would make a fresh credit report itself as an
+      // already-applied replay and move no money — a green assertion built on
+      // the previous run's state.
+      handle.prepare("DELETE FROM wallet_reservations"),
+      handle.prepare("DELETE FROM wallet_settlements"),
+      handle.prepare("DELETE FROM wallets"),
+      handle.prepare("DELETE FROM payment_methods"),
     ]);
   }
   await db().batch([

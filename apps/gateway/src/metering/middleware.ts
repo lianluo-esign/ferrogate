@@ -45,6 +45,7 @@
  */
 import type { Context, MiddlewareHandler } from "hono";
 import type { AuthContext, GatewayEnv } from "../ports.js";
+import { AGENT_RUN_ID_HEADER, agentRunIdFor } from "./agent-run.js";
 import { executionContextOf } from "./runtime.js";
 import type { MeteringUsageSink } from "./sink.js";
 import type { MeteringAttribution, MeteringDrainContext } from "./usage-ledger.js";
@@ -77,12 +78,18 @@ export function attributionFrom(
   const auth = c.get("auth") as AuthContext | null | undefined;
   if (auth === null || auth === undefined) return undefined;
   const { tenantId, projectId, workspaceId } = auth.tenancy;
+  // #305/#522 — the agent run that caused this spend. Read off the REQUEST for
+  // the same reason the api-key id is read off the credential: `Usage` carries
+  // neither, and this middleware is the only place either is in scope. See
+  // `./agent-run.ts` for why a malformed value is dropped rather than carried.
+  const agentRunId = agentRunIdFor(c.req.header(AGENT_RUN_ID_HEADER));
   return {
     requestId,
     ...(tenantId === null || tenantId === undefined ? {} : { tenantId }),
     ...(projectId === null || projectId === undefined ? {} : { projectId }),
     ...(workspaceId === null || workspaceId === undefined ? {} : { workspaceId }),
     ...(auth.subject === null ? {} : { apiKeyId: auth.subject }),
+    ...(agentRunId === undefined ? {} : { agentRunId }),
   };
 }
 

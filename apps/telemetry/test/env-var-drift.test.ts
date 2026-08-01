@@ -279,6 +279,26 @@ describe("the env-var drift gate itself", () => {
   });
 });
 
+/**
+ * The deploy-config lines this app had NO gate for — measured GREEN under
+ * mutation during the wave-17 seam pass (TEL-T1, TEL-T5), and both
+ * deploy-blocking. `vitest.config.ts` overrides `main`, and telemetry is not in
+ * `e2e/`, so `wrangler dev --local` was the ONLY proof channel for either.
+ */
+describe("the deploy config's unobservable lines", () => {
+  it("keeps nodejs_compat in compatibility_flags (TEL-T5)", () => {
+    expect(WRANGLER_TOML).toMatch(/^compatibility_flags\s*=\s*\[[^\]]*"nodejs_compat"/m);
+  });
+
+  it("pins a compatibility_date", () => {
+    expect(WRANGLER_TOML).toMatch(/^compatibility_date\s*=\s*"\d{4}-\d{2}-\d{2}"/m);
+  });
+
+  it("points main at the ENTRY module, not the composition root (TEL-T1)", () => {
+    expect(WRANGLER_TOML).toMatch(/^main\s*=\s*"src\/worker\.ts"/m);
+  });
+});
+
 describe("every var the source reads is declared or explicitly excepted", () => {
   const declaredNames = new Set([...DECLARED.vars.keys(), ...DECLARED.bindings.keys()]);
   const undeclared = [...READS.named.keys()].filter((n) => !declaredNames.has(n)).sort();

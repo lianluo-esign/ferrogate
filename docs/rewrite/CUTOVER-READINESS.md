@@ -1,6 +1,6 @@
 # CUTOVER READINESS — the decision document
 
-**Date:** 2026-08-01 · **Wave 15**, amended by **wave 16** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 15**, amended by **waves 16 and 17** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
 
@@ -12,6 +12,19 @@
 > moves, and the argument for NO-GO was never only the finding list — it was the
 > shape of the evidence (sixteen specification-bearing items; a discovery curve
 > that had not flattened). Only a fresh certification can change it.
+>
+> **Wave-17 amendment (2026-08-01).** Wave 17 took the entire remaining §0.1
+> "NOT closed" list except the two items that need a live account.
+> **§0.2 records what is now CLOSED, with the RED/GREEN the integrate step
+> observed itself.** The verdict is again **UNCHANGED and not re-litigated**,
+> for the same reason and for one more: wave 17's own integrate step found
+> **three first-order defects that the delivering agents' green suites did not
+> show** (§0.2's "found during integration" table), one of them a HIGH
+> policy-bypass residue that made the wave's own D2 fix unreachable on the
+> deployed Worker. That is direct evidence that **the discovery curve still has
+> not flattened** — which is the second of the two arguments the NO-GO rests on.
+> Only wave 18's fresh certification can move it; §0.2 ends by naming exactly
+> what that certification must check.
 
 ---
 
@@ -114,6 +127,94 @@ that were nominated as closable, and did not touch the two arguments the NO-GO
 actually rests on — the sixteen specification-bearing items, and a
 defect-discovery curve that had not flattened. Wave 16 is itself weak evidence
 about the curve: it was a *fix* wave, not an *audit* wave, so it was not looking.
+
+---
+
+## 0.2 WAVE 17 — which findings are CLOSED, and what wave 18 must still check
+
+Wave 17 took the whole remaining §0.1 "NOT closed" list except the two rows that
+require a live Cloudflare account. Six agents delivered; the integrate step
+verified **every** fix independently, by the §0.1 protocol: neutralise the fix in
+place, `grep` the mutation back OFF DISK to prove it landed, require the named
+test RED, restore, `sha256sum`-verify the restore, require GREEN. **A fix whose
+test was never *seen* red is not recorded as closed.** Nothing below is taken on
+a delivering agent's word.
+
+### CLOSED — verified by the integrate step's own mutations
+
+| Finding | What landed | RED-before / GREEN-after, observed by the integrate step |
+|---|---|---|
+| **`wallets` write half** (MONEY — "crediting a wallet still does not fund a request") | `apps/control-plane/src/store/wallet_projection.ts`: the admin movement now projects into the TENANT database's `wallets.balance_credits` through `@ferrogate/storage`'s `D1WalletStore.settleWalletBalance` — **the same class `apps/gateway/src/ratelimit/wallet.ts` calls** — inside one `batch()` claimed by a `wallet_settlements` row. Cents→credits is `bigint` end to end. CREDIT writes the ledger claim first, DEBIT writes the enforced row first | **END-TO-END, asserted as the effect and not the status code:** seed an EXHAUSTED wallet, run the gateway's own `reserveWalletCredits` ⇒ `insufficient`; `POST /admin/v1/wallets/{t}/adjust {amount_cents:500}` ⇒ 200; run the SAME decision ⇒ **`reserved`**, balance exactly `5_000_000` credits. Neutralising the tenant leg ⇒ **10 RED** in `test/wallet-funding.test.ts`; restored **15/15 GREEN**. **Double-submit:** the same `reference` twice ⇒ both 200, balance moves **once**, ONE ledger entry; making `walletLedgerEntryId` non-deterministic ⇒ **3 RED**. Cross-tenant control included: crediting `tenant_a` leaves `tenant_b` at 0 and still `insufficient`. Two-implementation trap CHECKED: `MemoryWalletStore` exists in `@ferrogate/storage` but **no app constructs it** — all four (`gateway`, `mcp`, `agent-runtime`, `control-plane`) build `D1WalletStore`, so there is no green twin |
+| **D2 — the workflow GRAPH gate** (HIGH; policy bypass. `[[agent_workflows]]` was parsed by `packages/config` and read by nothing) | `packages/policy/src/workflow-graph.ts` (all thirteen Rust refusals) + `apps/gateway/src/inference/workflow.ts` (Rust header names, the `control_plane_resources` catalog, a durable step ledger), enforced from `handlers.ts::admitWorkflowStep` ahead of dispatch | Neutralising the gate mount ⇒ **19 RED** across `test/inference/workflow-graph.test.ts` + `workflow-ledger.test.ts`. Replacing the composition root's env-resolved catalog with an empty one ⇒ **RED** (see the trap row below for what that mutation showed BEFORE the new gate). Restored GREEN |
+| **`guardrail_policy` write half** (10 ops; previously refused on purpose because projecting a bad row took the gateway's guardrail source down at BOOT) | Admission tightened first — `packages/guardrails/src/admission.ts::admitPolicyRevision`, a revision the data plane could never compile is now a **400**, not a 201 followed by silence — then projection into `guardrail_policy_revisions` / `guardrail_policy_bindings` (`apps/control-plane/src/store/guardrail_registry.ts`), plus per-policy boot resilience on the read side so a pre-existing bad row fails **that one policy CLOSED** instead of the Worker | Neutralising `admitPolicyRevision` ⇒ **7 RED** in `test/guardrail-write-half.test.ts`; neutralising `projectGuardrailRevision` ⇒ **7 RED** in the same file (activate/rollback/archive all move the binding row). Read side: unmounting `D1GuardrailPolicyStore.fromEnv` from `guardrailDepsFromEnv` ⇒ **3 RED** in `test/guardrails/d1.test.ts`. Restored **1875/1875 GREEN**. Two-implementation trap CHECKED: `InMemoryGuardrailPolicyStore` is the var half and `loadGuardrailPolicyStore` layers the durable half onto it — the D1 leg has its own gate, so mutating one does NOT leave the other silently green |
+| **`ferrogate-cloudflare` — the 21st crate** (§6 item 5; "the single strongest argument against deleting the Rust") | `packages/cloudflare` — S1–S5: account-scoped client with the retry schedule, D1 management, R2 buckets, bucket-scoped R2 token minting, scopes/envelope/errors. 146 tests | Narrowing `RETRYABLE_STATUSES` to `[429]` ⇒ **5 RED** across `test/retry.test.ts` + `test/client.test.ts`. **Wired, not merely written:** `packages/storage/src/tenant-rest.ts` now routes the D1 REST transport through `executeWithRetry`; forcing `isRetryableOutcome` to `false` ⇒ **5 RED** in `packages/storage/test/d1/rest-retry.test.ts`. `r2-token.ts` (S2) stays deliberately UNMOUNTED and says so — it needs the bucket-per-tenant decision and R2 enabled on the account |
+| **D3** — the agent run that caused the spend never reached the metering row | `apps/gateway/src/metering/agent-run.ts`, threaded through `middleware.ts` (read off the request) and `event.ts` (`agent_run_id`, absent-stays-absent) | Dropping the header read ⇒ **1 RED** in `test/metering/agent-run-correlation.test.ts` ("a declared `x-ferrogate-agent-run-id` reaches the settled `event_json`"). Restored **13/13 GREEN** |
+| **D6** — no per-request drain gate | `apps/gateway/src/routes/drain.ts`, mounted `app.use("*", options.nodeDrain ?? nodeDrainGate())` | Unmounting it ⇒ **3 RED** in `test/routes/drain.test.ts` (503 `node_draining` on all five spend-producing ops; re-read PER REQUEST; the same flag `/readyz` uses) |
+| **D7** — agent-job event-feed divergences | `apps/agent-runtime/src/runs/events.ts` — discriminator, `400 invalid_event_cursor`, the resume cursor surviving its own event, the `/result` `work_products` projection | Making a non-integer `?limit` fall back instead of refusing ⇒ **2 RED** in `test/event-feed.test.ts` |
+| **Contract gaps — `/metrics`, `/healthz` `version`, agent-runtime `/readyz`** | `apps/gateway/src/routes/metrics.ts` (`getMetrics`, Prometheus exposition over this isolate's counters) and `apps/agent-runtime/src/routes/health.ts` (the shared health document + the Rust readiness decision table) | Unregistering `getMetrics` ⇒ **5 RED** (`test/routes/metrics.test.ts` **and** `test/contract.test.ts`'s "mounts ALL 31 gateway-owned operations"). `/healthz` `version`: caught by `e2e/tests/gateway.spec.ts` over real HTTP. agent-runtime `/readyz`: see the "wired during integration" row below |
+| **Remaining DURABLE-BUT-UNREAD control-plane groups + the 3 MISSING ops** | `admin_agent_cost_burn`, `admin_agent_upstream`, `admin_agent_workflow`, `admin_request_log` now read the durable rows | Dropping the tenant fence from the cost-burn query ⇒ **10 RED** in `test/agent-cost-burn-read.test.ts` (incl. "never shows one tenant another tenant's burn"). Dropping the audit-trail fence ⇒ **3 RED** in `test/audit-events-read.test.ts` |
+| **`sync-bridge` deleted** | `packages/sync-bridge/**` removed; the root `workspaces` glob picks the removal up with no manifest edit | Verified by the integrate step: `grep -rn "sync-bridge"` over `apps/`, `packages/`, `e2e/` and every `package.json`/`tsconfig.json` returns **nothing** (only historical prose in `docs/`); `bun.lock` contains **0** references; `bun run typecheck` clean; full suite green |
+
+### FOUND DURING INTEGRATION — defects the delivering agents' green suites did not show
+
+These are the reason this wave is *not* evidence that the discovery curve has
+flattened. All three were found by the integrate step's own mutations, and all
+three are fixed and gated here.
+
+| Defect | How it hid | Fix + observed RED |
+|---|---|---|
+| **The D2 gate was UNREACHABLE on the deployed Worker** (HIGH — the wave's own headline security fix did nothing in production for reference-shaped clients) | `src/ratelimit/workflow.ts::workflowDeclarationFrom` (wave 16's budget envelope) required `x-ferrogate-workflow-run-id` among three headers that must appear together. The graph gate uses Rust's `x-ferrogate-agent-run-id`. A reference-shaped client therefore met the RATE-LIMIT middleware first and got `400 invalid_workflow_declaration` before the gate ran. Invisible because **every** workflow test built its own router (`fixtures.ts::harness` → `createInferenceRouter`) and none ran the middleware chain. `src/inference/workflow.ts` documented the residue and wrote out the fix, but as "not this module's to fix" | The recipe applied verbatim (the run-id alias, with its load-bearing `workflowId === ""` guard so a bare correlation id on assets/MCP traffic stays `absent`), plus a NEW SELF-driven gate `apps/gateway/test/inference/workflow-mount.test.ts` (9 cases). **Measured: all nine answered `400 invalid_workflow_declaration` before the alias.** Removing the alias again ⇒ **6 RED**; replacing the composition root's catalog with an empty one ⇒ **7 RED** (was **1** of 1866 before this file existed, i.e. no HTTP-level proof at all). `test/ratelimit/guards.test.ts` green either way, as the residue note predicted |
+| **Three DO binding NAMES had no gate** (GW-T8/T10/T12) | `test/wrangler-bindings.test.ts` asserted `class_name` three ways and `name` **zero** ways — and `name` is the half `src/` reads (`env.RATE_LIMIT`, `env.PROVIDER_CIRCUIT`, `env.SHADOW_BUDGET`). The cited escalation gate `test/ratelimit/durable-object.spec.ts` runs under `test/ratelimit/harness/vitest.config.ts`, which points at **`harness/wrangler.toml` — a different file**. Each read degrades SILENTLY when unbound: the RPM limiter falls back per isolate (the quieter form of the wave-16 admission bypass), the provider circuit becomes a per-isolate `Map`, the shadow budget stops being a cross-isolate cap | New `it("binds each namespace under the NAME src/ reads it by")`. Renaming any of the three ⇒ **1 RED** each |
+| **`compatibility_flags`, `main`, and MCP's DO migrations had no gate in 4 of 5 Workers** (GW-T2, CP-T1/T2, AR-T2, MCP-T1/T2/T6/T7, TEL-T1/T5) | MOUNT-SEAMS recorded GW-T2's *Expected RED* as "whole suite". Measured: commenting `compatibility_flags` out left **every** suite in every app GREEN — `@cloudflare/vitest-pool-workers` supplies its own runtime flags. Same for `main` and for `new_sqlite_classes` in `apps/mcp` (already known NO-GATE, now closed) | Drift assertions added to `apps/gateway/test/wrangler-bindings.test.ts`, `apps/agent-runtime/test/wrangler-bindings.test.ts`, and the `env-var-drift.test.ts` of control-plane, mcp and telemetry. Each mutation ⇒ **1 RED** |
+| **MCP-P6 — the identity CIPHER seam had no gate** (security) | `resolvePorts`'s durable branch sets `cipher: identityCipherFrom(env.FERROGATE_MCP_IDENTITY_KEY)`. Deleting that line left all 359 mcp tests GREEN — every assertion in the block was about `ports.credentials`. Without it the durable credential store seals OAuth grants under `webCryptoIdentityCipher()`'s **ephemeral per-isolate key**: every stored grant becomes undecryptable on the next isolate recycle, and the operator's configured key sits unread | New case in `test/durable-identity.test.ts`: seal with a cipher built from the fixture key, open with the one `resolvePorts` chose. Deleting the line ⇒ **1 RED** |
+
+### NOT closed — carried forward
+
+| Finding | Why it is still open |
+|---|---|
+| **D1's shared counter, on the RPM leg only** | Unchanged from §0.1. Needs a cross-script `script_name` binding, which **workerd cannot resolve offline**; committed uncommented, `apps/mcp` collapses to 0 collected tests and `wrangler dev --local` never reaches "Ready on". Still DEPLOY-ONLY, still pinned commented by both apps' `env-var-drift` gates |
+| **§4.1 — everything only a real deploy can settle** | Unchanged. `packages/cloudflare` narrows the *code* gap but every one of its five slices talks to the Cloudflare API and **none has been run against the live account**; the tests are transport-level fakes by construction. `r2-token.ts` additionally needs R2 enabled, which it is not |
+| **§2.3's AI-Gateway routing (#406), the credits `number`/`bigint` boundary at the remaining call sites, §2.4's IN-MEMORY-ONLY postures** | Untouched by this wave |
+| **`ferrogate-auth-service`'s 11,474 unported lines** (§6 item 7) | Untouched. Not scoped, not ported, not certified |
+| **§6 item 6 — re-run all three parity certifications and the full seam pass** | **Untouched, and it is what gates the verdict.** See below |
+
+### What wave 18's certification must check — explicitly
+
+The verdict cannot move until §6.6 is satisfied. Concretely, wave 18 must:
+
+1. **Re-run all three parity certifications** (`cutover-parity-dataplane.md`,
+   `cutover-parity-controlplane.md`, `cutover-parity-libraries.md`) against the
+   CURRENT tree, by fresh agents. Waves 16 and 17 were *fix* waves, not *audit*
+   waves — neither was looking for new defects, and wave 17 still tripped over
+   four. The specific new surface that has never been parity-certified at all:
+   `packages/policy/src/workflow-graph.ts`, `packages/guardrails/src/admission.ts`,
+   `packages/cloudflare/**` (all 21 modules), `packages/storage/src/credits.ts`,
+   `apps/control-plane/src/store/{wallet_projection,guardrail_registry}.ts`,
+   `apps/gateway/src/{inference/workflow,metering/agent-run,routes/drain,routes/metrics,routes/service}.ts`,
+   and `apps/agent-runtime/src/routes/health.ts`.
+2. **Re-run the FULL mount-seam pass** — all rows, not the §4(a)/(b) incremental
+   policy. Wave 17 ran the incremental policy (touched files + every T1) and that
+   is what found the ten ungated config rows above; a full pass is mandatory
+   before the Rust tree is deleted, per `MOUNT-SEAMS.md` §4 exception 2.
+   **The inventory itself must be re-derived mechanically first**: wave 17 added
+   rows (AR-C10) and corrected the *Expected RED* of ten others, so a pass run
+   off the old table would re-assert corrections that are now wrong.
+3. **Re-audit the two escalation-config apps for the harness trap.** The
+   `test/ratelimit/harness/` finding above is a class, not an instance: any
+   `*.spec.ts` project pointed at its own `wrangler.toml` or its own
+   `worker.ts` proves nothing about the deployed config. `apps/gateway`'s
+   tenancy harness and `apps/agent-runtime`'s durable harness have not been
+   checked for it.
+4. **Decide the two deferred sub-questions the code now names**: whether the
+   budget envelope's `x-ferrogate-workflow-version` may be optional (Rust's is
+   `Option<u32>`; ours is part of a primary key), and whether R2 goes
+   bucket-per-tenant (which is what unmounts-or-mounts `r2-token.ts`).
+5. **Answer the question no local wave can**: run the §4.1 live-deploy list.
+   `packages/cloudflare` existing does not make it verified.
+
+**Net effect on the verdict: none, by design.** Wave 17 closed nine of the ten
+remaining findings and found four more while doing it. The second of those two
+numbers is the one that matters.
 
 ---
 

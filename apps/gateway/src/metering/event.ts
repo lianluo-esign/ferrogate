@@ -18,6 +18,7 @@ import {
 } from "@ferrogate/billing";
 import type { TenantContext } from "@ferrogate/core";
 import type { Usage } from "../inference/ports.js";
+import { agentRunIdFor } from "./agent-run.js";
 import type { MeteringDiagnostics } from "./ports.js";
 
 /**
@@ -71,6 +72,38 @@ export const SINGLE_PROVIDER_ATTEMPT_INDEX = 0;
 export type UsageWithProviderAttempt = Usage & {
   /** Zero-based dispatch index within one logical request (Rust `#135`). */
   readonly providerAttemptIndex?: number | undefined;
+  /**
+   * `x-ferrogate-agent-run-id` (#305/#522), as validated by the request path.
+   *
+   * ## THE ONE-LINE CHANGE THE INFERENCE SLICE OWES THIS FIELD
+   *
+   * Cutover finding D3 was that the header is read on assets, on MCP and in
+   * `apps/agent-runtime`, and NOWHERE on the inference path — so the surface
+   * that produces the token spend was the one surface whose spend could not be
+   * joined to the agent run that caused it.
+   *
+   * The metering half is closed two ways. The one that works TODAY is the
+   * drain-side fallback: `./middleware.ts` reads the header off the request and
+   * `./agent-run.ts::chargeWithAgentRun` stamps it under the request-id guard.
+   * The one that matches RUST is this field, and it needs exactly one line in a
+   * file this slice does not own:
+   *
+   * ```ts
+   * // apps/gateway/src/inference/handlers.ts, in `recordUsage(...)`,
+   * // alongside `providerAttemptIndex: attemptIndex`:
+   * agentRunId: c.req.header("x-ferrogate-agent-run-id"),
+   * ```
+   *
+   * When it lands this value WINS over the drain-side one (see
+   * `chargeWithAgentRun`), because an ingress-validated id is the one Rust
+   * stamps. The remaining Rust behaviour that is genuinely inference-side is
+   * the REFUSAL — `400 invalid_agent_run_id_header` at `chat.rs:2767`, which
+   * belongs in the validation ladder next to `invalid_json`, and which a
+   * middleware running on the way OUT cannot produce. Both halves are pinned
+   * from here by `test/metering/agent-run-correlation.test.ts`, so they cannot
+   * land out of order or drift apart.
+   */
+  readonly agentRunId?: string | undefined;
 };
 
 /**
@@ -185,6 +218,14 @@ export function billingEventFromUsage(
     // provider-attempt key anyway, but a report reader needs the correlation.
     trace_id: usage.requestId,
     provider_attempt: providerAttemptForRequest(usage.requestId, providerAttemptIndexFor(usage)),
+    // #305/#522. Validated, never trusted: an id the request path threaded is
+    // still a client-declared string, and a malformed one poisons the join it
+    // exists to enable. Absent stays ABSENT — serde's
+    // `skip_serializing_if = "Option::is_none"` — so "no run declared" is
+    // distinguishable from "a run declared nothing".
+    ...(agentRunIdFor(usage.agentRunId) === undefined
+      ? {}
+      : { agent_run_id: agentRunIdFor(usage.agentRunId) }),
     ...(context.clusterId !== undefined ? { cluster_id: context.clusterId } : {}),
     ...(context.nodeId !== undefined ? { node_id: context.nodeId } : {}),
     tenant: tenantFrom(usage),

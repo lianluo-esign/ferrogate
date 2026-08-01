@@ -5,10 +5,20 @@
  *
  * The Rust crate depends on the shared `ferrogate_cloudflare::CloudflareClient`
  * (issue #405 — auth, retries, envelope decode + error mapping written once).
- * That sibling crate maps to a `@ferrogate/cloudflare` TS package which DOES
- * NOT EXIST YET; creating it is outside this package's scope, and inventing a
- * second partial copy of it here would be worse than the one that already
- * exists.
+ *
+ * **UPDATE (wave 17): `@ferrogate/cloudflare` NOW EXISTS.** The whole crate is
+ * ported — `errors.ts` (the typed taxonomy incl. the `10013`/`10058` traps),
+ * `envelope.ts`, `retry.ts`, `scopes.ts` + `preflight()`, `r2.ts`,
+ * `r2-token.ts`, `d1.ts` (lifecycle only) — with 146 tests. See
+ * `docs/rewrite/cf-crate-assessment.md` §0.0. **Do NOT write a third partial
+ * client anywhere; import that package.**
+ *
+ * This file is nonetheless left as-is, and the marker stays OPEN, for a reason
+ * that is about THIS package rather than the missing one: collapsing it into a
+ * re-export is a behaviour-affecting refactor of the Secrets Store manage
+ * plane, and it must be done by a task that owns `packages/secrets` and can
+ * re-prove its suite. Note it must NOT pick up the shared retry when it does —
+ * see the deliberate omission two paragraphs down.
  *
  * So this file keeps a self-contained re-implementation of exactly the slice
  * the Secrets Store backend uses — envelope decode, the `{account_id}` path
@@ -27,14 +37,18 @@
  *
  * That earlier "nothing-lost" claim was scoped to this file and read as though
  * it covered the crate. It does not. A census of the TS tree
- * (`grep -rn 'api.cloudflare.com' packages/ apps/`) finds exactly THREE
- * independent partial clients and no shared one:
+ * (`grep -rn 'api.cloudflare.com' packages/ apps/`) found TWO independent
+ * envelope-decoding partial clients and no shared one:
  *   - this file (Secrets Store manage plane),
  *   - `@ferrogate/storage`'s `tenant-rest.ts` (the D1 query API — on the request
  *     path, as the fail-closed router for a tenant fleet larger than the
- *     binding budget),
- *   - `@ferrogate/providers`' `registry-cloudflare` surface (AI Gateway).
- * Each decodes the `{success, errors, result}` envelope itself.
+ *     binding budget).
+ * (`@ferrogate/providers`' Cloudflare surface was once counted as a third; it
+ * is a request-SHAPING layer that rewrites a URL and injects `cf-aig-*`
+ * headers, and never decodes the envelope, so it is not a REST client.)
+ *
+ * **As of wave 17 there IS a shared one** — `@ferrogate/cloudflare` — and
+ * `tenant-rest.ts` has adopted its retry schedule. This file has not yet.
  *
  * MOST of the Rust crate is CORRECTLY absent, and it is worth writing down why
  * so nobody "ports" it back: `ferrogate-cloudflare` exists because the Rust
@@ -60,13 +74,24 @@
  *     API limit, and the typed `AUTHENTICATION_CODES` / `MISSING_SCOPE_CODES`
  *     error taxonomy, which all three clients above currently approximate.
  *
- * It is NOT closed here on purpose. Closing it means creating
- * `packages/cloudflare` and giving those surfaces a real consumer; writing them
- * into this package instead would add a fourth partial client, and writing them
- * with no consumer would add exactly the implemented-tested-never-mounted dead
- * code this port keeps getting bitten by. The R2 legs in particular have no
- * caller in the TS tree today (no app provisions a bucket), so they must land
- * WITH their control-plane call site or not at all.
+ * **All five of those are now ported** into `packages/cloudflare` (wave 17),
+ * so the list above is history, not a TODO. What REMAINS open, and why:
+ *
+ *   - S4 (retry + taxonomy) has a real consumer (`tenant-rest.ts`) and is
+ *     genuinely closed. THIS file still carries its own envelope decoder;
+ *     collapsing it is a `packages/secrets` refactor, not a port gap.
+ *   - S1/S2/S3/S5 are ported but have NO CALL SITE. That is deliberate: the R2
+ *     legs must land WITH their control-plane onboarding call site or not at
+ *     all, and that call site is gated on a bucket-per-tenant decision plus R2
+ *     being enabled on the account. Wiring them speculatively would add exactly
+ *     the implemented-tested-never-mounted dead code this port keeps getting
+ *     bitten by.
+ *
+ * Per-slice verdict, the wiring lines, and the Cloudflare-verified constants
+ * that must be transcribed BEFORE `crates/**` is deleted (permission-group ids,
+ * the R2 resource-scope format, the secret-key derivation, the already-exists /
+ * missing-scope / auth code sets, the bucket-name derivation, the retry
+ * schedule): `docs/rewrite/cf-crate-assessment.md`.
  */
 import { z } from "zod";
 

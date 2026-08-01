@@ -34,9 +34,14 @@ test.describe("gateway liveness", () => {
     expect(res.status()).toBe(200);
     expect(res.headers()["content-type"]).toContain("application/json");
     // `runtime: "workers"` is the port marker: Rust reported `"pingora"`.
+    // `version` was a recorded cutover gap — Rust's `HealthResponse.version` is
+    // `env!("CARGO_PKG_VERSION")` and this document had no member for it — and
+    // wave 17 closed it. Asserted here, over real HTTP against the deployed
+    // `wrangler dev` Worker, so the member cannot quietly disappear again.
     expect(await res.json()).toEqual({
       status: "ok",
       service: "ferrogate-gateway",
+      version: "0.0.0",
       runtime: "workers",
     });
   });

@@ -113,6 +113,31 @@ function migratedClasses(): { sqlite: string[]; legacy: string[] } {
   return { sqlite, legacy };
 }
 
+describe("the runtime contract at the top of the file", () => {
+  it("keeps nodejs_compat in compatibility_flags", () => {
+    // GW-T2, corrected in wave 17. The row's *Expected RED* was "whole suite":
+    // measured, deleting the line left every gateway suite GREEN, because
+    // `@cloudflare/vitest-pool-workers` supplies its own runtime flags and does
+    // not fail a module that needs `node:` builtins the way the deployed
+    // Worker does. So the one line whose absence stops the Worker starting had
+    // no gate at all.
+    expect(wranglerToml()).toMatch(/^compatibility_flags\s*=\s*\[[^\]]*"nodejs_compat"/m);
+  });
+
+  it("pins a compatibility_date", () => {
+    // Undated, Cloudflare applies the oldest semantics, silently changing
+    // behaviour the whole port was written against.
+    expect(wranglerToml()).toMatch(/^compatibility_date\s*=\s*"\d{4}-\d{2}-\d{2}"/m);
+  });
+
+  it("points main at the ENTRY module, not the composition root", () => {
+    // GW-T1 is marked DEPLOY-ONLY because workerd's entrypoint-shape check is
+    // what catches it. The NAME is still assertable here, which downgrades
+    // "the Worker will not boot" to "a test fails".
+    expect(wranglerToml()).toMatch(/^main\s*=\s*"src\/worker\.ts"/m);
+  });
+});
+
 describe("every Durable Object binding is deployable", () => {
   const bindings = stanzas("durable_objects.bindings");
 
@@ -133,6 +158,30 @@ describe("every Durable Object binding is deployable", () => {
       // counter/state class here assumes.
       expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
       expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);
+    }
+  });
+
+  it("binds each namespace under the NAME src/ reads it by", () => {
+    // GW-T8/GW-T10/GW-T12, corrected in wave 17.
+    //
+    // Every assertion above is about `class_name`. NONE of them was about
+    // `name`, and `name` is the half `src/` reads: `env.RATE_LIMIT`,
+    // `env.PROVIDER_CIRCUIT`, `env.SHADOW_BUDGET`. Measured: renaming
+    // `name = "RATE_LIMIT"` to anything else in `apps/gateway/wrangler.toml`
+    // left BOTH cited gates green — `test/ratelimit/durable-object.spec.ts`
+    // runs under `test/ratelimit/harness/vitest.config.ts`, which points at
+    // `harness/wrangler.toml`, a DIFFERENT file, so the escalation suite
+    // proves nothing about the deployed config.
+    //
+    // The consequence is not cosmetic. Each of these three reads degrades
+    // SILENTLY when its binding is absent: `rateLimit()` falls back to the
+    // per-isolate limiter (every isolate gets the full RPM allowance — the
+    // quieter form of the admission bypass wave 16 closed), the provider
+    // circuit becomes a per-isolate `Map`, and the shadow budget stops being a
+    // cross-isolate cap.
+    const names = bindings.map((body) => value(body, "name"));
+    for (const required of ["RATE_LIMIT", "PROVIDER_CIRCUIT", "SHADOW_BUDGET"]) {
+      expect(names, `no [[durable_objects.bindings]] is named ${required}`).toContain(required);
     }
   });
 

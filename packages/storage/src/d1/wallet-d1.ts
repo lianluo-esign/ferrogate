@@ -41,7 +41,9 @@
  * against `crates/ferrogate-storage/src/control_plane_store_d1/wallet.rs` will
  * notice the missing CASTs and should know they are not an oversight.)
  */
+import { bindCredits, creditsFromText } from "../credits.js";
 import { StorageError } from "../errors.js";
+import { type TenantDatabaseHandle, requireAtomicBatch } from "../tenant-router.js";
 import {
   type StoredWallet,
   type StoredWalletReservation,
@@ -53,11 +55,10 @@ import {
   type WalletReservationSettlement,
   type WalletSettlementOutcome,
 } from "../wallet.js";
-import { type TenantDatabaseHandle, requireAtomicBatch } from "../tenant-router.js";
 import {
+  bindOptional,
   boolFromSqlite,
   boolToSqlite,
-  bindOptional,
   d1Error,
   optionalNumber,
   optionalText,
@@ -102,6 +103,25 @@ interface SettlementRow {
   delta_credits: number;
   balance_after_credits: number | null;
   created_at_unix: number;
+}
+
+/**
+ * Normalise a credit amount to `bigint`, refusing anything a double has already
+ * damaged.
+ *
+ * A `number` past `Number.MAX_SAFE_INTEGER` arrived here having lost digits, and
+ * a fractional one is not an amount of money this schema can hold
+ * (`balance_credits INTEGER`). Both would otherwise be laundered into an
+ * exact-looking `bigint` by `BigInt(Math.round(x))`.
+ */
+function exactCredits(value: number | bigint, operation: string): bigint {
+  if (typeof value === "bigint") return value;
+  if (!Number.isSafeInteger(value)) {
+    throw StorageError.conflict(
+      `${operation}: ${value} is not an exact integer number of credits (safe-integer range)`,
+    );
+  }
+  return BigInt(value);
 }
 
 function walletFromRow(row: WalletRow): StoredWallet {
@@ -202,6 +222,66 @@ export class D1WalletStore {
       return row ? walletFromRow(row) : undefined;
     } catch (error) {
       throw d1Error("get_wallet", error);
+    }
+  }
+
+  /**
+   * Create the tenant's wallet row if — and only if — it does not already
+   * exist, at `openingCredits` (default zero). Returns whether a row was
+   * created, so a caller can tell "adopted just now" from "already had one".
+   *
+   * Distinct from {@link upsertWallet}, which OVERWRITES `balance_credits` with
+   * whatever the caller passed. That is right for configuring a wallet and
+   * catastrophic for adopting one: a caller that "made sure the wallet exists"
+   * with `upsertWallet({balanceCredits: 0, …})` would silently zero a funded
+   * customer.
+   *
+   * This exists because {@link settleWalletBalance} moves a balance with an
+   * `UPDATE`, and an `UPDATE` against a missing row matches nothing while the
+   * settlement id is still claimed — so a top-up for a tenant that has not yet
+   * adopted prepaid billing would be swallowed AND become unrepeatable. The
+   * settlement guards against that itself (see its docblock); this is how a
+   * caller makes the guard pass on purpose.
+   */
+  async ensureWallet(tenantId: string, nowUnix: number, openingCredits = 0n): Promise<boolean> {
+    this.assertTenant(tenantId, "ensure_wallet");
+    try {
+      const result = await this.db
+        .prepare(
+          "INSERT INTO wallets " +
+            "(id, tenant_id, balance_credits, auto_recharge_threshold_credits, " +
+            " auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, ?, NULL, NULL, 0, ?, ?) " +
+            "ON CONFLICT (id) DO NOTHING RETURNING id",
+        )
+        .bind(tenantId, tenantId, bindCredits(openingCredits), nowUnix, nowUnix)
+        .all<{ id: string }>();
+      return result.results.length > 0;
+    } catch (error) {
+      throw d1Error("ensure_wallet", error);
+    }
+  }
+
+  /**
+   * `wallets.balance_credits`, read EXACTLY.
+   *
+   * {@link getWallet} decodes the column through D1's default JS mapping, which
+   * is a `number` and therefore lossy past 2^53 — fine for a display balance,
+   * wrong as the input to any arithmetic. This selects `CAST(… AS TEXT)` and
+   * decodes with `BigInt`, so a balance anywhere in the int64 range comes back
+   * intact. `undefined` means NO wallet row, which is not the same fact as a
+   * balance of zero (see `SpendSource.walletBalanceCredits` in the gateway:
+   * "no wallet" must never deny).
+   */
+  async balanceCreditsExact(tenantId: string): Promise<bigint | undefined> {
+    try {
+      const row = await this.db
+        .prepare("SELECT CAST(balance_credits AS TEXT) AS credits FROM wallets WHERE tenant_id = ?")
+        .bind(tenantId)
+        .first<{ credits: string }>();
+      return row === null ? undefined : creditsFromText(row.credits);
+    } catch (error) {
+      throw d1Error("balance_credits_exact", error);
     }
   }
 
@@ -552,25 +632,54 @@ export class D1WalletStore {
    * reports `newlyApplied: false`. Guarding on the id ALONE would be wrong: the
    * id exists as soon as S0 runs, including on the replay path, so the balance
    * would move twice.
+   *
+   * ## The amount is `bigint`-exact end to end
+   *
+   * `deltaCredits` accepts a `bigint` (and a safe-integer `number`, which the
+   * older callers pass) and never touches a double after that. It reaches
+   * SQLite as a decimal STRING, because D1 rejects a `bigint` parameter outright
+   * and a `number` parameter would already have rounded — `100_000_000_000_001`
+   * cents is 1_000_000_000_000_010_000 credits, and the nearest double is
+   * sixteen credits short. `src/credits.ts` carries the whole argument. The
+   * replay-conflict comparison reads the stored amount back as TEXT for the same
+   * reason: comparing against the lossy decode would let a replay whose amount
+   * differs only past the 53rd bit through as "the same movement".
+   *
+   * ## A settlement for a tenant with NO wallet row is refused, not swallowed
+   *
+   * S1 is an `UPDATE`, so with no `wallets` row it matches nothing — while S0
+   * has already claimed the settlement id. The credit would vanish AND the id
+   * would be permanently spent, so the retry that should have repaired it
+   * reports `newlyApplied: false` and moves nothing either. That is the worst
+   * shape a money bug can have, so S0 carries `WHERE EXISTS (SELECT 1 FROM
+   * wallets …)`: with no wallet nothing is claimed, nothing is written, and the
+   * call raises `not_found`. Callers that mean to adopt the wallet call
+   * {@link ensureWallet} first.
    */
   async settleWalletBalance(
     settlementId: string,
     tenantId: string,
-    deltaCredits: number,
+    deltaCredits: number | bigint,
     nowUnix: number,
   ): Promise<WalletSettlementOutcome> {
     requireAtomicBatch(this.handle, "settle_wallet_balance");
     this.assertTenant(tenantId, "settle_wallet_balance");
-    const existing = await this.getSettlement(settlementId);
-    if (existing) {
-      if (existing.tenantId !== tenantId || existing.deltaCredits !== deltaCredits) {
+    const delta = exactCredits(deltaCredits, "settle_wallet_balance");
+    const claimed0 = await this.settlementClaim(settlementId);
+    if (claimed0 !== undefined) {
+      if (claimed0.tenantId !== tenantId || claimed0.deltaCredits !== delta) {
         throw StorageError.conflict(
           `wallet settlement ${settlementId} replay changed tenant or amount`,
         );
       }
+      const existing = await this.getSettlement(settlementId);
+      if (existing === undefined) {
+        throw StorageError.runtime(`wallet settlement ${settlementId} did not materialize`);
+      }
       return { settlement: existing, newlyApplied: false };
     }
 
+    const bound = bindCredits(delta);
     let results: D1Result[];
     try {
       results = await this.db.batch([
@@ -578,10 +687,11 @@ export class D1WalletStore {
           .prepare(
             "INSERT INTO wallet_settlements " +
               "(id, tenant_id, delta_credits, balance_after_credits, created_at_unix) " +
-              "VALUES (?, ?, ?, NULL, ?) " +
+              "SELECT ?, ?, ?, NULL, ? " +
+              "  WHERE EXISTS (SELECT 1 FROM wallets WHERE tenant_id = ?) " +
               "ON CONFLICT (id) DO NOTHING RETURNING id",
           )
-          .bind(settlementId, tenantId, deltaCredits, nowUnix),
+          .bind(settlementId, tenantId, bound, nowUnix, tenantId),
         this.db
           .prepare(
             "UPDATE wallets SET balance_credits = balance_credits + ?, updated_at_unix = ? " +
@@ -590,7 +700,7 @@ export class D1WalletStore {
               "             WHERE id = ? AND balance_after_credits IS NULL) " +
               "RETURNING balance_credits",
           )
-          .bind(deltaCredits, nowUnix, tenantId, settlementId),
+          .bind(bound, nowUnix, tenantId, settlementId),
         this.db
           .prepare(
             `UPDATE wallet_settlements SET balance_after_credits =
@@ -609,14 +719,42 @@ export class D1WalletStore {
       return { settlement: settlementFromRow(row), newlyApplied: claimed };
     }
     // S2 stamped nothing: either a concurrent duplicate won the primary-key
-    // race, or the tenant has no wallet row so the balance subquery was NULL.
-    // Either way the durable row is authoritative — read it back rather than
-    // synthesizing one.
+    // race, or the tenant has no wallet row at all. The durable row is
+    // authoritative — read it back rather than synthesizing one.
     const stored = await this.getSettlement(settlementId);
     if (!stored) {
-      throw StorageError.runtime(`wallet settlement ${settlementId} did not materialize`);
+      // Nothing was claimed and nothing was written, because S0's `WHERE EXISTS`
+      // found no wallet. Saying so is the whole point: the alternative is a
+      // top-up that reports success, moves nothing, and burns its own
+      // idempotency key so the retry is a no-op too.
+      throw StorageError.notFound(
+        `tenant ${tenantId} has no wallet row; settlement ${settlementId} was not applied`,
+      );
     }
     return { settlement: stored, newlyApplied: claimed };
+  }
+
+  /**
+   * The settlement's tenant and EXACT amount, or `undefined` when the id is
+   * unclaimed. Used only by {@link settleWalletBalance}'s replay guard — see
+   * that method's docblock for why the amount must not come back through
+   * {@link getSettlement}'s lossy `number` decode.
+   */
+  private async settlementClaim(
+    settlementId: string,
+  ): Promise<{ tenantId: string; deltaCredits: bigint } | undefined> {
+    try {
+      const row = await this.db
+        .prepare(
+          "SELECT tenant_id, CAST(delta_credits AS TEXT) AS delta FROM wallet_settlements WHERE id = ?",
+        )
+        .bind(settlementId)
+        .first<{ tenant_id: string; delta: string }>();
+      if (row === null) return undefined;
+      return { tenantId: row.tenant_id, deltaCredits: creditsFromText(row.delta) ?? 0n };
+    } catch (error) {
+      throw d1Error("get_wallet_settlement", error);
+    }
   }
 
   // --- Reads ---------------------------------------------------------------

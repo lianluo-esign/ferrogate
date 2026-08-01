@@ -268,11 +268,47 @@ describe("composite-key resource: /admin/v1/quota-policies/{scope_type}/{scope_i
   });
 });
 
+/**
+ * A COMPLETE, enforceable `PolicyRevision` body.
+ *
+ * These cases used to post `{policy_id, detectors: []}` and get a `201`. They
+ * cannot any more, and the change is the point of the guardrail write-half
+ * slice, not an inconvenience: `detectors` is not a field of Rust's
+ * `PolicyRevision` (which is `deny_unknown_fields`), and a revision with no
+ * `name`, no `checks` and no `on_*` actions is one `apps/gateway` could never
+ * compile — so accepting it produced a revision history no request was ever
+ * evaluated against. Admission now refuses it with `400
+ * invalid_guardrail_policy`, which
+ * `test/guardrail-write-half.test.ts` asserts directly. The fixtures below move
+ * to a revision that IS enforceable; every assertion in these cases is
+ * unchanged.
+ */
+function guardrailRevisionBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name: "crud fixture",
+    checks: [
+      {
+        id: "kw",
+        enabled: true,
+        stage: "request",
+        sources: ["user"],
+        detector: { kind: "local", keywords: ["forbidden"], regex: [], secret_patterns: [] },
+      },
+    ],
+    on_pass: [{ kind: "allow" }],
+    on_fail: [{ kind: "block", code: "guardrail_blocked", message: "blocked" }],
+    on_error: [{ kind: "block", code: "guardrail_unavailable", message: "unavailable" }],
+    ...overrides,
+  };
+}
+
 describe("guardrail policy revisions are immutable and monotonic", () => {
   it("numbers revisions upward and activates one", async () => {
     const first = await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies`,
-      jsonRequest(KEY, "POST", { policy_id: "gp1", detectors: [] }),
+      jsonRequest(KEY, "POST", guardrailRevisionBody({ policy_id: "gp1" })),
     );
     expect(first.status).toBe(201);
     expect((await first.json()) as { policy: { revision: number } }).toMatchObject({
@@ -281,7 +317,7 @@ describe("guardrail policy revisions are immutable and monotonic", () => {
 
     const second = await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies/gp1/revisions`,
-      jsonRequest(KEY, "POST", { detectors: [{ id: "pii" }] }),
+      jsonRequest(KEY, "POST", guardrailRevisionBody({ name: "second" })),
     );
     expect((await second.json()) as { policy: { revision: number } }).toMatchObject({
       policy: { revision: 2 },
@@ -314,7 +350,7 @@ describe("guardrail policy revisions are immutable and monotonic", () => {
   it("rejects an activate body with an unknown field (Rust deny_unknown_fields)", async () => {
     await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies`,
-      jsonRequest(KEY, "POST", { policy_id: "gp2" }),
+      jsonRequest(KEY, "POST", guardrailRevisionBody({ policy_id: "gp2" })),
     );
     const response = await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies/gp2/activate`,
@@ -326,7 +362,7 @@ describe("guardrail policy revisions are immutable and monotonic", () => {
   it("dry-run dispatches NOTHING", async () => {
     await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies`,
-      jsonRequest(KEY, "POST", { policy_id: "gp3" }),
+      jsonRequest(KEY, "POST", guardrailRevisionBody({ policy_id: "gp3" })),
     );
     await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies/gp3/activate`,
@@ -352,7 +388,7 @@ describe("guardrail policy revisions are immutable and monotonic", () => {
   it("rejects a stage outside Rust's DetectorStage (`request` | `response`)", async () => {
     await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies`,
-      jsonRequest(KEY, "POST", { policy_id: "gp4" }),
+      jsonRequest(KEY, "POST", guardrailRevisionBody({ policy_id: "gp4" })),
     );
     await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies/gp4/activate`,
@@ -767,7 +803,7 @@ describe("KEPT MARKER: the open admin body keeps operator fields it cannot name"
     // scoped approximation and not a blanket one.
     await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies`,
-      jsonRequest(KEY, "POST", { policy_id: "gp_open" }),
+      jsonRequest(KEY, "POST", guardrailRevisionBody({ policy_id: "gp_open" })),
     );
     const response = await SELF.fetch(
       `${BASE}/admin/v1/guardrail-policies/gp_open/activate`,

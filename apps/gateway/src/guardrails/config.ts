@@ -154,10 +154,22 @@ export function guardrailDepsFromEnv(
     return guardrailOptions(env, guardrailPolicySourceFromEnv(env, detectorContext));
   }
 
-  return loadGuardrailPolicyStore(durable, guardrailPolicyStoreFromEnv(env)).then((store) =>
+  // Which policies came out of the DURABLE control tables, as opposed to this
+  // deployment's own `GATEWAY_GUARDRAIL_POLICIES` var. Only the durable ones may
+  // fail closed instead of failing the boot: they are another Worker's runtime
+  // input, while a mistyped secret ref in the operator's own deploy config must
+  // still be a startup error rather than a policy that refuses every request.
+  const durablePolicyIds = new Set<string>();
+  return loadGuardrailPolicyStore(durable, guardrailPolicyStoreFromEnv(env), {
+    onDurablePolicy: (policyId) => durablePolicyIds.add(policyId),
+  }).then((store) =>
     guardrailOptions(
       env,
-      policySourceFromStore(store, { secrets: secretsFromEnv(env), ...detectorContext }),
+      policySourceFromStore(
+        store,
+        { secrets: secretsFromEnv(env), ...detectorContext },
+        { failClosedPolicyIds: durablePolicyIds },
+      ),
     ),
   );
 }

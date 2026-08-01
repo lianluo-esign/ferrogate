@@ -68,6 +68,7 @@ workers/*    → LEGACY reference only (rewrite fresh into apps/*); deleted at p
 
 | Rust crate | Target | CF products |
 |---|---|---|
+| `ferrogate-cloudflare` | `packages/cloudflare` — **mostly superseded by native bindings**; see `docs/rewrite/cf-crate-assessment.md` for the per-slice verdict | R2 (bucket provisioning), API Tokens (scoped R2 creds), D1 (**database lifecycle**, not the query endpoint), account preflight, shared retry/backoff + error taxonomy |
 | `ferrogate-core` | `packages/core` | — (types, errors) |
 | `ferrogate-config` | `packages/config` | Workers vars/secrets |
 | `ferrogate-policy` | `packages/policy` | — |
@@ -85,6 +86,14 @@ workers/*    → LEGACY reference only (rewrite fresh into apps/*); deleted at p
 | `ferrogate-mcp` | `apps/mcp` | MCP SDK, Agents SDK, DO |
 | `agent-worker` | `apps/agent-runtime` | Agents SDK, containers/sandbox |
 | `ferrogate-cli` | `apps/cli` | Bun-compiled binary (not a Worker) |
+
+> **This map must list EVERY crate — including the ones whose answer is
+> "obsolete".** `ferrogate-cloudflare` appeared in no row for sixteen waves, so
+> no wave ever owned it and nobody noticed that four of its slices had no TS
+> equivalent anywhere. It took a cutover certification to find. A crate whose
+> verdict is "superseded by a binding" still needs a row saying so; a crate with
+> no row is a crate nobody is responsible for. If a new crate is discovered,
+> add the row FIRST, then decide the verdict.
 
 ## Conventions
 

@@ -206,7 +206,10 @@ describe("GET /v1/agent-jobs/{run_id}/events", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = (await response.json()) as Record<string, unknown>;
-    expect(body.object).toBe("list");
+    // Rust `AgentJobEventPage.object` (`agent_jobs.rs:838`). This assertion
+    // pinned `"list"` until wave 17 — it was pinning cutover finding D7.1 in
+    // its DIVERGENT form, which is how the divergence survived every suite.
+    expect(body.object).toBe("agent_job_event_page");
     expect(Array.isArray(body.data)).toBe(true);
     expect(body.cursor_reset).toBe(false);
     expect(body.has_more).toBe(false);

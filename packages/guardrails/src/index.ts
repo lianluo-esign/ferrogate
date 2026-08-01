@@ -218,6 +218,18 @@ export type {
 } from "./adapters/workers_ai_llama_guard.js";
 export { FixtureTransport } from "./adapters/fixture.js";
 
+// Revision admission (the create-time compile gate the control plane runs).
+export {
+  INVALID_GUARDRAIL_POLICY_CODE,
+  INVALID_REQUEST_BODY_CODE,
+  admitPolicyRevision,
+} from "./admission.js";
+export type {
+  PolicyRevisionAdmission,
+  PolicyRevisionAdmissionError,
+  PolicyRevisionAdmissionOptions,
+} from "./admission.js";
+
 // Policy composition.
 export {
   aggregateCheckOutcomes,

@@ -47,6 +47,7 @@
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
+import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
 
 export type ProviderAuthScheme = "bearer" | "x-api-key";
 
@@ -787,6 +788,27 @@ export interface InferenceDeps {
    * observations without driving real dispatches.
    */
   readonly routingMetrics?: RoutingMetrics;
+  /**
+   * `[[agent_workflows]]` — the graph gate's configuration table
+   * (`src/inference/workflow.ts`). Absent ⇒ built per Worker `env`: the
+   * `control_plane_resources` documents `apps/control-plane`'s
+   * `admin_agent_workflow` group writes into `CONTROL_DB`, with the enabled
+   * skill packages' own `resources.agent_workflows` materialised over them.
+   */
+  readonly workflows?: WorkflowCatalogSource | ((env: InferenceBindings) => WorkflowCatalogSource);
+  /**
+   * The four run facts the graph gate needs (last successful node, run start,
+   * model-call count, token usage) plus the step ledger that produces them.
+   * Absent ⇒ the `CONTROL_DB`-backed ledger, or {@link NO_WORKFLOW_HISTORY}
+   * when nothing durable is bound.
+   */
+  readonly workflowHistory?: WorkflowRunHistory | ((env: InferenceBindings) => WorkflowRunHistory);
+  /**
+   * The clock the workflow timeout is measured against. Absent ⇒ the wall
+   * clock. Injected by tests so an elapsed-time refusal is deterministic rather
+   * than a sleep.
+   */
+  readonly nowUnixSeconds?: () => number;
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -804,4 +826,7 @@ export interface ResolvedInferenceDeps {
   readonly circuit: ProviderCircuit;
   readonly shadowBudget: AsyncShadowBudgetLedger;
   readonly routingMetrics: RoutingMetrics;
+  readonly workflows: WorkflowCatalogSource;
+  readonly workflowHistory: WorkflowRunHistory;
+  readonly nowUnixSeconds: () => number;
 }

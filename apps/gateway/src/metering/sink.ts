@@ -67,6 +67,7 @@ import {
   ledgerEntryId,
 } from "@ferrogate/billing";
 import type { Usage, UsageSink } from "../inference/ports.js";
+import { chargeWithAgentRun } from "./agent-run.js";
 import { usdToCredits } from "./credits.js";
 import { D1LedgerStore } from "./d1.js";
 import { billingEventFromUsage } from "./event.js";
@@ -529,7 +530,13 @@ export class MeteringUsageSink implements UsageSink {
     backend: MeteringBackend,
     attribution: MeteringAttribution | undefined,
   ): Promise<void> {
-    const { id, charge, attempts } = record;
+    const { id, attempts } = record;
+    // #305/#522 — stamp the agent run that caused this spend, when the drain's
+    // attribution belongs to THIS charge's request. A no-op otherwise, and
+    // never a change to `id`: see `./agent-run.ts`. Applied before BOTH the
+    // durable write and the downstream report, so the ledger row and the
+    // published event agree.
+    const charge = chargeWithAgentRun(record.charge, attribution);
     try {
       if (!record.settled) {
         const outcome = await backend.ledger.record(charge);

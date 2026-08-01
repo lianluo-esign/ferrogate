@@ -444,17 +444,44 @@ export class D1GuardrailPolicyStore implements AsyncGuardrailPolicyStore {
  * from a half-read policy set would screen with policies silently missing. The
  * caller (`guardrailDepsFromEnv`) lets it propagate, so the request answers 503
  * rather than passing unscreened content to a provider.
+ *
+ * `options.onDurablePolicy` is called once per policy id this function took
+ * from the DURABLE tables. It exists so the caller can tell those apart from
+ * the ones the seed (the config vars) already held, which is the discriminator
+ * `policySourceFromStore`'s `failClosedPolicyIds` needs: a durable row is
+ * another Worker's runtime input and must not be able to fail this Worker's
+ * boot, while a policy in this deployment's own configuration still must.
  */
+export interface LoadGuardrailPolicyStoreOptions {
+  readonly onDurablePolicy?: ((policyId: string) => void) | undefined;
+}
+
 export async function loadGuardrailPolicyStore(
   store: Pick<D1GuardrailPolicyStore, "listAllRevisions" | "listBindings">,
   seed: InMemoryGuardrailPolicyStore = new InMemoryGuardrailPolicyStore(),
+  options: LoadGuardrailPolicyStoreOptions = {},
 ): Promise<InMemoryGuardrailPolicyStore> {
   const revisions = await store.listAllRevisions();
   for (const revision of revisions) {
     if (seed.revision(revision.policy_id, revision.revision) !== undefined) {
       continue;
     }
-    seed.putRevision(revision);
+    try {
+      seed.putRevision(revision);
+    } catch {
+      // `putRevision` runs `validatePolicyRevision`, and a row written before
+      // `apps/control-plane` tightened admission can fail it. Skipping ONE row
+      // rather than throwing is what keeps a legacy document from taking the
+      // whole guardrail source — and therefore every request — down at boot;
+      // this loop is reached from `guardrailDepsFromEnv`, which lets a throw
+      // propagate into a 503.
+      //
+      // Skipping is NOT fail-open: the binding loop below refuses to activate a
+      // revision the snapshot does not have, so the policy has no live text and
+      // no request is told it was screened. A policy that DOES load and merely
+      // fails to COMPILE is the other case, and `binding.ts` keeps that one
+      // selected and failing closed rather than dropping it.
+    }
   }
 
   for (const binding of await store.listBindings()) {
@@ -479,6 +506,9 @@ export async function loadGuardrailPolicyStore(
         `guardrail policy binding ${binding.policyId}@${binding.activeRevision} could not be projected: ${result.detail}`,
       );
     }
+    // Reported only for a binding this function actually made live from the
+    // durable tables — after the activate, so a skipped one is never claimed.
+    options.onDurablePolicy?.(binding.policyId);
   }
   return seed;
 }

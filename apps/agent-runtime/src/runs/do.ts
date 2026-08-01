@@ -43,7 +43,16 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import type { AgentRuntimeBindings } from "../ports.js";
-import { doneFrame, runEventFrame, sseComment, sseFrame } from "./events.js";
+import {
+  comparePosition,
+  doneFrame,
+  eventCursorToken,
+  eventPosition,
+  resolveEventCursor,
+  runEventFrame,
+  sseComment,
+  sseFrame,
+} from "./events.js";
 import {
   type RunStatus,
   type StoredAgentRun,
@@ -268,7 +277,29 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
     return [...rows.values()];
   }
 
-  /** One page of the incremental event feed, cursored by event id. */
+  /**
+   * One page of the incremental event feed — Rust `page_agent_job_events`.
+   *
+   * ## Cutover finding D7.3: the cursor is a POSITION, not an event id
+   *
+   * The rows are ordered by `(occurred_at_unix, id)` before anything is sliced,
+   * and the cursor is resolved to a key in that order rather than to an index
+   * in the storage listing. The two together are what make the token cursor
+   * outlive its own event: `#append` prunes past `MAX_RETAINED_EVENTS`, and the
+   * previous implementation — `findIndex(event.id === afterEventId)` — could
+   * only answer `cursorReset: true` once the named event was gone, re-delivering
+   * the whole retained history to a poll loop on every subsequent call.
+   *
+   * `cursorReset` therefore survives ONLY for the case Rust also resets on: a
+   * BARE event id that is not in the set. A composite token always resolves, so
+   * a resuming client is never reset. See `./events.ts::resolveEventCursor`.
+   *
+   * The sort is explicit for the same reason Rust's is: `evt:<016d seq>` makes
+   * `storage.list()` sequence-ordered, and sequence order is only incidentally
+   * timestamp order — a worker reporting an event with an earlier
+   * `reported_at_unix` than its predecessor would otherwise be paged into a
+   * position the cursor key can never address.
+   */
   async listEvents(
     tenantId: string,
     options: { readonly afterEventId: string | null; readonly limit: number },
@@ -276,27 +307,37 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
     const run = await this.snapshot(tenantId);
     if (run === undefined) return undefined;
 
-    const events = await this.#allEvents();
-    let start = 0;
-    let cursorReset = false;
-    if (options.afterEventId !== null) {
-      const index = events.findIndex((event) => event.id === options.afterEventId);
-      if (index === -1) {
-        // Never hand back a permanently unusable cursor: restart from the
-        // oldest retained event and SAY that is what happened.
-        cursorReset = true;
-      } else {
-        start = index + 1;
-      }
-    }
+    const events = (await this.#allEvents()).sort((left, right) =>
+      comparePosition(eventPosition(left), eventPosition(right)),
+    );
+
+    const resolved =
+      options.afterEventId === null ? null : resolveEventCursor(options.afterEventId, events);
+    // Rust `let cursor_reset = matches!(resolved, Some(None));` — a cursor was
+    // supplied and could not be resolved at all.
+    const cursorReset = options.afterEventId !== null && resolved === null;
+    const start =
+      resolved === null
+        ? 0
+        : (() => {
+            const index = events.findIndex(
+              (event) => comparePosition(eventPosition(event), resolved) > 0,
+            );
+            return index === -1 ? events.length : index;
+          })();
+
     const page = events.slice(start, start + options.limit);
     const hasMore = start + page.length < events.length;
+    const last = page[page.length - 1];
     return {
       data: page,
       limit: options.limit,
       afterEventId: options.afterEventId,
+      // Rust: `data.last().map(token).or_else(|| after.clone().filter(|_| !reset))`.
+      // Carrying the caller's cursor forward on an EMPTY page is what keeps a
+      // caught-up poller from restarting; dropping it to `null` would.
       nextAfterEventId:
-        page.length === 0 ? options.afterEventId : (page[page.length - 1]?.id ?? null),
+        last !== undefined ? eventCursorToken(last) : cursorReset ? null : options.afterEventId,
       hasMore,
       cursorReset,
     };
@@ -452,11 +493,21 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
     if (run === undefined) return new Response("not found", { status: 404 });
 
     const afterEventId = url.searchParams.get("after_event_id");
-    const events = await this.#allEvents();
+    // The SAME order and the SAME cursor resolution the paged feed uses
+    // (`listEvents`). Sharing them is the point: `resumeCursor` feeds BOTH
+    // representations from one `Last-Event-ID`/`after_event_id`, so a client
+    // that resumes the stream with a composite token must not have its whole
+    // backlog replayed just because this branch only understood bare ids.
+    const events = (await this.#allEvents()).sort((left, right) =>
+      comparePosition(eventPosition(left), eventPosition(right)),
+    );
     let backlog = events;
     if (afterEventId !== null && afterEventId !== "") {
-      const index = events.findIndex((event) => event.id === afterEventId);
-      backlog = index === -1 ? events : events.slice(index + 1);
+      const resolved = resolveEventCursor(afterEventId, events);
+      backlog =
+        resolved === null
+          ? events
+          : events.filter((event) => comparePosition(eventPosition(event), resolved) > 0);
     }
 
     // Open frame: the reconnect hint plus the run's current status, so a client

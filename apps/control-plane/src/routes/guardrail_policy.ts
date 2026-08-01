@@ -34,17 +34,26 @@
 import {
   type CheckBinding,
   type DetectorDefinition,
+  type PolicyRevision,
   type PolicyScopeSelector,
   type PolicySelectionContext,
+  admitPolicyRevision,
   byteLen,
   checkBindingSchema,
+  policyRevisionSchema,
   policyScopeSelectorSchema,
   scopeMatches,
 } from "@ferrogate/guardrails";
+import type { Context } from "hono";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import type { StoreRecord } from "../ports.js";
+import type { ControlPlaneEnv, StoreRecord } from "../ports.js";
 import { adminDeleted, listResponse, parseListQuery } from "../responses.js";
+import {
+  projectGuardrailActivation,
+  projectGuardrailArchive,
+  projectGuardrailRevision,
+} from "../store/guardrail_registry.js";
 import { type GroupModule, crudGroup, json, pathParam, readJson, scopeOf } from "./resource.js";
 
 const POLICIES = "guardrail-policies";
@@ -64,25 +73,27 @@ const REVISIONS = "guardrail-policy-revisions";
  */
 export const DETECTOR_STAGES = ["request", "response"] as const;
 
-export const guardrailRevisionSchema = z
-  .object({
-    policy_id: z.string().trim().min(1).optional(),
-    /**
-     * Rust `PolicyRevision.checks` — the bound `CheckBinding` list the dry-run
-     * evaluates. Left as an open array here (the strict
-     * `@ferrogate/guardrails` `checkBindingSchema` is applied at READ time by
-     * the dry-run, so a revision authored before a detector kind existed is
-     * still storable) but named, because it is the field the evaluator reads.
-     */
-    checks: z.array(z.record(z.unknown())).optional(),
-    /** Rust `PolicyRevision.scope` — the `PolicyScopeSelector` selection fence. */
-    scope: z.record(z.unknown()).optional(),
-    detectors: z.array(z.record(z.unknown())).optional(),
-    on_pass: z.array(z.record(z.unknown())).optional(),
-    on_fail: z.array(z.record(z.unknown())).optional(),
-    on_error: z.array(z.record(z.unknown())).optional(),
-  })
-  .passthrough();
+/**
+ * The create-revision request body: Rust's `PolicyRevision` itself, which is
+ * `#[serde(deny_unknown_fields)]` — so `@ferrogate/guardrails`' `.strict()`
+ * twin IS the body schema, not an approximation of it.
+ *
+ * **This is a behaviour change and it is the point of the slice.** The previous
+ * schema made `checks`, `on_pass`, `on_fail`, `on_error` optional, had no
+ * `name`, and was `.passthrough()` — so `{"policy_id":"gp1","detectors":[]}`
+ * was a `201`. It cannot be one: `detectors` is not a field of Rust's
+ * `PolicyRevision` at all, and a document with no `name`/`checks`/actions is
+ * one the data plane could never enforce. A shape failure here is Rust's SERDE
+ * leg (`read_guardrail_body` → `400 invalid_request_body`, with the field path
+ * `readJson` attaches); a document that PARSES but cannot be enforced is the
+ * `validate()`/compile leg and is `400 invalid_guardrail_policy` — see
+ * {@link admitRevision}.
+ *
+ * `policy_id`, `revision`, `created_at_unix` and `created_by` are accepted here
+ * because Rust accepts them (`#[serde(default)]`), and then overwritten by the
+ * server exactly as Rust overwrites them.
+ */
+export const guardrailRevisionSchema = policyRevisionSchema;
 
 /** Rust `RevisionSelection { revision: u32 }` (`deny_unknown_fields`). */
 export const revisionSelectionSchema = z.object({ revision: z.number().int().min(0) }).strict();
@@ -261,62 +272,142 @@ function readRevisionParam(revision: string, policyId: string): number {
   return parsed;
 }
 
+// ---------------------------------------------------------------------------
+// Admission + projection (the write half)
+// ---------------------------------------------------------------------------
+
 /**
- * PORT-TODO(P: inventory-edge-control §guardrails) — the revision chain this group
- * owns is not the one the data plane enforces.
+ * The `PolicyRevision` fields, so a STORED document can be read back as a
+ * revision candidate without its control-plane bookkeeping (`id`, `status`,
+ * `archived_at`, `tenant_id`) tripping the `.strict()` schema.
  *
- * Every operation below reads and writes `control_plane_resources` documents
- * (`guardrail-policies` / `guardrail-policy-revisions`). `apps/gateway` resolves
- * the policy it actually applies from the TYPED control tables through
- * `apps/gateway/src/guardrails/d1.ts::D1GuardrailPolicyStore`:
- * `guardrail_policy_revisions(policy_id, revision, revision_json)` and
- * `guardrail_policy_bindings(policy_id, active_revision, generation, binding_json)`
- * — the same tables `apps/gateway/src/cache/fingerprint.ts` hashes to key the
- * response cache. Nothing in this app writes either table.
- *
- * Consequence: `createGuardrailPolicyRevision` +
- * `activateGuardrailPolicyRevision` produce a complete, audited, RBAC-gated
- * revision history that no request is ever evaluated against, and
- * `rollbackGuardrailPolicyRevision` rolls back a binding the gateway does not
- * read. `dryRunGuardrailPolicyRevision` is the exception and is genuinely real —
- * it evaluates the candidate in-process with `@ferrogate/guardrails`.
- *
- * The write half is a projection, in the shape `store/rbac_registry.ts` and
- * `store/static_keys.ts` now use for their families: `create*` appends the
- * revision row, `activate`/`rollback` move
- * `guardrail_policy_bindings.active_revision` under the SAME generation guard
- * `apps/gateway/src/guardrails/binding.ts` already implements (D1 has no
- * `SELECT … FOR UPDATE`, so the generation CAS is what makes two racing
- * activations safe), and a delete/archive fails CLOSED — the enforcement row
- * is the one a residue must not leave live.
- *
- * **It is NOT a straight document copy, and that is why this is still open.**
- * Verified against the reader this wave:
- *
- *  1. `revision_json` has to decode as a COMPLETE `PolicyRevision`.
- *     `@ferrogate/guardrails`' `policyRevisionSchema` gives defaults for
- *     `scope`/`aggregation`/`execution`/`mode`/`streaming`/`deadline_ms`, but
- *     `name`, `checks`, `on_pass`, `on_fail` and `on_error` have NONE — and
- *     `validatePolicyRevision` additionally requires a non-empty `created_by`
- *     and `checks.length > 0`. `guardrailRevisionSchema` above makes every one
- *     of those OPTIONAL, so today's documents are not projectable as they stand.
- *  2. A malformed row is not skipped, it is FATAL.
- *     `binding.ts::policySourceFromStore` iterates the bindings and calls
- *     `compilePolicyChecks(revision, context)` eagerly at construction with no
- *     `try`/`catch` — deliberately, so a detector-configuration error is a
- *     startup failure rather than a per-request one. Projecting a partial
- *     revision would therefore take the gateway's whole guardrail source down
- *     on boot, which is strictly worse than the current inert state.
- *
- * So the slice has to tighten the ADMISSION as well as add the projection: a
- * revision the data plane could never enforce must be a `400` here, not a `201`
- * followed by silence. That is a deliberate behaviour change to
- * `createGuardrailPolicyRevision` / `createNextGuardrailPolicyRevision`, and the
- * existing cases that post partial revisions (`test/guardrail-dry-run.test.ts`,
- * `test/crud.test.ts`) state the current acceptance and have to move with it.
- * It is called out rather than guessed at because the failure direction of
- * getting it wrong is a Worker that does not boot.
+ * A picked field list rather than a delete list on purpose: a bookkeeping field
+ * added later must not silently become part of the revision the data plane
+ * compiles.
  */
+const REVISION_FIELDS = [
+  "policy_id",
+  "revision",
+  "name",
+  "description",
+  "enforced",
+  "scope",
+  "checks",
+  "aggregation",
+  "execution",
+  "mode",
+  "streaming",
+  "on_pass",
+  "on_fail",
+  "on_error",
+  "deadline_ms",
+  "created_at_unix",
+  "created_by",
+] as const;
+
+function revisionFieldsOf(record: StoreRecord): Record<string, unknown> {
+  const candidate: Record<string, unknown> = {};
+  for (const field of REVISION_FIELDS) {
+    if (record[field] !== undefined) candidate[field] = record[field];
+  }
+  return candidate;
+}
+
+/**
+ * Rust `auth.api_key_id.unwrap_or("platform_operator")` — the `created_by`
+ * `validatePolicyRevision` requires to be non-empty.
+ */
+function createdBy(c: Context<ControlPlaneEnv>): string {
+  const subject = c.get("auth")?.subject;
+  return subject !== null && subject !== undefined && subject.trim() !== ""
+    ? subject
+    : "platform_operator";
+}
+
+/**
+ * The create-time compile gate — the reason this group's write half could not
+ * be closed until now, closed by tightening admission rather than loosening
+ * compilation.
+ *
+ * `apps/gateway/src/guardrails/binding.ts::policySourceFromStore` compiles every
+ * active revision EAGERLY, once, at construction. A revision it cannot compile
+ * is therefore not a per-request failure — it is a boot failure for the whole
+ * guardrail source. Rust makes the identical trade in the identical place:
+ * `state.rs::create_guardrail_policy_revision` calls
+ * `build_guardrail_policy_runtime(revision, ..)?` BEFORE inserting, and the
+ * handler renders the failure as `400 invalid_guardrail_policy`
+ * (`server/guardrail_policies.rs::write_guardrail_error`, `None =>`).
+ *
+ * `admitPolicyRevision` lives in `@ferrogate/guardrails` and is nothing but
+ * `policyRevisionSchema` + `validatePolicyRevision` — the SAME pair the
+ * gateway's `putRevision` runs on its boot path — plus the field path. There is
+ * no second validator to drift.
+ *
+ * What it cannot cover, by construction: `buildDetector` also resolves
+ * `secret_ref` / `fingerprint_secret_ref` against the GATEWAY's Worker
+ * bindings, which this Worker cannot see. That residue is handled on the other
+ * side, by `policySourceFromStore` failing that ONE policy closed instead of
+ * failing the boot.
+ */
+function admitRevision(
+  candidate: Record<string, unknown>,
+  options: { shapeCode?: string } = {},
+): PolicyRevision {
+  const admission = admitPolicyRevision(candidate, options);
+  if (!admission.ok) {
+    throw new HttpError(400, admission.error.code, admission.error.detail);
+  }
+  return admission.revision;
+}
+
+/**
+ * Publish `revision` as the policy's live binding — the ONE row the data plane
+ * enforces from — before the documents are touched.
+ *
+ * Three things happen here and the order is load-bearing:
+ *
+ *  1. **The stored document is re-admitted.** Admission was tightened at
+ *     create, but revisions written BEFORE the tightening are still in the
+ *     document store, and activating one would publish a revision the gateway
+ *     cannot compile. Refused as `400 invalid_guardrail_policy`, exactly as a
+ *     fresh unenforceable body is.
+ *  2. **The immutable revision row is re-projected.** `INSERT … ON CONFLICT DO
+ *     NOTHING`, so this is a no-op for a revision whose create already projected
+ *     it and a repair for one whose typed write did not land. Without it a
+ *     binding could point at a revision the gateway has no text for, which
+ *     `loadGuardrailPolicyStore` skips — a policy that reads as active and
+ *     screens nothing.
+ *  3. **The binding CAS.** A lost update is a typed `409`, never a silent
+ *     re-base onto the winner's state.
+ *
+ * The projection precedes the document merge because a guardrail is a
+ * RESTRICTION: a crash between them leaves the data plane enforcing a revision
+ * the document does not yet show as active (over-enforcement, visible as
+ * denials), rather than an operator being told content is screened when it is
+ * not.
+ */
+async function activateProjection(
+  c: Context<ControlPlaneEnv>,
+  policyId: string,
+  revision: number,
+  record: StoreRecord,
+): Promise<void> {
+  const db = c.get("deps").controlDatabase;
+  if (db === null) return;
+  const admitted = admitRevision(
+    { ...revisionFieldsOf(record), policy_id: policyId, revision },
+    // No request body carries this one — it came out of the store — so both
+    // legs report Rust's stored-revision code rather than blaming the caller's
+    // (valid) `{"revision": N}` selection.
+    { shapeCode: "invalid_guardrail_policy" },
+  );
+  const nowUnix = Math.floor(Date.now() / 1000);
+  await projectGuardrailRevision(db, admitted, nowUnix);
+  const outcome = await projectGuardrailActivation(db, policyId, revision, createdBy(c), nowUnix);
+  if (!outcome.ok) {
+    throw new HttpError(409, "guardrail_policy_conflict", outcome.conflict);
+  }
+}
 export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", [], {
   /** Every policy's current head revision. */
   listGuardrailPolicyRevisions: async (c) => {
@@ -337,11 +428,22 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
         : crypto.randomUUID();
 
     const revision = 1;
-    const stored = await deps.store.create(REVISIONS, scope, {
+    const nowUnix = Math.floor(Date.now() / 1000);
+    // Admission BEFORE the store touch: a refusal must leave no document
+    // behind, or the very row this gate exists to keep out of the enforcement
+    // table would still be sitting in the document store waiting for someone to
+    // activate it.
+    const admitted = admitRevision({
       ...body,
-      id: revisionId(policyId, revision),
       policy_id: policyId,
       revision,
+      created_at_unix: nowUnix,
+      created_by: createdBy(c),
+    });
+
+    const stored = await deps.store.create(REVISIONS, scope, {
+      ...admitted,
+      id: revisionId(policyId, revision),
       status: "draft",
     });
     const existingPolicy = await deps.store.get(POLICIES, scope, policyId);
@@ -354,6 +456,13 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
       });
     } else {
       await deps.store.merge(POLICIES, scope, policyId, { head_revision: revision });
+    }
+    // Document first, then the immutable enforcement row: a crash between them
+    // leaves a revision the operator can SEE but cannot yet activate, and
+    // `activate` re-projects it, so it heals. See `store/guardrail_registry.ts`.
+    const db = deps.controlDatabase;
+    if (db !== null) {
+      await projectGuardrailRevision(db, admitted, nowUnix);
     }
     return json(c, 201, { object: "guardrail_policy_revision", policy: stored });
   },
@@ -386,6 +495,16 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
     const policyId = pathParam(c, "policy_id");
     const body = await readJson(c, guardrailRevisionSchema);
 
+    // Rust: a body that names a DIFFERENT policy is a typed refusal, not a
+    // silent overwrite by the path segment.
+    if (body.policy_id.trim() !== "" && body.policy_id.trim() !== policyId) {
+      throw new HttpError(
+        400,
+        "guardrail_policy_id_mismatch",
+        "body policy_id must match the path",
+      );
+    }
+
     const history = await deps.store.list(REVISIONS, scope, {
       offset: 0,
       limit: Number.MAX_SAFE_INTEGER,
@@ -394,15 +513,25 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
       filters: { policy_id: policyId },
     });
     const next = history.items.reduce((max, item) => Math.max(max, revisionNumber(item)), 0) + 1;
-
-    const stored = await deps.store.create(REVISIONS, scope, {
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const admitted = admitRevision({
       ...body,
-      id: revisionId(policyId, next),
       policy_id: policyId,
       revision: next,
+      created_at_unix: nowUnix,
+      created_by: createdBy(c),
+    });
+
+    const stored = await deps.store.create(REVISIONS, scope, {
+      ...admitted,
+      id: revisionId(policyId, next),
       status: "draft",
     });
     await deps.store.merge(POLICIES, scope, policyId, { head_revision: next });
+    const db = deps.controlDatabase;
+    if (db !== null) {
+      await projectGuardrailRevision(db, admitted, nowUnix);
+    }
     return json(c, 201, { object: "guardrail_policy_revision", policy: stored });
   },
 
@@ -428,9 +557,10 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
     const policyId = pathParam(c, "policy_id");
     const revision = readRevisionParam(pathParam(c, "revision"), policyId);
     const id = revisionId(policyId, revision);
+    const nowUnix = Math.floor(Date.now() / 1000);
     const archived = await deps.store.merge(REVISIONS, scope, id, {
       status: "archived",
-      archived_at: Math.floor(Date.now() / 1000),
+      archived_at: nowUnix,
     });
     if (archived === null) {
       throw new HttpError(
@@ -438,6 +568,17 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
         "not_found",
         `guardrail policy ${policyId} revision ${revision} not found`,
       );
+    }
+    // Document first, then the enforcement pointer. The operator has been told
+    // the revision is archived; a residual `active_revision` would mean the data
+    // plane is still applying it on every request.
+    const db = deps.controlDatabase;
+    if (db !== null) {
+      const outcome = await projectGuardrailArchive(db, policyId, revision, createdBy(c), nowUnix);
+      if (!outcome.ok) {
+        throw new HttpError(409, "guardrail_policy_conflict", outcome.conflict);
+      }
+      await deps.store.merge(POLICIES, scope, policyId, { active_revision: null });
     }
     return json(c, 200, adminDeleted("guardrail_policy_revision", id));
   },
@@ -455,6 +596,7 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
         `guardrail policy ${policyId} revision ${revision} not found`,
       );
     }
+    await activateProjection(c, policyId, revision, target);
     await deps.store.merge(REVISIONS, scope, revisionId(policyId, revision), { status: "active" });
     const policy = await deps.store.merge(POLICIES, scope, policyId, {
       active_revision: revision,
@@ -506,13 +648,15 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
       target = previous;
     }
 
-    if ((await deps.store.get(REVISIONS, scope, revisionId(policyId, target))) === null) {
+    const targetRecord = await deps.store.get(REVISIONS, scope, revisionId(policyId, target));
+    if (targetRecord === null) {
       throw new HttpError(
         404,
         "not_found",
         `guardrail policy ${policyId} revision ${target} not found`,
       );
     }
+    await activateProjection(c, policyId, target, targetRecord);
     const rolled = await deps.store.merge(POLICIES, scope, policyId, {
       active_revision: target,
       rolled_back_at: Math.floor(Date.now() / 1000),
