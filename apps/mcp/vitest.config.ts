@@ -39,8 +39,25 @@
  * is deliberately NOT declared here, so the "provisioned but not yet
  * redeployed" 503 has something real to refuse.
  */
+import { readFileSync } from "node:fs";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+/**
+ * The COMMITTED deploy config, bound verbatim so a test can assert against the
+ * parts of it that no binding surfaces (workerd has no filesystem).
+ *
+ * Until wave 14 this app had NO committed-`wrangler.toml` gate at all: `main`
+ * is named explicitly above, which overrides the toml, and nothing under
+ * `test/` read the file. `docs/rewrite/MOUNT-SEAMS.md` §8.5 recorded the
+ * consequence — deleting either `[[migrations]] new_sqlite_classes` line left
+ * every MCP test green and would have failed the first real `wrangler deploy`
+ * with `Cannot create binding for class … because it is not currently defined`.
+ * Worse than failing: swapping `new_sqlite_classes` for `new_classes` DEPLOYS,
+ * and silently gives the class the key-value backend instead of the SQLite one.
+ * `test/wrangler-bindings.test.ts` is the gate; this binding is what feeds it.
+ */
+const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
 
 const controlMigrations = await readD1Migrations("../../sql/d1-ts/control");
 const tenantMigrations = await readD1Migrations("../../sql/d1-ts/tenant");
@@ -61,6 +78,7 @@ export default defineConfig({
         bindings: {
           TEST_CONTROL_D1_SCHEMA: controlMigrations,
           TEST_TENANT_D1_SCHEMA: tenantMigrations,
+          TEST_WRANGLER_TOML: WRANGLER_TOML,
         },
       },
     }),

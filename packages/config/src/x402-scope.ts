@@ -76,13 +76,28 @@ export type X402ScopedPolicyError =
   | { type: "duplicate_scope"; scope_type: X402PolicyScopeKind; scope_id: string }
   | { type: "empty_scope_id"; scope_type: X402PolicyScopeKind };
 
-/** Human text for an {@link X402ScopedPolicyError}. */
+/**
+ * `impl Display for X402ScopedPolicyError`, VERBATIM.
+ *
+ * These two strings are what `validate_x402_spend_policies` splices into `field
+ * x402_spend_policies: ...`, so they are operator-facing error identity, not
+ * prose — an operator grepping runbooks or a support ticket for the Rust text
+ * has to find it. They had been paraphrased ("two x402 spend policies target the
+ * same scope project \"p1\"" for "duplicate x402 spend policy for project p1"),
+ * which reads fine and matches nothing.
+ *
+ * Rust's third variant, `Invalid { .. , error: X402PolicyConfigError }`, is
+ * absent on purpose and is the subject of the module PORT-TODO: it delegates to
+ * the policy crate's own structural validation, which x402 being deprioritized
+ * leaves unported. It is NOT re-worded here, because inventing its text would
+ * make a marker look closed.
+ */
 export function describeX402ScopedPolicyError(error: X402ScopedPolicyError): string {
   switch (error.type) {
     case "duplicate_scope":
-      return `two x402 spend policies target the same scope ${error.scope_type} "${error.scope_id}"`;
+      return `duplicate x402 spend policy for ${error.scope_type} ${error.scope_id}`;
     case "empty_scope_id":
-      return `an x402 spend policy for scope ${error.scope_type} has an empty scope_id`;
+      return `x402 spend policy at scope ${error.scope_type} has an empty scope_id`;
   }
 }
 
@@ -92,7 +107,9 @@ export function describeX402ScopedPolicyError(error: X402ScopedPolicyError): str
  * The empty default (no declarations) always passes — every scope then resolves
  * to the disabled deny-all policy.
  */
-export function validateScopedX402SpendPolicies(declared: X402ScopedSpendPolicy[]): X402ScopedPolicyError | null {
+export function validateScopedX402SpendPolicies(
+  declared: X402ScopedSpendPolicy[],
+): X402ScopedPolicyError | null {
   const seen = new Set<string>();
   for (const entry of declared) {
     const scopeId = normalizeX402ScopeId(entry.scope_id);

@@ -40,6 +40,7 @@ import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { StoreConflictError, type StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem } from "../responses.js";
+import { projectTenantAccount, storedPlan, storedQuotaPolicy } from "../store/quota_registry.js";
 import {
   deleteProjectRow,
   deleteWorkspaceRow,
@@ -106,79 +107,16 @@ const PLANS = "plans";
 // Stored document → `@ferrogate/policy` value types
 // ---------------------------------------------------------------------------
 //
-// The field names below are the COLUMN names of `quota_policies` / `plans` in
-// `sql/d1-ts/control/0001_init_control.sql`, not names invented here: the admin
-// documents this app stores are the same shape those tables hold, so a document
-// written through `POST /admin/v1/quota-policies` and a row projected out of
-// `quota_policies` read identically. `@ferrogate/policy` is camelCase (it is the
-// Rust value type, not the wire/row shape), so this is the one place the two
-// vocabularies meet.
+// These two decoders MOVED to `../store/quota_registry.ts` and are re-exported
+// here unchanged, so every existing importer keeps working. The move is not
+// tidying: that module now also PROJECTS the same documents into the typed
+// `plans` / `quota_policies` / `tenants` rows the gateway's admission gate
+// reads, and it builds the row from the value these functions return. One
+// decode therefore feeds both the admin answer and the enforced row — a second
+// document→column mapping is exactly how "the console says 60 rpm and the
+// gateway enforces something else" happens.
 
-function optionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-/** `quota_policies` row/document → `StoredQuotaPolicy`. */
-export function storedQuotaPolicy(
-  record: StoreRecord,
-  scopeType: QuotaScopeKind,
-  scopeId: string,
-): StoredQuotaPolicy {
-  return {
-    id: record.id,
-    scopeType,
-    scopeId,
-    modelAllowlist: stringArray(record.model_allowlist),
-    rpmLimit: optionalNumber(record.rpm_limit),
-    tpmLimit: optionalNumber(record.tpm_limit),
-    monthlyBudgetUsd: optionalNumber(record.monthly_budget_usd),
-    assetStorageQuotaBytes: optionalNumber(record.asset_storage_quota_bytes),
-    assetMaxObjectBytes: optionalNumber(record.asset_max_object_bytes),
-    agentCostBudgetUsd: optionalNumber(record.agent_cost_budget_usd),
-    alertThresholdPcts: Array.isArray(record.alert_threshold_pcts)
-      ? record.alert_threshold_pcts.filter((pct): pct is number => typeof pct === "number")
-      : [],
-    // ABSENT means "this scope does not restrict", which is NOT the same as
-    // `enabled = false` (a hard deny for the whole chain). Only an explicit
-    // `false` disables.
-    enabled: record.enabled !== false,
-    createdAtUnix: optionalNumber(record.created_at) ?? 0,
-    updatedAtUnix: optionalNumber(record.updated_at) ?? 0,
-    monthlyEgressBytesBudget: optionalNumber(record.monthly_egress_bytes_budget),
-    downloadRpmLimit: optionalNumber(record.download_rpm_limit),
-  };
-}
-
-/** `plans` row/document → `StoredPlan` (the merge FLOOR, issue #168). */
-export function storedPlan(record: StoreRecord): StoredPlan {
-  return {
-    id: record.id,
-    name: typeof record.name === "string" ? record.name : record.id,
-    slug: typeof record.slug === "string" ? record.slug : record.id,
-    mcpEnabled: record.mcp_enabled === true,
-    selfHostedWorkersEnabled: record.self_hosted_workers_enabled === true,
-    adminConsoleSeats: optionalNumber(record.admin_console_seats),
-    defaultModelAllowlist: stringArray(record.default_model_allowlist),
-    defaultRpmLimit: optionalNumber(record.default_rpm_limit),
-    defaultTpmLimit: optionalNumber(record.default_tpm_limit),
-    defaultMonthlyBudgetUsd: optionalNumber(record.default_monthly_budget_usd),
-    createdAtUnix: optionalNumber(record.created_at) ?? 0,
-    updatedAtUnix: optionalNumber(record.updated_at) ?? 0,
-    assetHostingEnabled: record.asset_hosting_enabled === true,
-    defaultAssetStorageQuotaBytes: optionalNumber(record.default_asset_storage_quota_bytes),
-    defaultAssetMaxObjectBytes: optionalNumber(record.default_asset_max_object_bytes),
-    defaultAgentCostBudgetUsd: optionalNumber(record.default_agent_cost_budget_usd),
-    defaultMonthlyEgressBytesBudget: optionalNumber(record.default_monthly_egress_bytes_budget),
-    defaultDownloadRpmLimit: optionalNumber(record.default_download_rpm_limit),
-    extensionToolsEnabled: record.extension_tools_enabled === true,
-  };
-}
+export { storedPlan, storedQuotaPolicy };
 
 /**
  * `EffectiveQuota` → the admin wire shape.
@@ -330,7 +268,16 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
   [
     { segment: "projects", object: "project", body: projectSchema },
     { segment: "workspaces", object: "workspace", body: workspaceSchema },
-    { segment: TENANT_ACCOUNTS, object: "tenant_account", body: tenantAccountSchema },
+    // The typed `tenants` row is the LEFT side of the gateway's plan join
+    // (`JOIN plans p ON t.plan_id = p.id`): without it a tenant resolves to no
+    // plan and therefore no floor, whatever `PUT …/plan` recorded in the
+    // document. See `store/quota_registry.ts`.
+    {
+      segment: TENANT_ACCOUNTS,
+      object: "tenant_account",
+      body: tenantAccountSchema,
+      project: projectTenantAccount,
+    },
     readOnlyCollection("tenants", "tenant"),
   ],
   {
@@ -376,6 +323,15 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       });
       if (stored === null) {
         throw new HttpError(404, "not_found", `tenant account ${tenantId} not found`);
+      }
+      // This route is an OVERRIDE, so the spec's `project` hook does not run for
+      // it. Projecting here is not optional: assigning a plan and leaving
+      // `tenants.plan_id` stale is the single change most likely to make the
+      // console and the gateway disagree, because it is the ONLY route that
+      // moves a tenant between plans.
+      const db = deps.controlDatabase;
+      if (db !== null) {
+        await projectTenantAccount(db, stored, Math.floor(Date.now() / 1000));
       }
       return json(c, 200, adminItem("tenant_account", stored));
     },

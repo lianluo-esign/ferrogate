@@ -41,6 +41,8 @@ import {
 import type { ApiKeyAuthenticatorPort, ApiKeyResolution } from "../../src/ports.js";
 import { hasScope } from "../../src/ports.js";
 import { deleteApiKey, resetApiKeysTable, seedApiKey, suspendApiKey, testSecret } from "./seed.js";
+import { env } from "cloudflare:test";
+import { depsFromEnv } from "../../src/adapters.js";
 
 const NOW = 1_800_000_000;
 
@@ -905,5 +907,65 @@ describe("d1ApiKeyResolverFromEnv — the wiring seam", () => {
     expect(row?.allowedProviders).toEqual(["openai"]);
     expect(row?.requestLimitPerMinute).toBe(60);
     await expect(resolver().resolveStoredKey(suspended)).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The COMPOSITION seam — `depsFromEnv` must actually USE the resolver above
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything above this line tests `d1ApiKeyResolverFromEnv` as a FACTORY: call
+ * it, get a working resolver. None of it asserts that `depsFromEnv` — the
+ * adapter the deployed Worker actually builds its `GatewayDeps` from — calls
+ * that factory at all.
+ *
+ * The wave-14 mutation sweep proved the gap was real. Replacing
+ *
+ *     apiKeys: d1ApiKeyResolverFromEnv(env, { fallback: configured }) ?? configured,
+ *
+ * with a bare `apiKeys: configured` — i.e. unwiring D1 from the credential path
+ * of the whole gateway — left all 43 tests in this file GREEN, and the rest of
+ * the suite with it. That is `MOUNT-SEAMS.md` **GW-A1**, a T1 auth seam, and it
+ * is precisely the trap §1 of that file names: asserting a resolver EXISTS is
+ * not asserting the gateway RESOLVES WITH IT.
+ *
+ * The assertion below is the one thing only the real wiring can produce: a
+ * secret that exists ONLY as a D1 row. `vitest.config.ts` seeds
+ * `GATEWAY_NATIVE_API_KEYS` / `GATEWAY_STATIC_API_KEYS` with the `fg_tenant_*`
+ * and `fg_static_*` fixtures, and this key is in neither table, so the
+ * configured authenticator alone can only answer `unknown`.
+ */
+describe("depsFromEnv — the gateway's credential path is wired to D1", () => {
+  test("authenticates a key that exists ONLY as a D1 row", async () => {
+    const secret = await seedApiKey({
+      id: "key_deps_d1_only",
+      secret: testSecret("deps-wiring"),
+      tenantId: "tenant_a",
+      scopes: ["chat.completions"],
+    });
+
+    // The real adapter, over the real bindings the Worker is deployed with.
+    const deps = depsFromEnv(env as unknown as Parameters<typeof depsFromEnv>[0]);
+    const resolution = await deps.apiKeys.authenticate(secret);
+
+    expect(
+      resolution.outcome,
+      "depsFromEnv did not resolve a D1-only key: the D1 resolver is not wired into GatewayDeps.apiKeys",
+    ).toBe("resolved");
+    expect(resolution.outcome === "resolved" ? resolution.auth.tenancy.tenantId : null).toBe(
+      "tenant_a",
+    );
+    // The row came from D1, not from an operator var: `source` is the field
+    // that says so, and it is the second thing only the real wiring produces.
+    expect(resolution.outcome === "resolved" ? resolution.auth.source : null).toBe("durable_native");
+  });
+
+  test("still falls back to the configured tables, so the D1 leg only ADDS a source", async () => {
+    // The seam is a `??` chain: wiring D1 in must not un-wire the operator
+    // tables. `fg_tenant_tools` is a `vitest.config.ts` fixture with no D1 row.
+    const deps = depsFromEnv(env as unknown as Parameters<typeof depsFromEnv>[0]);
+    const resolution = await deps.apiKeys.authenticate("fg_tenant_tools");
+    expect(resolution.outcome).toBe("resolved");
   });
 });

@@ -221,6 +221,28 @@ export interface CollectionSpec {
   readonly body?: z.ZodTypeAny;
   /** Schema for PATCH bodies. Defaults to {@link CollectionSpec.body}. */
   readonly patch?: z.ZodTypeAny;
+  /**
+   * Project the stored document into a TYPED table in the control database.
+   *
+   * A handful of collections are not only operator documents: another Worker
+   * reads a typed row keyed off the same id and will not see the document at
+   * all. `plans` and `tenant-accounts` are two — `apps/gateway`'s
+   * `d1QuotaPolicySource` joins `plans` to `tenants.plan_id` on the admission
+   * path of every authenticated request — and before this hook existed the
+   * generic handlers wrote only the document, so those tables stayed empty on
+   * every deployment and every configured limit resolved to NO limit.
+   *
+   * Declared on the SPEC rather than called from a bespoke override so it
+   * cannot be wired on POST and forgotten on PUT/PATCH: all three legs below
+   * run it, on the record the store actually committed.
+   *
+   * It runs only when {@link ControlPlaneDeps.controlDatabase} is bound. That
+   * is not a silent fallback — `controlDatabase` is `null` exactly when
+   * `CONTROL_PLANE_STORE = "memory"` or no `DB` is bound, i.e. when this
+   * deployment has no control database for a typed row to live in, and the
+   * document store it is running on is not durable either.
+   */
+  readonly project?: (db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>;
 }
 
 interface ResolvedSpec {
@@ -230,6 +252,9 @@ interface ResolvedSpec {
   readonly idField: string;
   readonly body: z.ZodTypeAny;
   readonly patch: z.ZodTypeAny;
+  readonly project:
+    | ((db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>)
+    | null;
 }
 
 function resolveSpec(spec: CollectionSpec): ResolvedSpec {
@@ -241,7 +266,27 @@ function resolveSpec(spec: CollectionSpec): ResolvedSpec {
     idField: spec.idField ?? "id",
     body,
     patch: spec.patch ?? body,
+    project: spec.project ?? null,
   };
+}
+
+/**
+ * Run a spec's {@link CollectionSpec.project} hook for a committed record.
+ *
+ * AFTER the document write, deliberately: see the ordering table in
+ * `store/quota_registry.ts`. A crash between the two legs then leaves a
+ * configured limit that is not yet enforced (healed by the next write), never
+ * an enforced limit the operator cannot see.
+ */
+async function runProjection(
+  c: Context<ControlPlaneEnv>,
+  spec: ResolvedSpec,
+  record: StoreRecord,
+): Promise<void> {
+  if (spec.project === null) return;
+  const db = depsOf(c).controlDatabase;
+  if (db === null) return;
+  await spec.project(db, record, Math.floor(Date.now() / 1000));
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +314,7 @@ export function createHandler(spec: ResolvedSpec): Handler {
     const record: StoreRecord = { ...body, [spec.idField]: id, id };
     try {
       const stored = await deps.store.create(spec.collection, scopeOf(c), record);
+      await runProjection(c, spec, stored);
       // Rust: POST with no path id is 201 Created.
       return json(c, 201, adminItem(spec.object, stored));
     } catch (error) {
@@ -298,6 +344,7 @@ export function replaceHandler(spec: ResolvedSpec, param: string): Handler {
       [spec.idField]: id,
     });
     if (stored === null) throw notFound(spec, id);
+    await runProjection(c, spec, stored);
     // Rust: an upsert WITH a path id is 200 OK, not 201.
     return json(c, 200, adminItem(spec.object, stored));
   };
@@ -309,6 +356,7 @@ export function mergeHandler(spec: ResolvedSpec, param: string): Handler {
     const body = (await readJson(c, spec.patch)) as Record<string, unknown>;
     const stored = await depsOf(c).store.merge(spec.collection, scopeOf(c), id, body);
     if (stored === null) throw notFound(spec, id);
+    await runProjection(c, spec, stored);
     return json(c, 200, adminItem(spec.object, stored));
   };
 }
@@ -381,6 +429,20 @@ export function actionHandler(options: {
     body: Record<string, unknown>,
     now: number,
   ) => Record<string, unknown>;
+  /**
+   * Run after the merge commits, on the record the store returned.
+   *
+   * `enable` / `disable` / `revoke` are the actions that decide whether a
+   * credential still authenticates, and the rows a data-plane authenticator
+   * actually reads are NOT the document this handler wrote (see
+   * `store/virtual_keys.ts`). Without this hook those three actions changed
+   * only the operator's view of the key.
+   *
+   * Distinct from {@link CollectionSpec.project} because these writes carry a
+   * DIRECTION — whether they loosen or tighten the credential — and that
+   * decides which of two databases is written first.
+   */
+  readonly after?: (c: Context<ControlPlaneEnv>, record: StoreRecord) => Promise<void>;
 }): Handler {
   const spec = resolveSpec(options.spec);
   const bodySchema = options.body ?? z.record(z.unknown()).optional();
@@ -399,6 +461,7 @@ export function actionHandler(options: {
     const patch = options.apply(existing, body, Math.floor(Date.now() / 1000));
     const stored = await deps.store.merge(spec.collection, scope, id, patch);
     if (stored === null) throw notFound(spec, id);
+    if (options.after !== undefined) await options.after(c, stored);
     return json(c, 200, adminItem(spec.object, stored));
   };
 }

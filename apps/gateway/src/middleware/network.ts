@@ -106,11 +106,7 @@ export interface NetworkAccessBindings {
 // ---------------------------------------------------------------------------
 
 /** Rust `NetworkAccessDecision`, plus the Workers-only misconfiguration arm. */
-export type NetworkAccessDecision =
-  | "allowed"
-  | "ip_denied"
-  | "rate_limited"
-  | "misconfigured";
+export type NetworkAccessDecision = "allowed" | "ip_denied" | "rate_limited" | "misconfigured";
 
 /** The parsed `[network_access]` section. */
 export interface NetworkAccessPolicy {
@@ -200,8 +196,7 @@ export function networkAccessPolicy(env: NetworkAccessBindings | undefined): Net
     if (!Number.isSafeInteger(parsed) || parsed <= 0) {
       // `validate_network_access` fails on 0 with "must be greater than zero
       // when set"; a non-numeric value never reaches the Rust at all.
-      misconfiguration ??=
-        `${UNAUTHENTICATED_RATE_LIMIT_VAR} must be a positive integer when set (value: ${JSON.stringify(rawLimit)})`;
+      misconfiguration ??= `${UNAUTHENTICATED_RATE_LIMIT_VAR} must be a positive integer when set (value: ${JSON.stringify(rawLimit)})`;
     } else {
       limit = parsed;
     }
@@ -212,8 +207,7 @@ export function networkAccessPolicy(env: NetworkAccessBindings | undefined): Net
   if (rawHops !== "") {
     const parsed = Number(rawHops);
     if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-      misconfiguration ??=
-        `${TRUSTED_PROXY_HOPS_VAR} must be a positive integer when set (value: ${JSON.stringify(rawHops)})`;
+      misconfiguration ??= `${TRUSTED_PROXY_HOPS_VAR} must be a positive integer when set (value: ${JSON.stringify(rawHops)})`;
     } else {
       hops = parsed;
     }
@@ -242,13 +236,21 @@ export function networkAccessPolicy(env: NetworkAccessBindings | undefined): Net
 const POLICY_CACHE = new Map<string, NetworkAccessPolicy>();
 const POLICY_CACHE_LIMIT = 32;
 
+/**
+ * The separator is the ESCAPE `"\0"`, never a literal NUL byte typed into the
+ * source. Both produce the same one-character string at runtime, but a source
+ * file that CONTAINS a raw NUL is classified BINARY by `grep`, which then skips
+ * it silently — this file carried one until it was found by a byte scan, and
+ * for as long as it did, every `grep -r PORT-TODO` audit of `apps/gateway/src`
+ * reported on 199 files and quietly omitted the 200th.
+ */
 function policyCacheKey(env: NetworkAccessBindings | undefined): string {
   return [
     env?.GATEWAY_IP_ALLOWLIST ?? "",
     env?.GATEWAY_TRUST_FORWARDED_FOR ?? "",
     env?.GATEWAY_TRUSTED_PROXY_HOPS ?? "",
     env?.GATEWAY_UNAUTHENTICATED_RATE_LIMIT_PER_MINUTE ?? "",
-  ].join(" ");
+  ].join("\0");
 }
 
 /** {@link networkAccessPolicy}, memoized per distinct var tuple. */

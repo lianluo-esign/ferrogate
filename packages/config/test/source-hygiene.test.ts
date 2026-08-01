@@ -27,7 +27,7 @@
  * mistake is that easy to make, and a scan that skipped the test tree would not
  * have caught its own.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
@@ -46,6 +46,43 @@ const FILES = [
   ...sourceFiles(path.join(packageRoot, "src")),
   ...sourceFiles(path.join(packageRoot, "test")),
 ];
+
+/**
+ * ...and the tripwire only covered ONE package, which is how it got bitten a
+ * second time.
+ *
+ * This file was written after `packages/config` was cleaned, and it scans
+ * `packages/config` only. The other twelve libraries were never covered, and a
+ * re-scan of the whole tree found the same defect had landed again, unnoticed,
+ * in a package with no tripwire:
+ *
+ *   - `packages/guardrails/src/envelope.ts`     — 1 NUL (`${source}<NUL>${location}`)
+ *   - `packages/guardrails/src/deterministic.ts` — 3 NULs (a 4-part composite key)
+ *
+ * Both files were BINARY to `grep`/`rg` for as long as they existed, so
+ * `evaluateDeterministic`, the whole segment/category dedup, and the envelope's
+ * per-source location index were invisible to every census run through a
+ * line-oriented tool — including the ones that produced the parity audits.
+ *
+ * A per-package copy of this file would be thirteen copies to keep in step, and
+ * the one that matters is always the one nobody wrote. So the scan below is
+ * TREE-WIDE over `packages/*`, and it lives here because this is where the
+ * tripwire already is. A failure naming another package is not a mislocated
+ * test: it is this invariant doing its job in the one place that holds it.
+ *
+ * (`apps/*` is deliberately out of scope — a `packages/*` library must not
+ * assert on a Worker's tree. The apps carry their own composition-root gates.)
+ */
+const packagesRoot = path.resolve(packageRoot, "..");
+
+const TREE_WIDE_FILES = readdirSync(packagesRoot, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .flatMap((entry) =>
+    ["src", "test"]
+      .map((sub) => path.join(packagesRoot, entry.name, sub))
+      .filter((dir) => existsSync(dir))
+      .flatMap((dir) => sourceFiles(dir)),
+  );
 
 describe("source hygiene", () => {
   test("the scan actually found this package's sources", () => {
@@ -76,4 +113,36 @@ describe("source hygiene", () => {
       expect(bytes.includes(0)).toBe(false);
     },
   );
+
+  describe("tree-wide over packages/*", () => {
+    test("the tree-wide scan actually reached the other libraries", () => {
+      // Same vacuity guard, one level up: an empty or config-only list would
+      // make the NUL assertion below pass while covering nothing. Named
+      // packages, not just a count, because a count is satisfied by
+      // `packages/config` alone.
+      const packagesSeen = new Set(
+        TREE_WIDE_FILES.map((file) => path.relative(packagesRoot, file).split(path.sep)[0]),
+      );
+      for (const name of ["config", "guardrails", "storage", "billing", "secrets"]) {
+        expect(packagesSeen).toContain(name);
+      }
+      expect(packagesSeen.size).toBeGreaterThan(10);
+      expect(TREE_WIDE_FILES.length).toBeGreaterThan(FILES.length);
+      // The two files that were binary until this scan existed.
+      for (const relative of ["guardrails/src/envelope.ts", "guardrails/src/deterministic.ts"]) {
+        expect(
+          TREE_WIDE_FILES.some(
+            (file) => path.relative(packagesRoot, file) === path.normalize(relative),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    test("no packages/*/{src,test} file contains a NUL byte", () => {
+      const offenders = TREE_WIDE_FILES.filter((file) => readFileSync(file).includes(0)).map(
+        (file) => path.relative(packagesRoot, file),
+      );
+      expect(offenders).toEqual([]);
+    });
+  });
 });

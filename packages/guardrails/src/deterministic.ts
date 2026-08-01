@@ -376,7 +376,7 @@ export class DeterministicDetector implements GuardrailDetector {
     }
     const { category, severity, confidence, start, end } = detected;
     const matched = byteSlice(segment.text, start, end);
-    const key = `${category} ${segment.segment_id} ${start} ${end}`;
+    const key = `${category}\u0000${segment.segment_id}\u0000${start}\u0000${end}`;
     if (!sink.seenFindings.has(key)) {
       sink.seenFindings.add(key);
       sink.findings.push(this.finding(category, severity, confidence, segment, [start, end], matched));

@@ -482,7 +482,7 @@ function extractSse(protocol: GuardrailProtocol, body: Uint8Array, builder: Enve
   const normalized = new TextDecoder().decode(body).replace(/\r\n/g, "\n");
   // BTreeMap<(source, location)> → sort key preserves deterministic segment order.
   const accumulated = new Map<string, { source: ContentSource; location: string; text: string }>();
-  const keyOf = (source: ContentSource, location: string) => `${source} ${location}`;
+  const keyOf = (source: ContentSource, location: string) => `${source}\u0000${location}`;
   const append = (source: ContentSource, location: string, text: string) => {
     const key = keyOf(source, location);
     const existing = accumulated.get(key);

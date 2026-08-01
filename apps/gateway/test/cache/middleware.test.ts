@@ -144,8 +144,11 @@ describe("the response cache is mounted by createGatewayApp", () => {
       const metrics = responseCacheMetrics();
       expect(metrics.cacheMissesTotal).toBe(1);
       expect(metrics.cacheHitsTotal).toBe(1);
-      // Deliberately, permanently 0: there is no semantic layer, and a
-      // relabelled exact-match hit would be a lie. See `src/cache/metrics.ts`.
+      // 0 because this gateway is in `exact_match` mode. The semantic layer
+      // now exists (`src/cache/semantic.ts`) and has a real producer, so this
+      // is no longer "no producer" but the stronger claim: an EXACT hit must
+      // never be counted as a semantic one. `test/cache/semantic.test.ts`
+      // holds the other side — a semantic hit counts in both.
       expect(metrics.semanticCacheHitsTotal).toBe(0);
     } finally {
       resetResponseCacheMetrics();

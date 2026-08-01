@@ -38,6 +38,17 @@ import { SKILL_PACKAGES_VAR } from "../src/routes/skills.js";
 import * as entry from "../src/worker.js";
 import { BuiltinEicarScreener } from "../src/assets/ports.js";
 import { withSignatureVerification } from "../src/assets/signature-screener.js";
+import {
+  CACHE_DISABLED_API_KEYS_VAR,
+  CACHE_DISABLED_MODELS_VAR,
+  CACHE_DISABLED_POLICY,
+  CACHE_DISABLED_PROFILES_VAR,
+  CACHE_ENABLED_VAR,
+  CACHE_MAX_RECORDS_VAR,
+  CACHE_MODE_VAR,
+  CACHE_SEMANTIC_THRESHOLD_VAR,
+  CACHE_TTL_VAR,
+} from "../src/cache/config.js";
 
 
 function wranglerToml(): string {
@@ -289,5 +300,75 @@ describe("the asset publisher-signature policy vars", () => {
       const composed = withSignatureVerification(inner, { [name]: value });
       expect(composed, `${name} is declared but nothing in src/ reads it`).not.toBe(inner);
     }
+  });
+});
+
+describe("the response-cache [vars] src/cache/config.ts reads", () => {
+  /**
+   * A NAME-DRIFT gate, in the same weaker class as the asset-signature one
+   * above, and added in wave 14 for a specific reason.
+   *
+   * That wave ported the SEMANTIC cache layer (`src/cache/semantic.ts`) and
+   * with it a new operator var, `GATEWAY_CACHE_SEMANTIC_THRESHOLD`. The var was
+   * read by `cachePolicyFromEnv` but declared NOWHERE in the deploy config,
+   * while the other seven members of its family were — so an operator who set
+   * `GATEWAY_CACHE_MODE = "semantic"` had no adjacent knob for the cut-off and
+   * no way to discover one.
+   *
+   * The committed value is the code's own fallback (`0.92`, the Rust default),
+   * which is deliberate: it means declaring it CANNOT change behaviour, and it
+   * also means a behavioural gate is impossible — deleting the line is
+   * indistinguishable from keeping it, exactly as `MOUNT-SEAMS.md` GW-T18 says
+   * of the other fail-closed empties. What a test CAN hold is that the config
+   * keeps naming every var the code reads, so a rename on either side is loud.
+   */
+  function declaredVars(): Set<string> {
+    const declared = new Set<string>();
+    let inVars = false;
+    for (const line of wranglerToml().split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#")) continue;
+      if (/^\[/.test(trimmed)) {
+        inVars = trimmed === "[vars]";
+        continue;
+      }
+      const match = /^([A-Z0-9_]+)\s*=/.exec(trimmed);
+      if (inVars && match !== null) declared.add(match[1] as string);
+    }
+    return declared;
+  }
+
+  const CACHE_VARS = [
+    CACHE_ENABLED_VAR,
+    CACHE_TTL_VAR,
+    CACHE_MAX_RECORDS_VAR,
+    CACHE_MODE_VAR,
+    CACHE_SEMANTIC_THRESHOLD_VAR,
+    CACHE_DISABLED_MODELS_VAR,
+    CACHE_DISABLED_API_KEYS_VAR,
+    CACHE_DISABLED_PROFILES_VAR,
+  ];
+
+  it("declares every var the cache policy reads", () => {
+    const declared = declaredVars();
+    // A guard on the parser: if it ever matched nothing, the loop below would
+    // pass vacuously.
+    expect([...declared], "the [vars] parser matched nothing").toContain("GATEWAY_MODELS");
+    for (const name of CACHE_VARS) {
+      expect(declared, `${name} is read by src/cache/config.ts but not declared`).toContain(name);
+    }
+  });
+
+  it("commits the semantic threshold at the value the code falls back to", () => {
+    // If these two ever diverge, an operator reading the deploy config would be
+    // told a different default than an operator reading the code.
+    expect(wranglerToml()).toMatch(
+      new RegExp(`^${CACHE_SEMANTIC_THRESHOLD_VAR} = "0\\.92"$`, "m"),
+    );
+    expect(CACHE_DISABLED_POLICY.semanticSimilarityThreshold).toBe(0.92);
+  });
+
+  it("ships the cache DISABLED, so an unconfigured deployment caches nothing", () => {
+    expect(wranglerToml()).toMatch(new RegExp(`^${CACHE_ENABLED_VAR} = "false"$`, "m"));
   });
 });

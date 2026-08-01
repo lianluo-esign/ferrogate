@@ -15,6 +15,7 @@
  * `DELETE /admin/v1/plans/{id}` answers 405 rather than silently succeeding.
  */
 import { z } from "zod";
+import { projectPlan } from "../store/quota_registry.js";
 import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const planSchema = adminRecordSchema.extend({
@@ -25,6 +26,15 @@ export const planSchema = adminRecordSchema.extend({
   price_cents: z.number().int().min(0).nullish(),
 });
 
+/**
+ * A plan is not only an operator document: it is the FLOOR of the effective
+ * quota merge, and `apps/gateway`'s `d1QuotaPolicySource` reads it as a typed
+ * `plans` row joined to `tenants.plan_id` — never as a
+ * `control_plane_resources` document. `project` is what makes the two the same
+ * plan; without it every plan default (rpm, tpm, monthly budget, model
+ * allowlist, asset ceilings) was invisible to the data plane. See
+ * `store/quota_registry.ts`.
+ */
 export const plansRoutes: GroupModule = crudGroup("plans", [
-  { segment: "plans", object: "plan", idField: "id", body: planSchema },
+  { segment: "plans", object: "plan", idField: "id", body: planSchema, project: projectPlan },
 ]);

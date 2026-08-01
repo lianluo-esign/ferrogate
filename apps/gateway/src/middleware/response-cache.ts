@@ -1,8 +1,18 @@
 /**
- * The exact-match AI response cache, as ingress middleware.
+ * The AI response cache — exact-match, then semantic — as ingress middleware.
  *
  * Port of the cache seam inside Rust `server/chat.rs` (lookup at `:481`, store
  * at `:1976`), which is the only place `AiResponseCache` was ever consulted.
+ *
+ * ## Two layers, one seam
+ *
+ * Rust consulted the exact `AiResponseCache` and, `or_else`, the
+ * `SemanticResponseCache` (#273) — both behind the SAME gate, so the semantic
+ * layer inherits every opt-out rather than re-deriving any. This file
+ * reproduces that shape exactly: one `identity` record builds both the exact
+ * key and the semantic scope bucket (`cache/key.ts`), the semantic context is
+ * built only when an exact key would be, and it is `null` outside
+ * `mode = "semantic"` so the second layer is a strict no-op by default.
  *
  * ## Position, and why it is where it is
  *
@@ -71,8 +81,21 @@ import {
   responseCachePolicyFromEnv,
 } from "../cache/config.js";
 import { guardrailPolicyFingerprint, modelRegistryFingerprint } from "../cache/fingerprint.js";
-import { aiResponseCacheKey, scopeDigest } from "../cache/key.js";
-import { recordCacheHit, recordCacheMiss } from "../cache/metrics.js";
+import {
+  type CacheKeyInput,
+  aiResponseCacheKey,
+  canonicalJson,
+  scopeDigest,
+  semanticScopeHash,
+} from "../cache/key.js";
+import { recordCacheHit, recordCacheMiss, recordSemanticCacheHit } from "../cache/metrics.js";
+import {
+  type SemanticCacheContext,
+  type SemanticResponseCache,
+  embedText,
+  promptTextForEmbedding,
+  sharedSemanticCache,
+} from "../cache/semantic.js";
 import {
   CacheApiResponseStore,
   type CachedResponse,
@@ -115,6 +138,14 @@ export const CACHEABLE_OPERATION_IDS: ReadonlySet<string> = new Set([
 export interface ResponseCacheOptions {
   /** Override the store. Production uses the Cache API. */
   readonly store?: ResponseCacheStore;
+  /**
+   * Override the SEMANTIC store. Production uses the isolate singleton, which
+   * is the closest reachable form of Rust's process-global — see
+   * `cache/semantic.ts` for the platform limit that makes it per-isolate.
+   */
+  readonly semanticStore?: SemanticResponseCache;
+  /** Unix seconds, for the semantic layer's TTL. Overridden by tests. */
+  readonly now?: () => number;
 }
 
 /** Decoded, bounded request body plus the fields the key needs. */
@@ -180,6 +211,8 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
         // cache, never an incorrect one: the key is unchanged, so isolation
         // holds; only the hit rate falls.
         new MemoryResponseCacheStore());
+  const semanticStore = options.semanticStore ?? sharedSemanticCache();
+  const now = options.now ?? (() => Math.floor(Date.now() / 1000));
 
   return async function responseCacheMiddleware(c, next) {
     const env = (c.env ?? {}) as Record<string, unknown>;
@@ -249,7 +282,7 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
       return;
     }
 
-    const key = await aiResponseCacheKey({
+    const identity: CacheKeyInput = {
       route: operation.operationId,
       path: operation.path,
       tenantId: auth.tenancy.tenantId ?? null,
@@ -265,7 +298,21 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
       requestBody: facts.body,
       guardrailPolicyFingerprint: guardrailFingerprint,
       registryFingerprint: await modelRegistryFingerprint(env),
-    });
+    };
+    const key = await aiResponseCacheKey(identity);
+
+    // Rust `chat.rs:470`: the semantic context is built ONLY when an exact
+    // `cache_key` exists, so it inherits the whole gating ladder above
+    // (enabled + non-streaming + per-model/key/profile opt-outs + a readable
+    // guardrail policy) instead of re-deriving any of it, and is `None` in
+    // `exact_match` mode so the layer is a strict no-op there.
+    const semantic: SemanticCacheContext | null =
+      policy.mode === "semantic"
+        ? {
+            scope: await semanticScopeHash(identity),
+            embedding: embedText(promptTextForEmbedding(facts.body, canonicalJson)),
+          }
+        : null;
 
     const hit = await store.get(key);
     if (hit !== undefined) {
@@ -276,6 +323,25 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
       // by counting intercepted provider requests rather than trusting a header.
       return respondFromCache(hit);
     }
+
+    // Rust `state.lookup_ai_response_cache(key).or_else(|| semantic…)`: the
+    // similarity layer sits BEHIND the exact one and is consulted only on an
+    // exact miss — so a semantic hit can never be an exact hit relabelled.
+    if (semantic !== null) {
+      const similar = semanticStore.lookup(
+        semantic.scope,
+        semantic.embedding,
+        policy.semanticSimilarityThreshold,
+        now(),
+      );
+      if (similar !== undefined) {
+        // Rust records BOTH: `record_semantic_cache_hit` inside the lookup, and
+        // `record_ai_cache_hit` at the shared hit site (`chat.rs:485`).
+        recordSemanticCacheHit();
+        recordCacheHit();
+        return respondFromCache(similar.response);
+      }
+    }
     recordCacheMiss();
 
     await next();
@@ -283,6 +349,20 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
     const stored = await cacheableEntry(c.res);
     if (stored !== undefined) {
       await storeInBackground(c, store.put(key, stored, policy.ttlSeconds));
+      // Rust `chat.rs:1986` — "Mirror the store into the semantic layer so a
+      // later paraphrase can match this embedding." Same TTL and same
+      // `max_records` as the exact store, and behind the same success check
+      // (`cacheableEntry` is `undefined` for a non-2xx).
+      if (semantic !== null) {
+        semanticStore.insert(
+          semantic.scope,
+          semantic.embedding,
+          stored,
+          policy.ttlSeconds,
+          policy.maxRecords,
+          now(),
+        );
+      }
     }
     markCacheStatus(c, "miss");
     return;

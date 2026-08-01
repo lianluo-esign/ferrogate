@@ -150,9 +150,21 @@ function canonicalize(value: unknown): unknown {
   return out;
 }
 
-/** The exact byte string that gets hashed. Exported so a test can inspect it. */
-export function cacheKeyMaterial(input: CacheKeyInput): string {
-  return canonicalJson({
+/**
+ * Every field of the identity, as a record.
+ *
+ * The exact key and the SEMANTIC SCOPE (`./semantic.ts`) are both built from
+ * this ONE function — the scope is literally this record with `request_body`
+ * and `stream` removed, which is exactly the relationship Rust's
+ * `ai_semantic_scope_hash` has to `ai_response_cache_key`. Writing it once is
+ * the anti-drift property that matters here: a field added to the exact key to
+ * SPLIT the key space (as `key_source`, `platform_operator` and `scope_digest`
+ * were) would otherwise have to be remembered a second time for the scope, and
+ * forgetting it there is a cross-identity leak in the semantic layer only —
+ * the hardest possible place to notice one.
+ */
+function keyRecord(input: CacheKeyInput): Record<string, unknown> {
+  return {
     version: CACHE_KEY_VERSION,
     route: input.route,
     path: input.path,
@@ -169,7 +181,40 @@ export function cacheKeyMaterial(input: CacheKeyInput): string {
     stream: input.stream,
     request_body: input.requestBody,
     guardrail_policy_fingerprint: input.guardrailPolicyFingerprint,
-  });
+  };
+}
+
+/** The exact byte string that gets hashed. Exported so a test can inspect it. */
+export function cacheKeyMaterial(input: CacheKeyInput): string {
+  return canonicalJson(keyRecord(input));
+}
+
+/**
+ * The SEMANTIC SCOPE material — Rust `ai_semantic_scope_hash`'s `ScopeInput`.
+ *
+ * Every field of the exact key EXCEPT the request body, which is what the
+ * embedding replaces: entries in one bucket are compared by cosine similarity
+ * of their prompts, so everything that must NOT be compared away — tenant,
+ * credential identity, granted scopes, route, logical model, the provider
+ * registry fingerprint and the guardrail-policy fingerprint — has to be in the
+ * bucket key instead. `stream` goes with the body because the semantic layer,
+ * like the exact one, is only ever consulted for a non-streaming request.
+ */
+export function semanticScopeMaterial(input: CacheKeyInput): string {
+  const { request_body: _body, stream: _stream, ...scope } = keyRecord(input);
+  return canonicalJson(scope);
+}
+
+/**
+ * Rust `ai_semantic_scope_hash`, as a `sem-scope:<sha256-hex>` string.
+ *
+ * SHA-256 rather than Rust's FNV-1a-64 for the reason given in the header:
+ * a Rust `HashMap` bucket collision still compares the full key, a
+ * digest-addressed bucket has nothing left to compare, and a forged bucket
+ * collision here would serve one tenant's body to another.
+ */
+export async function semanticScopeHash(input: CacheKeyInput): Promise<string> {
+  return `sem-scope:${await sha256Hex(semanticScopeMaterial(input))}`;
 }
 
 /** Lowercase hex SHA-256 of `bytes`. */

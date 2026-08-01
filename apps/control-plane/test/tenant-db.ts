@@ -118,11 +118,12 @@ export async function workspaceIds(handle: D1Database): Promise<string[]> {
 /**
  * Insert a virtual API key row straight into a tenant database.
  *
- * This is the OTHER thing §1.5.7's guard counts, and nothing in this app mints
- * one yet (a virtual key's full row is tenant data the control plane cannot
- * write without the per-tenant credential path — see the platform-limit
- * PORT-TODO in `src/store/api_keys.ts`). Seeding it directly is therefore the
- * only way to prove the guard reads that leg at all.
+ * This is the OTHER thing §1.5.7's guard counts. The admin surface DOES mint one
+ * now (`src/store/virtual_keys.ts`, driven end to end by
+ * `virtual-key-credential.test.ts`), but a fixture built with the code under
+ * test cannot show that the reference guard reads what is actually in the table
+ * — so the guard's own tests seed the row directly, exactly as `seedD1` does for
+ * the document store.
  */
 export async function seedVirtualKey(
   handle: D1Database,

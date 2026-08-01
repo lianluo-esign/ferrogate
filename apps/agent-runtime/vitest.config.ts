@@ -12,8 +12,25 @@
  * `FG_DEV_SELF_HOSTED_WORKERS`, so a production deploy has an empty registry
  * and admits nobody — fail closed.
  */
+import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+/**
+ * The COMMITTED deploy config, bound verbatim so a test can assert against the
+ * parts of it that no binding surfaces (workerd has no filesystem).
+ *
+ * Until wave 14 this app had NO committed-`wrangler.toml` gate at all: `main`
+ * is named explicitly above, which overrides the toml, and nothing under
+ * `test/` read the file. `docs/rewrite/MOUNT-SEAMS.md` §9.4 recorded the
+ * consequence — deleting `new_sqlite_classes = ["AgentRunState", "WorkerPlane"]`
+ * left all 342 agent-runtime tests green, and this app is not covered by `e2e/`
+ * either, so there was NO local proof channel of any kind. Cloudflare rejects a
+ * bound `class_name` no migration introduced; and `new_classes` in its place
+ * deploys fine while giving the run state and the lease queue the key-value
+ * backend instead of the SQLite one they assume.
+ */
+const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
 
 /**
  * A 64-hex CSPRNG-shaped transport secret, the shape Rust
@@ -120,6 +137,7 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
         bindings: {
+          TEST_WRANGLER_TOML: WRANGLER_TOML,
           FG_DEV_IN_MEMORY_PORTS: "1",
           FG_REQUIRE_PRODUCTION_MTLS: "0",
           // Sealed by default (#471): with no governed host, no egress may be

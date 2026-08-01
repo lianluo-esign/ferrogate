@@ -180,7 +180,11 @@ describe("validate_observability (issue #520)", () => {
     [
       "the cloudflare provider with no collector token",
       {
-        observability: { enabled: true, provider: "cloudflare", otlp_endpoint: "https://c.example" },
+        observability: {
+          enabled: true,
+          provider: "cloudflare",
+          otlp_endpoint: "https://c.example",
+        },
       },
       "field observability.cloudflare_collector_token_ref: required when observability.provider is cloudflare",
     ],
@@ -481,7 +485,7 @@ describe("validate_agent_runtime", () => {
       "a plaintext external authorizer listener",
       managed({ external_action_authorizer_http_listen: "127.0.0.1:9999" }),
       "field agent_runtime.managed_worker.external_action_authorizer_http_listen: insecure " +
-        'plaintext authorizer transport is unsupported; configure ' +
+        "plaintext authorizer transport is unsupported; configure " +
         "external_action_authorizer_socket in a private owner-only directory (authenticated guest " +
         'transport remains tracked in #205), got "127.0.0.1:9999"',
     ],
@@ -664,7 +668,9 @@ describe("target_grants: CapabilityTargetSelector (ported from @ferrogate/runtim
         ...mcpSelector,
         argument_schema: {
           kind: "object",
-          fields: { outer: { kind: "array", items: { kind: "object", fields: { "": { kind: "number" } } } } },
+          fields: {
+            outer: { kind: "array", items: { kind: "object", fields: { "": { kind: "number" } } } },
+          },
         },
       }),
       "field agent_runtime.managed_worker.target_grants selector s1: MCP argument object field names must not be empty",
@@ -908,7 +914,9 @@ describe("validate_cluster", () => {
   });
 
   test("a disabled cluster is a no-op even when every knob is nonsense", () => {
-    expectAccepted({ cluster: { cluster_id: " ", state_backend: "postgres", counter_timeout_millis: 0 } });
+    expectAccepted({
+      cluster: { cluster_id: " ", state_backend: "postgres", counter_timeout_millis: 0 },
+    });
   });
 
   test("validateConfigAsync additionally parses the snapshot key material", async () => {
@@ -939,7 +947,7 @@ describe("validate_network_access (issue #166)", () => {
     [
       "a malformed CIDR entry",
       { network_access: { ip_allowlist: ["10.0.0.0/33"] } },
-      'field network_access.ip_allowlist[0]: prefix length /33 exceeds maximum /32 for 10.0.0.0 ' +
+      "field network_access.ip_allowlist[0]: prefix length /33 exceeds maximum /32 for 10.0.0.0 " +
         '(value: "10.0.0.0/33")',
     ],
     [
@@ -1037,7 +1045,8 @@ describe("validate_x402_spend_policies (issue #351)", () => {
     [
       "a blank scope id",
       { x402_spend_policies: [{ scope_type: "tenant", scope_id: "  ", policy: {} }] },
-      "field x402_spend_policies: an x402 spend policy for scope tenant has an empty scope_id",
+      // `impl Display for X402ScopedPolicyError::EmptyScopeId`, verbatim.
+      "field x402_spend_policies: x402 spend policy at scope tenant has an empty scope_id",
     ],
     [
       "two declarations targeting the same scope",
@@ -1047,7 +1056,11 @@ describe("validate_x402_spend_policies (issue #351)", () => {
           { scope_type: "project", scope_id: " p1 ", policy: {} },
         ],
       },
-      'field x402_spend_policies: two x402 spend policies target the same scope project "p1"',
+      // `impl Display for X402ScopedPolicyError::DuplicateScope`, verbatim. The
+      // reported `scope_id` is the NORMALIZED (trimmed) one, so the second
+      // declaration's " p1 " is reported as `p1` — same as Rust, which keys and
+      // reports off `normalize_x402_scope_id`.
+      "field x402_spend_policies: duplicate x402 spend policy for project p1",
     ],
   ];
   test.each(cases)("rejects %s", (_name, raw, expected) => {

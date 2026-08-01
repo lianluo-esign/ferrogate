@@ -13,16 +13,23 @@
  * {@link GatewayMetricsSnapshot} rather than a local shape, so a field rename
  * upstream breaks the build here instead of silently zeroing an export.
  *
- * ## `semantic_hit` is NEVER incremented, and that is the honest reading
+ * ## `semantic_hit` has a real producer now, and it is NOT a relabelled hit
  *
- * PORT-TODO(inventory-request-path §1.7 "Caches", issue #273): the semantic
- * layer is `SemanticResponseCache` — feature-hashed embeddings + a cosine
- * threshold — which maps to **Vectorize + Workers AI** on this platform
- * (inventory §1.8). Neither binding is declared for this Worker. Rather than
- * fake the counter by relabelling exact-match hits, {@link recordSemanticHit}
- * does not exist and {@link responseCacheMetrics} reports
- * `semanticCacheHitsTotal: 0` unconditionally. A 0 that is CORRECT is worth
- * more than a number that is wrong.
+ * It read `semanticCacheHitsTotal: 0` unconditionally until `./semantic.ts`
+ * landed, on a marker claiming the semantic layer needed Vectorize + Workers
+ * AI. It does not (see that file). {@link recordSemanticCacheHit} is called
+ * from exactly one place — the semantic branch of
+ * `middleware/response-cache.ts`, reached only after the EXACT lookup has
+ * already missed — so the counter can never be an exact-match hit wearing a
+ * different label.
+ *
+ * Rust increments BOTH on a semantic hit: `lookup_semantic_response_cache`
+ * calls `record_semantic_cache_hit`, and the caller in `chat.rs:485` then calls
+ * `record_ai_cache_hit` for either kind of hit. So `cacheHitsTotal` is the
+ * total served-from-cache count and `semanticCacheHitsTotal` is the subset of
+ * it that came from the similarity layer — `semanticCacheHitsTotal` is never
+ * larger, and `test/cache/semantic.test.ts` asserts that relationship rather
+ * than the two numbers separately.
  *
  * ## Accumulation is isolate-local, and says so
  *
@@ -44,8 +51,9 @@ export type ResponseCacheMetrics = Pick<
 
 let hits = 0;
 let misses = 0;
+let semanticHits = 0;
 
-/** Rust `AppState::record_ai_cache_hit`. */
+/** Rust `AppState::record_ai_cache_hit`. Both kinds of hit reach it. */
 export function recordCacheHit(): void {
   hits += 1;
 }
@@ -55,13 +63,20 @@ export function recordCacheMiss(): void {
   misses += 1;
 }
 
+/**
+ * Rust `AppState::record_semantic_cache_hit` (`state_routing.rs:367`), called
+ * from inside `lookup_semantic_response_cache` on a similarity hit only.
+ */
+export function recordSemanticCacheHit(): void {
+  semanticHits += 1;
+}
+
 /** This isolate's counters, in the shape the exporters render. */
 export function responseCacheMetrics(): ResponseCacheMetrics {
   return {
     cacheHitsTotal: hits,
     cacheMissesTotal: misses,
-    // See the header: no producer, and deliberately not faked.
-    semanticCacheHitsTotal: 0,
+    semanticCacheHitsTotal: semanticHits,
   };
 }
 
@@ -69,4 +84,5 @@ export function responseCacheMetrics(): ResponseCacheMetrics {
 export function resetResponseCacheMetrics(): void {
   hits = 0;
   misses = 0;
+  semanticHits = 0;
 }

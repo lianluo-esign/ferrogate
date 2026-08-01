@@ -231,6 +231,14 @@ export interface PhysicalRoute {
  *
  * ### Still open on this seam
  *
+ * One thing, and it is not in this file: `candidates.ts::routeExclusionReasons`
+ * is WIDER than Rust on three legs (undeclared `capabilities`, undeclared
+ * `context_window`, and unbounded media context), so a route this seam yields
+ * can survive an eligibility check Rust would have failed. The marker there
+ * states each deviation, why it is not closed unilaterally, and which file has
+ * to move first. This heading previously stood EMPTY, immediately above three
+ * "now wired" sections, which read as "nothing is open" — it is not nothing.
+ *
  * ### The provider attempt index (was PORT-TODO #135 — now wired)
  *
  * The ladder can make more than one attempt per request, so

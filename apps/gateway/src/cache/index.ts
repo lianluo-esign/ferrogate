@@ -13,6 +13,9 @@
  *                    that invalidate entries when the rules change.
  *  - `store`       — the Cloudflare Cache API (production) and the faithful
  *                    TTL+LRU port of the Rust structure (tests / fallback).
+ *  - `semantic`    — `SemanticResponseCache` (#273): the feature-hashing
+ *                    embedder + cosine bucket lookup that sits BEHIND the
+ *                    exact seam when `cache.mode = "semantic"`.
  *  - `metrics`     — the first producer for
  *                    `ferrogate_ai_cache_requests_total`, which read 0 forever.
  *
@@ -24,4 +27,5 @@ export * from "./config.js";
 export * from "./fingerprint.js";
 export * from "./key.js";
 export * from "./metrics.js";
+export * from "./semantic.js";
 export * from "./store.js";

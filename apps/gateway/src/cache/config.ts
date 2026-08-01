@@ -41,8 +41,10 @@ export const CACHE_ENABLED_VAR = "GATEWAY_CACHE_ENABLED";
 export const CACHE_TTL_VAR = "GATEWAY_CACHE_TTL_SECONDS";
 /** `cache.max_records` — bounded entry count. Rust default 1000. */
 export const CACHE_MAX_RECORDS_VAR = "GATEWAY_CACHE_MAX_RECORDS";
-/** `cache.mode` — `exact_match` (ported) or `semantic` (see the PORT-TODO). */
+/** `cache.mode` — `exact_match` or `semantic`; both ported (`./semantic.ts`). */
 export const CACHE_MODE_VAR = "GATEWAY_CACHE_MODE";
+/** `cache.semantic_similarity_threshold` — `(0.0, 1.0]`. Rust default 0.92. */
+export const CACHE_SEMANTIC_THRESHOLD_VAR = "GATEWAY_CACHE_SEMANTIC_THRESHOLD";
 /** JSON array of logical model names with `cache_enabled = false`. */
 export const CACHE_DISABLED_MODELS_VAR = "GATEWAY_CACHE_DISABLED_MODELS";
 /** JSON array of api-key ids with `cache_enabled = false`. */
@@ -51,18 +53,18 @@ export const CACHE_DISABLED_API_KEYS_VAR = "GATEWAY_CACHE_DISABLED_API_KEYS";
 export const CACHE_DISABLED_PROFILES_VAR = "GATEWAY_CACHE_DISABLED_PROFILES";
 
 /**
- * Rust `CacheMode`. Only `exact_match` is ported.
+ * Rust `CacheMode`. BOTH members are ported.
  *
- * PORT-TODO(inventory-request-path §1.7 "Caches", issue #273): `semantic` is
- * `SemanticResponseCache` — feature-hashed local embeddings and a cosine
- * threshold (`crates/ferrogate-gateway/src/semantic_cache.rs`). On this
- * platform that is **Vectorize + Workers AI embeddings** (inventory §1.8), and
- * neither binding is declared in `apps/gateway/wrangler.toml` (see its
- * NOT DECLARED section: `[ai]` has no reader, and there is no `[[vectorize]]`
- * entry at all). Rather than fake it, `mode = "semantic"` is accepted, the
- * EXACT-MATCH layer runs, and `semanticCacheHitsTotal` stays 0 — which is the
- * honest reading of `ferrogate_ai_cache_requests_total{status="semantic_hit"}`.
- * `src/cache/metrics.ts` never increments it.
+ * `semantic` is `SemanticResponseCache` — feature-hashed local embeddings and a
+ * cosine threshold (`crates/ferrogate-gateway/src/semantic_cache.rs`), ported
+ * in `./semantic.ts`. An earlier revision of this comment said the mode was
+ * unported because it "maps to Vectorize + Workers AI on this platform"; that
+ * was read off the words "embedding" and "cosine similarity" rather than off
+ * the Rust, whose own header says *"In-tree cosine similarity over stored f32
+ * vectors; no external vector DB"*. It is arithmetic over the prompt string
+ * and needs no binding at all. The residual platform limit — the store's REACH,
+ * per-isolate here versus process-global in Rust — is stated and pinned in
+ * `./semantic.ts`, not here.
  */
 export type ResponseCacheMode = "exact_match" | "semantic";
 
@@ -71,6 +73,11 @@ export interface ResponseCachePolicy {
   /** `cache.enabled`. */
   readonly enabled: boolean;
   readonly mode: ResponseCacheMode;
+  /**
+   * `cache.semantic_similarity_threshold`. Rust ignores it unless
+   * `mode = "semantic"`, and so does the middleware.
+   */
+  readonly semanticSimilarityThreshold: number;
   /** `cache.ttl_secs`, seconds. */
   readonly ttlSeconds: number;
   /** `cache.max_records`. Honoured by the memory store; see `store.ts`. */
@@ -89,6 +96,8 @@ export interface ResponseCachePolicy {
 export const CACHE_DISABLED_POLICY: ResponseCachePolicy = {
   enabled: false,
   mode: "exact_match",
+  // Rust `default_cache_semantic_similarity_threshold()` (`types.rs:2917`).
+  semanticSimilarityThreshold: 0.92,
   ttlSeconds: 300,
   maxRecords: 1000,
   disabledModels: new Set(),
@@ -97,12 +106,13 @@ export const CACHE_DISABLED_POLICY: ResponseCachePolicy = {
   misconfiguration: null,
 };
 
-/** The seven vars this module reads. */
+/** The eight vars this module reads. */
 export interface ResponseCacheBindings {
   readonly GATEWAY_CACHE_ENABLED?: string | undefined;
   readonly GATEWAY_CACHE_TTL_SECONDS?: string | undefined;
   readonly GATEWAY_CACHE_MAX_RECORDS?: string | undefined;
   readonly GATEWAY_CACHE_MODE?: string | undefined;
+  readonly GATEWAY_CACHE_SEMANTIC_THRESHOLD?: string | undefined;
   readonly GATEWAY_CACHE_DISABLED_MODELS?: string | undefined;
   readonly GATEWAY_CACHE_DISABLED_API_KEYS?: string | undefined;
   readonly GATEWAY_CACHE_DISABLED_PROFILES?: string | undefined;
@@ -198,6 +208,41 @@ export function responseCachePolicy(env: ResponseCacheBindings | undefined): Res
     }
   }
 
+  // Rust splits this check across TWO layers and the split is reproduced
+  // exactly, because the two halves have different scopes:
+  //
+  //   - serde parses `semantic_similarity_threshold: f32` REGARDLESS of mode,
+  //     so a value that is not a number at all is an error even in
+  //     `exact_match` mode — an operator who typed `0,92` learns about it
+  //     instead of having the field silently ignored;
+  //   - `Config::validate_cache` (`validate.rs:1010`) checks the RANGE
+  //     `(0.0, 1.0]` only `if matches!(self.cache.mode, CacheMode::Semantic)`,
+  //     because out of semantic mode the number is never read.
+  //
+  // The upper bound is not cosmetic: cosine similarity is at most 1.0, so a
+  // threshold above it can never be met and the semantic layer would be
+  // silently inert. The lower bound is the one that matters for correctness —
+  // `cosineSimilarity` returns 0 for a degenerate vector, so a threshold of 0
+  // would turn every zero-magnitude embedding into a HIT on an arbitrary
+  // stored entry.
+  const rawThreshold = (env?.GATEWAY_CACHE_SEMANTIC_THRESHOLD ?? "").trim();
+  let semanticSimilarityThreshold = CACHE_DISABLED_POLICY.semanticSimilarityThreshold;
+  if (rawThreshold !== "") {
+    const parsed = Number(rawThreshold);
+    if (!Number.isFinite(parsed)) {
+      fail(
+        `${CACHE_SEMANTIC_THRESHOLD_VAR} must be a number (value: ${JSON.stringify(rawThreshold)})`,
+      );
+    } else if (mode === "semantic" && !(parsed > 0 && parsed <= 1)) {
+      fail(
+        `${CACHE_SEMANTIC_THRESHOLD_VAR} must be within (0.0, 1.0] for semantic mode ` +
+          `(value: ${JSON.stringify(rawThreshold)})`,
+      );
+    } else {
+      semanticSimilarityThreshold = parsed;
+    }
+  }
+
   const lists: Array<[string, string, Set<string>]> = [];
   for (const [name, raw] of [
     [CACHE_DISABLED_MODELS_VAR, env?.GATEWAY_CACHE_DISABLED_MODELS ?? ""],
@@ -222,6 +267,7 @@ export function responseCachePolicy(env: ResponseCacheBindings | undefined): Res
   return {
     enabled: true,
     mode,
+    semanticSimilarityThreshold,
     ttlSeconds,
     maxRecords,
     disabledModels: lists[0]![2],
@@ -247,6 +293,7 @@ export function responseCachePolicyFromEnv(
     env?.GATEWAY_CACHE_TTL_SECONDS ?? "",
     env?.GATEWAY_CACHE_MAX_RECORDS ?? "",
     env?.GATEWAY_CACHE_MODE ?? "",
+    env?.GATEWAY_CACHE_SEMANTIC_THRESHOLD ?? "",
     env?.GATEWAY_CACHE_DISABLED_MODELS ?? "",
     env?.GATEWAY_CACHE_DISABLED_API_KEYS ?? "",
     env?.GATEWAY_CACHE_DISABLED_PROFILES ?? "",

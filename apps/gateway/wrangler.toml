@@ -300,13 +300,32 @@ GATEWAY_RELIABILITY = "{}"
 # purpose: degrading "no allowlist" is an open gateway, degrading "no cache"
 # costs only latency.
 #
-# `exact_match` is the only ported mode; `semantic` needs Vectorize + Workers AI
-# embeddings, neither of which is bound (see "NOT DECLARED" at the end).
+# BOTH modes are now ported. `semantic` (wave 14, `src/cache/semantic.ts`) needs
+# NO new binding: the Rust `SemanticResponseCache` is in-tree cosine similarity
+# over a deterministic, network-free FNV-1a-64 feature-hashing embedder, so
+# there is no Vectorize namespace and no Workers AI call to declare — the
+# earlier note here claiming otherwise was inferred from the words "embedding"
+# and "cosine similarity" rather than from the Rust, and is corrected.
+#
+# The residual difference is REACH, not behaviour: Rust held one cache in a
+# process, a Worker has no process, so the semantic store is a module-scope
+# per-isolate singleton. That costs hit rate on a cold isolate and can never
+# serve a wrong body — the scope bucket carries the same tenant/credential
+# material the exact key does.
+#
+# `GATEWAY_CACHE_SEMANTIC_THRESHOLD` is the cosine cut-off, committed at the
+# Rust default (`default_cache_semantic_similarity_threshold()`), which is also
+# the value `CACHE_DISABLED_POLICY` falls back to when the var is absent — so
+# declaring it here changes no behaviour, it only makes the knob discoverable
+# next to the mode it belongs to. It is range-checked to (0.0, 1.0] ONLY in
+# semantic mode: cosine similarity maxes out at 1.0, so a larger threshold can
+# never be met and would leave the layer silently inert.
 # ---------------------------------------------------------------------------
 GATEWAY_CACHE_ENABLED = "false"
 GATEWAY_CACHE_TTL_SECONDS = "300"
 GATEWAY_CACHE_MAX_RECORDS = "1000"
 GATEWAY_CACHE_MODE = "exact_match"
+GATEWAY_CACHE_SEMANTIC_THRESHOLD = "0.92"
 GATEWAY_CACHE_DISABLED_MODELS = "[]"
 GATEWAY_CACHE_DISABLED_API_KEYS = "[]"
 GATEWAY_CACHE_DISABLED_PROFILES = "[]"

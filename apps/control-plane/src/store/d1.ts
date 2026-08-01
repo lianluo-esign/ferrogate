@@ -937,17 +937,33 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 // directory exists to prevent. Both are also PERFORMANCE/ergonomics, not
 // correctness: every statement above is correct against the schema as shipped.
 //
-// (2) has since been closed for the two families that were actually blocking
+// (2) has since been closed for every family that was actually blocking
 // something, and the ANSWER was the second of the two options it named — the
 // minting routes write both, rather than the store gaining an overflow column.
-// `routes/tenant_hierarchy.ts` now projects `projects` and `workspaces` into the
-// owning tenant's database through `@ferrogate/storage`'s tenant router
-// (`store/tenancy.ts`), and `store/api_keys.ts` reads a virtual key's
-// `scopes_json` back out of it, which retired the platform-limit marker that
-// used to live there. Note that this deliberately did NOT put the projection in
-// this store: the typed rows are in a DIFFERENT database from the document, so
-// they cannot share a `batch()` at all, and the ordering that makes the pair
-// safe is a route-level decision (see `store/tenancy.ts`).
+// Note that this deliberately did NOT put the projections in this store: for
+// the per-tenant families the typed rows are in a DIFFERENT database from the
+// document, so they cannot share a `batch()` at all, and the ordering that
+// makes each pair safe is a route-level decision that differs per family.
+//
+// What is projected today, and by whom:
+//
+//   * `projects`, `workspaces` (tenant) — `routes/tenant_hierarchy.ts` through
+//     `store/tenancy.ts`, plus `@ferrogate/storage`'s reference-guarded deletes.
+//   * `plans`, `tenants`, `quota_policies` (control) — `store/quota_registry.ts`,
+//     via the `CollectionSpec.project` hook on `plans`/`tenant-accounts` and
+//     explicit calls in the `quota_policy` overrides. These are the three the
+//     gateway's `d1QuotaPolicySource` reads on the admission path of EVERY
+//     authenticated request; while they were unwritten, every operator-configured
+//     rpm/tpm/budget/allowlist resolved to no limit at all.
+//   * `api_key_directory` (control) + `api_keys` (tenant) — `store/virtual_keys.ts`,
+//     from every leg of `routes/admin_virtual_key.ts`. These are the two hops
+//     every native-credential authenticator in the repo makes, so while they were
+//     unwritten a minted virtual key answered `401` everywhere and `revoke` was
+//     a no-op outside the admin console. The SECRET question this note used to
+//     defer is answered the way `store/worker_registry.ts` answered it: the
+//     plaintext is returned exactly once (create and rotate) and only the
+//     `sha256:`-tagged hash is ever stored, so the projection needs no access to
+//     it — it reads `key_hash`/`key_prefix`/`last4` off the document.
 //
 //  1. `control_plane_resources` has no `tenant_id` column. Tenant isolation
 //     therefore runs through `json_extract(document_json, '$.tenant_id')`,
@@ -958,16 +974,14 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 //     statement above. The Rust schema did not need it because its D1 topology
 //     isolated tenants PHYSICALLY (one database per tenant); this Worker holds
 //     one control database, so the fence is logical.
-//  2. The REMAINING typed tables are still not written: `tenants`,
-//     `api_key_directory`, `gateway_providers`, `gateway_models`,
-//     `quota_policies`, `plans`, `site_domains` (control) and `api_keys`,
-//     `wallets` (tenant). `projects` and `workspaces` ARE now projected — see
-//     above — so the pattern is settled and the rest is mechanical rather than
-//     undecided. Two of them are load-bearing for OTHER Workers and belong to
-//     their slices, which is why they are reported here rather than guessed:
-//     the gateway's model resolver reads `gateway_providers`/`gateway_models`,
-//     and its key lookup reads `api_key_directory`/`api_keys` — this app can
-//     now WRITE the latter pair (the router makes the tenant half reachable),
-//     but minting a virtual key also mints a SECRET, and where that secret is
-//     surfaced to the operator is a contract decision the virtual-key routes
-//     own, not a storage one.
+//  2. The REMAINING typed tables are still not written: `gateway_providers`,
+//     `gateway_models`, `site_domains` (control) and `wallets` (tenant). The
+//     pattern is settled (see above) and the rest is mechanical rather than
+//     undecided, but each remaining one is load-bearing for a DIFFERENT slice
+//     and is reported here rather than guessed: the gateway's model resolver
+//     reads `gateway_providers`/`gateway_models` and owns what a "deployed
+//     model" means, `site_domains` is verified by `routes/site_domain.ts`'s
+//     rate-limited DNS challenge (whose CAS lives in the document today), and
+//     `wallets` is money, whose ledger/balance pair `routes/wallets.ts` already
+//     writes through `store.atomic()` and must not gain a second, unguarded
+//     writer.

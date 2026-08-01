@@ -250,6 +250,25 @@ describe("composition root — the asset module is wired to the bindings", () =>
  * depsFromEnv: assetDepsFromEnv })`, verbatim from `src/index.ts`) against an
  * env with no `ASSETS`, which is the ONE thing `SELF.fetch` cannot express —
  * `wrangler.toml` declares the binding, so the deployed app always has it.
+ *
+ * ## The doc's "the 18 asset ops" is one word too broad, and this is the exact
+ *
+ * Six operations move or authorize OBJECT BYTES and every one of them refuses
+ * with `asset_bucket_unavailable`:
+ *
+ *   - the inline PUSH and the inline PULL, on `AssetLimits.objectStoreEnabled`
+ *     (`src/assets/service.ts:797` / `:2010`);
+ *   - the four presign ops — intent, commit, abort, download-url — on
+ *     `AssetLimits.presignEnabled`, which `assetDepsFromEnv` sets only when the
+ *     bucket binding AND all five `ASSET_S3_*` values are present, so it is
+ *     false whenever the bucket is.
+ *
+ * The remaining twelve are METADATA — list, get, yank, channel promote/read,
+ * the storage summary — and they keep answering normally, which is correct and
+ * is asserted below rather than merely tolerated: the registry rows live in D1,
+ * not R2, so a deployment with no bucket can still enumerate and YANK a bad
+ * artifact. A yank that 503'd because the bucket was gone would disable the
+ * kill switch at exactly the moment it is most likely to be needed.
  */
 describe("no ASSETS binding ⇒ 503, never a 200 whose bytes evaporate", () => {
   const ENV = {
@@ -310,6 +329,28 @@ describe("no ASSETS binding ⇒ 503, never a 200 whose bytes evaporate", () => {
     const listed = await call("/v1/assets/skill", { method: "GET" });
     expect(listed.status).toBe(200);
     expect(await listed.json()).toEqual({ object: "list", data: [] });
+  });
+
+  test("the METADATA surface stays available — the kill switch must not need a bucket", async () => {
+    // The counterpart to the refusals above, and the reason the doc's "the
+    // whole family answers 503" is one word too broad. The registry lives in
+    // D1, not R2, so with no bucket an operator can still enumerate what is
+    // published and YANK a bad artifact. If these ever started answering 503
+    // the deployment would lose its recall mechanism precisely when a bucket
+    // misconfiguration is what it is dealing with.
+    const listed = await call("/v1/assets/skill", { method: "GET" });
+    expect(listed.status).toBe(200);
+
+    const summary = await call("/v1/assets/storage/summary", { method: "GET" });
+    expect(summary.status).toBe(200);
+
+    // 404 (no such version) rather than 503 (no such bucket) is the assertion:
+    // it proves the bucket gate is not in front of the yank path at all.
+    const yanked = await call("/v1/assets/skill/absent/1.0.0/yank", { method: "POST" });
+    expect(yanked.status).toBe(404);
+    expect(((await yanked.json()) as { error: { code: string } }).error.code).not.toBe(
+      "asset_bucket_unavailable",
+    );
   });
 
   test("content screening still runs FIRST — a config error cannot skip a security gate", async () => {

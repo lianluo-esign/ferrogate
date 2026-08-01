@@ -26,6 +26,7 @@ Workers will run in a dev posture.
 | B3 | **The account token lacks KV** (prior finding) but `apps/mcp` declares `[[kv_namespaces]] MCP_OAUTH_KV` | `apps/mcp/wrangler.toml` | Grant the token KV rights and create the namespace, or drop the stanza for this run. Without KV, `resolvePorts` does not enter the `durableIdentityBound` branch and stored-credential encryption is not exercised — say so in the result rather than assuming it passed. |
 | B4 | `apps/agent-runtime` declares **no D1 bindings** (both stanzas are committed commented-out, deliberately) | `apps/agent-runtime/wrangler.toml` | `resolveDeps` **fails closed** with no `DB`/`CONTROL_DB`: every authenticated surface refuses. If agent-runtime is in scope for the verification, add the two `[[d1_databases]]` stanzas at deploy time AND apply the migrations; otherwise verify only `/healthz` on it and record that the authenticated surface was not covered. |
 | B5 | Analytics Engine must be enabled on the account for `apps/telemetry` | `apps/telemetry/wrangler.toml` | AE is a paid-plan feature. With the binding absent the Worker still boots and the OTLP routes answer without writing; with the binding **declared but unavailable**, the deploy fails. |
+| B6 | `FG_REQUIRE_PRODUCTION_MTLS = "0"` is committed in **apps/agent-runtime** `[vars]` | `apps/agent-runtime/wrangler.toml` | **Added wave 14.** Same shape as **B1** and previously missing from this table: the flag is committed OFF so `wrangler dev --local` and the offline suite can drive the self-hosted-worker callbacks without client certificates, and a deploy that inherits it runs the production plane with mTLS enforcement DISABLED. Override to `"1"` in the deploy environment; do not flip it in the committed file. `apps/agent-runtime/test/wrangler-bindings.test.ts` now pins the spelling so the var cannot drift out of this row while `src/mtls.ts` still reads it — but no test can stop a deploy inheriting the value, so this stays a human step. |
 
 ---
 
@@ -170,7 +171,7 @@ bunx wrangler secret put TELEMETRY_TOKEN
 | `TELEMETRY` (`[[analytics_engine_datasets]]`) | telemetry | `writeDataPoint()` is the only write path and it is fire-and-forget: a failed write does not surface in the response. Reading back requires the AE SQL API, which is a separate (read-only) HTTP call. |
 | `MCP_OAUTH_KV` | mcp | Gated on **B3**; if the token lacks KV the deploy fails rather than degrading. |
 | `DB` / `CONTROL_DB` on agent-runtime | agent-runtime | **Not declared at all** (B4) — the authenticated surface fails closed. |
-| Durable Objects (all 7) | gateway/mcp/agent-runtime | Require a paid plan. Each `class_name` is now gated against both the entry-module export and a `new_sqlite_classes` migration by `apps/gateway/test/wrangler-bindings.test.ts`; the equivalent for mcp/agent-runtime is held by their own mutation proofs. |
+| Durable Objects (all 7) | gateway/mcp/agent-runtime | Require a paid plan. Each `class_name` is gated against both the entry-module export and a `new_sqlite_classes` migration — by `apps/gateway/test/wrangler-bindings.test.ts` for the three gateway classes, and, **as of wave 14, by the newly ported `apps/mcp/test/wrangler-bindings.test.ts` and `apps/agent-runtime/test/wrangler-bindings.test.ts` for the other four.** The earlier claim here that mcp/agent-runtime were "held by their own mutation proofs" was **wrong**, and the wave-14 sweep proved it: deleting either `new_sqlite_classes` line in `apps/mcp/wrangler.toml`, or the single one in `apps/agent-runtime/wrangler.toml`, left every test in those apps GREEN. Neither app read its committed toml at all (both `vitest.config.ts` files override `main` and bound no `TEST_WRANGLER_TOML`). All four seams are now RED under mutation, including the substitution of `new_classes` for `new_sqlite_classes` — the variant that DEPLOYS SUCCESSFULLY and silently gives the class the key-value backend instead of SQLite. |
 
 ---
 
@@ -193,8 +194,12 @@ Fill in the placeholders — **do not commit these edits**:
 6. gateway: `database_id` ×3, `bucket_name` ×2, queue name.
 7. control-plane: `database_id`.
 8. mcp: `database_id`, KV `id`, and `FG_DEV_IN_MEMORY_PORTS = "0"` (B1).
-9. agent-runtime: `FG_DEV_IN_MEMORY_PORTS = "0"` (B1) and, if in scope, the two
-   D1 stanzas (B4).
+9. agent-runtime: `FG_DEV_IN_MEMORY_PORTS = "0"` (B1),
+   `FG_REQUIRE_PRODUCTION_MTLS = "1"` (**B6**) and, if in scope, the two
+   D1 stanzas (B4). Leave `CONTAINER_GOVERNED_EGRESS_HOSTS = ""` as committed
+   unless the run needs container egress: empty means SEALED (#471), and
+   `test/governance-mount.test.ts` (wave 14) proves `resolveDeps` really reads
+   the var rather than defaulting permissively.
 10. telemetry: real `dataset` name.
 
 Schema:
