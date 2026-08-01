@@ -367,11 +367,16 @@ describe("the deployed Worker serves every operation it owns", () => {
   it("answers /healthz and /readyz with this Worker's own identity", async () => {
     const healthz = await SELF.fetch(`${BASE}/healthz`);
     expect(healthz.status).toBe(200);
+    // Rust `HealthResponse`, all four members in the struct's declaration order.
+    // `protocol` is deliberately NOT here: it was an invention of this Worker,
+    // and `/healthz` is a SHARED operation whose document must not depend on
+    // which Worker answered. It stays on `/readyz` below, on `/version`, and in
+    // the JSON-RPC `initialize` result, which is where a client reads it.
     expect(await healthz.json()).toEqual({
       status: "ok",
       service: "ferrogate-mcp",
+      version: "0.0.0",
       runtime: "workers",
-      protocol: "2026-07-28",
     });
 
     const readyz = await SELF.fetch(`${BASE}/readyz`);
@@ -379,6 +384,7 @@ describe("the deployed Worker serves every operation it owns", () => {
     expect(await readyz.json()).toEqual({
       status: "ready",
       service: "ferrogate-mcp",
+      version: "0.0.0",
       runtime: "workers",
       protocol: "2026-07-28",
       // The probe reports real dependency state, so it cannot claim readiness

@@ -89,6 +89,26 @@ AGENT_RUNTIME_ENABLED = "1"
 AGENT_JOB_MAX_OPEN_PER_TENANT = "200"
 AGENT_JOB_DISPATCH_TTL_SECS = "86400"
 
+# The OPERATOR workflow table (Rust `[[agent_workflows]]`), read by the
+# tool-side graph gate in `src/runs/workflow.ts` — the ladder that enforces
+# node-kind, tool-pinning, edge transitions and parallelism on a run that
+# DECLARES a workflow through the `x-ferrogate-workflow-id` header.
+#
+# Materialised OVER the `control_plane_resources` documents of kind
+# `agent-workflows` in `CONTROL_DB`, so an operator can state the table here
+# and the admin surface can add to it, with this var winning on a collision.
+#
+# Empty is fail-closed for a caller that DECLARES a workflow
+# (`400 workflow_not_found`) and invisible to one that does not — the gate is
+# opt-in by the header, so `"[]"` is not an "allow everything" posture.
+#
+# UNLIKE `AGENT_UPSTREAMS`, committing this empty is safe: there is
+# deliberately no `FG_DEV_AGENT_WORKFLOWS` twin, so there is no `??` chain a
+# committed value could shadow, and `test/workflow-tool-gate.test.ts` seeds the
+# var through `setEnvVar` at runtime (overriding whatever the toml bound) and
+# restores it in `afterAll`. Absent and `"[]"` are the same table.
+AGENT_WORKFLOWS = "[]"
+
 # DEV / TEST ONLY. JSON `{ keywords?, regex?, secretPatterns? }` configuring the
 # A2A request/response guardrail (#278), evaluated by the real
 # `@ferrogate/guardrails` deterministic detector. ABSENT OR EMPTY means NO

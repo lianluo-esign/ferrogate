@@ -6,9 +6,24 @@
  * (`docs/legacy/inventory-edge-control.md` §agent discovery). The Rust reads
  * `state.config.agent_upstreams` — the `[[agent_upstreams]]` config table — and
  * projects the ENABLED, caller-visible entries into an `AdminList`. There is no
- * I/O and no upstream contact: it is a pure projection of operator config, which
- * is why it ports to a Worker var one-for-one, exactly as the provider/model
- * tables in `src/inference/catalog.ts` do.
+ * upstream contact: it is a pure projection of the live table.
+ *
+ * ## Where the TABLE comes from — and why that is not only the var (A3)
+ *
+ * The `[[agent_upstreams]]` table Rust projects is the LIVE one, and the admin
+ * surface mutates it in place: `state.rs:796 delete_agent_upstream` removes the
+ * control-plane document, rebuilds the candidate config, `validate()`s it and
+ * hot-reloads, so a withdrawn upstream is gone from the very next response.
+ *
+ * Reading only the deploy-time var `GATEWAY_AGENT_UPSTREAMS` therefore dropped
+ * a behaviour that WORKED in Rust: **`DELETE /admin/v1/agent-upstreams/{id}`
+ * answered `200` and withdrew nothing** — an operator who found a compromised
+ * upstream could not take it out of rotation without editing `wrangler.toml`
+ * and redeploying. `./agent-upstreams.ts` closes that by reading the
+ * `control_plane_resources` documents `apps/control-plane` already writes,
+ * whenever `CONTROL_DB` is bound; the var stays the source for a deployment
+ * with no control database. Precedence, tenancy and failure direction are all
+ * argued there.
  *
  * Authentication (`bearer`, scope `agents.read`) is NOT re-implemented here.
  * `contractAuth` has already run for this operation by the time the handler is
@@ -17,6 +32,10 @@
  */
 import type { Context } from "hono";
 import type { AuthContext, GatewayEnv } from "../ports.js";
+import {
+  type AgentUpstreamRegistryBindings,
+  agentUpstreamsForCaller,
+} from "./agent-upstreams.js";
 
 /** JSON array of `AgentUpstreamConfig` records — Rust `[[agent_upstreams]]`. */
 export const AGENT_UPSTREAMS_VAR = "GATEWAY_AGENT_UPSTREAMS";
@@ -157,9 +176,20 @@ export function agentDiscoveryDocument(
   };
 }
 
-/** The `getAgentDiscovery` operation handler. */
-export function agentDiscoveryHandler(c: Context<GatewayEnv>): Response {
-  const env = c.env as AgentDiscoveryBindings | undefined;
-  const upstreams = parseAgentUpstreams(env?.GATEWAY_AGENT_UPSTREAMS);
-  return c.json(agentDiscoveryDocument(upstreams, c.get("auth")));
+/**
+ * The `getAgentDiscovery` operation handler.
+ *
+ * The table is resolved PER REQUEST and nothing about it is memoised: a
+ * withdrawal has to take effect on the very next request, and a process-lifetime
+ * cache of the registry would be precisely the defect this reads around — the
+ * gateway would keep publishing an upstream the operator deleted for as long as
+ * the isolate lived. The one HTTP-level cache in the chain
+ * (`middleware/response-cache.ts`) never sees this operation: its
+ * `CACHEABLE_OPERATION_IDS` holds the five inference operations only.
+ */
+export async function agentDiscoveryHandler(c: Context<GatewayEnv>): Promise<Response> {
+  const env = c.env as (AgentDiscoveryBindings & AgentUpstreamRegistryBindings) | undefined;
+  const auth = c.get("auth");
+  const upstreams = await agentUpstreamsForCaller(env, auth, parseAgentUpstreams);
+  return c.json(agentDiscoveryDocument(upstreams, auth));
 }

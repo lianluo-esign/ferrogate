@@ -68,6 +68,12 @@ import {
 } from "@ferrogate/billing";
 import type { Usage, UsageSink } from "../inference/ports.js";
 import { chargeWithAgentRun } from "./agent-run.js";
+import {
+  type BudgetAlertPorts,
+  budgetAlertPortsFrom,
+  budgetAlertScopesFor,
+  dispatchBudgetThresholdAlerts,
+} from "./budget-alerts.js";
 import { usdToCredits } from "./credits.js";
 import { D1LedgerStore } from "./d1.js";
 import { billingEventFromUsage } from "./event.js";
@@ -121,6 +127,19 @@ interface MeteringBackend {
    * and D1 has no cross-database transaction — see `./usage-ledger.ts`.
    */
   readonly usageDatabase?: D1Database | undefined;
+  /**
+   * The proactive budget-threshold alerter (#170/#228), when this deployment
+   * configures one — see `./budget-alerts.ts`.
+   *
+   * A FOURTH seam, resolved with the other three so it is memoized on the same
+   * env object: it reads the CONTROL database's `quota_policies` and the TENANT
+   * database's `usage_monthly_rollups`, and writes the CONTROL database's
+   * `budget_alert_notifications` claim. `undefined` whenever no webhook URL is
+   * configured or no control database is bound — never a degraded in-isolate
+   * substitute, because an alerter without a durable arbiter re-fires the same
+   * webhook on every request past the crossing.
+   */
+  readonly budgetAlerts?: BudgetAlertPorts | undefined;
 }
 
 /**
@@ -384,10 +403,12 @@ export class MeteringUsageSink implements UsageSink {
     const database = this.#bindings.database(env);
     const queue = this.#bindings.queue(env);
     const usageDatabase = this.#bindings.usageDatabase?.(env);
+    const budgetAlerts = budgetAlertPortsFrom(env);
     const resolved: MeteringBackend = {
       ledger: database === undefined ? fallback.ledger : new D1LedgerStore(database),
       publisher: queue === undefined ? fallback.publisher : new QueueBillingReportPublisher(queue),
       ...(usageDatabase === undefined ? {} : { usageDatabase }),
+      ...(budgetAlerts === undefined ? {} : { budgetAlerts }),
     };
     this.#backends.set(env, resolved);
     return resolved;
@@ -660,6 +681,59 @@ export class MeteringUsageSink implements UsageSink {
       this.#stats.aggregated += 1;
     } catch (error) {
       this.#report("usage_aggregate", error);
+      // The alert reads the rollup this accumulate was supposed to write, so a
+      // failed accumulate has nothing fresh to evaluate against. Returning is
+      // what keeps a bookkeeping outage from firing a tier off a stale number.
+      return;
+    }
+    await this.#budgetAlerts(backend, charge, attribution);
+  }
+
+  /**
+   * A1 (#170/#228) — proactive budget-threshold alerting, fired from the same
+   * position Rust fires it: `state_billing_metering.rs` calls
+   * `dispatch_budget_threshold_alerts` after every settlement, and it reads the
+   * rollup the settlement just moved.
+   *
+   * MOUNT GATE. Delete this call and `test/metering/budget-alerts.test.ts` goes
+   * red on eight assertions — the whole point of the file, because before this
+   * slice an operator who configured a budget alert was never notified of
+   * anything.
+   *
+   * BEST-EFFORT, and it never rejects: `dispatchBudgetThresholdAlerts` swallows
+   * and reports every failure itself, and the `try` here is belt-and-braces
+   * against a future change to that contract. Rethrowing would run
+   * `#deliverOnce`'s `catch`, which counts a DELIVERY failure and arms the
+   * billing outbox's retry ladder — i.e. a webhook outage would become duplicate
+   * downstream reports of charges that already settled.
+   *
+   * The whole drain runs on `ctx.waitUntil` (`./middleware.ts`), so the outbound
+   * POST — bounded by `BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS`, default 5s —
+   * cannot delay or fail the customer request.
+   */
+  async #budgetAlerts(
+    backend: MeteringBackend,
+    charge: MeteredCharge,
+    attribution: MeteringAttribution | undefined,
+  ): Promise<void> {
+    const ports = backend.budgetAlerts;
+    if (ports === undefined) {
+      return; // no webhook configured, or no control database bound
+    }
+    // Attribution belongs to ONE request — the same guard `usageWriteFor`
+    // applies. A drain pass can settle an earlier request's outbox row, and
+    // evaluating THIS request's tenant against THAT charge's spend would alert
+    // the wrong operator.
+    const owned = attribution !== undefined && attribution.requestId === charge.requestId;
+    const scopes = budgetAlertScopesFor(owned ? attribution : undefined, charge.event.tenant);
+    try {
+      await dispatchBudgetThresholdAlerts(ports, {
+        scopes,
+        nowUnixSeconds: this.#clock.nowUnixSeconds(),
+        diagnostics: this.#diagnostics,
+      });
+    } catch (error) {
+      this.#report("budget_alert", error);
     }
   }
 

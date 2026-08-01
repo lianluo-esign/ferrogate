@@ -59,6 +59,36 @@ export interface SelfHostedRunDispatch {
   readonly agent_run_id: string | null;
   /** #307: `sha256:<hex>` of the UPSTREAM governed action, or `null`. */
   readonly parent_action_fingerprint: string | null;
+  /**
+   * The caller's accepted run plan (`POST /v1/agent-runs`), or `null` when the
+   * caller declared none.
+   *
+   * The reference built an `AgentHarness` from `max_turns` / `timeout_millis`
+   * and dispatched `tool_calls` through it IN the request
+   * (`agent_runs.rs::harness_config`, `GatewayAgentToolDispatcher`). This
+   * platform cannot: Rust's only working provider spawns a local child process
+   * and its DEFAULT one is an explicit "not implemented yet". So the plan is
+   * carried to whoever DOES execute the run — the leasing worker. Without this
+   * field the three members would be validated and then dropped, which is the
+   * cutover finding "`max_turns`, `timeout_millis` and `tool_calls` have no
+   * reader" in a politer form.
+   */
+  readonly run_plan?: AgentRunPlan | null;
+}
+
+/** `AgentRunCreateRequest`'s execution plan, minus the input. */
+export interface AgentRunPlan {
+  readonly max_turns: number;
+  readonly timeout_millis: number;
+  readonly tool_calls: readonly AgentRunToolCall[];
+}
+
+/** `agent_runs.rs::AgentRunToolCallRequest`. */
+export interface AgentRunToolCall {
+  readonly name: string;
+  readonly arguments?: unknown;
+  readonly route?: string;
+  readonly session_id?: string;
 }
 
 /** Rust `SelfHostedRunLease`. */
@@ -83,6 +113,8 @@ export interface SelfHostedRunLease {
   readonly trace_id?: string;
   readonly agent_run_id?: string;
   readonly parent_action_fingerprint?: string;
+  /** The caller's accepted run plan. OMITTED when the caller declared none. */
+  readonly run_plan?: AgentRunPlan;
 }
 
 /** Rust `SelfHostedRunAck`. */
@@ -322,6 +354,12 @@ export class WorkerPlane extends DurableObject<AgentRuntimeBindings> {
       ...(dispatch.parent_action_fingerprint === null
         ? {}
         : { parent_action_fingerprint: dispatch.parent_action_fingerprint }),
+      // Same omit-don't-null rule: a worker must be able to tell "the caller
+      // asked for three turns" from "the caller asked for nothing", because the
+      // second case means the worker applies its OWN defaults.
+      ...(dispatch.run_plan === null || dispatch.run_plan === undefined
+        ? {}
+        : { run_plan: dispatch.run_plan }),
     };
   }
 

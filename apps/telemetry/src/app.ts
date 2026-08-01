@@ -20,6 +20,21 @@ import type { TelemetrySink } from "./sink.js";
 export const SERVICE_NAME = "ferrogate-telemetry";
 /** Rust reported `runtime: "tokio"`; this collector runs on `workerd`. */
 export const RUNTIME_NAME = "workers";
+/**
+ * `HealthResponse.version` — Rust `env!("CARGO_PKG_VERSION")`
+ * (`crates/ferrogate-gateway/src/responses.rs:72`).
+ *
+ * `docs/rewrite/cert2-dataplane.md` finding **A11** named only `apps/mcp`; the
+ * wave-19 boot proof (`docs/rewrite/CUTOVER-READINESS.md` §3.3) found the member
+ * missing here too, so an operator curling this collector's `/healthz` could not
+ * tell which build answered.
+ *
+ * The TypeScript equivalent of `CARGO_PKG_VERSION` is the workspace version —
+ * `package.json`'s `"0.0.0"` — carried as a constant rather than imported,
+ * because a `resolveJsonModule` import of the ROOT manifest would bundle it into
+ * the Worker. Every other Worker in the fleet carries it the same way.
+ */
+export const SERVICE_VERSION = "0.0.0";
 
 /**
  * The two SHARED contract operations, implemented in **every** Worker
@@ -91,8 +106,16 @@ export function createTelemetryApp(options: TelemetryAppOptions = {}): Telemetry
 
   // --- shared contract operations (anonymous) ------------------------------
 
+  // Rust `HealthResponse`, all four members in the struct's declaration order.
+  // The shape is identical on all five Workers and
+  // `test/fleet-health-contract.test.ts` is the gate that keeps it that way.
   app.get("/healthz", (c) =>
-    c.json({ status: "ok", service: SERVICE_NAME, runtime: RUNTIME_NAME }),
+    c.json({
+      status: "ok",
+      service: SERVICE_NAME,
+      version: SERVICE_VERSION,
+      runtime: RUNTIME_NAME,
+    }),
   );
 
   app.get("/readyz", (c) => {
@@ -105,6 +128,7 @@ export function createTelemetryApp(options: TelemetryAppOptions = {}): Telemetry
       {
         status: configured ? "ready" : "not_ready",
         service: SERVICE_NAME,
+        version: SERVICE_VERSION,
         runtime: RUNTIME_NAME,
         sink: { configured, name: configured ? sink.name : null },
       },

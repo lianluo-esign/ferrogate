@@ -44,6 +44,24 @@ export const RUNTIME_NAME = "workers";
 /** The MCP protocol revision this ingress pins (see `src/protocol.ts`). */
 export const MCP_PROTOCOL_REVISION = "2026-07-28";
 
+/**
+ * `HealthResponse.version` — Rust `env!("CARGO_PKG_VERSION")`
+ * (`crates/ferrogate-gateway/src/responses.rs:72`).
+ *
+ * `docs/rewrite/cert2-dataplane.md` finding **A11** recorded its absence on this
+ * Worker: an operator checking which build a colo serves had nothing to read.
+ * (The finding named `apps/mcp` alone; the wave-19 boot proof found the same
+ * hole on `control-plane` and `telemetry` too.)
+ *
+ * The TypeScript equivalent of `CARGO_PKG_VERSION` is the workspace version —
+ * `package.json`'s `"0.0.0"` — carried as a constant rather than imported,
+ * because a `resolveJsonModule` import of the ROOT manifest would bundle it into
+ * the Worker. `apps/gateway/src/routes/service.ts` and
+ * `apps/agent-runtime/src/routes/health.ts` carry it the same way for the same
+ * reason.
+ */
+export const SERVICE_VERSION = "0.0.0";
+
 export { OWNED_OPERATION_IDS, SHARED_OPERATION_IDS };
 
 /**
@@ -141,18 +159,42 @@ export interface RouteModule {
 // Shared operations — `/healthz` + `/readyz`, present in EVERY Worker
 // ---------------------------------------------------------------------------
 
-/** Body of `GET /healthz` (Rust `HealthResponse`). */
+/**
+ * Body of `GET /healthz` — Rust `HealthResponse`, all four members, in the
+ * struct's own declaration order (`serde` serialises in that order, so this is
+ * the document a Rust deployment actually produced).
+ *
+ * ## `protocol` used to be here and is deliberately gone
+ *
+ * This Worker answered `{status, service, runtime, protocol}`: it had invented a
+ * fifth member and dropped the one the contract requires, so `/healthz` was the
+ * one operation in the fleet whose document depended on WHICH Worker answered
+ * it. `docs/rewrite/CUTOVER-READINESS.md` §2.1 (A12) records the same class of
+ * damage on `/readyz` — "three different documents for one contract operation".
+ * A shared probe whose shape varies per Worker cannot be consumed by one uptime
+ * check, which is the entire point of it being shared.
+ *
+ * Nothing is lost: the protocol revision is still on `GET /version`, still on
+ * this Worker's `/readyz`, and is still negotiated authoritatively in the
+ * JSON-RPC `initialize` result (`src/protocol.ts`) — which is where an MCP
+ * client reads it. `apps/telemetry/test/fleet-health-contract.test.ts` is the
+ * gate that keeps all five documents identical from now on.
+ */
 export interface HealthReport {
   status: "ok";
   service: string;
+  version: string;
   runtime: string;
-  protocol: string;
 }
 
-/** Body of `GET /readyz` (Rust `ReadinessResponse`). */
+/**
+ * Body of `GET /readyz` (Rust `ReadinessResponse`): the same four identity
+ * members as {@link HealthReport}, then this Worker's own readiness evidence.
+ */
 export interface ReadinessReport {
   status: "ready" | "not_ready";
   service: string;
+  version: string;
   runtime: string;
   protocol: string;
   dependencies: { ready: boolean };
@@ -162,8 +204,8 @@ export function healthReport(): HealthReport {
   return {
     status: "ok",
     service: SERVICE_NAME,
+    version: SERVICE_VERSION,
     runtime: RUNTIME_NAME,
-    protocol: MCP_PROTOCOL_REVISION,
   };
 }
 
@@ -184,6 +226,7 @@ export function readinessReport(env: McpEnv): { status: number; body: ReadinessR
     body: {
       status: ready ? "ready" : "not_ready",
       service: SERVICE_NAME,
+      version: SERVICE_VERSION,
       runtime: RUNTIME_NAME,
       protocol: MCP_PROTOCOL_REVISION,
       dependencies: { ready },

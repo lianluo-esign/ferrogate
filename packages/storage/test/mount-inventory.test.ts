@@ -96,12 +96,20 @@ const MOUNTED: [symbol: string, app: string][] = [
   // the state in which a mount disappears without anything noticing.
   ["NonAtomicD1RestTenantDatabaseRouter", "gateway"],
   ["SharedDatabaseTenantRouter", "gateway"],
+  // WAVE 20 — moved up from `DEAD`, which is this gate working in its "good
+  // news" direction: `apps/gateway/src/metering/budget-alerts.ts` imports the
+  // class and constructs one as the `claims` port, so the once-per-period
+  // arbiter behind budget-threshold alert delivery (cutover HOLD item A1) is
+  // now a real mount. Keeping it in `DEAD` would have made the wave's own
+  // suite red; keeping it in NEITHER list is the state that let five classes
+  // rot. Unmounting it now reddens here as well as in
+  // `apps/gateway/test/metering/budget-alerts.test.ts`.
+  ["D1BudgetAlertStore", "gateway"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
 const DEAD = [
   "D1BillingEventLedger",
-  "D1BudgetAlertStore",
   "D1RetentionPolicyStore",
   "D1AgentScheduleStore",
   "D1SiteDomainVerificationStore",

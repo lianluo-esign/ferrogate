@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import { healthReport, readinessReport } from "../src/index.js";
 import { portsBound, resolvePorts } from "../src/ports.js";
+import { MCP_PROTOCOL_REVISION, SERVICE_VERSION } from "../src/routes/index.js";
 
 const BASE = "https://ferrogate.test";
 
@@ -32,6 +33,50 @@ describe("health", () => {
     // The deployed answer IS the pure report — no second, drifting shape.
     expect(await res.json()).toEqual(healthReport());
     expect(healthReport()).toMatchObject({ status: "ok", service: "ferrogate-mcp" });
+  });
+
+  /**
+   * `docs/rewrite/cert2-dataplane.md` finding **A11**: Rust's `HealthResponse`
+   * carries `version = env!("CARGO_PKG_VERSION")` and this document had no
+   * member for it, so an operator could not tell which build a colo served.
+   *
+   * The literal shape is asserted here, NOT against `healthReport()`. Comparing
+   * the response to the function that produced it (as the case above does, on
+   * purpose, to prove the deployed answer is not a second copy) can never catch
+   * a member being dropped from both at once.
+   */
+  it("GET /healthz is Rust's four-member HealthResponse, and nothing else", async () => {
+    const res = await SELF.fetch(`${BASE}/healthz`);
+    expect(await res.json()).toEqual({
+      status: "ok",
+      service: "ferrogate-mcp",
+      version: SERVICE_VERSION,
+      runtime: "workers",
+    });
+    // A blank version satisfies the shape and tells an operator nothing.
+    expect(SERVICE_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  /**
+   * `protocol` used to be a fifth member of the health document — an invention
+   * of this Worker on a SHARED contract operation, which is how `/healthz` came
+   * to answer a different shape depending on who served it.
+   *
+   * Removing it must not remove the CAPABILITY, so the three surfaces that
+   * still publish the revision are asserted here. Without this, "drop the
+   * member" and "lose the discovery path" look identical.
+   */
+  it("still publishes the protocol revision, on /version and /readyz", async () => {
+    const version = await SELF.fetch(`${BASE}/version`);
+    expect(version.status).toBe(200);
+    expect(await version.json()).toMatchObject({ protocol: MCP_PROTOCOL_REVISION });
+
+    const readyz = await SELF.fetch(`${BASE}/readyz`);
+    expect(readyz.status).toBe(200);
+    expect(await readyz.json()).toMatchObject({ protocol: MCP_PROTOCOL_REVISION });
+
+    const health = (await (await SELF.fetch(`${BASE}/healthz`)).json()) as Record<string, unknown>;
+    expect(Object.keys(health)).not.toContain("protocol");
   });
 
   it("GET /readyz reports READY while the ports are bound", async () => {
@@ -63,6 +108,7 @@ describe("readiness is a real signal, not a constant", () => {
     expect(readinessReport({}).body.status).toBe("not_ready");
     // ...and both reports agree on WHO is answering.
     expect(readinessReport({}).body.service).toBe(healthReport().service);
+    expect(readinessReport({}).body.version).toBe(healthReport().version);
     expect(readinessReport({}).body.runtime).toBe(healthReport().runtime);
   });
 

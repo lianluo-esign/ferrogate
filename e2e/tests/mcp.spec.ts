@@ -49,16 +49,33 @@ type RawPost = { headers: Record<string, string>; data: Buffer };
 const raw = (body: string): RawPost => ({ headers: JSON_HEADERS, data: Buffer.from(body, "utf8") });
 
 test.describe("mcp liveness", () => {
-  test("GET /healthz reports the service and pinned protocol revision", async ({ request }) => {
+  test("GET /healthz is the fleet's ONE health document", async ({ request }) => {
     const res = await request.get(`${MCP_BASE_URL}/healthz`);
 
     expect(res.status()).toBe(200);
+    // Rust `HealthResponse` — `{status, service, version, runtime}` — and
+    // nothing else. `version` was the cert2-dataplane A11 gap (understated 2×:
+    // it was missing here, on control-plane AND on telemetry), and `protocol`
+    // was a fifth member this Worker had invented on a SHARED contract
+    // operation, which is how `/healthz` came to answer a different shape
+    // depending on which Worker served it. The document below is now
+    // byte-for-byte the one `gateway.spec.ts` asserts, modulo `service`.
     expect(await res.json()).toEqual({
       status: "ok",
       service: "ferrogate-mcp",
+      version: "0.0.0",
       runtime: "workers",
-      protocol: "2026-07-28",
     });
+  });
+
+  test("the pinned protocol revision is still published, on /version", async ({ request }) => {
+    // Dropping the member from `/healthz` must not drop the CAPABILITY. Over
+    // real HTTP against the deployed Worker, so "we removed a field" and "we
+    // lost a discovery path" cannot look the same.
+    const res = await request.get(`${MCP_BASE_URL}/version`);
+
+    expect(res.status()).toBe(200);
+    expect(await res.json()).toMatchObject({ protocol: "2026-07-28" });
   });
 
   test("GET /readyz is ready because the dev port bundle is bound", async ({ request }) => {
@@ -71,6 +88,8 @@ test.describe("mcp liveness", () => {
     expect(await res.json()).toMatchObject({
       status: "ready",
       service: "ferrogate-mcp",
+      version: "0.0.0",
+      protocol: "2026-07-28",
       dependencies: { ready: true },
     });
   });

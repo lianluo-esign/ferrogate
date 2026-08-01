@@ -26,7 +26,7 @@ import { agentJobRunId } from "../crypto.js";
 import { depsOrThrow, requireAuth, tenantIdOf } from "../middleware/auth.js";
 import { HttpError } from "../middleware/errors.js";
 import type { AgentRuntimeEnv } from "../ports.js";
-import type { SelfHostedRunDispatch } from "../workers/plane.js";
+import type { AgentRunPlan, AgentRunToolCall, SelfHostedRunDispatch } from "../workers/plane.js";
 import { runStateStub, workerPlaneStub } from "./addressing.js";
 import { SSE_HEADERS, parseEventLimit, resumeCursor, wantsEventStream } from "./events.js";
 import {
@@ -38,6 +38,12 @@ import {
 } from "./governance.js";
 import { SUBMITTED_INPUT_EVIDENCE_MAX_CHARS, isTerminalStatus, truncate } from "./model.js";
 import type { StoredAgentRun } from "./model.js";
+import {
+  type WorkflowUse,
+  enforceWorkflowToolPolicy,
+  workflowCallerFrom,
+  workflowHeadersFrom,
+} from "./workflow.js";
 
 /**
  * Dispatch-id namespace of the START dispatches THIS surface mints — the only
@@ -83,6 +89,152 @@ interface SubmitRequest {
   readonly egress_allowlist?: unknown;
   readonly session_id?: unknown;
   readonly workspace_id?: unknown;
+  /** `AgentRunCreateRequest.run_id` — the body half of the run identity. */
+  readonly run_id?: unknown;
+  readonly max_turns?: unknown;
+  readonly timeout_millis?: unknown;
+  readonly tool_calls?: unknown;
+}
+
+/**
+ * `agent_runs.rs::harness_config` + the `tool_calls` shape check, as one
+ * ladder — each refusal carrying Rust's OWN code rather than the generic
+ * `invalid_request` this route used to collapse them onto.
+ *
+ * The codes are not decoration. A client that branches on `error.code` cannot
+ * tell "your prompt was empty" from "your tool call was malformed" from "your
+ * turn budget exceeds the operator's" while all three share one code, and all
+ * three have different fixes.
+ */
+function parseRunPlan(
+  body: SubmitRequest,
+  limits: { readonly maxTurns: number; readonly timeoutMillis: number },
+): { readonly plan: AgentRunPlan; readonly declared: boolean } {
+  const toolCalls = parseToolCalls(body.tool_calls);
+
+  const maxTurns = optionalPositiveInt(
+    body.max_turns,
+    "invalid_agent_run_max_turns",
+    `agent run max_turns must be between 1 and operator limit ${limits.maxTurns}`,
+  );
+  if (maxTurns !== null && maxTurns > limits.maxTurns) {
+    throw new HttpError(
+      400,
+      "invalid_agent_run_max_turns",
+      `agent run max_turns must be between 1 and operator limit ${limits.maxTurns}`,
+    );
+  }
+  const effectiveMaxTurns = maxTurns ?? limits.maxTurns;
+  // One turn per scripted call, plus the final turn that consumes their
+  // results. Refused up front rather than silently truncating the caller's
+  // tool calls to whatever the budget happens to admit.
+  if (toolCalls.length + 1 > effectiveMaxTurns) {
+    throw new HttpError(
+      400,
+      "invalid_agent_run_max_turns",
+      `agent run max_turns must allow ${toolCalls.length} scripted tool call(s) plus one final turn`,
+    );
+  }
+
+  const timeoutMillis = optionalPositiveInt(
+    body.timeout_millis,
+    "invalid_agent_run_timeout",
+    `agent run timeout_millis must be between 1 and operator limit ${limits.timeoutMillis}`,
+  );
+  if (timeoutMillis !== null && timeoutMillis > limits.timeoutMillis) {
+    throw new HttpError(
+      400,
+      "invalid_agent_run_timeout",
+      `agent run timeout_millis must be between 1 and operator limit ${limits.timeoutMillis}`,
+    );
+  }
+
+  return {
+    plan: {
+      max_turns: effectiveMaxTurns,
+      timeout_millis: timeoutMillis ?? limits.timeoutMillis,
+      tool_calls: toolCalls,
+    },
+    // Whether the CALLER stated a plan, as opposed to inheriting the operator
+    // defaults. Only a declared plan rides the dispatch: a worker must be able
+    // to distinguish "asked for 4 turns" from "asked for nothing", or the
+    // operator default silently becomes a caller instruction.
+    declared: maxTurns !== null || timeoutMillis !== null || toolCalls.length > 0,
+  };
+}
+
+/**
+ * Rust's `Option<u32>` / `Option<u64>` members: absent stays absent; present
+ * must be a positive integer. `0` is refused explicitly — it is not a sentinel
+ * for "unbounded", it is a plan that can never run a turn.
+ */
+function optionalPositiveInt(value: unknown, code: string, message: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new HttpError(400, code, message);
+  }
+  return value;
+}
+
+/** `Vec<AgentRunToolCallRequest>` — a blank name is `invalid_agent_tool_call`. */
+function parseToolCalls(value: unknown): readonly AgentRunToolCall[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new HttpError(400, "invalid_agent_tool_call", "tool_calls must be an array of objects");
+  }
+  const calls: AgentRunToolCall[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new HttpError(400, "invalid_agent_tool_call", "each tool call must be a JSON object");
+    }
+    const entry = raw as Record<string, unknown>;
+    const name = entry["name"];
+    if (typeof name !== "string" || name.trim() === "") {
+      throw new HttpError(400, "invalid_agent_tool_call", "agent tool call name must not be empty");
+    }
+    const route = entry["route"];
+    const sessionId = entry["session_id"];
+    if (route !== undefined && route !== null && typeof route !== "string") {
+      throw new HttpError(400, "invalid_agent_tool_call", "tool call route must be a string");
+    }
+    if (sessionId !== undefined && sessionId !== null && typeof sessionId !== "string") {
+      throw new HttpError(400, "invalid_agent_tool_call", "tool call session_id must be a string");
+    }
+    calls.push({
+      name: name.trim(),
+      ...(entry["arguments"] === undefined ? {} : { arguments: entry["arguments"] }),
+      ...(typeof route === "string" ? { route } : {}),
+      ...(typeof sessionId === "string" ? { session_id: sessionId } : {}),
+    });
+  }
+  return calls;
+}
+
+/**
+ * `requested_agent_run_id`'s BODY half.
+ *
+ * The header half stays `declaredAgentRunId` (`400
+ * invalid_agent_run_id_header`, the code the whole tree already uses for the
+ * header — `apps/gateway/src/assets/handlers.ts`, `apps/mcp/src/http.ts`). The
+ * body field carries Rust's handler-local `invalid_agent_run_id`, because that
+ * is the code `handle_agent_run_create` answers and a Rust-written client
+ * branches on it. Two codes for two inputs, each matching where it came from.
+ */
+function bodyRunId(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw new HttpError(400, "invalid_agent_run_id", "run_id must be a string");
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  if (!isAddressableRunId(trimmed)) {
+    throw new HttpError(
+      400,
+      "invalid_agent_run_id",
+      "agent run id must be at most 128 characters of letters, numbers, _, -, ., or :",
+    );
+  }
+  return trimmed;
 }
 
 async function readJsonBody(
@@ -175,6 +327,117 @@ function requireRuntimeEnabled(enabled: boolean): void {
 }
 
 /**
+ * Run the tool-side graph ladder and, if it passes, DEBIT the run's envelope.
+ *
+ * Two Durable Object round trips, and both are necessary: the ladder's edge and
+ * timeout rules are functions of what the run has already done, and the budget
+ * debit must be atomic with the check. Splitting the second one into a read and
+ * a write is the check-then-act shape this Worker already removed once from the
+ * dispatch admission path.
+ *
+ * Returns the `WorkflowUse` for an admitted step, or `null` when the request
+ * declared no workflow at all. Refusals leave here as {@link HttpError} with
+ * Rust's code and status verbatim.
+ */
+async function admitWorkflowStep(
+  c: Context<AgentRuntimeEnv>,
+  input: {
+    readonly stub: ReturnType<typeof runStateStub>;
+    readonly tenantId: string;
+    readonly runId: string;
+    readonly nowUnix: number;
+    readonly toolCalls: readonly AgentRunToolCall[];
+  },
+): Promise<WorkflowUse | null> {
+  const deps = depsOrThrow(c);
+  const auth = requireAuth(c);
+  const declaration = workflowHeadersFrom(c.req.raw.headers);
+  // A malformed declaration is refused BEFORE the catalog is read, so a
+  // deployment with no workflows still reports the header error rather than
+  // `workflow_not_found` — the ladder's first rung is the shape of the request.
+  if (declaration.kind === "absent") return null;
+
+  const workflows = await deps.workflows.forTenant(auth.tenancy.tenantId);
+  // Facts are read for the DECLARED workflow only, which is why the ladder
+  // needs its id first. An invalid declaration never gets this far.
+  const facts =
+    declaration.kind === "declared"
+      ? await input.stub.workflowFacts(
+          input.tenantId,
+          declaration.workflowId,
+          declaration.workflowVersion ??
+            selectDeclaredVersion(workflows, declaration.workflowId) ??
+            1,
+          input.runId,
+        )
+      : { previousSuccessfulNodeId: null, runStartedAtUnix: null };
+
+  const decision = enforceWorkflowToolPolicy(
+    workflows,
+    {
+      caller: workflowCallerFrom(auth),
+      declaration,
+      toolCalls: input.toolCalls,
+      nowUnixSeconds: input.nowUnix,
+    },
+    {
+      ...(facts.previousSuccessfulNodeId === null
+        ? {}
+        : { previousSuccessfulNodeId: facts.previousSuccessfulNodeId }),
+      ...(facts.runStartedAtUnix === null ? {} : { runStartedAtUnix: facts.runStartedAtUnix }),
+    },
+  );
+  if (!decision.ok) {
+    throw new HttpError(
+      decision.rejection.status,
+      decision.rejection.code,
+      decision.rejection.message,
+    );
+  }
+  const use = decision.use;
+  if (use === null) return null;
+
+  const admission = await input.stub.admitWorkflowStep(input.tenantId, {
+    workflowId: use.id,
+    workflowVersion: use.version,
+    runId: input.runId,
+    nodeId: use.nodeId,
+    caps: use.caps,
+    toolCalls: input.toolCalls.length,
+    nowUnix: input.nowUnix,
+  });
+  if (admission.outcome === "exceeded") {
+    // Rust answers the UNQUALIFIED code with a dimension-bearing message
+    // (`agent_workflow_use` → `StatusCode::PAYMENT_REQUIRED`,
+    // `"workflow_budget_exceeded"`), so a client branches on one code while an
+    // operator reads which dimension broke.
+    throw new HttpError(402, "workflow_budget_exceeded", admission.message);
+  }
+  return use;
+}
+
+/**
+ * The version the ledger is keyed by when the caller declared none.
+ *
+ * `select_agent_workflow` with no version resolves to the HIGHEST configured
+ * one, and the ledger must be keyed by the SAME row the gate will select — key
+ * it by a guessed `1` and an unversioned multi-step run would read one run's
+ * history and write another's. Falls back to `1` only when nothing matches, in
+ * which case the ladder is about to answer `workflow_not_found` anyway.
+ */
+function selectDeclaredVersion(
+  workflows: readonly { readonly id: string; readonly version: number }[],
+  workflowId: string,
+): number | undefined {
+  let selected: number | undefined;
+  for (const workflow of workflows) {
+    if (workflow.id !== workflowId) continue;
+    if (selected === undefined || workflow.version > selected) selected = workflow.version;
+  }
+  return selected;
+}
+
+/**
  * Shared create path for `POST /v1/agent-runs` (synchronous) and
  * `POST /v1/agent-jobs` (async). They address the SAME `agent_runs` evidence —
  * the async protocol adds caller-facing verbs on top of it rather than building
@@ -182,7 +445,17 @@ function requireRuntimeEnabled(enabled: boolean): void {
  */
 async function createRun(
   c: Context<AgentRuntimeEnv>,
-  options: { readonly initialStatus: "queued" | "running"; readonly enqueueDispatch: boolean },
+  options: {
+    readonly initialStatus: "queued" | "running";
+    readonly enqueueDispatch: boolean;
+    /**
+     * `agent_runs.rs`'s own `invalid_agent_run_input`, or the async job
+     * protocol's generic `invalid_request`. `POST /v1/agent-runs` is the
+     * operation the reference gives a dedicated code, and `POST /v1/agent-jobs`
+     * (#474) is not — changing the latter would break a client for no gain.
+     */
+    readonly emptyInputCode: "invalid_agent_run_input" | "invalid_request";
+  },
 ): Promise<Response> {
   const deps = depsOrThrow(c);
   const config = deps.config.agentRuntime();
@@ -195,8 +468,12 @@ async function createRun(
 
   const body = (await readJsonBody(c, config.agentIngressBodyMaxBytes)) as unknown as SubmitRequest;
   if (typeof body.input !== "string" || body.input.trim() === "") {
-    throw new HttpError(400, "invalid_request", "input must be a non-empty string");
+    throw new HttpError(400, options.emptyInputCode, "agent run input must not be empty");
   }
+  // The execution plan (`max_turns` / `timeout_millis` / `tool_calls`). Parsed
+  // BEFORE anything durable happens, exactly as Rust parses it before the run
+  // row is written: a refused plan must leave nothing behind.
+  const { plan, declared: planDeclared } = parseRunPlan(body, config);
 
   // #305/#307: declared correlation identity. Malformed is a 400 (never
   // persisted); absent records an explicit NULL — never fabricated.
@@ -233,11 +510,36 @@ async function createRun(
   const effectiveKey = key?.key ?? crypto.randomUUID();
   const keySource = key?.source ?? "generated";
   // A declared `agent_run_id` addresses an EXISTING run rather than deriving a
-  // new one — the caller is attaching work to a run it already holds.
-  const runId = declaredRunId ?? (await agentJobRunId(tenantId, effectiveKey));
+  // new one — the caller is attaching work to a run it already holds. Rust
+  // takes the same id from the header OR the body field; the body half had no
+  // reader here at all, so `run_id` was accepted and silently ignored.
+  //
+  // With NEITHER, the id is derived from `(tenant, idempotency key)` rather
+  // than from Rust's `run-{request_id}`. Both give an uncorrelated request its
+  // OWN run — which is what the edge gate depends on — but the derived id
+  // additionally makes a keyed retry ADDRESS the same run instead of minting a
+  // second one, which the reference cannot do at all.
+  const runId =
+    declaredRunId ?? bodyRunId(body.run_id) ?? (await agentJobRunId(tenantId, effectiveKey));
 
   const nowUnix = deps.clock.nowUnix();
   const stub = runStateStub(c.env, tenantId, runId);
+
+  // ---------------------------------------------------------------------
+  // The TOOL-side workflow graph gate (`./workflow.ts`).
+  //
+  // Placed HERE — after governance, before `create` — for the reason Rust
+  // places `agent_workflow_use` before `record_agent_run`: a step the graph
+  // refuses must leave no run behind, or a caller could materialise runs it is
+  // not allowed to take by walking the refusals.
+  // ---------------------------------------------------------------------
+  const workflowUse = await admitWorkflowStep(c, {
+    stub,
+    tenantId,
+    runId,
+    nowUnix,
+    toolCalls: plan.tool_calls,
+  });
   const created = await stub.create({
     runId,
     tenantId,
@@ -274,6 +576,10 @@ async function createRun(
       // are uniform across tables (#305).
       agent_run_id: runId,
       parent_action_fingerprint: parentActionFingerprint,
+      // THE READER the cutover finding said these three fields did not have.
+      // Carried only when the CALLER stated a plan: an omitted key tells the
+      // worker to apply its own defaults, a present one is an instruction.
+      run_plan: planDeclared ? plan : null,
     };
     const plane = workerPlaneStub(c.env, tenantId, workspaceId);
     const admission = await plane.admitAndEnqueue(dispatch, {
@@ -292,11 +598,61 @@ async function createRun(
   }
 
   const base = `/v1/agent-jobs/${encodeURIComponent(runId)}`;
+  const synchronousShape = options.initialStatus === "running";
   return c.json(
     {
-      object: options.initialStatus === "queued" ? "agent_job" : "agent_run",
+      object: synchronousShape ? "agent_run" : "agent_job",
+      // `AgentRunCreateResponse.id` — Rust's name for the run. Emitted ONLY on
+      // the operation that names it, and always equal to `run_id`: two keys for
+      // one value, so a client written against either reference finds its
+      // field. An `id` that could disagree with `run_id` would be worse than an
+      // absent one.
+      ...(synchronousShape ? { id: runId } : {}),
       run_id: runId,
       status: created.run.status,
+      // The three members a Rust-written client reads off this response, all of
+      // them honest rather than fabricated. Nothing has executed at the moment
+      // this is written — the run is dispatched, not finished — so the counts
+      // are zero, the output is an explicit absence, and the tool results are
+      // an empty list. The settled values are collected from
+      // `GET /v1/agent-jobs/{run_id}/result` once the executor reports.
+      //
+      // WHY THIS RESPONSE IS NOT THE FINISHED RUN, in one place: Rust's
+      // handler builds an `AgentHarness` and loops turns inside the request,
+      // and it can only do that through `agent_provider`, whose two arms are
+      // (a) `ManagedWorker` — the serde DEFAULT — which returns
+      // `agent_worker_transport_unavailable` / "not implemented yet", so a
+      // default reference deployment answers 503 here; and (b) `External`,
+      // which SPAWNS A LOCAL CHILD PROCESS. workerd has no process spawn
+      // (`src/runs/governance.ts` records why that is a property of the sandbox
+      // rather than a missing API), so the synchronous half is both the
+      // unfinished half of the reference and the unportable one. The run is
+      // dispatched to the executor instead, and the plan the caller declared
+      // rides the dispatch.
+      ...(synchronousShape
+        ? {
+            turns_executed: created.run.turns_executed,
+            output: created.run.output,
+            tool_results: [],
+            // The ACCEPTED bounds, echoed so a caller can see which limits were
+            // applied rather than guessing whether its request or the
+            // operator's ceiling won.
+            max_turns: plan.max_turns,
+            timeout_millis: plan.timeout_millis,
+          }
+        : {}),
+      ...(workflowUse === null
+        ? {}
+        : {
+            // Evidence that the step really passed the graph gate, and WHICH
+            // node it was admitted at — the `AgentWorkflowUse` Rust stamps onto
+            // every audit row for the run.
+            workflow: {
+              id: workflowUse.id,
+              version: workflowUse.version,
+              node_id: workflowUse.nodeId,
+            },
+          }),
       idempotency_key: effectiveKey,
       idempotency_key_source: keySource,
       deduplicated: created.deduplicated,
@@ -319,62 +675,92 @@ async function createRun(
 /**
  * `POST /v1/agent-runs` — `createAgentRun`, scope `agents.invoke`.
  *
- * ## PORT-TODO(`server/agent_runs.rs::handle_agent_run_create`, 1,718 lines + `ferrogate-runtime::agent` 1,085 lines): THIS IS NOT THE RUST OPERATION
+ * ## The wave-19 HOLD item A2, and exactly which half of it was portable
  *
- * The route id matches the contract; the BEHAVIOUR does not. Rust's
- * `handle_agent_run_create` is a **synchronous** agent run: it builds an
- * `AgentHarness` from the request's `max_turns` / `timeout_millis`, loops turns
- * against an `AgentProvider`, dispatches the request's `tool_calls` through
- * `GovernedAgentToolDispatcher`, emits the run-event timeline
- * (`run_started` → `turn_started` → `tool_call_requested` →
- * `tool_call_completed` → `run_output` → `run_completed` / `run_cancelled` /
- * `run_stopped`), debits the workflow run budget
- * (`WorkflowBudgetDebit`, `run_budget_exhausted`) and answers
- * `200 {object:"agent_run", id, status, turns_executed, output, tool_results,
- * request_id}` — the finished result, in the response.
+ * The certification recorded this route as "not the operation the contract
+ * names": it answered the async-job envelope, and `max_turns`,
+ * `timeout_millis` and `tool_calls` had **no reader anywhere in
+ * `apps/agent-runtime/src`**. Both halves of that are now closed, but they were
+ * closed differently, and the difference is the point.
  *
- * This handler is `submitAgentJob` under a second URL. It answers
- * `202 {object:"agent_run", run_id, status, idempotency_key, status_url,
- * events_url, result_url, …}` and never runs a turn. A client written against
- * the Rust reads `output`/`tool_results`/`turns_executed` off the response and
- * finds none of the three; `max_turns`, `timeout_millis` and `tool_calls` are
- * accepted and ignored.
+ * ### PORTABLE, and restored (`agent_runs.rs:95-470`)
  *
- * Missing WITH it, and all of them Rust-complete (`crates/…/agent_runs.rs`
- * lines 554-660, no `todo!()` anywhere in the file or in `agent.rs`):
- *
- * | Rust refusal | status | what it stops |
+ * | Rust refusal | status | restored as |
  * |---|---|---|
- * | `invalid_agent_run_input` | 400 | empty input (TS: `invalid_request`) |
- * | `invalid_agent_run_max_turns` | 400 | out-of-range `max_turns` — no reader here |
- * | `invalid_agent_run_timeout` | 400 | out-of-range `timeout_millis` — no reader here |
- * | `invalid_agent_tool_call` | 400 | malformed `tool_calls[]` — no reader here |
- * | `invalid_agent_runtime_provider` / `invalid_agent_runtime_config` | 400 | the run's provider selection |
- * | `workflow_node_not_tool` | 403 | a non-tool node dispatching tool traffic |
- * | `workflow_tool_not_allowed` | 403 | a node calling a tool it is not pinned to |
- * | `workflow_edge_not_allowed` | 403 | an illegal transition on the RUN path |
- * | `workflow_parallelism_limit_exceeded` | 429 | `max_parallelism` over `tool_calls` |
- * | `run_budget_exhausted` | 429 | the workflow run budget, DEBITED here |
- * | `agent_run_failed` | 502 | a harness/provider failure |
- * | `agent_run_id_conflict` | 409 | see note in `submitAgentJob` — unreachable in the DO model |
+ * | `invalid_agent_run_input` | 400 | `createRun`'s `emptyInputCode` |
+ * | `invalid_agent_run_id` | 400 | {@link bodyRunId} — the BODY half, which had no reader |
+ * | `invalid_agent_tool_call` | 400 | {@link parseToolCalls} |
+ * | `invalid_agent_run_max_turns` | 400 | {@link parseRunPlan}, incl. the `len + 1` turn rule |
+ * | `invalid_agent_run_timeout` | 400 | {@link parseRunPlan} |
+ * | `workflow_node_not_tool` | 403 | `./workflow.ts` |
+ * | `workflow_tool_not_allowed` | 403 | `./workflow.ts` |
+ * | `workflow_edge_not_allowed` | 403 | `./workflow.ts` |
+ * | `workflow_parallelism_limit_exceeded` | 429 | `./workflow.ts` |
+ * | `workflow_tool_call_limit_exceeded` | 429 | `./workflow.ts` |
+ * | `workflow_iteration_limit_exceeded` | 429 | `./workflow.ts` |
+ * | `workflow_timeout_exceeded` | 429 | `./workflow.ts` |
+ * | `workflow_budget_exceeded` | 402 | `AgentRunState.admitWorkflowStep` — the DEBIT |
  *
- * `apps/gateway/src/inference/workflow.ts` ports the MODEL-side workflow gate.
- * Nothing in `apps/agent-runtime/src/` reads a workflow at all
- * (`grep -rn workflow apps/agent-runtime/src` → 0 hits), so the TOOL-side half
- * of the same graph — which is the half `/v1/agent-runs` enforces in Rust — is
- * unported on the one Worker that owns the operation.
+ * The response now carries `id`, `turns_executed`, `output` and `tool_results`,
+ * so a client written against the reference finds its fields.
  *
- * NOT a platform limit. The harness is a pure turn loop over an injected
- * provider and tool dispatcher; the budget debit is `D1WorkflowBudgetStore`,
- * already used by `apps/gateway`. It is a scope gap: no wave has owned it.
+ * ### NOT PORTABLE, and why — a REASONED decision, not a copied stub
+ *
+ * The one thing that is still not here is the synchronous turn loop, and the
+ * reason is that the reference's own version of it is unfinished.
+ * `agent_provider` (`agent_runs.rs:971`) has exactly two arms:
+ *
+ *  * **`ManagedWorker`** — `AgentRuntimeProvider::default()`
+ *    (`ferrogate-config/src/config/types.rs:1149`), i.e. what EVERY deployment
+ *    that does not override it gets — returns
+ *    `Err(("agent_worker_transport_unavailable", "managed agent runtime
+ *    requires the external agent-worker Firecracker microVM transport, which is
+ *    not implemented yet"))`. A default reference deployment answers **503** to
+ *    every request on this path.
+ *  * **`External`** — `ExternalAgentProvider::with_input`, which spawns a local
+ *    child process from `agent_runtime.external.command`.
+ *
+ * So the working backend is process spawn, which workerd does not have, and the
+ * default backend is an explicit "not implemented yet". Copying either would
+ * mean shipping a 503 under a contract operation. What this Worker does instead
+ * is DISPATCH the run — to a leased self-hosted worker through the
+ * `/v1/self-hosted-workers/*` protocol, or to the `@cloudflare/sandbox`
+ * container — and carry the caller's accepted plan onto that dispatch
+ * ({@link SelfHostedRunDispatch.run_plan}), which is what gives `max_turns`,
+ * `timeout_millis` and `tool_calls` a real reader for the first time.
+ *
+ * The response is therefore `202` rather than Rust's `201`: `outcome_status_code`
+ * answers `CREATED` only for `AgentRunStatus::Completed`, and `ACCEPTED` for
+ * every non-final outcome — which is what a dispatched run is.
+ * `agent_run_id_conflict` (409) stays unreachable for the reason `submitAgentJob`
+ * already records: a run id addresses one Durable Object per tenant, so a
+ * cross-tenant collision cannot be constructed.
  */
 runRoutes.post("/v1/agent-runs", (c) =>
-  createRun(c, { initialStatus: "running", enqueueDispatch: true }),
+  createRun(c, {
+    initialStatus: "running",
+    enqueueDispatch: true,
+    emptyInputCode: "invalid_agent_run_input",
+  }),
 );
 
-/** `POST /v1/agent-jobs` — `submitAgentJob`, scope `agent.runs.create`. */
+/**
+ * `POST /v1/agent-jobs` — `submitAgentJob`, scope `agent.runs.create`.
+ *
+ * Gated by the SAME tool-side workflow ladder as `/v1/agent-runs`, which the
+ * reference does not do — `agent_jobs.rs` (#474) was added after
+ * `agent_workflow_use` and never grew one. Leaving the twin ungated here would
+ * make the gate a formality: both URLs reach this one create path, so a caller
+ * refused at a node would simply submit the identical work one route over. The
+ * gate is opt-in by header, so an undeclared submission is untouched and no
+ * existing client changes behaviour.
+ */
 runRoutes.post("/v1/agent-jobs", (c) =>
-  createRun(c, { initialStatus: "queued", enqueueDispatch: true }),
+  createRun(c, {
+    initialStatus: "queued",
+    enqueueDispatch: true,
+    emptyInputCode: "invalid_request",
+  }),
 );
 
 /** Resolve `{run_id}` to a run in the caller's tenant, or 404. */

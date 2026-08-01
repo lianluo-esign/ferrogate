@@ -587,6 +587,46 @@ TELEMETRY_SERVICE_NAME = "ferrogate-gateway"
 TELEMETRY_SIGNALS = "metric,trace,log"
 
 # ---------------------------------------------------------------------------
+# Budget-threshold alert delivery (#170/#228) — Rust `[billing_alerts]`
+#
+# Read by `budgetAlertConfigFromEnv` (src/metering/budget-alerts.ts) and
+# resolved per request by `MeteringUsageSink` (src/metering/sink.ts), which
+# compares post-charge spend against `EffectiveQuota.alertThresholdPcts` and
+# POSTs one signed notification per (scope, period, threshold) crossing. The
+# once-per-period arbiter is the D1 table `budget_alert_notifications` in
+# `CONTROL_DB` — an `INSERT` whose UNIQUE violation IS the "already sent"
+# answer, so a concurrent second isolate cannot double-notify.
+#
+# WIRING STATE — LIVE with no composition-root edit. The sink reads these off
+# the REQUEST's own bindings exactly as it already reads `BILLING_DB`,
+# `BILLING` and `DB`; `src/index.ts` is untouched. What the operator switches
+# on is the URL.
+#
+# PLACEHOLDER, and empty is the OFF posture: `budgetAlertConfigFromEnv`
+# requires a non-empty `http://`/`https://` URL and answers `undefined`
+# otherwise, so with `""` no crossing is detected, no row is written and no
+# request pays two D1 round trips. Substitute the receiver's URL at deploy
+# time. This does NOT affect the 429 `monthly_budget_exceeded` hard stop at
+# 100%, which is enforced on the request path either way.
+#
+# A malformed value never throws: alert delivery runs after the response is
+# served, and a configuration typo must not become a lost metering write.
+#
+# BILLING_ALERTS_WEBHOOK_SIGNING_SECRET is deliberately NOT declared here — it
+# is the HMAC-SHA256 key every receiver authenticates the alert with
+# (`X-FerroGate-Signature` over `"<timestamp>.<body>"`), so a committed value
+# would be a leaked credential that lets anyone forge a budget alert. It is a
+# deploy-time secret:
+#
+#     bunx wrangler secret put BILLING_ALERTS_WEBHOOK_SIGNING_SECRET
+#
+# With the URL set and the secret unset the notification is sent UNSIGNED,
+# which is the documented Rust behaviour for an operator who configured no key.
+# ---------------------------------------------------------------------------
+BILLING_ALERTS_WEBHOOK_URL = ""
+BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS = "5"
+
+# ---------------------------------------------------------------------------
 # R2 — asset object storage
 #
 # Read as `env.ASSETS`, the production `AssetObjectStore` (src/assets/ports.ts:

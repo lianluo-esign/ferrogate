@@ -33,6 +33,7 @@ import {
 import { normalizedCapabilities } from "./capabilities.js";
 import { timingSafeEqualStrings } from "./crypto.js";
 import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
+import { type WorkflowCatalogPort, workflowCatalogFromEnv } from "./runs/workflow.js";
 import { type FrameOpenResult, type SealedWorkerFrame, openWorkerFrame } from "./workers/frame.js";
 
 /**
@@ -80,6 +81,23 @@ export interface AgentRuntimeBindings {
    * ⇒ every `/v1/agents/*` dispatch is 404, which is fail-closed.
    */
   readonly AGENT_UPSTREAMS?: string;
+  /**
+   * OPERATOR config: JSON array of `[[agent_workflows]]` documents (Rust
+   * `config.agent_workflows`), read by the tool-side graph gate in
+   * `src/runs/workflow.ts`.
+   *
+   * A real deployment knob, not a test seam — the workflow table was TOML
+   * configuration in Rust, exactly as `[[agent_upstreams]]` was. It is
+   * materialised OVER the durable `control_plane_resources` documents of kind
+   * `agent-workflows` (the same rows `apps/gateway`'s model-side gate reads and
+   * `apps/control-plane`'s `admin_agent_workflow` group writes), so an operator
+   * can pin a graph per deployment without a control-plane round trip.
+   *
+   * Absent ⇒ no workflow resolves ⇒ a step DECLARING one is refused
+   * `400 workflow_not_found` and a step declaring none is untouched. The gate is
+   * opt-in by header, which is why an empty table can only ever add refusals.
+   */
+  readonly AGENT_WORKFLOWS?: string;
   /**
    * `apps/gateway`'s `RateLimiterDurableObject` namespace, bound with
    * `script_name = "ferrogate-gateway"` so BOTH Workers charge ONE window per
@@ -468,6 +486,16 @@ export interface AgentRuntimeConfig {
   readonly agentIngressBodyMaxBytes: number;
   /** Default framework adapter for a submission that names none. */
   readonly defaultFrameworkAdapter: string;
+  /**
+   * Rust `config.agent_runtime.max_turns` (`default_agent_runtime_max_turns()`
+   * = 4). The OPERATOR ceiling: a run may ask for fewer turns, never more.
+   */
+  readonly maxTurns: number;
+  /**
+   * Rust `config.agent_runtime.timeout_millis`
+   * (`default_agent_runtime_timeout_millis()` = 30 000). Same ceiling rule.
+   */
+  readonly timeoutMillis: number;
 }
 
 export interface ConfigPort {
@@ -502,6 +530,12 @@ export interface AgentRuntimeDeps {
   readonly governance: GovernancePort;
   readonly upstreams: AgentUpstreamPort;
   readonly guardrails: GuardrailPort;
+  /**
+   * The `[[agent_workflows]]` table the TOOL-side graph gate reads
+   * (`src/runs/workflow.ts`). Durable documents in `CONTROL_DB` with the
+   * operator var materialised over them; see {@link workflowCatalogFromEnv}.
+   */
+  readonly workflows: WorkflowCatalogPort;
   readonly config: ConfigPort;
   readonly clock: ClockPort;
 }
@@ -525,6 +559,8 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG: AgentRuntimeConfig = {
   telemetryMaxPayloadBytes: 64 * 1024,
   agentIngressBodyMaxBytes: 1024 * 1024,
   defaultFrameworkAdapter: "native",
+  maxTurns: 4,
+  timeoutMillis: 30_000,
 };
 
 /** A dev/test API key row (`FG_DEV_API_KEYS`). */
@@ -1120,6 +1156,10 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
         secretPatterns?: SecretPattern[];
       }>(env.FG_DEV_A2A_GUARDRAILS, {}),
     ),
+    // Real in every posture: with no `CONTROL_DB` the operator var alone is the
+    // table, which is exactly the offline harness's posture and a legitimate
+    // deployment's. There is no in-memory stand-in to forget to replace.
+    workflows: workflowCatalogFromEnv(env),
     config: inMemoryConfigPort(configFromEnv(env)),
     clock: systemClock,
   };

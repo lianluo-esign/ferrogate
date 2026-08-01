@@ -1,6 +1,6 @@
 # CUTOVER READINESS — the decision document
 
-**Date:** 2026-08-01 · **Wave 19** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 19 decision, amended by wave 20 (§0.3)** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
 
@@ -104,12 +104,163 @@ CLASS B is as much a failure as a premature GO.**
 Not "finish everything". Specifically:
 
 1. Close or explicitly accept the **HOLD subset** in §2.2 (4 clusters).
+   **— DONE by wave 20; see §0.3 for the mutation table and the two residues.**
 2. Take one more certification pass and have it find **no new CLASS A cluster**.
-   The curve flattening is the signal; this wave's did not.
+   The curve flattening is the signal; this wave's did not. **— STILL OPEN.
+   Wave 20 was a FIX wave and is weak evidence here by construction: it looked
+   where a problem was already known to be. §0.3.4 lists what wave 21 must
+   re-check.**
 3. Run the single authorised live deploy (`CLOUD-VERIFICATION.md`), which is the
-   only way to settle §4.
+   only way to settle §4. **— STILL OPEN.**
 
 Then delete the Rust. `legacy-rs` remains the byte-level fallback either way.
+
+---
+
+## 0.3 WAVE 20 — the HOLD subset is CLOSED. The verdict is NOT changed.
+
+**Wave 20 was a FIX wave, not a certification.** It closed the four §2.2 HOLD
+clusters and the `/healthz` `version` drift. It did **not** re-run the parity
+certifications, and §0.2's exit criterion has two conditions, not one:
+
+> 1. Close or explicitly accept the **HOLD subset** — **done, below.**
+> 2. Take one more certification pass and have it find **no new CLASS A
+>    cluster** — **NOT done. A fix wave is weak evidence about this, and is in
+>    fact the WORST kind of evidence for it:** the wave looked exactly where it
+>    already knew there was a problem. Every wave since 15 has found new CLASS A
+>    clusters while closing the old ones, and three of the four closed here were
+>    themselves found by a certification, not by a fix wave.
+> 3. Run the single authorised live deploy — **NOT done** (§4 stands unchanged).
+
+**So the verdict above is UNCHANGED and deliberately left as written:**
+merging `main-ts` → `main` is still GO, deleting `crates/**` is still NO-GO.
+This wave earned condition 1 and nothing else. The integrate step does not get
+to promote its own work.
+
+### 0.3.1 What wave 20 CLOSED, with the RED-before/GREEN-after observed HERE
+
+Every row was verified by this integration step, not read from a deliverable:
+the fix was neutralised, the marker was **grepped on disk** to confirm the edit
+landed, the named test was required to go RED, the file was restored and
+verified byte-identical by sha256, and the test was required to go GREEN again.
+
+| HOLD item | Neutralisation | RED under mutation | GREEN restored |
+|---|---|---|---|
+| **A1** budget alerts (**MONEY**) | delete `await this.#budgetAlerts(...)` from `MeteringUsageSink.#accumulate` | **8 failed / 4 passed (12)** | 12/12 |
+| **A3** upstream withdrawal (**SECURITY**) | revert `agentDiscoveryHandler` to the var-only registry | **12 failed / 2 passed (14)** | 14/14 |
+| **A4** billing replay (**MONEY**) | make the no-document path 404 instead of reaching `replayOutboxReportRow` | **11 failed / 11 passed (22)** | 22/22 |
+| **A2** tool-side workflow gate | bypass `admitWorkflowStep` on the create path | **22 failed / 3 passed (25)** | 25/25 |
+| **A2** `createAgentRun` contract | drop `turns_executed` / `output` from the synchronous response | **1 failed / 16 passed (17)** | 17/17 |
+| `/healthz` `version` — control-plane | drop `version` from `healthReport()` | **3 failed / 3 passed (6)** | 6/6 |
+| `/healthz` `version` — mcp | same | **2 failed / 6 passed (8)** | 8/8 |
+| `/healthz` `version` — telemetry | same | **3 failed / 28 passed (31)** | 31/31 |
+
+### 0.3.2 The two MONEY claims, asserted as EFFECTS rather than as calls
+
+A dispatcher that is *called* is not a webhook that is *delivered once*. Both
+money items were re-read at the assertion level, not the test-name level:
+
+- **A1.** `test/metering/budget-alerts.test.ts` drives a real settlement through
+  the sink and asserts `webhook.calls.length === 1`, the payload's **exact key
+  order** (the HMAC is over those bytes), and
+  `x-ferrogate-signature === HMAC-SHA256(secret, "<ts>.<body>")` recomputed in
+  the test. A **second** settlement past the same threshold leaves
+  `webhook.calls.length === 1` and exactly one `budget_alert_notifications` row
+  keyed `tenant:tenant_a:<period>:80`. A row pre-claimed by another isolate
+  yields **zero** webhooks. So: **one signed webhook on the crossing, none on
+  the re-crossing.**
+- **A4.** `test/billing-replay.test.ts` seeds a REAL dead letter (an outbox
+  **row** with **no** document — the shape production actually produces),
+  asserts the sweeper's own `BILLING_OUTBOX_LIST_DUE_SQL` selects nothing
+  before and exactly `["rep_real"]` after, and counts the ledger:
+  `ledgerRowCount === 1` and `billingEventRowCount === 1`. A second replay is
+  `409 dead_letter_not_replayable` and the counts do not move. So: **one ledger
+  row on the replay, zero on the already-settled one.**
+
+### 0.3.3 The SECURITY claim, and the HALF OF IT THAT IS NOT CLOSED
+
+`test/routes/agent-upstream-withdrawal.test.ts` asserts the real before/after:
+the compromised endpoint IS published to the operator and to a tenant caller,
+`DELETE` answers 200, and on the **very next request** it is gone while every
+other upstream is untouched; an unknown id is 404 and removes nothing; and
+tenant A's `DELETE` of tenant B's upstream is **404 with B's upstream still
+served to B**, after which B can still withdraw its own.
+
+**But the withdrawal covers the gateway's DISCOVERY surface only.** A
+mechanical re-derivation of every reader of the upstream table
+(`grep -rn 'AGENT_UPSTREAMS|agentUpstream' apps/*/src`) shows the gateway's only
+consumer is `/.well-known/agent.json`, while **`apps/agent-runtime` resolves its
+A2A dispatch catalog from its own deploy-time `AGENT_UPSTREAMS` var** through
+`inMemoryAgentUpstreamPort` (`src/ports.ts:1146`) — a different Worker, a
+different var, and **no durable leg**. An operator who configured the same
+upstream in both places will find `DELETE` withdraws it from discovery and
+**not** from A2A dispatch. That is a narrower defect than the one A3 named
+(discovery was the reachability path Rust's `delete_agent_upstream` governed),
+but it is the same shape, it is security-adjacent, and it is stated here rather
+than left for a later wave to "discover".
+
+### 0.3.4 What the WAVE-21 CERTIFICATION MUST RE-CHECK
+
+Named specifically, because "re-certify everything" is how a checklist becomes
+decoration:
+
+1. **The A3 residue in §0.3.3.** Does `apps/agent-runtime`'s A2A dispatch
+   catalog need the same `CONTROL_DB` leg the gateway now has? Decide it as
+   CLASS A or CLASS C explicitly; do not let it stay unclassified.
+2. **A2 is closed in SHAPE and in ENFORCEMENT, not in EXECUTION.**
+   `POST /v1/agent-runs` now runs the full validation ladder, answers `id`,
+   `turns_executed`, `output`, `tool_results`, `max_turns`, `timeout_millis`,
+   and enforces the tool-side graph gate — but it still **dispatches** the run
+   rather than looping turns inside the request, and `src/runs/lifecycle.ts`
+   documents why (Rust's synchronous arm is either `ManagedWorker`, which
+   answers "not implemented yet", or `External`, which spawns a child process
+   workerd cannot). Wave 21 must decide whether "answers the contract's fields
+   with `turns_executed: 0` and settles asynchronously" is CLASS A or CLASS C.
+   **It is not the same claim as "A2 closed".**
+3. **`CP-C13b`** (new row in `MOUNT-SEAMS.md`): `/version`'s route registration
+   is gated, its DOCUMENT is not — `api: 0` leaves 687/687 green.
+4. **`AR-P1` / `AR-P2` are ESC rows and the inventory does not say so.** Both
+   durable agent-runtime ports are GREEN under the app's default project (433/433)
+   and only RED under the chained `test/durable/harness/` config (45 of 55).
+   `MOUNT-SEAMS.md` marks neither as **ESC**; a reader would conclude the
+   default suite holds them.
+5. **The five `[vars]`-table and commented-stanza rows** (`GW-T16/17/18`,
+   `AR-T11`) are NOT-MUTABLE by category, not merely ungated. Wave 21 should
+   either give them a proof channel or reclassify them out of the seam table.
+6. **The budget-alert webhook has never left the isolate.** Every A1 assertion
+   is against an intercepted `fetch`. The live run must confirm one real signed
+   POST reaches a real receiver, and that `BILLING_ALERTS_WEBHOOK_SIGNING_SECRET`
+   resolves from `wrangler secret put` (§2(c)).
+7. **A4's re-emission is still not this Worker's.** `replay` re-arms the row and
+   answers `emitted: false`; the gateway's Cron sweeper emits. Nothing local
+   proves the hand-off across two Workers and a Queue producer.
+8. **`A5`–`A12` were never worked** and remain exactly as §2.1 states. If the
+   owner is still minded to accept them (§2.2), that acceptance should be
+   recorded in wave 21 as an explicit decision, because deleting the reference
+   makes it unappealable.
+
+### 0.3.5 Wave-20 gate results, first-hand
+
+| Gate | Result |
+|---|---|
+| `bun install` | clean, no changes |
+| `bun run typecheck` | **exit 0**, 21 projects + `e2e`, zero diagnostics |
+| `bun run test`, every `packages/*` and `apps/*` | **6,758 passed · 0 failed · 9 todo** (baseline 6,624; +134) |
+| Seam pass — every **T1** row plus every row whose file this wave touched | **145 rows · 140 RED · 0 GREEN-unproven · 5 NOT-MUTABLE-by-category · 1 stale row corrected** |
+| Restore verification (sha256 after every mutation) | **byte-identical, every row**; `grep -rl MUTW20` over `apps/` + `packages/` → nothing |
+| Own fix verification (§0.3.1) | **8 / 8 PROVEN**, none RED-by-parse-error |
+| Real boot: `bunx wrangler dev --local` × 5, distinct ports | **5 / 5 "Ready on" + 5 / 5 `/healthz` 200** |
+| Fleet health-document shape | **1 distinct shape across all five**, `{status, service, version, runtime}`, every one carrying `version` — the wave-19 3-of-5 drift is gone |
+| `bunx playwright test` | **22 / 22 passed** (6.8 s; 21 before — `e2e/tests/mcp.spec.ts` gained one) |
+
+**Two honesty notes.** (1) The first seam-pass driver ran `bun run test -- <filter>`;
+several apps chain suites with `&&`, so the filter landed on the LAST chained
+config and two rows looked GREEN under a landed mutation for a purely mechanical
+reason. Fixed to `bunx vitest run <filter>` and re-run. (2) Three residue rows
+first went RED because commenting a line inside an object literal made the module
+unparseable — a **RED-by-parse-error is not a proof**, and `MOUNT-SEAMS.md` §5
+already records this exact mistake twice. All three were redone as value
+substitutions that still compile, and the driver now flags the condition.
 
 ---
 
@@ -182,12 +333,23 @@ Not all ~90 carry equal weight and it would be dishonest to imply they do.
 If the owner closes or accepts **only** these four, the deletion argument
 changes materially:
 
-| | Why it is in the HOLD subset |
-|---|---|
-| **A1** budget alerts | The system **affirms the configuration** and then never notifies. Silent, unbounded, money. This is the exact archetype of the wave-15 admission bypass, and the archetype is why this project runs mutation gates at all |
-| **A3**'s `admin_agent_upstream` `DELETE` | Revoking a compromised upstream through the admin API returns `200` and withdraws nothing. Security-shaped, and one of five identical three-line fixes |
-| **A4** `billing.replay` | A real dead letter is **unrecoverable**. Money, and the failure is silent until reconciliation |
-| **A2** `createAgentRun` | Not a divergence — a *different operation* under the contract's name, with the tool-side workflow gate absent. A client written to the contract gets neither the fields nor the enforcement |
+> **STATUS, WAVE 20: all four CLOSED.** Each row's fix was verified by this
+> integration step's own mutation table (§0.3.1) rather than accepted from the
+> agent that wrote it, and the two money items were asserted as EFFECTS —
+> one signed webhook per crossing and none on the re-crossing; one ledger row
+> per replay and zero on an already-settled one (§0.3.2). **Two residues are
+> carried forward and named in §0.3.3–§0.3.4:** the A3 withdrawal covers the
+> gateway's discovery surface but not `apps/agent-runtime`'s A2A dispatch
+> catalog, and A2 is closed in SHAPE and ENFORCEMENT but still dispatches
+> rather than looping turns in-request. **Closing this subset satisfies exit
+> condition 1 of §0.2 and nothing else** — the verdict is unchanged.
+
+| | Why it is in the HOLD subset | Wave-20 status |
+|---|---|---|
+| **A1** budget alerts | The system **affirms the configuration** and then never notifies. Silent, unbounded, money. This is the exact archetype of the wave-15 admission bypass, and the archetype is why this project runs mutation gates at all | **CLOSED** — 8 RED / 12 GREEN. Effect asserted, not just the call |
+| **A3**'s `admin_agent_upstream` `DELETE` | Revoking a compromised upstream through the admin API returns `200` and withdraws nothing. Security-shaped, and one of five identical three-line fixes | **CLOSED for discovery** — 12 RED / 14 GREEN, incl. the cross-tenant refusal. **A2A dispatch residue: §0.3.3** |
+| **A4** `billing.replay` | A real dead letter is **unrecoverable**. Money, and the failure is silent until reconciliation | **CLOSED** — 11 RED / 22 GREEN. Ledger counted: 1 then 0 |
+| **A2** `createAgentRun` | Not a divergence — a *different operation* under the contract's name, with the tool-side workflow gate absent. A client written to the contract gets neither the fields nor the enforcement | **CLOSED for fields + enforcement** — 22 RED (gate) and 1 RED (contract). **Turn loop still async: §0.3.4 item 2** |
 
 **A5–A12 are, in my judgement, acceptable-by-decision.** They are real
 regressions and should be recorded as such, but each is either bounded to

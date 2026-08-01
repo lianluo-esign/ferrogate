@@ -33,7 +33,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  */
 import { createIdentityRoutes } from "@ferrogate/identity";
 import { Hono } from "hono";
-import { SERVICE_NAME, resolveDeps } from "./adapters.js";
+import { resolveDeps } from "./adapters.js";
 import {
   CONTROL_PLANE_GROUPS,
   CONTROL_PLANE_OPERATIONS,
@@ -137,30 +137,29 @@ export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES
 /**
  * The two SHARED contract probes (`docs/rewrite/ROUTE-MAP.md`: implemented in
  * EVERY Worker; `auth.kind: "anonymous"`, `visibility: "public"` in
- * `docs/openapi/runtime-api-contract.json`).
+ * `docs/openapi/runtime-api-contract.json`) are mounted by `registerRoutes`
+ * above, from `./routes/health.ts`.
  *
- * They were missing here — `gateway`, `mcp`, `agent-runtime` and `telemetry`
- * all mount them, and this Worker mounted only the historic `/health`. Nothing
- * in the unit suite could see the hole: it drives named contract operations,
- * and an unmounted anonymous probe is not one of the 197 this app owns. It
- * surfaced on the first real `wrangler dev --local` boot, where `/healthz`
- * answered `404 not_found` — i.e. every uptime check and load-balancer origin
- * probe pointed at the fleet-standard path would have marked this Worker down.
+ * They used to be two inline handlers HERE, and both had drifted from the other
+ * four Workers: `/healthz` answered `{status, service, runtime}` where Rust's
+ * `HealthResponse` also carries `version` (cert2-dataplane **A11**, which named
+ * `apps/mcp` alone and was understated 2×), and `/readyz` answered the constant
+ * string `"ready"` — a probe that cannot report anything else, ever, which is
+ * the defect wave 17 fixed on `apps/agent-runtime`. Moving them to a module lets
+ * `apps/telemetry/test/fleet-health-contract.test.ts` read this Worker's
+ * document off disk alongside the other four and fail if any one of them drifts
+ * again; two handlers for one path, here and there, would defeat that gate.
  *
- * Mounted as plain routes rather than through `registerRoutes`, deliberately:
- * folding them into the contract-driven registry would move them inside the
- * operation count the anti-drift test pins. `contractAuth` still runs over them
- * — it is an `app.use("*", …)` — and passes them through because neither path is
- * one of the 197 operations it guards, which is the same treatment `/health`
- * and `/version` have always had. `test/health.test.ts` asserts both answer 200
- * with NO credential, so a future guard change that starts challenging them
- * fails there rather than in an operator's uptime dashboard.
+ * They stay OUTSIDE the contract-driven registry — `registerRoutes` mounts them
+ * without appending them to the record it returns — because folding them into
+ * the loop would move them inside the 197-operation count the anti-drift test
+ * pins. `contractAuth` still runs over them (it is an `app.use("*", …)`) and
+ * passes them through, because neither path is one of the 197 it guards, which
+ * is the same treatment `/health` and `/version` have always had.
  *
- * `/health` and `/version` are NOT contract operations and stay outside the 197
- * by design.
+ * `/health` and `/version` are NOT contract operations, are described by no
+ * shared document, and therefore stay exactly where they are.
  */
-app.get("/healthz", (c) => c.json({ status: "ok", service: SERVICE_NAME, runtime: "workers" }));
-app.get("/readyz", (c) => c.json({ status: "ready", service: SERVICE_NAME, runtime: "workers" }));
 app.get("/health", (c) => c.json({ ok: true }));
 app.get("/version", (c) =>
   c.json({

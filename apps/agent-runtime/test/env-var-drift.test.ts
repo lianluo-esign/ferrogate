@@ -323,6 +323,25 @@ const DOCUMENTED_BUT_UNDECLARED = [
  * the fourth read this list carried while the admission slice was in flight, is
  * now WRITTEN OUT in `wrangler.toml` and has moved up to
  * `DOCUMENTED_BUT_UNDECLARED`.)
+ *
+ * `AGENT_WORKFLOWS` used to be a fourth entry here, listed only because
+ * `wrangler.toml` is the integrate step's file. It is a REAL operator knob —
+ * the `[[agent_workflows]]` table the tool-side graph gate reads
+ * (`src/runs/workflow.ts`, cutover HOLD item A2) — so the WAVE-20 INTEGRATE
+ * STEP committed it and it has left this list for `DECLARED.vars` below.
+ *
+ * Committing it empty is safe in a way `AGENT_UPSTREAMS = "[]"` was not: there
+ * is deliberately no `FG_DEV_AGENT_WORKFLOWS` twin, so there is no `??` chain a
+ * committed value could shadow, and `test/workflow-tool-gate.test.ts` seeds the
+ * var through `setEnvVar` at runtime (which overrides whatever the toml bound)
+ * and restores it in `afterAll`. Absent and `"[]"` are the same table. That the
+ * committed value does not leak into the suite is now asserted directly, in
+ * "the committed AGENT_WORKFLOWS does not leak into the suite" below, rather
+ * than argued in prose.
+ *
+ * ITS MOUNT GATE: `test/workflow-tool-gate.test.ts` drives every case through
+ * `SELF.fetch`, so deleting the `workflows:` line from `resolveDeps` or the
+ * `admitWorkflowStep` call from `src/runs/lifecycle.ts` turns 24 assertions red.
  */
 const UNDOCUMENTED = [
   "FG_DEV_API_KEYS",
@@ -355,6 +374,9 @@ describe("the env-var drift gate itself", () => {
       "AGENT_JOB_DISPATCH_TTL_SECS",
       "AGENT_JOB_MAX_OPEN_PER_TENANT",
       "AGENT_RUNTIME_ENABLED",
+      // WAVE 20 — committed by the integrate step, on this file's own written
+      // instruction, once the tool-side workflow graph gate landed.
+      "AGENT_WORKFLOWS",
       "CONTAINER_GOVERNED_EGRESS_HOSTS",
       "FG_DEV_A2A_GUARDRAILS",
       "FG_DEV_IN_MEMORY_PORTS",
@@ -492,7 +514,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(7);
+    expect(rows.length).toBe(8);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -521,9 +543,34 @@ describe("which committed [vars] values this runner can actually observe", () =>
     }
   });
 
-  it("records that all seven committed values reach this runner unchanged", () => {
+  it("records that all eight committed values reach this runner unchanged", () => {
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(7);
+    expect(observable.length).toBe(8);
+  });
+
+  /**
+   * THE LEAK CHECK for the one var wave 20 added, stated rather than argued.
+   *
+   * The measured hazard this Worker already paid for twice (the commented D1
+   * stanzas, 106 of 259 red; `AGENT_UPSTREAMS = "[]"`, 14 A2A tests red) is a
+   * committed `[vars]` value SHADOWING a fixture the harness seeds. So the two
+   * properties that make `AGENT_WORKFLOWS = "[]"` safe to commit are asserted
+   * here, not left to the prose above:
+   *
+   *   1. the committed value is the EMPTY table, so it configures no workflow
+   *      and cannot admit or refuse anything on its own; and
+   *   2. there is no `FG_DEV_AGENT_WORKFLOWS` twin anywhere in `src/`, so there
+   *      is no `??` chain whose left arm this could win.
+   *
+   * `test/workflow-tool-gate.test.ts` overrides the var through `setEnvVar`,
+   * which beats the toml binding at runtime, and restores it afterwards.
+   */
+  it("the committed AGENT_WORKFLOWS cannot shadow a harness fixture", () => {
+    const row = rows.find((r) => r.name === "AGENT_WORKFLOWS");
+    expect(row?.committed).toBe("[]");
+    expect(row?.runtime).toBe("[]");
+    expect(READS.named.has("FG_DEV_AGENT_WORKFLOWS")).toBe(false);
+    expect(referencedInCode("FG_DEV_AGENT_WORKFLOWS")).toBe(false);
   });
 });

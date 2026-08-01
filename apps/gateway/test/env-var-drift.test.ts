@@ -275,6 +275,28 @@ const SECRETS = [
 ] as const;
 
 /**
+ * Deploy-time SECRETS the `env`-anchored scanner cannot see, because they are
+ * read off a RENAMED parameter — the `READ_INDIRECTLY` shape, but for a name
+ * that must never appear in `[vars]` at all.
+ *
+ * They are a separate list rather than entries in {@link SECRETS} for a reason
+ * worth stating: `SECRETS` is asserted with `toEqual` against the set of
+ * undeclared READS, so putting an invisible-to-the-scanner name in it would
+ * make that assertion fail — and "fixing" that by loosening the `toEqual` would
+ * cost the exactness the whole gate rests on. Instead these get the SAME two
+ * documentation assertions plus a whole-token source check, so a secret cannot
+ * hide here either.
+ *
+ * `BILLING_ALERTS_WEBHOOK_SIGNING_SECRET` (WAVE 20) is the HMAC-SHA256 key a
+ * budget-alert receiver authenticates the notification with
+ * (`X-FerroGate-Signature` over `"<timestamp>.<body>"`). A committed value
+ * would let anyone forge a budget alert, so `[vars]` carries the
+ * `wrangler secret put` instruction next to the two knobs that ARE committed.
+ * `budgetAlertConfigFromEnv` reads it as `bindings.BILLING_ALERTS_WEBHOOK_SIGNING_SECRET`.
+ */
+const SECRETS_READ_INDIRECTLY = ["BILLING_ALERTS_WEBHOOK_SIGNING_SECRET"] as const;
+
+/**
  * Plain vars deliberately left out of `[vars]`, each NAMED in the config's
  * prose so an operator can still discover it.
  *
@@ -330,8 +352,20 @@ const UNDOCUMENTED = ["FG_DEV_IN_MEMORY_PORTS"] as const;
  *
  * `ASSETS` is the R2 bucket: `assetDepsFromEnv` takes the env as `bindings` and
  * reads `bindings.ASSETS`.
+ *
+ * The two `BILLING_ALERTS_*` vars are the same shape, added in WAVE 20:
+ * `budgetAlertConfigFromEnv` (`src/metering/budget-alerts.ts`) narrows the env
+ * to a `BudgetAlertBindings` parameter named `bindings` and reads
+ * `bindings.BILLING_ALERTS_WEBHOOK_URL` /
+ * `bindings.BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS`. They are NOT dead config —
+ * the "still finds a real reference" case below re-proves each one appears in
+ * `src/`, so this list cannot be used to smuggle in a var nothing reads.
  */
-const READ_INDIRECTLY = ["ASSETS"] as const;
+const READ_INDIRECTLY = [
+  "ASSETS",
+  "BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS",
+  "BILLING_ALERTS_WEBHOOK_URL",
+] as const;
 
 describe("the env-var drift gate itself", () => {
   it("inlined the real source tree — an empty scan would assert nothing", () => {
@@ -352,9 +386,10 @@ describe("the env-var drift gate itself", () => {
   });
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
-    // GW-T18 counts 49 `[vars]`. Pinning the exact number makes an accidental
-    // parser regression (or a silently deleted table) loud here first.
-    expect(DECLARED.vars.size).toBe(49);
+    // GW-T18 counted 49 `[vars]`; WAVE 20 committed the two `BILLING_ALERTS_*`
+    // knobs, so 51. Pinning the exact number makes an accidental parser
+    // regression (or a silently deleted table) loud here first.
+    expect(DECLARED.vars.size).toBe(51);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -383,6 +418,32 @@ describe("every var the source reads is declared or explicitly excepted", () => 
 
   it("documents every secret in wrangler.toml, next to its name", () => {
     for (const name of SECRETS) {
+      expect(mentionedInToml(name), `${name} is read but never mentioned in wrangler.toml`).toBe(
+        true,
+      );
+      expect(
+        documentedNear(name, /secret/i, 8),
+        `wrangler.toml names ${name} but never says it is a secret`,
+      ).toBe(true);
+    }
+  });
+
+  it("documents every indirectly-read secret, and keeps it out of [vars]", () => {
+    // Not vacuous: the loop proves nothing on an empty list.
+    expect(SECRETS_READ_INDIRECTLY.length).toBeGreaterThan(0);
+    for (const name of SECRETS_READ_INDIRECTLY) {
+      // It really is read by src/ — this is what stops the list being a place
+      // to park a name nothing consults.
+      expect(
+        referencedInCode(name),
+        `${name} is excepted as an indirectly-read secret but appears nowhere in src/`,
+      ).toBe(true);
+      // …and really is invisible to the scanner, i.e. it belongs on THIS list
+      // and not in `SECRETS`. The day someone rewrites the read as `env.NAME`
+      // this goes red and the name moves up, which is the correction we want.
+      expect(READS.named.has(name)).toBe(false);
+      // A committed value would be a leaked credential.
+      expect(DECLARED.vars.has(name), `${name} is a secret and must not be in [vars]`).toBe(false);
       expect(mentionedInToml(name), `${name} is read but never mentioned in wrangler.toml`).toBe(
         true,
       );
@@ -493,7 +554,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(49);
+    expect(rows.length).toBe(51);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -520,8 +581,15 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // The number GW-T18 is really about. Stated as an assertion so it cannot
     // drift silently in either direction: pinning one more var in
     // `vitest.config.ts`, or committing a different value for one, moves it.
+    // WAVE 20: 44 -> 46. The two new `BILLING_ALERTS_*` vars ARE observable,
+    // i.e. they DO reach the runner as committed — deliberately. `""` and `"5"`
+    // are the OFF posture (`budgetAlertConfigFromEnv` requires a non-empty
+    // http(s) URL), so the committed values configure no alerting in the suite,
+    // and `test/metering/budget-alerts.test.ts` supplies its own URL and secret
+    // on the env it passes. The committed value is therefore inert rather than
+    // absent, which is what keeps it from shadowing a fixture.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(44);
+    expect(observable.length).toBe(46);
     expect(rows.length - observable.length).toBe(5);
   });
 });

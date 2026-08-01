@@ -47,6 +47,7 @@ import { adminVirtualKeyRoutes } from "./admin_virtual_key.js";
 import { agentRunRoutes } from "./agent_run.js";
 import { billingRoutes } from "./billing.js";
 import { guardrailPolicyRoutes } from "./guardrail_policy.js";
+import { mountSharedProbes } from "./health.js";
 import { paymentAttemptRoutes } from "./payment_attempt.js";
 import { plansRoutes } from "./plans.js";
 import { promptRoutes } from "./prompt.js";
@@ -215,6 +216,18 @@ export function registeredRoutes(): readonly RegisteredRoute[] {
  * changes with it.
  */
 export function registerRoutes(app: Hono<ControlPlaneEnv>): readonly RegisteredRoute[] {
+  // The two SHARED probes (`/healthz`, `/readyz`), which belong to no group and
+  // are therefore NOT contract operations of this app — they are not appended to
+  // `mounted`, so the 197-operation count `test/wiring.test.ts` pins does not
+  // move. They are mounted HERE, from the one function `src/index.ts` already
+  // calls, because `src/index.ts` is a composition root this slice may not edit
+  // and its two inline probe handlers answered a document that had drifted from
+  // the other four Workers (no `version`, and a `/readyz` that could only ever
+  // say "ready"). Registering first is what makes this the live pair: Hono runs
+  // matching handlers in registration order and stops at the first response.
+  // See `./health.ts` for the exact two lines the integrate step should delete.
+  mountSharedProbes(app);
+
   const mounted: RegisteredRoute[] = [];
   for (const operation of CONTROL_PLANE_OPERATIONS) {
     const handler = HANDLERS.get(operation.operationId);

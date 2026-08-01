@@ -53,11 +53,17 @@
  *   - `D1UsageLedger` → `apps/gateway/src/metering/{runtime,sink,usage-ledger}.ts`
  *     and `src/ratelimit/{middleware,token-budget}.ts`.
  *   - `D1ReferenceGuardedDeletes` → `apps/control-plane/src/{ports,store/tenancy}.ts`.
+ *   - `D1BudgetAlertStore` → `apps/gateway/src/metering/budget-alerts.ts`
+ *     (WAVE 20). `MeteringUsageSink` compares post-charge spend against the
+ *     tenant's alert thresholds and this class is the once-per-period arbiter:
+ *     `claimBudgetAlertNotification` is an `INSERT` whose UNIQUE violation IS
+ *     the "already notified" answer, so two isolates crossing the same
+ *     threshold concurrently send ONE webhook between them. Closing cutover
+ *     HOLD item A1.
  *
  * STILL DEAD — zero importers anywhere under `apps/`, so deleting any of them
  * would leave every suite in this repo green:
  *   - `D1BillingEventLedger`      (the billing outbox drain)
- *   - `D1BudgetAlertStore`        (see `./budget-alerts.js`)
  *   - `D1RetentionPolicyStore`    (see `./retention.js` — no cron calls it)
  *   - `D1AgentScheduleStore`      (see the §1.4.7 marker below)
  *   - `D1SiteDomainVerificationStore`

@@ -7,6 +7,7 @@
  */
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { SERVICE_VERSION } from "../src/app.js";
 import app, { RUNTIME_NAME, SERVICE_NAME } from "../src/index.js";
 import { RecordingDataset, envWithSink, envWithoutSink } from "./fixtures.js";
 
@@ -25,14 +26,23 @@ describe("health", () => {
 });
 
 describe("getHealthz (GET /healthz)", () => {
-  it("answers 200 with the service identity, unauthenticated", async () => {
+  /**
+   * `docs/rewrite/cert2-dataplane.md` finding **A11** — Rust's `HealthResponse`
+   * carries `version = env!("CARGO_PKG_VERSION")` — named `apps/mcp` alone. The
+   * wave-19 boot proof found the member missing on this collector too, so an
+   * operator curling it could not tell which build answered.
+   */
+  it("answers 200 with Rust's four HealthResponse members, unauthenticated", async () => {
     const res = await SELF.fetch("https://ferrogate.test/healthz");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       status: "ok",
       service: SERVICE_NAME,
+      version: SERVICE_VERSION,
       runtime: RUNTIME_NAME,
     });
+    // A blank version satisfies the shape and tells an operator nothing.
+    expect(SERVICE_VERSION).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it("is anonymous: a bad bearer token does NOT turn it into a 401", async () => {
@@ -50,6 +60,7 @@ describe("getReadyz (GET /readyz)", () => {
     expect(await res.json()).toEqual({
       status: "ready",
       service: SERVICE_NAME,
+      version: SERVICE_VERSION,
       runtime: RUNTIME_NAME,
       sink: { configured: true, name: "analytics_engine" },
     });
@@ -69,6 +80,7 @@ describe("getReadyz (GET /readyz)", () => {
     expect(await res.json()).toEqual({
       status: "not_ready",
       service: SERVICE_NAME,
+      version: SERVICE_VERSION,
       runtime: RUNTIME_NAME,
       sink: { configured: false, name: null },
     });

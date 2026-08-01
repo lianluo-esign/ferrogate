@@ -135,6 +135,22 @@ export {
 
 export { attributionFrom, meteringDrain } from "./middleware.js";
 
+// #170/#228 — proactive budget-threshold alerting. See `./budget-alerts.ts` for
+// the vars, the delivery posture and the mount gate.
+export {
+  budgetAlertConfigFromEnv,
+  budgetAlertPortsFrom,
+  budgetAlertScopesFor,
+  dispatchBudgetThresholdAlerts,
+} from "./budget-alerts.js";
+export type {
+  BudgetAlertBindings,
+  BudgetAlertClaimStore,
+  BudgetAlertConfig,
+  BudgetAlertPassInput,
+  BudgetAlertPorts,
+} from "./budget-alerts.js";
+
 // #305/#522 — the agent-run correlation the model spend is joined on.
 export {
   AGENT_RUN_ID_HEADER,

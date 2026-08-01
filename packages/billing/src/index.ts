@@ -19,6 +19,9 @@
  *  - `ledger`       — `charge`, `LedgerEntry`, `CostSource`, `ledgerEntryId`,
  *                     `LedgerSink`, `LedgerListFilter`, `LedgerTotals`.
  *  - `service`      — `createBillingService`, `billingErrorHttpStatus`.
+ *  - `budget-alerts`— proactive budget-threshold alerting (#170/#228): which
+ *                     tiers a spend crosses, the webhook payload, its
+ *                     HMAC-SHA256 signing scheme, and the outbound POST.
  *  - `x402-inbound` — inbound revenue seam (payment legs deferred).
  */
 export * from "./usage.js";
@@ -26,4 +29,5 @@ export * from "./event.js";
 export * from "./pricing.js";
 export * from "./ledger.js";
 export * from "./service.js";
+export * from "./budget-alerts.js";
 export * from "./x402-inbound.js";

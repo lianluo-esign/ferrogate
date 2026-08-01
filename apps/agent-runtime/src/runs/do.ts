@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 /**
  * `AgentRunState` — the Durable Object that IS an agent run.
  *
@@ -41,7 +42,16 @@
  * // dispatch through `/v1/self-hosted-workers/runs/poll` — which IS fully
  * // implemented, and is the path this DO's dispatch queue exists to serve.
  */
-import { DurableObject } from "cloudflare:workers";
+import {
+  type StoredWorkflowRunBudget,
+  WORKFLOW_RUN_BUDGET_ACTIVE,
+  WORKFLOW_RUN_BUDGET_EXHAUSTED,
+  type WorkflowBudgetCaps,
+  type WorkflowBudgetDimension,
+  dimensionExceededBy,
+  workflowBudgetDenialCode,
+} from "@ferrogate/policy";
+import { workflowRunBudgetId } from "@ferrogate/storage";
 import type { AgentRuntimeBindings } from "../ports.js";
 import {
   comparePosition,
@@ -73,9 +83,19 @@ const MAX_RETAINED_EVENTS = 5_000;
 const RUN_KEY = "run";
 const SEQ_KEY = "seq";
 const EVENT_PREFIX = "evt:";
+/** One workflow ledger per `(workflowId, version)` this run has stepped in. */
+const WORKFLOW_PREFIX = "wf:";
 
 function eventKey(seq: number): string {
   return `${EVENT_PREFIX}${String(seq).padStart(16, "0")}`;
+}
+
+function workflowKey(workflowId: string, workflowVersion: number, runId: string): string {
+  // The SAME primary key `D1WorkflowBudgetStore` uses, so a run's envelope is
+  // addressable by one id whichever store holds it. Computed rather than
+  // hand-formatted: a second spelling of this key is how the durable and the
+  // DO-resident halves would silently stop being the same row.
+  return `${WORKFLOW_PREFIX}${workflowRunBudgetId(workflowId, workflowVersion, runId)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +158,67 @@ export interface CancelOutcome {
   readonly cancelled: boolean;
 }
 
+/**
+ * The workflow ledger for one `(workflowId, version)` of THIS run.
+ *
+ * Kept on the run's own Durable Object rather than in D1 for two reasons, both
+ * load-bearing:
+ *
+ *  1. **It is already the right granularity.** `workflow_run_budgets` is keyed
+ *     by `(workflowId, version, runId)` and this object IS the run, so the row
+ *     has exactly one home and cannot be addressed from another tenant — the
+ *     instance name is `${tenant_id}:${run_id}`.
+ *  2. **A DO is single-threaded.** The reference had to obtain no-oversell with
+ *     a `FOR UPDATE` lock (Postgres) or a guarded CAS (D1). Here the check and
+ *     the debit run in one turn of one object, so a split check-then-act — the
+ *     bug class that let K concurrent submits all pass a `cap - 1` check in the
+ *     Rust dispatch path — cannot be written.
+ */
+interface WorkflowLedger {
+  readonly tenantId: string;
+  /** `workflow_run_last_successful_node_id` — the newest ADMITTED step's node. */
+  lastNodeId: string | null;
+  /** `workflow_run_started_at` — the first admitted step's clock. */
+  startedAtUnix: number;
+  /** The durable envelope, or `null` when every dimension is unbounded. */
+  budget: StoredWorkflowRunBudget | null;
+}
+
+/** The two facts `enforceWorkflowToolPolicy` reads about a run. */
+export interface WorkflowStepFacts {
+  readonly previousSuccessfulNodeId: string | null;
+  readonly runStartedAtUnix: number | null;
+}
+
+/** What one step asked the ledger to admit. */
+export interface WorkflowStepInput {
+  readonly workflowId: string;
+  readonly workflowVersion: number;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly caps: WorkflowBudgetCaps;
+  /** The step's declared tool calls — the dimension this layer can observe. */
+  readonly toolCalls: number;
+  readonly nowUnix: number;
+}
+
+export type WorkflowStepAdmission =
+  | { readonly outcome: "admitted" }
+  | {
+      readonly outcome: "exceeded";
+      /** Which dimension broke, e.g. `tool_calls`. */
+      readonly dimension: WorkflowBudgetDimension;
+      /**
+       * The dimension-QUALIFIED code (`workflow_budget_exceeded:tool_calls`),
+       * carried as evidence. The WIRE code stays the unqualified
+       * `workflow_budget_exceeded` Rust answers, so a client's branch does not
+       * have to enumerate four suffixes; the route puts the dimension in the
+       * message where an operator reads it.
+       */
+      readonly qualifiedCode: string;
+      readonly message: string;
+    };
+
 export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
   /** Live SSE subscribers. In-memory: they are, by definition, connected now. */
   readonly #subscribers = new Set<WritableStreamDefaultWriter<Uint8Array>>();
@@ -160,6 +241,153 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
     const run = await this.#load();
     if (run === undefined || run.tenant_id !== tenantId) return undefined;
     return run;
+  }
+
+  // -------------------------------------------------------------------------
+  // Workflow ledger (the tool-side graph gate — `./workflow.ts`)
+  // -------------------------------------------------------------------------
+
+  async #ledger(
+    tenantId: string,
+    workflowId: string,
+    workflowVersion: number,
+    runId: string,
+  ): Promise<WorkflowLedger | undefined> {
+    const stored = await this.ctx.storage.get<WorkflowLedger>(
+      workflowKey(workflowId, workflowVersion, runId),
+    );
+    // Defence in depth: the instance name already encodes the tenant, so a
+    // mismatch means the caller mis-derived the stub. Report "no history"
+    // rather than another tenant's — the fail-CLOSED direction, because an
+    // empty history only ever makes the edge gate stricter (rule 3: a run with
+    // no previous node may open only at a node with no incoming edges).
+    if (stored !== undefined && stored.tenantId !== tenantId) return undefined;
+    return stored;
+  }
+
+  /**
+   * The run facts the workflow gate needs, BEFORE the run row exists.
+   *
+   * A first step legitimately calls this on an object with no run: the gate
+   * runs ahead of `create`, so a refused step leaves nothing behind. That is
+   * why this method does not go through `snapshot`.
+   */
+  async workflowFacts(
+    tenantId: string,
+    workflowId: string,
+    workflowVersion: number,
+    runId: string,
+  ): Promise<WorkflowStepFacts> {
+    const ledger = await this.#ledger(tenantId, workflowId, workflowVersion, runId);
+    if (ledger === undefined) {
+      return { previousSuccessfulNodeId: null, runStartedAtUnix: null };
+    }
+    return {
+      previousSuccessfulNodeId: ledger.lastNodeId,
+      runStartedAtUnix: ledger.startedAtUnix,
+    };
+  }
+
+  /**
+   * Open the run's envelope (idempotent), DEBIT this step against it, and
+   * record the step as the run's newest node — all in one turn.
+   *
+   * This is the debit `packages/policy/src/workflow-budget.ts`'s PORT-TODO
+   * names: *"the authority for them is the atomic `debitWorkflowRunBudget`.
+   * Nothing calls that debit yet. The owner is whoever settles a step —
+   * `apps/agent-runtime`'s run-step path."*
+   *
+   * The arithmetic is `@ferrogate/storage`'s `dimensionExceededBy`, imported
+   * rather than re-derived, because a second copy of the overspend rule is
+   * precisely how a budget stops being one. A breaching debit applies NO spend
+   * and flips the run to `exhausted`, so every later step is refused fail-closed
+   * without re-deriving why.
+   *
+   * The step is debited by its DECLARED tool calls, not by settled results. The
+   * reference debits actuals because it ran the turn loop inside the request;
+   * this Worker dispatches the run, so the declared count is the only number
+   * available at the decision point — and charging the declared count is the
+   * fail-closed direction (a caller cannot widen its envelope by declaring work
+   * it then does not do).
+   */
+  async admitWorkflowStep(
+    tenantId: string,
+    input: WorkflowStepInput,
+  ): Promise<WorkflowStepAdmission> {
+    const key = workflowKey(input.workflowId, input.workflowVersion, input.runId);
+    const existing = await this.#ledger(
+      tenantId,
+      input.workflowId,
+      input.workflowVersion,
+      input.runId,
+    );
+
+    const bounded =
+      input.caps.costBudgetCredits !== undefined ||
+      input.caps.tokenBudget !== undefined ||
+      input.caps.toolCallBudget !== undefined;
+
+    const ledger: WorkflowLedger = existing ?? {
+      tenantId,
+      lastNodeId: null,
+      startedAtUnix: input.nowUnix,
+      // Caps are fixed at the run's FIRST step, exactly as
+      // `openWorkflowRunBudget` fixes them: a later step cannot re-open with a
+      // wider envelope by declaring a different node.
+      budget: bounded
+        ? {
+            id: workflowRunBudgetId(input.workflowId, input.workflowVersion, input.runId),
+            workflowId: input.workflowId,
+            workflowVersion: input.workflowVersion,
+            runId: input.runId,
+            tenantId,
+            ...(input.caps.costBudgetCredits === undefined
+              ? {}
+              : { costBudgetCredits: input.caps.costBudgetCredits }),
+            ...(input.caps.tokenBudget === undefined
+              ? {}
+              : { tokenBudget: input.caps.tokenBudget }),
+            ...(input.caps.toolCallBudget === undefined
+              ? {}
+              : { toolCallBudget: input.caps.toolCallBudget }),
+            spentCredits: 0,
+            spentTokens: 0,
+            spentToolCalls: 0,
+            status: WORKFLOW_RUN_BUDGET_ACTIVE,
+            createdAtUnix: input.nowUnix,
+            updatedAtUnix: input.nowUnix,
+          }
+        : null,
+    };
+
+    const budget = ledger.budget;
+    if (budget !== null) {
+      const breach =
+        budget.status === WORKFLOW_RUN_BUDGET_EXHAUSTED
+          ? (dimensionExceededBy(budget, 0, 0, input.toolCalls, input.nowUnix) ?? "cost")
+          : dimensionExceededBy(budget, 0, 0, input.toolCalls, input.nowUnix);
+      if (breach !== undefined) {
+        budget.status = WORKFLOW_RUN_BUDGET_EXHAUSTED;
+        budget.updatedAtUnix = input.nowUnix;
+        // The refused step is NOT recorded as the run's newest node — a denial
+        // must not advance the graph.
+        await this.ctx.storage.put(key, ledger);
+        return {
+          outcome: "exceeded",
+          dimension: breach,
+          qualifiedCode: workflowBudgetDenialCode(breach),
+          message:
+            `agent workflow ${input.workflowId}@${input.workflowVersion} run ${input.runId} ` +
+            `execution budget exhausted on the ${breach} dimension`,
+        };
+      }
+      budget.spentToolCalls += input.toolCalls;
+      budget.updatedAtUnix = input.nowUnix;
+    }
+
+    ledger.lastNodeId = input.nodeId;
+    await this.ctx.storage.put(key, ledger);
+    return { outcome: "admitted" };
   }
 
   // -------------------------------------------------------------------------
