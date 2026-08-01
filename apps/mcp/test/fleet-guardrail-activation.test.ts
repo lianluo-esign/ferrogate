@@ -24,10 +24,10 @@
  *
  * So the assertions below are deliberately written as ONE path: write the
  * revision and flip the binding through the CONTROL PLANE's own writer, then
- * require the GATEWAY's own durable reader, the DEPLOYED MCP Worker and
- * AGENT-RUNTIME's real screening function to agree about it — inside a single
- * `it()`, so a regression on any side fails the same test rather than a
- * different app's suite six minutes later.
+ * require the GATEWAY's own durable reader, the DEPLOYED MCP Worker and the
+ * DEPLOYED AGENT-RUNTIME Worker to agree about it — inside a single `it()`, so
+ * a regression on any side fails the same test rather than a different app's
+ * suite six minutes later.
  *
  * ## How three Workers are reached from one test
  *
@@ -50,18 +50,40 @@
  *    deployed `src/worker.ts` of THIS Worker over JSON-RPC `tools/call`, with
  *    `FG_DEV_MCP_GUARDRAILS` pinned EMPTY for the whole file so nothing here
  *    can be explained by the var.
- *  - **THE A2A DOOR** is `apps/agent-runtime`'s REAL screening function,
- *    `screenA2aAgainstDurablePolicies` (`src/guardrails.ts`), against the same
- *    handle. Its BEHAVIOURAL half — the deployed agent-runtime Worker refusing
- *    `message:send` and cutting `message:stream` mid-flight — is
- *    `apps/agent-runtime/test/durable/guardrail-policy-activation.spec.ts`,
- *    which runs in that app's durable harness where `CONTROL_DB` is bound.
+ *  - **THE A2A DOOR** is `apps/agent-runtime`'s DEPLOYED Hono app
+ *    (`src/index.ts`), invoked with `app.fetch(request, env)` against the same
+ *    two D1 handles, plus its COMPOSITION ROOT `resolveDeps(env)` for the
+ *    response leg no offline harness can reach through the wire. Its own
+ *    durable harness carries the deeper behavioural matrix —
+ *    `apps/agent-runtime/test/durable/guardrail-policy-activation.spec.ts`.
  *
- * The two cross-app imports are only sound because both modules are LEAVES: D1
- * plus `@ferrogate/guardrails`, no Hono, no Worker entry, no route. That is
- * asserted off the files' own source text below rather than trusted to this
- * docblock, exactly as `apps/gateway/test/routes/agent-upstream-fleet-withdrawal.test.ts`
- * asserts its own.
+ * ## WHY THE A2A DOOR IS NOT `screenA2aAgainstDurablePolicies` ANY MORE
+ *
+ * It was, until wave 23, and that was a hole in this file with this file's name
+ * on it. Importing agent-runtime's screening FUNCTION as a leaf proves the
+ * FUNCTION honours an activation; it cannot see whether the deployed Worker
+ * still MOUNTS it. `docs/rewrite/FLEET-CONSISTENCY.md` §7.5 **M29** measured
+ * exactly that: dropping the `durableA2aGuardrailPort(…)` wrapper from
+ * `apps/agent-runtime/src/ports.ts::resolveDeps` — the Worker returned to the
+ * var-only posture FC-3 describes — left this file **15/15 GREEN**. The
+ * regression was caught twice elsewhere, so it was gated; but the file whose
+ * NAME says "fleet" was not the file that caught it, and the next reader would
+ * trust the name.
+ *
+ * Both sibling fleet gates already had the right shape and this one now copies
+ * them: `apps/mcp/test/drain-fleet.test.ts` (FC-1) drives agent-runtime's real
+ * resolver against the real database, and
+ * `apps/mcp/test/fleet-tenancy-suspension.test.ts` (FC-2) drives
+ * `agentRuntimeApp.fetch(request, env)` — which is how a Workers module
+ * entrypoint is invoked in production. Every A2A assertion below now passes
+ * through `resolveDeps`, so unmounting the durable guardrail port turns THIS
+ * file red.
+ *
+ * The cross-app imports are sound for the reason
+ * `apps/gateway/test/routes/agent-upstream-fleet-withdrawal.test.ts` and FC-2's
+ * gate state: this is a TEST, not a bundle. No `wrangler deploy` sees it. What
+ * must not drift is the SQL and the tables, and those are pinned below off the
+ * modules' own exported constants.
  *
  * ## The two scope classes, and why there are two policies
  *
@@ -88,8 +110,8 @@ import {
   GUARDRAIL_BINDING_TABLE,
   GUARDRAIL_REVISION_LIST_ALL_SQL,
   GUARDRAIL_REVISION_TABLE,
-  type PolicySelectionContext,
   type PolicyRevision,
+  type PolicySelectionContext,
   envelopeFromText,
   envelopeManagedAction,
   flattenedText,
@@ -99,9 +121,14 @@ import {
   A2A_GUARDRAIL_BINDING_SQL,
   A2A_GUARDRAIL_POINTER_SQL,
   A2A_GUARDRAIL_REVISION_SQL,
-  screenA2aAgainstDurablePolicies,
 } from "../../agent-runtime/src/guardrails.js";
 import agentRuntimeGuardrailsSource from "../../agent-runtime/src/guardrails.ts?raw";
+import agentRuntimeApp from "../../agent-runtime/src/index.js";
+import {
+  type AgentRuntimeBindings,
+  type AgentRuntimeDeps,
+  resolveDeps as resolveAgentRuntimeDeps,
+} from "../../agent-runtime/src/ports.js";
 import {
   GUARDRAIL_BINDINGS_TABLE,
   GUARDRAIL_REVISIONS_TABLE,
@@ -113,6 +140,7 @@ import {
   D1GuardrailPolicyStore,
   loadGuardrailPolicyStore,
 } from "../../gateway/src/guardrails/d1.js";
+import { hashApiKeySecret } from "../src/auth.js";
 import {
   MCP_GUARDRAIL_BINDING_SQL,
   MCP_GUARDRAIL_POINTER_SQL,
@@ -122,21 +150,35 @@ import mcpGuardrailsSource from "../src/guardrails.ts?raw";
 import { managedActionTarget } from "../src/ports.js";
 import {
   EXEC_KEY,
+  type Fixture,
   TENANT,
   getMcpEnvVar,
   rpcRequest,
   seedFixture,
   setMcpEnvVar,
-  type Fixture,
 } from "./fixtures.js";
 
 interface Bindings {
+  /** `apps/mcp`'s `DB` IS the CONTROL database (`wrangler.toml`). */
   readonly DB: D1Database;
+  /** A provisioned tenant database, declared in `vitest.config.ts`. */
+  readonly TENANT_DB_A: D1Database;
   readonly TEST_CONTROL_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
+  readonly TEST_TENANT_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
 }
 
-const bindings = (): Bindings => env as unknown as Bindings;
+function bindings(): Bindings {
+  const b = env as unknown as Partial<Bindings>;
+  if (b.DB === undefined || b.TENANT_DB_A === undefined) {
+    // Loud rather than a silent skip: without both handles the A2A door below
+    // would resolve no credential and prove nothing about any Worker.
+    throw new Error("the FC-3 fleet gate needs both the `DB` (control) and `TENANT_DB_A` bindings");
+  }
+  return b as Bindings;
+}
+
 const control = (): D1Database => bindings().DB;
+const tenantDb = (): D1Database => bindings().TENANT_DB_A;
 
 /**
  * The payload. The same string on every surface, so any refusal below is
@@ -276,11 +318,221 @@ async function rpcError(res: Response): Promise<{ code: number; message: string 
   return body.error as { code: number; message: string };
 }
 
-function a2a(stage: "request" | "response", text: string, tenantId = TENANT): Promise<unknown> {
-  return screenA2aAgainstDurablePolicies(
-    { CONTROL_DB: control() },
-    { stage, tenantId, agentId: "planner", streaming: false, text },
+// ---------------------------------------------------------------------------
+// THE A2A DOOR — `apps/agent-runtime`, through its own composition root
+// ---------------------------------------------------------------------------
+
+/** In the governed allowlist, and deliberately NOT the upstream's host. */
+const GOVERNED_HOST = "governed.egress.invalid";
+/** The registered A2A upstream the dispatch below is addressed to. */
+const A2A_UPSTREAM_ID = "fleet-guardrail-probe";
+const A2A_UPSTREAM_HOST = `${A2A_UPSTREAM_ID}.upstream.invalid`;
+
+/** `fg_` + 48 hex chars — the shape `virtual_api_key_material` mints. */
+const A2A_KEY = `fg_${"c3d4e5f6".repeat(6)}`;
+const A2A_PROJECT = "proj-fc3";
+const A2A_WORKSPACE = "ws-fc3";
+
+/**
+ * THE ENV `apps/agent-runtime` IS INVOKED WITH — built ONCE, on purpose.
+ *
+ * The binding NAMES are agent-runtime's, not this Worker's: it binds the TENANT
+ * database as `DB` and the control database as `CONTROL_DB`
+ * (`apps/agent-runtime/wrangler.toml`'s deploy stanzas), while `apps/mcp` binds
+ * the CONTROL database as `DB` — so the mapping is not the identity.
+ *
+ * ONE object for the whole file because the durable policy snapshot is
+ * memoized against the env identity, exactly as a production isolate memoizes
+ * against the one env workerd hands it. A fresh object per call would hand
+ * every assertion a cold cache and quietly retire the property FC-3 actually
+ * promises: an activation takes effect on the very NEXT request, in a WARM
+ * isolate, because the binding POINTERS are revalidated. That is the property
+ * `FLEET-CONSISTENCY.md` §7.3 **M19** attacks.
+ */
+let agentRuntimeEnvSingleton: Record<string, unknown> | undefined;
+function agentRuntimeEnv(): Record<string, unknown> {
+  agentRuntimeEnvSingleton ??= {
+    DB: tenantDb(),
+    CONTROL_DB: control(),
+    // Non-empty and NOT the upstream's host: a sealed tier would also refuse
+    // the forward, but with a message naming no host, and a test that cannot
+    // tell WHICH endpoint was about to be contacted proves less.
+    CONTAINER_GOVERNED_EGRESS_HOSTS: GOVERNED_HOST,
+  };
+  return agentRuntimeEnvSingleton;
+}
+
+/**
+ * `apps/agent-runtime`'s COMPOSITION ROOT, resolved exactly as
+ * `middleware/auth.ts::depsOrThrow` resolves it per request.
+ *
+ * This is the line the old leaf import skipped. `resolveDeps` is where
+ * `durableA2aGuardrailPort` is mounted over the var-driven detector, so a
+ * deployment that dropped the wrapper answers here — and every A2A assertion in
+ * this file goes through it.
+ */
+function agentRuntimeDeps(): AgentRuntimeDeps {
+  const deps = resolveAgentRuntimeDeps(agentRuntimeEnv() as unknown as AgentRuntimeBindings);
+  expect(
+    deps,
+    "apps/agent-runtime's composition root refused to resolve — it fails CLOSED when a " +
+      "credential authority is missing, so nothing below would mean anything",
+  ).toBeDefined();
+  return deps as AgentRuntimeDeps;
+}
+
+/** The A2A screening answer, reduced to the fields an operator branches on. */
+type A2aVerdict = { outcome: "allow" } | { outcome: "deny"; code?: string; message?: string };
+
+/**
+ * Screen one A2A leg through the port the DEPLOYED Worker mounts.
+ *
+ * The RESPONSE leg has no offline wire equivalent — `vitest-pool-workers`
+ * 0.18.8 exports no `fetchMock`, so no upstream reply exists to screen — which
+ * is why this stays a port call rather than becoming a second `fetch`. It is
+ * still the deployed mount: `deps.guardrails` is the object
+ * `agents/ingress.ts` calls on both legs.
+ */
+async function a2a(
+  stage: "request" | "response",
+  text: string,
+  tenantId = TENANT,
+): Promise<A2aVerdict> {
+  const decision = await agentRuntimeDeps().guardrails.evaluate({
+    stage,
+    tenantId,
+    agentId: "planner",
+    streaming: false,
+    text,
+  });
+  if (decision.outcome !== "deny") return { outcome: "allow" };
+  return {
+    outcome: "deny",
+    code: decision.denial.code,
+    message: decision.denial.message,
+  };
+}
+
+interface A2aDispatch {
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly body: string;
+}
+
+/**
+ * DOOR: the DEPLOYED agent-runtime Worker, over real HTTP.
+ *
+ * `app.fetch(request, env)` is how a Workers module entrypoint is invoked in
+ * production, and it is how `test/fleet-tenancy-suspension.test.ts` reaches the
+ * same Worker. Every middleware runs: correlation, `contractAuth`, the FC-2
+ * lifecycle gate, the admission ladder, the durable upstream registry, then the
+ * request-stage guardrail, then the egress gate.
+ */
+async function a2aDispatch(text: string, verb = ""): Promise<A2aDispatch> {
+  const response = await agentRuntimeApp.fetch(
+    new Request(`https://ar.test/v1/agents/${A2A_UPSTREAM_ID}${verb}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${A2A_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({ message: { role: "user", parts: [{ kind: "text", text }] } }),
+    }),
+    agentRuntimeEnv() as never,
   );
+  const body = await response.text();
+  let code: string | undefined;
+  try {
+    code = (JSON.parse(body) as { error?: { code?: string } }).error?.code;
+  } catch {
+    code = undefined;
+  }
+  return { status: response.status, code, body };
+}
+
+/**
+ * The payload passed EVERY content control and was at the point of forward.
+ *
+ * `agents/ingress.ts` runs the request-stage guardrail BEFORE the egress gate,
+ * so a `422` that NAMES the upstream host is direct evidence that nothing
+ * screened it. That pair — `403` with the operator's code versus `422` naming
+ * the host — is the before/after of an activation, and it is the strongest
+ * observation available offline.
+ */
+function expectA2aForwardReached(result: A2aDispatch): void {
+  expect(result.status, result.body).toBe(422);
+  expect(result.code).toBe("egress_host_not_governed");
+  expect(result.body).toContain(A2A_UPSTREAM_HOST);
+}
+
+/**
+ * ONE credential and ONE registered upstream, seeded with raw SQL rather than
+ * through any code under test.
+ *
+ * The tenant is `TENANT` — the SAME organization the MCP door authenticates as
+ * and the same one the gateway selection below is scoped to — which is what
+ * makes "one activation, every door" a claim about one policy rather than
+ * three coincidences.
+ */
+async function seedA2aFixture(): Promise<void> {
+  const hash = await hashApiKeySecret(A2A_KEY);
+  const now = 1_700_000_000;
+
+  await tenantDb().batch([
+    tenantDb()
+      .prepare(
+        `INSERT INTO projects (id, tenant_id, name, slug, status)
+         VALUES (?1, ?2, 'p', 'p-fc3', 'active')
+         ON CONFLICT (id) DO UPDATE SET status = 'active'`,
+      )
+      .bind(A2A_PROJECT, TENANT),
+    tenantDb()
+      .prepare(
+        `INSERT INTO workspaces (id, project_id, tenant_id, name, slug, status)
+         VALUES (?1, ?2, ?3, 'w', 'w-fc3', 'active')
+         ON CONFLICT (id) DO UPDATE SET status = 'active'`,
+      )
+      .bind(A2A_WORKSPACE, A2A_PROJECT, TENANT),
+    tenantDb()
+      .prepare(
+        `INSERT INTO api_keys (id, workspace_id, tenant_id, project_id, name, key_prefix,
+           key_hash, last4, enabled, scopes_json)
+         VALUES ('key-fc3', ?1, ?2, ?3, 'fc3', ?4, ?5, ?6, 1, ?7)
+         ON CONFLICT (id) DO UPDATE SET enabled = 1, key_hash = excluded.key_hash`,
+      )
+      .bind(
+        A2A_WORKSPACE,
+        TENANT,
+        A2A_PROJECT,
+        A2A_KEY.slice(0, 16),
+        hash,
+        A2A_KEY.slice(-4),
+        // Deliberately NOT the wildcard: a `["*"]` key would make a 403
+        // ambiguous between "scope" and "guardrail".
+        JSON.stringify(["agents.invoke"]),
+      ),
+  ]);
+
+  // The durable `agent-upstreams` document — the SAME rows
+  // `apps/control-plane`'s admin group writes and `apps/gateway`'s discovery
+  // surface reads.
+  await control()
+    .prepare(
+      `INSERT INTO control_plane_resources
+         (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+       VALUES ('agent-upstreams', ?1, ?2, 1, ?3, ?3)
+       ON CONFLICT (resource_kind, resource_id) DO UPDATE SET document_json = excluded.document_json`,
+    )
+    .bind(
+      A2A_UPSTREAM_ID,
+      JSON.stringify({
+        id: A2A_UPSTREAM_ID,
+        name: "fleet guardrail probe",
+        protocol: "a2a",
+        endpoint: `https://${A2A_UPSTREAM_HOST}/a2a`,
+        capabilities: ["invoke", "read"],
+        tenant_id: null,
+      }),
+      now,
+    )
+    .run();
 }
 
 let fixture: Fixture;
@@ -288,10 +540,12 @@ const originalVar = getMcpEnvVar("FG_DEV_MCP_GUARDRAILS");
 
 beforeAll(async () => {
   await applyD1Migrations(control(), bindings().TEST_CONTROL_D1_SCHEMA);
+  await applyD1Migrations(tenantDb(), bindings().TEST_TENANT_D1_SCHEMA);
 });
 
 beforeEach(async () => {
   fixture = seedFixture();
+  await seedA2aFixture();
   // THE VAR IS PINNED EMPTY FOR THE WHOLE FILE. Anything refused below was
   // refused because of a durable ACTIVATED REVISION and nothing else — without
   // this line every assertion here could be satisfied by the dev var, which is
@@ -316,6 +570,9 @@ describe("FC-3 — one activation, every door", () => {
     expect(fixture.calls, "the tool must really have dispatched").toHaveLength(1);
     expect(await gatewayActivatedCodes({ organization_id: TENANT })).toEqual([]);
     expect(await a2a("request", PAYLOAD)).toEqual({ outcome: "allow" });
+    // And on the wire: the DEPLOYED agent-runtime Worker carried the payload
+    // all the way to the forward.
+    expectA2aForwardReached(await a2aDispatch(PAYLOAD));
   });
 
   it("ONE managed-action activation shuts the MCP door AND is live on the gateway, same code", async () => {
@@ -367,6 +624,26 @@ describe("FC-3 — one activation, every door", () => {
     // The RESPONSE leg too: a policy that screens inbound and not outbound is
     // the half an exfiltration payload uses.
     expect(await a2a("response", PAYLOAD)).toMatchObject({ outcome: "deny", code: CODE });
+
+    // ---- the DEPLOYED agent-runtime Worker, over real HTTP ----------------
+    // The mount half. `deps.guardrails` honouring the activation is necessary
+    // and not sufficient: the ROUTE must call it, and call it BEFORE the
+    // forward. Both `message:send` and the bare invoke verb.
+    for (const verb of ["", "/message:send", "/message:stream"]) {
+      const result = await a2aDispatch(PAYLOAD, verb);
+      expect(result.status, `${verb}: ${result.body}`).toBe(403);
+      expect(
+        result.code,
+        "A2A must refuse with the code the operator activated, not a private one",
+      ).toBe(CODE);
+      expect(result.body).toContain(MESSAGE);
+      // ORDERING: the egress gate is never reached, so the endpoint was never
+      // resolved for contact. A build that screened after the forward would
+      // still answer 403 while the bytes had already left.
+      expect(result.body).not.toContain(A2A_UPSTREAM_HOST);
+      // Never echo what matched.
+      expect(result.body).not.toContain("signing keys");
+    }
   });
 
   it("clean content under the SAME activation still passes every door", async () => {
@@ -378,6 +655,7 @@ describe("FC-3 — one activation, every door", () => {
     expect(res.status).toBe(200);
     expect(fixture.calls).toHaveLength(1);
     expect(await a2a("request", "hello there")).toEqual({ outcome: "allow" });
+    expectA2aForwardReached(await a2aDispatch("hello there"));
   });
 
   it("a MODEL-CONTENT policy does not police a MANAGED ACTION", async () => {
@@ -400,13 +678,53 @@ describe("FC-3 — one activation, every door", () => {
     await activateThroughControlPlane(modelContentPolicy());
     expect(await a2a("request", PAYLOAD, "tenant-not-scoped")).toEqual({ outcome: "allow" });
   });
+
+  it("the A2A door is the DEPLOYED Worker's, not a screening function called directly", async () => {
+    // The property `FLEET-CONSISTENCY.md` §7.5 M29 found missing, pinned as an
+    // assertion rather than left to the helpers above: the composition root
+    // resolves, and the port it MOUNTED is the one that honours an activation.
+    // Unmount `durableA2aGuardrailPort` in `apps/agent-runtime/src/ports.ts`
+    // and this fails here, in the file whose name says fleet.
+    const deps = agentRuntimeDeps();
+    expect(
+      await deps.guardrails.evaluate({
+        stage: "request",
+        tenantId: TENANT,
+        agentId: "planner",
+        streaming: false,
+        text: PAYLOAD,
+      }),
+    ).toMatchObject({ outcome: "allow" });
+
+    await activateThroughControlPlane(modelContentPolicy());
+
+    // The SAME deps object — no re-resolution, no isolate recycle, no redeploy.
+    // An activation takes effect on the next request through a WARM composition
+    // root, which is the promise FC-3 makes and the one a process-lifetime memo
+    // would quietly break.
+    expect(
+      await deps.guardrails.evaluate({
+        stage: "request",
+        tenantId: TENANT,
+        agentId: "planner",
+        streaming: false,
+        text: PAYLOAD,
+      }),
+    ).toMatchObject({ outcome: "deny", denial: { code: CODE } });
+  });
 });
 
 describe("FC-3 — the properties that make the shared reader trustworthy", () => {
-  it("the cross-app imports stay LEAVES", () => {
-    // If either screening module grew a Hono/route/env import this file would
-    // quietly pull one Worker's module graph into another's test bundle.
-    // Asserted off the source text, not the docblock.
+  it("the two screening modules stay LEAVES", () => {
+    // NOT a bundle-isolation claim any more — this file drives agent-runtime's
+    // deployed app, so its module graph is here by design and the leaf property
+    // buys that file nothing. What it still buys is the thing FC-3 was found
+    // with: `fleet-control-matrix.test.ts` scores each control's
+    // source-of-truth class off the SQL literals in each Worker's own `src/`,
+    // and an operator grepping "who reads guardrail_policy_bindings" must find
+    // every reader in one file per Worker. A screening module that grew a
+    // Hono/route/env import is one that started resolving its policy somewhere
+    // else. Asserted off the source text, not the docblock.
     for (const [label, source] of [
       ["agent-runtime", agentRuntimeGuardrailsSource],
       ["mcp", mcpGuardrailsSource],

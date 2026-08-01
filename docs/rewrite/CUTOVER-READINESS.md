@@ -1,5 +1,540 @@
 # CUTOVER READINESS — the decision document
 
+**Wave 23 · 2026-08-01 · branch `main-ts` · worktree `/home/dev/ferrogate-ts`**
+
+**This is a FRESH decision.** It inherits no verdict. Waves 15–22 are preserved
+verbatim in **Appendix G** (waves 19–22) and **Appendix H** (waves 15–18) and are
+history, not evidence. Every number in §1 was measured by this agent, on this
+tree, this wave. Four certifications were delivered into this wave and all four
+were read end to end; where one of them is loose I say so and give the
+measurement (§2.4, §4.3).
+
+The question this document answers is exactly the one it was asked:
+
+> May we delete `crates/**`, `workers/**` and `Cargo.*`, and merge `main-ts`
+> into `main`?
+
+---
+
+## 0. THE VERDICT
+
+| Decision | Verdict |
+|---|---|
+| **Merge `main-ts` → `main`** | **GO — unconditionally, today.** |
+| **Delete `crates/**` + `workers/**` + `Cargo.*`** | **NO-GO — on a named, five-cluster subset.** Everything else is clear. |
+| **The compound decision as asked (delete AND merge)** | **NO-GO**, because deletion is inside it. |
+
+### 0.1 Why the merge is a clean GO
+
+Nothing in the CLASS A list is a reason to keep `main` pointing at the Rust. The
+Rust tree does not run on Cloudflare Workers and cannot be deployed to the target
+platform at all; keeping `main` on it does not preserve a single one of the
+capabilities §2 says were lost. The TypeScript tree typechecks clean across 22
+projects, is green on 6,980 tests across 381 files, boots all five Workers under
+real `workerd`, and holds 195 of 200 mount seams under mutation. **Merging is
+strictly better than not merging and there is no argument on the other side.**
+All four certifications reach the same conclusion independently.
+
+### 0.2 Why the deletion is a NO-GO, stated so it can be argued with
+
+The rule I was given is that CLASS A — *regressions where the Rust worked and the
+TypeScript dropped it* — and **only** CLASS A blocks. So the discipline is:
+
+1. CLASS A is **not empty**. It is 77 contract operations plus 6 cross-cutting
+   items (§2). That is measured, not asserted, and three of the sharpest items I
+   re-verified against the Rust myself rather than inheriting (§2.4).
+2. But **most of CLASS A does not require the Rust to survive.** An error code
+   collapsed from `invalid_upload_intent` to `invalid_request` is fully specified
+   by the sentence you just read. Deleting the Rust costs nothing there.
+3. What blocks the deletion is the **SPEC-BOUND subset** — the CLASS A items
+   whose only complete specification is Rust source that is about to be deleted.
+   That is five clusters (§3), and for those the deletion is not "irreversible in
+   principle", it is *"this work gets materially harder next week than it is
+   today"*.
+
+**The honest framing: the blocker is not the size of CLASS A, it is the overlap
+between CLASS A and the Rust's role as a specification.** Once that overlap is
+empty — by building the five clusters, or by the owner explicitly dropping them —
+the deletion is a GO and I would say so.
+
+### 0.3 The exit criterion, so this is not an indefinite hold
+
+Deletion becomes **GO** when, for each of the five clusters in §3, exactly one of
+these is true:
+
+* it has been **built** in TypeScript; or
+* the owner has **explicitly dropped** the capability (a product decision, and a
+  legitimate one — the owner has released this project from parity with an
+  unfinished system, and three of the five are small); or
+* its Rust specification has been **transcribed** into `docs/rewrite/` at the
+  fidelity §3 names, so the delete costs no information.
+
+The third option is cheap and is the fastest path. **This is days of work, not
+waves.** Nothing here requires the certification cycle to run again.
+
+### 0.4 What this verdict is NOT
+
+* It is **not** "the TypeScript is unfinished, so hold". On security and money
+  the TypeScript is *better held* than the Rust ever was: 19 data-plane
+  mutations RED, 8 control-plane write halves proven as EFFECTS, 195 seams
+  mutation-proven. That work is done.
+* It is **not** parity-with-Rust as a standard. Zero of the 197 control-plane
+  operations are CLASS B, because cert-3 opened the Rust handler for every one —
+  and the places the Rust genuinely never finished (§5) are explicitly **not**
+  allowed to block anything.
+* It is **not** a hold on the merge. The two decisions are separable and I have
+  separated them.
+
+---
+
+## 1. Evidence this wave produced, first-hand
+
+Everything below was run by me in this worktree. No number is inherited.
+
+| Gate | Result |
+|---|---|
+| `bun install` | clean, no changes (262 installs / 338 packages) |
+| `bun run typecheck` | **exit 0**, 22 projects, zero diagnostics — run twice, before and after this wave's edits |
+| `bun run test`, per workspace, serially | **exit 0 in all 21** · **6,980 passed + 9 todo · 0 failed · 381 files** |
+| **Full seam pass, all 200 rows** | **195 RED · 5 NOT-MUTABLE by category · 0 GREEN-unproven · 0 restore failures** (§2.1) |
+| `bunx wrangler dev --local`, five Workers, distinct ports | **5/5 "Ready on"**, `/healthz` **200 ×5**, `/readyz` **200 ×5**, ONE health-document shape (§2.2) |
+| `bunx playwright test --config e2e/playwright.config.ts` | **22 passed**, exit 0, 4.3 s |
+
+Baseline was ~6,986. The tree is at **6,989 including todos**; the +2 is the
+source-hygiene gate this wave added (§4.1) and it was proven RED before it was
+proven GREEN.
+
+### 1.1 The seam pass, and the correction it needed
+
+`bun scripts/seam-proof.mjs --list` reports the three numbers that keep a scripted
+pass honest, and **they agree**:
+
+```
+rows CLAIMED by the inventory's §13 total ... 200
+rows PARSED out of §7-§12 .................. 200 (+1 retired)
+rows with a RESOLVABLE gate ................ 198
+rows with NO gate BY DESIGN ................ 2
+rows with NO gate and no reason ............ 0
+```
+
+I built a second, independent parser (`scripts/wave23-seam-pass.py`) and
+cross-checked it against `seam-proof.mjs`'s row set **by ID**: 200 = 200, empty
+symmetric difference. A driver that sees a different population than the counter
+is precisely how a "full" pass under-runs.
+
+**The first attempt was not honest and I did not report it as if it were.** The
+generic driver located each Seam cell's *first backticked span* and commented out
+its line. That produced 166 RED, 5 GREEN and **26 rows it could not locate** —
+and 26 unlocatable rows in a summary look exactly like 26 passing ones. Three
+causes, all properties of the inventory rather than the tree:
+
+* twelve rows sit under a `### … src/index.ts` heading while the Seam cell names
+  the module the seam actually lives in (`src/http.ts`,
+  `src/identity/routes.ts`, `src/routes/health.ts`, …);
+* eight seams are multi-line expressions with no single line to comment out —
+  commenting one line yields a **syntax error**, and a suite that goes red
+  because the file no longer parses proves nothing whatever about the gate;
+* two seams **are already comments** (the deliberately commented cross-script
+  `RATE_LIMIT` stanza), and commenting a comment is a byte change with no
+  behaviour change.
+
+Five of the first pass's GREENs were the same defect wearing the other face: the
+driver had commented out a *docblock line*, so the mutation changed bytes and
+changed nothing, and the resulting GREEN would have been reported as an unproven
+mount. **That is a false finding in the direction that manufactures work**, and
+it is why `is_inert_line()` now rejects an already-inert target rather than
+measuring it.
+
+The fix was a refined candidate search (`scripts/wave23-seam-pass.py`) for 9 of
+them and **22 hand-written, behaviour-changing edits**
+(`scripts/wave23-seam-residue.py`) for the rest — each one naming, in the script,
+the behaviour it removes. Final tally:
+
+| | rows |
+|---|---:|
+| **RED — the named gate failed under a LANDED mutation** | **195** |
+| NOT-MUTABLE by category (2 `NONE`, 1 `NOT-MUTABLE`, 2 already-commented stanzas) | 5 |
+| GREEN against a landed mutation (an unproven mount) | **0** |
+| restore failures (every file re-verified byte-identical by sha256) | **0** |
+| **total** | **200** |
+
+Every mutation was **grepped back off disk** before its suite ran, and required
+the original text to be *gone* — not merely the marker present. `grep -rn MUTW23
+apps packages` at the end of the pass returns nothing.
+
+### 1.2 One seam finding, independently reproduced
+
+While mutating `CP-C13` I initially removed the `/version` document's three
+census fields while leaving the route registered — and the gate stayed **GREEN**.
+That is not a new defect: it is exactly what `MOUNT-SEAMS.md` records as
+**CP-C13b**, a knowingly unproven sub-seam whose Channel is `NONE`. Re-running
+`CP-C13` against its *actual* seam — the registration itself — is **RED**.
+
+So the inventory's own honesty about CP-C13b is now independently confirmed by an
+agent that stumbled into it rather than read it. That is the best evidence a
+tombstone row can get, and it is the argument for keeping the `NONE`-with-a-
+reason channel rather than deleting rows that cannot be proven.
+
+---
+
+## 2. (b) THE CLASS A LIST — the only cutover blockers
+
+**CLASS A = 77 contract operations + 6 cross-cutting items = 83 findings.**
+It is not empty, and §0.2 explains why that alone is not the blocker.
+
+Severity is *what a paying customer or an operator observes*, not size.
+
+### 2.1 CLASS A · the material items
+
+| # | Finding | Where Rust had it | Severity |
+|---|---|---|---|
+| **A1** | **`executeFunction` answers 501.** The "out-of-process sandbox" justification is **false about the reference**: Rust's `handle_function_execute` is a broker — `fetch` + WebCrypto HMAC + a config table — with a fail-closed per-tenant egress allowlist, a signed short-lived token and a Cloudflare-Worker target arm. All of it is portable to workerd. | `local.rs:3219`; `ferrogate-runtime/src/{function_egress,function_token,supabase_edge_function,function_egress_cloudflare}.rs` | **MEDIUM** |
+| **A2** | **`listTools` + `executeTool` answer 501.** Rust's registry is real: `tools_for(tenant, api_key_id, route)` merges builtin providers, MCP-HTTP-declared tools and per-tool approval policy + tenant/key/route allowlists. | `extensions.rs`, `state_tools.rs` | **MEDIUM** |
+| **A3** | **R1 — the plan tool-entitlement gate is parsed by four Workers and enforced by none.** `plans.mcp_enabled` / `extension_tools_enabled` / `self_hosted_workers_enabled` are read into a `StoredPlan` by gateway, mcp, agent-runtime **and** the control plane, and have zero consumers. **Verified by me** (§2.4). | `local.rs:137 tool_execution_entitlement_denial`, called from `local.rs:3617` and `mcp_rpc.rs:567`; durable half `state_rbac.rs:11` | **HIGH — money + capability** |
+| **A4** | **R2 — the `monthly_token_budget = 0` kill switch stops one spend Worker of three.** Rust enforced it inside the SHARED credential-resolution path, so every handler in the process got it. TS reproduces it on the gateway only. **Verified by me** (§2.4). | `auth.rs:1344-1350` inside `authenticate_durable` | **MEDIUM — money** |
+| **A5** | **L1 — Cloudflare AI Gateway routing (#406) is unreachable, and its config is REJECTED.** `defaultAdapterRegistry` is a hand-written `switch` that never goes through `ProviderAdapterRegistry`, so the routing is skipped on every request; and `providerRecordSchema` is `.strict()` with no `cloudflare_ai_gateway` key, so a working Rust operator config is **refused**, not ignored. A config-acceptance regression on top of a feature regression. | the library half is complete and correct in `packages/providers` | **MEDIUM** |
+| **A6** | **55 control-plane operations whose write takes no effect.** The write lands in `control_plane_resources`; the data plane reads deploy-time vars. In Rust the same `POST` was a persist → rebuild-candidate → `validate()` → hot-reload → rollback transaction and was live on the next request. | `state.rs:1334` + `local.rs:1844`; `local.rs:5019/5062/8227` for providers/models | **MEDIUM in aggregate** |
+| **A7** | **R5 — guardrail evidence is durable nowhere.** `InMemoryGuardrailEvidenceSink` is bound **unconditionally**, and there is no evidence table in `sql/d1-ts/` at all. Every guardrail decision dies with the isolate. Request-path behaviour is unaffected, which is exactly why it is invisible. | `state_quota_and_policy.rs:935 record_guardrail_evaluation` → durable admin audit | **MEDIUM — compliance / IR** |
+| **A8** | **CORS is absent from the entire `/v1/**` data plane.** Rust's `apply_cors_headers` is called from 9 sites including the generic `write_json_response`/`write_raw_response` bodies. `apps/control-plane` has CORS, so `/admin/v1/**` is covered and `/v1/**` is not. | `responses.rs:38`, driven by `config.admin.cors_allowed_origin` | **MEDIUM — browser clients** |
+| **A9** | **D1 — the same missing binding fails OPEN on two Workers and CLOSED on the third.** With `CONTROL_DB` unbound, mcp answers `503 lifecycle_status_unavailable`; gateway and agent-runtime read "no row" as "not suspended". Combined with the committed `FG_DEV_IN_MEMORY_PORTS = "1"`, the **half-bound** deployment serves traffic with suspension, drain, guardrails and upstream withdrawal all silently off. | — (a TS configuration asymmetry) | **HIGH in the half-bound posture** |
+| **A10** | **`GET /metrics` is served by two Workers with two different bodies** — 47 series from the gateway, two gauges from the control plane — and `ROUTE-MAP.md` points operators at the two-gauge host. | | LOW–MEDIUM |
+| **A11** | **R4 — `apps/mcp` keeps no durable audit trail.** `InMemoryAuditSink` in every posture, 20 call sites including every tool execution, credential grant and OAuth completion. The gateway writes `audit_events` durably; in Rust the two surfaces were one process writing one log. | | LOW |
+
+### 2.2 CLASS A · the tail (19 items, all LOW, all fully transcribed)
+
+These need no Rust to fix and are listed so they are decided rather than lost:
+six error codes collapsed to `invalid_request` (three asset-presign, plus
+`asset_commit_outcome_unknown` absent); the four job-lifecycle codes
+(`invalid_agent_job_input`, `invalid_agent_job_capabilities`,
+`409 agent_job_not_cancellable`, `503 agent_job_cancel_unavailable`); the eight
+per-verb self-hosted-worker callback codes; `422 image_generation_unsupported`
+→ `400 model_capability_unsupported`; a malformed `x-ferrogate-agent-run-id`
+accepted silently on ordinary inference; a misspelled `x-ferrogate-config`
+silently selecting the default posture; `renderPromptTemplate` writing no audit
+row; `chars/4` in place of BPE (**fails closed** — it over-reserves, and the
+inequality direction is pinned); and **`/readyz` on the gateway omitting
+`version`** — which the boot proof confirmed live this wave (§2.3).
+
+### 2.3 What the boot proof actually showed
+
+All five Workers reached "Ready on", answered `/healthz` **200** with an
+identical four-member document, and answered `/readyz` **200**.
+
+I read the bodies rather than the status codes, and the one thing they show is
+the `/readyz` divergence:
+
+```
+gateway        {status, service, runtime, cluster{…}}          ← no `version`
+control-plane  {status, service, version, runtime, dependencies}
+mcp            {status, service, version, runtime, protocol, readiness_reason, …}
+agent-runtime  {status, service, version, runtime, ready, readiness_reason, …}
+telemetry      {status, service, version, runtime, sink}
+```
+
+**This is the one CLASS A item the boot proof reaches, and it is exactly the one
+cert-3 predicted**: the gateway alone omits `version`. I checked the Rust before
+calling anything else a divergence — `ReadinessResponse` is
+`{status, service, version, runtime, cluster}` (`responses.rs:77`), so the
+gateway's *nesting* is the shape closest to Rust and `readiness_reason` /
+`draining` at the top level on mcp and agent-runtime are TS **additions**, not
+Rust members. Only `version` is lost.
+
+**No new defect was found by the boot proof this wave.** Waves 20 and 22 each
+found one, so this is worth stating rather than passing over: the composition
+roots are now stable enough that the channel is quiet. That is a result, not an
+absence of one.
+
+### 2.4 The three decisive claims, re-verified against the Rust by me
+
+I do not bounce a cutover on a sub-agent's word. The three findings that carry
+the most weight in §2.1 were re-derived from the actual files:
+
+**A3 (R1) — CONFIRMED, both halves.**
+Rust: `local.rs:137 pub(super) async fn tool_execution_entitlement_denial(` with
+the refusal `"mcp_tools_disabled"` at `local.rs:156`, called at `local.rs:3617`
+and `mcp_rpc.rs:567` — two live call sites in the request path.
+TypeScript: the only occurrence of `mcp_tools_disabled` in the whole tree is
+`apps/mcp/src/ports.ts:1062`, inside `InMemoryEntitlements`, whose
+`deniedTenants` set has **exactly one writer in the repository** —
+`apps/mcp/test/tools.test.ts:193`. `resolvePorts` never overrides `entitlements`
+in either posture. So `toolExecutionDenial` returns `undefined` for every caller
+on every deployment.
+
+**A4 (R2) — CONFIRMED.** Rust `auth.rs:1347`:
+
+```rust
+if decision.monthly_token_budget == Some(0) {
+    return Err(AuthError { status: TOO_MANY_REQUESTS, code: "token_budget_exceeded", … });
+}
+```
+
+Files able to emit `token_budget_exceeded`, counted per Worker with a
+control-character-safe scan: **gateway 7, control-plane 2, mcp 0,
+agent-runtime 0.**
+
+**A5 (L1) — CONFIRMED.** `applyCloudflareAiGatewayRouting` exists and is correct
+in `packages/providers/src/cloudflare.ts:128`; `registry.ts:106` calls it; and
+`registry.ts:24` records in its own docblock that the deployed data plane never
+goes through that registry. `packages/config` accepts the config
+(`entities.ts:61`, `sections.ts:798`) — it is `apps/gateway`'s
+`providerRecordSchema` that refuses it.
+
+---
+
+## 3. The SPEC-BOUND subset — what actually blocks the deletion
+
+For each cluster: is the Rust the **only** complete specification?
+
+| # | Cluster | Rust files that would be lost | Spec-bound? |
+|---|---|---|---|
+| **S1** | `executeFunction` (A1) | `crates/ferrogate-gateway/src/server/local.rs` (the `handle_function_execute` region) + `crates/ferrogate-runtime/src/{function_egress,function_token,supabase_edge_function,function_egress_cloudflare}.rs` — ~400 lines of egress allowlist and token minting, `0` `todo!()` | **YES.** Nothing in `docs/` reproduces the allowlist semantics or the token claim set. |
+| **S2** | `listTools` / `executeTool` (A2) | `crates/ferrogate-gateway/src/extensions.rs` + `state_tools.rs` | **YES, the CATALOGUE half.** Note `extensions.rs`'s `RequestHook` enum has one variant (`Noop`) and `EventSink` one (`audit_log`) — the **hook model should be designed fresh**, not copied. Keep the catalogue. |
+| **S3** | The 25 config-backed control-plane operations — `skill`, `admin_plugin`, `admin_policy`, `prompt` (A6) | `crates/ferrogate-gateway/src/state.rs:1334` + `local.rs:1844` | **YES.** The value is the *transaction shape* — persist → clone config → apply snapshot → `validate()` → reload → roll back on error → re-read and answer `409 …_reload_rejected`. That is not in any doc. |
+| **S4** | `admin_provider` (3) + `admin_model` (1) (A6) | `local.rs:5019` (projection), `local.rs:5062` (live per-provider catalog fetch), `local.rs:8227` (the **#535 field-level redaction**) | **YES for the redaction.** Shipping the model projection without it is a credential-disclosure regression, and the redaction rule exists only in that function. |
+| **S5** | R1's entitlement ladder (A3) | `local.rs:137-160` + `state_rbac.rs:11` | **PARTLY.** The plan-OR-role shape is transcribed and `apps/gateway/src/assets/entitlements.ts` is an already-ported template of the same walk. **~2 hours of transcription clears this one entirely.** |
+
+**Not spec-bound, and therefore NOT blocking the deletion**: A4/R2 (three lines,
+quoted in full above), A5/L1 (the library is written; the gap is three edits at a
+composition root), A7/R5 (a table and a sink; the Rust call site is named),
+A8/CORS (nine call sites named, semantics trivial), A9/D1 (a TS asymmetry, no
+Rust involved), A10, A11, and every one of the 19 tail items in §2.2.
+
+### 3.1 Two pieces of insurance that expire on deletion
+
+Neither is CLASS A. Both are cheap, and both are **impossible after the delete**:
+
+* **L11 — pin the two SigV4 golden signatures.** A structurally wrong canonical
+  request (the mandatory blank line deleted) leaves `packages/providers`
+  **75/75 green**, because every SigV4 assertion is a *shape* assertion
+  (`/^[0-9a-f]{64}$/`). The implementation is **correct** — cert-3 reproduced it
+  against an independent Python implementation of the AWS algorithm — and the
+  two golden vectors are printed in `cert3-controlplane-libs.md §7.11`. Ten
+  lines. Do it while `sigv4.rs` can still be read by a third party who disputes
+  the vector.
+* **Generate a Rust golden bucket table for `rolloutBucket`** (FNV-1a-64 canary
+  bucketing). Today the TS is byte-identical by inspection and by its own
+  vectors; there is no Rust-generated table, and that window closes with the
+  delete.
+
+---
+
+## 4. CLASS B — Rust never finished it. **Explicitly reframed as TS product backlog.**
+
+None of this blocks anything. Porting any of it would import a defect. It is
+listed so it is *scheduled*, not so it is *feared*.
+
+| Item | Why it is CLASS B, with evidence |
+|---|---|
+| **`createAgentRun`'s synchronous turn loop** | Rust's `agent_runs.rs::agent_provider` has exactly two arms. `ManagedWorker` — **the default** (`types.rs:1149`), i.e. what every deployment that does not override it gets — returns `Err(("agent_worker_transport_unavailable", "…is not implemented yet"))`. `External` spawns a local **child process**, which workerd does not have. So a default Rust deployment answers **503** on this path. TS returns an accepted envelope with the full validation ladder, the run-plan echo and a real workflow gate. **Residual, and it is a product decision not porting work: the row should be RATIFIED or RENAMED** — accept the async semantics under `createAgentRun`, or rename and add `runAgentSynchronously` later. |
+| **The `ferrogate-auth-service` `/v1/rbac/*` + `/v1/tenants` route arms (7)** | `AuthServiceData` is loaded from YAML into `Arc<RwLock<…>>` with **no writer back to disk**. A role created through that API is lost on restart. Decisive. |
+| **`packages/cloudflare`'s account-management surface** | Zero production call sites for `ensure_tenant_r2_bucket`, `create_scoped_r2_token` or `.preflight(` — **in the Rust too**. Porting it anyway was right: it is the part of the Rust most expensive to re-derive after deletion. |
+| **R3 — MCP `resources/read`** | `InMemoryAssets` in every posture; the durable `stored_assets` + R2 read was deliberately deferred and the module docblock says so. **Fails closed**, no money and no data exposure. |
+
+**This section is the one I was warned about, and I want to be explicit: not one
+item above is being used to hold the cutover.** Zero of the 197 control-plane
+operations are CLASS B — cert-3 opened the Rust handler, its `state.*` method and
+its repository call for every single one of the 55 it called a regression, and
+found no `todo!()`, no orphan and no dead code.
+
+### 4.1 What this wave changed in the tree
+
+Four source files and one test file arrived from the two repair agents
+(`callbacks.ts`, `metrics.ts`, `prompts.ts`, `readiness.ts` — four accurate
+`PORT-TODO` markers for CLASS A gaps that previously had none — and the rewired
+`fleet-guardrail-activation.test.ts`, which now drives agent-runtime's
+`resolveDeps` composition root instead of importing a leaf function).
+
+I added one thing, and only after proving it bites:
+
+**A source-hygiene gate for control characters in FILE NAMES**
+(`apps/gateway/test/source-nul-bytes.test.ts`). Two files in this repo had names
+containing literal newlines — both 27,809 bytes, byte-identical to each other
+(sha256 `5861badf…`), both a stale snapshot of
+`apps/agent-runtime/src/middleware/auth.ts` produced by a shell redirect whose
+target was an unquoted multi-line variable:
+
+```
+apps/mcp/src/admission/gate.ts\n    code: "quota_scope_disabled",…
+apps/agent-runtime/src/admission/admit.ts\n    message: (requestId…
+```
+
+They were inert for the build and **actively corrupting for `grep`**, which is
+this project's primary evidence-gathering instrument. They bit *this
+certification*: a `grep -rc token_budget_exceeded` run to decide the **A4 CLASS A
+verdict** printed those names as though they were matching files (§2.4 is the
+re-run with a safe scan). One substitution away from a wrong verdict in this
+document.
+
+Sequence, in this order: the new assertion was run **first** and went RED naming
+both offenders; the two files were then deleted (the real `gate.ts` and
+`admit.ts` verified intact); the assertion went GREEN. The companion vacuity
+guard derives the scanned app set from the glob keys rather than a hand-written
+list, so a sixth app is covered the day it exists.
+
+---
+
+## 5. (d) What remains UNVERIFIABLE locally — the honest cost
+
+These can produce a **security or money failure in production against a fully
+green local tree**, and no further offline work can close them. Ranked.
+
+1. **The shared RPM counter (B10). Money. Silent. Ungatable offline by
+   construction.** `apps/mcp` and `apps/agent-runtime` carry the cross-script
+   `RATE_LIMIT` stanza **commented out**, because workerd cannot resolve a
+   `script_name` binding offline — uncommenting takes both suites to **0
+   collected tests** and `wrangler dev --local` never reaches "Ready on". Left
+   commented at deploy, `counterFromEnv` degrades to a per-isolate counter and a
+   credential capped at 60 rpm is charged 60 on the gateway **plus 60×N across N
+   mcp isolates plus 60×M across M agent-runtime isolates**. Nothing errors. The
+   other four admission legs are shared and durable. **This is the single item
+   with no mechanical backstop of any kind, and it has now survived five waves in
+   that state.**
+2. **The half-bound `agent-runtime` (B4 + B1 → A9/D1). Security AND money.
+   Silent.** Fully unbound is loud — `resolveDeps` returns `undefined` and every
+   authenticated surface refuses. Bind `DB`, forget `CONTROL_DB`, leave the
+   committed `FG_DEV_IN_MEMORY_PORTS = "1"`, and `resolveDeps` **succeeds**: the
+   Worker serves normally with tenant suspension, the operator drain, guardrail
+   screening and agent-upstream withdrawal **all four silently inoperative**.
+   `CLOUD-VERIFICATION.md` describes only the fully-unbound case. **The
+   half-bound case is the one that ships.**
+3. **Three control-database uuids that must be equal (B11).** The drain's
+   fleet-wideness is a function of three `database_id` values matching. Point two
+   Workers at different control databases and each drains independently, every
+   local test green, `GET /admin/v1/drain` cheerfully reporting `draining: true`.
+   No stanza, no placeholder, nothing to typecheck.
+4. **The mTLS posture (B6).** At `FG_REQUIRE_PRODUCTION_MTLS = "0"` every
+   transport channel is admitted. It is **not** an authentication bypass — the
+   six worker-plane callbacks still require the AEAD-sealed frame keyed on
+   `self_hosted_worker_registrations` — it is transport-downgrade acceptance.
+   And the remediation is not a var flip: a Worker never sees the TLS handshake,
+   so `"1"` admits `verified_mutual_tls` only, which `request.cf.tlsClientAuth`
+   supplies **exclusively on a zone with Cloudflare mTLS configured** and never
+   under `--local`. **A platform limit with a zone precondition.**
+5. **Axis-level gaps that change no verdict but are not certified**: SSE framing
+   byte-for-byte against Rust `messages_stream.rs` / `responses_stream.rs`; AEAD
+   interoperability against a real Rust self-hosted-worker binary (no `cargo`, by
+   hard rule — and this window also closes on deletion); `sigv4`/Vertex signing
+   against real AWS/GCP vectors; per-operation request/response FIELD parity for
+   ~60 control-plane collections; Cron dispatch (`workerd` never fires a
+   scheduled event under vitest or `wrangler dev`).
+
+**Not on this list, deliberately:** B2 (R2 bucket), B5 (Analytics Engine) and B9
+(migrations) fail the **deploy** rather than degrading, and B7 fails **closed and
+loud**. That is the shape the rest of the residue should be pushed toward.
+
+### 5.1 Two invariants that are correct and held by nothing
+
+Neither is CLASS A — both are correct code with tests that would survive their own
+deletion, which is this project's documented dominant defect mode arriving for the
+seventh time. Both are cheap and neither should be discovered by a customer.
+
+* **C1 — the operator's suspension WRITE leg.** Neutralising
+  `projectTenantAccount`'s `status` so every tenant is written `'active'` leaves
+  **693/693 control-plane tests green AND the FC-2 fleet gate 12/12 green**,
+  because the control plane's own lifecycle gate reads the *document* and the
+  fleet gate writes the *column* with its own hand-written `UPDATE`. Nothing
+  joins the two. ~25 lines, or one call-site change so
+  `fleet-tenancy-suspension.test.ts` calls `projectTenantAccount` exactly as the
+  FC-3 file calls `projectGuardrailActivation`.
+* **L11 — SigV4**, §3.1.
+
+### 5.2 A calibration to carry forward, not a defect
+
+`FLEET-CONSISTENCY.md`'s "13 of 23 capabilities mechanically gated" should be
+read as **13 of 23 watched for source-text drift, and 5 proven behaviourally end
+to end**. Of the 101 assertions in the two files presented as "the fleet gates",
+**3 are behavioural**; the other 98 are the class that M22 demonstrated stays
+green when a Worker reads the operator's document and discards the answer. A
+source-text ratchet is the right instrument for "has a Worker been added" — it is
+not coverage. Decide it; do not inherit it.
+
+---
+
+## 6. (e) Irreversibility — read this before running `git rm`
+
+`legacy-rs` recovers the **bytes**. It does not recover the **workflow**.
+
+Every agent in this project diffs against the *working tree*: the seam inventory
+was derived by walking files on disk, `MODULE-OWNERSHIP.md` was built by
+enumerating `crates/**/src`, and all three certifications this wave answered
+"did the port lose anything" by opening a Rust file next to a TypeScript one.
+After the delete, that becomes "check out a tag into a scratch directory first" —
+which is possible, and which in practice **nobody does**. The wave-23 finding R1
+is the proof: it was found by reading `local.rs` and asking why a TS port parsed
+three columns it never used. That question does not get asked against a tag.
+
+So the practical, honest statement is:
+
+> **Deleting `crates/**` ends regression-hunting against the original.** Not in
+> principle — in practice. Every CLASS A item still open on the day of the delete
+> becomes a permanent product decision, specified by whatever `docs/rewrite/`
+> happens to say about it.
+
+That is precisely why §3 is the blocker rather than the whole of §2, and why §3.1
+lists two things to do *first* that cost hours and expire forever.
+
+**`workers/**` and `Cargo.*` carry no such cost.** `workers/` is
+reference-only and superseded by `apps/`; `Cargo.*` is a lockfile. If it is
+useful to shrink the tree now, those can go today — the argument in this section
+is about `crates/**` alone.
+
+---
+
+## 7. Ranked actions
+
+1. **Merge `main-ts` → `main`.** Nothing is waiting on anything.
+2. **Close L11 and generate the routing golden table** (§3.1). Hours. They expire
+   on deletion and on nothing else.
+3. **Close C1** (§5.1) — the suspension write leg. Security-adjacent; it is FC-2
+   arriving through a door nobody is watching.
+4. **Transcribe or build S1–S5** (§3). This is the deletion gate. S5 is ~2 hours;
+   S3 and S4 are transcription; S1 and S2 are the real work, and the owner may
+   legitimately choose to **drop** them instead — that converts the verdict to GO
+   without writing a line.
+5. **Close A3/R1 and A4/R2.** R2 is two SQL columns and one branch on each of two
+   Workers. R1 has an already-ported template in
+   `apps/gateway/src/assets/entitlements.ts`.
+6. **Add the §3.3 column property** to `fleet-control-matrix.test.ts` — *every
+   column of a shared control table that any Worker PARSES must have at least one
+   Worker that CONSUMES it in a decision* — or the next wave re-derives R1 and R2
+   instead of reading them.
+7. **Close A5/L1** — three edits, the third being the one that matters: assert the
+   PREPARED ENDPOINT is the AI Gateway host.
+8. **Carry §5's four-item silent list into the live run** as the thing
+   verification is FOR. Add the three missing `V-` steps (§8).
+9. The 19 tail items (§2.2), the 55 control-plane write halves (A6), R5, R4, CORS.
+
+---
+
+## 8. Scope statement
+
+Run in `/home/dev/ferrogate-ts` on `main-ts`. **No `cargo`, no Rust compiled,
+imported or executed** — `crates/**` was read only, for comparison. **No
+`wrangler deploy`, no live Cloudflare resource, no real upstream LLM call.** No
+`crates/` or `workers/` file was modified or deleted. **No merge to `main`.**
+
+No test was weakened, skipped or deleted; every seam mutation was reverted and
+verified byte-identical by sha256, and `grep -rn MUTW23 apps packages` returns
+nothing. Two files were deleted: the stray control-character-named duplicates in
+§4.1, after the gate that forbids them was proven RED with them present.
+
+`CLOUD-VERIFICATION.md` was updated this wave with the three verification steps
+the new findings require (R1's entitlement gate, R2's token-budget kill switch,
+and B10's shared RPM window) — all three recorded as **currently expected to
+FAIL**, because a verification plan that omits a known-failing check is worse
+than one that admits it.
+
+---
+
+# APPENDIX G — the wave-19 → wave-22 document, preserved verbatim
+
+Kept for the audit trail. **Superseded by §0 above.** Its verdict was a
+conditional GO with a HOLD subset; wave 23 re-derived the decision from
+scratch and reaches a different shape (GO on the merge, NO-GO on the delete
+against a five-cluster spec-bound subset). Read §0 first; this is history.
+
+## (archived) CUTOVER READINESS — waves 19-22
+
 **Date:** 2026-08-01 · **Wave 19 decision, amended by wave 20 (§0.3), wave 21 (§0.4) and wave 22 (§0.5)** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
@@ -769,6 +1304,7 @@ only; no Rust was compiled and `cargo` was never invoked.
 
 ---
 
+
 # APPENDIX H — the wave-15 → wave-18 document, preserved verbatim
 
 Kept for the audit trail. **Superseded by §0 above.** Its verdict was NO-GO on
@@ -820,7 +1356,7 @@ re-derived rather than inherited.
 
 ## 0. The verdict
 
-# **NO-GO.**
+### (archived verdict) **NO-GO.**
 
 Do **not** delete the Rust tree and do **not** merge `main-ts` → `main` on the
 strength of this wave's evidence.

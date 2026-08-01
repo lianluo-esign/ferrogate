@@ -45,6 +45,11 @@
  *
  * ## Residue (NOT closed, and not a platform limit)
  *
+ * PORT-TODO(cert3-dataplane A8 · `server/local.rs::handle_prompt_template_render`):
+ * this route writes NO audit row. Recorded as a marker rather than prose because
+ * `cert2-dataplane` A8 named it, `cert3-dataplane` re-confirmed it unchanged a
+ * wave later, and a paragraph is not something `grep -rn "PORT-TODO"` finds.
+ *
  * Rust records an `admin_audit_event` on every arm of this handler — success and
  * each refusal, carrying `variable_count` and `variable_schema_hash`. There is
  * no admin-audit sink anywhere in `apps/gateway/src` to write to (the audit

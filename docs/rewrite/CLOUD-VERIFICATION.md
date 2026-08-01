@@ -258,3 +258,68 @@ Verify with real requests — the smallest set that actually proves the wiring:
 Roll back / stop: if any step fails, capture the error and stop — do not iterate
 against the account. Every failure mode above is reproducible locally except
 V5, V7 and V10.
+
+---
+
+## 7. WAVE 23 — three verification steps that are EXPECTED TO FAIL, and two rows re-scoped
+
+Added by the wave-23 certification (`CUTOVER-READINESS.md` §5). **A verification
+plan that omits a known-failing check is worse than one that admits it**: an
+operator who runs §6 and sees every row pass will reasonably conclude the fleet
+controls are whole, and three of them are not. These rows exist so the live run
+*records* the gap rather than *discovering* it.
+
+| # | Request | Expected TODAY | Expected AFTER the fix |
+|---|---|---|---|
+| **V-R1** | Set `plans.mcp_enabled = 0` for the verification tenant (or bind it to a plan that never granted MCP — `mcp_enabled INTEGER NOT NULL DEFAULT 0`, so the schema default is OFF), then call MCP `tools/call` with that tenant's credential | **FAILS: the tool executes.** `apps/mcp`'s `entitlements` port is `InMemoryEntitlements` in **both** postures — `resolvePorts` never overrides it — so `mcp_tools_disabled` is unreachable in production. Four Workers parse the column; none consumes it | `403 mcp_tools_disabled`, matching Rust `local.rs:137 tool_execution_entitlement_denial` |
+| **V-R2** | `UPDATE api_keys SET monthly_token_budget = 0` for a test credential, then call all three spend Workers | **PARTIAL: `429 token_budget_exceeded` on the gateway ONLY.** `apps/mcp/src/auth.ts::TENANT_KEY_SQL` and `apps/agent-runtime/src/durable/adapters.ts::FIND_KEYS_BY_PREFIX_SQL` open the same `api_keys` row and do not select the column; neither Worker can emit the code at all | `429 token_budget_exceeded` on all three, as Rust's shared `authenticate_durable` (`auth.rs:1344`) gave every handler |
+| **V-B10** | Drive **N > 1 concurrent isolates** on `apps/mcp` against a credential capped at 60 rpm and count the admitted requests | **FAILS unless both `RATE_LIMIT` stanzas were uncommented at deploy (B10).** Left commented, `counterFromEnv` degrades to a per-isolate counter and roughly 60×N are admitted, with nothing logged and nothing errored | exactly one 60-request window fleet-wide |
+
+**Run V-R1 and V-R2 anyway.** They cost one admin write each, and they are the
+only account-side evidence that these two controls are inert; today that fact
+rests entirely on source reading.
+
+### 7.1 B6 re-scoped — a platform limit with a ZONE precondition, not a var flip
+
+**B6's remediation as written ("override to `1`") is correct only where the ZONE
+has Cloudflare mTLS configured.** A Worker never sees the TLS handshake, so at
+`FG_REQUIRE_PRODUCTION_MTLS = "1"` the ladder admits `verified_mutual_tls` only,
+which `request.cf.tlsClientAuth` can supply **exclusively on a properly
+configured zone** and never under `--local`. Flipping the var on a zone without
+mTLS configured does not harden the deployment — it **refuses every self-hosted
+worker callback**. Confirm the zone first, then flip. The kept `PORT-TODO` at
+`apps/agent-runtime/src/middleware/auth.ts:238` records the same constraint.
+
+For the record, at `"0"` this is transport-downgrade acceptance and **not** an
+authentication bypass: the six worker-plane callbacks still require the
+AEAD-sealed frame keyed on `self_hosted_worker_registrations`.
+
+### 7.2 B1 + B4 — the HALF-BOUND posture is the dangerous one, and it was not in this table
+
+B4 describes `apps/agent-runtime` with **no** D1 bindings and correctly calls that
+fail-closed: `resolveDeps` returns `undefined` and every authenticated surface
+refuses. Loud, obvious, safe.
+
+**The posture that ships is the half-bound one, and it is silent.** Bind `DB`,
+forget `CONTROL_DB`, and leave the committed `FG_DEV_IN_MEMORY_PORTS = "1"` (B1)
+in place: `resolveDeps` **succeeds** — `apiKeys` is durable, `workerIdentities`
+falls back to the in-memory dev table instead of returning `undefined` — and the
+Worker serves normal traffic with
+
+* **tenant suspension** inoperative (the tenant tier reads `null`, and "no row"
+  is indistinguishable from "not suspended" on gateway and agent-runtime, where
+  `apps/mcp` fails CLOSED with `503 lifecycle_status_unavailable`),
+* **the operator drain** inoperative (`readDurableDrain(undefined)` returns
+  `NOT_DRAINING` — a defensible rule for the drain, and not defensible for the
+  suspension authority, which is currently on the same rule),
+* **guardrail screening** inoperative (var-only, and `FG_DEV_A2A_GUARDRAILS` is
+  not committed),
+* **agent-upstream withdrawal** inoperative (var-only).
+
+Four fleet controls off, no error, every local test green.
+
+**Deploy rule: on `apps/agent-runtime`, bind `CONTROL_DB` and `DB` together or
+bind neither.** Binding exactly one is the only configuration in this table that
+degrades silently in the security direction, and V-FC1 / V-FC2 / V-FC3 are the
+rows that catch it — run all three, and treat a pass on the gateway and mcp with
+a serve on agent-runtime as a FAILED verification, not a partial one.

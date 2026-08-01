@@ -89,6 +89,16 @@
  * the FLAG can be flipped, and it stands. This was about the flag being read on
  * one route out of 31, and it is now read on six.
  *
+ * PORT-TODO(cert3-dataplane · `responses.rs:77 ReadinessResponse`): this
+ * Worker's `/readyz` answers `{status, service, runtime, cluster}` and omits
+ * `version`, which Rust's `ReadinessResponse` carries and which `apps/mcp`,
+ * `apps/agent-runtime`, `apps/control-plane` and `apps/telemetry` all now
+ * emit. It is the LAST readiness-identity divergence in the fleet, and
+ * `apps/telemetry/test/fleet-health-contract.test.ts` records it as an exact
+ * computed exception set (`expect(omitting).toEqual(["gateway"])`) — so adding
+ * `version: SERVICE_VERSION` to `readinessResponse` turns that gate RED until
+ * the exception is deleted with it. Both halves land together, on purpose.
+ *
  * The `ClusterStatus` members that describe a PEER TOPOLOGY — `cluster_id`,
  * `node_id`, `node_region`, `node_zone`, `state_backend`, `counter_backend`,
  * `last_sync_at_unix` — are deliberately absent rather than faked: they

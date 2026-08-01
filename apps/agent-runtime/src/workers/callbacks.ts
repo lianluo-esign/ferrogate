@@ -21,6 +21,27 @@
  * Everything a worker reports is stamped `reported_by_self_hosted_worker` —
  * Rust's `SelfHostedTelemetryTrustLevel` has exactly one variant, and it is not
  * "trusted". The gateway records what the worker CLAIMS, attributed as such.
+ *
+ * ## PORT-TODO(cert3-dataplane A10) — the per-VERB error vocabulary is collapsed
+ *
+ * The TRANSPORT ladder here is faithful and is not what this marker is about
+ * (`x-ferrogate-transport-security`, the downgrade refusals, the
+ * `FG_REQUIRE_PRODUCTION_MTLS` posture switch, `201` on the four record verbs,
+ * and the XChaCha20-Poly1305 envelope are all re-verified). The ERROR CATALOGUE
+ * is what diverges. Rust names the verb in both directions —
+ * `invalid_self_hosted_worker_{heartbeat,event,artifact,checkpoint}` (400) and
+ * `self_hosted_worker_{heartbeat,event,artifact,checkpoint}_failed` (500), at
+ * `local.rs:5570,5590,6807,6825,6843,7047` — and this file answers two generic
+ * codes: {@link invalidTransport} and {@link invalidTelemetry}. A worker-plane
+ * client cannot tell which of its four report kinds was rejected from the code
+ * alone.
+ *
+ * `404 self_hosted_worker_not_found` is deliberately NOT on this list: folding
+ * it into `401 invalid_self_hosted_worker_identity` is a TIGHTENING (it does not
+ * leak worker existence to an unauthenticated prober) and should be kept.
+ *
+ * Named in `cert2-dataplane` A10 and re-confirmed unchanged by `cert3-dataplane`
+ * — the per-verb codes are a straight loss and cost one `switch` to restore.
  */
 import { Hono } from "hono";
 import { depsOrThrow } from "../middleware/auth.js";

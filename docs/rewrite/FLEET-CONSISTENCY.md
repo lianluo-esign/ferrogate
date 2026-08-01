@@ -476,7 +476,7 @@ module's own header.
 
 | Gate | What it holds |
 |---|---|
-| `apps/mcp/test/fleet-guardrail-activation.test.ts` (15) | THE FLEET EFFECT. Activates through `apps/control-plane`'s REAL writer (`projectGuardrailRevision` + the generation-guarded `projectGuardrailActivation`), then requires the GATEWAY's real durable reader, the DEPLOYED MCP Worker over `SELF`, and agent-runtime's real screening function to agree — inside one `it()`, with `FG_DEV_MCP_GUARDRAILS` pinned EMPTY for the whole file so nothing can be explained by the var |
+| `apps/mcp/test/fleet-guardrail-activation.test.ts` (16, **rewired wave 23**) | THE FLEET EFFECT. Activates through `apps/control-plane`'s REAL writer (`projectGuardrailRevision` + the generation-guarded `projectGuardrailActivation`), then requires the GATEWAY's real durable reader, the DEPLOYED MCP Worker over `SELF`, and the DEPLOYED agent-runtime Worker (`agentRuntimeApp.fetch(request, env)` + its `resolveDeps` composition root) to agree — inside one `it()`, with `FG_DEV_MCP_GUARDRAILS` pinned EMPTY for the whole file so nothing can be explained by the var. **Until wave 23 the A2A leg imported `screenA2aAgainstDurablePolicies` as a LEAF and could not see the mount** — see §7.6 |
 | `apps/agent-runtime/test/durable/guardrail-policy-activation.spec.ts` (7) | THE A2A DOOR, behaviourally, in the durable harness where `CONTROL_DB` is bound and no `FG_DEV_*` exists. Ordered: a refusal is `403` with the operator's code and the egress gate is never reached, versus `422 egress_host_not_governed` naming the upstream host when nothing screened |
 | `apps/agent-runtime/test/stream-screen.test.ts` (12) | THE INCREMENTAL CONTRACT: clean prefix byte for byte, refused frame and everything after it never delivered, one detector call per FRAME, upstream cancelled, and all three failure postures closed |
 | `describe("FC-3 …")` in `fleet-consistency.test.ts` (4) | THE SOURCE-TEXT FORWARD GATE: all four Workers read the durable tables, they name the same two, both borrowers MOUNT the durable screening in their composition root, and the var survives only as the fallback |
@@ -822,6 +822,52 @@ held behaviourally in the gateway's own bundle), and the equivalent for FC-2
 does not either (M27 turned the fleet gate red). This one is the outlier and it
 should be closed by driving `resolveDeps` in the fleet file.
 
+### 7.6 That gap, CLOSED (wave 23) — and re-proven from both sides
+
+`apps/mcp/test/fleet-guardrail-activation.test.ts` now reaches agent-runtime the
+way FC-2's fleet gate does. The leaf import of
+`screenA2aAgainstDurablePolicies` is GONE. Two paths replace it, and neither can
+be satisfied by a module that exists and is not wired:
+
+ - **the composition root** — `resolveDeps(env)` from
+   `apps/agent-runtime/src/ports.ts`, called exactly as
+   `middleware/auth.ts::depsOrThrow` calls it per request, with every A2A
+   assertion in the file going through the `deps.guardrails` port it returns;
+ - **the deployed Worker** — `agentRuntimeApp.fetch(request, env)` against a
+   real `api_keys` credential and a real durable `agent-upstreams` row, over the
+   bare invoke verb AND `message:send` AND `message:stream`, with the ordered
+   `403`-with-the-operator's-code versus `422 egress_host_not_governed`-naming-
+   the-host observation the durable spec established.
+
+The env agent-runtime is invoked with is built ONCE for the file, deliberately:
+the durable snapshot is memoized against env identity, so a fresh object per
+call would hand every assertion a cold cache and quietly retire the property
+FC-3 actually promises (an activation takes effect on the next request through a
+WARM isolate, because the binding POINTERS are revalidated — the property M19
+attacks). One `it()` states it directly: resolve the deps, screen and get
+`allow`, activate, screen through the **same** deps object and get the
+operator's code.
+
+Baseline: **16 pass** (was 15). No assertion was weakened or deleted; the
+response-leg screening the wire cannot reach offline is still asserted, now
+through the mounted port instead of the bare function.
+
+| # | Mutation | Confirmed off disk | Result |
+|---|---|---|---|
+| **M30** (= M29's site, re-run against the rewired file) | `apps/agent-runtime/src/ports.ts::resolveDeps` drops the `durableA2aGuardrailPort` wrapper — the module intact, the mount gone | `1554: guardrails: /*MUT-W23-FC3-AR*/ ((_e: unknown, p2: never) => p2)(`, `grep -c 'durableA2aGuardrailPort('` → **0** | **3 RED of 16**, in the file whose name says fleet: *ONE model-content activation shuts the A2A door AND is live on the gateway, same code*; *the A2A door is the DEPLOYED Worker's, not a screening function called directly*; *a detector that cannot BUILD fails the policy CLOSED, not open*. Under wave 22 this same mutation left the file **15/15 GREEN** |
+| **M31** | `apps/agent-runtime/src/agents/ingress.ts` evaluates the request-stage guardrail and DISCARDS the verdict — the M22 shape, at the decision rather than the mount | `291: if (/*MUT-W23-FC3-ING: evaluate and DISCARD*/ false && requestVerdict.outcome === "deny") {` | **1 RED of 16**, and it is the interesting one: **every port-level assertion in the file stayed GREEN** and only the wire assertion (`403` with the operator's code, all three verbs) went red — `422 egress_host_not_governed` naming `fleet-guardrail-probe.upstream.invalid`, i.e. the payload passed every content control and was at the point of forward. A port-only gate would have passed a Worker that screens and throws the answer away |
+
+Both source files were restored and verified byte-identical by `sha256sum`, and
+`grep -c MUT-W23` over both returns 0.
+
+M31 is M22's warning arriving on a second capability, and it is the argument for
+why this file now has BOTH shapes rather than either: M30 is invisible to the
+wire assertions (the mount is gone, but the fallback still allows and the
+dispatch still reaches the forward — indistinguishable from the control case at
+the port), and M31 is invisible to the port assertions (the port is mounted and
+honours the activation; the route asks and discards). Neither half subsumes the
+other.
+
 ---
 
 ## 8. What the next wave should do with this
@@ -849,6 +895,44 @@ should be closed by driving `resolveDeps` in the fleet file.
    fleet-wide deny and changes behaviour Rust never had.
 5. **Never delete FC-5.** It guards a thing that is not broken, which is exactly
    why it will look deletable.
+6. **The FC-3 fleet gate's leaf-import gap — DONE (wave 23).** §7.6. The one
+   thing to carry forward is the RULE the gap taught, not the fix: a fleet gate
+   that reaches another Worker by importing one of its FUNCTIONS proves the
+   function and nothing about the deployment. Reach a sibling Worker through its
+   composition root (`resolveDeps`) or its entrypoint
+   (`app.fetch(request, env)`) — never through a leaf — and pair the two, because
+   §7.6 M30/M31 show each is blind to what the other catches. `drain-fleet.test.ts`
+   (FC-1) and `fleet-tenancy-suspension.test.ts` (FC-2) are the two worked
+   examples; every future fleet gate copies one of them.
+7. **THE SUITE ITSELF IS NOT DETERMINISTIC AT FULL SCALE — open, and it is a
+   GATE defect, not a product one.** Chasing a once-observed failure of
+   `apps/gateway/test/metering/durable.test.ts` *"does not double-charge the SAME
+   request id"* did not reproduce that test (0 failures in 20 isolated runs, 12
+   `test/metering` runs, 10 `test/assets`+`test/metering` runs, 16 whole-suite
+   runs and 1 whole-workspace `bun run test`) but did surface something larger:
+   **5 of 15 full `apps/gateway` runs failed, in a DIFFERENT file each time**,
+   all inside one ~10-minute window when another process held the machine at
+   load ≈ 5, and all 10 runs outside that window were green. The signature is
+   always the same shape — one file, a whole CLUSTER of assertions, and always
+   the ones that assert a RECORDED SIDE EFFECT (a meter charge, a durable row's
+   field, a refusal driven by seeded policy), while the status/`ok` assertions in
+   the same tests pass:
+
+   | Run | File | Failures | Shape |
+   |---|---|---|---|
+   | 2 | `test/assets/egress.test.ts` | 7 of 24 | every test asserting a NON-ZERO `meter.charges`; the one asserting ZERO passed |
+   | 3 | `test/assets/content-gate.test.ts` | 7 | **`expect(result.ok).toBe(false)` got `true`** — the per-`asset_type` content-type allowlist ADMITTED a disallowed content type |
+   | 4 | `test/metering/agent-run-correlation.test.ts` | 1 | `events` had length 1 but `agent_run_id` was `undefined` — the row present was not the row the request wrote |
+   | 1 | one file (6) and one workflow cluster (~40) | | same shape |
+
+   Run 3's entry is the one to look at first: if it is a harness artefact it is
+   benign, and if it is a real intermittent admission it is a live content-gate
+   bypass. It did not reproduce in 10 targeted `test/assets` runs. It is outside
+   the wave-23 owned scope and is recorded here rather than fixed or explained
+   away. **Do not read "6,986 green" as a reproducible fact until this is
+   closed** — a suite that fails one run in three under contention cannot
+   distinguish a regression from a bad afternoon, which is the same class of
+   problem as a green suite that cannot fail.
 
 ---
 

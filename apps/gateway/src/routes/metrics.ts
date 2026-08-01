@@ -19,6 +19,21 @@
  * caller; `src/cache/metrics.ts` has produced three of them and had no
  * exporter. This module joins the two and puts the result on a route.
  *
+ * ## PORT-TODO(cert3-dataplane A14) — TWO Workers serve this ONE contract row
+ *
+ * The contract has exactly one `/metrics` operation and `docs/rewrite/ROUTE-MAP.md`
+ * assigns it to `apps/control-plane`. Both serve it, with different bodies: this
+ * module renders the full 47-series `ferrogate_*` exposition, and
+ * `apps/control-plane/src/adapters.ts::getMetrics` renders TWO gauges
+ * (`ferrogate_control_plane_up`, `ferrogate_request_log_entries`). An operator
+ * who scrapes the control-plane host — the host ROUTE-MAP tells them to scrape —
+ * gets the two-gauge answer and a blank dashboard, and nothing in the tree says
+ * which host is canonical.
+ *
+ * Named in `cert2-dataplane` A14 and re-confirmed unchanged by `cert3-dataplane`.
+ * The fix is a product decision (pick a canonical host, or give the two rows
+ * distinct operation ids), not a port.
+ *
  * ## It is NOT an anonymous scrape endpoint
  *
  * `getMetrics` is contract operation `/metrics`, `visibility: internal`,
