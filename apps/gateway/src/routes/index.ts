@@ -277,14 +277,33 @@ function registerToolingRoutes(router: GatewayRouter): void {
   );
   router.registerNotImplemented(
     "executeFunction",
-    // The only one with a real deployment constraint attached: the Rust ran
-    // user functions in an out-of-process sandbox. On Workers that is
-    // `@cloudflare/sandbox`/containers, which `apps/agent-runtime` owns —
-    // `apps/gateway` deliberately declares no container binding (see the
-    // `compatibility_date` note in wrangler.toml).
-    "PORT-TODO(P: inventory-request-path §function execution): sandboxed function " +
-      "dispatch. Belongs to apps/agent-runtime (containers/@cloudflare/sandbox), " +
-      "not to this Worker.",
+    // CORRECTION (cert2-dataplane): the paragraph that used to sit here — "the
+    // Rust ran user functions in an out-of-process sandbox … belongs to
+    // apps/agent-runtime (containers/@cloudflare/sandbox)" — is FACTUALLY WRONG
+    // ABOUT THE RUST, and it is the reason this operation was filed as a
+    // platform-blocked item for eighteen waves. Read
+    // `crates/ferrogate-gateway/src/server/local.rs:3219 handle_function_execute`:
+    // there is no sandbox and no container anywhere in it. It is a BROKER. It
+    // reads a `FunctionInvocationRequest`, clears the fail-closed per-tenant
+    // `FunctionEgressAllowlist` of `{project_base_url, function_slug}` targets
+    // (`crates/ferrogate-runtime/src/function_egress.rs`, 197 lines, 0 `todo!()`),
+    // mints a short-lived signed function token
+    // (`function_token.rs`, 200 lines) and `POST`s to a Supabase Edge Function
+    // (`supabase_edge_function.rs`) or — since #435 — to a Cloudflare Worker
+    // (`local.rs:3417 handle_function_execute_cloudflare`,
+    // `function_egress_cloudflare.rs`). Refusals: `503 function_egress_disabled`
+    // when no signing secret is configured, `413 payload_too_large`,
+    // `405 method_not_allowed`, plus the allowlist denials.
+    //
+    // Every primitive it needs exists on Workers today: `fetch()`, WebCrypto
+    // HMAC, and a config table. There is NO paid-plan prerequisite and no
+    // Containers dependency. This is a CLASS A regression, not a platform limit.
+    "PORT-TODO(P: `server/local.rs::handle_function_execute` + " +
+      "`ferrogate-runtime::{function_egress,function_token,supabase_edge_function}`): " +
+      "the brokered edge-function egress path (#117/#120/#435) — fail-closed per-tenant " +
+      "target allowlist, signed short-lived function token, HTTP dispatch to a Supabase " +
+      "Edge Function or a Cloudflare Worker. NOT sandboxed execution and NOT blocked on " +
+      "Containers; fetch() + WebCrypto are sufficient.",
   );
   // Skill packages are the `[[skill_packages]]` OPERATOR CONFIG TABLE, not
   // control-plane rows — `handle_agent_skills` reads `state.config`. Ported in

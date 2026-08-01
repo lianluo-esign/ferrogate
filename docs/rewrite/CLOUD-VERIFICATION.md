@@ -1,6 +1,6 @@
 # Cloud verification — the ONE authorised live deploy
 
-**Status: PLAN ONLY. Nothing in this document has been executed.** No
+**Status: PLAN ONLY. Nothing in this document has been executed.** *(Wave 19: still true. This wave ran the full seam pass, five `wrangler dev --local` boots and the E2E suite — all offline. No `wrangler deploy`, no live Cloudflare resource, no upstream LLM call. Wave 19 added **B10**.)* No
 `wrangler deploy` has been run, no Cloudflare resource has been created or
 mutated, and no upstream LLM has been called. Everything proven so far is
 `--local` (workerd) or vitest.
@@ -12,8 +12,10 @@ ordering constraint is spelled out, and every binding that is declared but not
 yet resolvable is called out **before** the deploy rather than discovered by a
 500 afterwards.
 
-Read §0 first — three of the committed defaults must be changed or the deployed
-Workers will run in a dev posture.
+Read §0 first — several of the committed defaults must be changed or the
+deployed Workers will run in a dev posture: `FG_DEV_IN_MEMORY_PORTS` (B1),
+`FG_REQUIRE_PRODUCTION_MTLS` (B6), and the two commented-out cross-script
+`RATE_LIMIT` stanzas (B10). None of the three can be gated by a local test.
 
 ---
 
@@ -30,6 +32,7 @@ Workers will run in a dev posture.
 | B7 | **The admin console + every SSO login is DOWN without `ADMIN_CONSOLE_JWT_SECRET`** on **apps/control-plane** | `apps/control-plane/wrangler.toml` (documented, never declared in `[vars]`) | **Added wave 18**, with the surface itself. `wrangler secret put ADMIN_CONSOLE_JWT_SECRET --name ferrogate-control-plane` BEFORE the first console request. Unset is fail-closed and loud — `POST /v1/admin/login`, `/register`, `/refresh`, `GET /me`, `/team*`, and both SSO callbacks answer `503 admin_console_unconfigured` — so nothing is silently forgeable; but the console is simply unusable until it is set. It must NOT be added to `[vars]`: that file is committed. |
 | B8 | **SSO per-tenant IdP secrets are `env://` references, and the referenced secrets must exist** | `sso_provider_configs.oidc_client_secret_ref` (a D1 row, not config) | **Added wave 18.** A tenant's OIDC config stores `env://<NAME>`, never the secret, so the control-plane row can never leak a live IdP credential. Each `<NAME>` must be provisioned with `wrangler secret put <NAME> --name ferrogate-control-plane`. An unresolvable reference fails the login CLOSED (`500`, no session), which is correct but indistinguishable from an IdP outage in the logs — check this explicitly during the run. SAML needs no secret at all: its trust anchor is the certificate the tenant owner pasted into `POST /v1/admin/team/sso-config`. |
 | B9 | **The control migrations are now TWO files** | `sql/d1-ts/control/` | **Added wave 18.** `0002_sso_flow_nonce.sql` adds the OIDC `nonce` column to `sso_pending_flows`. `wrangler d1 migrations apply` runs both in order; a database migrated by an earlier wave needs the second file applied or every OIDC callback refuses (the nonce rung cannot be checked). §3's command is unchanged — only the file count is. |
+| B10 | **The shared RPM counter is ONE counter on `apps/gateway` only. `apps/mcp` and `apps/agent-runtime` carry the cross-script `RATE_LIMIT` stanza COMMENTED OUT** | `apps/mcp/wrangler.toml:225-231`, `apps/agent-runtime/wrangler.toml:170-176` | **Added wave 19.** Uncomment both stanzas at deploy time, AFTER `ferrogate-gateway` is deployed (a `script_name` binding is resolved by name at deploy time — see §1's deploy order; the gateway is step 3, so both of these move after it). They are committed commented out because workerd cannot resolve a `script_name` binding offline: uncommenting takes each app's suite to **0 collected tests** (`binding "RATE_LIMIT" refers to a service "core:user:ferrogate-gateway", but no such service is defined`), so this can never be gated by a local test and is a **human step with no mechanical backstop**. Left commented, a credential capped at 60 rpm is charged **60 on the gateway PLUS 60×N across N MCP isolates PLUS 60×M across M agent-runtime isolates** — i.e. the RPM ceiling is not enforced fleet-wide. The other four admission legs (quota scope, monthly USD budget, prepaid-wallet hold, counter-key derivation) ARE shared and durable across all three and are proven by `apps/gateway/test/admission-consistency.test.ts`. **Do NOT instead define a local `RateLimiterDurableObject` in either Worker**: that compiles, deploys and passes every test while handing each Worker its own private counter and a second full RPM allowance — a quieter version of the admission bypass wave 16 closed. `apps/{mcp,agent-runtime}/test/env-var-drift.test.ts` pins the three ways the commented stanza can rot (uncommented locally, `script_name` dropped, or a `new_sqlite_classes` added for a class the script does not export). |
 
 ---
 

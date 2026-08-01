@@ -74,10 +74,22 @@ export const AGENT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
  * `resolve_asset_action_id` refuses to synthesize: a made-up correlation id
  * makes an UNJOINABLE action look joined, which is worse than the gap.
  *
- * The corresponding `400 invalid_agent_run_id_header` REFUSAL is an ingress
- * decision and belongs to `src/inference/`'s validation ladder — see
- * `./event.ts` for the exact one-line change. Refusing from a middleware that
- * runs on the way OUT is not possible: by then the response is served.
+ * ## PORT-TODO(`server/chat.rs:2767 requested_agent_run_id`): the REFUSAL half
+ *
+ * Rust validates this header on EVERY `/v1/chat/completions` and `/v1/responses`
+ * ingress, inside `build_ai_ingress_plan`, and answers
+ * `400 invalid_agent_run_id_header` for anything malformed — a complete,
+ * unconditional, live call site (`chat.rs:3209`, 0 `todo!()`). This tree refuses
+ * only when a WORKFLOW is also declared
+ * (`src/inference/workflow.ts::enforceWorkflowGate` → `resolveWorkflowRunId`);
+ * on an ordinary inference request a malformed id is silently dropped here and
+ * the request is served 200 with `agent_run_id` absent. So the client that most
+ * needs to be told its correlation id is broken is the one that is not told.
+ *
+ * Refusing from a middleware that runs on the way OUT is not possible — by then
+ * the response is served — so the fix is one arm in `src/inference/handlers.ts`'
+ * validation ladder, ahead of dispatch, reusing {@link AGENT_RUN_ID_PATTERN}.
+ * See `./event.ts` for the matching one-line change on the `Usage` side.
  */
 export function agentRunIdFor(declared: string | null | undefined): string | undefined {
   if (declared === null || declared === undefined) return undefined;

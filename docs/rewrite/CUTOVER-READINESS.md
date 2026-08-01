@@ -1,5 +1,397 @@
 # CUTOVER READINESS — the decision document
 
+**Date:** 2026-08-01 · **Wave 19** · **Branch:** `main-ts`
+**Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
+`main-ts` → `main`?
+
+**This is a FRESH decision, not an amendment.** Waves 15–18 appended
+amendments to a wave-15 verdict without re-litigating it, four times, each
+time saying "only a fresh certification can move this". Wave 19 ran that
+certification: a triage of the 37 `MISSING` modules under the owner's revised
+rule, and three independent parity re-certifications (data plane, control
+plane, libraries), plus this integration step's own full seam pass, boot proof
+and E2E. The wave-15→18 document is preserved verbatim in **Appendix H** and
+nothing below inherits from it.
+
+**The rule this document is decided under is the owner's, not the old one.**
+The Rust tree is *not* the specification. The owner has stated that the Rust
+system is itself a half-finished product and that TypeScript is the forward
+platform. So "the Rust had it and we don't" is not, by itself, a blocker.
+Only **CLASS A** is:
+
+| Class | Meaning | Blocks cutover |
+|---|---|---|
+| **A — REGRESSION** | the behaviour was COMPLETE, WIRED and REACHABLE in Rust, and the TypeScript port dropped or broke it | **YES** |
+| **B — RUST UNFINISHED** | built but never wired: no production caller, no producer, no persistence. Copying it would port a design, not a behaviour | no — **product backlog on TS** |
+| **C — DELIBERATE / OBSOLETE / PLATFORM** | its purpose evaporates on workerd, it is `#[cfg(test)]`-only, or it is a standing product decision | no |
+
+---
+
+## 0. THE VERDICT
+
+> ### On merging `main-ts` → `main`: **GO.**
+> ### On deleting `crates/**`, `workers/**` and `Cargo.*`: **NO-GO.**
+
+These are two different acts and wave 19 is the first pass to separate them.
+Bundling them is what has made this decision look binary for five waves.
+
+**Merging costs nothing and destroys nothing.** `main-ts` is strictly further
+along than `main` for the Cloudflare target, it is green on every gate this
+wave ran, and making it the mainline unblocks every subsequent slice. There is
+no evidence-based argument against it and this document does not make one.
+
+**Deleting the Rust destroys the specification for work that is known,
+catalogued, and not yet done.** That is the whole of the NO-GO, and it rests on
+two facts, neither of which is a matter of taste:
+
+1. **The CLASS A list is not empty.** Under the owner's own revised rule —
+   after 27,644 lines of Rust were triaged *away* as B or C — what survives is
+   **~90 operations in 12 capability clusters** (§2). Several are money-shaped
+   or security-shaped, and every one of them has its specification in
+   `crates/**`. The remediation instructions the certifications wrote are
+   literally Rust line numbers: `budget_alerts.rs:24-38` for the HMAC scheme,
+   `function_egress.rs:96-98` for the env var names, `state.rs:1334` for the
+   persist→validate→hot-reload→rollback ladder, `state_tools.rs:28` for the
+   tenant-ref derivation.
+2. **The inventory is still converging.** *This wave alone*: 9 of the 37
+   `MISSING` rows turned out to be **stale** (already ported); wave 15's `L`
+   severity rating on four control-plane groups was **overturned upward**;
+   wave 17's claim that `admin_agent_upstream` was CLOSED is **false**
+   (`grep -n "CONTROL_DB" apps/gateway/src/routes/agent-discovery.ts` → 0);
+   and wave 18's mechanical re-derivation found **eight mount lines that had
+   been in no wave's table at all**. An inventory that corrects itself by ~25%
+   per wave, in *both* directions, is not a finished inventory.
+
+Deleting the reference implementation at the exact moment you have finally
+produced an accurate — but still moving — catalogue of what you still owe it is
+the wrong sequencing. You delete a reference when you no longer need it, not
+when you have just finished writing down why you do.
+
+### 0.1 What this verdict is NOT
+
+Stated explicitly, because the failure mode in the other direction is real and
+this wave was warned about it: **a verdict that manufactures blockers out of
+CLASS B is as much a failure as a premature GO.**
+
+- This is **not** a parity hold. 27,644 lines of Rust were examined and
+  **17,357 of them (63%) were classified B or C and dismissed**: the
+  10,820-line external-action broker (AF_UNIX + `SO_PEERCRED`, gating a
+  process-spawning executor that cannot exist on workerd), the 5,098-line
+  coding-agent contract (its adapter is constructed only by its own tests, and
+  no non-test Rust writes the artifact it projects — a Rust deployment returns
+  the same empty array TS does), the auth-service's `/v1/rbac/*` (a YAML-loaded
+  RBAC model with **no writer back to disk** — a role created through it is
+  lost on restart), `recorded_evidence.rs` (all seven callers inside the worker
+  executor), and the CLI reference generator (`#[cfg(test)]`).
+- This is **not** a demand that TS match an unfinished system. Every CLASS A
+  item was qualified by reading the Rust **handler, its `state.*` method, and
+  its repository call** and confirming there is no `todo!()`, no orphan, no
+  dead code. Items that failed that test were moved to B, not kept.
+- **Enterprise identity does not block.** It was the loudest finding in
+  `MODULE-OWNERSHIP.md` — "enterprise tenants cannot log in at all" — and wave
+  18 closed it: 8,448 lines of TS against 5,896 of Rust, path-for-path on all
+  17 non-health routes, with real `crypto.subtle.verify` signature checking,
+  the storage half, and four adversarial mutation proofs (§3.4).
+- **The owner can shrink this list by decision, not only by work.** Any CLASS A
+  item the owner explicitly accepts becomes CLASS C and stops blocking. That is
+  a legitimate and fast path, and §2.3 marks which items are the realistic
+  candidates. What the owner should not do is delete the reference *before*
+  making those calls, because after deletion the calls get made without the
+  evidence.
+
+### 0.2 The exit criterion — what converts this to a full GO
+
+Not "finish everything". Specifically:
+
+1. Close or explicitly accept the **HOLD subset** in §2.2 (4 clusters).
+2. Take one more certification pass and have it find **no new CLASS A cluster**.
+   The curve flattening is the signal; this wave's did not.
+3. Run the single authorised live deploy (`CLOUD-VERIFICATION.md`), which is the
+   only way to settle §4.
+
+Then delete the Rust. `legacy-rs` remains the byte-level fallback either way.
+
+---
+
+## 1. Evidence this wave produced, first-hand
+
+Everything in this section was run by this integration step on the current
+tree, not read from a deliverable.
+
+| Gate | Result |
+|---|---|
+| `bun install` | clean, no changes |
+| `bun run typecheck` | **exit 0**, 21 projects + `e2e`, zero diagnostics |
+| `bun run test` in every `packages/*` and `apps/*` (21 workspaces, run serially) | **6,624 passed · 361 files · 0 failed · 0 skipped** |
+| **Full mount-seam pass — every row, not incremental** | **194 rows · 193 RED · 1 GREEN** (§3.1) |
+| Restore verification (`sha256sum -c` after every mutation) | **194 / 194 byte-identical** |
+| Mutations that failed to land or were semantic no-ops | **0** (§3.2) |
+| REDs caused by a parse error rather than an assertion | **0** |
+| Real boot: `bunx wrangler dev --local` × 5 Workers | **5 / 5 "Ready on" + `/healthz` 200** (§3.3) |
+| `bunx playwright test --config e2e/playwright.config.ts` | **21 / 21 passed** (7.7 s) |
+| Working tree after the pass | identical to before; **no mutation leaked** |
+
+The 6,624 figure reconciles with `cert2-libraries.md`'s 6,633 exactly: 6,624
+passing + 9 `todo`.
+
+**Baseline honesty note.** The seam pass was interrupted once, at row `GW-C3`,
+after `GW-C2` took 43 minutes (removing `inferenceRouteModule` makes the
+workerd pool fail to start and vitest retries per test file). The kill left one
+mutation on disk in `apps/gateway/src/index.ts`; it was detected by
+`git status`, restored from the row's backup, and the file verified identical
+to `HEAD` before the pass resumed. The remaining rows ran under a 300 s per-row
+timeout. This is recorded because an undetected leaked mutation is exactly the
+kind of thing that turns a later wave's honest measurement into a false finding.
+
+---
+
+## 2. (b) THE CLASS A LIST — the only cutover blockers
+
+Consolidated and de-duplicated across all four wave-19 deliverables.
+`executeFunction` and the `/v1/tools` pair each appear in two of them and are
+counted once.
+
+### 2.1 The full list — 12 clusters, ~90 operations
+
+| # | Cluster | Ops | Severity | The Rust that makes it a regression | Source |
+|---|---|---:|---|---|---|
+| **A1** | **Budget-threshold alert delivery is silently dead.** Config validates the `webhook_url`, the once-per-period D1 arbiter exists, thresholds are parsed into `EffectiveQuota.alertThresholdPcts` — and **nothing ever compares spend to them and nothing ever POSTs**. `webhookUrl` has zero implementation hits | 1 | **HIGH — money, silent** | `budget_alerts.rs` (264 lines) called from the metering-record path at `state_billing_metering.rs:231`; HMAC-SHA256 over `"<ts>.<body>"`, `X-FerroGate-Signature` | MISSING-TRIAGE §A1 |
+| **A2** | **`POST /v1/agent-runs` is not the operation the contract names.** Rust runs a synchronous turn loop and answers `200 {turns_executed, output, tool_results}`; TS answers `202` and never executes a turn. `max_turns`, `timeout_millis`, `tool_calls` have **no reader**. The tool-side workflow graph gate is absent entirely (`grep -rn workflow apps/agent-runtime/src` → nothing), so node-kind, tool-pinning, edge-transition and parallelism are unenforced on the Worker that owns the operation | 1 | **HIGH** | `agent_runs.rs` (1,718 lines) + `agent.rs` (1,085), `grep -c "todo!"` = **0** in both | cert2-dataplane §2.1 |
+| **A3** | **The five config-backed control-plane groups do not take effect.** `skill`, `prompt`, `admin_plugin`, `admin_policy`, `admin_agent_upstream`. Operator gets `200`/`201`; the data plane reads a deploy-time Worker var. **`DELETE /admin/v1/agent-upstreams/{id}` does not withdraw a compromised upstream** | 31 | **HIGH (upstream DELETE) / MEDIUM** | each has a real `state.upsert_*`: persist → rebuild candidate → `validate()` → hot-reload → rollback on failure (`state.rs:1334`, `:674`, `:1223`, `:1404`, `:774`). `skill` even re-reads the committed config and answers `409` if the write did not take | cert2-controlplane §4.1 |
+| **A4** | **`billing`'s six read feeds are empty, and `replay` is worse than inert.** `POST /admin/v1/billing-outbox-dead-letters/{id}/replay` requires a *document* before it re-arms, but the sweeper dead-letters the *row* — so **a real dead letter answers 404 and can never be replayed**. The data plane writes `billing_events` / `billing_ledger` / `billing_report_outbox` in the same control DB this Worker already binds | 7 | **HIGH — money** | `local.rs:9317` pages `state.metering_events_page(...)` with the #185 tenant filter | cert2-controlplane §4.8 |
+| **A5** | **`executeFunction` is `501`, and the recorded reason is factually false about the Rust.** The marker claims an out-of-process sandbox / Containers prerequisite. `handle_function_execute` sandboxes nothing: it is a **broker** — allowlist-authorize, mint a short-lived scoped token, signed HTTPS POST to an already-deployed Supabase Edge Function or CF Worker. That is `fetch` + WebCrypto HMAC, arguably more natural on Workers than in Pingora | 1 | MEDIUM | `local.rs:3219`; `function_egress.rs` (197 lines), `function_token.rs` (200), `supabase_edge_function.rs` (262), `function_egress_cloudflare.rs` (222) — **0 `todo!()`** across all | MISSING-TRIAGE §A2 / cert2-dataplane §2.2 |
+| **A6** | **`GET /v1/tools` + `POST /v1/tools/execute` regress to `501` on the gateway.** With zero plugins configured, Rust still returned the tenant's MCP tool catalogue. The capability **already exists in the TS tree** (`apps/mcp` `tools/list`, `fetch_asset`, `tools/call` through the ported managed-action chokepoint) — what is missing is the projection onto the gateway's REST aliases | 2 | MEDIUM | `state_tools.rs:48-57`, `local.rs:3573` (capability → input guardrail → approval → execute → output guardrail) | MISSING-TRIAGE §A3 |
+| **A7** | **Cloudflare AI Gateway routing (#406) is unreachable in production.** The library layer is complete and tested; `apps/gateway/src/inference/adapters.ts` builds its own registry and never goes through `ProviderAdapterRegistry`, so capture/apply is skipped on every request. Worse, `providerRecordSchema` is `.strict()` with no `cloudflare_ai_gateway` key, so **a working Rust operator's config is REJECTED, not ignored** | cross-cutting | MEDIUM | `state.rs:1477`/`:4850`, `registry.rs:45,83,104,125`; config side `types.rs:1413` + `validate.rs:291` | cert2-libraries §L1 |
+| **A8** | **`admin_provider` / `admin_model` / the `status` counts are empty on every deployment.** An operator is told the gateway has **0 providers and 0 models**. The control schema already declares `gateway_providers` / `gateway_models` with a real FK — the tables exist, the wire does not | 4+4 | MEDIUM | `local.rs:5019`, `:5062` (live per-provider catalog fetch), `:8227` with the #535 field-level redaction | cert2-controlplane §4.2, §4.6 |
+| **A9** | **Signed client action-time tokens are issued by the CLI and ignored by the gateway.** The CLI sends `x-ferrogate-action-id` and reads the returned token; `apps/gateway` never reads either header. `ActionIdentity` is declared in `apps/agent-runtime/src/ports.ts:289` with **zero references anywhere** | cross-cutting | LOW-but-A | `client_action_time.rs` (494 lines), a Pingora `HttpModule` on every request; HMAC-SHA256, 30 s TTL, rotation via trusted-key list | MISSING-TRIAGE §A4 |
+| **A10** | **`request_logs`, `agent_run`, `tool-sessions`, `GET /admin/v1/tenants`, `site_domain` read stores nothing writes.** `guardrail_evaluations` does not exist in `sql/d1-ts/` **at all**, so guardrail evidence is in-memory-only fleet-wide. `/metrics`'s one substantive gauge is pinned at 0 and heals with `request_logs` | 15 | MEDIUM | `local.rs:4330`, `:4395`, `:9288`; `sites.rs` (1,226) + `site_domains.rs` (1,370) | cert2-controlplane §4.3–4.9 |
+| **A11** | **Data-plane error-vocabulary and shape collapse.** `400 invalid_agent_run_id_header` unenforced on ordinary inference; gateway-config profile resolution **fails open** where Rust refuses four ways; `createImage` capability refusal changed status *and* code (`422` → `400`); 3 asset presign codes collapsed; the 6 self-hosted-worker callbacks fold a per-verb 400/500 vocabulary into 2 generic codes; `renderPromptTemplate` writes no audit trail | ~20 | LOW | per-item Rust cites in the source doc | cert2-dataplane §3 (A3–A10) |
+| **A12** | **CORS is absent from the entire data plane**, and the shared probes disagree across Workers. Rust `apply_cors_headers` runs on 9 response sites; `grep -ri "access-control-allow" apps/{gateway,mcp,agent-runtime}/src` returns only comments — so a browser client of `/v1/**` that worked against Rust does not work here. `/readyz` answers **three different documents** for one contract operation; `/metrics` is served by two Workers with two different bodies and nothing says which is canonical | ~4 | LOW | `responses.rs:38`, `server/mod.rs:235` | cert2-dataplane §3 (A12–A14) |
+
+**New this wave, found by this integration step, not by any deliverable:**
+`cert2-dataplane` §A11 states that `/healthz` lacks `version` on `apps/mcp`
+only. The §3.3 boot proof shows it is missing on **three** Workers — `mcp`,
+`control-plane` and `telemetry` — and present on `gateway` and
+`agent-runtime`. The finding is correct in kind and understated by 2×. This is
+recorded here rather than silently corrected because the pattern (a fix-wave's
+summary disagreeing with the code) is the one this project keeps repeating.
+
+### 2.2 The HOLD subset — what I would actually block on
+
+Not all ~90 carry equal weight and it would be dishonest to imply they do.
+If the owner closes or accepts **only** these four, the deletion argument
+changes materially:
+
+| | Why it is in the HOLD subset |
+|---|---|
+| **A1** budget alerts | The system **affirms the configuration** and then never notifies. Silent, unbounded, money. This is the exact archetype of the wave-15 admission bypass, and the archetype is why this project runs mutation gates at all |
+| **A3**'s `admin_agent_upstream` `DELETE` | Revoking a compromised upstream through the admin API returns `200` and withdraws nothing. Security-shaped, and one of five identical three-line fixes |
+| **A4** `billing.replay` | A real dead letter is **unrecoverable**. Money, and the failure is silent until reconciliation |
+| **A2** `createAgentRun` | Not a divergence — a *different operation* under the contract's name, with the tool-side workflow gate absent. A client written to the contract gets neither the fields nor the enforcement |
+
+**A5–A12 are, in my judgement, acceptable-by-decision.** They are real
+regressions and should be recorded as such, but each is either bounded to
+operators who configured an off-by-default feature (A5, A9), degrades a
+discovery path while the capability stays reachable elsewhere (A6), or is a
+vocabulary/shape/observability loss rather than a behavioural one (A8, A10,
+A11, A12). A7 is three enumerated edits. **If the owner signs these off, they
+become CLASS C and this document's blocker list is the four rows above.**
+
+### 2.3 Blast radius of getting this wrong
+
+If the Rust is deleted and the HOLD subset is *not* closed: the alert webhook
+scheme, the metering-path call site, the dead-letter row addressing and the
+turn-loop/graph-gate semantics all have to be re-derived from prose in these
+markdown files rather than from source. Three of the four involve money.
+
+---
+
+## 3. The full seam pass (§ step 2 of the brief)
+
+### 3.1 Result
+
+**Every row in the re-derived `MOUNT-SEAMS.md`, not incremental.** The
+inventory itself names two triggers for a full pass — *before the live deploy*
+and *before deleting the Rust* — and this is that gate.
+
+| App | Rows | RED | GREEN | Σ failing assertions |
+|---|---:|---:|---:|---:|
+| `apps/gateway` | 61 | **61** | 0 | 1,826 |
+| `apps/control-plane` | 41 | **41** | 0 | 3,415 |
+| `apps/agent-runtime` | 34 | **34** | 0 | 1,280 |
+| `apps/mcp` | 32 | **32** | 0 | 1,063 |
+| `apps/telemetry` | 17 | **16** | 1 | 243 |
+| `apps/cli` | 9 | **9** | 0 | 86 |
+| **Total** | **194** | **193** | **1** | **7,913** |
+
+194 rather than 188 because six rows were split into their two documented
+variants and run separately (`AR-T2b`, `AR-T5b`, `CP-C4b`, `MCP-R6b`,
+`MCP-T6b`, `MCP-T7b`).
+
+**Coverage was verified by diffing IDs, not asserted.** 191 IDs appear in
+`MOUNT-SEAMS.md`. Two are unrunnable by construction and both are documented as
+such: `GW-C11` is retired (wave 18 fixed the dead route and it is now `GW-R16`,
+proven RED here), and `AR-T11` is the *absence* of a `[[d1_databases]]` stanza —
+there is nothing to remove. Every one of the other 189 ran.
+
+### 3.2 Why each RED is a real behaviour change and not an artefact
+
+The brief requires satisfying oneself that each mutation changes behaviour and
+is not a semantic no-op. Four independent controls, all mechanical:
+
+1. **The edit landed.** `sha256sum` before and after; an unchanged file is
+   reported `MUT-NOOP` and never counted. **0 rows.**
+2. **The edit was read back OFF DISK.** Every row carries a `grep -F` CONFIRM
+   assertion (marker present, or anchor absent) executed against the file after
+   the write, guarding against a concurrent overwrite. Rows that failed CONFIRM
+   were corrected and re-run, never counted. **0 rows remain failing.**
+3. **A semantic no-op cannot produce a RED.** This is the decisive one. 193 rows
+   went RED, so 193 mutations demonstrably changed observable behaviour. The
+   `GW-C11` trap of wave 15 — a mutation that looked real but was unreachable
+   because the fall-through already won — is *precisely* the case that shows up
+   as GREEN, and it did not occur.
+4. **A RED from a parse error proves nothing.** Recipes that would orphan a
+   block were written as `if (false as boolean)` guards or `/*MUT*/ void <sym>;`
+   statements so the tree still compiles. **0 rows** matched a transform/esbuild
+   failure.
+
+Six rows went RED with **zero counted assertions**; each was individually
+inspected and each has a legitimate, distinct mechanism, not a flake:
+
+| Row | Mechanism |
+|---|---|
+| `AR-T2`, `CP-T6`, `GW-T19`, `TEL-T6` | deleting `compatibility_date` makes **workerd refuse to start** (`MiniflareCoreError ERR_RUNTIME_FAILURE`, 6–109 pool-start failures). The documented **WORKERD-REFUSAL** channel |
+| `CP-R1` | module-load throw: `Error: no route module for contract group(s): admin_api_key`, exactly as the row predicts |
+| `GW-T4` | `test/setup-d1.ts` throws by name: *"expected both the `DB` binding … and `TEST_D1_SCHEMA`"* — the documented expected RED |
+
+**A correction this pass made to its own method.** Six `wrangler.toml` stanza
+rows (`GW-T3`–`T7`, `CP-T3`) were first mutated by commenting out only the
+table header, which orphaned the stanza's remaining keys onto the preceding
+table — and for `GW-T5`/`GW-T6` produced **`Error: Invalid TOML document`**,
+i.e. a parse-level RED that proves nothing under the protocol's own rule 4. All
+six were re-run as clean whole-stanza deletions. The re-run REDs (26, 0, 49,
+231, 27, 5 assertions) are the ones recorded above; the invalid-TOML runs were
+discarded. Had this not been checked, two T1 Durable-Object/D1 rows would have
+been recorded as proven on evidence that was worthless.
+
+### 3.3 (§ step 3) Real boot — five Workers under workerd
+
+`bunx wrangler dev --local` on distinct ports; "Ready on" observed in each log;
+`/healthz` fetched over real HTTP; process killed.
+
+| Worker | Port | Ready on | `/healthz` | Body |
+|---|---:|---|---:|---|
+| `gateway` | 8801 | yes | **200** | `{"status":"ok","service":"ferrogate-gateway","version":"0.0.0","runtime":"workers"}` |
+| `control-plane` | 8802 | yes | **200** | `{"status":"ok","service":"ferrogate-control-plane","runtime":"workers"}` |
+| `mcp` | 8803 | yes | **200** | `{"status":"ok","service":"ferrogate-mcp","runtime":"workers","protocol":"2026-07-28"}` |
+| `agent-runtime` | 8804 | yes | **200** | `{"status":"ok","service":"ferrogate-agent-runtime","version":"0.0.0","runtime":"workers"}` |
+| `telemetry` | 8805 | yes | **200** | `{"status":"ok","service":"ferrogate-telemetry","runtime":"workers"}` |
+
+Three of the five bodies carry no `version` — see the correction in §2.1.
+
+### 3.4 What the seam pass proves, and what it does not
+
+It proves that **every mount seam in the deployed composition roots is held by a
+test that fails when the mount is removed** — the defect class that has bitten
+this project eleven times is, as of this pass, comprehensively closed. That is a
+genuine and significant result and it is the strongest single piece of evidence
+for a GO.
+
+It does **not** speak to CLASS A at all. A seam gate answers *"does the wired
+thing run?"*. Every CLASS A item in §2 is a case where the wired thing runs
+correctly and **there is no wire** — a store nothing reads, a threshold nothing
+compares, a header nothing verifies. No mount gate can see those, which is why
+the certifications exist and why the seam pass being perfect does not settle
+the decision.
+
+---
+
+## 4. (d) What remains UNVERIFIED — provable only by the live deploy
+
+Everything below is offline-only evidence. No `wrangler deploy` has been run,
+no Cloudflare resource created or mutated, no upstream LLM called.
+
+1. **The RPM window is one counter on `apps/gateway` only.** `apps/mcp` and
+   `apps/agent-runtime` carry the cross-script `RATE_LIMIT` stanza **commented
+   out**, because workerd cannot resolve a `script_name` binding offline. A
+   credential capped at 60 rpm is today charged 60 on the gateway **plus 60×N
+   across N MCP isolates plus 60×M across M agent-runtime isolates**. The other
+   four ladder legs (quota scope, monthly budget, wallet hold, counter-key
+   derivation) are shared and durable. **CLASS C locally, CLASS A on a deployed
+   tree**, and nothing mechanical forces the uncommenting. Now recorded as
+   **B10** in `CLOUD-VERIFICATION.md`.
+2. **Three seams have no local proof channel of any kind** and were confirmed as
+   such again this pass: `TEL-T4` (`[observability]` — Workers Logs config has no
+   local effect; the single GREEN in §3.1, and its GREEN means *unobservable
+   locally*, not *dead in production*), `MCP-T8`'s missing `migrations_dir`, and
+   `AR-T11`'s absent `[[d1_databases]]`.
+3. **Two are WORKERD-REFUSAL by nature**: the cross-script `RATE_LIMIT` bindings
+   on `mcp` and `agent-runtime` cannot be exercised locally at all — uncommenting
+   takes the suite to 0 collected tests.
+4. **Deploy-time posture flips are human steps nothing can enforce**:
+   `FG_DEV_IN_MEMORY_PORTS` → `"0"` (B1), `FG_REQUIRE_PRODUCTION_MTLS` → `"1"`
+   (B6), R2 bucket existence (B2), KV token rights (B3), agent-runtime D1
+   stanzas (B4), Analytics Engine (B5), `ADMIN_CONSOLE_JWT_SECRET` (B7), the
+   per-tenant SSO `env://` secrets (B8), and both control migrations (B9).
+5. **Live upstream provider behaviour** — streaming relay, failover and circuit
+   breaking are proven against fakes only.
+6. **`apps/agent-runtime` and `apps/telemetry` are not covered by `e2e/`** (only
+   gateway and mcp are), so their DEPLOY-ONLY rows have no CI fallback either.
+7. Per `cert2-controlplane` §6: per-operation **field** parity for ~60
+   collections, envelope keys beyond the three named, per-collection search
+   field sets, and 56 ops verdicted EQUIVALENT from the consumer graph without a
+   fresh mutation this wave.
+
+---
+
+## 5. (e) The irreversibility note
+
+`legacy-rs` recovers the **bytes**. It does not recover the **workflow**.
+
+Every finding this wave produced came from operations that need the tree on
+disk: `grep -rn` across `crates/**` to prove `AgentMemoryClient` has zero
+callers; `grep -c "todo!"` per file to separate a finished Rust handler from an
+abandoned one; walking a handler → its `state.*` method → its repository call to
+qualify a regression; and the `.rs`-path citation grep that caught **9 of 9**
+stale `MISSING` rows. `MODULE-OWNERSHIP.md` itself was derived by walking the
+tree. None of that survives as `git show legacy-rs:crates/...` in practice, and
+the agents doing this work diff against the working copy.
+
+So deletion does not merely make regression-hunting harder — **it ends it**. The
+next wave that asks "did Rust enforce X, and how?" gets an answer from these
+markdown files or gets no answer. Those files are good, and this wave improved
+them substantially, but they are a summary of a 220,000-line production system
+written by readers who have already been wrong in both directions **within this
+same wave**.
+
+That asymmetry — cheap to keep, unrecoverable to lose, at a moment when the
+catalogue is still moving ~25% per pass — is the whole argument, and it is why
+the merge is a GO and the deletion is not.
+
+---
+
+## 6. Scope statement
+
+This wave ran **local only**. No `wrangler deploy`, no live Cloudflare
+resource, no real upstream LLM call. `crates/**` and `workers/**` were **not**
+deleted and `main-ts` was **not** merged to `main` — executing the cutover is a
+separate step, gated on this verdict. The Rust tree was read as a reference
+only; no Rust was compiled and `cargo` was never invoked.
+
+---
+
+# APPENDIX H — the wave-15 → wave-18 document, preserved verbatim
+
+Kept for the audit trail. **Superseded by §0 above.** Its verdict was NO-GO on
+both acts; wave 19 splits them and upgrades the merge to GO. Where its finding
+lists disagree with §2, §2 is current — in particular its §0.2 claim that
+`admin_agent_upstream` is CLOSED is **false** and is the reason wave 19
+re-derived rather than inherited.
+
+---
+
+## (archived) CUTOVER READINESS — waves 15-18
+
 **Date:** 2026-08-01 · **Wave 15**, amended by **waves 16, 17 and 18** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
@@ -784,3 +1176,206 @@ that changed were made STRICTER (a name moved from "not even mentioned in
 `wrangler.toml`" to "mentioned but undeclared", and three new assertions were
 added pinning the `RATE_LIMIT` stanza's commented state, its `script_name`, and
 the absence of a migration claiming a class the script does not export).
+
+---
+
+# APPENDIX S — the wave-19 full seam pass, row by row
+
+Every row of `MOUNT-SEAMS.md`, mutated in place, confirmed off disk, run, restored and sha256-verified. `—` in the *Failing assertions* column means the RED came from a runtime/module-load refusal rather than an assertion (mechanism named in §3.2).
+
+| Row | App | Verdict | Failing assertions | RED mechanism |
+|---|---|---|---:|---|
+| `AR-C1` | agent-runtime | RED | 112 | assertion RED |
+| `AR-C10` | agent-runtime | RED | 6 | assertion RED |
+| `AR-C11` | agent-runtime | RED | 195 | assertion RED |
+| `AR-C2` | agent-runtime | RED | 3 | assertion RED |
+| `AR-C3` | agent-runtime | RED | 5 | assertion RED |
+| `AR-C4` | agent-runtime | RED | 149 | assertion RED |
+| `AR-C5` | agent-runtime | RED | 73 | assertion RED |
+| `AR-C6` | agent-runtime | RED | 15 | assertion RED |
+| `AR-C7` | agent-runtime | RED | 99 | assertion RED |
+| `AR-C9` | agent-runtime | RED | 1 | assertion RED |
+| `AR-E1` | agent-runtime | RED | 194 | assertion RED |
+| `AR-E2` | agent-runtime | RED | 77 | assertion RED |
+| `AR-E3` | agent-runtime | RED | 93 | assertion RED |
+| `AR-P1` | agent-runtime | RED | 13 | assertion RED |
+| `AR-P2` | agent-runtime | RED | 11 | assertion RED |
+| `AR-P3` | agent-runtime | RED | 4 | assertion RED |
+| `AR-P4` | agent-runtime | RED | 3 | assertion RED |
+| `AR-P5` | agent-runtime | RED | 15 | assertion RED |
+| `AR-P6` | agent-runtime | RED | 4 | assertion RED |
+| `AR-P7` | agent-runtime | RED | 3 | assertion RED |
+| `AR-P8` | agent-runtime | RED | 4 | assertion RED |
+| `AR-T1` | agent-runtime | RED | 1 | assertion RED |
+| `AR-T10` | agent-runtime | RED | 1 | assertion RED |
+| `AR-T2` | agent-runtime | RED | — | runtime/module refusal |
+| `AR-T2b` | agent-runtime | RED | 1 | assertion RED |
+| `AR-T3` | agent-runtime | RED | 81 | assertion RED |
+| `AR-T4` | agent-runtime | RED | 97 | assertion RED |
+| `AR-T5` | agent-runtime | RED | 1 | assertion RED |
+| `AR-T5b` | agent-runtime | RED | 1 | assertion RED |
+| `AR-T6` | agent-runtime | RED | 4 | assertion RED |
+| `AR-T7` | agent-runtime | RED | 4 | assertion RED |
+| `AR-T8` | agent-runtime | RED | 4 | assertion RED |
+| `AR-T9` | agent-runtime | RED | 4 | assertion RED |
+| `AR-V1` | agent-runtime | RED | 2 | assertion RED |
+| `CLI-1` | cli | RED | 16 | assertion RED |
+| `CLI-2` | cli | RED | 16 | assertion RED |
+| `CLI-3` | cli | RED | 16 | assertion RED |
+| `CLI-4` | cli | RED | 16 | assertion RED |
+| `CLI-5` | cli | RED | 16 | assertion RED |
+| `CLI-6` | cli | RED | 1 | assertion RED |
+| `CLI-7` | cli | RED | 3 | assertion RED |
+| `CLI-8a` | cli | RED | 1 | assertion RED |
+| `CLI-8b` | cli | RED | 1 | assertion RED |
+| `CP-A1` | control-plane | RED | 427 | assertion RED |
+| `CP-A10` | control-plane | RED | 2 | assertion RED |
+| `CP-A11` | control-plane | RED | 2 | assertion RED |
+| `CP-A2` | control-plane | RED | 328 | assertion RED |
+| `CP-A3` | control-plane | RED | 21 | assertion RED |
+| `CP-A4` | control-plane | RED | 19 | assertion RED |
+| `CP-A5` | control-plane | RED | 121 | assertion RED |
+| `CP-A6` | control-plane | RED | 131 | assertion RED |
+| `CP-A7` | control-plane | RED | 26 | assertion RED |
+| `CP-A8` | control-plane | RED | 3 | assertion RED |
+| `CP-A9` | control-plane | RED | 3 | assertion RED |
+| `CP-C1` | control-plane | RED | 171 | assertion RED |
+| `CP-C10` | control-plane | RED | 4 | assertion RED |
+| `CP-C11` | control-plane | RED | 1 | assertion RED |
+| `CP-C12` | control-plane | RED | 2 | assertion RED |
+| `CP-C13` | control-plane | RED | 1 | assertion RED |
+| `CP-C2` | control-plane | RED | 3 | assertion RED |
+| `CP-C3` | control-plane | RED | 3 | assertion RED |
+| `CP-C4` | control-plane | RED | 1 | assertion RED |
+| `CP-C4b` | control-plane | RED | 385 | assertion RED |
+| `CP-C5` | control-plane | RED | 1 | assertion RED |
+| `CP-C6` | control-plane | RED | 2 | assertion RED |
+| `CP-C7` | control-plane | RED | 324 | assertion RED |
+| `CP-C8` | control-plane | RED | 285 | assertion RED |
+| `CP-C9` | control-plane | RED | 3 | assertion RED |
+| `CP-E1` | control-plane | RED | 398 | assertion RED |
+| `CP-E2` | control-plane | RED | 3 | assertion RED |
+| `CP-E3` | control-plane | RED | 399 | assertion RED |
+| `CP-R1` | control-plane | RED | — | runtime/module refusal |
+| `CP-R2` | control-plane | RED | 284 | assertion RED |
+| `CP-S1` | control-plane | RED | 18 | assertion RED |
+| `CP-S2` | control-plane | RED | 11 | assertion RED |
+| `CP-S3` | control-plane | RED | 12 | assertion RED |
+| `CP-S4` | control-plane | RED | 2 | assertion RED |
+| `CP-S5` | control-plane | RED | 5 | assertion RED |
+| `CP-T1` | control-plane | RED | 1 | assertion RED |
+| `CP-T2` | control-plane | RED | 1 | assertion RED |
+| `CP-T3` | control-plane | RED | 5 | assertion RED |
+| `CP-T4` | control-plane | RED | 3 | assertion RED |
+| `CP-T5` | control-plane | RED | 4 | assertion RED |
+| `CP-T6` | control-plane | RED | — | runtime/module refusal |
+| `GW-A1` | gateway | RED | 21 | assertion RED |
+| `GW-A2` | gateway | RED | 3 | assertion RED |
+| `GW-A3` | gateway | RED | 3 | assertion RED |
+| `GW-A4` | gateway | RED | 6 | assertion RED |
+| `GW-A5` | gateway | RED | 6 | assertion RED |
+| `GW-A6` | gateway | RED | 4 | assertion RED |
+| `GW-A7` | gateway | RED | 5 | assertion RED |
+| `GW-A8` | gateway | RED | 3 | assertion RED |
+| `GW-C1` | gateway | RED | 2 | assertion RED |
+| `GW-C10` | gateway | RED | 1 | assertion RED |
+| `GW-C2` | gateway | RED | 57 | assertion RED |
+| `GW-C3` | gateway | RED | 19 | assertion RED |
+| `GW-C4` | gateway | RED | 3 | assertion RED |
+| `GW-C5` | gateway | RED | 3 | assertion RED |
+| `GW-C6` | gateway | RED | 16 | assertion RED |
+| `GW-C7` | gateway | RED | 130 | assertion RED |
+| `GW-C8` | gateway | RED | 1 | assertion RED |
+| `GW-C9` | gateway | RED | 78 | assertion RED |
+| `GW-E1` | gateway | RED | 181 | assertion RED |
+| `GW-E2` | gateway | RED | 3 | assertion RED |
+| `GW-E3` | gateway | RED | 5 | assertion RED |
+| `GW-E4` | gateway | RED | 5 | assertion RED |
+| `GW-E5` | gateway | RED | 3 | assertion RED |
+| `GW-E6` | gateway | RED | 184 | assertion RED |
+| `GW-R1` | gateway | RED | 130 | assertion RED |
+| `GW-R10` | gateway | RED | 25 | assertion RED |
+| `GW-R11` | gateway | RED | 5 | assertion RED |
+| `GW-R12` | gateway | RED | 38 | assertion RED |
+| `GW-R13` | gateway | RED | 196 | assertion RED |
+| `GW-R14` | gateway | RED | 2 | assertion RED |
+| `GW-R15` | gateway | RED | 13 | assertion RED |
+| `GW-R16` | gateway | RED | 2 | assertion RED |
+| `GW-R2` | gateway | RED | 6 | assertion RED |
+| `GW-R3` | gateway | RED | 15 | assertion RED |
+| `GW-R4` | gateway | RED | 3 | assertion RED |
+| `GW-R5` | gateway | RED | 10 | assertion RED |
+| `GW-R6` | gateway | RED | 171 | assertion RED |
+| `GW-R7` | gateway | RED | 39 | assertion RED |
+| `GW-R8` | gateway | RED | 3 | assertion RED |
+| `GW-R9` | gateway | RED | 16 | assertion RED |
+| `GW-T1` | gateway | RED | 10 | assertion RED |
+| `GW-T10` | gateway | RED | 6 | assertion RED |
+| `GW-T11` | gateway | RED | 1 | assertion RED |
+| `GW-T12` | gateway | RED | 6 | assertion RED |
+| `GW-T13` | gateway | RED | 1 | assertion RED |
+| `GW-T14` | gateway | RED | 4 | assertion RED |
+| `GW-T15` | gateway | RED | 2 | assertion RED |
+| `GW-T16` | gateway | RED | 8 | assertion RED |
+| `GW-T17` | gateway | RED | 7 | assertion RED |
+| `GW-T18` | gateway | RED | 11 | assertion RED |
+| `GW-T19` | gateway | RED | — | runtime/module refusal |
+| `GW-T2` | gateway | RED | 1 | assertion RED |
+| `GW-T3` | gateway | RED | 26 | assertion RED |
+| `GW-T4` | gateway | RED | — | runtime/module refusal |
+| `GW-T5` | gateway | RED | 49 | assertion RED |
+| `GW-T6` | gateway | RED | 231 | assertion RED |
+| `GW-T7` | gateway | RED | 27 | assertion RED |
+| `GW-T8` | gateway | RED | 5 | assertion RED |
+| `GW-T9` | gateway | RED | 1 | assertion RED |
+| `GW-W1` | gateway | RED | 8 | assertion RED |
+| `GW-W2` | gateway | RED | 6 | assertion RED |
+| `MCP-C1` | mcp | RED | 97 | assertion RED |
+| `MCP-C2` | mcp | RED | 32 | assertion RED |
+| `MCP-C3` | mcp | RED | 124 | assertion RED |
+| `MCP-E1` | mcp | RED | 137 | assertion RED |
+| `MCP-E2` | mcp | RED | 9 | assertion RED |
+| `MCP-E3` | mcp | RED | 10 | assertion RED |
+| `MCP-P1` | mcp | RED | 113 | assertion RED |
+| `MCP-P2` | mcp | RED | 11 | assertion RED |
+| `MCP-P3` | mcp | RED | 5 | assertion RED |
+| `MCP-P4` | mcp | RED | 4 | assertion RED |
+| `MCP-P5` | mcp | RED | 3 | assertion RED |
+| `MCP-P6` | mcp | RED | 1 | assertion RED |
+| `MCP-P7` | mcp | RED | 89 | assertion RED |
+| `MCP-R1` | mcp | RED | 8 | assertion RED |
+| `MCP-R2` | mcp | RED | 1 | assertion RED |
+| `MCP-R3` | mcp | RED | 2 | assertion RED |
+| `MCP-R4` | mcp | RED | 124 | assertion RED |
+| `MCP-R5` | mcp | RED | 1 | assertion RED |
+| `MCP-R6` | mcp | RED | 1 | assertion RED |
+| `MCP-R6b` | mcp | RED | 2 | assertion RED |
+| `MCP-T1` | mcp | RED | 2 | assertion RED |
+| `MCP-T10` | mcp | RED | 1 | assertion RED |
+| `MCP-T2` | mcp | RED | 1 | assertion RED |
+| `MCP-T3` | mcp | RED | 48 | assertion RED |
+| `MCP-T4` | mcp | RED | 12 | assertion RED |
+| `MCP-T5` | mcp | RED | 13 | assertion RED |
+| `MCP-T6` | mcp | RED | 2 | assertion RED |
+| `MCP-T6b` | mcp | RED | 2 | assertion RED |
+| `MCP-T7` | mcp | RED | 2 | assertion RED |
+| `MCP-T7b` | mcp | RED | 2 | assertion RED |
+| `MCP-T8` | mcp | RED | 118 | assertion RED |
+| `MCP-T9` | mcp | RED | 86 | assertion RED |
+| `TEL-A1` | telemetry | RED | 5 | assertion RED |
+| `TEL-A2` | telemetry | RED | 1 | assertion RED |
+| `TEL-A3` | telemetry | RED | 49 | assertion RED |
+| `TEL-A4` | telemetry | RED | 11 | assertion RED |
+| `TEL-A5` | telemetry | RED | 3 | assertion RED |
+| `TEL-A6` | telemetry | RED | 1 | assertion RED |
+| `TEL-A7` | telemetry | RED | 3 | assertion RED |
+| `TEL-A8` | telemetry | RED | 3 | assertion RED |
+| `TEL-C1` | telemetry | RED | 61 | assertion RED |
+| `TEL-E1` | telemetry | RED | 42 | assertion RED |
+| `TEL-P1` | telemetry | RED | 31 | assertion RED |
+| `TEL-T1` | telemetry | RED | 1 | assertion RED |
+| `TEL-T2` | telemetry | RED | 25 | assertion RED |
+| `TEL-T3` | telemetry | RED | 6 | assertion RED |
+| `TEL-T4` | telemetry | **GREEN** | 0 | **no local proof channel** — Workers Logs config has no local effect (DEPLOY-ONLY; §4.2) |
+| `TEL-T5` | telemetry | RED | 1 | assertion RED |
+| `TEL-T6` | telemetry | RED | — | runtime/module refusal |

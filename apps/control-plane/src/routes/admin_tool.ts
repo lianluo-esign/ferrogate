@@ -33,6 +33,27 @@ import {
   subListHandler,
 } from "./resource.js";
 
+/**
+ * PORT-TODO(P: cert2-controlplane §CLASS-A admin_tool tools catalogue) — the
+ * approvals half is EQUIVALENT (`apps/mcp/src/approvals.ts` reads the very
+ * documents the three decisions write, `TOOL_APPROVAL_COLLECTION`), but
+ * `GET /admin/v1/tools` and `GET /admin/v1/tool-sessions/{id}` are CLASS A.
+ *
+ * Rust `local.rs::handle_admin_tools` (7901) answers from `state.all_tools()`
+ * (`state_tools.rs:71` → the live extension/tool registry), i.e. the tools the
+ * deployment can actually dispatch. Here `tools`, `tool-sessions` and
+ * `tool-session-events` are read-only `control_plane_resources` collections with
+ * NO writer anywhere in `apps/*\/src` or `packages/*\/src`, so an operator asking
+ * "what tools does this deployment expose?" is told "none", and
+ * `adapters.ts::StoreRuntimeStatus.status()` reports `tools: 0` off the same
+ * empty collection.
+ *
+ * `tools` closes with the same cross-app decision as `admin_plugin` (the plugin
+ * registry is where tools come from). `tool-sessions` needs a writer on the MCP
+ * side first — `apps/mcp` holds session state in its Durable Object, which is
+ * addressable but not queryable across instances, so it needs a projection row
+ * exactly as `agent_run` does.
+ */
 const TOOL_APPROVAL_SPEC: CollectionSpec = {
   segment: "tool-approvals",
   object: "tool_approval",

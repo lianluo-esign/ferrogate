@@ -316,7 +316,58 @@ async function createRun(
   );
 }
 
-/** `POST /v1/agent-runs` — `createAgentRun`, scope `agents.invoke`. */
+/**
+ * `POST /v1/agent-runs` — `createAgentRun`, scope `agents.invoke`.
+ *
+ * ## PORT-TODO(`server/agent_runs.rs::handle_agent_run_create`, 1,718 lines + `ferrogate-runtime::agent` 1,085 lines): THIS IS NOT THE RUST OPERATION
+ *
+ * The route id matches the contract; the BEHAVIOUR does not. Rust's
+ * `handle_agent_run_create` is a **synchronous** agent run: it builds an
+ * `AgentHarness` from the request's `max_turns` / `timeout_millis`, loops turns
+ * against an `AgentProvider`, dispatches the request's `tool_calls` through
+ * `GovernedAgentToolDispatcher`, emits the run-event timeline
+ * (`run_started` → `turn_started` → `tool_call_requested` →
+ * `tool_call_completed` → `run_output` → `run_completed` / `run_cancelled` /
+ * `run_stopped`), debits the workflow run budget
+ * (`WorkflowBudgetDebit`, `run_budget_exhausted`) and answers
+ * `200 {object:"agent_run", id, status, turns_executed, output, tool_results,
+ * request_id}` — the finished result, in the response.
+ *
+ * This handler is `submitAgentJob` under a second URL. It answers
+ * `202 {object:"agent_run", run_id, status, idempotency_key, status_url,
+ * events_url, result_url, …}` and never runs a turn. A client written against
+ * the Rust reads `output`/`tool_results`/`turns_executed` off the response and
+ * finds none of the three; `max_turns`, `timeout_millis` and `tool_calls` are
+ * accepted and ignored.
+ *
+ * Missing WITH it, and all of them Rust-complete (`crates/…/agent_runs.rs`
+ * lines 554-660, no `todo!()` anywhere in the file or in `agent.rs`):
+ *
+ * | Rust refusal | status | what it stops |
+ * |---|---|---|
+ * | `invalid_agent_run_input` | 400 | empty input (TS: `invalid_request`) |
+ * | `invalid_agent_run_max_turns` | 400 | out-of-range `max_turns` — no reader here |
+ * | `invalid_agent_run_timeout` | 400 | out-of-range `timeout_millis` — no reader here |
+ * | `invalid_agent_tool_call` | 400 | malformed `tool_calls[]` — no reader here |
+ * | `invalid_agent_runtime_provider` / `invalid_agent_runtime_config` | 400 | the run's provider selection |
+ * | `workflow_node_not_tool` | 403 | a non-tool node dispatching tool traffic |
+ * | `workflow_tool_not_allowed` | 403 | a node calling a tool it is not pinned to |
+ * | `workflow_edge_not_allowed` | 403 | an illegal transition on the RUN path |
+ * | `workflow_parallelism_limit_exceeded` | 429 | `max_parallelism` over `tool_calls` |
+ * | `run_budget_exhausted` | 429 | the workflow run budget, DEBITED here |
+ * | `agent_run_failed` | 502 | a harness/provider failure |
+ * | `agent_run_id_conflict` | 409 | see note in `submitAgentJob` — unreachable in the DO model |
+ *
+ * `apps/gateway/src/inference/workflow.ts` ports the MODEL-side workflow gate.
+ * Nothing in `apps/agent-runtime/src/` reads a workflow at all
+ * (`grep -rn workflow apps/agent-runtime/src` → 0 hits), so the TOOL-side half
+ * of the same graph — which is the half `/v1/agent-runs` enforces in Rust — is
+ * unported on the one Worker that owns the operation.
+ *
+ * NOT a platform limit. The harness is a pure turn loop over an injected
+ * provider and tool dispatcher; the budget debit is `D1WorkflowBudgetStore`,
+ * already used by `apps/gateway`. It is a scope gap: no wave has owned it.
+ */
 runRoutes.post("/v1/agent-runs", (c) =>
   createRun(c, { initialStatus: "running", enqueueDispatch: true }),
 );

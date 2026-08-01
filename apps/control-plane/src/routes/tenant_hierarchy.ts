@@ -278,6 +278,32 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       body: tenantAccountSchema,
       project: projectTenantAccount,
     },
+    /**
+     * PORT-TODO(P: cert2-controlplane §CLASS-A tenant_hierarchy GET /tenants) —
+     * CLASS A REGRESSION, and the ONE non-equivalent operation in this
+     * otherwise-equivalent 20-operation group.
+     *
+     * This pages a `tenants` DOCUMENT collection that no contract operation
+     * writes (tenant ACCOUNTS are the separate `tenant-accounts` collection
+     * above, and the typed `tenants` TABLE is written by `projectTenantAccount`,
+     * not by this document store). It therefore answers an empty `AdminList` on
+     * every deployment.
+     *
+     * Rust `local.rs::handle_admin_tenants` (9288) answers a DERIVED view:
+     * `state.tenant_refs()` (`state_tools.rs:28`) projects every configured api
+     * key that carries an `organization_id` / `team_id` / `project_id` /
+     * `user_id` into an `AdminTenantRef {organization_id, team_id, project_id,
+     * user_id, api_key_id}`, then `filter_by_tenant_scope` fences it to the
+     * caller. It is the "which tenancies exist, and through which credential"
+     * answer an operator uses to find an unattributed key — a real, complete,
+     * non-stub handler.
+     *
+     * Closing it needs no new binding: the same projection is derivable here
+     * from `api_key_directory` ⋈ `static_api_keys` in the CONTROL database,
+     * which `store/api_keys.ts` and `store/virtual_keys.ts` already write. Carry
+     * the fence: Rust filters by STRICT tenant equality, so an un-attributed
+     * platform key must not appear for a tenant-scoped caller.
+     */
     readOnlyCollection("tenants", "tenant"),
   ],
   {

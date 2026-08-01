@@ -94,20 +94,53 @@ signatures resolve into the TS tree, but the body was not read).
 
 ## Summary
 
+> ### ⚠️ SUPERSEDED IN PART — read `MISSING-TRIAGE.md` first
+>
+> **Wave 19 (2026-08-01) re-opened all 37 MISSING modules.** Two things changed:
+>
+> 1. **Nine rows were STALE and are corrected in place below** (each is marked
+>    `CORRECTED wave 19`). Eight are the enterprise-identity family the
+>    concurrency note predicted — `admin_console.rs`, `sso.rs`, `scim.rs`,
+>    `saml.rs`, `server.rs`, `http.rs`, `lib.rs`, `auth_quota.rs`, all landed by
+>    wave 18 in `packages/{sso,identity}` + `apps/control-plane/src/{session,identity}`
+>    (8,448 lines of TS). The ninth was NOT predicted:
+>    `server/managed_action_guardrail.rs` is ported at `apps/mcp/src/ports.ts:466-511`
+>    and the signature index simply missed it.
+> 2. **The remaining 28 are no longer all blockers.** Under the owner's ruling
+>    that the Rust tree is itself half-finished, they triage to
+>    **A=8 (regression, blocks) · B=15 (Rust never wired) · C=5 (platform /
+>    `cfg(test)` / obsolete)**. The evidence per row — is there a production
+>    caller, does the transport exist on workerd — is in
+>    `docs/rewrite/MISSING-TRIAGE.md`.
+>
+> The `Ranked MISSING list` and `MISSING grouped by capability` sections below
+> are preserved AS WRITTEN (they are the wave-18 record); they overstate the
+> blocker set by 29 modules. Use the triage for the cutover decision.
+
 | Class | Modules | Lines |
 |---|---:|---:|
-| PORTED | 245 | 197,756 |
-| OBSOLETE-ON-CF | 24 | 19,677 |
+| PORTED (245 + 8 corrected) | 253 | 203,165 |
+| OBSOLETE-ON-CF (24 + 1 corrected) | 25 | 20,164 |
 | DELIBERATELY-DROPPED | 11 | 7,178 |
-| MISSING | 37 | 27,644 |
+| MISSING (37 − 9 stale) | 28 | 21,748 |
 | UNVERIFIED | 46 | 23,040 |
 | **product total** | **363** | **275,295** |
+
+Of the 28 real MISSING modules: **A 8 / 3,391 lines · B 15 / 6,664 · C 5 / 11,693**
+(`MISSING-TRIAGE.md`).
 | TEST-ONLY | 257 | 123,750 |
 | **grand total** | **620** | **399,045** |
 
 Evidence tiers across PORTED + OBSOLETE-ON-CF: **signature-derived** 131 · **hand-verified** 77 · **cited-by-TS** 61.
 
 ## Ranked MISSING list
+
+> **HISTORICAL — wave-18 record, superseded by `MISSING-TRIAGE.md`.** Rows
+> 4, 7, 12, 13, 14, 15, 16, 18 and 37 of this table were STALE when written and
+> are corrected in the full table below. Of the 28 that survive, 20 are B or C
+> and do not block cutover. The blocking set is
+> `budget_alerts.rs` · the 5-module brokered edge-function egress ·
+> `extensions.rs` (2 contract ops only) · `client_action_time.rs`.
 
 **37 modules, 27,644 lines of Rust with no TypeScript implementation.**
 
@@ -288,18 +321,18 @@ rest PORTED, is exactly the failure this document exists to end.
 
 | Module | Lines | Class | Evidence | TS owner | Note |
 |---|---:|---|---|---|---|
-| `admin_console.rs` | 1481 | MISSING | hand-verified | — | **1481 lines. The admin-console SESSION surface**: `POST /v1/admin/register`, `/login`, `/refresh`, `/logout`; `GET /v1/admin/me`; `GET /v1/admin/team`; `POST /v1/admin/team/invite`; `/v1/admin/team/members/{id}` role change + removal. Zero TS routes at scan; `apps/control-plane/src/session/` (store/tokens/credentials) was appearing in-flight but is not mounted on any route. Blast radius: the console has no way to authenticate a human at all; every `/admin/v1/**` op in TS assumes a bearer key that only this surface could mint for a person. |
-| `sso.rs` | 970 | MISSING | hand-verified | — | **970 lines. OIDC (Authorization Code + PKCE, RFC 7636) and SAML SSO flows plus the per-tenant SSO config endpoints (#160/#283).** Zero TS implementation at scan (see concurrency note): `sso`/`oidc` matched no implementation file under apps/ or packages/, only an unrelated MCP OAuth client; `packages/identity/src/oidc/` held one base64url helper and RED tests. Lost: `POST\|GET\|DELETE /v1/admin/team/sso-config`, `GET /v1/admin/auth/sso/authorize`, `GET /v1/admin/auth/sso/callback`, group->role mapping, `client_secret_ref` indirection, 10-minute flow TTL. Blast radius: enterprise tenants cannot log in at all. |
-| `server.rs` | 622 | MISSING | hand-verified | — | 622 lines: the auth-service router itself. **Its 34 routes are not in `docs/openapi/runtime-api-contract.json`** — grep for `scim`/`sso`/`saml`/`admin/login` in the 251-op contract returns False for all. This is the mechanical reason 17 waves of contract-driven parity audits could not see this crate: the contract they audit against never described it. |
-| `scim.rs` | 598 | MISSING | hand-verified | — | **598 lines. SCIM 2.0 user/group provisioning.** The "1 TS file" that made this look covered is `apps/gateway/src/keys/scopes.ts`, which merely contains the substring `scim` in an unrelated scope name — it is NOT a SCIM implementation. (`packages/identity/test/scim-*.test.ts` are RED tests written this wave; no `src/scim` implementation existed at scan.) Lost: `GET\|POST /scim/v2/Users`, `GET\|PATCH\|DELETE /scim/v2/Users/{id}`, `GET /scim/v2/Groups`, `POST /v1/admin/team/scim-token`. Blast radius: no IdP-driven deprovisioning, so a revoked employee keeps tenant access. |
-| `saml.rs` | 551 | MISSING | hand-verified | — | **551 lines. SAML 2.0 SP: AuthnRequest construction, ACS assertion verification against the IdP signing certificate, attribute mapping.** Zero TS implementation at scan; `packages/sso/` had RED tests and NO `src/` directory. Lost: `GET /v1/admin/auth/saml/authorize`, `GET /v1/admin/auth/saml/acs`. Blast radius: same as sso.rs; also the highest-risk surface to reimplement (signature verification). |
-| `http.rs` | 487 | MISSING | hand-verified | — | 487 lines: the crate HTTP layer (request/response shapes, cookie/session handling) the four surfaces above share. |
+| `admin_console.rs` | 1481 | PORTED | hand-verified (CORRECTED wave 19) | — | **1481 lines. The admin-console SESSION surface**: `POST /v1/admin/register`, `/login`, `/refresh`, `/logout`; `GET /v1/admin/me`; `GET /v1/admin/team`; `POST /v1/admin/team/invite`; `/v1/admin/team/members/{id}` role change + removal. Zero TS routes at scan; `apps/control-plane/src/session/` (store/tokens/credentials) was appearing in-flight but is not mounted on any route. Blast radius: the console has no way to authenticate a human at all; every `/admin/v1/**` op in TS assumes a bearer key that only this surface could mint for a person. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — apps/control-plane/src/session/routes.ts (869) + session/index.ts — mounted at index.ts:104.** |
+| `sso.rs` | 970 | PORTED | hand-verified (CORRECTED wave 19) | — | **970 lines. OIDC (Authorization Code + PKCE, RFC 7636) and SAML SSO flows plus the per-tenant SSO config endpoints (#160/#283).** Zero TS implementation at scan (see concurrency note): `sso`/`oidc` matched no implementation file under apps/ or packages/, only an unrelated MCP OAuth client; `packages/identity/src/oidc/` held one base64url helper and RED tests. Lost: `POST\|GET\|DELETE /v1/admin/team/sso-config`, `GET /v1/admin/auth/sso/authorize`, `GET /v1/admin/auth/sso/callback`, group->role mapping, `client_secret_ref` indirection, 10-minute flow TTL. Blast radius: enterprise tenants cannot log in at all. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — packages/identity/src/oidc/flow.ts + index.ts — mounted via createIdentityRoutes (index.ts:107).** |
+| `server.rs` | 622 | PORTED | hand-verified (CORRECTED wave 19) | — | 622 lines: the auth-service router itself. **Its 34 routes are not in `docs/openapi/runtime-api-contract.json`** — grep for `scim`/`sso`/`saml`/`admin/login` in the 251-op contract returns False for all. This is the mechanical reason 17 waves of contract-driven parity audits could not see this crate: the contract they audit against never described it. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — packages/identity/src/routes.ts + apps/control-plane/src/session/routes.ts — 17/17 identity paths; /v1/auth/*, /v1/rbac/*, /v1/tenants are OBSOLETE-ON-CF (direct D1 binding + contract ops).** |
+| `scim.rs` | 598 | PORTED | hand-verified (CORRECTED wave 19) | — | **598 lines. SCIM 2.0 user/group provisioning.** The "1 TS file" that made this look covered is `apps/gateway/src/keys/scopes.ts`, which merely contains the substring `scim` in an unrelated scope name — it is NOT a SCIM implementation. (`packages/identity/test/scim-*.test.ts` are RED tests written this wave; no `src/scim` implementation existed at scan.) Lost: `GET\|POST /scim/v2/Users`, `GET\|PATCH\|DELETE /scim/v2/Users/{id}`, `GET /scim/v2/Groups`, `POST /v1/admin/team/scim-token`. Blast radius: no IdP-driven deprovisioning, so a revoked employee keeps tenant access. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — packages/identity/src/scim/service.ts (461) + scim/{filter,auth,resources}.ts.** |
+| `saml.rs` | 551 | PORTED | hand-verified (CORRECTED wave 19) | — | **551 lines. SAML 2.0 SP: AuthnRequest construction, ACS assertion verification against the IdP signing certificate, attribute mapping.** Zero TS implementation at scan; `packages/sso/` had RED tests and NO `src/` directory. Lost: `GET /v1/admin/auth/saml/authorize`, `GET /v1/admin/auth/saml/acs`. Blast radius: same as sso.rs; also the highest-risk surface to reimplement (signature verification). **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — packages/sso/src/* (2256 lines incl. redirect-binding.ts:139-185 crypto.subtle.verify).** |
+| `http.rs` | 487 | OBSOLETE-ON-CF | hand-verified (CORRECTED wave 19) | — | 487 lines: the crate HTTP layer (request/response shapes, cookie/session handling) the four surfaces above share. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — packages/identity/src/errors.ts — hand-rolled bounded HTTP reader replaced by Hono + platform Request/Response.** |
 | `rbac.rs` | 402 | PORTED | hand-verified | apps/control-plane/src/routes/rbac.ts, apps/control-plane/src/store/rbac_registry.ts | `/v1/rbac/roles` + `/v1/rbac/bindings`; the durable write half landed in wave 17 (task #111). |
 | `main.rs` | 223 | OBSOLETE-ON-CF | hand-verified | — | 223 lines: standalone binary entry (listener/bind). A Worker entry replaces it — but only once the surface it serves exists. |
 | `membership_role.rs` | 183 | PORTED | hand-verified | apps/gateway/src/keys/scopes.ts, apps/gateway/src/keys/index.ts | owner/admin/member role ladder. |
 | `api_key.rs` | 180 | PORTED | hand-verified | apps/gateway/src/keys/hash.ts, apps/control-plane/src/routes/admin_api_key.ts |  |
 | `util.rs` | 172 | PORTED | hand-verified | apps/gateway/src/keys/hash.ts, apps/agent-runtime/src/durable/hash.ts | Hash/encode helpers. |
-| `lib.rs` | 117 | MISSING | hand-verified | — | 117 lines: crate root wiring the above together. |
+| `lib.rs` | 117 | PORTED | hand-verified (CORRECTED wave 19) | — | 117 lines: crate root wiring the above together. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — crate root is mod/pub use only (lib.rs:33-60); subsumed once every module is owned.** |
 
 <details><summary>TEST-ONLY modules (7, 5,488 lines)</summary>
 
@@ -581,7 +614,7 @@ rest PORTED, is exactly the failure this document exists to end.
 | `server/observed_agent_activity.rs` | 587 | PORTED | hand-verified | packages/storage/src/presence.ts, apps/control-plane/src/routes/admin_managed_worker.ts |  |
 | `asset_scan.rs` | 567 | PORTED | signature-derived | apps/gateway/src/assets/scan.ts, apps/gateway/src/assets/ports.ts | signature coverage 18/34. |
 | `model_routing.rs` | 564 | PORTED | signature-derived | apps/gateway/src/inference/candidates.ts, apps/gateway/src/inference/handlers.ts | signature coverage 3/3. |
-| `server/managed_action_guardrail.rs` | 551 | MISSING | hand-verified | — | 551 lines: derives the guardrail `ManagedActionClass`, canonical target string and scannable input text FROM a runtime external action, so managed actions get the same guardrail envelope as user traffic. Depends on `ManagedExternalAction::capability_action`, which is itself unported (see agent-worker::external_actions). |
+| `server/managed_action_guardrail.rs` | 551 | PORTED | hand-verified (CORRECTED wave 19) | — | 551 lines: derives the guardrail `ManagedActionClass`, canonical target string and scannable input text FROM a runtime external action, so managed actions get the same guardrail envelope as user traffic. Depends on `ManagedExternalAction::capability_action`, which is itself unported (see agent-worker::external_actions). **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — apps/mcp/src/ports.ts:466-511 (evaluate_managed_action_guardrail_async + payload_text), run by the tools.ts chokepoint.** |
 | `server/payment_attempts.rs` | 542 | DELIBERATELY-DROPPED | hand-verified | apps/control-plane/src/routes/payment_attempt.ts | x402/Solana deprioritized. |
 | `asset_signature.rs` | 541 | PORTED | cited-by-TS | apps/gateway/src/assets/signature.ts, apps/gateway/test/assets/signature.test.ts | TS owner cites `crates/ferrogate-gateway/src/asset_signature.rs` by path; signature coverage 16/17. |
 | `state_evidence_writer.rs` | 541 | OBSOLETE-ON-CF | hand-verified | `ctx.waitUntil` (19 src files), apps/gateway/src/metering/publisher.ts | Bounded MPSC background writer that existed solely to keep `block_in_place` off a Pingora worker thread (#309). Workers have no thread to park. |
@@ -1001,7 +1034,7 @@ rest PORTED, is exactly the failure this document exists to end.
 | `control_plane_store_d1/worker_stores.rs` | 567 | PORTED | hand-verified | apps/control-plane/src/store/worker_registry.ts | Managed + self-hosted worker stores (#449); WRITE half landed wave 17 (task #102). |
 | `control_plane_store_d1/agent_schedule.rs` | 563 | PORTED | signature-derived | packages/storage/src/d1/agent-schedule-d1.ts | signature coverage 7/8. |
 | `control_plane_store_d1/rbac_site_domain.rs` | 556 | PORTED | hand-verified | apps/control-plane/src/store/rbac_registry.ts, packages/storage/src/d1/site-domain-d1.ts, packages/storage/src/d1/budget-alerts-d1.ts | RBAC + site domains + budget-alert idempotency ledger (#445). |
-| `control_plane_store_d1/auth_quota.rs` | 519 | MISSING | hand-verified | apps/control-plane/src/store/quota_registry.ts (quota policies + plans ONLY) | 519 lines covering "admin users, **SSO**, refresh tokens, quota policies, plans" (#440). Quotas and plans are ported; the **admin-user / SSO-config / refresh-token tables are not** — `sso_config` = 0 TS hits. This is the STORAGE half of the same auth-service gap, and it is why that gap is not just a missing router. |
+| `control_plane_store_d1/auth_quota.rs` | 519 | PORTED | hand-verified (CORRECTED wave 19) | apps/control-plane/src/store/quota_registry.ts (quota policies + plans ONLY) | 519 lines covering "admin users, **SSO**, refresh tokens, quota policies, plans" (#440). Quotas and plans are ported; the **admin-user / SSO-config / refresh-token tables are not** — `sso_config` = 0 TS hits. This is the STORAGE half of the same auth-service gap, and it is why that gap is not just a missing router. **CORRECTED 2026-08-01 (see MISSING-TRIAGE.md §1): this row was STALE — apps/control-plane/src/session/store.ts:182-300 (admin_users/memberships/refresh tokens) + identity/adapters.ts:321-492 (sso_provider_configs, sso_pending_flows).** |
 | `control_plane_store_d1/billing.rs` | 466 | PORTED | signature-derived | packages/storage/src/d1/billing-d1.ts, apps/gateway/src/metering/outbox.ts | signature coverage 1/1. |
 | `site_domain.rs` | 416 | PORTED | signature-derived | packages/storage/src/site-domain.ts, apps/cli/src/registry.ts | signature coverage 4/8. |
 | `control_plane_store_d1/usage.rs` | 411 | PORTED | signature-derived | packages/storage/src/d1/usage-d1.ts, packages/storage/src/metadata-rollups.ts | signature coverage 3/4. |
