@@ -2,6 +2,11 @@
 
 **Wave 23 · 2026-08-01 · branch `main-ts` · worktree `/home/dev/ferrogate-ts`**
 
+> **WAVE 24 APPENDED — see §0.5.** The verdict below is UNCHANGED. Wave 24
+> captured the two pieces of expiring insurance (§3.1), transcribed S3 and S4
+> into `docs/rewrite/SPEC-TRANSCRIPTS.md`, and built S5. S1 and S2 remain, and
+> they are a product decision the owner is answering separately.
+
 **This is a FRESH decision.** It inherits no verdict. Waves 15–22 are preserved
 verbatim in **Appendix G** (waves 19–22) and **Appendix H** (waves 15–18) and are
 history, not evidence. Every number in §1 was measured by this agent, on this
@@ -84,6 +89,166 @@ waves.** Nothing here requires the certification cycle to run again.
   allowed to block anything.
 * It is **not** a hold on the merge. The two decisions are separable and I have
   separated them.
+
+---
+
+## 0.5 WAVE 24 — the expiring insurance is CAPTURED, S3/S4 are TRANSCRIBED, S5 is BUILT. The verdict is NOT changed.
+
+**Wave 24 · 2026-08-01 · integrate step, first-hand.** This section is appended,
+not merged into the wave-23 text above: every number in §§0-8 remains what wave
+23 measured, and every number here is what wave 24 measured.
+
+**The verdict is deliberately untouched.** S1 (`executeFunction`) and S2
+(`listTools`/`executeTool` catalogue) are the remaining spec-bound clusters and
+they are a **product decision the owner is answering separately**. Three of the
+five clusters moved; the two that gate the deletion did not, so neither the
+GO on the merge nor the NO-GO on the delete changes.
+
+### 0.5.1 The two pieces of insurance (§3.1) are CAPTURED — verified independently, not accepted
+
+Both were *irreversible-if-missed*, so the integrate step re-derived them rather
+than reading the delivering agents' notes.
+
+**L11 — SigV4 golden vectors** (`packages/providers/test/sigv4-golden.test.ts`,
+27 assertions). Every literal was regenerated from AWS's published algorithm in
+a from-scratch ~40-line Python `hashlib`/`hmac` script that touches neither the
+TS nor the Rust: **12 of 12 values reproduced exactly** — the four canonical
+request digests, the six signatures, and both payload hashes. The Rust
+`sign_canonical` (`crates/ferrogate-providers/src/sigv4.rs:225-233`) was then
+read directly and its canonical-request `format!` is character-for-character the
+layout the file pins. **The TS agreed with the Rust on the first run.** There was
+no divergence to report.
+
+The claim that made this worth doing was also re-measured rather than trusted.
+The pre-L11 gate was reconstructed verbatim from `HEAD` (23 assertions) and run
+against each mutation:
+
+| mutation | pre-L11 gate | `sigv4-golden.test.ts` |
+|---|---|---|
+| A drop the blank line before the signed-header list | **GREEN 23/23** | **RED, 6 failed** |
+| B reorder canonical headers, list left correct | **GREEN 23/23** | **RED, 3 failed** |
+| C double-hash the payload line | RED | **RED, 5 failed** |
+| D credential scope from `amzDate` not `dateStamp` | RED | **RED, 7 failed** |
+| E drop the trailing `\n` on the last canonical header | **GREEN 23/23** | **RED, 3 failed** |
+| F `canonicalUri` returns the path unencoded | **GREEN 23/23** | **RED, 2 failed** |
+| G presign signs `""` instead of `UNSIGNED-PAYLOAD` | **GREEN 23/23** | **RED, 1 failed** |
+
+Five of seven — every purely structural one — were invisible before this file
+existed. Each mutation was read back **off disk** with the original text required
+absent, and each restore was verified byte-identical by `sha256`.
+
+**The Rust-derived rollout bucket table** (`packages/routing/test/fnv-golden.test.ts`,
+165 rows). `crates/ferrogate-routing/src/rollout.rs` was read directly
+(`FNV_OFFSET_BASIS`, `FNV_PRIME`, `salt ++ 0x00 ++ sticky_key`, `% 100`) and all
+165 rows were regenerated in an independent Python implementation anchored first
+against the canonical FNV-1a-64 reference vectors: **0 mismatches of 165**, on
+both the full 64-bit `raw` column and the `bucket` column. **The TS agreed with
+the Rust on the first run.** Six divergence mutations were then applied to
+`packages/routing/src/fnv.ts` and every one is RED: FNV-1 instead of FNV-1a, the
+NUL separator changed to `0x01`, `% 101`, an offset basis off by one, and latin1
+instead of UTF-8 on each of the salt and the key.
+
+**Both artefacts are now independent of `crates/**`.** This is the part of wave
+24 that cannot be redone later, and it is done.
+
+### 0.5.2 S3 and S4 are TRANSCRIBED — `docs/rewrite/SPEC-TRANSCRIPTS.md` (1,334 lines)
+
+Written against the exit criterion in §0.3, third bullet. Spot-verified against
+the Rust by the integrate step at the points the certification called decisive:
+
+* **S3 · the transaction shape.** `state.rs:880-926 reload_process_local` is
+  transcribed as an algorithm — coordinator lock, `prepare`, GATE 1 listener-level
+  rejection, GATE 2 runtime construction, the swap, `commit` — and the Rust reads
+  exactly that, including both `RuntimeReloadResult` early returns and their
+  `mode` constants. `config_snapshot_id` is confirmed FNV-1a-64 over
+  `serde_json::to_vec(config)` rendered `{:016x}`, with the transcript's warning
+  that it is **content-addressed and not an ordering key**.
+* **S4 · the #535 field-level redaction.** `local.rs:8227-8281` and
+  `rbac.rs:1276-1349` were opened. `narrow`, `narrow_organizations` and
+  `visible_model` are transcribed correctly, including the invariant that carries
+  the security: **a non-empty selector that loses every entry returns `None` (hide
+  the entry), never `Some([])`**, because an empty selector is a WILDCARD — so the
+  careless port converts a tenant-scoped model into a globally-visible one. The
+  transcript states that in those terms.
+
+The document also carries an explicit honest ledger (§C1) of where the Rust is
+unfinished and must **not** be transcribed as specification.
+
+### 0.5.3 S5 is BUILT — the plan/RBAC tool-entitlement ladder is mounted and gated
+
+`apps/mcp/src/entitlements.ts` (`D1ToolEntitlements`) ports
+`local.rs:137 tool_execution_entitlement_denial` + `state_rbac.rs:11
+tenant_tool_entitlement_denied` over the CONTROL D1, and `resolvePorts` now binds
+it (`MCP-P15`, a new T1 seam row). Both consumers were already calling
+`ports.entitlements.toolExecutionDenial` and being answered `undefined` — the
+"implemented, tested, never mounted" shape that R1 turned out to be.
+
+Verified as an EFFECT, not as a call: mutating the mount to
+`inMemoryPorts().entitlements` — original text confirmed gone off disk,
+`grep -c 'durableEntitlements(env)' → 0` — takes `test/entitlements.test.ts` to
+**5 failed / 3 passed (8)**, and restoring returns it to 8/8 with the file
+`sha256`-identical. The four Rust properties that are easy to lose are each
+pinned: denial requires a REGISTERED tenant, plan **OR** role grants, an
+UNDECLARED permission grants nothing, and every lookup swallows its error into
+"no grant" so a control-plane outage cannot lock the fleet out.
+
+**This closes A3/R1 and empties cluster S5.**
+
+### 0.5.4 Does a NEW BLOCKER appear? NO
+
+Nothing found this wave is CLASS A. Two corrections to the record:
+
+1. **The `version` drift is on `/readyz`, not `/healthz`.** The wave-24 boot proof
+   read all ten bodies: **all five `/healthz` documents carry `version`** and share
+   ONE shape (`{status, service, version, runtime}`, `distinct shapes: 1`). It is
+   the gateway's **`/readyz`** that omits `version` while the other four carry it —
+   exactly as §2.3 records. Unchanged, still the one CLASS A item the boot proof
+   reaches, still not new.
+2. **`apps/mcp/wrangler.toml` inertness is now ASSERTED, not claimed.** S5 needs
+   no new binding and adds no Durable Object, but under
+   `@cloudflare/vitest-pool-workers` the `DB` binding comes from
+   `vitest.config.ts`, so the committed deploy config could have stopped declaring
+   it with every entitlement test still green — R1's shape one level down. Two
+   assertions were added to `test/wrangler-bindings.test.ts`: the committed
+   `[[d1_databases]]` declares `binding = "DB"` / `ferrogate-control` /
+   `PLACEHOLDER_SET_AT_DEPLOY_TIME`, and the bound Durable Object class set is
+   **exactly** what `src/worker.ts` exports. Renaming the `DB` binding in the
+   committed toml takes that file RED.
+
+### 0.5.5 Wave-24 gate results, first-hand
+
+| Gate | Result |
+|---|---|
+| `bun install` | no changes, 262 installs checked |
+| `bun run typecheck` | **clean**, 22 projects |
+| `bun run test`, per package and app | **7,029 passed, 0 failed**, exit 0 in all 21 workspaces (was ~6,980; +40 new assertions, +9 counted `todo`) |
+| Seam pass — parse | CLAIMED **201** · PARSED **201** · gated **199** · no-gate-by-design **2** · no-gate-no-reason **0** |
+| Seam pass — T1 `--run` | **136 rows**, 435s, all GREEN except `AR-T11` (NO-GATE by design) |
+| Seam pass — every `apps/mcp` row (the file this wave touched) | **34 rows**, 63s, **34 GREEN** |
+| Seam mutations re-proven | `MCP-P15` 5 RED / 8 · `MCP-P14` 8 RED / 12 (its gate file was edited this wave, so it was re-proven rather than assumed) |
+| Insurance mutations | 7 SigV4 + 6 FNV, **13 of 13 RED**, all restored `sha256`-identical |
+| Boot proof — five Workers, `wrangler dev --local` | all five **"Ready on"**, `/healthz` **200 ×5**, `/readyz` **200 ×5**, bodies read |
+| `playwright test --config e2e/playwright.config.ts` | **22 passed** (22 before) |
+
+### 0.5.6 What remains between here and `git rm -r crates/`
+
+Precisely two things, and they are the same two the owner is deciding:
+
+1. **S1 — `executeFunction`.** ~400 lines of egress allowlist + token minting in
+   `local.rs`'s `handle_function_execute` region and
+   `ferrogate-runtime/src/{function_egress,function_token,supabase_edge_function,function_egress_cloudflare}.rs`.
+   Nothing in `docs/` reproduces the allowlist semantics or the token claim set.
+   **BUILD, TRANSCRIBE or DROP.**
+2. **S2 — the `listTools`/`executeTool` CATALOGUE half.**
+   `crates/ferrogate-gateway/src/extensions.rs` + `state_tools.rs`. Keep the
+   catalogue; the hook model (`RequestHook` has one variant, `Noop`) should be
+   designed fresh rather than copied. **BUILD, TRANSCRIBE or DROP.**
+
+S3, S4 and S5 are cleared: S3 and S4 by transcription at the fidelity §3 names,
+S5 by construction. The two insurance artefacts are captured and no longer
+depend on `crates/**` existing. **Nothing else in this document blocks the
+deletion**, and §0.3's exit criterion is now satisfied for three of five
+clusters.
 
 ---
 
@@ -289,9 +454,9 @@ For each cluster: is the Rust the **only** complete specification?
 |---|---|---|---|
 | **S1** | `executeFunction` (A1) | `crates/ferrogate-gateway/src/server/local.rs` (the `handle_function_execute` region) + `crates/ferrogate-runtime/src/{function_egress,function_token,supabase_edge_function,function_egress_cloudflare}.rs` — ~400 lines of egress allowlist and token minting, `0` `todo!()` | **YES.** Nothing in `docs/` reproduces the allowlist semantics or the token claim set. |
 | **S2** | `listTools` / `executeTool` (A2) | `crates/ferrogate-gateway/src/extensions.rs` + `state_tools.rs` | **YES, the CATALOGUE half.** Note `extensions.rs`'s `RequestHook` enum has one variant (`Noop`) and `EventSink` one (`audit_log`) — the **hook model should be designed fresh**, not copied. Keep the catalogue. |
-| **S3** | The 25 config-backed control-plane operations — `skill`, `admin_plugin`, `admin_policy`, `prompt` (A6) | `crates/ferrogate-gateway/src/state.rs:1334` + `local.rs:1844` | **YES.** The value is the *transaction shape* — persist → clone config → apply snapshot → `validate()` → reload → roll back on error → re-read and answer `409 …_reload_rejected`. That is not in any doc. |
-| **S4** | `admin_provider` (3) + `admin_model` (1) (A6) | `local.rs:5019` (projection), `local.rs:5062` (live per-provider catalog fetch), `local.rs:8227` (the **#535 field-level redaction**) | **YES for the redaction.** Shipping the model projection without it is a credential-disclosure regression, and the redaction rule exists only in that function. |
-| **S5** | R1's entitlement ladder (A3) | `local.rs:137-160` + `state_rbac.rs:11` | **PARTLY.** The plan-OR-role shape is transcribed and `apps/gateway/src/assets/entitlements.ts` is an already-ported template of the same walk. **~2 hours of transcription clears this one entirely.** |
+| **S3** ✅ **CLEARED (wave 24 — TRANSCRIBED)** | The 25 config-backed control-plane operations — `skill`, `admin_plugin`, `admin_policy`, `prompt` (A6) | `crates/ferrogate-gateway/src/state.rs:1334` + `local.rs:1844` | **YES.** The value is the *transaction shape* — persist → clone config → apply snapshot → `validate()` → reload → roll back on error → re-read and answer `409 …_reload_rejected`. That is not in any doc. **Transcribed in full: `SPEC-TRANSCRIPTS.md` PART A (§§A1-A6), `reload_process_local` spot-verified against `state.rs:880-926` by the wave-24 integrate step.** |
+| **S4** ✅ **CLEARED (wave 24 — TRANSCRIBED)** | `admin_provider` (3) + `admin_model` (1) (A6) | `local.rs:5019` (projection), `local.rs:5062` (live per-provider catalog fetch), `local.rs:8227` (the **#535 field-level redaction**) | **YES for the redaction.** Shipping the model projection without it is a credential-disclosure regression, and the redaction rule exists only in that function. **Transcribed: `SPEC-TRANSCRIPTS.md` PART B (§§B1-B5); `narrow` / `narrow_organizations` / `visible_model` spot-verified against `rbac.rs:1276-1349`, including the `None`-not-`Some([])` wildcard invariant.** |
+| **S5** ✅ **CLEARED (wave 24 — BUILT)** | R1's entitlement ladder (A3) | `local.rs:137-160` + `state_rbac.rs:11` | **PARTLY.** The plan-OR-role shape is transcribed and `apps/gateway/src/assets/entitlements.ts` is an already-ported template of the same walk. **BUILT in wave 24**: `apps/mcp/src/entitlements.ts` + seam `MCP-P15`, mutation-proven 5 RED / 8. |
 
 **Not spec-bound, and therefore NOT blocking the deletion**: A4/R2 (three lines,
 quoted in full above), A5/L1 (the library is written; the gap is three edits at a
@@ -299,7 +464,7 @@ composition root), A7/R5 (a table and a sink; the Rust call site is named),
 A8/CORS (nine call sites named, semantics trivial), A9/D1 (a TS asymmetry, no
 Rust involved), A10, A11, and every one of the 19 tail items in §2.2.
 
-### 3.1 Two pieces of insurance that expire on deletion
+### 3.1 Two pieces of insurance that expire on deletion — ✅ **BOTH CAPTURED IN WAVE 24 (§0.5.1)**
 
 Neither is CLASS A. Both are cheap, and both are **impossible after the delete**:
 
@@ -483,17 +648,19 @@ is about `crates/**` alone.
 ## 7. Ranked actions
 
 1. **Merge `main-ts` → `main`.** Nothing is waiting on anything.
-2. **Close L11 and generate the routing golden table** (§3.1). Hours. They expire
-   on deletion and on nothing else.
+2. ~~**Close L11 and generate the routing golden table** (§3.1).~~ ✅ **DONE, wave 24** —
+   both captured and independently re-derived by the integrate step (§0.5.1). They
+   no longer depend on `crates/**`.
 3. **Close C1** (§5.1) — the suspension write leg. Security-adjacent; it is FC-2
    arriving through a door nobody is watching.
-4. **Transcribe or build S1–S5** (§3). This is the deletion gate. S5 is ~2 hours;
-   S3 and S4 are transcription; S1 and S2 are the real work, and the owner may
-   legitimately choose to **drop** them instead — that converts the verdict to GO
-   without writing a line.
-5. **Close A3/R1 and A4/R2.** R2 is two SQL columns and one branch on each of two
-   Workers. R1 has an already-ported template in
-   `apps/gateway/src/assets/entitlements.ts`.
+4. **Transcribe or build S1 and S2** (§3). This is the deletion gate, and it is now
+   only two clusters: **S3 and S4 were transcribed and S5 was built in wave 24**
+   (§§0.5.2-0.5.3). S1 and S2 are the real work, and the owner may legitimately
+   choose to **drop** them instead — that converts the verdict to GO without
+   writing a line.
+5. **Close A4/R2.** Two SQL columns and one branch on each of two Workers.
+   ~~A3/R1~~ ✅ **CLOSED, wave 24** — `apps/mcp/src/entitlements.ts`, mounted at
+   `MCP-P15` and mutation-proven (§0.5.3).
 6. **Add the §3.3 column property** to `fleet-control-matrix.test.ts` — *every
    column of a shared control table that any Worker PARSES must have at least one
    Worker that CONSUMES it in a decision* — or the next wave re-derives R1 and R2
@@ -523,6 +690,31 @@ the new findings require (R1's entitlement gate, R2's token-budget kill switch,
 and B10's shared RPM window) — all three recorded as **currently expected to
 FAIL**, because a verification plan that omits a known-failing check is worse
 than one that admits it.
+
+### 8.1 Wave-24 scope statement
+
+Run in `/home/dev/ferrogate-ts` on `main-ts`. **No `cargo`, no Rust compiled,
+imported or executed** — `crates/**` was READ ONLY, for provenance checking and
+comparison, which is what §0.3's transcription option requires. **No
+`wrangler deploy`, no live Cloudflare resource, no real upstream LLM call.** No
+`crates/` or `workers/` file was created, modified or deleted. **No merge to
+`main`.**
+
+No test was weakened, skipped or deleted. Every mutation in §0.5 was read back
+OFF DISK with the ORIGINAL TEXT required ABSENT, then reverted and verified
+byte-identical by `sha256`; `grep -rn 'MUT-[A-M]' apps packages` returns nothing.
+The pre-L11 gate reconstructed from `HEAD` for the §0.5.1 comparison was written
+to `packages/providers/test/zz-pre-l11.test.ts`, used, and removed — it is not in
+the commit.
+
+The independent re-derivations of both insurance artefacts were done in Python
+(`hashlib`/`hmac` and a from-scratch FNV-1a-64), driven from AWS's published
+algorithm text and from `rollout.rs`'s constants respectively, never from the TS
+under test. `CLOUD-VERIFICATION.md` §7's **V-R1** was flipped from
+expected-FAIL to expected-PASS, with the tenant-registration and role
+preconditions written into the row.
+
+---
 
 ---
 

@@ -159,6 +159,7 @@ async function seedCredential(): Promise<void> {
     control().prepare("DELETE FROM static_api_keys"),
     control().prepare("DELETE FROM tenant_role_bindings"),
     control().prepare("DELETE FROM roles"),
+    control().prepare("DELETE FROM permissions"),
   ]);
   await tenantDb().batch([
     tenantDb().prepare("DELETE FROM api_keys"),
@@ -186,7 +187,18 @@ async function seedCredential(): Promise<void> {
          VALUES (?, 'key-fc2', ?, ?, ?, ?, ?, 1)`,
       )
       .bind(hash, TENANT, PROJECT, WORKSPACE, KEY_PREFIX, KEY_LAST4),
-    // `mcp.execute` — `InMemoryEntitlements` reads it off `AuthContext.permissions`.
+    // `mcp.execute` — the S5/R1 entitlement ladder (`src/entitlements.ts`)
+    // walks Permission → Role → TenantRoleBinding for it, so all THREE rows are
+    // needed and the DECLARATION is one of them: this tenant's plan is `free`,
+    // whose migration default is `mcp_enabled = 0`, so the bound role is what
+    // opens the MCP door here. Rust's `tenant_tool_entitlement_denied` checks
+    // `list_permissions()` before reading any binding, which is why a role
+    // naming an undeclared key grants nothing — see
+    // `test/entitlements.test.ts`. Dropping this row makes DOOR 2 answer
+    // `mcp_tools_disabled` and the ADMITTED baseline below stops holding.
+    control().prepare(
+      "INSERT INTO permissions (id, key, name) VALUES ('perm-fc2', 'mcp.execute', 'MCP')",
+    ),
     control()
       .prepare(
         `INSERT INTO roles (id, name, slug, description, permission_keys_json)
@@ -194,7 +206,9 @@ async function seedCredential(): Promise<void> {
       )
       .bind(JSON.stringify(["mcp.execute"])),
     control()
-      .prepare("INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, 'role-fc2')")
+      .prepare(
+        "INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, 'role-fc2')",
+      )
       .bind(`${TENANT}:role-fc2`, TENANT),
   ]);
 

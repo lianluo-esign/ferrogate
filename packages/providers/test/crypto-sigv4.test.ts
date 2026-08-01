@@ -70,6 +70,11 @@ describe("SigV4 signing", () => {
     const signature = signed.authorization.split("Signature=")[1]!;
     expect(signature).toHaveLength(64);
     expect(signature).toMatch(/^[0-9a-f]{64}$/);
+    // L11: shape is not enough — a structurally wrong canonical request is also
+    // 64 lowercase hex. The value is pinned to the independently-derived golden
+    // (cert3-controlplane-libs.md §7.11); `test/sigv4-golden.test.ts` carries
+    // the canonical request and string-to-sign it comes from.
+    expect(signature).toBe("ee11e0386b7d4282de4b9d27205cb9633a5f30dcde4a5013991445a3093e6803");
   });
 
   test("includes the security token for temporary credentials", () => {
@@ -100,6 +105,10 @@ describe("SigV4 signing", () => {
     );
     expect(streamed.authorization).toBe(buffered.authorization);
     expect(buffered.xAmzContentSha256).toBe(hexSha256(request.body));
+    // L11: pin the value the two agree ON, not merely that they agree.
+    expect(streamed.authorization.split("Signature=")[1]).toBe(
+      "398afec746a079f98e63bf0ead0a2c56e516490f56f0192c848c5a1ae7013c13",
+    );
   });
 
   test("presignQuery emits all required X-Amz parameters", () => {
@@ -119,6 +128,10 @@ describe("SigV4 signing", () => {
     expect(query).toContain("X-Amz-Credential=AKIDEXAMPLE%2F20150830%2Fus-east-1%2Fs3%2Faws4_request");
     expect(query).toContain("X-Amz-SignedHeaders=host");
     expect(query).toMatch(/&X-Amz-Signature=[0-9a-f]{64}$/);
+    // L11: same trap on the presign path — pin the value.
+    expect(query).toMatch(
+      /&X-Amz-Signature=6751d6cb0aa4fb962fdb322beeb16da030ba004d4f92670a65d4bf5108d2c1b9$/,
+    );
   });
 
   test("canonicalQueryString sorts and RFC3986-encodes pairs", () => {

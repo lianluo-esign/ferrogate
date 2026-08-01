@@ -652,7 +652,7 @@ they were derived by the §2 walk and had never been enumerated.
 
 ---
 
-## 9. `apps/mcp` — 33 seams
+## 9. `apps/mcp` — 34 seams
 
 ### 9.1 Entry module `src/worker.ts` (3)
 
@@ -686,7 +686,7 @@ The old table's `MCP-R4` (`app.onError`) is **MCP-R6** here, and it is now gated
 | MCP-R5 | `app.notFound((c) => { … })` (242-245) | `if (false as boolean)` guard (a `MUT-1` line delete orphans the block and yields a PARSE error, not a behaviour change — corrected wave 15) | `grep -nF 'if (false as boolean)'` | `test/contract.test.ts` (404 control probe) | DEF | T2 |
 | MCP-R6 | `app.onError((error, c) => { … })` (247-256) — the 500 envelope | `MUT-2 "\"internal_error\""→"\"MUT_internal\""` (rename) **or** `if (false as boolean)` guard (full unmount) | marker present | `apps/mcp/test/error-envelope-mount.test.ts` (**wave 18**) — **1 RED** on the rename, **2 RED** on the unmount. **Was NO GATE: `grep -rn internal_error apps/mcp/test` returned nothing and the rename was GREEN across 397 tests** | DEF | T2 |
 
-### 9.4 Ports `src/ports.ts` — `resolvePorts` (1769-1794) (7)
+### 9.4 Ports `src/ports.ts` — `resolvePorts` (1769-1794) (8)
 
 | ID | Seam | Mutation | Confirm | Expected RED | Channel | Tier |
 |---|---|---|---|---|---|---|
@@ -696,6 +696,7 @@ The old table's `MCP-R4` (`app.onError`) is **MCP-R6** here, and it is now gated
 | MCP-P4 | the VAR leg of the tool guardrail — `deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS))`, now passed as `durableManagedActionGuardrails`' fallback argument (**rewritten wave 22**, MCP-P8 is the durable leg) | `MUT-2 "parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS)"→"{}/*MUT*/"` | marker present | `test/guardrails.test.ts`. The default project binds `DB` but activates no policy, so the durable half resolves to an empty set and the recipe still bites | DEF | T2 |
 | MCP-P8 | `const guardrails = durableManagedActionGuardrails(env, deterministicManagedActionGuardrails(…));` — the DURABLE leg, **NEW ROW** (wave 22, FLEET-CONSISTENCY FC-3) | `MUT-2 "const guardrails = durableManagedActionGuardrails(\n    env,\n    deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS)),\n  );"→"const guardrails = /*MUT*/ deterministicManagedActionGuardrails(parseGuardrailVar(env.FG_DEV_MCP_GUARDRAILS));"` — i.e. drop the durable wrapper and keep only the var, which is the pre-wave-22 posture | `grep -c 'durableManagedActionGuardrails(' src/ports.ts` → **0** (import only) | `test/fleet-guardrail-activation.test.ts` — **2 RED of 15**, both naming the operator's own activated code: *ONE managed-action activation shuts the MCP door AND is live on the gateway, same code*, and *the SAME activation screens a matching tool RESULT*. Unmounted, a tenant moves the payload into an MCP `tools/call` argument or reads it back out of a tool RESULT and the activated revision never sees it — the fleet-consistency defect class (`FLEET-CONSISTENCY.md` FC-3). The gate pins `FG_DEV_MCP_GUARDRAILS = ""` for the whole file, so nothing in it can be satisfied by the var | DEF | T1 |
 | MCP-P14 | `const lifecycle = durableLifecycle(env);` — the TENANCY LIFECYCLE gate, **NEW ROW** (wave 22, FLEET-CONSISTENCY FC-2). Consumed by `src/http.ts::authenticateRequest` AHEAD of `ports.admission.admit`, which is not cosmetic: a suspended tenant must not reach the step that authorizes spend | `MUT-2 "const lifecycle = durableLifecycle(env);"→"const lifecycle = /*MUT*/ ALWAYS_ADMIT_LIFECYCLE;"` — the module intact, the MOUNT gone, which is this repo's dominant defect shape | `grep -c 'durableLifecycle(env)' src/ports.ts` → **0** | `test/fleet-tenancy-suspension.test.ts` — **8 RED of 12**, incl. *shuts all three doors with the SAME status and code after ONE suspension*, *computes an EMPTY exploit set*, the suspended-ANCESTOR case, the fail-closed 503, and *resolvePorts binds the durable lifecycle gate in the posture this Worker deploys*. Unmounted, a tenant the operator suspended keeps its still-valid credential and spends through MCP `tools/call` — wave 16's admission bypass in a second control. See `FLEET-CONSISTENCY.md` §7.5 M26 | DEF | T1 |
+| MCP-P15 | `const entitlements = durableEntitlements(env);` — the PLAN/RBAC tool-entitlement ladder, **NEW ROW** (wave 24, cluster **S5** / finding **A3/R1**). Consumed at BOTH transports: `src/tools.ts::toolsCall` (JSON-RPC) and `src/routes/ingress.ts::executeMcpTool` (REST), each of which already called `ports.entitlements.toolExecutionDenial` and was answered `undefined` by `InMemoryEntitlements` on every deployed posture | `MUT-2 "const entitlements = durableEntitlements(env);"→"const entitlements = /*MUT*/ inMemoryPorts().entitlements;"` — the module intact, the MOUNT gone, which is the exact shape R1 turned out to be | `grep -c 'durableEntitlements(env)' src/ports.ts` → **0** | `test/entitlements.test.ts` — **5 RED of 8**: *DENIES both transports when the tenant's plan disables MCP tool execution*, *ADMITS both transports when the SAME plan enables it*, *lets a bound ROLE lift a plan denial*, *grants nothing for a role naming an UNDECLARED permission*, *DENIES a registered tenant whose plan_id names no plan row*. Unmounted, `plans.mcp_enabled = 0` withdraws nothing and the tenant keeps executing tools and spending upstream money | DEF | T1 |
 | MCP-P7 | `const admission = durableAdmission(env);` — **NEW ROW** (task #114) | `MUT-2 →"const admission = /*MUT*/ undefined as never;"` | marker present | `test/admission.test.ts`, `test/d1-auth.test.ts`, `test/server-catalog.test.ts` — **12 RED** (per-key RPM, TOK-12 `request_limit_per_minute`, monthly budget, the D1 catalog + auth ladder) | DEF | T1 |
 | MCP-P5 | `credentials: new DurableCredentialStore(env.MCP_OAUTH_KV, env.DB, … DurableOauthFlowStore(env.MCP_OAUTH_FLOWS))` | `MUT-2 "if (durableIdentityBound(env)) {"→"if (false) {/*MUT*/"` | marker present | `test/durable-identity.test.ts` | DEF | T1 |
 | MCP-P6 | `cipher: identityCipherFrom(env.FERROGATE_MCP_IDENTITY_KEY) as IdentityCipherPort,` | `MUT-1 /cipher: identityCipherFrom\(/` | anchor gone | `test/durable-identity.test.ts` §the wave-17 case sealing with `identityCipherFrom(KEY_HEX)` and opening with the cipher `resolvePorts` chose. **Before it: GREEN — the base bundle already sets `cipher: webCryptoIdentityCipher()` (src/ports.ts:1404), so the mutation swapped the operator's configured AEAD key for an ephemeral per-isolate one and every stored OAuth grant became undecryptable on isolate recycle, invisibly** | DEF | T1 |
@@ -865,11 +866,11 @@ and the reason the tool now EXITS NON-ZERO when the two disagree.
 |---|---:|---:|---:|---:|
 | `apps/gateway` | 62 | 44 | 16 | 2 |
 | `apps/control-plane` | 42 | 26 | 11 | 5 |
-| `apps/mcp` | 33 | 27 | 4 | 2 |
+| `apps/mcp` | 34 | 28 | 4 | 2 |
 | `apps/agent-runtime` | 38 | 26 | 10 | 2 |
 | `apps/telemetry` | 17 | 9 | 3 | 5 |
 | `apps/cli` | 8 | 3 | 5 | 0 |
-| **Total** | **200** | **135** | **49** | **16** |
+| **Total** | **201** | **136** | **49** | **16** |
 
 Plus **1 RETIRED tombstone** (`GW-C11`, §3.2), which is a row but not a seam and
 is excluded from every total above. 201 ID-bearing lines, 200 seams.

@@ -133,6 +133,47 @@ describe("every Durable Object binding is deployable", () => {
   });
 });
 
+describe("wave 24 — the S5 entitlement ladder needs no new binding, ASSERTED", () => {
+  /**
+   * `src/entitlements.ts` (`D1ToolEntitlements`, cluster **S5**) reads the
+   * CONTROL database through `env.DB` and NOTHING else. Under
+   * `@cloudflare/vitest-pool-workers` that binding comes from
+   * `vitest.config.ts`, so every entitlement test would still pass if the
+   * committed deploy config stopped declaring it — and the ladder would then
+   * fall back to `InMemoryEntitlements` in production, denying nobody. That is
+   * the R1 shape again, one level down, and only the committed text can see it.
+   */
+  it("declares the CONTROL D1 binding the entitlement ladder reads", () => {
+    const d1 = stanzas("d1_databases");
+    expect(d1.length, "no [[d1_databases]] stanza in the committed config").toBeGreaterThan(0);
+    const control = d1.filter((body) => value(body, "binding") === "DB");
+    expect(control.length, 'no [[d1_databases]] declares binding = "DB"').toBe(1);
+    expect(value(control[0] as string[], "database_name")).toBe("ferrogate-control");
+    // The id is a deploy-time PLACEHOLDER by design (CLOUD-VERIFICATION §B).
+    // Pinning it stops a real account id from being committed by accident.
+    expect(value(control[0] as string[], "database_id")).toBe("PLACEHOLDER_SET_AT_DEPLOY_TIME");
+  });
+
+  /**
+   * INERTNESS, asserted rather than claimed in a wave note: S5 introduced no
+   * Durable Object, so the committed config's bound class set must still be
+   * exactly the set `src/worker.ts` exports. A new DO added without its binding
+   * (or a binding added without its export) fails here.
+   */
+  it("binds exactly the Durable Object classes the entry module exports", () => {
+    const bound = stanzas("durable_objects.bindings")
+      .map((body) => value(body, "class_name"))
+      .filter((name): name is string => name !== undefined)
+      .sort();
+    const exported = Object.entries(entry as unknown as Record<string, unknown>)
+      .filter(([name, member]) => name !== "default" && typeof member === "function")
+      .map(([name]) => name)
+      .sort();
+    expect(bound).toEqual(exported);
+    expect(bound).toEqual(["FerroGateMcpSession", "McpOauthFlowClaim"]);
+  });
+});
+
 describe("the entry module the deploy config points at", () => {
   it("names src/worker.ts as main, not the composition root", () => {
     // `src/index.ts` default-exports the Hono app; the Durable Object classes

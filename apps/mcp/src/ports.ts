@@ -82,15 +82,16 @@ import {
   admissionFromEnv,
 } from "./admission/index.js";
 import { D1ToolApprovals } from "./approvals.js";
-import { durableManagedActionGuardrails } from "./guardrails.js";
 import { D1McpAuth, type D1McpAuthOptions } from "./auth.js";
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
+import { D1ToolEntitlements } from "./entitlements.js";
+import { durableManagedActionGuardrails } from "./guardrails.js";
+import type { ParsedToolDef } from "./jsonrpc.js";
 import {
   D1McpTenancyLifecycleGate,
   type TenancyLifecycleGatePort,
   UnboundLifecycleGate,
 } from "./lifecycle.js";
-import type { ParsedToolDef } from "./jsonrpc.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
 // TYPE-ONLY. `./session.js` imports `McpTool` back out of this module, also
 // type-only, so nothing is evaluated in either direction at module load.
@@ -1829,9 +1830,28 @@ export function resolvePorts(env: McpEnv): McpPorts {
   const approvals = durableApprovals(env);
   const admission = durableAdmission(env);
   const lifecycle = durableLifecycle(env);
+  const entitlements = durableEntitlements(env);
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
-    return { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission, lifecycle };
-  const ports = { ...inMemoryPorts(), guardrails, secrets, auth, approvals, admission, lifecycle };
+    return {
+      ...inMemoryPorts(),
+      guardrails,
+      secrets,
+      auth,
+      approvals,
+      admission,
+      lifecycle,
+      entitlements,
+    };
+  const ports = {
+    ...inMemoryPorts(),
+    guardrails,
+    secrets,
+    auth,
+    approvals,
+    admission,
+    lifecycle,
+    entitlements,
+  };
   if (durableIdentityBound(env)) {
     return {
       ...ports,
@@ -1944,5 +1964,38 @@ function durableAdmission(env: McpEnv): AdmissionPort {
   return admissionFromEnv(
     env,
     new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
+  );
+}
+
+/**
+ * Choose the {@link EntitlementPort} for this env — the PLAN-and-RBAC tool
+ * entitlement ladder (`docs/rewrite/CUTOVER-READINESS.md` finding **A3/R1**,
+ * cluster **S5**).
+ *
+ * `env.DB` bound ⇒ {@link D1ToolEntitlements} over the CONTROL database's
+ * `tenants` × `plans` × `permissions` × `roles` × `tenant_role_bindings` — the
+ * SAME rows `apps/control-plane`'s plan and RBAC routes write. Absent ⇒
+ * {@link InMemoryEntitlements}, which denies nobody: that is the honest reading
+ * of "this deployment has no `plans` table, so no plan could have withdrawn
+ * anything", AND it is the posture Rust itself lands in when the control plane
+ * is unreadable (`tenant_account_exists && …` with every lookup swallowing its
+ * error). Binding `DB` can therefore only ever TIGHTEN entitlement.
+ *
+ * The dev bundle is passed as the FALLBACK, not as the answer: it speaks only
+ * for a tenant with no `tenants` row, so a real plan can never be overridden by
+ * it. Production sets no `FG_DEV_IN_MEMORY_PORTS` and gets no fallback at all.
+ *
+ * Bound in the DEV posture too, for the same provability reason the auth,
+ * admission and lifecycle ports state: the offline suite can only drive the
+ * deployed app end to end there, so a gate mounted anywhere else would be
+ * untestable over `SELF` — the "implemented, tested, never mounted" defect that
+ * is precisely what R1 turned out to be. Deleting the `entitlements` entry in
+ * {@link resolvePorts} turns `test/entitlements.test.ts` red.
+ */
+function durableEntitlements(env: McpEnv): EntitlementPort {
+  if (env.DB === undefined) return inMemoryPorts().entitlements;
+  return new D1ToolEntitlements(
+    env.DB,
+    env.FG_DEV_IN_MEMORY_PORTS === "1" ? { fallback: inMemoryPorts().entitlements } : {},
   );
 }

@@ -271,13 +271,15 @@ controls are whole, and three of them are not. These rows exist so the live run
 
 | # | Request | Expected TODAY | Expected AFTER the fix |
 |---|---|---|---|
-| **V-R1** | Set `plans.mcp_enabled = 0` for the verification tenant (or bind it to a plan that never granted MCP — `mcp_enabled INTEGER NOT NULL DEFAULT 0`, so the schema default is OFF), then call MCP `tools/call` with that tenant's credential | **FAILS: the tool executes.** `apps/mcp`'s `entitlements` port is `InMemoryEntitlements` in **both** postures — `resolvePorts` never overrides it — so `mcp_tools_disabled` is unreachable in production. Four Workers parse the column; none consumes it | `403 mcp_tools_disabled`, matching Rust `local.rs:137 tool_execution_entitlement_denial` |
+| **V-R1** ✅ **FIX SHIPPED, WAVE 24 — now expected to PASS** | Set `plans.mcp_enabled = 0` for the verification tenant (or bind it to a plan that never granted MCP — `mcp_enabled INTEGER NOT NULL DEFAULT 0`, so the schema default is OFF), then call MCP `tools/call` **and** `POST /v1/tools/execute` with that tenant's credential. The tenant MUST have a `tenants` row (denial requires a REGISTERED tenant, exactly as Rust's `tenant_account_exists &&` first conjunct) and MUST NOT hold a bound role granting `mcp.execute` | **PASSES.** `resolvePorts` binds `D1ToolEntitlements` (`apps/mcp/src/entitlements.ts`, seam `MCP-P15`) over the CONTROL `DB` — the same `plans` rows the control plane writes. Mutation-proven: unmounting it takes `test/entitlements.test.ts` to 5 failed / 3 passed (8). **This row is the account-side evidence; nothing local can prove the CONTROL D1 is the deployed one** | `403 mcp_tools_disabled` on BOTH transports, matching Rust `local.rs:137 tool_execution_entitlement_denial`. Grant the tenant a role naming `mcp.execute` (with the `permissions` row DECLARED) and both must ADMIT — the plan-OR-role arm |
 | **V-R2** | `UPDATE api_keys SET monthly_token_budget = 0` for a test credential, then call all three spend Workers | **PARTIAL: `429 token_budget_exceeded` on the gateway ONLY.** `apps/mcp/src/auth.ts::TENANT_KEY_SQL` and `apps/agent-runtime/src/durable/adapters.ts::FIND_KEYS_BY_PREFIX_SQL` open the same `api_keys` row and do not select the column; neither Worker can emit the code at all | `429 token_budget_exceeded` on all three, as Rust's shared `authenticate_durable` (`auth.rs:1344`) gave every handler |
 | **V-B10** | Drive **N > 1 concurrent isolates** on `apps/mcp` against a credential capped at 60 rpm and count the admitted requests | **FAILS unless both `RATE_LIMIT` stanzas were uncommented at deploy (B10).** Left commented, `counterFromEnv` degrades to a per-isolate counter and roughly 60×N are admitted, with nothing logged and nothing errored | exactly one 60-request window fleet-wide |
 
-**Run V-R1 and V-R2 anyway.** They cost one admin write each, and they are the
-only account-side evidence that these two controls are inert; today that fact
-rests entirely on source reading.
+**Run V-R1 and V-R2 anyway.** They cost one admin write each. **V-R1 flipped to
+expected-PASS in wave 24** and is now the only account-side evidence that the
+entitlement ladder reads the DEPLOYED control database rather than a placeholder
+`database_id`; V-R2 is still the only account-side evidence that its control is
+inert, and today that fact rests entirely on source reading.
 
 ### 7.1 B6 re-scoped — a platform limit with a ZONE precondition, not a var flip
 
