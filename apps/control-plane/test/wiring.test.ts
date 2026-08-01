@@ -37,8 +37,11 @@ import {
 } from "../src/contract.js";
 import {
   CONTROL_PLANE_ROUTE_MODULES,
+  IDENTITY_APP,
   MOUNTED_OPERATION_IDS,
   MOUNTED_ROUTES,
+  MOUNTED_SESSION_ROUTES,
+  MOUNTED_SSO_ROUTES,
   app,
 } from "../src/index.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
@@ -73,7 +76,30 @@ const HONO_KEYS = new Set(HONO_ROUTES.map((route) => `${route.method} ${route.pa
  *
  * `/health` and `/version` are not contract operations at all.
  */
-const NON_CONTRACT_ROUTES = ["GET /healthz", "GET /readyz", "GET /health", "GET /version"] as const;
+const PROBE_ROUTES = ["GET /healthz", "GET /readyz", "GET /health", "GET /version"] as const;
+
+/**
+ * The enterprise-identity mounts (wave 18): the nine admin-console session
+ * routes, the OIDC + SCIM sub-app, and the SAML legs + shared `sso-config` row.
+ *
+ * NOT hardcoded, deliberately. Each is the registry the composition root's own
+ * mount function RETURNED — one entry per `app.on(...)` it actually performed —
+ * so this list cannot drift from what was mounted, and the comparison below
+ * stays a comparison between two independent things (Hono's table vs. what the
+ * root says it did) rather than a restatement of one of them.
+ *
+ * The consequence is the point: unmount `mountAdminConsoleSession(app)` and
+ * `MOUNTED_SESSION_ROUTES` empties WHILE Hono's table loses the same nine, so
+ * the count assertion still balances — which is why the SELF-driven mount
+ * assertions further down, not this one, are the seam's real gate.
+ */
+const IDENTITY_MOUNTS: readonly string[] = [
+  ...MOUNTED_SESSION_ROUTES.map((route) => `${route.method} ${route.path}`),
+  ...IDENTITY_APP.identityRoutes.map((route) => `${route.method} ${route.path}`),
+  ...MOUNTED_SSO_ROUTES.map((route) => `${route.method} ${route.path}`),
+];
+
+const NON_CONTRACT_ROUTES = [...PROBE_ROUTES, ...IDENTITY_MOUNTS] as const;
 
 function contractKey(operationId: string): string {
   const operation = operationById(operationId);

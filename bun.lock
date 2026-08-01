@@ -53,10 +53,12 @@
         "@ferrogate/config": "workspace:*",
         "@ferrogate/core": "workspace:*",
         "@ferrogate/guardrails": "workspace:*",
+        "@ferrogate/identity": "workspace:*",
         "@ferrogate/observability": "workspace:*",
         "@ferrogate/policy": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
         "@ferrogate/secrets": "workspace:*",
+        "@ferrogate/sso": "workspace:*",
         "@ferrogate/storage": "workspace:*",
         "hono": "^4.6.0",
         "zod": "^3.25.76",
@@ -153,6 +155,10 @@
         "zod": "^3.25.76",
       },
     },
+    "packages/identity": {
+      "name": "@ferrogate/identity",
+      "version": "0.0.0",
+    },
     "packages/observability": {
       "name": "@ferrogate/observability",
       "version": "0.0.0",
@@ -208,6 +214,10 @@
         "@ferrogate/core": "workspace:*",
         "zod": "^3.25.76",
       },
+    },
+    "packages/sso": {
+      "name": "@ferrogate/sso",
+      "version": "0.0.0",
     },
     "packages/storage": {
       "name": "@ferrogate/storage",
@@ -357,6 +367,8 @@
 
     "@ferrogate/guardrails": ["@ferrogate/guardrails@workspace:packages/guardrails"],
 
+    "@ferrogate/identity": ["@ferrogate/identity@workspace:packages/identity"],
+
     "@ferrogate/observability": ["@ferrogate/observability@workspace:packages/observability"],
 
     "@ferrogate/payments": ["@ferrogate/payments@workspace:packages/payments"],
@@ -370,6 +382,8 @@
     "@ferrogate/schemas": ["@ferrogate/schemas@workspace:packages/schemas"],
 
     "@ferrogate/secrets": ["@ferrogate/secrets@workspace:packages/secrets"],
+
+    "@ferrogate/sso": ["@ferrogate/sso@workspace:packages/sso"],
 
     "@ferrogate/storage": ["@ferrogate/storage@workspace:packages/storage"],
 

@@ -15,6 +15,7 @@
  * `src/index.ts` and passed to `createGatewayApp({ modules })`. Everything else
  * is mounted here.
  */
+import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { depsFromEnv } from "../adapters.js";
@@ -32,10 +33,10 @@ import type { GatewayEnv } from "../ports.js";
 import { agentDiscoveryHandler } from "./agent-discovery.js";
 import { nodeDrainGate } from "./drain.js";
 import { metricsHandler, requestMetrics } from "./metrics.js";
-import { RUNTIME_NAME, SERVICE_NAME, SERVICE_VERSION } from "./service.js";
 import { renderPromptTemplateHandler } from "./prompts.js";
 import { readinessResponse } from "./readiness.js";
 import { reverseProxyFallThrough } from "./reverse-proxy.js";
+import { RUNTIME_NAME, SERVICE_NAME, SERVICE_VERSION } from "./service.js";
 import { getAgentSkillHandler, listAgentSkillsHandler } from "./skills.js";
 
 // Service identity — `./service.ts`, re-exported here so every existing
@@ -453,6 +454,17 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // Retained from the pre-contract scaffold so existing probes keep working;
   // neither is a contract operation, so both fall through `contractAuth`.
   app.get("/health", (c) => c.json({ ok: true }));
+
+  // GW-C11, fixed in wave 18. This route used to be registered in
+  // `src/index.ts` AFTER `createGatewayApp` returned — i.e. after the
+  // `app.all("*")` fall-through below — so the deployed gateway answered
+  // `404 not_found` on `/version` while every one of 1875 tests stayed green.
+  // It was the only one of the five Workers not serving `/version`.
+  // `docs/rewrite/MOUNT-SEAMS.md` §3.2 has the measurement; the rule that a
+  // route registered after the fall-through is DEAD is pinned by
+  // `test/routes/registration-order.test.ts`, and this line's own gate is
+  // `test/version.test.ts`.
+  app.get("/version", (c) => c.json({ api: PUBLIC_API_MAJOR }));
 
   // The OPERATOR REVERSE-PROXY FALL-THROUGH (Rust step 12, §1.3;
   // `docs/rewrite/parity-audit-request-path.md` F9). See `./reverse-proxy.ts`.

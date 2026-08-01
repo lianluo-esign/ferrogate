@@ -1,6 +1,6 @@
 # CUTOVER READINESS — the decision document
 
-**Date:** 2026-08-01 · **Wave 15**, amended by **waves 16 and 17** · **Branch:** `main-ts`
+**Date:** 2026-08-01 · **Wave 15**, amended by **waves 16, 17 and 18** · **Branch:** `main-ts`
 **Question:** may we delete `crates/**`, `workers/**` and `Cargo.*`, and merge
 `main-ts` → `main`?
 
@@ -25,6 +25,15 @@
 > not flattened** — which is the second of the two arguments the NO-GO rests on.
 > Only wave 18's fresh certification can move it; §0.2 ends by naming exactly
 > what that certification must check.
+>
+> **Wave-18 amendment (2026-08-01).** Wave 18 did NOT run that certification. It
+> ported the enterprise-identity surface that had no TypeScript at all, mounted
+> it, fixed the one DEAD production route (`GW-C11`), and — the part that
+> matters — ran `MODULE-OWNERSHIP.md`, the first **module-granularity** audit of
+> the Rust tree. **§0.3 records what closed and what that audit opened: 37
+> MISSING modules (27,644 lines) and 46 UNVERIFIED (23,040 lines).** The verdict
+> is **UNCHANGED**, and §0.3.4 explains why the new evidence makes it firmer
+> rather than closer to a GO.
 
 ---
 
@@ -215,6 +224,117 @@ The verdict cannot move until §6.6 is satisfied. Concretely, wave 18 must:
 **Net effect on the verdict: none, by design.** Wave 17 closed nine of the ten
 remaining findings and found four more while doing it. The second of those two
 numbers is the one that matters.
+
+---
+
+## 0.3 WAVE 18 — what this wave CLOSED, and the much larger thing it OPENED
+
+> **The verdict in §0 is UNCHANGED and was not re-litigated.** Per §6.6 only a
+> fresh three-way certification plus a full seam pass can move it, and wave 18
+> produced neither: it produced a *port*, an *integration*, and — decisively —
+> a **new control that had never been run before**, whose first result is the
+> largest single piece of bad news in this document's history.
+
+### 0.3.1 CLOSED by wave 18
+
+| # | What was closed | Evidence the integrate step observed ITSELF |
+|---|---|---|
+| C1 | **Enterprise identity existed nowhere in TypeScript.** SAML 2.0 (`packages/sso`), OIDC RP + SCIM 2.0 (`packages/identity`) and the admin-console session surface (`apps/control-plane/src/session/`) are now implemented AND MOUNTED on the deployed control-plane Worker | `apps/control-plane/test/identity-mount.test.ts` — 23 `SELF`-driven cases. Mount seams `CP-S1`/`CP-S2`/`CP-S3` mutated: **18 / 10 / 12 RED**, restored GREEN. Confirmed again on a real `wrangler dev --local` boot: `POST /v1/admin/login` → `503 admin_console_unconfigured`, `GET /scim/v2/Users` → `401`, `GET /v1/admin/auth/saml/acs` → `422 missing_relay_state` — three surfaces answering, none `404` |
+| C2 | **`GW-C11` — the gateway's `/version` was DEAD IN PRODUCTION**, registered after the `app.all("*")` fall-through, for seventeen waves. It was the only one of the five Workers not serving `/version` | Moved inside `createGatewayApp`, above the fall-through. Re-proven by deletion: **2 RED**. Confirmed on a real boot: `GET /version` → `200 {"api":"v1"}` (it was `404 not_found`) |
+| C3 | **Eight mount lines that had never been a row in any wave's table**, plus three T1 rows whose only cited gate was a harness that builds its own Worker | `docs/rewrite/MOUNT-SEAMS.md` was re-derived mechanically from the composition roots rather than patched. Five new T1 rows (`CP-S1`…`CP-S5`) were added by the integrate step for its own mounts |
+| C4 | **The SSO replay defence had no durable proof.** `packages/{sso,identity}` prove single-use `take` against an in-memory map; the D1 twin was unproven | `apps/control-plane/test/sso-store-contract.test.ts` runs the package's OWN exported `samlPendingFlowStoreContract` against the D1 implementation. Mutating the `DELETE … RETURNING` to a `SELECT` is **5 RED** across that file and the mount suite |
+
+### 0.3.2 Found DURING integration — the curve still has not flattened
+
+Wave 17's amendment rested on this same observation, and wave 18 reproduces it.
+Every item below was green in the delivering agent's own suite.
+
+1. **The D1 pending-flow store diverged from the package's own exported contract
+   in two ways**, and one of them is replay-adjacent: the first implementation
+   filtered expiry in SQL (`… AND expires_at_unix > ?`), so **presenting an
+   expired state did not BURN it** — the row survived for a second attempt under
+   a different clock. Caught only because the contract is exported from `src/`
+   and could be run against the durable twin; **no test in `packages/sso` or
+   `packages/identity` could have seen it.** Fixed to `DELETE … WHERE state = ?
+   RETURNING *` with the expiry decided in TypeScript on a row that no longer
+   exists either way.
+2. **`test/console-session.test.ts` is a FACTORY test**, not a mount test: it
+   builds its own `Hono` app and calls `app.request(...)`. Measured — it stays
+   **fully green with the console-session surface unmounted from the deployed
+   Worker**. That is `MOUNT-SEAMS.md` §4's rule firing for the twelfth time.
+3. **`ADMIN_CONSOLE_JWT_SECRET` was read by `src/` and named nowhere in the
+   deploy config.** The env-var drift gate caught it the moment the surface was
+   mounted; it is now a documented `wrangler secret` and a new **B7** blocker in
+   `CLOUD-VERIFICATION.md`, alongside **B8** (per-tenant IdP secret references)
+   and **B9** (the control migrations are now two files).
+
+### 0.3.3 OPENED by wave 18 — `MODULE-OWNERSHIP.md`, and why it is the headline
+
+`docs/rewrite/MODULE-OWNERSHIP.md` is the first control this project has ever run
+at **module** granularity. `PORT-PLAN.md` maps CRATES, and
+`docs/openapi/runtime-api-contract.json` enumerates OPERATIONS — and
+`crates/ferrogate-auth-service/src/server.rs` serves **34 routes, none of which is
+in that contract**. Two independent controls therefore had the *same* blind spot,
+which is why an entire enterprise-identity crate could be missing for seventeen
+waves with every audit green.
+
+Its verdict, over **363 product modules / 275,295 lines** of Rust:
+
+| Class | Modules | Lines |
+|---|---:|---:|
+| PORTED | 245 | 197,756 |
+| OBSOLETE-ON-CF | 24 | 19,677 |
+| DELIBERATELY-DROPPED | 11 | 7,178 |
+| **MISSING** | **37** | **27,644** |
+| **UNVERIFIED** | **46** | **23,040** |
+
+**Do not net wave 18's work off that 37.** The audit ran while the identity
+packages were being written and states its own rule: *"a row does not become
+PORTED because a package directory appeared."* Wave 18 has now delivered
+implementations **and mutation-proven mounts** for the 8-module / 5,345-line
+enterprise-identity group, so a wave-19 **behaviour-level re-derivation** may
+reclassify those eight. It has not happened yet. What is certain today is the
+other number:
+
+> **29 MISSING modules / ~22,300 lines that no wave has touched, plus 46
+> UNVERIFIED modules / 23,040 lines that this pass explicitly declines to call
+> PORTED.**
+
+The unfunded MISSING work is not cosmetic. It includes the 4-module,
+11,371-line **external-action capability boundary** (TypeScript models it as
+`requiredCapabilities: string[]`, which cannot express a per-variant decision),
+the 11-module **coding-agent five-phase contract** including its credential
+broker, **evidence redaction** (`recorded_evidence.rs` — evidence rows can carry
+unredacted upstream bytes), **tether-bypass detection**, **agent memory**, the
+**brokered edge-function egress** family, and the **budget-alert webhook** that
+never fires. Several are security- or money-relevant and **none of them was in
+any wave's task list**.
+
+### 0.3.4 What this means for the verdict
+
+It strengthens **NO-GO** rather than weakening it, and for a new reason: until
+wave 18 the argument was *"the discovery curve has not flattened."* It is now
+*"we have measured the residue for the first time, and it is 37 modules we
+cannot see the bottom of plus 46 we have not looked at."* §5's irreversibility
+note applies with full force — deleting `crates/**` deletes the only
+specification for every one of them.
+
+**Wave 19 cannot certify on this evidence.** The minimum before a GO is
+re-litigated:
+
+1. re-derive the 8 enterprise-identity rows at BEHAVIOUR level and reclassify
+   them honestly (they are the only rows wave 18 could have moved);
+2. take the **46 UNVERIFIED** rows to a decision — each is a claim that this
+   pass did not prove presence, not a claim of absence, and shipping on them is
+   shipping on "probably";
+3. fund or explicitly drop, with a recorded decision, the **29 untouched
+   MISSING** modules — starting with `recorded_evidence.rs`,
+   `cloudflare_container_tether_audit.rs` and the external-action boundary,
+   which are the security-relevant ones;
+4. everything §0.2 already listed, which is unchanged.
+
+**Net effect on the verdict: none, by design — but the gap to a plausible GO got
+measurably larger, because for the first time it was measured.**
 
 ---
 

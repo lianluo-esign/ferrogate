@@ -15,7 +15,6 @@
  * from their own directories and are mounted in `GATEWAY_ROUTE_MODULES` below;
  * they need no change to the router, the guard, or the contract table.
  */
-import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { guardrailDepsFromEnv, guardrails } from "./guardrails/index.js";
 import {
@@ -240,8 +239,21 @@ const { app, router } = createGatewayApp({
 /** The registry of what the deployed Worker actually mounted (anti-drift test). */
 export const gatewayRouter = router;
 
-app.get("/version", (c) => c.json({ api: PUBLIC_API_MAJOR }));
-
+/**
+ * `/version` used to be registered HERE, and it was DEAD (GW-C11).
+ *
+ * `createGatewayApp` ends with `app.all("*", … reverseProxyFallThrough())`,
+ * which TERMINATES the chain, and Hono runs matched handlers in registration
+ * order — so a route attached to the returned `app` could never run. Measured
+ * through `SELF`, the deployed gateway answered
+ * `404 {"code":"not_found","message":"no route for GET /version"}` while the
+ * other four Workers all served it. Wave 15 read the mutation's GREEN as
+ * "unproven" when the truth was "unreachable".
+ *
+ * The route now lives inside `createGatewayApp`, immediately beside `/health`
+ * and immediately ABOVE the fall-through. Nothing else may be registered on
+ * `app` below this comment.
+ */
 export default app;
 
 /**

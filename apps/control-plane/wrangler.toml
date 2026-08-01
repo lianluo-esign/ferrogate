@@ -85,6 +85,35 @@ database_name = "ferrogate-control"
 database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 migrations_dir = "../../sql/d1-ts/control"
 
+# ---------------------------------------------------------------------------
+# ENTERPRISE IDENTITY (wave 18) — the deploy-time secrets, as PLACEHOLDERS
+# ---------------------------------------------------------------------------
+#
+# These are `wrangler secret put` values, NOT `[vars]`, and that asymmetry is
+# the point: a `[vars]` entry is committed plaintext in this file, and both of
+# the values below mint or unlock a credential.
+#
+#   ADMIN_CONSOLE_JWT_SECRET   — REQUIRED by `/v1/admin/*` (the console session
+#       surface) and by every SSO login, which ends in the same session. HS256
+#       signing key. ABSENT ⇒ every one of those routes answers
+#       `503 admin_console_unconfigured`; there is deliberately NO default,
+#       because a constant is forgeable by anyone who reads the source and a
+#       per-isolate random value silently invalidates every session on isolate
+#       eviction. Provision with:
+#           wrangler secret put ADMIN_CONSOLE_JWT_SECRET --name ferrogate-control-plane
+#
+#   <OIDC client secrets>      — NOT named here, by construction. A tenant's
+#       `sso_provider_configs.oidc_client_secret_ref` holds a REFERENCE
+#       (`env://NAME`), never the secret, so the control-plane row can never
+#       leak a live IdP credential. The operator provisions one
+#       `wrangler secret put <NAME>` per tenant IdP and writes `env://<NAME>`
+#       into the config. An unresolvable reference fails the login CLOSED.
+#
+# `docs/rewrite/CLOUD-VERIFICATION.md` §B carries the deploy checklist for both.
+# Neither is declared in `[vars]` on purpose — a secret in this file would be
+# committed to git, and `test/env-var-drift.test.ts` treats them as the
+# documented secret-binding exception rather than as drift.
+
 # TODO(bindings): the remaining bindings, configured per this app's inventory
 # before first deploy. Do NOT commit real resource IDs — placeholders only.
 #   [[d1_databases]]  binding = "TENANT_DB_<slug>" -> per-tenant database, the

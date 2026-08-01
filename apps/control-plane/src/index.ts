@@ -31,6 +31,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  * `/v1/admin/*` console identity, `/v1/auth/*` resolve-api-key + authorize, and
  * `/scim/v2/*` provisioning — see `docs/legacy/inventory-edge-control.md` §5.1.
  */
+import { createIdentityRoutes } from "@ferrogate/identity";
 import { Hono } from "hono";
 import { SERVICE_NAME, resolveDeps } from "./adapters.js";
 import {
@@ -38,6 +39,8 @@ import {
   CONTROL_PLANE_OPERATIONS,
   EXPECTED_CONTROL_PLANE_OPERATION_COUNT,
 } from "./contract.js";
+import { resolveIdentityDeps } from "./identity/adapters.js";
+import { type SsoRouteRecord, mountSsoRoutes } from "./identity/routes.js";
 import { withAliasCanonicalization } from "./middleware/alias.js";
 import { contractAuth } from "./middleware/auth.js";
 import { adminCorsPreflight, corsResponseHeaders } from "./middleware/cors.js";
@@ -49,6 +52,7 @@ import {
 import type { ControlPlaneEnv } from "./ports.js";
 import { GROUP_MODULES, type RegisteredRoute, registerRoutes } from "./routes/index.js";
 import type { GroupModule } from "./routes/resource.js";
+import { type AdminConsoleSessionRoute, mountAdminConsoleSession } from "./session/index.js";
 
 export const app = new Hono<ControlPlaneEnv>();
 
@@ -73,6 +77,39 @@ app.use("*", async (c, next) => {
 app.use("*", corsResponseHeaders);
 app.use("*", adminCorsPreflight);
 app.use("*", contractAuth());
+
+/**
+ * THE ENTERPRISE-IDENTITY MOUNTS (wave 18).
+ *
+ * Three surfaces that had NO TypeScript at all for seventeen waves — the
+ * admin-console session, OIDC + SCIM, and SAML — and that
+ * `docs/rewrite/MODULE-OWNERSHIP.md` found precisely because they are not in
+ * `docs/openapi/runtime-api-contract.json`. None of their paths is one of the
+ * 197, so mounting them cannot move the anti-drift operation count; they mount
+ * OUTSIDE `registerRoutes` exactly as `/healthz` and `/version` do.
+ *
+ * The ORDER is load-bearing:
+ *
+ *  1. `mountAdminConsoleSession` first, because it installs
+ *     `app.use("/v1/admin/*", consoleCsrf)` and Hono applies a `use` to the
+ *     handlers registered after it. Mounting it later would leave every
+ *     `/v1/admin/*` route below without the cross-site guard;
+ *  2. the identity app (`/scim/v2/*` + the OIDC legs + the SCIM-token mint);
+ *  3. the SAML legs and the SHARED `sso-config` row.
+ *
+ * Each returns what it ACTUALLY mounted, so `test/wiring.test.ts` asserts
+ * against what the composition root did rather than against a restatement.
+ * Deleting any one of these three lines takes a named test RED with a
+ * `404 no route for …`, which is the property `docs/rewrite/MOUNT-SEAMS.md`
+ * requires of a seam.
+ */
+export const MOUNTED_SESSION_ROUTES: readonly AdminConsoleSessionRoute[] =
+  mountAdminConsoleSession(app);
+
+export const IDENTITY_APP = createIdentityRoutes((c) => resolveIdentityDeps(c));
+app.route("/", IDENTITY_APP);
+
+export const MOUNTED_SSO_ROUTES: readonly SsoRouteRecord[] = mountSsoRoutes(app);
 
 /**
  * THE mount. `MOUNTED_ROUTES` is the value `registerRoutes` returned for THIS

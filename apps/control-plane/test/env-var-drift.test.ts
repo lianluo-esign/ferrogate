@@ -259,13 +259,22 @@ const DECLARED = declared();
 // ---------------------------------------------------------------------------
 
 /**
- * Deploy-time SECRETS (`wrangler secret put`). This Worker has none: it holds
- * no outbound credential of its own — the D1 binding is capability-based and
- * the API keys it checks live in the database, not in config. Asserted empty
- * rather than omitted, because "none" is a claim that can become false the
- * moment someone adds an outbound integration.
+ * Deploy-time SECRETS (`wrangler secret put`) — NAMED in `wrangler.toml`'s
+ * prose, never declared in `[vars]`, because a `[vars]` entry is committed
+ * plaintext in a tracked file.
+ *
+ *  - `ADMIN_CONSOLE_JWT_SECRET` — the HS256 signing key for the admin-console
+ *    session JWT (`src/session/`), which every SSO login also ends in. Wave 18
+ *    mounted that surface on `src/index.ts` and documented the secret in
+ *    `wrangler.toml`, which is what let this move out of {@link UNDOCUMENTED}.
+ *
+ * Absence is SAFE, and that is asserted behaviourally rather than by
+ * convention: `test/console-session.test.ts` ("an unconfigured deployment")
+ * pins that with no secret bound every console route answers
+ * `503 admin_console_unconfigured` instead of signing a session with a
+ * guessable key.
  */
-const SECRETS: readonly string[] = [];
+const SECRETS: readonly string[] = ["ADMIN_CONSOLE_JWT_SECRET"];
 
 /**
  * Vars deliberately left out of `[vars]`, each NAMED in the config's prose so
@@ -289,6 +298,11 @@ const DOCUMENTED_BUT_UNDECLARED = ["ADMIN_CONSOLE_ALLOWED_ORIGIN", "CONTROL_PLAN
  * a static answer table for domain verification; the other three configure it.
  * `ADMIN_LIST_DEFAULT_LIMIT` / `ADMIN_LIST_MAX_LIMIT` are the admin pagination
  * ceilings. None appear in the deploy config in any form.
+ *
+ * `ADMIN_CONSOLE_JWT_SECRET` used to be parked here. Wave 18 mounted the
+ * console-session surface on `src/index.ts` and documented the secret in
+ * `wrangler.toml`, so it moved to {@link SECRETS} — which is the stricter list,
+ * because that one asserts the name really is named in the deploy config.
  */
 const UNDOCUMENTED = [
   "ADMIN_LIST_DEFAULT_LIMIT",
