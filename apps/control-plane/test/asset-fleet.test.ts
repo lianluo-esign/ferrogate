@@ -441,6 +441,52 @@ describe("POST /admin/v1/assets/quarantine/{asset_id} — the review decision", 
     expect(await visibilityOf(tenantDbB(), "asset_b_held")).toBe("quarantined");
   });
 
+  /**
+   * THE escalation. A tenant may SEE that its version is withheld — that read
+   * is deliberate and is asserted at the bottom of this test — and must not be
+   * able to decide the screener's verdict on its own content. Releasing is
+   * reversing #366's withholding for the very tenant whose bytes were
+   * withheld; `apps/gateway/src/assets/d1.ts`'s promotion CAS guards
+   * `AND visibility = 'pending_scan'` precisely so the data plane cannot be
+   * used this way, and an admin surface that authorised the WRITE with the
+   * READ's fence would hand the same power back through a different door.
+   *
+   * Both halves are asserted, and the second is the one that matters more: a
+   * 403 whose row moved anyway is worse than an outright 200, because the
+   * operator reads a refusal while the state changed.
+   */
+  it("REFUSES the owning tenant's own admin.write credential, and does not move the row", async () => {
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/assets/quarantine/asset_held`,
+      jsonRequest(TENANT_A_KEY, "POST", {
+        tenant_id: TENANT_A,
+        decision: "release",
+        reason: "it is my own asset and I want it served again",
+      }),
+    );
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("asset_fleet_write_operator_only");
+
+    // The row did not move: `pending_scan` is still what every read path
+    // filters on, so the artifact is still withheld.
+    expect(await visibilityOf(tenantDbA(), "asset_held")).toBe("pending_scan");
+    // …and no decision was recorded. A refused decision that still appears in
+    // the trail is a lie in the other direction.
+    expect((await auditRows()).filter((row) => row.audit.collection === "asset-reviews")).toEqual(
+      [],
+    );
+
+    // The READ side is untouched: the tenant can still see that its own
+    // version is being withheld. Fixing the write by fencing the read would
+    // hide the queue from the only party that can fix the artifact.
+    const queue = await SELF.fetch(`${BASE}/admin/v1/assets/quarantine`, {
+      headers: bearer(TENANT_A_KEY),
+    });
+    expect(queue.status).toBe(200);
+    expect(ids((await queue.json()) as ListBody)).toEqual(["asset_held"]);
+  });
+
   it("refuses a platform operator without the distinct fleet grant", async () => {
     const response = await SELF.fetch(
       `${BASE}/admin/v1/assets/quarantine/asset_held`,

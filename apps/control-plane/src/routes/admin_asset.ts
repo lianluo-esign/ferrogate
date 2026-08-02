@@ -15,8 +15,24 @@
  * excluded from every read path by `AssetService.#resolveArtifact`, with nobody
  * able to look at it and nobody able to release it.
  *
- * Four decisions are the substance of this module. Each is a security property,
+ * Five decisions are the substance of this module. Each is a security property,
  * not a style choice.
+ *
+ * ## 0. Reading is one authority; DECIDING is another
+ *
+ * The review verb has its own fence ({@link authorizeFleetWrite}) and does not
+ * borrow the read's ({@link authorizeFleetRead}). The read's tenant branch
+ * admits a tenant credential over that tenant's own rows — correct for a read,
+ * and an ESCALATION for a decision, because `visibility` is the #366 screener's
+ * verdict on that tenant's own content. Authorising the write with the read's
+ * fence let any tenant-scoped `admin.write` key move its own `quarantined`
+ * version to `visible`: the reviewed party overturning the review, and the
+ * exact promotion `apps/gateway/src/assets/d1.ts` refuses on the data plane by
+ * guarding its CAS with `AND visibility = 'pending_scan'`.
+ *
+ * So: a tenant may SEE that its version is withheld (that read is what tells it
+ * to fix the artifact) and there is NO credential a tenant can hold that moves
+ * one. Release and reject are operator verbs.
  *
  * ## 1. Seeing another tenant's assets is a DISTINCT grant
  *
@@ -143,14 +159,16 @@ const visibilitySchema = z.enum(ASSET_VISIBILITIES);
 
 export const assetReviewSchema = z.object({
   /**
-   * The tenant that owns the version. REQUIRED for a platform operator, whose
-   * credential names no tenant; a tenant credential may omit it and may not
-   * disagree with it.
+   * The tenant that owns the version. REQUIRED — the only caller this verb
+   * admits is a platform operator, whose credential names no tenant, so there
+   * is nothing to default it from (see decision 0 in the module header).
    *
    * A write names the database it acts on rather than searching for it: an
    * id-only fan-out across every tenant database would make one operator
    * mistake into an O(tenants) write path, and the id alone cannot be
-   * authorized before the row is found.
+   * authorized before the row is found. It stays `optional()` in the SCHEMA so
+   * the refusal is the authorization one (`403`) rather than a body-shape
+   * `400` that would tell an unauthorized caller which field to add.
    */
   tenant_id: z.string().trim().min(1).optional(),
   decision: z.enum(["release", "reject"]),
@@ -163,10 +181,15 @@ export const assetReviewSchema = z.object({
 });
 
 /**
- * The tenants this caller may read, or the refusal.
+ * The tenants this caller may READ, or the refusal.
  *
- * ONE function, called by all three operations, so there is no second place to
+ * ONE function, called by both read operations, so there is no second place to
  * forget the fence. `null` means "fan out over every provisioned tenant".
+ *
+ * It is deliberately NOT the fence for a write — see
+ * {@link authorizeFleetWrite}. Its tenant branch admits a tenant credential
+ * over that tenant's own rows, which is right for a read and is an escalation
+ * for a decision.
  */
 export function authorizeFleetRead(
   scope: CallerScope,
@@ -196,6 +219,81 @@ export function authorizeFleetRead(
   if (requestedTenantId !== null) return { kind: "tenant", tenantId: requestedTenantId };
   return { kind: "fleet" };
 }
+
+/**
+ * The tenant a caller may WRITE a decision for, or the refusal.
+ *
+ * A SEPARATE function from {@link authorizeFleetRead}, and the separation is
+ * the security property rather than a tidiness one. Read authority and write
+ * authority are not the same authority:
+ *
+ *  - **A tenant credential is refused outright.** `visibility` is the #366
+ *    screener's verdict on the tenant's OWN content, so letting the owning
+ *    tenant move it is letting the reviewed party overturn the review. The
+ *    data plane already refuses this — `apps/gateway/src/assets/d1.ts`'s
+ *    promotion CAS is guarded `AND visibility = 'pending_scan'` so a tenant
+ *    cannot promote its own quarantined version — and an admin surface that
+ *    reused the READ fence would hand that same power back through a different
+ *    door. A tenant may still SEE that its version is withheld (that is the
+ *    read, and it is what tells the tenant to fix the artifact); it may not
+ *    decide.
+ *  - **A platform operator must hold {@link ASSET_FLEET_SCOPE} exactly**, for
+ *    the same reason the read requires it: every write it makes is about
+ *    somebody else's tenant.
+ *
+ * The consequence, stated so it is not mistaken for an oversight: on this
+ * surface there is NO credential a tenant can hold that moves a withheld
+ * version. Release and takedown are operator verbs, full stop.
+ */
+export function authorizeFleetWrite(
+  scope: CallerScope,
+  auth: AuthContext,
+  requestedTenantId: string | null,
+  verb: FleetWriteVerb,
+): { readonly tenantId: string } {
+  if (scope.kind === "tenant") {
+    throw new HttpError(
+      403,
+      "asset_fleet_write_operator_only",
+      `${verb.action} is an operator decision: this credential is scoped to tenant ${scope.tenantId}, which may read its own withheld versions but may not ${verb.imperative} them`,
+    );
+  }
+  if (!auth.scopes.includes(ASSET_FLEET_SCOPE)) {
+    throw new HttpError(
+      403,
+      "asset_fleet_scope_required",
+      `${verb.action} requires the distinct ${ASSET_FLEET_SCOPE} scope; the admin wildcard does not grant it`,
+    );
+  }
+  if (requestedTenantId === null) {
+    // A write NAMES the database it acts on rather than searching for it: an
+    // id-only fan-out across every tenant database would make one operator
+    // mistake into an O(tenants) write path.
+    throw new HttpError(
+      400,
+      verb.missingTenantCode,
+      `tenant_id is required: ${verb.action} names the tenant whose asset it acts on`,
+    );
+  }
+  return { tenantId: requestedTenantId };
+}
+
+/** How {@link authorizeFleetWrite} words its refusals for one verb. */
+interface FleetWriteVerb {
+  /** Noun phrase: "releasing or rejecting a withheld version". */
+  readonly action: string;
+  /** Verb phrase completing "may not …": "release or reject". */
+  readonly imperative: string;
+  /** The 400 code for a missing tenant — body-shaped or query-shaped. */
+  readonly missingTenantCode: "invalid_request_body" | "invalid_request";
+}
+
+/** The review verb, as {@link authorizeFleetWrite} describes it. */
+const REVIEW_VERB: FleetWriteVerb = {
+  action: "reviewing a withheld asset version",
+  imperative: "release or reject",
+  missingTenantCode: "invalid_request_body",
+};
 
 /** `?visibility=` → the validated set, or the 400. */
 function requestedVisibilities(
@@ -275,16 +373,8 @@ const reviewHandler: Handler = async (c) => {
   const assetId = pathParam(c, "asset_id");
   const body = await readJson(c, assetReviewSchema);
 
-  const target = authorizeFleetRead(scope, auth, body.tenant_id ?? null);
-  if (target.kind === "fleet") {
-    // A write must name the row's tenant: see `assetReviewSchema.tenant_id`.
-    throw new HttpError(
-      400,
-      "invalid_request_body",
-      "tenant_id is required: a review names the tenant whose asset it acts on",
-    );
-  }
-  const tenantId = target.tenantId;
+  // The WRITE fence, not the read one — see `authorizeFleetWrite`.
+  const { tenantId } = authorizeFleetWrite(scope, auth, body.tenant_id ?? null, REVIEW_VERB);
 
   const resolved = await readAssetForReview(deps.tenantDatabases, tenantId, assetId);
   // Absent, or in a tenant this caller cannot see: the SAME 404 either way. A

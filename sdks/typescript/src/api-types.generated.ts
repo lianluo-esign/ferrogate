@@ -5693,7 +5693,7 @@ export interface paths {
         put?: never;
         /**
          * Release or reject one withheld asset version, with a reason, writing an attributed audit event.
-         * @description Cross-tenant reads require the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it and being a platform operator does not grant it. A tenant credential is confined to its own tenant and naming another is a 403. The decision record is written (and hash-chained into audit_events on the owning tenant's chain) BEFORE the version moves, so a crash between the two leaves an attributed decision that did not take effect rather than a release nobody can attribute. The applying write is a compare-and-set on the exact state that was reviewed; a live (non-withheld) version is a 409, because a takedown is a different verb.
+         * @description OPERATOR ONLY, and that is a different fence from the one the two reads use. A tenant-scoped credential — including the owning tenant's own `admin.write` key — is refused `403 asset_fleet_write_operator_only` and the version does NOT move: `visibility` is the trust screener's verdict on that tenant's own content, so releasing it from a tenant credential would be the reviewed party overturning the review (the data plane refuses the same promotion by guarding its compare-and-set with `visibility = 'pending_scan'`). A tenant may still SEE its withheld versions on `GET /admin/v1/assets/quarantine`. A platform operator must additionally hold the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it. `tenant_id` is therefore required — the only admitted caller owns no tenant to default it from. The decision record is written (and hash-chained into audit_events on the owning tenant's chain) BEFORE the version moves, so a crash between the two leaves an attributed decision that did not take effect rather than a release nobody can attribute. The applying write is a compare-and-set on the exact state that was reviewed; a live (non-withheld) version is a 409, because a takedown is a different verb.
          */
         post: operations["reviewQuarantinedAsset"];
         delete?: never;
@@ -10109,8 +10109,8 @@ export interface components {
         };
         /** @description An operator's decision about one withheld asset version. */
         AdminAssetReviewRequest: {
-            /** @description Tenant that owns the version. REQUIRED for a platform operator (whose credential names no tenant); a tenant credential may omit it and may not disagree with it. */
-            tenant_id?: string;
+            /** @description Tenant that owns the version. REQUIRED: the only caller this verb admits is a platform operator, whose credential names no tenant, so there is nothing to default it from. A write names the database it acts on rather than searching for it. */
+            tenant_id: string;
             /**
              * @description `release` moves the version to `visible` through the same column every read path filters on. `reject` HARDENS it to `quarantined` so a reviewed row is distinguishable from an unscreened one; it deletes nothing.
              * @enum {string}
