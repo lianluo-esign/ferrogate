@@ -13,7 +13,7 @@
  * > exposing them means a gateway-side `/metrics` or an Analytics Engine query
  * > binding.*
  *
- * This file is the gateway-side `/metrics`. `getMetrics` is one of the 259
+ * This file is the gateway-side `/metrics`. `getMetrics` is one of the 265
  * contract operations (`visibility: internal`, `auth.kind: bearer`,
  * `auth.scope: admin.read`), so mounting it puts it behind the SAME guard Rust
  * put it behind — `handle_metrics` opens with an auth check, and
@@ -31,7 +31,11 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
-import { defaultGatewayMetricsSnapshot, renderPrometheusText } from "@ferrogate/observability";
+import {
+  defaultGatewayMetricsSnapshot,
+  renderCacheTenantText,
+  renderPrometheusText,
+} from "@ferrogate/observability";
 import { operationById } from "../../src/contract.js";
 import { PROMETHEUS_CONTENT_TYPE, gatewayMetricsSnapshot } from "../../src/routes/metrics.js";
 
@@ -108,7 +112,16 @@ describe("GET /metrics renders the exposition Rust rendered", () => {
     // series added upstream is automatically required here rather than being
     // silently dropped, and a subset (the control plane's 2 gauges) is red.
     const { body } = await scrape();
-    const expected = helpNames(renderPrometheusText(defaultGatewayMetricsSnapshot()));
+    // #695 added a SECOND renderer to the body: `renderCacheTenantText`, whose
+    // family is variable-length and fed by its own accumulator. It is composed
+    // in here rather than hand-listed, for the same reason the first one is —
+    // a series added to either renderer becomes required automatically. Passing
+    // `[]` is deliberate: an empty tenant list still emits both `# HELP`
+    // headers, so the SERIES SET is asserted without depending on which tenants
+    // happen to have traffic in this isolate.
+    const expected = helpNames(
+      renderPrometheusText(defaultGatewayMetricsSnapshot()) + renderCacheTenantText([]),
+    );
     expect(expected.size).toBeGreaterThan(40);
     expect(helpNames(body)).toEqual(expected);
   });

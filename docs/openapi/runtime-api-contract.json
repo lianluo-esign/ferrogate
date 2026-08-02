@@ -399,6 +399,14 @@
       "group": "admin_virtual_key"
     },
     {
+      "pattern": "/admin/v1/semantic-cache-policies",
+      "group": "semantic_cache_policy"
+    },
+    {
+      "pattern": "/admin/v1/semantic-cache-policies/{*rest}",
+      "group": "semantic_cache_policy"
+    },
+    {
       "pattern": "/admin/v1/quota-policies",
       "group": "quota_policy"
     },
@@ -3403,6 +3411,72 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies",
+      "method": "get",
+      "operation_id": "listSemanticCachePolicies",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies",
+      "method": "post",
+      "operation_id": "createSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}",
+      "method": "get",
+      "operation_id": "getSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}",
+      "method": "put",
+      "operation_id": "replaceSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}",
+      "method": "delete",
+      "operation_id": "deleteSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}/invalidate",
+      "method": "post",
+      "operation_id": "invalidateSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     }

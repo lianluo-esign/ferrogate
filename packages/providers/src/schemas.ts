@@ -38,6 +38,7 @@ export const providerAdapterFamilySchema = z.enum([
   "azure-openai",
   "bedrock",
   "vertex",
+  "workers-ai",
 ]);
 
 export const providerUsageSchema = z.object({

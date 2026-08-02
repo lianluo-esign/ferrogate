@@ -90,7 +90,7 @@ export type { GatewayErrorData, GatewayResult } from "@ferrogate/core";
  * LIMIT, NOT CLOSED HERE AND NOT CLOSABLE HERE.
  *
  * The remaining per-operation request/response shapes of the committed
- * 259-operation runtime contract (`docs/openapi/runtime-api-contract.json`) are
+ * 265-operation runtime contract (`docs/openapi/runtime-api-contract.json`) are
  * OWNED by the surfaces that serve them — `apps/gateway`, `apps/control-plane`,
  * `apps/mcp`. Defining them in this package would invert the dependency (a
  * shared leaf package would have to know every route's body) and would
@@ -109,7 +109,7 @@ export type { GatewayErrorData, GatewayResult } from "@ferrogate/core";
  * registerWireSchema apps/` returns nothing. The registry therefore holds only
  * the 10 names seeded below (2 cross-plane envelopes + 8 `ferrogate-core`
  * primitives) out of {@link OPENAPI_OPERATION_COUNT} contract operations. That
- * does NOT mean 241 operations are unvalidated — every app validates its bodies
+ * does NOT mean 255 operations are unvalidated — every app validates its bodies
  * with co-located Zod schemas today — it means those schemas are not
  * DISCOVERABLE by operationId through this registry. Wiring them in is work in
  * `apps/*`, not here, which is why the marker stays.

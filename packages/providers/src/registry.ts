@@ -1,7 +1,7 @@
 /**
  * Provider adapter registry — port of `registry.rs`.
  *
- * Holds one instance of each of the 8 adapters, resolves `kind` → adapter via
+ * Holds one instance of each of the 9 adapters, resolves `kind` → adapter via
  * {@link canonicalProviderAdapterFamily}, wraps every trait method, and — after
  * preparation — applies Cloudflare AI Gateway routing (issue #406).
  *
@@ -83,6 +83,7 @@ import { OpenRouterAdapter } from "./openrouter.js";
 import { AzureOpenAiAdapter } from "./azure.js";
 import { BedrockAdapter } from "./bedrock.js";
 import { VertexAiAdapter } from "./vertex.js";
+import { WorkersAiAdapter } from "./workers_ai.js";
 
 /** Captures the per-provider Cloudflare routing + family before the config moves. */
 class CloudflareRouting {
@@ -116,6 +117,15 @@ export class ProviderAdapterRegistry {
   readonly #azureOpenai = new AzureOpenAiAdapter();
   readonly #bedrock = new BedrockAdapter();
   readonly #vertex = new VertexAiAdapter();
+  /**
+   * The ninth family (issue #673). Registering it HERE is not what makes it
+   * reachable — see the header note: the deployed data plane builds adapters
+   * through `packageProviderAdapter()` in
+   * `apps/gateway/src/inference/adapters.ts` and never constructs this class for
+   * dispatch. That file is where the Workers AI family is actually mounted; this
+   * entry keeps the two registries from disagreeing about what exists.
+   */
+  readonly #workersAi = new WorkersAiAdapter();
 
   adapterFor(kind: string): ProviderAdapter {
     switch (canonicalProviderAdapterFamily(kind)) {
@@ -135,6 +145,8 @@ export class ProviderAdapterRegistry {
         return this.#bedrock;
       case "Vertex":
         return this.#vertex;
+      case "WorkersAi":
+        return this.#workersAi;
       default:
         throw AdapterError.unsupportedProviderKind(kind.trim().toLowerCase());
     }

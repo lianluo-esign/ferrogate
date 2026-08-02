@@ -596,7 +596,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 259
+ * enforcement belong to the ONE contract-driven middleware that covers all 265
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
@@ -832,7 +832,15 @@ export interface InferenceDeps {
    */
   readonly models?: ModelResolver | ModelResolverFactory;
   readonly adapters?: AdapterRegistry;
-  readonly dispatcher?: UpstreamDispatcher;
+  /**
+   * The provider egress, or a factory resolved per Worker `env` — the same
+   * shape `circuit` / `shadowBudget` / `workflows` use, and for the same
+   * reason: the `AI` binding the `workers-ai` family dispatches through only
+   * exists per request, while this deps object is built once per router
+   * (issue #673). Absent ⇒ `dispatcherFromEnv`, i.e. `fetch` for every family
+   * plus the `env.AI` short-circuit for Workers AI.
+   */
+  readonly dispatcher?: UpstreamDispatcher | ((env: InferenceBindings) => UpstreamDispatcher);
   readonly usage?: UsageSink;
   readonly normalizers?: StreamNormalizers;
   readonly translator?: AnthropicTranslator;

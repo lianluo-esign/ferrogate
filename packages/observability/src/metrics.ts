@@ -52,6 +52,25 @@ export interface UnjoinableActionMetricTotal {
 }
 
 /**
+ * #695: one governed tenant's response-cache outcomes.
+ *
+ * Outside {@link GatewayMetricsSnapshot} on purpose — the snapshot is a flat
+ * bag of scalars, and this is a variable-length labelled family fed by its own
+ * accumulator (`apps/gateway/src/cache/metrics.ts`), exactly like
+ * {@link UnjoinableActionMetricTotal}. `tenant` is the AUTHENTICATED tenancy,
+ * never a client-declared value, and the producer bounds its cardinality.
+ */
+export interface CacheTenantMetricTotal {
+  tenant: string;
+  hits: number;
+  misses: number;
+  /** Subset of `hits` answered by the similarity layer. */
+  semanticHits: number;
+  /** `hits / (hits + misses)`; 0 when nothing was observed. */
+  hitRatio: number;
+}
+
+/**
  * A large flat counter bag every exporter renders from. Field docs mirror the
  * Rust crate; the issue tags (#151/#166/#263/#273/#277/#309/#368/#522) are the
  * acceptance-criteria anchors.

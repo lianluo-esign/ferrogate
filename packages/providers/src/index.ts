@@ -16,10 +16,12 @@
  *  - `structured`         — `response_format`/`text.format` → per-family output
  *                           contract, or an explicit refusal (issue #674).
  *  - `models`             — logical→physical `ModelRegistry`.
- *  - `registry`           — `ProviderAdapterRegistry` (8 adapters + CF routing).
+ *  - `registry`           — `ProviderAdapterRegistry` (9 adapters + CF routing).
  *  - `sigv4`              — AWS SigV4 signing (Bedrock; byte-exact).
  *  - `openai`/`anthropic`/`azure`/`bedrock`/`gemini`/`grok`/`openrouter`/`vertex`
- *                         — the 8 provider adapters.
+ *                         — the 8 ported provider adapters.
+ *  - `workers_ai`         — the 9th family, Cloudflare Workers AI (issue #673).
+ *                           No Rust ancestor: a Rust process has no `env.AI`.
  *  - `anthropic_messages` — Anthropic Messages ⇄ OpenAI chat translation (#272).
  *  - `schemas`            — Zod wire schemas for the data shapes (§3.3).
  */
@@ -114,6 +116,7 @@ export { GeminiAdapter } from "./gemini.js";
 export { GrokAdapter } from "./grok.js";
 export { OpenRouterAdapter } from "./openrouter.js";
 export { VertexAiAdapter } from "./vertex.js";
+export { WorkersAiAdapter, WORKERS_AI_KIND, WORKERS_AI_RUN_PATH_SEGMENT } from "./workers_ai.js";
 export { ProviderAdapterRegistry } from "./registry.js";
 
 // Anthropic Messages ⇄ OpenAI translation.

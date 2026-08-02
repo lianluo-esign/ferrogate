@@ -1,7 +1,7 @@
-# FerroGate — route map (259 operations → Hono apps)
+# FerroGate — route map (265 operations → Hono apps)
 
 Derived from the authoritative contract `docs/openapi/runtime-api-contract.json`
-(`version: 1`, 259 operations, 38 route groups). **That JSON is the source of
+(`version: 1`, 265 operations, 39 route groups). **That JSON is the source of
 truth** — this document only assigns each operation to a Worker and records the
 auth/visibility invariants the Hono port must preserve.
 
@@ -9,53 +9,63 @@ auth/visibility invariants the Hono port must preserve.
 
 | App | Ops | Surface |
 |---|---:|---|
-| `apps/control-plane` | **203** | `/admin/v1/**` (198) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
-| `apps/gateway` | **33** | inference (8): `/v1/{chat/completions,messages,messages/count_tokens,responses,embeddings,images/generations,models,models/{model}}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions, `/.well-known/agent.json` (7) |
+| `apps/control-plane` | **209** | `/admin/v1/**` (204) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
+| `apps/gateway` | **33** | inference (8): `/v1/{chat/completions,messages,messages/count_tokens,responses,embeddings,images/generations,models,models/{model}}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions + `/.well-known/agent.json` (7) |
 | `apps/agent-runtime` | **15** | `/v1/agent-jobs/**` (5), `/v1/agents/**` (3), `/v1/agent-runs` (1), `/v1/self-hosted-workers/**` (6) |
 | `apps/mcp` | **6** | `/v1/mcp`, `/v1/mcp/tool/execute`, `/v1/mcp/identity/**` |
 | shared | **2** | `/healthz`, `/readyz` — implemented in **every** Worker |
-| **total** | **259** | |
+| **total** | **265** | |
 
 `apps/telemetry` owns no contract route: it is the observability sink
 (Analytics Engine / Logpush), fed by the other Workers.
 
 ## Invariants the port MUST preserve
 
-**Auth kinds** (259): `bearer` 246 · `internal` 6 · `anonymous` 6 · `method_dependent` 1.
-**Visibility**: `admin` 199 · `public` 53 · `internal` 7.
-**Methods**: GET 119 · POST 79 · DELETE 26 · PUT 19 · PATCH 16.
+**Auth kinds** (265): `bearer` 252 · `internal` 6 · `anonymous` 6 · `method_dependent` 1.
+**Visibility**: `admin` 205 · `public` 53 · `internal` 7.
+**Methods**: GET 121 · POST 81 · DELETE 27 · PUT 20 · PATCH 16.
 
-> Every figure above is COUNTED off `docs/openapi/runtime-api-contract.json`
-> after the merge, not carried forward from either side of it. Four waves
-> landed on top of the 251-operation baseline:
+> Every figure above is **re-derived from the JSON**, not carried forward. This
+> document is the third place a count lives (after `src/contract.ts` and
+> `packages/schemas`), and two branches that each add operations will each write
+> a plausible-but-wrong total.
 >
-> - **252** — `countMessageTokens` (`POST /v1/messages/count_tokens`, issue
->   #671): the Anthropic-native token-count pre-flight. It is
->   bearer-`messages.create` — the SAME scope as the `createMessage` it
->   pre-flights, so no already-provisioned key has to be re-scoped and no
->   unauthenticated counting oracle exists. `public` visibility;
->   `apps/gateway` (32).
-> - **253-255** — the prompt deployment labels (issue #694):
+> Five slices landed on top of the 251-operation baseline, four of them
+> developed in parallel:
+>
+> - `countMessageTokens` (`POST /v1/messages/count_tokens`, issue #671): the
+>   Anthropic-native token-count pre-flight. It is bearer-`messages.create` —
+>   the SAME scope as the `createMessage` it pre-flights, so no
+>   already-provisioned key has to be re-scoped and no unauthenticated counting
+>   oracle exists. `public`; `apps/gateway`.
+> - The prompt deployment labels (issue #694):
 >   `GET /admin/v1/prompt-templates/{id}/labels`, and `PUT`/`DELETE` on
->   `.../labels/{label}`. All three `admin`; `apps/control-plane` (200).
-> - **256-258** — the per-tenant BYOK provider credentials (issue #682):
->   `GET /admin/v1/provider-credentials` and `PUT`/`DELETE` on
->   `.../provider-credentials/{alias}`. All three `admin`;
->   `apps/control-plane` (203).
-> - **259** — `getModel` (`GET /v1/models/{model}`, issue #670): the
->   single-model catalogue read beside `listModels`. Bearer-`models.read`,
->   `public` visibility; `apps/gateway` (33).
+>   `.../labels/{label}`. All `admin`; `apps/control-plane`.
+> - The BYOK provider-credential aliases (issue #682):
+>   `GET /admin/v1/provider-credentials`, and `PUT`/`DELETE` on
+>   `.../provider-credentials/{alias}`. All `admin`; `apps/control-plane`.
+> - The semantic-cache policy surface (issue #695):
+>   `GET`/`POST /admin/v1/semantic-cache-policies`, `GET`/`PUT`/`DELETE` on
+>   `.../{scope_type}/{scope_id}`, and
+>   `POST .../{scope_type}/{scope_id}/invalidate`. All `admin` and
+>   `admin.read`/`admin.write`; `apps/control-plane`.
+> - `getModel` (`GET /v1/models/{model}`, issue #670): the single-model
+>   catalogue read beside `listModels`. Bearer-`models.read`, `public`;
+>   `apps/gateway`.
 >
-> The four waves were developed in parallel, so several of these per-app and
-> per-census figures were written IDENTICALLY on two branches that had each
-> only seen their own delta (`apps/gateway` 31→32 twice; `public` 51→52 twice;
-> the inference family 6→7 twice; `apps/control-plane` 197→200 twice). Git
-> merges identical text without a conflict, so those pins must be RE-COUNTED
-> after every merge rather than reviewed as a diff.
+> `apps/control-plane` went 197 → 209 (197 + 3 + 3 + 6) and `apps/gateway` went
+> 31 → 33 (31 + 1 + 1).
+>
+> Because those slices were parallel, several per-app and per-census figures
+> were written IDENTICALLY on branches that had each seen only their own delta
+> (`apps/gateway` 31→32 twice; `public` 51→52 twice; the inference family 6→7
+> twice; `apps/control-plane` 197→200 twice; GET/DELETE/PUT 117/25/18 three
+> times). Git merges identical text with no conflict marker, so these pins must
+> be RE-COUNTED off the JSON after every merge rather than reviewed as a diff.
 
 1. **Every operation carries `visibility`, `auth.kind`, `auth.scope`, and
    `rbac_action`.** Port these as Hono middleware driven by the contract, not as
-   hand-written per-route guards — one table-driven middleware keeps all 259 in sync.
+   hand-written per-route guards — one table-driven middleware keeps all 265 in sync.
 2. **`auth.kind: "internal"`** — the 6 `/v1/self-hosted-workers/*` operations
    (`artifacts`, `checkpoints`, `events`, `heartbeat`, `runs/ack`, `runs/poll`)
    are worker-plane callbacks. They must NOT be reachable with a normal tenant
@@ -72,7 +82,7 @@ auth/visibility invariants the Hono port must preserve.
 7. **`/control/v1/*` → `/admin/v1/*` alias canonicalization** must be kept
    (`ferrogate-admin`'s naming contract).
 
-## Dynamic surfaces (NOT in the 259)
+## Dynamic surfaces (NOT in the 265)
 
 From `dynamic_surfaces` in the contract — these are data, not contract:
 
@@ -87,7 +97,7 @@ From `dynamic_surfaces` in the contract — these are data, not contract:
 
 - Generate the route table from the JSON at build time (or import it directly)
   so a contract change can't silently drift from the implementation. Add a test
-  asserting **`routes.length === 259`** and that every contract `operation_id`
+  asserting **`routes.length === 265`** and that every contract `operation_id`
   has a handler — this is the anti-drift gate.
 - Zod schemas per operation live in `@ferrogate/schemas`; the validator is
   `@hono/zod-validator`.

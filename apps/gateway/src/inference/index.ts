@@ -57,6 +57,14 @@ export * from "./workflow.js";
 export * from "./errors.js";
 export * from "./usage.js";
 export {
+  WORKERS_AI_BINDING,
+  workersAiDispatcher,
+  workersAiDispatcherFromEnv,
+  workersAiModelOf,
+  workersAiSseToOpenAi,
+} from "./workers-ai.js";
+export type { WorkersAiBinding } from "./workers-ai.js";
+export {
   DEFAULT_INFERENCE_LIMITS,
   InMemoryModelResolver,
   InMemoryUsageSink,
@@ -64,6 +72,7 @@ export {
   defaultRequestIds,
   defaultStreamNormalizers,
   emptyModelResolver,
+  dispatcherFromEnv,
   fetchDispatcher,
   isolateRoutingMetrics,
   passthroughNormalizers,

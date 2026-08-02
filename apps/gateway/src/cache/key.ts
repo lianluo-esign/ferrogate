@@ -117,6 +117,21 @@ export interface CacheKeyInput {
   readonly guardrailPolicyFingerprint: string;
   /** Stands in for Rust's `provider` + `provider_model`. See the header. */
   readonly registryFingerprint: string;
+  /**
+   * ADDED (#695) — the DURABLE, per-tenant cache-governance material:
+   * invalidation epoch, mode, similarity threshold, TTL and governed scope.
+   * `"ungoverned"` when no `semantic_cache_policies` row applies, which keeps
+   * every pre-#695 key byte-identical.
+   *
+   * It is the same kind of field as `guardrailPolicyFingerprint` and it is here
+   * for the same reason: a cached body was produced under a set of rules, and
+   * changing those rules must make it unreachable rather than silently reused.
+   * `./governance.ts::cacheGovernanceFingerprint` builds it and states, at
+   * length, why the THRESHOLD in particular has to be in the key once it
+   * becomes tunable, and why the epoch is the only purge primitive a
+   * Cache-API-backed store has.
+   */
+  readonly governanceFingerprint: string;
 }
 
 /**
@@ -181,6 +196,13 @@ function keyRecord(input: CacheKeyInput): Record<string, unknown> {
     stream: input.stream,
     request_body: input.requestBody,
     guardrail_policy_fingerprint: input.guardrailPolicyFingerprint,
+    // In `keyRecord`, not in the exact key alone: `semanticScopeMaterial` is
+    // this record minus the body, so the governance material lands in the
+    // SEMANTIC BUCKET too — which is where it has to be, because the bucket is
+    // what a threshold change or an invalidation has to rotate. Adding it only
+    // to the exact key would leave the similarity layer serving entries the
+    // tenant had just purged, and that layer is the harder one to notice.
+    governance_fingerprint: input.governanceFingerprint,
   };
 }
 

@@ -18,6 +18,8 @@
  * | Anthropic (Messages)  | forced tool call — `tools` + `tool_choice`            |
  * | Bedrock (Converse)    | forced tool call — `toolConfig.tools`/`.toolChoice`   |
  * | Gemini / Vertex       | `generationConfig.responseMimeType` + `responseSchema`|
+ * | Workers AI (#673)     | native `response_format`, schema UNWRAPPED under       |
+ * |                       | `json_schema` — see `./workers_ai.ts`                  |
  *
  * ## Refuse rather than degrade
  *
