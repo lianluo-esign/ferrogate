@@ -139,9 +139,7 @@ function payload(sse: string, event: string): Record<string, unknown> | undefine
 function completedText(sse: string): string | undefined {
   const body = payload(sse, "response.completed");
   const response = body?.["response"] as Record<string, unknown> | undefined;
-  const output = response?.["output"] as
-    | Array<{ content?: Array<{ text?: unknown }> }>
-    | undefined;
+  const output = response?.["output"] as Array<{ content?: Array<{ text?: unknown }> }> | undefined;
   const text = output?.[0]?.content?.[0]?.text;
   return typeof text === "string" ? text : undefined;
 }
