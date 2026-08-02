@@ -208,9 +208,12 @@ describe("the idle interval is a stated policy", () => {
     const armed = await armedAt(sessionId);
     expect(armed, "opening a session must arm its idle alarm").not.toBeNull();
     const delayMs = (armed as number) - before;
-    expect(delayMs).toBeLessThanOrEqual(SESSION_IDLE_TTL_SECS * 1000);
-    // Generous only on the lower side, to absorb the test's own wall clock.
-    expect(delayMs).toBeGreaterThan(SESSION_IDLE_TTL_SECS * 1000 - 60_000);
+    // A minute of slack either way, because the test's `Date.now()` and the
+    // isolate's are only approximately the same clock. It is still an exact
+    // enough pin for the policy: any other plausible interval — five minutes,
+    // an hour, a day — misses this window by a wide margin, so changing the
+    // constant without changing the stated policy fails here.
+    expect(Math.abs(delayMs - SESSION_IDLE_TTL_SECS * 1000)).toBeLessThan(60_000);
   });
 
   it("RENEWS the deadline on every request — it evicts idleness, not age", async () => {
