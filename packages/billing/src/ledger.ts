@@ -260,9 +260,37 @@ function deepEqual(a: unknown, b: unknown): boolean {
 /**
  * Whether two entries are an exact replay of one immutable provider-attempt
  * settlement (port of `same_provider_attempt_settlement` == full struct eq).
+ *
+ * The `usage` counters are normalized on both sides first (#667), and that is a
+ * correctness requirement rather than a convenience. Rust's `TokenUsage` has
+ * plain `u64` fields, so an event that omitted a counter and one that reported
+ * `0` are the SAME VALUE there. TypeScript's optionality reintroduces a
+ * distinction Rust does not have: an entry built in memory can carry
+ * `cached_input_tokens: undefined` while the very same entry, reloaded from
+ * `entry_json` through `tokenUsageSchema` (`.default(0)`), carries `0`.
+ *
+ * Compared naively, those differ — and this function is the IDEMPOTENCY
+ * ARBITER. A difference here turns an at-least-once outbox redelivery of one
+ * settled request into `billing_idempotency_conflict`, i.e. a stuck outbox row
+ * and a 409 for a replay that was in fact identical. Erasing the distinction
+ * restores the Rust semantic exactly; nothing else about the comparison is
+ * loosened.
  */
 export function sameProviderAttemptSettlement(left: LedgerEntry, right: LedgerEntry): boolean {
-  return deepEqual(left, right);
+  return deepEqual(withNormalizedUsage(left), withNormalizedUsage(right));
+}
+
+/** An entry whose optional token counters are concrete zeros (see above). */
+function withNormalizedUsage(entry: LedgerEntry): LedgerEntry {
+  return {
+    ...entry,
+    usage: {
+      ...entry.usage,
+      cached_input_tokens: entry.usage.cached_input_tokens ?? 0,
+      cache_write_tokens: entry.usage.cache_write_tokens ?? 0,
+      reasoning_tokens: entry.usage.reasoning_tokens ?? 0,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

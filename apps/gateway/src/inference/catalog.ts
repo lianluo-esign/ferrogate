@@ -181,6 +181,19 @@ const routeFieldsSchema = {
   input_price_per_1m: z.number().nonnegative().optional(),
   /** `ModelRoute.output_price_per_1m` — USD per 1M completion tokens. */
   output_price_per_1m: z.number().nonnegative().optional(),
+  /**
+   * `ModelRoute.cached_input_price_per_1m` — USD per 1M CACHE-READ prompt
+   * tokens (issue #667). Absent ⇒ cache reads settle at `input_price_per_1m`.
+   *
+   * Settlement-only: `metering/route-price.ts` reads these three, and routing
+   * does not, because whether a prompt hits the cache is not known when the
+   * route is chosen.
+   */
+  cached_input_price_per_1m: z.number().nonnegative().optional(),
+  /** `ModelRoute.cache_write_price_per_1m` — USD per 1M CACHE-WRITE prompt tokens. */
+  cache_write_price_per_1m: z.number().nonnegative().optional(),
+  /** `ModelRoute.reasoning_price_per_1m` — USD per 1M reasoning tokens. */
+  reasoning_price_per_1m: z.number().nonnegative().optional(),
 } as const;
 
 /** One `[[models]].fallbacks` entry — a `ModelRoute` with no rollout split. */
@@ -646,6 +659,18 @@ export function buildModelCatalog(
           : {}),
         ...(leg.output_price_per_1m !== undefined
           ? { outputPricePer1m: leg.output_price_per_1m }
+          : {}),
+        // #667. Absent keys, never `undefined` values: `route-price.ts`
+        // distinguishes "this route states no cached rate" (fall back to the
+        // fresh input rate) from "priced at zero".
+        ...(leg.cached_input_price_per_1m !== undefined
+          ? { cachedInputPricePer1m: leg.cached_input_price_per_1m }
+          : {}),
+        ...(leg.cache_write_price_per_1m !== undefined
+          ? { cacheWritePricePer1m: leg.cache_write_price_per_1m }
+          : {}),
+        ...(leg.reasoning_price_per_1m !== undefined
+          ? { reasoningPricePer1m: leg.reasoning_price_per_1m }
           : {}),
         // `routing_strategy` belongs to the registry ENTRY, so it is copied from
         // `model` onto EVERY leg — never read off `leg`, which for a fallback

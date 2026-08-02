@@ -77,13 +77,28 @@ export const tokenUsageSchema = z.object({
   reasoning_tokens: u64.default(0),
 });
 
-/** Mirrors `TokenUsage::new`. */
+/**
+ * Mirrors `TokenUsage::new`.
+ *
+ * The #667 counters are emitted as concrete zeros rather than left off, so a
+ * value built here is byte-identical to the same value parsed from the wire
+ * (where they are `.default(0)`) and to the same value run through
+ * {@link reconcileSplit}. Rust has no `Option` here at all — the asymmetry is a
+ * TypeScript artifact, and every place it can leak is closed the same way.
+ */
 export function newTokenUsage(
   prompt_tokens: number,
   completion_tokens: number,
   total_tokens: number,
 ): TokenUsage {
-  return { prompt_tokens, completion_tokens, total_tokens };
+  return {
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+    cached_input_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+  };
 }
 
 /** Mirrors `TokenUsage::estimate_missing_total`. */
@@ -104,7 +119,25 @@ export function estimateMissingTotal(usage: TokenUsage): TokenUsage {
  * - `prompt == 0 && total > completion`     → `prompt = total - completion`
  */
 export function reconcileSplit(usage: TokenUsage): TokenUsage {
-  const out = { ...usage };
+  const out = {
+    ...usage,
+    // #667 — NORMALIZE the three optional counters to concrete zeros, and do it
+    // here because `charge()` runs every event through this function on the way
+    // into a `LedgerEntry`.
+    //
+    // This is not tidiness. `sameProviderAttemptSettlement` is the idempotency
+    // arbiter, and it compares a freshly-charged entry against one RELOADED
+    // from `entry_json` — which came back through `tokenUsageSchema`, where
+    // these fields are `.default(0)`. Leave them `undefined` on the fresh side
+    // and `undefined !== 0` makes an honest replay of the SAME settlement look
+    // like divergent data, so an at-least-once outbox delivery raises
+    // `billing_idempotency_conflict` instead of being absorbed as the no-op it
+    // is. Observed as a real failure in `apps/gateway/test/metering/d1.test.ts`
+    // ("absorbs a replay as a duplicate") the moment the fields were added.
+    cached_input_tokens: usage.cached_input_tokens ?? 0,
+    cache_write_tokens: usage.cache_write_tokens ?? 0,
+    reasoning_tokens: usage.reasoning_tokens ?? 0,
+  };
   if (out.total_tokens === 0) {
     out.total_tokens = out.prompt_tokens + out.completion_tokens;
   } else {

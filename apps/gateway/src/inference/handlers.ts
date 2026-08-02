@@ -908,17 +908,40 @@ function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstr
 function routePricing(route: PhysicalRoute): {
   inputPricePer1m?: number;
   outputPricePer1m?: number;
+  cachedInputPricePer1m?: number;
+  cacheWritePricePer1m?: number;
+  reasoningPricePer1m?: number;
 } {
   return {
     ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
     ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
+    // #667 — the cached/reasoning rates travel with the other two, for the same
+    // reason: a failover means the route that ANSWERED is not the route that
+    // was planned, and the two can be priced differently.
+    ...(route.cachedInputPricePer1m !== undefined
+      ? { cachedInputPricePer1m: route.cachedInputPricePer1m }
+      : {}),
+    ...(route.cacheWritePricePer1m !== undefined
+      ? { cacheWritePricePer1m: route.cacheWritePricePer1m }
+      : {}),
+    ...(route.reasoningPricePer1m !== undefined
+      ? { reasoningPricePer1m: route.reasoningPricePer1m }
+      : {}),
   };
 }
 
 /** Record a metering event; never allowed to fail the response. */
 function recordUsage(
   deps: ResolvedInferenceDeps,
-  base: Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">,
+  base: Omit<
+    Usage,
+    | "promptTokens"
+    | "completionTokens"
+    | "totalTokens"
+    | "cachedInputTokens"
+    | "cacheWriteTokens"
+    | "reasoningTokens"
+  >,
   usage: ProviderUsage | undefined,
 ): void {
   try {
@@ -929,6 +952,19 @@ function recordUsage(
         ? { completionTokens: usage.completionTokens }
         : {}),
       ...(usage?.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+      // #667. Absent stays absent all the way to the billing event, where the
+      // wire schema defaults it to 0 — so "the provider reported no cached
+      // tokens" and "this response predates the counter" settle identically,
+      // and neither can be mistaken for an observed zero mid-stream.
+      ...(usage?.cachedInputTokens !== undefined
+        ? { cachedInputTokens: usage.cachedInputTokens }
+        : {}),
+      ...(usage?.cacheWriteTokens !== undefined
+        ? { cacheWriteTokens: usage.cacheWriteTokens }
+        : {}),
+      ...(usage?.reasoningTokens !== undefined
+        ? { reasoningTokens: usage.reasoningTokens }
+        : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
