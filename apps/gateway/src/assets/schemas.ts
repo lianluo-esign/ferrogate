@@ -78,6 +78,20 @@ export const platformQuerySchema = z.object({
   platform: z.string().min(1).max(128).optional(),
 });
 
+/**
+ * `?platform=` plus `?path=` — the pull query.
+ *
+ * `path` selects one file of an expanded `static_site` bundle (#736). It is NOT
+ * a new operation and NOT a second way to resolve a version: the reference in
+ * the URL still resolves through the one registry path, and `path` only narrows
+ * which bytes of the artifact that resolution chose are served. The bound is
+ * generous but finite; `bundle.ts::bundlePathRejection` owns the real grammar.
+ */
+export const pullQuerySchema = z.object({
+  platform: z.string().min(1).max(128).optional(),
+  path: z.string().min(1).max(512).optional(),
+});
+
 /** `?version=` — the target of a channel move. */
 export const channelMoveQuerySchema = z.object({
   version: assetVersionSchema,

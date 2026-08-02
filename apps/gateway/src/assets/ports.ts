@@ -487,6 +487,83 @@ export class InMemoryAssetMetadataStore implements AssetMetadataStore {
 }
 
 // ---------------------------------------------------------------------------
+// Static-site bundle file index (issue #736)
+// ---------------------------------------------------------------------------
+
+/**
+ * One file inside an expanded `static_site` bundle.
+ *
+ * `asset_id` is the SAME `stored_assets.id` the version's row carries, which is
+ * what keeps a bundle from needing its own resolution path: channels, semver
+ * ranges, variants, yank and the manifest all resolve to a version row exactly
+ * as they do for a single-object asset, and only THEN is this index consulted
+ * to pick a file out of the version that resolution already chose.
+ */
+export interface StoredBundleFile {
+  readonly asset_id: string;
+  readonly tenant_id: string;
+  /** Bundle-relative path, e.g. `assets/app.css`. Never absolute, never `..`. */
+  readonly path: string;
+  readonly storage_uri: string;
+  readonly content_type: string;
+  readonly content_hash: string;
+  readonly size_bytes: number;
+  readonly created_at_unix: number;
+}
+
+/**
+ * The per-bundle file index.
+ *
+ * Kept as its own port rather than folded into {@link AssetMetadataStore}
+ * because it carries no lifecycle invariant: the index is written while the
+ * version row is still `pending_scan` — i.e. invisible to every read path — and
+ * the version only becomes `visible` through the existing CAS promotion AFTER
+ * the whole index is durable. There is therefore no window in which a partial
+ * index is observable, and no serialization point for this store to hold.
+ */
+export interface AssetBundleIndexStore {
+  /** Insert (or replace) the whole index of one bundle version. */
+  putBundleFiles(files: readonly StoredBundleFile[]): Promise<void>;
+  getBundleFile(assetId: string, path: string): Promise<StoredBundleFile | null>;
+  listBundleFiles(assetId: string): Promise<StoredBundleFile[]>;
+  /** Drop the index, RETURNING what was dropped so its objects are reclaimable. */
+  deleteBundleFiles(assetId: string): Promise<StoredBundleFile[]>;
+}
+
+/** In-memory {@link AssetBundleIndexStore} — the offline/default wiring. */
+export class InMemoryAssetBundleIndexStore implements AssetBundleIndexStore {
+  readonly files = new Map<string, StoredBundleFile>();
+
+  #key(assetId: string, path: string): string {
+    return `${assetId} ${path}`;
+  }
+
+  async putBundleFiles(files: readonly StoredBundleFile[]): Promise<void> {
+    for (const file of files) {
+      this.files.set(this.#key(file.asset_id, file.path), { ...file });
+    }
+  }
+
+  async getBundleFile(assetId: string, path: string): Promise<StoredBundleFile | null> {
+    const found = this.files.get(this.#key(assetId, path));
+    return found ? { ...found } : null;
+  }
+
+  async listBundleFiles(assetId: string): Promise<StoredBundleFile[]> {
+    return [...this.files.values()]
+      .filter((file) => file.asset_id === assetId)
+      .map((file) => ({ ...file }))
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  }
+
+  async deleteBundleFiles(assetId: string): Promise<StoredBundleFile[]> {
+    const removed = await this.listBundleFiles(assetId);
+    for (const file of removed) this.files.delete(this.#key(assetId, file.path));
+    return removed;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Presigning
 // ---------------------------------------------------------------------------
 

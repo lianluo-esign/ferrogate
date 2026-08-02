@@ -96,15 +96,23 @@ export function paxRecord(key: string, value: string): string {
 
 /** gzip the bytes with the platform's own compressor (workerd has one). */
 export async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream("gzip"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  return compress(bytes, "gzip");
 }
 
 /** raw-DEFLATE the bytes, the compression method a real zip uses. */
 async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes as BlobPart])
-    .stream()
-    .pipeThrough(new CompressionStream("deflate-raw"));
+  return compress(bytes, "deflate-raw");
+}
+
+/** `new Response(bytes).body` is the ambient-typed byte stream in workerd. */
+async function compress(bytes: Uint8Array, format: "gzip" | "deflate-raw"): Promise<Uint8Array> {
+  const copy = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const body = new Response(copy).body;
+  if (body === null) return new Uint8Array(0);
+  const stream = body.pipeThrough(new CompressionStream(format));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 

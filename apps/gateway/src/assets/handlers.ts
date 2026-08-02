@@ -79,6 +79,7 @@ import {
   assetVisibilityPromotionRequestSchema,
   channelMoveQuerySchema,
   platformQuerySchema,
+  pullQuerySchema,
   presignAbortRequestSchema,
   presignCommitRequestSchema,
   presignUploadIntentRequestSchema,
@@ -970,13 +971,17 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
       // the #522 `agent_run_id` correlation exactly as the push/delete rows do.
       on("getAsset", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
-        const query = parseOrThrow(platformQuerySchema, c.req.query());
+        const query = parseOrThrow(pullQuerySchema, c.req.query());
         return renderBytes(
           await serviceFor(c).pullAsset(
             await caller(c),
             { assetType: params.asset_type, name: params.name, reference: params.version },
             {
               platform: query.platform,
+              // #736: one file of an expanded `static_site` bundle. Threaded
+              // through the SAME operation, so channels/ranges/yank/variants
+              // are the ones already documented for `getAsset`.
+              bundlePath: query.path,
               headers: c.req.raw.headers,
               method: c.req.method,
             },
