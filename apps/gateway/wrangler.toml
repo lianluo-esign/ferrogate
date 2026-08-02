@@ -298,6 +298,33 @@ GATEWAY_PLANS = "{}"
 GATEWAY_TENANT_PLANS = "{}"
 
 # ---------------------------------------------------------------------------
+# [vars] — required attribution tags (#678)
+#
+# Read by `attributionPolicySourceFromEnv` (src/attribution/source.ts) ONLY when
+# no control database is bound. The DURABLE source is `CONTROL_DB`'s
+# `quota_policies.required_tags_json` + `on_missing_tags`, written through
+# `PUT /admin/v1/quota-policies/tenant/{tenant_id}` — so on a deployment with
+# `CONTROL_DB` (which is every real one) this var is never consulted, exactly
+# like `GATEWAY_QUOTA_POLICIES` beside it.
+#
+# A JSON array of `{ tenant_id, required_tags, on_missing }`, where `on_missing`
+# is `"reject"` or `"default_from_key"`:
+#
+#   GATEWAY_ATTRIBUTION_POLICIES = '''
+#   [{ "tenant_id": "tenant_acme",
+#      "required_tags": ["team", "cost_center"],
+#      "on_missing": "default_from_key" }]
+#   '''
+#
+# EMPTY, the shipped default, is the OFF posture: no tenant requires tags and
+# every request is served exactly as before. There is no implicit default for
+# `on_missing` — an entry that lists required tags without naming an action
+# enforces NOTHING, because the point of the control is that the operator
+# chooses refusal or defaulting explicitly.
+# ---------------------------------------------------------------------------
+GATEWAY_ATTRIBUTION_POLICIES = "[]"
+
+# ---------------------------------------------------------------------------
 # [vars] — deny/allow policy rules and the prepaid-wallet hold
 #
 # GATEWAY_POLICY_RULES is read by `policyRulesFromEnv` (src/ratelimit/policy.ts):

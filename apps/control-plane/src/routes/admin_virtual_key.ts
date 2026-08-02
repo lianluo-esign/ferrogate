@@ -58,6 +58,17 @@ export const virtualKeySchema = adminRecordSchema.extend({
   monthly_token_budget: z.number().int().min(0).nullish(),
   request_limit_per_minute: z.number().int().min(0).nullish(),
   expires_at: z.number().int().min(0).nullish(),
+  /**
+   * #678 — the attribution tags this key STANDS FOR, e.g.
+   * `{"team":"growth","cost_center":"eng-platform"}`.
+   *
+   * Read only when the calling tenant's quota policy says
+   * `on_missing_tags = "default_from_key"`, and only for the tag keys that
+   * policy requires and the caller did not state. A key that declares nothing
+   * is refused under that policy rather than admitted — see
+   * `apps/gateway/src/attribution/policy.ts`.
+   */
+  attribution_tags: z.record(z.string().trim().min(1)).optional(),
 });
 
 const VIRTUAL_KEY_SPEC: CollectionSpec = {

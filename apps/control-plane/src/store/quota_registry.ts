@@ -213,6 +213,39 @@ function text(value: unknown, fallback: string): string {
 }
 
 /**
+ * `required_tags` on a quota-policy document → the `required_tags_json` column
+ * (#678). Non-strings and blanks are dropped, so a malformed entry cannot
+ * become a tag name no caller can ever supply.
+ */
+function requiredTagsOf(record: StoreRecord): string[] {
+  const raw = record.required_tags;
+  if (!Array.isArray(raw)) return [];
+  return [
+    ...new Set(
+      raw
+        .filter((tag): tag is string => typeof tag === "string")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag !== ""),
+    ),
+  ];
+}
+
+/**
+ * `on_missing_tags` → the column, or SQL `NULL`.
+ *
+ * NULL is "this tenant is not enforced", and it is what an unrecognised value
+ * projects to as well: half a policy is not a policy, and the gateway reader
+ * (`attribution/policy.ts::parseMissingTagAction`) makes the same judgement
+ * from the other side. The route schema already refuses anything but the two
+ * spellings, so this arm is defence in depth for a document written before the
+ * field existed.
+ */
+function missingTagActionOf(record: StoreRecord): string | null {
+  const raw = record.on_missing_tags;
+  return raw === "reject" || raw === "default_from_key" ? raw : null;
+}
+
+/**
  * A UNIQUE-constraint failure on a projection is the operator's conflict, not
  * an internal error: two plans cannot share a slug. Anything else is re-thrown
  * unchanged so a real fault is not disguised as a 409.
@@ -391,9 +424,9 @@ export async function projectQuotaPolicy(
            monthly_budget_usd, enabled, created_at_unix, updated_at_unix,
            alert_threshold_pcts_json, asset_storage_quota_bytes,
            monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes,
-           agent_cost_budget_usd
+           agent_cost_budget_usd, required_tags_json, on_missing_tags
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            scope_type = excluded.scope_type,
            scope_id = excluded.scope_id,
@@ -408,7 +441,9 @@ export async function projectQuotaPolicy(
            monthly_egress_bytes_budget = excluded.monthly_egress_bytes_budget,
            download_rpm_limit = excluded.download_rpm_limit,
            asset_max_object_bytes = excluded.asset_max_object_bytes,
-           agent_cost_budget_usd = excluded.agent_cost_budget_usd`,
+           agent_cost_budget_usd = excluded.agent_cost_budget_usd,
+           required_tags_json = excluded.required_tags_json,
+           on_missing_tags = excluded.on_missing_tags`,
       )
       .bind(
         id,
@@ -427,6 +462,14 @@ export async function projectQuotaPolicy(
         nullable(policy.downloadRpmLimit),
         nullable(policy.assetMaxObjectBytes),
         nullable(policy.agentCostBudgetUsd),
+        // #678. Read off the DOCUMENT rather than through `StoredQuotaPolicy`,
+        // because attribution is not part of the quota MERGE: `@ferrogate/policy`
+        // resolves rpm/tpm/budget across the tenant→project→workspace→key chain,
+        // and an attribution requirement is read at the tenant scope only (see
+        // `apps/gateway/src/attribution/source.ts`). Threading it through the
+        // merge value type would imply a chain semantic nothing implements.
+        JSON.stringify(requiredTagsOf(record)),
+        missingTagActionOf(record),
       )
       .run();
   } catch (error) {
