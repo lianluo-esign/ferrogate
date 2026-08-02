@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 272.
+ * ANTI-DRIFT GATE for the third copy of 274.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(272);
+    expect(OPENAPI_OPERATION_COUNT).toBe(274);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -295,10 +295,15 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
     // merged truth: it is 258 + 3 + 1 = 262.
     //
+    // #693's two experiment reads are the same story again: their response
+    // shapes are described in `docs/openapi/admin-api.openapi.json` and their
+    // handler lives in `apps/control-plane/src/routes/admin_experiment.ts`, so
+    // this package seeds no Zod for either. 262 -> 264.
+    //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 272 - 10. The running sum is narrative, and #703 and #737
+    // `seeded`, i.e. 274 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(262);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(264);
   });
 });
