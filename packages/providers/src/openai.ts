@@ -26,6 +26,7 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
+import { assertPromptCacheForAutomaticFamily, stripPromptCacheDirective } from "./caching.js";
 import {
   asStr,
   asU64,
@@ -47,6 +48,13 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
   ): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ensureChatObjectBody(request.body);
+    // Prompt caching (#690). This adapter copies the caller's body WHOLESALE,
+    // which is exactly why the FerroGate-only `prompt_cache` member has to be
+    // removed here: OpenAI rejects unknown top-level fields, so a directive
+    // left in place would turn a caching hint into a 400. What OpenAI can and
+    // cannot honour is adjudicated first.
+    assertPromptCacheForAutomaticFamily(body, provider.kind);
+    stripPromptCacheDirective(body);
     body["model"] = request.providerModel;
     body["stream"] = request.stream;
     if (request.stream) requestOpenaiStreamUsage(body);
@@ -66,6 +74,8 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
   ): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ensureLabeledObjectBody(request.body, "responses request body");
+    assertPromptCacheForAutomaticFamily(body, provider.kind);
+    stripPromptCacheDirective(body);
     body["model"] = request.providerModel;
     body["stream"] = request.stream;
 

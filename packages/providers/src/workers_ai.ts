@@ -60,6 +60,7 @@ import { embeddingsTextInputs, openaiEmbeddingsResponse } from "./gemini.js";
 import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
 import { structuredOutputFromChatBody, structuredOutputFromResponsesBody } from "./structured.js";
 import type { CanonicalStructuredOutput } from "./structured.js";
+import { assertPromptCacheForAutomaticFamily } from "./caching.js";
 
 /** The canonical `kind` string for this family. */
 export const WORKERS_AI_KIND = "workers-ai";
@@ -82,6 +83,10 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
   ): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ensureObjectBody(request.body, "chat completion request body");
+    // Workers AI has no prompt cache at all (#690): `auto` and `off` are both
+    // satisfied vacuously, and a request that DEPENDS on a cached prefix is
+    // refused so the ladder can try a family that actually has one.
+    assertPromptCacheForAutomaticFamily(body, provider.kind, { cachesNothing: true });
     const input = textGenerationInput(body, request.stream);
     applyStructuredOutput(input, structuredOutputFromChatBody(body), provider.kind);
     return {
@@ -110,6 +115,7 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
     request: ResponsesPlan,
   ): ProviderHttpRequest {
     validateKind(provider.kind);
+    assertPromptCacheForAutomaticFamily(request.body, provider.kind, { cachesNothing: true });
     const canonical = CanonicalAiRequest.fromResponsesBody(
       request.body,
     ).intoChatBodyWithSystemMessage();

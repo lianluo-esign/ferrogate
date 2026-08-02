@@ -17,25 +17,35 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  AdapterError,
   AnthropicAdapter,
   BedrockAdapter,
   GeminiAdapter,
   OpenAiCompatibleAdapter,
   SecretValue,
   VertexAiAdapter,
+  WorkersAiAdapter,
+  promptCacheFromBody,
 } from "../src/index.js";
 import type { ProviderConfig } from "../src/index.js";
 
 // --- fixtures --------------------------------------------------------------
 
+const SYSTEM_PROMPT = "You are a claims adjuster. <10k tokens of policy text>";
+
 /**
- * A body with a long, stable prefix (system + tools) and a volatile last turn —
- * the only shape prompt caching pays off on, in every family.
+ * A body with a long, stable prefix (the system turn) and a volatile last turn
+ * — the only shape prompt caching pays off on, in every family. Written in the
+ * OpenAI grammar (`role: "system"` message), because that is the shape every
+ * adapter is handed: the `/v1/chat/completions` ingress produces it directly
+ * and the `/v1/messages` ingress is translated into it on the way in.
  */
 const chatBody = (promptCache: unknown, extra: Record<string, unknown> = {}) => ({
   model: "logical",
-  system: "You are a claims adjuster. <10k tokens of policy text>",
-  messages: [{ role: "user", content: "is claim 91 covered?" }],
+  messages: [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content: "is claim 91 covered?" },
+  ],
   ...(promptCache === undefined ? {} : { prompt_cache: promptCache }),
   ...extra,
 });
@@ -83,8 +93,49 @@ const chatPlan = (body: Record<string, unknown>) => ({
   body: body as never,
 });
 
-const bedrockBody = (body: Record<string, unknown>): Record<string, any> =>
-  JSON.parse(new TextDecoder().decode(body as unknown as Uint8Array)) as Record<string, any>;
+
+const workersAiProvider: ProviderConfig = {
+  name: "cf-ai",
+  kind: "workers-ai",
+  baseUrl: "https://api.cloudflare.example/client/v4/accounts/acct/",
+  apiKey: "cf-token",
+};
+
+// --- canonical parsing -----------------------------------------------------
+
+describe("canonical directive parsing", () => {
+  test("the three modes collapse to one canonical intent", () => {
+    expect(promptCacheFromBody({ prompt_cache: { mode: "auto" } } as never)).toEqual({
+      kind: "auto",
+    });
+    expect(promptCacheFromBody({ prompt_cache: { mode: "off" } } as never)).toEqual({
+      kind: "off",
+    });
+    // An explicit request with no ttl means the default lifetime, not "any".
+    expect(promptCacheFromBody({ prompt_cache: { mode: "explicit" } } as never)).toEqual({
+      kind: "explicit",
+      ttl: "5m",
+    });
+  });
+
+  test("a body with no directive states no intent", () => {
+    expect(promptCacheFromBody({ messages: [] } as never)).toBeUndefined();
+  });
+
+  test("a ttl on a mode that promises nothing is a caller error", () => {
+    // Accepting it would let a caller believe it had bought a 1h cache when
+    // `auto` guarantees nothing at all.
+    expect(() =>
+      promptCacheFromBody({ prompt_cache: { mode: "auto", ttl: "1h" } } as never),
+    ).toThrowError(/only meaningful/i);
+  });
+
+  test("an unsupported ttl is refused rather than rounded", () => {
+    expect(() =>
+      promptCacheFromBody({ prompt_cache: { mode: "explicit", ttl: "24h" } } as never),
+    ).toThrowError(/ttl/i);
+  });
+});
 
 // --- per-family translation ------------------------------------------------
 
@@ -95,15 +146,18 @@ describe("the directive reaches every family's own caching mechanism", () => {
       chatPlan(chatBody({ mode: "explicit", ttl: "1h" })),
     );
     const body = prepared.body as Record<string, any>;
-    // The breakpoint lands on the LAST system block: Anthropic's cache prefix is
-    // rendered tools → system → messages, so one marker there covers both the
-    // tools and the system prompt, and leaves the volatile turn outside it.
-    expect(body["system"]).toEqual([
+    // The breakpoint lands at the END of the static prefix: Anthropic's cache
+    // prefix is rendered tools → system → messages, so a marker there covers
+    // the tools and the system prompt while leaving the volatile turn — the
+    // caller's actual question — outside the cached span.
+    expect(body["messages"]).toEqual([
       {
-        type: "text",
-        text: "You are a claims adjuster. <10k tokens of policy text>",
-        cache_control: { type: "ephemeral", ttl: "1h" },
+        role: "system",
+        content: [
+          { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+        ],
       },
+      { role: "user", content: "is claim 91 covered?" },
     ]);
     // The FerroGate-only directive must never reach a provider.
     expect(body["prompt_cache"]).toBeUndefined();
@@ -114,8 +168,27 @@ describe("the directive reaches every family's own caching mechanism", () => {
       anthropicProvider,
       chatPlan(chatBody({ mode: "auto" })),
     );
-    const system = (prepared.body as Record<string, any>)["system"] as Array<Record<string, any>>;
-    expect(system[0]!["cache_control"]).toEqual({ type: "ephemeral" });
+    const messages = (prepared.body as Record<string, any>)["messages"] as Array<
+      Record<string, any>
+    >;
+    expect(messages[0]!["content"][0]["cache_control"]).toEqual({ type: "ephemeral" });
+  });
+
+  test("a top-level `system` carries the breakpoint when the body has one", () => {
+    // The `/v1/responses` canonicalizer lifts `instructions` to a top-level
+    // `system`, so both spellings have to reach the same boundary.
+    const prepared = new AnthropicAdapter().prepareChatCompletions(
+      anthropicProvider,
+      chatPlan({
+        model: "logical",
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: "is claim 91 covered?" }],
+        prompt_cache: { mode: "auto" },
+      }),
+    );
+    expect((prepared.body as Record<string, any>)["system"]).toEqual([
+      { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+    ]);
   });
 
   test("bedrock converse marks the same boundary with a cachePoint block", () => {
@@ -123,9 +196,11 @@ describe("the directive reaches every family's own caching mechanism", () => {
       bedrockProvider,
       chatPlan(chatBody({ mode: "explicit", ttl: "5m" })),
     );
-    const body = bedrockBody(prepared.body as Record<string, unknown>);
+    const body = prepared.body as Record<string, any>;
+    // Same boundary, Converse's spelling: a `cachePoint` BLOCK after the static
+    // system content rather than a member of the preceding block.
     expect(body["system"]).toEqual([
-      { text: "You are a claims adjuster. <10k tokens of policy text>" },
+      { text: SYSTEM_PROMPT },
       { cachePoint: { type: "default" } },
     ]);
   });
@@ -140,7 +215,12 @@ describe("the directive reaches every family's own caching mechanism", () => {
     // — but the directive is FerroGate's field, and OpenAI rejects unknown
     // top-level members, so leaving it on the body would 400 the request.
     expect(body["prompt_cache"]).toBeUndefined();
-    expect(body["messages"]).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
+    // …and the rest of the body is untouched: no breakpoint is invented for a
+    // family that chooses its own prefix.
+    expect(body["messages"]).toEqual([
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: "is claim 91 covered?" },
+    ]);
   });
 
   test("gemini and vertex rely on implicit caching and strip the directive", () => {
@@ -206,6 +286,85 @@ describe("a family that cannot express the directive refuses it", () => {
         chatPlan(chatBody({ mode: "forever" })),
       ),
     ).toThrowError(/prompt_cache/i);
+  });
+});
+
+describe("no family may silently ignore the directive", () => {
+  /** Every family, prepared through its own adapter, with one shared body. */
+  const prepareEverywhere = (directive: unknown): Array<[string, () => unknown]> => [
+    [
+      "anthropic",
+      () =>
+        new AnthropicAdapter().prepareChatCompletions(
+          anthropicProvider,
+          chatPlan(chatBody(directive)),
+        ).body,
+    ],
+    [
+      "bedrock",
+      () =>
+        new BedrockAdapter().prepareChatCompletions(bedrockProvider, chatPlan(chatBody(directive)))
+          .body,
+    ],
+    [
+      "openai-compatible",
+      () =>
+        new OpenAiCompatibleAdapter().prepareChatCompletions(
+          openaiProvider,
+          chatPlan(chatBody(directive)),
+        ).body,
+    ],
+    [
+      "gemini",
+      () =>
+        new GeminiAdapter().prepareChatCompletions(geminiProvider, chatPlan(chatBody(directive)))
+          .body,
+    ],
+    [
+      "vertex",
+      () =>
+        new VertexAiAdapter().prepareChatCompletions(vertexProvider, chatPlan(chatBody(directive)))
+          .body,
+    ],
+    [
+      "workers-ai",
+      () =>
+        new WorkersAiAdapter().prepareChatCompletions(
+          workersAiProvider,
+          chatPlan(chatBody(directive)),
+        ).body,
+    ],
+  ];
+
+  test("an `explicit` contract is either honoured on the wire or refused", () => {
+    // This is the whole issue in one assertion. Before #690 EVERY family in
+    // this list produced a body with no caching in it and answered 200, so the
+    // caller could not tell a cached leg from an uncached one. Now each one
+    // either carries its own mechanism or takes itself out of the ladder.
+    for (const [family, prepare] of prepareEverywhere({ mode: "explicit", ttl: "5m" })) {
+      let refused: unknown;
+      let body: unknown;
+      try {
+        body = prepare();
+      } catch (error) {
+        refused = error;
+      }
+      if (refused !== undefined) {
+        expect(refused, family).toBeInstanceOf(AdapterError);
+        expect((refused as AdapterError).kind, family).toBe("UnsupportedCapability");
+        continue;
+      }
+      const serialized = JSON.stringify(body);
+      expect(serialized, family).toMatch(/cache_control|cachePoint/);
+      expect(serialized, family).not.toContain("prompt_cache");
+    }
+  });
+
+  test("`auto` never costs a route — every family accepts it", () => {
+    for (const [family, prepare] of prepareEverywhere({ mode: "auto" })) {
+      expect(() => prepare(), family).not.toThrow();
+      expect(JSON.stringify(prepare()), family).not.toContain("prompt_cache");
+    }
   });
 });
 

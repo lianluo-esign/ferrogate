@@ -18,6 +18,7 @@ import type {
   ResponsesPlan,
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
+import { applyPromptCacheToAnthropic, promptCacheFromBody } from "./caching.js";
 import { applyStructuredOutputToAnthropic, structuredOutputFromChatBody } from "./structured.js";
 import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
@@ -51,6 +52,13 @@ export class AnthropicAdapter extends BaseProviderAdapter {
     const structured = structuredOutputFromChatBody(body);
     if (structured !== undefined) {
       applyStructuredOutputToAnthropic(anthropicBody, structured, provider.kind);
+    }
+    // Prompt caching (issue #690). Applied AFTER the structured-output coercion
+    // so a coercion tool is inside the cached prefix rather than appended after
+    // the breakpoint, where it would invalidate the cache on every request.
+    const promptCache = promptCacheFromBody(body);
+    if (promptCache !== undefined) {
+      applyPromptCacheToAnthropic(anthropicBody, promptCache, provider.kind);
     }
 
     return {

@@ -26,6 +26,7 @@ import {
   applyStructuredOutputToBedrockConverse,
   structuredOutputFromChatBody,
 } from "./structured.js";
+import { applyPromptCacheToBedrockConverse, promptCacheFromBody } from "./caching.js";
 import { sign } from "./sigv4.js";
 import type { AwsCredentials, SigningRequest } from "./sigv4.js";
 import { asStr, asU64, getField, isArray, isObject, parseJson } from "./json.js";
@@ -57,6 +58,12 @@ export class BedrockAdapter extends BaseProviderAdapter {
     const structured = structuredOutputFromChatBody(body);
     if (structured !== undefined) {
       applyStructuredOutputToBedrockConverse(bedrockBody, structured, provider.kind);
+    }
+    // Converse's own prefix-cache mechanism is a `cachePoint` block (#690);
+    // applied after `toolConfig` exists so a tool prefix can carry it.
+    const promptCache = promptCacheFromBody(body);
+    if (promptCache !== undefined) {
+      applyPromptCacheToBedrockConverse(bedrockBody, promptCache, provider.kind);
     }
 
     const path = `/model/${percentEncodePathSegment(request.providerModel)}/converse`;

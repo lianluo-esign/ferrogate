@@ -16,6 +16,13 @@ import {
   structuredOutputFromResponsesBody,
 } from "./structured.js";
 import type { CanonicalStructuredOutput } from "./structured.js";
+import {
+  applyPromptCacheToAnthropic,
+  applyPromptCacheToAutomaticFamily,
+  promptCacheFromBody,
+  stripPromptCacheDirective,
+} from "./caching.js";
+import type { CanonicalPromptCache } from "./caching.js";
 
 type CanonicalToolChoice =
   | { type: "Auto" }
@@ -62,6 +69,8 @@ export class CanonicalAiRequest {
     private readonly maxOutputTokens: Json | undefined,
     /** `text.format` — the Responses spelling of `response_format` (#674). */
     private readonly structuredOutput: CanonicalStructuredOutput | undefined,
+    /** `prompt_cache` — the provider-neutral caching directive (#690). */
+    private readonly promptCache: CanonicalPromptCache | undefined,
   ) {}
 
   static fromResponsesBody(body: Json): CanonicalAiRequest {
@@ -74,6 +83,7 @@ export class CanonicalAiRequest {
       getField(object, "instructions"),
       getField(object, "max_output_tokens"),
       structuredOutputFromResponsesBody(object),
+      promptCacheFromBody(object),
     );
   }
 
@@ -115,6 +125,12 @@ export class CanonicalAiRequest {
     if (this.structuredOutput !== undefined) {
       applyStructuredOutputToAnthropic(body, this.structuredOutput, "anthropic");
     }
+    // The caching directive is FerroGate's own member: it is stripped from the
+    // copied source body and re-emitted as `cache_control` breakpoints (#690).
+    stripPromptCacheDirective(body);
+    if (this.promptCache !== undefined) {
+      applyPromptCacheToAnthropic(body, this.promptCache, "anthropic");
+    }
     return body;
   }
 
@@ -134,6 +150,13 @@ export class CanonicalAiRequest {
       applyStructuredOutputToGemini(generationConfig, this.structuredOutput, "gemini");
     }
     if (Object.keys(generationConfig).length > 0) body["generationConfig"] = generationConfig;
+    // Gemini caches implicitly and has no per-request breakpoint, so the
+    // directive is adjudicated (auto accepted, explicit/off refused) and never
+    // reaches the wire (#690).
+    stripPromptCacheDirective(body);
+    if (this.promptCache !== undefined) {
+      applyPromptCacheToAutomaticFamily(this.promptCache, "gemini");
+    }
     return body;
   }
 }

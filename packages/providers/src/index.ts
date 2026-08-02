@@ -85,6 +85,18 @@ export {
 } from "./structured.js";
 export type { CanonicalStructuredOutput } from "./structured.js";
 
+// Canonical prompt-caching directive (`prompt_cache`) — issue #690.
+export {
+  PROMPT_CACHE_MEMBER,
+  applyPromptCacheToAnthropic,
+  applyPromptCacheToAutomaticFamily,
+  applyPromptCacheToBedrockConverse,
+  assertPromptCacheForAutomaticFamily,
+  promptCacheFromBody,
+  stripPromptCacheDirective,
+} from "./caching.js";
+export type { CanonicalPromptCache, PromptCacheTtl } from "./caching.js";
+
 // Model registry.
 export {
   DEFAULT_ROUTING_STRATEGY,
