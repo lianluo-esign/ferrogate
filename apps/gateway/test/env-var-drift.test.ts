@@ -387,9 +387,12 @@ describe("the env-var drift gate itself", () => {
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
     // GW-T18 counted 49 `[vars]`; WAVE 20 committed the two `BILLING_ALERTS_*`
-    // knobs, so 51. Pinning the exact number makes an accidental parser
-    // regression (or a silently deleted table) loud here first.
-    expect(DECLARED.vars.size).toBe(51);
+    // knobs, so 51; #669 committed `TELEMETRY_ATTRIBUTE_PROFILE`, so 52.
+    // Pinning the exact number makes an accidental parser regression (or a
+    // silently deleted table) loud here first — and it is why adding a var is
+    // deliberately a two-file change: the count below must be re-stated by
+    // whoever adds one, rather than drifting silently.
+    expect(DECLARED.vars.size).toBe(52);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -606,7 +609,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(51);
+    expect(rows.length).toBe(52);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -641,7 +644,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // on the env it passes. The committed value is therefore inert rather than
     // absent, which is what keeps it from shadowing a fixture.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(46);
+    expect(observable.length).toBe(47);
     expect(rows.length - observable.length).toBe(5);
   });
 });
