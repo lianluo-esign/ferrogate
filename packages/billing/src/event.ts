@@ -119,6 +119,24 @@ export interface BillingEvent {
   wallet_delta_credits?: bigint;
   /** Wallet balance immediately after the debit (issue #169). */
   wallet_balance_after_credits?: bigint;
+  /**
+   * Seconds of audio transcribed (issue #703).
+   *
+   * On the EVENT rather than inside `usage`, because `usage` is `TokenUsage` and
+   * a transcription produces no tokens — `reconcileSplit` would have had to
+   * reconcile a quantity with no total to reconcile against. Carrying it here
+   * is what arms `charge()`'s divergence check for an audio row: without it the
+   * rate-card estimate is $0 against a positive settled cost, so the check would
+   * either be off (no card entry) or permanently wrong (a card entry with no
+   * quantity to price). Both are worse than the third option, which is this one.
+   *
+   * ABSENT, never zero, when the provider reported no duration — the same rule
+   * `Usage.audioSeconds` follows one layer up. Zero would settle a real call
+   * authoritatively at $0.
+   */
+  audio_seconds?: number;
+  /** Characters synthesized (issue #703). Known before dispatch, so exact. */
+  audio_characters?: number;
 }
 
 const optStr = z.string().nullish().transform((v) => v ?? undefined);
@@ -158,6 +176,8 @@ export const billingEventWireSchema = z
     metadata: z.record(z.string()).default({}),
     wallet_delta_credits: optI64,
     wallet_balance_after_credits: optI64,
+    audio_seconds: z.number().nullish().transform((v) => v ?? undefined),
+    audio_characters: z.number().nullish().transform((v) => v ?? undefined),
   })
   .transform((w): BillingEvent => ({
     request_id: w.request_id,
@@ -185,6 +205,8 @@ export const billingEventWireSchema = z
     metadata: w.metadata,
     wallet_delta_credits: w.wallet_delta_credits,
     wallet_balance_after_credits: w.wallet_balance_after_credits,
+    audio_seconds: w.audio_seconds,
+    audio_characters: w.audio_characters,
   }));
 
 /** Parse an untrusted JSON value into a {@link BillingEvent} (throws on invalid). */

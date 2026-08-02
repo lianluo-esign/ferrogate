@@ -50,6 +50,40 @@ describe("billingEventFromUsage", () => {
     );
   });
 
+  /**
+   * The audio rails, and the reason they are on the EVENT (issue #703).
+   *
+   * `charge()` prices an audio row off `audio_seconds` / `audio_characters`; if
+   * they do not survive this mapping the rate card cannot value the row, the
+   * expected cost is $0 against a positive settled cost, and the >5% divergence
+   * check either never runs or fires on every correct row. So this is the seam
+   * that decides whether the mispricing detector works for audio at all.
+   */
+  describe("the audio quantities (issue #703)", () => {
+    it("carries a reported duration onto the billing event", () => {
+      const event = billingEventFromUsage(usageFixture({ audioSeconds: 12.5 }), {
+        nowUnixSeconds: 1,
+      });
+      expect(event.audio_seconds).toBe(12.5);
+    });
+
+    it("carries a character count for a synthesis row", () => {
+      const event = billingEventFromUsage(usageFixture({ audioCharacters: 1_234 }), {
+        nowUnixSeconds: 1,
+      });
+      expect(event.audio_characters).toBe(1_234);
+    });
+
+    it("leaves them ABSENT — not zero — when the provider reported none", () => {
+      // Zero would settle a real, billable call authoritatively at $0. The
+      // whole `audioSeconds` rail is `undefined`-when-unknown for this reason,
+      // and a `?? 0` anywhere on the way here would undo it silently.
+      const event = billingEventFromUsage(usageFixture(), { nowUnixSeconds: 1 });
+      expect("audio_seconds" in event).toBe(false);
+      expect("audio_characters" in event).toBe(false);
+    });
+  });
+
   describe("provider attempt index (issue #135)", () => {
     // The failover ladder (`inference/reliability.ts::dispatchWithFailover`) can
     // make several provider dispatches per logical request, and each is

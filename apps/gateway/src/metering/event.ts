@@ -246,6 +246,19 @@ export function billingEventFromUsage(
     status_code: usage.status,
     occurred_at_unix: context.nowUnixSeconds,
     ...(context.settledCostUsd !== undefined ? { cost_usd: context.settledCostUsd } : {}),
+    // #703. The audio quantities, on the EVENT rather than folded into
+    // `usage` — see `BillingEvent.audio_seconds`. Carrying them is what lets
+    // `charge()` price an audio row off the rate card at all, and therefore
+    // what arms its >5% divergence check for the two newest units: without
+    // them the card estimate is $0 against a positive settled cost, so a
+    // mispriced transcription would never trip the one detector built to catch
+    // a mispriced row.
+    //
+    // ABSENT, never zero, exactly as `Usage.audioSeconds` is: a provider that
+    // reported no duration has not reported zero, and settling a real call
+    // authoritatively at $0 is the #129 bug.
+    ...(usage.audioSeconds !== undefined ? { audio_seconds: usage.audioSeconds } : {}),
+    ...(usage.audioCharacters !== undefined ? { audio_characters: usage.audioCharacters } : {}),
     metadata,
   };
 }

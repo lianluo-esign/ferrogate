@@ -25,6 +25,23 @@ export const DEFAULT_EGRESS_PRICE_PER_GB = 0.09;
 const WILDCARD = "*";
 
 /**
+ * A card entry priced ONLY on transcribed seconds (issue #703).
+ *
+ * Both token rates are 0 and that is not a free-inference bug: a transcription
+ * emits no tokens, so `estimateCost`'s token arms multiply 0 by 0. The rate that
+ * decides the row is the audio one, and a row carrying an audio quantity this
+ * entry does not price is still `price_not_found` — see `audioQuantityUnpriced`.
+ */
+function audioSecondPriceUsd(price_per_1m_seconds: number): ModelPrice {
+  return { ...modelPriceUsd(0.0, 0.0), audio_second_price_per_1m: price_per_1m_seconds };
+}
+
+/** As above, for synthesis, which bills on characters of input. */
+function audioCharacterPriceUsd(price_per_1m_characters: number): ModelPrice {
+  return { ...modelPriceUsd(0.0, 0.0), audio_character_price_per_1m: price_per_1m_characters };
+}
+
+/**
  * Settled USD cost of transferring `bytes` at `price_per_gb` (#262). Shared so
  * the rate card and per-download metering can never drift on the GB divisor.
  */
@@ -239,6 +256,34 @@ export class PriceBook {
         "deepseek-reasoner",
         withCacheMultipliers(modelPriceUsd(0.55, 2.19), 0.14 / 0.55),
       ),
+      // ---- the audio surface (issue #703) ---------------------------------
+      //
+      // These two exist so `charge()`'s >5% divergence check is ARMED for an
+      // audio row. Until they landed, `book.priceFor(...)` found nothing for a
+      // transcription and the check simply did not run — so a rail typo'd by one
+      // decimal would have been settled, invoiced and never mentioned. That is
+      // the one detector in this package whose whole job is to catch exactly
+      // that, and it was switched off for the two newest units.
+      //
+      // The rates are stated on `audio_second_price_per_1m` /
+      // `audio_character_price_per_1m`, not squeezed into the token rates.
+      // Squeezing would have been the fast way to make an entry appear, and it
+      // would have valued every audio row at $0 (an audio row carries no
+      // tokens), which makes the check fire on every CORRECT row — a warning
+      // that is always on is a warning nobody reads.
+      //
+      // The FIGURES are Cloudflare's published Workers AI audio pricing at the
+      // time of writing, and like every other rate here they are a DEFAULT an
+      // operator is expected to replace. Their accuracy is not what this entry
+      // is for: an operator who leaves a stale figure here gets a divergence
+      // warning, which is a working detector reporting a stale card. An operator
+      // with no entry at all gets silence, which is the state being fixed.
+      priceEntry("*", "@cf/openai/whisper-large-v3-turbo", audioSecondPriceUsd(1.6)),
+      priceEntry("*", "@cf/openai/whisper", audioSecondPriceUsd(1.6)),
+      priceEntry("*", "@cf/myshell-ai/melotts", audioCharacterPriceUsd(0.1)),
+      // OpenAI's own audio models, for the passthrough family.
+      priceEntry("*", "whisper-1", audioSecondPriceUsd(100.0)),
+      priceEntry("*", "tts-1", audioCharacterPriceUsd(15.0)),
     ];
     return PriceBook.new(entries).withEgressPricePerGb(DEFAULT_EGRESS_PRICE_PER_GB);
   }
