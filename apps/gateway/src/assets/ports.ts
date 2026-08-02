@@ -534,8 +534,15 @@ export interface AssetBundleIndexStore {
 export class InMemoryAssetBundleIndexStore implements AssetBundleIndexStore {
   readonly files = new Map<string, StoredBundleFile>();
 
+  /**
+   * `\0` written as the ESCAPE, never as the byte.
+   *
+   * Identical one-character separator at runtime, but a literal NUL makes
+   * git and grep classify this file as binary and drop it out of every diff
+   * and every search silently. `test/source-nul-bytes.test.ts` is the guard.
+   */
   #key(assetId: string, path: string): string {
-    return `${assetId} ${path}`;
+    return `${assetId}\0${path}`;
   }
 
   async putBundleFiles(files: readonly StoredBundleFile[]): Promise<void> {
