@@ -285,7 +285,15 @@ const DECLARED = declared();
  * `503 admin_console_unconfigured` instead of signing a session with a
  * guessable key.
  */
-const SECRETS: readonly string[] = ["ADMIN_CONSOLE_JWT_SECRET", "SITE_DOMAIN_CF_API_TOKEN"];
+const SECRETS: readonly string[] = [
+  "ADMIN_CONSOLE_JWT_SECRET",
+  "SITE_DOMAIN_CF_API_TOKEN",
+  // #697 — the two HMAC keys `src/finops/notify.ts` signs a spend-anomaly alert
+  // with. Never `[vars]`: a plaintext signing key in a tracked file is a key
+  // anyone who can read the repository can forge alerts with.
+  "SPEND_ANOMALY_WEBHOOK_SIGNING_SECRET",
+  "BILLING_ALERTS_WEBHOOK_SIGNING_SECRET",
+];
 
 /**
  * Vars deliberately left out of `[vars]`, each NAMED in the config's prose so
@@ -316,6 +324,12 @@ const DOCUMENTED_BUT_UNDECLARED = [
   "SITE_DOMAIN_CERTIFICATE_RECORDS",
   "SITE_DOMAIN_CF_ACCOUNT_ID",
   "SITE_DOMAIN_CF_ZONE_ID",
+  // #697 — the #170 budget-alert receiver, which spend-anomaly delivery falls
+  // back to when no anomaly-specific URL is set. Declared in
+  // `apps/gateway/wrangler.toml` (that Worker owns the budget alerter) and only
+  // NAMED here, because declaring the same operator-facing URL in two deploy
+  // configs is how the two come to disagree.
+  "BILLING_ALERTS_WEBHOOK_URL",
 ] as const;
 
 /**
@@ -374,6 +388,8 @@ describe("the env-var drift gate itself", () => {
       // `env://` REFERENCE and `src/siem/config.ts` refuses an inline literal,
       // which is what makes this list safe to commit.
       "SIEM_EXPORT_SINKS",
+      "SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS",
+      "SPEND_ANOMALY_WEBHOOK_URL",
       "TENANCY_LIFECYCLE",
       "TENANT_RBAC_ACTIONS",
     ]);
@@ -442,11 +458,12 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
-    // Not vacuous: SIX entries today, counted off the table above — it was two
-    // before #738 added the four `SITE_DOMAIN_*` knobs, and the stale "two" is
-    // the kind of drift this whole file exists to catch, so it does not get to
+    // Not vacuous: SEVEN entries today, counted off the table above — it was
+    // two before #738 added the four `SITE_DOMAIN_*` knobs and seven with
+    // #697's `BILLING_ALERTS_WEBHOOK_URL` fallback, and the stale "two" is the
+    // kind of drift this whole file exists to catch, so it does not get to
     // live here.
-    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(6);
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(7);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name), `${name} is read but no longer documented`).toBe(true);
     }
@@ -511,9 +528,10 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    // SIX since #683 added `SIEM_EXPORT_SINKS`. Re-derived by counting the
+    // EIGHT since #697 added the two `SPEND_ANOMALY_WEBHOOK_*` delivery knobs
+    // (six since #683's `SIEM_EXPORT_SINKS`). Re-derived by counting the
     // committed `[vars]` table, not by incrementing the old number.
-    expect(rows.length).toBe(6);
+    expect(rows.length).toBe(8);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -526,7 +544,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
     expect(overridden).toEqual([]);
   });
 
-  it("records that ALL six committed values reach this runner unchanged", () => {
+  it("records that ALL eight committed values reach this runner unchanged", () => {
     // NOTE (#683): `test/siem-export.test.ts` OVERRIDES `SIEM_EXPORT_SINKS` at
     // runtime to arm a sink, and restores it to the committed `"[]"` in its
     // `afterEach` for exactly this assertion — the pool shares one isolate per
@@ -542,6 +560,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(6);
+    expect(observable.length).toBe(8);
   });
 });

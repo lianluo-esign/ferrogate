@@ -32,11 +32,12 @@
  * gateway writes those tables in that shape is held by
  * `apps/gateway/test/requestlog/write.test.ts` and `test/metering/*`.
  */
-import { env } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
+import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 /** One hour, the default detection window. */
 const HOUR = 3_600;
@@ -573,5 +574,144 @@ describe("auto-throttle", () => {
     expect(report.spendAnomaly.opened).toBe(1);
     expect(report.spendAnomaly.throttled).toBe(0);
     expect(await throttles()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The operator's read surface
+// ---------------------------------------------------------------------------
+
+describe("GET /admin/v1/spend-anomalies", () => {
+  const ACME_KEY = "spend-anomaly-acme";
+  const OTHER_KEY = "spend-anomaly-other";
+
+  interface ListBody {
+    readonly object: string;
+    readonly data: Record<string, unknown>[];
+    readonly total: number;
+  }
+
+  async function read(secret: string, query = ""): Promise<ListBody> {
+    const response = await SELF.fetch(`${BASE}/admin/v1/spend-anomalies${query}`, {
+      headers: bearer(secret),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return (await response.json()) as ListBody;
+  }
+
+  beforeEach(async () => {
+    arm({
+      store: "d1",
+      staticKeys: [operatorKey],
+      nativeKeys: [tenantKey(ACME_KEY, "acme"), tenantKey(OTHER_KEY, "other")],
+    });
+    // Two tenants, both anomalous in the same window.
+    await seedFlatBaseline("acme", 2);
+    await seedHour("acme", 0, 80, 40);
+    await seedFlatBaseline("other", 3);
+    await seedHour("other", 0, 90, 40);
+    await runScheduledTick(bindings(), NOW);
+  });
+
+  it("publishes the evidence an operator needs to answer 'why did this fire'", async () => {
+    const body = await read(operatorKey.secret, "?scope_id=acme");
+    const acme = body.data.find((row) => row["scope_id"] === "acme");
+    expect(acme?.["object"]).toBe("spend_anomaly");
+    expect(acme?.["status"]).toBe("open");
+    expect(acme?.["signal"]).toBe("burn_rate_spike");
+    expect(acme?.["severity"]).toBe("critical");
+    expect(acme?.["baseline_usd"]).toBeCloseTo(2, 6);
+    expect(acme?.["threshold_usd"]).toBeCloseTo(8, 6);
+    expect(acme?.["bound_by"]).toBe("ratio");
+    expect(acme?.["baseline_windows"]).toBe(24);
+    expect(acme?.["active_windows"]).toBe(24);
+    // The two numbers that make the episode model legible side by side.
+    expect(acme?.["windows_seen"]).toBe(1);
+    expect(acme?.["notified_count"]).toBe(1);
+  });
+
+  it("fences a tenant to its own episodes, and counts only what it may see", async () => {
+    // An episode names a customer and their hourly burn. A leak here is a
+    // competitive-intelligence leak, not merely a privacy one.
+    const operator = await read(operatorKey.secret);
+    expect(operator.total).toBe(2);
+    expect(operator.data.map((row) => row["scope_id"]).sort()).toEqual(["acme", "other"]);
+
+    const acme = await read(ACME_KEY);
+    expect(acme.total).toBe(1);
+    expect(acme.data.map((row) => row["scope_id"])).toEqual(["acme"]);
+
+    const other = await read(OTHER_KEY);
+    expect(other.total).toBe(1);
+    expect(other.data.map((row) => row["scope_id"])).toEqual(["other"]);
+  });
+
+  it("cannot be widened by asking for someone else's tenant", async () => {
+    // The `?scope_id=` filter is AND-ed with the fence, never a replacement for
+    // it — a filter that REPLACED the fence would be a one-parameter
+    // cross-tenant read of the most sensitive report in the product.
+    const acme = await read(ACME_KEY, "?scope_id=other");
+    expect(acme.total).toBe(0);
+    expect(acme.data).toEqual([]);
+
+    // …and it really is a working filter for the operator, so the empty set
+    // above is the fence biting rather than the parameter being ignored.
+    const operator = await read(operatorKey.secret, "?scope_id=other");
+    expect(operator.data.map((row) => row["scope_id"])).toEqual(["other"]);
+  });
+
+  it("separates the incident view from the history", async () => {
+    expect((await read(operatorKey.secret, "?status=open")).total).toBe(2);
+    expect((await read(operatorKey.secret, "?status=resolved")).total).toBe(0);
+    expect((await read(operatorKey.secret, "?signal=forecast_overrun")).total).toBe(0);
+    expect((await read(operatorKey.secret, "?severity=critical")).total).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tuning through the surface an operator actually has
+// ---------------------------------------------------------------------------
+
+describe("PUT /admin/v1/quota-policies/tenant/{id} tunes the detector", () => {
+  /**
+   * The gap this closes, stated because the tree has shipped it before: #692's
+   * `online_eval_*` opt-in columns are read by the gateway and settable through
+   * NO admin operation at all, because `projectQuotaPolicy` writes a fixed
+   * column list nobody extended. A knob an operator cannot turn is not a knob,
+   * and "it is tunable" would be a claim with nothing behind it.
+   */
+  beforeEach(() => {
+    arm({ store: "d1", staticKeys: [operatorKey] });
+  });
+
+  /** `POST /admin/v1/quota-policies` — the create leg of the same group. */
+  async function putPolicy(body: Record<string, unknown>): Promise<Response> {
+    return await SELF.fetch(`${BASE}/admin/v1/quota-policies`, {
+      method: "POST",
+      headers: { ...bearer(operatorKey.secret), "content-type": "application/json" },
+      body: JSON.stringify({ scope_type: "tenant", scope_id: "noisy", ...body }),
+    });
+  }
+
+  it("carries the tuning through to the row the detector reads", async () => {
+    const response = await putPolicy({ spend_anomaly_ratio: 100, spend_anomaly_min_window_usd: 5 });
+    expect(response.status, await response.clone().text()).toBe(201);
+
+    // A tenant whose 40x spike now sits UNDER its own 100x bar.
+    await seedFlatBaseline("noisy", 2);
+    await seedHour("noisy", 0, 80, 40);
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+  });
+
+  it("refuses a tuning value that is not a number instead of silently defaulting", async () => {
+    // `adminRecordSchema` is a Zod `passthrough()`, so without the explicit
+    // field this would be ACCEPTED, projected as NULL, and fall back to 4x — an
+    // operator who believes they raised the bar, still at the default, holding
+    // a 200.
+    const response = await putPolicy({ spend_anomaly_ratio: "one hundred" });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("spend_anomaly_ratio");
   });
 });

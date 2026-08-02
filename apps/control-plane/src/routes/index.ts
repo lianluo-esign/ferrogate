@@ -44,6 +44,7 @@ import { adminPolicyRoutes } from "./admin_policy.js";
 import { adminProviderCredentialRoutes } from "./admin_provider_credential.js";
 import { adminProviderRoutes } from "./admin_provider.js";
 import { adminRequestLogRoutes } from "./admin_request_log.js";
+import { adminSpendAnomalyRoutes } from "./admin_spend_anomaly.js";
 import { adminToolRoutes } from "./admin_tool.js";
 import { adminVirtualKeyRoutes } from "./admin_virtual_key.js";
 import { agentRunRoutes } from "./agent_run.js";
@@ -82,6 +83,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   adminProviderRoutes,
   adminProviderCredentialRoutes,
   adminRequestLogRoutes,
+  adminSpendAnomalyRoutes,
   adminToolRoutes,
   adminVirtualKeyRoutes,
   agentRunRoutes,

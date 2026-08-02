@@ -310,6 +310,53 @@ class QuotaRowError extends Error {}
  */
 const SPEND_THROTTLE_TABLE = "spend_throttles";
 
+/**
+ * Is `spend_throttles` provisioned in this control database?
+ *
+ * Probed STRUCTURALLY and cached per handle, exactly as
+ * `apps/mcp/src/admission/quota.ts` probes its own quota tables, and for a
+ * reason that is a live deploy hazard rather than tidiness: D1 fails a whole
+ * `batch()` when any statement in it errors, so adding an unconditional
+ * `SELECT … FROM spend_throttles` to the admission batch would turn every
+ * authenticated request into `503 quota_resolution_unavailable` on any
+ * deployment whose control database has not had `0010_spend_anomaly.sql`
+ * applied yet. Deploying the Worker and applying the migration are separate
+ * operator actions; a release that requires them in one order and fails the
+ * whole gateway in the other is not shippable.
+ *
+ * Absent ⇒ no throttle rows can exist ⇒ skipping the read cannot drop a brake
+ * that was applied. Present ⇒ any failure is an OUTAGE and stays a 503, which
+ * is the direction a limiter must fail in.
+ *
+ * CONSEQUENCE, stated: an operator who applies the migration under a LIVE
+ * isolate is not seen by that isolate until it recycles. Provisioning precedes
+ * traffic, and the alternative is a `sqlite_master` read on every admission —
+ * a hot-path cost paid forever to serve a one-time transition.
+ */
+const throttleTableCache = new WeakMap<D1Database, Promise<boolean>>();
+
+async function spendThrottlesProvisioned(db: D1Database): Promise<boolean> {
+  const cached = throttleTableCache.get(db);
+  if (cached !== undefined) return cached;
+  const probe = (async (): Promise<boolean> => {
+    const row = await db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .bind(SPEND_THROTTLE_TABLE)
+      .first<{ name: string }>();
+    return row !== null;
+  })();
+  throttleTableCache.set(db, probe);
+  // A FAILED probe must not be remembered as "not provisioned": that would turn
+  // a transient D1 blip into an isolate that never applies a brake again.
+  probe.catch(() => throttleTableCache.delete(db));
+  return probe;
+}
+
+/** Test seam: forget the probe for one database (an isolate recycle, simulated). */
+export function forgetSpendThrottleProbe(db: D1Database): void {
+  throttleTableCache.delete(db);
+}
+
 interface ThrottleRow {
   readonly scope_type: string;
   readonly scope_id: string;
@@ -567,17 +614,30 @@ export function d1QuotaPolicySource(
         );
       }
       // #697 — the auto-throttle overlay, in the SAME batch, so it costs one
-      // extra statement and no extra round trip on the admission path.
-      const throttleIndex = statements.length;
-      statements.push(
-        db
-          .prepare(
-            `SELECT scope_type, scope_id, rpm_limit
-               FROM ${SPEND_THROTTLE_TABLE}
-              WHERE expires_at_unix > ? AND (${predicate})`,
-          )
-          .bind(nowSeconds(), ...bindings),
-      );
+      // extra statement and no extra round trip on the admission path. The
+      // probe is per-isolate, not per-request; see {@link spendThrottlesProvisioned}
+      // for why it cannot simply be added unconditionally.
+      let throttleIndex = -1;
+      try {
+        if (await spendThrottlesProvisioned(db)) {
+          throttleIndex = statements.length;
+          statements.push(
+            db
+              .prepare(
+                `SELECT scope_type, scope_id, rpm_limit
+                   FROM ${SPEND_THROTTLE_TABLE}
+                  WHERE expires_at_unix > ? AND (${predicate})`,
+              )
+              .bind(nowSeconds(), ...bindings),
+          );
+        }
+      } catch (error) {
+        // The PROBE failing is a control-database outage, and a limiter that
+        // answered "no policies" during one would be a free-traffic hole. Same
+        // 503 the policy read itself takes.
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `cloudflare d1: spend throttle probe failed: ${detail}` };
+      }
 
       let results: { results?: unknown[] }[];
       try {
@@ -602,7 +662,9 @@ export function d1QuotaPolicySource(
             plan = rowToStoredPlan(planRow);
           }
         }
-        applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
+        if (throttleIndex >= 0) {
+          applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
+        }
       } catch (error) {
         if (error instanceof QuotaRowError) {
           return { ok: false, detail: error.message };

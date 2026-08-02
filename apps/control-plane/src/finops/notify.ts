@@ -146,14 +146,23 @@ function stringVar(value: unknown): string | undefined {
  */
 export function spendAlertDeliveryFrom(env: unknown): SpendAlertDelivery | undefined {
   if (typeof env !== "object" || env === null) return undefined;
-  const bindings = env as SpendAlertBindings;
+
+  // Every binding is read as `(env as T).NAME`, one access per name, rather
+  // than through an aliased `const bindings = env as T`. `test/env-var-drift.ts`
+  // derives the READ side of the wrangler.toml contract by scanning the source
+  // for exactly those forms, and its docblock is explicit that a read through a
+  // renamed parameter is invisible to it — so an alias here would make these
+  // vars look like DEAD CONFIG on one side of the gate and like an undeclared
+  // read on the other. Writing them in the form the gate can see is the cheap
+  // half of keeping that gate honest.
+  const anomalyUrl = stringVar((env as SpendAlertBindings).SPEND_ANOMALY_WEBHOOK_URL);
   const webhookUrl =
-    stringVar(bindings.SPEND_ANOMALY_WEBHOOK_URL) ?? stringVar(bindings.BILLING_ALERTS_WEBHOOK_URL);
+    anomalyUrl ?? stringVar((env as SpendAlertBindings).BILLING_ALERTS_WEBHOOK_URL);
   if (webhookUrl === undefined) return undefined;
   if (!webhookUrl.startsWith("http://") && !webhookUrl.startsWith("https://")) return undefined;
 
   let timeoutSeconds = DEFAULT_BUDGET_ALERT_TIMEOUT_SECONDS;
-  const rawTimeout = stringVar(bindings.SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS);
+  const rawTimeout = stringVar((env as SpendAlertBindings).SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS);
   if (rawTimeout !== undefined) {
     const parsed = Number(rawTimeout);
     timeoutSeconds = Number.isFinite(parsed) && parsed > 0 ? parsed : timeoutSeconds;
@@ -164,10 +173,17 @@ export function spendAlertDeliveryFrom(env: unknown): SpendAlertDelivery | undef
   // every delivery is rejected as unauthenticated. Pairing them here rather
   // than resolving each independently is what stops the mismatched combination
   // (anomaly URL + billing secret) from being reachable at all.
-  const signingSecret =
-    stringVar(bindings.SPEND_ANOMALY_WEBHOOK_URL) !== undefined
-      ? stringVar(bindings.SPEND_ANOMALY_WEBHOOK_SIGNING_SECRET)
-      : stringVar(bindings.BILLING_ALERTS_WEBHOOK_SIGNING_SECRET);
+  //
+  // Both are read into their own statement rather than inline in the ternary,
+  // for the scanner reason above: the drift gate's `(env as T).NAME` pattern
+  // matches greedily up to the next `;`, so two casts inside one expression are
+  // seen as ONE read and the first name silently disappears from the gate's
+  // read set. Two statements, two reads, and the gate sees both.
+  const anomalySecret = stringVar((env as SpendAlertBindings).SPEND_ANOMALY_WEBHOOK_SIGNING_SECRET);
+  const billingSecret = stringVar(
+    (env as SpendAlertBindings).BILLING_ALERTS_WEBHOOK_SIGNING_SECRET,
+  );
+  const signingSecret = anomalyUrl !== undefined ? anomalySecret : billingSecret;
 
   return {
     webhookUrl,

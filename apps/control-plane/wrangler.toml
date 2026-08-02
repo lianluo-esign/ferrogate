@@ -171,6 +171,40 @@ CONTROL_PLANE_SEED = "{}"
 SIEM_EXPORT_SINKS = "[]"
 
 # ---------------------------------------------------------------------------
+# Spend burn-rate anomaly + forecast alerts (#697) — `src/finops/notify.ts`
+# ---------------------------------------------------------------------------
+#
+# DETECTION IS ALWAYS ON and needs none of these: the pass runs on the Cron
+# Trigger tick below, costs two fleet-wide aggregate queries, and fills
+# `spend_anomaly_episodes` regardless. `GET /admin/v1/spend-anomalies` reads
+# that ledger. A tenant opts OUT with `quota_policies.spend_anomaly_enabled = 0`.
+#
+# These vars configure DELIVERY only.
+#
+# Unset ⇒ `spendAlertDeliveryFrom` falls back to `BILLING_ALERTS_WEBHOOK_URL`
+# (the #170 budget-alert receiver, declared in `apps/gateway/wrangler.toml`),
+# because every deployment that already cares about spend alerts has one and a
+# feature that is off until somebody notices it exists leaves the issue's
+# premise true. The payload carries `"type": "spend_anomaly"` so a receiver can
+# route the two apart; set this var instead when they should go to different
+# endpoints.
+#
+# A malformed value disables DELIVERY and nothing else — a configuration typo
+# must cost a webhook, never the detection history.
+SPEND_ANOMALY_WEBHOOK_URL = ""
+SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS = "5"
+# `SPEND_ANOMALY_WEBHOOK_SIGNING_SECRET` is deliberately NOT here: it is the
+# HMAC key every receiver authenticates an alert with, so this secret goes in
+# with `wrangler secret put`, never as a plaintext var. Absent ⇒ alerts are sent
+# unsigned, which is the documented posture and not a silent one.
+#
+# `BILLING_ALERTS_WEBHOOK_SIGNING_SECRET` is the same secret for the #170
+# receiver and is supplied the same way with `wrangler secret put`; it is read
+# here ONLY on the fallback path above, so that a deployment reusing the budget
+# receiver signs with the key that receiver already verifies. Both are named
+# here rather than declared so an operator can discover the knobs exist.
+
+# ---------------------------------------------------------------------------
 # D1: the control database
 # ---------------------------------------------------------------------------
 #

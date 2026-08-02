@@ -116,7 +116,7 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 273;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -124,14 +124,15 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
  * `GET /metrics` (5).
  *
  * 209 -> 211 with #677's two chargeback reads (`GET /admin/v1/cost-records`
- * and `GET /admin/v1/cost-record-exports`). The 209 itself was a three-way
+ * and `GET /admin/v1/cost-record-exports`), and 211 -> 212 with #697's burn-rate
+ * episode ledger (`GET /admin/v1/spend-anomalies`). The 209 itself was a three-way
  * figure no parent held — 200 + 3 (`/admin/v1/provider-credentials*`, issue
  * #682) + 6 (`/admin/v1/semantic-cache-policies/**`, issue #695) — which is
  * why this number is RE-DERIVED by counting `/admin/v1/` paths in
  * `docs/openapi/runtime-api-contract.json` after every merge rather than
  * incremented from whichever side happened to land first.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 211;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 212;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate
