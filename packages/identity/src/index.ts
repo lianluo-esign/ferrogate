@@ -110,6 +110,66 @@ export {
   type JwksCacheOptions,
 } from "./oidc/jwks.js";
 export { generateNonce, generatePkcePair, generateState } from "./oidc/pkce.js";
+export { base64UrlToBytes, bytesToBase64Url, decodeBase64UrlJson } from "./oidc/base64url.js";
+
+// --- delegation chain (#691) --------------------------------------------
+export {
+  DELEGATION_CLOCK_SKEW_SECONDS,
+  DELEGATION_FORMAT_VERSION,
+  DELEGATION_HEADER,
+  DELEGATION_JWS_ALGORITHM,
+  DELEGATION_JWS_HEADER,
+  DELEGATION_JWS_TYPE,
+  DELEGATION_LINK_SEPARATOR,
+  DELEGATION_PATH_SEPARATOR,
+  DELEGATION_PRINCIPAL_KINDS,
+  MAX_DELEGATION_DEPTH,
+  MAX_DELEGATION_HEADER_BYTES,
+  MAX_DELEGATION_LIFETIME_SECONDS,
+  type DelegationClaims,
+  type DelegationPrincipalKind,
+  delegationPath,
+  // `encodeSegment` and `signingInput` are the RAW encoder halves, exported so
+  // a test can FORGE a link the mint would refuse to issue — which is the only
+  // way to prove the verifier re-derives every rule itself instead of trusting
+  // that the mint checked. Production code should mint through
+  // `mintDelegationLink`.
+  encodeSegment,
+  signingInput,
+  isDelegationPrincipal,
+  parseDelegationClaims,
+  parseDelegationPrincipal,
+  splitDelegationLink,
+} from "./delegation/link.js";
+export {
+  MIN_DELEGATION_KEY_BYTES,
+  type DelegationGrant,
+  type DelegationKeyResolution,
+  type DelegationMintFailure,
+  type DelegationMintResult,
+  delegationScopeSubset,
+  encodeDelegationChain,
+  importDelegationKey,
+  mintDelegationLink,
+  verifyDelegationSignature,
+} from "./delegation/sign.js";
+export {
+  DELEGATION_REVOCATION_TABLE,
+  DELEGATION_REVOCATION_TTL_MS,
+  NO_DELEGATION_REVOCATIONS,
+  type DelegationRevocationDatabase,
+  type DelegationRevocationResolution,
+  type DelegationRevocationSource,
+  cachedDelegationRevocationSource,
+  d1DelegationRevocationSource,
+} from "./delegation/revocation.js";
+export {
+  type DelegationFailureCode,
+  type DelegationVerification,
+  type DelegationVerificationInput,
+  type VerifiedDelegationChain,
+  verifyDelegationChain,
+} from "./delegation/verify.js";
 
 // --- SCIM ---------------------------------------------------------------
 export {

@@ -18,6 +18,7 @@
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
+import { delegationChain } from "./delegation/index.js";
 import { residency } from "./residency/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
@@ -291,6 +292,25 @@ export const GATEWAY_MIDDLEWARE = [
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),
+  // #691 — the VERIFIABLE agent delegation chain.
+  //
+  // BETWEEN admission and attribution, and both edges are decisions:
+  //
+  //  - AFTER `rateLimit()` so a request with a forged chain still burns the
+  //    caller's admission window. Ahead of it, probing chain forgeries would be
+  //    free and unthrottled — the same argument `attributionTags()` makes for
+  //    its own position, and the same one `nodeDrainGate` makes for its.
+  //  - BEFORE `attributionTags()` because identity precedes attribution: the
+  //    chain contributes the `agent_run_id` the #677 cost query groups by, and
+  //    attributing spend to a chain nothing verified is precisely the
+  //    approximate audit answer this issue exists to end.
+  //
+  // Inert until a caller PRESENTS `x-ferrogate-delegation`: one header read and
+  // `next()`. A request that presents one on a Worker with no
+  // `DELEGATION_SIGNING_KEY` bound is refused `503
+  // delegation_verification_unavailable` rather than served with the header
+  // ignored — otherwise deleting the binding would bypass the whole verifier.
+  delegationChain(),
   // #678 — `403 attribution_tags_required` on the five spend-producing
   // operations, per the CALLING TENANT's policy.
   //

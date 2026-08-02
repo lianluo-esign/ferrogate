@@ -437,6 +437,10 @@ describe("#677: the two cost operations are described for a generated client", (
     const FILTERS = [
       "agent_run_id",
       "api_key_id",
+      // #691 — the principal ultimately responsible for the spend. Added to
+      // this pinned list DELIBERATELY: the list is the contract, and a new
+      // filter that is not described is a filter no generated client can send.
+      "delegation_root",
       "limit",
       "model",
       "offset",

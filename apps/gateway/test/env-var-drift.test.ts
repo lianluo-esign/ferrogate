@@ -268,6 +268,12 @@ const SECRETS = [
   "ASSET_S3_ACCESS_KEY_ID",
   "ASSET_S3_SECRET_ACCESS_KEY",
   "ASSET_S3_SESSION_TOKEN",
+  // Issue #691: the HMAC key a delegation link is signed and verified with. One
+  // binding for the whole fleet, and the SAME key does both — Secrets Store
+  // bindings resolve at deploy time, so per-agent keys would mean a deploy per
+  // agent. A committed value would let anyone mint a chain naming any principal
+  // as ultimately responsible.
+  "DELEGATION_SIGNING_KEY",
   // Issue #682: the fleet-wide AES-256 key that seals every tenant's own
   // provider credential. ONE binding for the whole fleet — the per-tenant part
   // is row data in control D1, which is what keeps onboarding and rotation off

@@ -150,6 +150,11 @@ export function requestLogRecordFrom(
     requestId: response.headers.get("x-request-id") ?? c.get("requestId") ?? "",
     traceId: c.get("traceId") ?? undefined,
     agentRunId: facts.agentRunId,
+    // #691 — contributed by the delegation middleware, and only for a chain
+    // that VERIFIED. The row therefore names the principal ultimately
+    // responsible rather than the last credential to touch the request.
+    delegationChain: facts.delegationChain,
+    delegationRoot: facts.delegationRoot,
     // The AUTHENTICATED tenancy, never a client-declared header. A
     // platform-operator credential carries none, and the row records that
     // absence rather than inventing a tenant — which is also what keeps the
