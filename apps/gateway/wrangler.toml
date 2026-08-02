@@ -241,6 +241,40 @@ GATEWAY_PROVIDERS = "[]"
 GATEWAY_MODELS = "[]"
 
 # ---------------------------------------------------------------------------
+# [vars] — the account-level Cloudflare block (issue #672)
+#
+# The port of the Rust config's top-level `[cloudflare]` section, read by
+# `modelCatalogFromEnv` (src/inference/catalog.ts). It supplies the ACCOUNT half
+# of Cloudflare AI Gateway routing; the per-provider half is the
+# `cloudflare_ai_gateway` key on a `GATEWAY_PROVIDERS` row:
+#
+#   GATEWAY_CLOUDFLARE = '{ "account_id": "<account>" }'
+#   GATEWAY_PROVIDERS = '''
+#   [{ "name": "openai",
+#       "kind": "openai",
+#       "base_url": "https://api.openai.com/v1",
+#       "api_key_var": "OPENAI_API_KEY",
+#       "cloudflare_ai_gateway": { "gateway_id": "<gateway>",
+#                                  "aig_token_var": "CF_AIG_TOKEN" } }]
+#   '''
+#
+# With both halves present, every chat / responses / embeddings request that
+# provider serves is re-addressed onto
+# `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/<slug>/...` — the AI
+# Gateway's caching, rate limiting, analytics and unified billing — with the
+# vendor credential passed through untouched. `mode = "unified"` selects the
+# account REST surface instead; `provider_slug` is REQUIRED for families other
+# than openai/anthropic, which have no derivable Cloudflare slug.
+#
+# EMPTY, the shipped default, is the OFF posture: no provider can be routed,
+# because a `cloudflare_ai_gateway` block with no account block refuses the whole
+# provider table rather than quietly dialling the vendor direct. `account_id` is
+# an ACCOUNT RESOURCE ID, so it is a deploy-time value and stays out of the repo
+# (see the header note at the top of this file).
+# ---------------------------------------------------------------------------
+GATEWAY_CLOUDFLARE = ""
+
+# ---------------------------------------------------------------------------
 # [vars] — quota policies and plan floors
 #
 # Read by `quotaPolicySourceFromEnv` (src/ratelimit/quota.ts), the port of the

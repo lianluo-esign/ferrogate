@@ -45,11 +45,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 265 operations", () => {
+  it("carries exactly 267 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 265 unique operation ids", () => {
+  it("has 267 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -64,10 +64,12 @@ describe("contract table", () => {
     // 245), the six `/admin/v1/semantic-cache-policies/**` operations (issue
     // #695, `admin.read` / `admin.write` like every other admin surface, ->
     // 251), and `getModel` (issue #670, bearer-`models.read` like the
-    // `listModels` it narrows, -> 252). All fourteen additions since 238 are
-    // bearer; none is anonymous or internal.
+    // `listModels` it narrows, -> 252), and finally #677's two chargeback
+    // reads (`listAdminCostRecords` / `exportAdminCostRecords`, ->
+    // 254), which are `admin.read` like every other evidence read. All sixteen
+    // additions since 238 are bearer; none is anonymous or internal.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 252,
+      bearer: 254,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -80,9 +82,11 @@ describe("contract table", () => {
       // #694): prompt-registry management is admin-visibility. From that 196
       // `main` reached 199 with the three #682 BYOK-alias operations and this
       // branch reached 202 with the six #695 semantic-cache-policy operations,
-      // all admin for the same reason. BOTH sets landed, so this is
-      // 196 + 3 + 6 = 205 and not either parent's number.
-      admin: 205,
+      // all admin for the same reason. BOTH sets landed, so that leg is
+      // 196 + 3 + 6 = 205 and not either parent's number; #677's two
+      // chargeback reads then take it to 207, admin because a per-request cost
+      // record is the most identity-dense report in the product.
+      admin: 207,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -106,8 +110,10 @@ describe("contract table", () => {
       // parents had independently written the same intermediate figures for
       // their own increment, git merged those lines with NO conflict — the true
       // combined figures are 121/27/20, which is no parent's number and had to
-      // be re-derived from `docs/openapi/runtime-api-contract.json`.
-      GET: 121,
+      // be re-derived from `docs/openapi/runtime-api-contract.json`. #677 then
+      // adds two more GETs (`/admin/v1/cost-records` and
+      // `/admin/v1/cost-record-exports`) for 123.
+      GET: 123,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
       POST: 81,

@@ -222,7 +222,7 @@ export interface ListPage {
  * The narrow persistence surface every route module talks to.
  *
  * Deliberately generic over a collection name rather than one method per
- * resource: the 209 operations are overwhelmingly CRUD over ~60 named
+ * resource: the 211 operations are overwhelmingly CRUD over ~60 named
  * collections, and a per-resource method-per-operation interface would be the
  * hand-written-197-handlers problem moved down a layer.
  *
@@ -585,6 +585,29 @@ export interface ControlPlaneBindings {
    * than silent.
    */
   readonly AUDIT_ANCHORS?: R2Bucket;
+  /**
+   * The SIEM export sinks (#683) — a JSON array declaring where this
+   * deployment pushes evidence, parsed by `src/siem/config.ts`.
+   *
+   * Absent or `"[]"` means NO EGRESS, which is the default posture: evidence
+   * leaving the platform is an operator decision, never an accident of
+   * deployment. Every sink names a TENANT (a sink without one does not parse)
+   * and carries its credential as an `env://` REFERENCE, never a literal — this
+   * var is committed plaintext in `wrangler.toml`, so a literal here would be a
+   * credential in git.
+   */
+  readonly SIEM_EXPORT_SINKS?: string;
+  /**
+   * The R2 bucket an `{"kind":"r2"}` sink writes NDJSON batches into (#683).
+   *
+   * Separate from {@link ControlPlaneBindings.AUDIT_ANCHORS} on purpose: the
+   * anchor bucket exists to be un-writable by anyone who could edit the
+   * database, and pointing bulk evidence export at the same bucket would give
+   * the export path write access to the tamper-evidence store. Absent is
+   * supported — an `r2` sink then reports a failed delivery, and its cursor
+   * does not move, so nothing is lost.
+   */
+  readonly SIEM_EXPORTS?: R2Bucket;
 }
 
 /** Per-request context values set by the middleware chain. */

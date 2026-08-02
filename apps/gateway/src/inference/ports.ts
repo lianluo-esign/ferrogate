@@ -103,6 +103,42 @@ export interface GcpRouteCredentials {
 }
 
 /**
+ * `ferrogate_providers::CloudflareAiGatewayRouting` — the per-provider upstream
+ * routing that puts a request through the tenant's Cloudflare AI Gateway
+ * (issue #406, mounted by #672).
+ *
+ * This is the ROUTE-side twin of `@ferrogate/providers`' interface of the same
+ * shape, and it exists here for the same reason `AwsRouteCredentials` does: the
+ * token is a plain string on this seam and is wrapped in the package's
+ * un-printable `SecretValue` only at the package boundary
+ * (`adapters.ts::withCloudflareAiGatewayRouting`).
+ *
+ * `accountId` / `gatewayBaseUrl` / `apiBaseUrl` come from the ACCOUNT block and
+ * are copied onto every route so the seam carries one value — the same
+ * flattening `PhysicalRoute` already does for `ModelRoute` + `ProviderConfig`.
+ */
+export interface CloudflareAiGatewayRoute {
+  /** `[cloudflare].account_id` — the account the gateway lives in. */
+  readonly accountId: string;
+  /** `cloudflare_ai_gateway.gateway_id` — the gateway's name in that account. */
+  readonly gatewayId: string;
+  /** `[cloudflare].ai_gateway_base_url`; the compat (passthrough) host. */
+  readonly gatewayBaseUrl: string;
+  /** `[cloudflare].api_base_url`; the unified REST host. */
+  readonly apiBaseUrl: string;
+  /** Which of the two AI Gateway surfaces this provider is routed onto. */
+  readonly mode: "Compat" | "Unified";
+  /** Cloudflare's provider slug; derived from the family when absent. */
+  readonly providerSlug?: string | undefined;
+  /**
+   * `cf-aig-authorization` bearer, resolved from the binding named by
+   * `aig_token_var`. Absent = an unauthenticated gateway, which is a real
+   * Cloudflare configuration and must NOT produce an empty header.
+   */
+  readonly aigToken?: string | undefined;
+}
+
+/**
  * One physical provider/model pair a logical model resolves to, flattened
  * together with the provider connection details the adapter needs.
  *
@@ -145,6 +181,14 @@ export interface PhysicalRoute {
   readonly awsCredentials?: AwsRouteCredentials | undefined;
   /** `ProviderConfig.gcp_credentials` — the `vertex` family's equivalent. */
   readonly gcpCredentials?: GcpRouteCredentials | undefined;
+  /**
+   * `ProviderConfig.cloudflare_ai_gateway` (issue #672). Present ⇒ every
+   * request built for this route is re-addressed onto the tenant's Cloudflare
+   * AI Gateway AFTER the adapter has prepared it, by the wrapper every entry in
+   * `defaultAdapterRegistry` is built through. Absent ⇒ the vendor is dialled
+   * directly, which is what every deployment did before this field existed.
+   */
+  readonly cloudflareAiGateway?: CloudflareAiGatewayRoute | undefined;
   /** Credential scheme; `undefined` = the Rust default for `providerKind`. */
   readonly authScheme?: ProviderAuthScheme | undefined;
   /** `owned_by` in the `/v1/models` listing — the Rust code echoes the provider name. */
@@ -316,6 +360,15 @@ export interface InferenceBindings {
   readonly GATEWAY_PROVIDERS?: string | undefined;
   /** JSON array of logical model entries — Rust `[[models]]`. */
   readonly GATEWAY_MODELS?: string | undefined;
+  /**
+   * The account-level Cloudflare block — Rust's top-level `[cloudflare]`
+   * (issue #672). JSON object: `account_id` plus the two optional base-URL
+   * overrides. It is a separate var rather than a key on every provider row for
+   * the same reason Rust makes it a separate section: the account id is a
+   * property of the DEPLOYMENT, and repeating it per provider is a chance to
+   * write two different ones.
+   */
+  readonly GATEWAY_CLOUDFLARE?: string | undefined;
   /** Secret bindings, reached by name through a provider's `api_key_var`. */
   readonly [binding: string]: unknown;
 }
@@ -596,7 +649,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 265
+ * enforcement belong to the ONE contract-driven middleware that covers all 267
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`

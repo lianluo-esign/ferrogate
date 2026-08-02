@@ -71,7 +71,7 @@ export interface AdminRefreshTokenRow {
 /**
  * The narrow persistence surface the session routes talk to.
  *
- * One method per Rust repository call, deliberately: unlike the 209 CRUD
+ * One method per Rust repository call, deliberately: unlike the 211 CRUD
  * operations, this is nine routes over three tables with fixed access patterns,
  * and a generic document interface here would hide the two lookups that MUST be
  * indexed point reads (`email`, `token_hash`) behind a scan.

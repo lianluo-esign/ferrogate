@@ -62,12 +62,58 @@ compatibility_flags = ["nodejs_compat"]
 # 503 `byok_not_configured`; nothing else on this Worker is affected.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# SIEM EXPORT SINKS (issue #683) — SIEM_EXPORT_SINKS
+# ---------------------------------------------------------------------------
+# Where this deployment PUSHES evidence: `request_logs` (#664) and the
+# hash-chained `audit_events` (#684), delivered to a customer's Splunk, Datadog,
+# generic HTTPS collector or R2/S3 bucket with at-least-once semantics and a
+# durable, replayable cursor (`src/siem/pump.ts`, `docs/siem-export.md`).
+#
+# `"[]"` — the committed value — means NO EGRESS. That is the deliberate
+# default: evidence leaving the platform is an operator decision, never an
+# accident of deployment.
+#
+# Shape (one object per sink; only `id`, `tenant` and `destination` are
+# required):
+#
+#   [{"id":"acme-splunk",
+#     "tenant":"acme",
+#     "streams":["request_logs","audit_events"],
+#     "batch_size":500,
+#     "max_batches_per_tick":20,
+#     "visibility_lag_seconds":60,
+#     "destination":{"kind":"http",
+#                    "endpoint":"https://http-inputs-acme.splunkcloud.com/services/collector/raw",
+#                    "auth":{"header":"Authorization","prefix":"Splunk ",
+#                            "secret_ref":"env://ACME_SPLUNK_HEC_TOKEN"}},
+#     "replay":{"epoch":1,"from_unix":1753900000}}]
+#
+# THREE THINGS THIS FILE CANNOT BE USED TO DO, enforced by the parser in
+# `src/siem/config.ts` rather than by convention:
+#
+#   1. A sink with NO `tenant` does not parse. Every read the pump makes is
+#      fenced to one tenant, so no configuration can produce a cross-tenant
+#      export — including one that would hand a tenant the PLATFORM's own
+#      un-attributed rows.
+#   2. `secret_ref` must be an `env://` REFERENCE. This file is committed
+#      plaintext, so an inline token would be a credential in git. Provision the
+#      referenced name with `wrangler secret put ACME_SPLUNK_HEC_TOKEN` — the
+#      name is per-deployment, which is why it cannot be listed here.
+#   3. An `http` endpoint must be `https`.
+#
+# REPLAY: bump `replay.epoch` and set `replay.from_unix` to re-deliver a window
+# (a SIEM outage, a re-index). The applied epoch is stored on the cursor row, so
+# the rewind happens exactly once however many ticks read this config.
+# ---------------------------------------------------------------------------
+
 [vars]
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"
 TENANCY_LIFECYCLE = "{}"
 TENANT_RBAC_ACTIONS = "{}"
 CONTROL_PLANE_SEED = "{}"
+SIEM_EXPORT_SINKS = "[]"
 
 # ---------------------------------------------------------------------------
 # D1: the control database
@@ -167,6 +213,31 @@ id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 [[r2_buckets]]
 binding = "AUDIT_ANCHORS"
 bucket_name = "replace-at-deploy-ferrogate-audit-anchors"
+
+# ---------------------------------------------------------------------------
+# R2: the SIEM EXPORT bucket (#683)
+# ---------------------------------------------------------------------------
+#
+# Where a `{"kind":"r2"}` sink writes its NDJSON batches — the "R2-backed pump"
+# half of #683, and the one a customer fronts with S3-compatible tooling. Each
+# object is one delivered batch, keyed on the batch's own cursor position
+# (`src/siem/destination.ts::siemObjectKey`), so a re-delivery after a crash
+# overwrites the same object instead of piling a near-duplicate beside it.
+#
+# DELIBERATELY NOT THE `AUDIT_ANCHORS` BUCKET. That bucket's entire value is
+# that the principals who can edit the database cannot rewrite it; pointing bulk
+# export at it would hand the export path write access to the tamper-evidence
+# store. Two bindings, ideally two buckets with different retention rules.
+#
+# ABSENT IS SUPPORTED: an `r2` sink then reports a failed delivery every tick
+# and its cursor does not move, so nothing is lost — the rows are still there
+# when the binding arrives. An `http` sink is unaffected.
+#
+# `bucket_name` is a documented PLACEHOLDER; the deploy step substitutes the
+# account's real bucket.
+[[r2_buckets]]
+binding = "SIEM_EXPORTS"
+bucket_name = "replace-at-deploy-ferrogate-siem-exports"
 
 # ---------------------------------------------------------------------------
 # ENTERPRISE IDENTITY (wave 18) — the deploy-time secrets, as PLACEHOLDERS

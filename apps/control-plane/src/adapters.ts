@@ -4,7 +4,7 @@
  * The STORE is now the real one: {@link resolveStore} builds
  * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
  * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
- * it — the 209 handlers still talk only to `ControlPlaneStore`, which is what
+ * it — the 211 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
  * CREDENTIALS, RBAC and the TENANCY LIFECYCLE GATE are now durable too, on the
@@ -763,6 +763,23 @@ export function resolvePromptLabels(env: ControlPlaneBindings): KVNamespace | nu
  */
 export function resolveAuditAnchorBucket(env: ControlPlaneBindings): R2Bucket | null {
   return env.AUDIT_ANCHORS ?? null;
+}
+
+/**
+ * The SIEM export bucket (#683), or `null` when the deployment binds none.
+ *
+ * Not gated on `CONTROL_PLANE_STORE`, for the same reason
+ * {@link resolveAuditAnchorBucket} is not: the export is evidence LEAVING the
+ * platform, and its availability should not be a side effect of a var about
+ * which store the admin surface uses.
+ *
+ * `null` is not silently tolerated at the point of use — an `r2` sink whose
+ * bucket is unbound reports a FAILED delivery and leaves its cursor where it
+ * is, so the rows are still there when the binding arrives. That is the whole
+ * value of having a cursor: a missing binding becomes a delay instead of a gap.
+ */
+export function resolveSiemExportBucket(env: ControlPlaneBindings): R2Bucket | null {
+  return env.SIEM_EXPORTS ?? null;
 }
 
 export function resolveDeps(

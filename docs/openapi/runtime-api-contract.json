@@ -215,6 +215,14 @@
       "group": "admin_request_log"
     },
     {
+      "pattern": "/admin/v1/cost-records",
+      "group": "admin_cost_record"
+    },
+    {
+      "pattern": "/admin/v1/cost-record-exports",
+      "group": "admin_cost_record"
+    },
+    {
       "pattern": "/admin/v1/config/validate",
       "group": "admin_config_ops"
     },
@@ -1361,6 +1369,28 @@
       "path": "/admin/v1/request-log-exports",
       "method": "get",
       "operation_id": "exportAdminRequestLogsJsonl",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/cost-records",
+      "method": "get",
+      "operation_id": "listAdminCostRecords",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/cost-record-exports",
+      "method": "get",
+      "operation_id": "exportAdminCostRecords",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

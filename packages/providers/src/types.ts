@@ -76,8 +76,13 @@ export interface ProviderConfig {
   openrouterXTitle?: string;
   awsCredentials?: AwsProviderCredentials;
   gcpCredentials?: GcpProviderCredentials;
-  /** Cloudflare AI Gateway routing (issue #406); absent means direct dispatch. */
-  cloudflareAiGateway?: CloudflareAiGatewayRouting;
+  // `cloudflareAiGateway` was here (issue #406) and is gone (issue #672). It was
+  // read by exactly one thing — `ProviderAdapterRegistry`'s routing leg — which
+  // the deployed data plane never ran, and keeping an unread field would leave a
+  // second way to "configure" AI Gateway routing that has no effect. The routing
+  // now travels on `PhysicalRoute.cloudflareAiGateway`
+  // (`apps/gateway/src/inference/ports.ts`) and is applied by that app's adapter
+  // decorator, which is the path dispatch actually takes.
 }
 
 // ---------------------------------------------------------------------------

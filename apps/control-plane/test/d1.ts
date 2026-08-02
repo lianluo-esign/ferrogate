@@ -15,8 +15,10 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import type { StoreRecord } from "../src/ports.js";
+import { SIEM_CURSOR_TABLE } from "../src/siem/cursor.js";
 import {
   AUDIT_TABLE,
+  BILLING_EVENT_TABLE,
   GUARDRAIL_CHECK_TABLE,
   GUARDRAIL_EVALUATION_TABLE,
   REQUEST_LOG_TABLE,
@@ -58,12 +60,21 @@ export async function resetD1(): Promise<void> {
     db().prepare(`DELETE FROM ${RESOURCE_TABLE}`),
     db().prepare(`DELETE FROM ${AUDIT_TABLE}`),
     db().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
+    // Same argument as `request_logs`: written by `apps/gateway`, READ here
+    // (#677 joins it for the per-request cost), so a leftover row would make an
+    // "empty first" precondition lie and would attach a stale cost to a
+    // freshly seeded request id.
+    db().prepare(`DELETE FROM ${BILLING_EVENT_TABLE}`),
     // Children first: `guardrail_check_evaluations` has a foreign key onto the
     // evaluation, so deleting the parents first would fail on a database with
     // enforcement on. D1 runs a batch in order, so the order here is the
     // guarantee.
     db().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`),
     db().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`),
+    // #683: the SIEM export cursors. A leftover cursor is the one kind of stale
+    // row that makes a LATER test see nothing and call it correct — the pump
+    // would report `idle` over rows it had never sent, in this run.
+    db().prepare(`DELETE FROM ${SIEM_CURSOR_TABLE}`),
   ]);
 }
 
@@ -234,8 +245,12 @@ export async function seedAuditEvents(rows: readonly AuditEventSeed[]): Promise<
  */
 export interface RequestLogSeed {
   readonly requestId: string;
+  readonly traceId?: string | null;
+  /** `#305/#522` — the agent run, which is one of #677's chargeback dimensions. */
+  readonly agentRunId?: string | null;
   readonly tenant?: string | null;
   readonly project?: string | null;
+  readonly workspace?: string | null;
   readonly apiKeyId?: string | null;
   readonly startedAtUnix: number;
   readonly completedAtUnix?: number | null;
@@ -244,9 +259,13 @@ export interface RequestLogSeed {
   readonly logicalModel?: string | null;
   readonly providerModel?: string | null;
   readonly statusCode?: number | null;
+  readonly cacheStatus?: string | null;
   readonly latencyMs?: number | null;
+  readonly promptTokens?: number | null;
+  readonly completionTokens?: number | null;
   readonly totalTokens?: number | null;
   readonly guardrailVerdict?: string | null;
+  readonly streamed?: boolean;
   readonly document?: Record<string, unknown>;
 }
 
@@ -258,15 +277,20 @@ export async function seedRequestLogs(rows: readonly RequestLogSeed[]): Promise<
       db()
         .prepare(
           `INSERT INTO ${REQUEST_LOG_TABLE}
-             (request_id, tenant, project, api_key_id, started_at_unix, completed_at_unix,
-              route, provider, logical_model, provider_model, status_code, latency_ms,
-              total_tokens, guardrail_verdict, request_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (request_id, trace_id, agent_run_id, tenant, project, workspace, api_key_id,
+              started_at_unix, completed_at_unix,
+              route, provider, logical_model, provider_model, status_code, cache_status,
+              latency_ms, prompt_tokens, completion_tokens, total_tokens,
+              guardrail_verdict, streamed, request_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           row.requestId,
+          row.traceId ?? null,
+          row.agentRunId ?? null,
           row.tenant ?? null,
           row.project ?? null,
+          row.workspace ?? null,
           row.apiKeyId ?? null,
           row.startedAtUnix,
           row.completedAtUnix ?? null,
@@ -275,10 +299,60 @@ export async function seedRequestLogs(rows: readonly RequestLogSeed[]): Promise<
           row.logicalModel ?? null,
           row.providerModel ?? null,
           row.statusCode ?? null,
+          row.cacheStatus ?? null,
           row.latencyMs ?? null,
+          row.promptTokens ?? null,
+          row.completionTokens ?? null,
           row.totalTokens ?? null,
           row.guardrailVerdict ?? null,
+          row.streamed === true ? 1 : 0,
           JSON.stringify(row.document ?? {}),
+        ),
+    ),
+  );
+}
+
+/**
+ * One settled (or deliberately unpriced) `billing_events` row, in the shape
+ * `apps/gateway/src/metering/d1.ts` writes.
+ *
+ * The same cross-Worker-seam argument {@link RequestLogSeed} makes applies:
+ * the writer is the gateway's metering sink, a different Worker with a
+ * different `wrangler.toml`, so what these fixtures hold is that the READER
+ * joins and fences what the table holds. `event` is the raw `event_json`
+ * document, stated verbatim rather than assembled by a helper — the reader
+ * reads that document with `json_extract`, so a fixture built by the encoder
+ * under test could not show that the two agree.
+ *
+ * `cost` is deliberately `number | null`, not `number | undefined` collapsed to
+ * 0: #663's whole point is that a usage nothing could price leaves a durable
+ * row whose `cost_usd` is ABSENT, and "absent" must not read as "$0".
+ */
+export interface BillingEventSeed {
+  readonly id: string;
+  readonly requestId: string;
+  readonly attemptIndex?: number;
+  readonly occurredAtUnix: number;
+  readonly event: Record<string, unknown>;
+}
+
+/** Seed `billing_events` with raw SQL — see {@link BillingEventSeed}. */
+export async function seedBillingEvents(rows: readonly BillingEventSeed[]): Promise<void> {
+  if (rows.length === 0) return;
+  await db().batch(
+    rows.map((row) =>
+      db()
+        .prepare(
+          `INSERT INTO ${BILLING_EVENT_TABLE}
+             (billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.id,
+          row.requestId,
+          row.attemptIndex ?? 0,
+          row.occurredAtUnix,
+          JSON.stringify(row.event),
         ),
     ),
   );

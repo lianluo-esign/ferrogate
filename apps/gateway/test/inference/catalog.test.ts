@@ -487,3 +487,122 @@ describe("model catalog validation", () => {
     expect(defaultAuthScheme("openai-compatible")).toBe("bearer");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cloudflare AI Gateway configuration (issue #672)
+// ---------------------------------------------------------------------------
+
+/**
+ * The CONFIG half of the mount. The behavioural half — that a routed provider's
+ * requests actually leave addressed at the gateway — is
+ * `test/inference/cloudflare-ai-gateway-mount.test.ts`, through `SELF.fetch`;
+ * nothing here would catch the routing being unwired again, which is why these
+ * two files are separate and why that one exists at all.
+ *
+ * Every refusal below is a WHOLE-CATALOG refusal on purpose. The tempting
+ * alternative — drop the routing and dispatch to the vendor directly — is
+ * invisible to an operator who believes their traffic is being cached, rate
+ * limited and logged by the AI Gateway, and invisible misconfiguration is the
+ * defect class this issue is about.
+ */
+describe("cloudflare_ai_gateway on the provider table", () => {
+  const routed: ProviderRecord = {
+    name: "p",
+    kind: "openai",
+    base_url: "https://p.test/v1",
+    cloudflare_ai_gateway: { gateway_id: "gw" },
+  };
+  const model: ModelRecord = { name: "m", provider: "p", provider_model: "physical-m" };
+  const account = { account_id: "acct" };
+
+  it("carries the account block and the provider block onto every route", () => {
+    const result = buildModelCatalog(
+      [routed],
+      [{ ...model, fallbacks: [{ provider: "p", provider_model: "fallback-m" }] }],
+      {},
+      account,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // BOTH legs: a fallback that bypassed the gateway would be the same defect
+    // at whatever share of traffic fails over.
+    expect(result.routes).toHaveLength(2);
+    for (const route of result.routes) {
+      expect(route.cloudflareAiGateway).toEqual({
+        accountId: "acct",
+        gatewayId: "gw",
+        // Cloudflare's public hosts, from `cloudflareConfigSchema`'s defaults.
+        gatewayBaseUrl: "https://gateway.ai.cloudflare.com",
+        apiBaseUrl: "https://api.cloudflare.com/client/v4",
+        mode: "Compat",
+      });
+    }
+  });
+
+  it("leaves an unrouted provider's routes with no routing at all", () => {
+    const result = buildModelCatalog(
+      [{ name: "p", kind: "openai", base_url: "https://p.test/v1" }],
+      [model],
+      {},
+      account,
+    );
+    expect(result.ok && result.routes[0]?.cloudflareAiGateway).toBeUndefined();
+  });
+
+  it("refuses a routed provider when the account block is absent", () => {
+    const result = buildModelCatalog([routed], [model], {});
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toContain("requires the account-level");
+  });
+
+  it("refuses a routed provider whose aig_token_var is not bound, and never prints the value", () => {
+    const missing = buildModelCatalog(
+      [{ ...routed, cloudflare_ai_gateway: { gateway_id: "gw", aig_token_var: "MISSING" } }],
+      [model],
+      {},
+      account,
+    );
+    expect(missing.ok).toBe(false);
+    expect(missing.ok === false && missing.reason).toContain("aig_token_var MISSING");
+
+    const bound = buildModelCatalog(
+      [{ ...routed, cloudflare_ai_gateway: { gateway_id: "gw", aig_token_var: "AIG" } }],
+      [model],
+      { AIG: "cf-token-value" },
+      account,
+    );
+    expect(bound.ok && bound.routes[0]?.cloudflareAiGateway?.aigToken).toBe("cf-token-value");
+    expect(missing.ok === false && missing.reason).not.toContain("cf-token-value");
+  });
+
+  it("refuses the workers-ai pairing rather than taking the request off the AI binding", () => {
+    const result = buildModelCatalog(
+      [{ ...routed, kind: "workers-ai", name: "p" }],
+      [model],
+      {},
+      account,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toContain("not supported for kind = workers-ai");
+  });
+
+  it("reads the account block out of GATEWAY_CLOUDFLARE, and refuses a malformed one", () => {
+    const env = {
+      GATEWAY_CLOUDFLARE: JSON.stringify(account),
+      GATEWAY_PROVIDERS: JSON.stringify([{ ...routed, cloudflare_ai_gateway: { gateway_id: "gw", mode: "unified" } }]),
+      GATEWAY_MODELS: JSON.stringify([model]),
+    };
+    const wired = modelCatalogFromEnv(env);
+    expect(wired.ok && wired.routes[0]?.cloudflareAiGateway?.mode).toBe("Unified");
+
+    // Blank is the OFF posture (and the committed wrangler.toml value), not an
+    // error — it only bites once a provider asks to be routed.
+    expect(modelCatalogFromEnv({ GATEWAY_CLOUDFLARE: "" }).ok).toBe(true);
+    expect(modelCatalogFromEnv({ ...env, GATEWAY_CLOUDFLARE: "{not json" }).ok).toBe(false);
+    // `.strict()`, like every other table here: a misspelled key must not read
+    // as "no account id".
+    expect(
+      modelCatalogFromEnv({ ...env, GATEWAY_CLOUDFLARE: JSON.stringify({ accountId: "acct" }) }).ok,
+    ).toBe(false);
+  });
+});
