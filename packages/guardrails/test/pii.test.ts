@@ -15,14 +15,15 @@
  */
 import { describe, expect, test } from "vitest";
 import {
+  type ContentSegment,
+  type DetectorInput,
   DetectorSecret,
+  type GuardrailProtocol,
   InMemoryPiiTokenVault,
   PII_ENTITIES,
   PiiDetector,
-  type ContentSegment,
-  type DetectorInput,
-  type GuardrailProtocol,
   type PiiEntity,
+  type WorkersAiClient,
   applyContentPatchesToDocument,
   contentFingerprint,
   normalizeRequest,
@@ -41,9 +42,7 @@ const CN_ID = "11010519491231002X";
 const EMAIL = "jane.doe@example.com";
 const E164 = "+14155552671";
 
-function detector(
-  overrides: Partial<Parameters<typeof PiiDetector.new>[0]> = {},
-): PiiDetector {
+function detector(overrides: Partial<Parameters<typeof PiiDetector.new>[0]> = {}): PiiDetector {
   return PiiDetector.new({
     id: "pii",
     supported_sources: ["system", "developer", "user", "assistant", "tool_result"],
@@ -235,7 +234,10 @@ describe("redaction policy", () => {
       const result = await det.evaluate(chatInput(`a ${CARD} b ${EMAIL}`), DEADLINE());
       expect(result.patches.length).toBeGreaterThan(0);
       for (const patch of result.patches) {
-        expect(patch.replacement).not.toMatch(/["\\ -]/);
+        // A quote, a backslash or a control character is exactly what would
+        // break a JSON string literal the placeholder is spliced into.
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: that IS the assertion
+        expect(patch.replacement).not.toMatch(/["\\\u0000-\u001f]/);
       }
     },
   );
@@ -319,7 +321,11 @@ describe("protocol coverage", () => {
   // protocol whose extractor yields an empty envelope screens NOTHING and does
   // it silently — the #676 rerank hole, in the general case.
   const bodies: Array<[GuardrailProtocol, string, unknown]> = [
-    ["chat_completions", "string content", { messages: [{ role: "user", content: `pay ${CARD}` }] }],
+    [
+      "chat_completions",
+      "string content",
+      { messages: [{ role: "user", content: `pay ${CARD}` }] },
+    ],
     [
       "chat_completions",
       "content parts",
@@ -386,10 +392,7 @@ describe("audit hygiene", () => {
   });
 
   test("every configured entity is actually reachable", async () => {
-    const found = await categories(
-      detector(),
-      `${CARD} ${SSN} ${IBAN} ${CN_ID} ${EMAIL} ${E164}`,
-    );
+    const found = await categories(detector(), `${CARD} ${SSN} ${IBAN} ${CN_ID} ${EMAIL} ${E164}`);
     for (const entity of PII_ENTITIES) {
       expect(found).toContain(`pii.${entity satisfies PiiEntity}`);
     }
@@ -429,5 +432,78 @@ describe("bounds", () => {
         redaction: "mask",
       } as never),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The OPTIONAL Workers AI stage — for the entities no grammar can reach
+// ---------------------------------------------------------------------------
+
+describe("workers ai stage", () => {
+  /** A Workers AI client scripted to answer with `spans`, in the wire shape. */
+  function aiClient(spans: Array<{ type: string; text: string }>): WorkersAiClient {
+    return {
+      run: async () => ({ response: `Sure! ${JSON.stringify({ entities: spans })}` }),
+    };
+  }
+
+  function withAi(client: WorkersAiClient, timeoutMs = 1_000): PiiDetector {
+    return detector({
+      ai: { client, entities: ["person", "postal_address", "organization"], timeoutMs },
+    });
+  }
+
+  test("a name the pattern pack cannot reach is found and redacted", async () => {
+    const det = withAi(aiClient([{ type: "person", text: "Dr. Ada Lovelace" }]));
+    const out = await redactChat(det, "book a call with Dr. Ada Lovelace on Tuesday");
+    expect(out).toBe("book a call with [REDACTED:PERSON] on Tuesday");
+  });
+
+  test("a HALLUCINATED span redacts nothing — the model proposes, the text disposes", async () => {
+    // The model returns a name that never appears in the input. Trusting it
+    // would blank bytes the user never wrote, at an offset the model chose.
+    const det = withAi(aiClient([{ type: "person", text: "Grace Hopper" }]));
+    const text = "book a call with Dr. Ada Lovelace on Tuesday";
+    const result = await det.evaluate(chatInput(text), DEADLINE());
+    expect(result.findings.map((f) => f.category)).not.toContain("pii.person");
+    expect(result.patches).toEqual([]);
+    expect(await redactChat(det, text)).toBe(text);
+  });
+
+  test("an entity type the policy did not enable is ignored", async () => {
+    const det = detector({
+      ai: {
+        client: aiClient([{ type: "organization", text: "Acme Corp" }]),
+        entities: ["person"],
+        timeoutMs: 1_000,
+      },
+    });
+    const text = "invoice Acme Corp please";
+    expect(await redactChat(det, text)).toBe(text);
+  });
+
+  test("an unreachable model FAILS CLOSED — never a clean pass", async () => {
+    const det = withAi({ run: async () => Promise.reject(new Error("AI binding unavailable")) });
+    await expect(det.evaluate(chatInput("hello there"), DEADLINE())).rejects.toMatchObject({
+      kind: "unavailable",
+    });
+  });
+
+  test("a hung model is a timeout, not a pass", async () => {
+    const det = withAi({ run: () => new Promise(() => {}) }, 10);
+    await expect(det.evaluate(chatInput("hello there"), DEADLINE())).rejects.toMatchObject({
+      kind: "timeout",
+    });
+  });
+
+  test("a chatty or malformed model answer cannot erase the deterministic findings", async () => {
+    const det = withAi({ run: async () => ({ response: "I am not going to answer that." }) });
+    const result = await det.evaluate(chatInput(`charge ${CARD}`), DEADLINE());
+    expect(result.findings.map((f) => f.category)).toContain("pii.credit_card");
+  });
+
+  test("enabling the stage is declared on the descriptor's residency", () => {
+    expect(detector().descriptor().data_residency).toBe("in_repo");
+    expect(withAi(aiClient([])).descriptor().data_residency).toBe("provider_saas");
   });
 });

@@ -148,11 +148,38 @@ export {
   secretPatternSchema,
 } from "./deterministic.js";
 export type {
+  CoalescedGroup,
   DeterministicDetectorConfig,
   JsonConstraints,
   RequestConstraints,
   SecretPattern,
 } from "./deterministic.js";
+export { coalesceSelectedSegments, regexByteMatches } from "./deterministic.js";
+
+// Native PII detection + redaction (#680) — patterns + validators in-process,
+// with an OPTIONAL Workers AI stage for the entities no grammar can reach.
+export {
+  InMemoryPiiTokenVault,
+  PII_AI_DEFAULT_MODEL,
+  PII_AI_ENTITIES,
+  PII_ENTITIES,
+  PiiDetector,
+  cnResidentIdValid,
+  ibanValid,
+  luhnValid,
+  piiEntityCategory,
+  piiEntityLabel,
+  usSsnValid,
+  verbatimSpans,
+} from "./pii.js";
+export type {
+  PiiAiEntity,
+  PiiAiStageConfig,
+  PiiDetectorConfig,
+  PiiEntity,
+  PiiRedactionMode,
+  PiiTokenVault,
+} from "./pii.js";
 
 // JSON schema/pointer helpers.
 export { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "./jsonschema.js";
