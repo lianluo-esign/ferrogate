@@ -7,7 +7,7 @@ path). A Hono streaming proxy that serves the **38 gateway-owned operations** of
 the 7-operation tools/skills/prompts/functions + `/.well-known/agent.json`
 surface.
 
-Routing and auth are contract-driven: `src/contract.ts` is the 274-operation
+Routing and auth are contract-driven: `src/contract.ts` is the 278-operation
 table, `src/middleware/auth.ts` is the single guard that enforces each
 operation's `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts`
 mounts what this Worker owns. The deployed module list is

@@ -20,7 +20,7 @@
  *
  * ## These are NOT contract operations, and that is correct
  *
- * `docs/openapi/runtime-api-contract.json` has 274 operations and none of them
+ * `docs/openapi/runtime-api-contract.json` has 278 operations and none of them
  * is `/v1/admin/login` — the contract describes the GATEWAY runtime API, while
  * this is the auth SERVICE's own surface, which the Rust tree served from a
  * separate binary on a separate port. `PORT-PLAN.md` folds
@@ -32,7 +32,7 @@
  * ## CSRF is applied here explicitly, because `contractAuth` cannot
  *
  * `contractAuth` runs `adminCrossSiteRejection` only after it has MATCHED a
- * contract operation; a path that is not one of the 211 is waved straight
+ * contract operation; a path that is not one of the 214 is waved straight
  * through. `/v1/admin/login` is a state-changing browser endpoint that mints a
  * credential, so it must carry the same guard, and {@link consoleCsrf} below is
  * that guard — the same function `middleware/auth.ts` exports, not a second
@@ -813,7 +813,7 @@ export const ADMIN_CONSOLE_SESSION_ROUTES: readonly AdminConsoleSessionRoute[] =
 
 /**
  * CSRF for this surface. The SAME `adminCrossSiteRejection` `contractAuth`
- * applies to the 211 — imported, not re-implemented, so a change to the rule
+ * applies to the 214 — imported, not re-implemented, so a change to the rule
  * cannot apply to one surface and not the other.
  */
 async function consoleCsrf(c: Ctx, next: () => Promise<void>): Promise<void> {

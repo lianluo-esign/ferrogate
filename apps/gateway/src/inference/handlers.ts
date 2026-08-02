@@ -41,7 +41,7 @@ import type { WorkflowProviderConstraint } from "@ferrogate/policy";
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 274 operations, and duplicating a per-route
+ * table-driven middleware for all 278 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */

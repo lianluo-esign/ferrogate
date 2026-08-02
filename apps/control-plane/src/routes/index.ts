@@ -32,6 +32,7 @@ import { adminAgentScheduleRoutes } from "./admin_agent_schedule.js";
 import { adminAgentUpstreamRoutes } from "./admin_agent_upstream.js";
 import { adminAgentWorkflowRoutes } from "./admin_agent_workflow.js";
 import { adminApiKeyRoutes } from "./admin_api_key.js";
+import { adminAssetRoutes } from "./admin_asset.js";
 import { adminConfigOpsRoutes } from "./admin_config_ops.js";
 import { adminCostRecordRoutes } from "./admin_cost_record.js";
 import { adminGatewayConfigRoutes } from "./admin_gateway_config.js";
@@ -41,9 +42,10 @@ import { adminModelRoutes } from "./admin_model.js";
 import { adminOverviewRoutes } from "./admin_overview.js";
 import { adminPluginRoutes } from "./admin_plugin.js";
 import { adminPolicyRoutes } from "./admin_policy.js";
-import { adminProviderCredentialRoutes } from "./admin_provider_credential.js";
 import { adminProviderRoutes } from "./admin_provider.js";
+import { adminProviderCredentialRoutes } from "./admin_provider_credential.js";
 import { adminRequestLogRoutes } from "./admin_request_log.js";
+import { semanticCachePolicyRoutes } from "./admin_semantic_cache.js";
 import { adminToolRoutes } from "./admin_tool.js";
 import { adminVirtualKeyRoutes } from "./admin_virtual_key.js";
 import { agentRunRoutes } from "./agent_run.js";
@@ -55,7 +57,6 @@ import { plansRoutes } from "./plans.js";
 import { promptRoutes } from "./prompt.js";
 import { quotaPolicyRoutes } from "./quota_policy.js";
 import { rbacRoutes } from "./rbac.js";
-import { semanticCachePolicyRoutes } from "./admin_semantic_cache.js";
 import { selfHostedWorkerRoutes } from "./self_hosted_worker.js";
 import { siteDomainRoutes } from "./site_domain.js";
 import { skillRoutes } from "./skill.js";
@@ -70,6 +71,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   adminAgentUpstreamRoutes,
   adminAgentWorkflowRoutes,
   adminApiKeyRoutes,
+  adminAssetRoutes,
   adminConfigOpsRoutes,
   adminCostRecordRoutes,
   adminGatewayConfigRoutes,
@@ -224,7 +226,7 @@ export function registeredRoutes(): readonly RegisteredRoute[] {
 export function registerRoutes(app: Hono<ControlPlaneEnv>): readonly RegisteredRoute[] {
   // The two SHARED probes (`/healthz`, `/readyz`), which belong to no group and
   // are therefore NOT contract operations of this app — they are not appended to
-  // `mounted`, so the 211-operation count `test/wiring.test.ts` pins does not
+  // `mounted`, so the 215-operation count `test/wiring.test.ts` pins does not
   // move. They are mounted HERE, from the one function `src/index.ts` already
   // calls, because `src/index.ts` is a composition root this slice may not edit
   // and its two inline probe handlers answered a document that had drifted from

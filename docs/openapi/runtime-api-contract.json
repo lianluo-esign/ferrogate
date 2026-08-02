@@ -463,6 +463,14 @@
       "group": "site_domain"
     },
     {
+      "pattern": "/admin/v1/assets",
+      "group": "admin_asset"
+    },
+    {
+      "pattern": "/admin/v1/assets/{*rest}",
+      "group": "admin_asset"
+    },
+    {
       "pattern": "/admin/v1/permissions",
       "group": "rbac"
     },
@@ -2841,6 +2849,50 @@
       "path": "/admin/v1/site-domains/{hostname}/verify",
       "method": "post",
       "operation_id": "verifySiteDomain",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets",
+      "method": "get",
+      "operation_id": "listFleetAssets",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets/quarantine",
+      "method": "get",
+      "operation_id": "listQuarantinedAssets",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets/quarantine/{asset_id}",
+      "method": "post",
+      "operation_id": "reviewQuarantinedAsset",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets/{asset_id}",
+      "method": "delete",
+      "operation_id": "forceDeleteAssetVersion",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

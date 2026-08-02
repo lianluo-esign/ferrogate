@@ -33,7 +33,7 @@ describe("health", () => {
 
   /**
    * The two SHARED contract probes. This Worker shipped without them — the
-   * suite could not see it, because it drives the 211 operations this app owns
+   * suite could not see it, because it drives the 214 operations this app owns
    * and these are owned by no app. A real `wrangler dev --local` boot answered
    * `404 not_found` on `/healthz`, which is what every uptime check and
    * load-balancer origin probe would have seen.
