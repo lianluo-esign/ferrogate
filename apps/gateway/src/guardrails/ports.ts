@@ -203,8 +203,42 @@ export interface GuardrailPolicySource {
 // ---------------------------------------------------------------------------
 
 /**
+ * One sanitized finding, as it reaches durable evidence (#665).
+ *
+ * `docs/legacy/inventory-policy-core.md`'s cross-cutting invariant is that
+ * `matched_text` is NEVER persisted, and this type is the boundary that
+ * enforces it: it has no field that can carry content. What it does carry is
+ * everything an investigation needs to act — WHICH detector category fired, how
+ * confident it was, and WHERE in the request it fired — plus
+ * {@link redactedExcerpt}, which is a RECONSTRUCTION of the matched span (the
+ * category, the byte range, and a run of `*` as wide as the match) built from
+ * the finding's structure and never from its bytes.
+ *
+ * An excerpt that carried the matched text would move the leak into the
+ * evidence table rather than stop it; an evidence row with no excerpt at all
+ * leaves an operator unable to tell a 20-byte credential from a 2 000-byte
+ * document. The mask answers the second question without opening the first.
+ */
+export interface GuardrailFindingEvidence {
+  /** Sanitized detector category (`aws_access_key_id`, `regex`, …). */
+  readonly category: string;
+  /** `info` | `low` | `medium` | `high` | `critical`, sanitized. */
+  readonly severity: string;
+  /** The detector's own confidence, clamped to `[0, 1]`. Absent when it gave none. */
+  readonly confidence?: number | undefined;
+  readonly segmentId?: string | undefined;
+  readonly byteStart?: number | undefined;
+  readonly byteEnd?: number | undefined;
+  /** The detector's keyed `hmac-sha256:<hex>` / `sha256:<hex>` finding id, when it produced one. */
+  readonly fingerprint?: string | undefined;
+  /** The MASK. Contains no byte of the screened content — see the type docblock. */
+  readonly redactedExcerpt: string;
+}
+
+/**
  * One `guardrail_check_evaluations` row. **Sanitized**: no prompt text, no
- * `matched_text`, only category COUNTS and the detector's own version tokens.
+ * `matched_text`, only category COUNTS, the detector's own version tokens, and
+ * the {@link GuardrailFindingEvidence} projection of each finding.
  */
 export interface GuardrailCheckEvidence {
   readonly id: string;
@@ -219,6 +253,12 @@ export interface GuardrailCheckEvidence {
   readonly latencyMs: number;
   readonly findingCategoryCounts: Readonly<Record<string, number>>;
   readonly findingCount: number;
+  /**
+   * The per-finding detail, bounded (see
+   * `evidence.ts::MAX_EVIDENCE_FINDINGS`). `findingCount` remains the TRUE
+   * count, so a truncated array is visible rather than silently authoritative.
+   */
+  readonly findings: readonly GuardrailFindingEvidence[];
   readonly transformed: boolean;
   readonly usedFallback: boolean;
   readonly errorKind?: string | undefined;
@@ -271,6 +311,46 @@ export interface GuardrailEvidenceSink {
     evaluation: GuardrailEvidence,
     checks: readonly GuardrailCheckEvidence[],
   ): boolean | Promise<boolean>;
+  /**
+   * Hand everything buffered to durable storage. OPTIONAL, and never awaited on
+   * the request path (#665).
+   *
+   * `append` is called from inside `matchGuardrail`, i.e. in front of the
+   * client's first byte, so a durable sink may not do I/O there — the same
+   * hot-path rule `apps/gateway/src/requestlog/` states. A durable sink
+   * therefore BUFFERS in `append` (which is what keeps the fail-closed capacity
+   * check synchronous) and writes here, from
+   * `ctx.waitUntil(...)` in `./middleware.ts`.
+   *
+   * Implementations MUST NOT reject: a logging failure is never a request
+   * failure.
+   */
+  flush?(runtime: {
+    env: unknown;
+    ctx?: { waitUntil(work: Promise<unknown>): void };
+  }): Promise<void>;
+  /**
+   * Re-key buffered evidence onto the request id the CLIENT was actually told.
+   * OPTIONAL, and only meaningful before a {@link GuardrailEvidenceSink.flush}.
+   *
+   * ## Why this is needed at all
+   *
+   * `inference/handlers.ts:1190` does
+   * `c.set("requestId", c.req.header("x-request-id") ?? requestIds.next())`,
+   * i.e. the inference route OVERWRITES the id
+   * `middleware/errors.ts::requestId` minted before any middleware ran. The
+   * guardrail middleware screens BEFORE the route, so its evaluation is built
+   * with the earlier id, while `request_logs.request_id` (#664) and the
+   * `x-request-id` response header carry the later one.
+   *
+   * Left alone that is a silent correlation break: `GET
+   * /admin/v1/investigations?request_id=<what the client was told>` would find
+   * the request log and NOT the guardrail evaluation, i.e. would report that a
+   * blocked request was never screened. Adopting the client's id here is the
+   * narrow fix; making the route stop overwriting is a fleet-wide change to
+   * request-id semantics that does not belong in an evidence slice.
+   */
+  recorrelate?(previousRequestId: string, requestId: string): void;
 }
 
 /** `AdminAuditEventDraft` — the subset the guardrail path writes. */
@@ -317,6 +397,12 @@ export interface GuardrailCheckEvaluation {
   readonly latencyMs: number;
   readonly findingCategoryCounts: Readonly<Record<string, number>>;
   readonly findingCount: number;
+  /**
+   * The sanitized per-finding projection (#665). Built at the ONE point the
+   * raw `Finding[]` is available (`engine.ts::externalEvaluation`) and carrying
+   * no content, so `matched_text` never leaves the in-memory decision path.
+   */
+  readonly findings: readonly GuardrailFindingEvidence[];
   /**
    * A located finding no patch covers. Forces a `redact` to fail closed to
    * `deny` — reporting it as a successful redaction would return the flagged

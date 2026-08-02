@@ -35,6 +35,7 @@ import type {
   GuardrailEvaluationContext,
   GuardrailEvidence,
   GuardrailEvidenceSink,
+  GuardrailFindingEvidence,
   GuardrailPolicyRuntime,
   PolicyAction,
 } from "./ports.js";
@@ -50,6 +51,126 @@ export function sanitizedEvidenceToken(value: string, fallback: string): string 
     return fallback;
   }
   return trimmed;
+}
+
+// ---------------------------------------------------------------------------
+// The REDACTED excerpt  (#665)
+// ---------------------------------------------------------------------------
+
+/**
+ * How many findings one check row carries in detail.
+ *
+ * A detector scanning a large document can produce thousands, and the row is
+ * written on every screened request; `findingCount` keeps the TRUE total, so
+ * truncating the detail is visibly a truncation rather than a wrong number.
+ */
+export const MAX_EVIDENCE_FINDINGS = 32;
+
+/** How many mask characters an excerpt shows before it summarises the rest. */
+const MAX_EXCERPT_MASK = 40;
+
+/**
+ * Build the REDACTED excerpt for one finding.
+ *
+ * ## Why this is a reconstruction and not a snippet
+ *
+ * The obvious reading of "store a redacted excerpt" is: take the matched text,
+ * blank the middle, keep the edges. That is what most gateways do and it is
+ * wrong here, for two reasons that are not stylistic.
+ *
+ *  1. The cross-cutting invariant this tree preserves verbatim
+ *     (`docs/legacy/inventory-policy-core.md`, appendix §1) is that
+ *     `matched_text` is NEVER persisted — only a keyed fingerprint. An excerpt
+ *     with edges kept is `matched_text` with fewer characters: the first four
+ *     bytes of an AWS key identify the key type, and the surrounding words of a
+ *     prompt are the prompt.
+ *  2. The whole point of #665 is that a BLOCKED request must be investigable.
+ *     If investigating it required reading the content that got it blocked,
+ *     the evidence table would be a place secrets accumulate and every operator
+ *     with `guardrails.evidence.read` would become a holder of them.
+ *
+ * So the excerpt is built from the finding's STRUCTURE — its category, its
+ * segment, its byte range — plus a run of `*` as wide as the match. It answers
+ * "a 20-byte AWS access key at bytes 13..33 of the first user message" without
+ * answering "which one", which is exactly the split an investigation needs: the
+ * WHAT and the WHERE are the operator's business, the value is the customer's.
+ *
+ * `sanitizedEvidenceToken` is applied to every token that came from a detector,
+ * so a hostile or buggy detector cannot smuggle content out through a category
+ * name or a segment id.
+ */
+export function redactedExcerpt(finding: {
+  category: string;
+  segment_id?: string | null;
+  byte_start?: number | null;
+  byte_end?: number | null;
+}): string {
+  const category = sanitizedEvidenceToken(finding.category, "uncategorized");
+  const segment = sanitizedEvidenceToken(finding.segment_id ?? "", "unsegmented");
+  const start = typeof finding.byte_start === "number" ? finding.byte_start : undefined;
+  const end = typeof finding.byte_end === "number" ? finding.byte_end : undefined;
+
+  if (start === undefined || end === undefined || end < start) {
+    // A STRUCTURAL finding (a size cap, a JSON-schema violation) has no span.
+    // Saying so is the honest excerpt; inventing `0..0` would claim a location.
+    return `[${category}] ${segment}:unlocated`;
+  }
+  const width = end - start;
+  const mask = "*".repeat(Math.min(width, MAX_EXCERPT_MASK));
+  const overflow = width > MAX_EXCERPT_MASK ? `+${width - MAX_EXCERPT_MASK}` : "";
+  return `[${category}] ${segment}:${start}..${end} ${mask}${overflow}`;
+}
+
+/** `confidence`, clamped and rounded; `undefined` when the detector gave none. */
+function evidenceConfidence(value: number | null | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  // Clamped rather than trusted: `confidence` reaches here from an external
+  // detector's JSON, and a `1e308` in an evidence row breaks every consumer
+  // that treats it as a probability.
+  return Math.round(Math.min(Math.max(value, 0), 1) * 1_000) / 1_000;
+}
+
+/** A detector-supplied fingerprint, only when it is shaped like one. */
+function evidenceFingerprint(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return /^(hmac-)?sha256:[0-9a-f]{8,128}$/.test(value) ? value : undefined;
+}
+
+/**
+ * Project raw detector findings onto durable evidence.
+ *
+ * THE boundary. `Finding.matched_text` is read by nothing below this line and
+ * has no field to land in; every value that does cross is either a number this
+ * function clamped, a token `sanitizedEvidenceToken` accepted, or the mask
+ * {@link redactedExcerpt} built.
+ */
+export function sanitizedFindings(
+  findings: readonly {
+    category: string;
+    severity?: string;
+    confidence?: number | null;
+    segment_id?: string | null;
+    byte_start?: number | null;
+    byte_end?: number | null;
+    fingerprint?: string | null;
+  }[],
+): GuardrailFindingEvidence[] {
+  return findings.slice(0, MAX_EVIDENCE_FINDINGS).map((finding) => {
+    const confidence = evidenceConfidence(finding.confidence);
+    const fingerprint = evidenceFingerprint(finding.fingerprint);
+    return {
+      category: sanitizedEvidenceToken(finding.category, "uncategorized"),
+      severity: sanitizedEvidenceToken(finding.severity ?? "", "high"),
+      ...(confidence !== undefined ? { confidence } : {}),
+      ...(typeof finding.segment_id === "string"
+        ? { segmentId: sanitizedEvidenceToken(finding.segment_id, "unsegmented") }
+        : {}),
+      ...(typeof finding.byte_start === "number" ? { byteStart: finding.byte_start } : {}),
+      ...(typeof finding.byte_end === "number" ? { byteEnd: finding.byte_end } : {}),
+      ...(fingerprint !== undefined ? { fingerprint } : {}),
+      redactedExcerpt: redactedExcerpt(finding),
+    };
+  });
 }
 
 /** `guardrail_evaluation_id` — deterministic per (request, policy@rev, stage). */
@@ -222,6 +343,10 @@ export function buildCheckEvidence(
         latencyMs: 0,
         findingCategoryCounts: {},
         findingCount: 0,
+        // A check that never executed found nothing, and an empty array says
+        // exactly that. It is not the same as a check that ran and matched
+        // nothing — `verdict` carries that distinction.
+        findings: [],
         transformed: false,
         usedFallback: false,
         errorKind: sanitizedEvidenceToken(errorKind, "streaming_error"),
@@ -242,6 +367,7 @@ export function buildCheckEvidence(
       latencyMs: evaluation.latencyMs,
       findingCategoryCounts: evaluation.findingCategoryCounts,
       findingCount: evaluation.findingCount,
+      findings: evaluation.findings,
       transformed:
         args.applied &&
         args.action === "redact" &&

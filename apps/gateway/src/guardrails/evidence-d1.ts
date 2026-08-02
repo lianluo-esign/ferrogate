@@ -1,0 +1,206 @@
+/**
+ * `guardrail_evaluations` / `guardrail_check_evaluations` in the CONTROL
+ * database — the durable half of guardrail screening evidence (#665).
+ *
+ * The tables are defined by `sql/d1-ts/control/0004_guardrail_evaluations.sql`.
+ * `apps/control-plane` READS them; this module is the only writer in the tree,
+ * and it lives on the gateway because that is the only Worker on the screening
+ * path.
+ *
+ * Deliberately the same shape as `../requestlog/d1.ts`, statement for
+ * statement: a COALESCE upsert keyed on the deterministic evidence id, written
+ * through `db.batch` so one delivery is one round trip and one atomic unit.
+ * Two writers against one database that disagreed about redelivery would be a
+ * class of bug nobody would find until an incident.
+ */
+import { type GuardrailEvidenceEnvelope, guardrailEvidenceToWire } from "./evidence-wire.js";
+
+/** The tables `apps/control-plane/src/store/d1.ts` reads. */
+export const GUARDRAIL_EVALUATION_TABLE = "guardrail_evaluations";
+export const GUARDRAIL_CHECK_TABLE = "guardrail_check_evaluations";
+
+/**
+ * The evaluation upsert.
+ *
+ * ## Why UPSERT and not INSERT
+ *
+ * Three reasons, each sufficient on its own:
+ *
+ *  1. **Queues are at-least-once.** A consumer that has already applied a
+ *     message may be handed it again; a bare `INSERT` would fail the retry on
+ *     the primary key and the whole batch would redeliver forever.
+ *  2. **Streaming screening re-decides.** `stream.ts` calls the engine once per
+ *     SSE frame and the evaluation id is deterministic per
+ *     `(request, policy@revision, stage)`, so a streamed response produces ONE
+ *     logical row that is rewritten as the stream progresses. The last write
+ *     wins, i.e. the row records the frame that actually decided the stream —
+ *     which is exactly what `InMemoryGuardrailEvidenceSink.append` already did.
+ *  3. **Later legs.** The same request id will grow cost and tamper-evidence
+ *     legs; merging now means those add a column rather than a table.
+ *
+ * ## Why every updated column is `COALESCE(excluded.x, …)` except the verdict
+ *
+ * A partial write must never ERASE a fact. The DECISION columns
+ * (`verdict`/`action`/`enforcement_status`/`latency_ms`/`finding_count`/
+ * `evaluation_json`) are the exception and are REPLACED, because for those the
+ * later write is the more truthful one: a stream that passed frame 1 and failed
+ * frame 9 was blocked, and a `COALESCE` there would preserve the `pass` and
+ * report that the guardrail let it through.
+ */
+export const GUARDRAIL_EVALUATION_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE} (
+  id, request_id, trace_id, agent_run_id, subject_id, tenant,
+  scope_type, scope_id, target, protocol, stage, mode,
+  policy_id, policy_revision, verdict, action, enforcement_status,
+  latency_ms, finding_count, input_fingerprint, action_fingerprint,
+  occurred_at_unix, evaluation_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  trace_id = COALESCE(excluded.trace_id, ${GUARDRAIL_EVALUATION_TABLE}.trace_id),
+  agent_run_id = COALESCE(excluded.agent_run_id, ${GUARDRAIL_EVALUATION_TABLE}.agent_run_id),
+  subject_id = COALESCE(excluded.subject_id, ${GUARDRAIL_EVALUATION_TABLE}.subject_id),
+  tenant = COALESCE(excluded.tenant, ${GUARDRAIL_EVALUATION_TABLE}.tenant),
+  scope_type = excluded.scope_type,
+  scope_id = COALESCE(excluded.scope_id, ${GUARDRAIL_EVALUATION_TABLE}.scope_id),
+  target = excluded.target,
+  protocol = excluded.protocol,
+  stage = excluded.stage,
+  mode = excluded.mode,
+  policy_id = excluded.policy_id,
+  policy_revision = excluded.policy_revision,
+  verdict = excluded.verdict,
+  action = excluded.action,
+  enforcement_status = excluded.enforcement_status,
+  latency_ms = excluded.latency_ms,
+  finding_count = excluded.finding_count,
+  input_fingerprint = excluded.input_fingerprint,
+  action_fingerprint = COALESCE(excluded.action_fingerprint, ${GUARDRAIL_EVALUATION_TABLE}.action_fingerprint),
+  occurred_at_unix = excluded.occurred_at_unix,
+  evaluation_json = excluded.evaluation_json`;
+
+/**
+ * The check upsert.
+ *
+ * Keyed on the check's own id, with `(evaluation_id, check_id)` UNIQUE behind
+ * it. Same replace-the-decision rule as the parent, for the same streaming
+ * reason: a detector that passed an early frame and failed a later one has
+ * failed.
+ */
+export const GUARDRAIL_CHECK_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_CHECK_TABLE} (
+  id, evaluation_id, check_id, detector_id, detector_version, config_digest,
+  verdict, action, enforcement_status, error_kind, check_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  detector_id = excluded.detector_id,
+  detector_version = excluded.detector_version,
+  config_digest = excluded.config_digest,
+  verdict = excluded.verdict,
+  action = excluded.action,
+  enforcement_status = excluded.enforcement_status,
+  error_kind = COALESCE(excluded.error_kind, ${GUARDRAIL_CHECK_TABLE}.error_kind),
+  check_json = excluded.check_json`;
+
+/** `undefined` → SQL NULL, so an unknown fact is stored as unknown. */
+function bindOptional(value: string | number | undefined): string | number | null {
+  return value === undefined ? null : value;
+}
+
+/**
+ * The `D1Database` surface this module uses, structurally.
+ *
+ * Shaped so a live binding satisfies it with no cast — the same device
+ * `../requestlog/d1.ts` uses — so a test can supply a failing decorator without
+ * the production code knowing a test exists.
+ */
+export interface GuardrailEvidenceDatabase {
+  prepare(query: string): {
+    bind(...values: unknown[]): { run(): Promise<unknown>; all(): Promise<unknown> };
+  };
+  batch(statements: unknown[]): Promise<unknown[]>;
+}
+
+/**
+ * Persist a batch of evidence envelopes in ONE D1 round trip.
+ *
+ * The PARENT statements are emitted before the child ones, and D1 applies a
+ * batch in order: `guardrail_check_evaluations.evaluation_id` is a foreign key,
+ * so a child written first would be rejected on a database with enforcement on.
+ *
+ * Rejects on failure — deliberately, and unlike everything else on this path.
+ * The caller is either the Queue consumer (whose retry ladder needs a rejection
+ * to arm) or {@link DurableGuardrailEvidenceSink}, which swallows it and counts
+ * it.
+ */
+export async function writeGuardrailEvidence(
+  db: GuardrailEvidenceDatabase,
+  envelopes: readonly GuardrailEvidenceEnvelope[],
+): Promise<void> {
+  if (envelopes.length === 0) return;
+  await db.batch(guardrailEvidenceStatements(db, envelopes));
+}
+
+/**
+ * The prepared statements for a batch, WITHOUT running them.
+ *
+ * Exported so the shared queue consumer can put request-log and guardrail
+ * statements into the SAME `db.batch` — one delivery, one round trip, one
+ * atomic unit, which is what makes `retryAll()` safe for a mixed batch.
+ */
+export function guardrailEvidenceStatements(
+  db: GuardrailEvidenceDatabase,
+  envelopes: readonly GuardrailEvidenceEnvelope[],
+): unknown[] {
+  const evaluationStatement = db.prepare(GUARDRAIL_EVALUATION_UPSERT_SQL);
+  const checkStatement = db.prepare(GUARDRAIL_CHECK_UPSERT_SQL);
+  const parents: unknown[] = [];
+  const children: unknown[] = [];
+  for (const envelope of envelopes) {
+    const wire = guardrailEvidenceToWire(envelope);
+    const evaluation = envelope.evaluation;
+    parents.push(
+      evaluationStatement.bind(
+        evaluation.id,
+        evaluation.requestId,
+        bindOptional(evaluation.traceId),
+        bindOptional(evaluation.agentRunId),
+        bindOptional(evaluation.subjectId),
+        bindOptional(evaluation.tenant.organizationId),
+        evaluation.scopeType,
+        bindOptional(evaluation.scopeId),
+        evaluation.target,
+        evaluation.protocol,
+        evaluation.stage,
+        evaluation.mode,
+        evaluation.policyId,
+        evaluation.policyRevision,
+        evaluation.verdict,
+        evaluation.action,
+        evaluation.enforcementStatus,
+        evaluation.latencyMs,
+        evaluation.findingCount,
+        evaluation.inputFingerprint,
+        bindOptional(evaluation.actionFingerprint),
+        evaluation.occurredAtUnix,
+        JSON.stringify(wire),
+      ),
+    );
+    const checkWires = Array.isArray(wire["checks"]) ? (wire["checks"] as unknown[]) : [];
+    envelope.checks.forEach((check, index) => {
+      children.push(
+        checkStatement.bind(
+          check.id,
+          evaluation.id,
+          check.checkId,
+          check.detectorId,
+          check.detectorVersion,
+          check.configDigest,
+          check.verdict,
+          check.action,
+          check.enforcementStatus,
+          bindOptional(check.errorKind),
+          JSON.stringify(checkWires[index] ?? {}),
+        ),
+      );
+    });
+  }
+  return [...parents, ...children];
+}

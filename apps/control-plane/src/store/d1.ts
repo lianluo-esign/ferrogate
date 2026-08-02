@@ -103,6 +103,21 @@ export const AUDIT_TABLE = "audit_events";
  */
 export const REQUEST_LOG_TABLE = "request_logs";
 
+/**
+ * The durable guardrail screening-evidence tables
+ * (`sql/d1-ts/control/0004_guardrail_evaluations.sql`, #665).
+ *
+ * READ-ONLY from this Worker, for the same reason {@link REQUEST_LOG_TABLE} is:
+ * the writer is `apps/gateway`'s `src/guardrails/` on the same CONTROL
+ * database. Two tables rather than one because a check evaluation is per
+ * DETECTOR and an evaluation is per policy@revision/stage — flattening them
+ * would either lose which detector fired or duplicate the decision row per
+ * check, and an auditor asking "which control caught this" needs both halves
+ * intact.
+ */
+export const GUARDRAIL_EVALUATION_TABLE = "guardrail_evaluations";
+export const GUARDRAIL_CHECK_TABLE = "guardrail_check_evaluations";
+
 /** `audit_json.object` — names the document shape for a later reader. */
 export const AUDIT_OBJECT = "control_plane_mutation";
 

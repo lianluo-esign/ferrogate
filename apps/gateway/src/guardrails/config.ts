@@ -25,9 +25,14 @@ import {
 import { D1GuardrailPolicyStore, loadGuardrailPolicyStore } from "./d1.js";
 import { secretsFromEnv } from "./detectors.js";
 import type { DetectorBuildContext } from "./detectors.js";
+import {
+  DurableGuardrailEvidenceSink,
+  guardrailEvidenceDatabaseFrom,
+  guardrailEvidenceQueueFrom,
+} from "./evidence-sink.js";
 import { InMemoryGuardrailEvidenceSink } from "./evidence.js";
 import type { GuardrailDepsResolver, GuardrailMiddlewareOptions } from "./middleware.js";
-import type { GuardrailPolicySource } from "./ports.js";
+import type { GuardrailEvidenceSink, GuardrailPolicySource } from "./ports.js";
 
 /** JSON array of `PolicyRevision` documents. */
 export const GUARDRAIL_POLICY_VAR = "GATEWAY_GUARDRAIL_POLICIES";
@@ -174,6 +179,27 @@ export function guardrailDepsFromEnv(
   );
 }
 
+/**
+ * The evidence sink for a Worker `env` (#665).
+ *
+ * DURABLE whenever a destination is bound — the `REQUEST_LOG` queue or the
+ * `CONTROL_DB` D1 that owns `guardrail_evaluations` — and in-memory otherwise.
+ *
+ * The fork is on the BINDING rather than on a feature flag, deliberately. A
+ * deployment with no evidence destination is `wrangler dev --local`, a unit
+ * test, or a self-hosted install that has not provisioned D1; installing a
+ * durable sink there would count a `dropped` for every screened request and say
+ * nothing more useful than the in-memory sink already does. A deployment that
+ * HAS the binding has one because an operator provisioned it, and silently not
+ * writing to it would reproduce exactly the defect this issue closes.
+ */
+function guardrailEvidenceSinkFor(env: Record<string, unknown>): GuardrailEvidenceSink {
+  const durable =
+    guardrailEvidenceQueueFrom(env) !== undefined ||
+    guardrailEvidenceDatabaseFrom(env) !== undefined;
+  return durable ? new DurableGuardrailEvidenceSink() : new InMemoryGuardrailEvidenceSink();
+}
+
 function guardrailOptions(
   env: Record<string, unknown>,
   policies: GuardrailPolicySource,
@@ -181,7 +207,7 @@ function guardrailOptions(
   const key = env[GUARDRAIL_EVIDENCE_KEY_VAR];
   return {
     policies,
-    evidence: new InMemoryGuardrailEvidenceSink(),
+    evidence: guardrailEvidenceSinkFor(env),
     ...(typeof key === "string" && key.length > 0
       ? { evidenceHmacKey: new TextEncoder().encode(key) }
       : {}),

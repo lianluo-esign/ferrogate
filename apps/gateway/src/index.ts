@@ -16,7 +16,7 @@
  * they need no change to the router, the guard, or the contract table.
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
-import { guardrailDepsFromEnv, guardrails } from "./guardrails/index.js";
+import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
   dispatcherFromEnv,
@@ -379,7 +379,14 @@ export async function gatewayScheduled(
 async function gatewayRequestLogRetention(env: unknown): Promise<void> {
   const db = requestLogDatabaseFrom(env);
   if (db === undefined) return;
-  await sweepRequestLogs(db, env, Math.floor(Date.now() / 1000));
+  const nowUnix = Math.floor(Date.now() / 1000);
+  await sweepRequestLogs(db, env, nowUnix);
+  // Guardrail screening evidence (#665) is swept on the SAME tick, with the
+  // SAME policy, against the same database. Deliberately not a separate
+  // retention window: a request log whose screening evidence has been deleted
+  // (or the reverse) makes the investigation view able to half-answer, which is
+  // the failure #665 exists to fix. See `guardrails/evidence-retention.ts`.
+  await sweepGuardrailEvidence(db, env, nowUnix);
 }
 
 /**
@@ -391,10 +398,7 @@ async function gatewayRequestLogRetention(env: unknown): Promise<void> {
  * silently accepted as a service entrypoint and the queue would fill and
  * dead-letter with nothing consuming it.
  */
-export async function gatewayQueue(
-  batch: RequestLogMessageBatch,
-  env: unknown,
-): Promise<void> {
+export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown): Promise<void> {
   await consumeRequestLogBatch(batch, env);
 }
 

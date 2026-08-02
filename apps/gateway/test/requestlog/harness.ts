@@ -19,6 +19,8 @@ import { env } from "cloudflare:test";
 import controlInitSql from "../../../../sql/d1-ts/control/0001_init_control.sql?raw";
 import ssoNonceSql from "../../../../sql/d1-ts/control/0002_sso_flow_nonce.sql?raw";
 import requestLogColumnsSql from "../../../../sql/d1-ts/control/0003_request_log_columns.sql?raw";
+import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_evaluations.sql?raw";
+import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 
 /** Split a `.sql` migration into executable statements (comments stripped). */
@@ -75,6 +77,12 @@ export async function applyControlMigrations(): Promise<void> {
       await db.prepare(statement).run();
     }
   }
+
+  // `0004` is `CREATE TABLE IF NOT EXISTS` throughout, so unlike `0003` it is
+  // idempotent and needs no guard (#665).
+  for (const statement of sqlStatements(guardrailEvidenceSql)) {
+    await db.prepare(statement).run();
+  }
   applied = true;
 }
 
@@ -82,6 +90,76 @@ export async function applyControlMigrations(): Promise<void> {
 export async function resetRequestLogs(): Promise<void> {
   await applyControlMigrations();
   await controlDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
+}
+
+/**
+ * Empty the guardrail evidence tables (#665).
+ *
+ * Children first: `guardrail_check_evaluations.evaluation_id` is a foreign key,
+ * so deleting parents first fails on a database with enforcement on.
+ */
+export async function resetGuardrailEvidence(): Promise<void> {
+  await applyControlMigrations();
+  await controlDb().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`).run();
+  await controlDb().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`).run();
+}
+
+/** One stored `guardrail_evaluations` row, read straight out of the table. */
+export interface StoredGuardrailEvaluation {
+  readonly id: string;
+  readonly request_id: string;
+  readonly trace_id: string | null;
+  readonly agent_run_id: string | null;
+  readonly subject_id: string | null;
+  readonly tenant: string | null;
+  readonly scope_type: string;
+  readonly scope_id: string | null;
+  readonly target: string;
+  readonly protocol: string;
+  readonly stage: string;
+  readonly mode: string;
+  readonly policy_id: string;
+  readonly policy_revision: number;
+  readonly verdict: string;
+  readonly action: string;
+  readonly enforcement_status: string;
+  readonly latency_ms: number;
+  readonly finding_count: number;
+  readonly input_fingerprint: string;
+  readonly action_fingerprint: string | null;
+  readonly occurred_at_unix: number;
+  readonly evaluation_json: string;
+}
+
+/** One stored `guardrail_check_evaluations` row. */
+export interface StoredGuardrailCheck {
+  readonly id: string;
+  readonly evaluation_id: string;
+  readonly check_id: string;
+  readonly detector_id: string;
+  readonly detector_version: string;
+  readonly config_digest: string;
+  readonly verdict: string;
+  readonly action: string;
+  readonly enforcement_status: string;
+  readonly error_kind: string | null;
+  readonly check_json: string;
+}
+
+/** Every stored evaluation, oldest first. */
+export async function storedGuardrailEvaluations(): Promise<StoredGuardrailEvaluation[]> {
+  const result = await controlDb()
+    .prepare(`SELECT * FROM ${GUARDRAIL_EVALUATION_TABLE} ORDER BY occurred_at_unix ASC, id ASC`)
+    .all<StoredGuardrailEvaluation>();
+  return result.results;
+}
+
+/** Every stored check row, by evaluation then check. */
+export async function storedGuardrailChecks(): Promise<StoredGuardrailCheck[]> {
+  const result = await controlDb()
+    .prepare(`SELECT * FROM ${GUARDRAIL_CHECK_TABLE} ORDER BY evaluation_id ASC, check_id ASC`)
+    .all<StoredGuardrailCheck>();
+  return result.results;
 }
 
 /** One stored row, read straight out of the table. */

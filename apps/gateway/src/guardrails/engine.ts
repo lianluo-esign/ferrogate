@@ -66,6 +66,7 @@ import {
   evaluationId,
   evidenceAction,
   sanitizedEvidenceToken,
+  sanitizedFindings,
 } from "./evidence.js";
 import type {
   GuardrailCheckEvaluation,
@@ -586,6 +587,7 @@ function disabledEvaluation(checkId: string): GuardrailCheckEvaluation {
     latencyMs: 0,
     findingCategoryCounts: {},
     findingCount: 0,
+    findings: [],
     hasUnredactableFindings: false,
   };
 }
@@ -601,6 +603,10 @@ function errorEvaluation(checkId: string, error: DetectorError): GuardrailCheckE
     latencyMs: 0,
     findingCategoryCounts: {},
     findingCount: 0,
+    // A detector that ERRORED reported no findings, and an empty array is the
+    // truthful projection. `outcome: "error"` is what tells an auditor the
+    // control did not conclude, so an empty array here cannot read as a pass.
+    findings: [],
     hasUnredactableFindings: false,
   };
 }
@@ -666,6 +672,10 @@ function externalEvaluation(
     latencyMs: 0,
     findingCategoryCounts,
     findingCount: result.findings.length,
+    // THE boundary: `sanitizedFindings` is the only thing that ever sees the
+    // raw `Finding[]`, and it has no field that can carry `matched_text`
+    // (#665). Everything downstream of here is already redacted.
+    findings: sanitizedFindings(result.findings),
     hasUnredactableFindings,
   };
 }
