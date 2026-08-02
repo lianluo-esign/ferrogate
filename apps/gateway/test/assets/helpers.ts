@@ -15,6 +15,7 @@ import {
   type AssetScreeningVerdict,
   BuiltinEicarScreener,
   InMemoryAssetAuditSink,
+  InMemoryAssetBundleIndexStore,
   InMemoryAssetMetadataStore,
   InMemoryAssetObjectStore,
   type PresignedUpload,
@@ -76,6 +77,8 @@ export interface Harness {
   readonly service: AssetService;
   readonly objects: InMemoryAssetObjectStore;
   readonly metadata: InMemoryAssetMetadataStore;
+  /** The `static_site` bundle file index (#736). */
+  readonly bundles: InMemoryAssetBundleIndexStore;
   readonly audit: InMemoryAssetAuditSink;
   readonly presigner: FakePresigner;
   /** Advance the injected clock. */
@@ -96,12 +99,14 @@ export const START_UNIX = 1_700_000_000;
 export function harness(options: HarnessOptions = {}): Harness {
   const objects = options.objects ?? new InMemoryAssetObjectStore();
   const metadata = new InMemoryAssetMetadataStore();
+  const bundles = new InMemoryAssetBundleIndexStore();
   const audit = new InMemoryAssetAuditSink();
   const presigner = new FakePresigner();
   let clock = START_UNIX;
   const service = new AssetService({
     objects,
     metadata,
+    bundles,
     presigner,
     screener: options.screener ?? new BuiltinEicarScreener(),
     audit,
@@ -113,6 +118,7 @@ export function harness(options: HarnessOptions = {}): Harness {
     service,
     objects,
     metadata,
+    bundles,
     audit,
     presigner,
     tick: (seconds = 1) => {

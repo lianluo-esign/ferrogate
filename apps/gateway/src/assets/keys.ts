@@ -97,6 +97,27 @@ export function newAssetObjectKey(ref: AssetObjectRef): string {
 }
 
 /**
+ * The R2 key of ONE file inside an expanded `static_site` bundle (issue #736).
+ *
+ * `…/{version}/{variant}/bundle/{percent-encoded path}` — one extra segment
+ * under the SAME per-version prefix the single-object layout already uses, so a
+ * bundle's files are inside the version's own prefix and inside the tenant's
+ * own prefix, and {@link assertKeyBelongsToTenant} guards them with no new
+ * rule.
+ *
+ * The whole relative path is ONE encoded segment rather than a nested path.
+ * That is deliberate and is a defence in depth behind
+ * `bundle.ts::bundlePathRejection`: `encodeKeySegment` turns `/` into `%2F` and
+ * `.` stays literal but can no longer act as a separator, so even a path that
+ * somehow reached here with a `..` in it addresses a key literally named
+ * `..%2Fx` rather than escaping the prefix. There is no path arithmetic on the
+ * key side at all.
+ */
+export function bundleFileObjectKey(ref: AssetObjectRef, path: string): string {
+  return `${assetObjectPrefix(ref)}bundle/${encodeKeySegment(path)}`;
+}
+
+/**
  * Prefix of every final object one presigned upload could ever produce (Rust
  * `final_object_prefix`).
  *

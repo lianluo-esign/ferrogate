@@ -23,6 +23,7 @@
  * `handlers.ts` renders it into the gateway error envelope. That is what keeps
  * the status/code taxonomy assertable without a Worker.
  */
+import { bundlePathRejection, expandBundle, isBundlePush, normalizeBundlePath } from "./bundle.js";
 import {
   ASSET_REJECTED_CODE,
   ASSET_REJECTED_STATUS,
@@ -43,6 +44,7 @@ import {
   CrossTenantKeyError,
   assertKeyBelongsToTenant,
   assetChannelId,
+  bundleFileObjectKey,
   commitObjectKeyPrefix,
   newAssetObjectKey,
   newCommitObjectKey,
@@ -53,6 +55,7 @@ import {
 } from "./keys.js";
 import {
   type AssetAuditSink,
+  type AssetBundleIndexStore,
   type AssetCaller,
   type AssetMetadataStore,
   type AssetObjectStore,
@@ -60,10 +63,12 @@ import {
   type AssetScreener,
   type AssetScreeningRequest,
   type AssetVisibility,
+  InMemoryAssetBundleIndexStore,
   PresignUnavailableError,
   type PresignedUpload,
   type StoredAsset,
   type StoredAssetChannel,
+  type StoredBundleFile,
   isDownloadable,
   isScreeningRejection,
 } from "./ports.js";
@@ -341,6 +346,18 @@ export interface AssetPushInput {
 export interface AssetPullInput {
   /** `?platform=` / `x-ferrogate-platform`. */
   readonly platform?: string | undefined;
+  /**
+   * `?path=` — one file inside a `static_site` BUNDLE version (#736).
+   *
+   * Deliberately NOT a second resolution path. The reference still resolves to
+   * a version through {@link resolveVersion} and to an artifact through
+   * {@link selectVariant}, with channels, semver ranges, yank and variants all
+   * behaving exactly as they do for a single-object asset; only the last step —
+   * which bytes of the already-resolved artifact to serve — consults the bundle
+   * index. A yanked bundle therefore drops out of channel resolution before
+   * this field is ever read.
+   */
+  readonly bundlePath?: string | undefined;
   /** Client conditional/`Range` headers. */
   readonly headers: Headers;
   /** `HEAD` suppresses the body but keeps every header. */
@@ -375,6 +392,12 @@ export interface AssetServiceDeps {
   readonly presigner: AssetPresigner;
   readonly screener: AssetScreener;
   readonly audit: AssetAuditSink;
+  /**
+   * The `static_site` bundle file index (#736). Absent ⇒ an in-memory index,
+   * which is right for unit suites and for `wrangler dev --local`; the
+   * composition root supplies the D1-backed one.
+   */
+  readonly bundles?: AssetBundleIndexStore | undefined;
   readonly limits?: Partial<AssetLimits> | undefined;
   /** Injected clock, in unix seconds. */
   readonly now?: (() => number) | undefined;
@@ -516,6 +539,7 @@ export function classifyAbort(
 export class AssetService {
   readonly #objects: AssetObjectStore;
   readonly #metadata: AssetMetadataStore;
+  readonly #bundles: AssetBundleIndexStore;
   readonly #presigner: AssetPresigner;
   readonly #screener: AssetScreener;
   readonly #audit: AssetAuditSink;
@@ -526,6 +550,7 @@ export class AssetService {
   constructor(deps: AssetServiceDeps) {
     this.#objects = deps.objects;
     this.#metadata = deps.metadata;
+    this.#bundles = deps.bundles ?? new InMemoryAssetBundleIndexStore();
     this.#presigner = deps.presigner;
     this.#screener = deps.screener;
     this.#audit = deps.audit;
@@ -835,6 +860,11 @@ export class AssetService {
 
     const variant = ref.variant ?? "";
     const contentType = input.contentType ?? "application/octet-stream";
+    // #736: a `static_site` pushed as an archive is a multi-file BUNDLE, not an
+    // opaque blob. The decision is made from the asset type plus the container
+    // content type — both of which the content gate below has already vetted —
+    // so it adds no new client-controlled switch.
+    const bundle = isBundlePush(ref.assetType, contentType);
 
     // The per-request byte ceiling: the inline cap tightened to BOTH the
     // tenant's dedicated per-object cap and its cumulative quota.
@@ -944,7 +974,16 @@ export class AssetService {
       yanked: false,
       // #366: persist the verdict, so a pending/quarantined push is durably
       // withheld from every read path rather than merely labeled on the wire.
-      visibility: screening.visibility,
+      //
+      // #736: a BUNDLE is admitted as `pending_scan` no matter what the
+      // screener said, because the version is not yet what it claims to be —
+      // its files have not been expanded. `pending_scan` is exactly the right
+      // state for that: the row reserves `{name}/{version}` against a
+      // concurrent push and against the quota, while `isDownloadable` keeps it
+      // out of every read path. The screener's verdict is applied afterwards
+      // through the existing CAS promotion, so a partial expansion cannot
+      // reach `visible` — the promotion is the last step and never runs.
+      visibility: bundle ? "pending_scan" : screening.visibility,
       created_at_unix: now,
       updated_at_unix: now,
     };
@@ -983,14 +1022,49 @@ export class AssetService {
       );
     }
 
-    this.#record(
-      context,
-      caller,
-      "asset.push",
-      id,
-      "committed",
-      `asset ${id} pushed (${asset.size_bytes} bytes); ${screening.auditDetail}; manifest=${JSON.stringify(screening.manifest)}`,
-    );
+    // #736: the version is reserved and invisible; NOW expand it. A refusal
+    // here — a traversing path, a symlink, a disallowed file type, a bomb —
+    // unwinds the whole publish, so the reservation cannot become a permanent
+    // tombstone that blocks the corrected republish.
+    if (bundle) {
+      const expanded = await this.#expandBundleIntoStore(
+        caller,
+        objectRef,
+        id,
+        input.content,
+        contentType,
+      );
+      if (!expanded.ok) {
+        await this.#unwindBundlePublish(caller, ref, id, candidateKey);
+        this.#record(
+          context,
+          caller,
+          "asset.push",
+          id,
+          "rejected_commit",
+          `asset ${id} static_site bundle rejected (${expanded.code}): ${expanded.message}`,
+        );
+        return expanded;
+      }
+      asset.visibility = await this.#promoteExpandedBundle(id, screening.visibility);
+      this.#record(
+        context,
+        caller,
+        "asset.push",
+        id,
+        "committed",
+        `asset ${id} pushed as a static_site bundle of ${expanded.body.length} files (${asset.size_bytes} archive bytes); ${screening.auditDetail}`,
+      );
+    } else {
+      this.#record(
+        context,
+        caller,
+        "asset.push",
+        id,
+        "committed",
+        `asset ${id} pushed (${asset.size_bytes} bytes); ${screening.auditDetail}; manifest=${JSON.stringify(screening.manifest)}`,
+      );
+    }
 
     // Optional same-request channel move (#260): `?channel=stable`.
     if (input.channel !== undefined) {
@@ -1079,20 +1153,29 @@ export class AssetService {
       extra["x-ferrogate-asset-yanked"] = "true";
     }
 
+    // #736: `?path=` narrows the already-resolved artifact to ONE file of an
+    // expanded bundle. `served` is that file projected onto the version row, so
+    // every rule below — egress charging, the integrity re-check, the ETag, the
+    // conditional/Range evaluation — runs over it verbatim rather than being
+    // reimplemented for bundles.
+    const projected = await this.#projectBundleFile(selected, input.bundlePath);
+    if (!projected.ok) return projected;
+    const served = projected.body;
+
     // #262 egress quota (finding D4): the fail-closed deny gate, BEFORE a byte
     // is read or served, charged the RESOLVED OBJECT SIZE exactly as Rust does
     // (`assets.rs:1114` passes `selected.size_bytes`, never a range slice, so a
     // caller cannot drain an exhausted budget one `Range` header at a time).
-    const egressDenied = await this.#egressDenial(caller, selected.size_bytes);
+    const egressDenied = await this.#egressDenial(caller, served.size_bytes);
     if (egressDenied) return egressDenied;
 
-    const loaded = await this.#loadAssetContent(selected, caller.tenantId);
+    const loaded = await this.#loadAssetContent(served, caller.tenantId);
     if (!loaded.ok) return loaded;
     const content = loaded.body;
 
     // Re-verify integrity on EVERY read (#176/#179): a mismatch is storage
     // corruption or tampering, not a client error.
-    if ((await sha256Hex(content)) !== selected.content_hash) {
+    if ((await sha256Hex(content)) !== served.content_hash) {
       return fail(
         500,
         "asset_integrity_check_failed",
@@ -1100,7 +1183,7 @@ export class AssetService {
       );
     }
 
-    const etag = `"${selected.content_hash}"`;
+    const etag = `"${served.content_hash}"`;
     const validators: Record<string, string> = {
       ...extra,
       etag,
@@ -1124,7 +1207,7 @@ export class AssetService {
           bytes: null,
           headers: {
             ...validators,
-            "content-type": selected.content_type,
+            "content-type": served.content_type,
             "content-range": `bytes */${content.byteLength}`,
           },
         };
@@ -1148,7 +1231,7 @@ export class AssetService {
           bytes: body,
           headers: {
             ...validators,
-            "content-type": selected.content_type,
+            "content-type": served.content_type,
             "content-length": String(slice.byteLength),
             "content-range": `bytes ${outcome.start}-${outcome.end}/${content.byteLength}`,
           },
@@ -1168,7 +1251,7 @@ export class AssetService {
           bytes: body,
           headers: {
             ...validators,
-            "content-type": selected.content_type,
+            "content-type": served.content_type,
             "content-length": String(content.byteLength),
           },
         };
@@ -1224,6 +1307,10 @@ export class AssetService {
     if (existing !== null && existing.storage_uri !== "") {
       await this.#bestEffortDelete(existing.storage_uri, caller.tenantId);
     }
+    // #736: a bundle version owns per-file objects too. They are reclaimed
+    // after the row delete committed, for the same reason the archive is: an
+    // orphaned object is GC-able, bytes deleted under a live row are not.
+    await this.#reclaimBundleObjects(caller.tenantId, id);
     this.#record(context, caller, "asset.delete", id, "committed", `asset ${id} deleted`);
     return { ok: true, status: 200, body: { object: "asset", id, deleted: true } };
   }
@@ -1684,6 +1771,7 @@ export class AssetService {
 
     const sha256 = request.sha256.toLowerCase();
     const contentType = request.content_type ?? "application/octet-stream";
+    const bundle = isBundlePush(ref.assetType, contentType);
     const id = storedAssetId(caller.tenantId, ref.assetType, ref.name, ref.version);
     const objectRef = this.#ref(caller, { ...ref, variant: "" });
     const stagingKey = stagingObjectKey(objectRef, request.upload_id, request.size_bytes, sha256);
@@ -1856,7 +1944,11 @@ export class AssetService {
       storage_uri: finalKey,
       variant: "",
       yanked: false,
-      visibility: screening.visibility,
+      // #736: identical to the inline path — a bundle is admitted invisible and
+      // only promoted once every file is expanded. The presigned path is
+      // exactly how a tenant would smuggle an unexpanded archive past an
+      // inline-only bundle gate, so it runs the same lifecycle.
+      visibility: bundle ? "pending_scan" : screening.visibility,
       created_at_unix: now,
       updated_at_unix: now,
     };
@@ -1915,6 +2007,26 @@ export class AssetService {
         };
       }
       return this.#versionImmutable(ref);
+    }
+
+    // #736: expand AFTER the reservation row exists and BEFORE anything can
+    // resolve it — the same order as the inline path, through the same helpers.
+    if (bundle) {
+      const expanded = await this.#expandBundleIntoStore(caller, objectRef, id, bytes, contentType);
+      if (!expanded.ok) {
+        await this.#unwindBundlePublish(caller, ref, id, finalKey);
+        await this.#bestEffortDelete(stagingKey, caller.tenantId);
+        this.#record(
+          context,
+          caller,
+          "asset.push",
+          id,
+          "rejected_commit",
+          `asset ${id} upload ${request.upload_id} static_site bundle rejected (${expanded.code}): ${expanded.message}`,
+        );
+        return expanded;
+      }
+      asset.visibility = await this.#promoteExpandedBundle(id, screening.visibility);
     }
 
     this.#record(
@@ -2209,6 +2321,187 @@ export class AssetService {
       );
     }
     return { ok: true, status: 200, body: new Uint8Array(await object.arrayBuffer()) };
+  }
+
+  // -------------------------------------------------------------------------
+  // static_site bundles (#736)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Expand an archive into per-file R2 objects plus the D1 file index.
+   *
+   * Runs only while the version row is `pending_scan`, i.e. while nothing can
+   * resolve it. Every file lands under the version's OWN key prefix, so the
+   * one cross-tenant guard the rest of the service uses covers these keys
+   * unchanged, and it is re-asserted per file rather than once for the batch.
+   *
+   * The decompressed ceiling is tightened to the tenant's storage quota when it
+   * has one: expansion multiplies bytes, and a tenant should not be able to
+   * turn a 10 MiB inline push into more storage than its whole quota. The
+   * fixed {@link BUNDLE_MAX_TOTAL_BYTES} still binds independently — this only
+   * ever lowers it.
+   */
+  async #expandBundleIntoStore(
+    caller: AssetCaller,
+    objectRef: AssetObjectRef,
+    assetId: string,
+    archive: Uint8Array,
+    archiveContentType: string,
+  ): Promise<AssetResult<readonly StoredBundleFile[]>> {
+    const expansion = await expandBundle(archive, {
+      maxTotalBytes: caller.assetStorageQuotaBytes,
+    });
+    if (!expansion.ok) {
+      // The SAME `422 asset_rejected` taxonomy the content gate uses. A file
+      // the allowlist refuses is not a different kind of refusal just because
+      // it arrived inside an archive — the archive's own content type
+      // (`${archiveContentType}`) was allowed and proves nothing about it.
+      return fail(
+        ASSET_REJECTED_STATUS,
+        ASSET_REJECTED_CODE,
+        `${expansion.message} (pushed as ${archiveContentType})`,
+      );
+    }
+
+    const now = this.#now();
+    const written: string[] = [];
+    const rows: StoredBundleFile[] = [];
+    try {
+      for (const file of expansion.files) {
+        const key = bundleFileObjectKey(objectRef, file.path);
+        // Fail-closed, per file: a path that somehow produced a key outside the
+        // tenant prefix throws here rather than being written.
+        assertKeyBelongsToTenant(key, caller.tenantId);
+        await this.#objects.put(key, bufferOf(file.content), {
+          httpMetadata: { contentType: file.contentType },
+        });
+        written.push(key);
+        rows.push({
+          asset_id: assetId,
+          tenant_id: caller.tenantId,
+          path: file.path,
+          storage_uri: key,
+          content_type: file.contentType,
+          content_hash: file.sha256,
+          size_bytes: file.content.byteLength,
+          created_at_unix: now,
+        });
+      }
+      // The index is written as ONE call after every object has landed, so a
+      // reader can never see an index row whose bytes are not there yet.
+      await this.#bundles.putBundleFiles(rows);
+    } catch (error) {
+      // A mid-expansion bucket failure. Reclaim what THIS attempt wrote — it is
+      // provably unreferenced, because the version is still `pending_scan` and
+      // the index write either never ran or is being undone right here.
+      for (const key of written) await this.#bestEffortDelete(key, caller.tenantId);
+      await this.#bundles.deleteBundleFiles(assetId);
+      return fail(
+        503,
+        "storage_unavailable",
+        `the static_site bundle could not be expanded into the object bucket: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return { ok: true, status: 200, body: rows };
+  }
+
+  /**
+   * Project one bundle file onto the version row that resolution already
+   * chose, or return the row unchanged when no `?path=` was asked for.
+   *
+   * The returned value is a {@link StoredAsset} on purpose: everything
+   * downstream in `pullAsset` — egress charging, the object load, the integrity
+   * re-check, the ETag, `evaluateConditionalRequest` — then operates on one
+   * shape, and a bundle file cannot accidentally skip a rule that a
+   * single-object asset gets. `updated_at_unix` and `variant` stay the
+   * VERSION's, because a bundle's files are published atomically and share the
+   * version's mutation time.
+   */
+  async #projectBundleFile(
+    selected: StoredAsset,
+    bundlePath: string | undefined,
+  ): Promise<AssetResult<StoredAsset>> {
+    if (bundlePath === undefined) return { ok: true, status: 200, body: selected };
+    // The same grammar the expander enforced on write. A `..` on the READ side
+    // can never reach a key (the index is a lookup, not path arithmetic), but
+    // answering 400 rather than 404 keeps the two sides telling one story.
+    const rejection = bundlePathRejection(bundlePath);
+    if (rejection !== undefined) {
+      return fail(400, "asset_bundle_path_invalid", `?path= is not a bundle path: ${rejection}`);
+    }
+    const file = await this.#bundles.getBundleFile(selected.id, normalizeBundlePath(bundlePath));
+    if (file === null) {
+      return fail(
+        404,
+        "asset_bundle_file_not_found",
+        `${selected.asset_type}/${selected.name}/${selected.version} has no bundle file at ${normalizeBundlePath(bundlePath)}`,
+      );
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        ...selected,
+        storage_uri: file.storage_uri,
+        size_bytes: file.size_bytes,
+        content_type: file.content_type,
+        content_hash: file.content_hash,
+      },
+    };
+  }
+
+  /**
+   * Apply the screener's verdict to a fully-expanded bundle through the
+   * EXISTING `pending_scan` CAS (#378) — the same one the async-scan promotion
+   * endpoint drives. Nothing else may move a bundle to `visible`.
+   */
+  async #promoteExpandedBundle(assetId: string, target: AssetVisibility): Promise<AssetVisibility> {
+    // A screener that deferred wants the row withheld; leaving it `pending_scan`
+    // is the verdict, not a missing step.
+    if (target === "pending_scan") return "pending_scan";
+    const outcome = await this.#metadata.promotePendingAssetVisibility(
+      assetId,
+      target,
+      this.#now(),
+    );
+    if (outcome.kind === "promoted") return outcome.to;
+    // Someone else moved the row between the create and here (a concurrent
+    // promote/quarantine). Report what the store says, never what we wanted.
+    if (outcome.kind === "not_pending") return outcome.current;
+    return "pending_scan";
+  }
+
+  /**
+   * Undo a bundle publish that failed after its row was created: drop the index
+   * and its objects, the archive object, and the reservation row itself.
+   *
+   * The row goes LAST, mirroring `deleteAsset`'s ordering rationale in reverse:
+   * here the row is invisible for its whole life, so the only durable harm a
+   * crash mid-unwind can do is an orphaned object, which GC can reclaim.
+   */
+  async #unwindBundlePublish(
+    caller: AssetCaller,
+    ref: AssetVersionRef,
+    assetId: string,
+    archiveKey: string,
+  ): Promise<void> {
+    await this.#reclaimBundleObjects(caller.tenantId, assetId);
+    await this.#bestEffortDelete(archiveKey, caller.tenantId);
+    await this.#metadata.deleteAssetVariantIfUnreferenced(
+      assetId,
+      caller.tenantId,
+      ref.assetType,
+      ref.name,
+      ref.version,
+    );
+  }
+
+  /** Drop a bundle's index rows and the objects they point at. */
+  async #reclaimBundleObjects(tenantId: string, assetId: string): Promise<void> {
+    const removed = await this.#bundles.deleteBundleFiles(assetId);
+    for (const file of removed) {
+      await this.#bestEffortDelete(file.storage_uri, tenantId);
+    }
   }
 
   /**

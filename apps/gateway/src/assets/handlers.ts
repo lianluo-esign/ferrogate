@@ -50,7 +50,11 @@ import {
   subjectFor,
 } from "../ratelimit/index.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
-import { assetAuditSinkFromEnv, assetMetadataStoreFromEnv } from "./d1.js";
+import {
+  assetAuditSinkFromEnv,
+  assetBundleIndexStoreFromEnv,
+  assetMetadataStoreFromEnv,
+} from "./d1.js";
 import {
   type AssetEgressQuota,
   NO_ASSET_EGRESS_METER,
@@ -65,6 +69,7 @@ import {
   type AssetObjectStore,
   BuiltinEicarScreener,
   InMemoryAssetAuditSink,
+  InMemoryAssetBundleIndexStore,
   InMemoryAssetMetadataStore,
   InMemoryAssetObjectStore,
   UnavailablePresigner,
@@ -82,6 +87,7 @@ import {
   presignAbortRequestSchema,
   presignCommitRequestSchema,
   presignUploadIntentRequestSchema,
+  pullQuerySchema,
   pushQuerySchema,
   withheldQuerySchema,
 } from "./schemas.js";
@@ -646,6 +652,12 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   // the default screener keeps living in exactly one place.
   const screener = composed === inner ? scanScreener : composed;
   const metadata = assetMetadataStoreFromEnv(env);
+  // #736: the `static_site` bundle file index lives in the SAME tenant D1 as
+  // `stored_assets`, so it is bound exactly when the metadata store is. Absent
+  // ⇒ the service's in-memory index, which matches the in-memory metadata
+  // fallback beside it: the two halves of a bundle version are never split
+  // across a durable store and an isolate-local one.
+  const bundles = assetBundleIndexStoreFromEnv(env);
   const audit = assetAuditSinkFromEnv(env);
   const objectStoreEnabled = objects !== undefined || devInMemoryPortsEnabled(env);
   // #262 egress governance (finding D4). ALWAYS supplied, never conditional on
@@ -662,6 +674,7 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   return {
     ...(objects !== undefined ? { objects } : {}),
     ...(metadata !== null ? { metadata } : {}),
+    ...(bundles !== null ? { bundles } : {}),
     ...(audit !== null ? { audit } : {}),
     ...(presigner !== null ? { presigner } : {}),
     ...(screener !== null ? { screener } : {}),
@@ -729,6 +742,7 @@ export function buildAssetService(deps?: Partial<AssetServiceDeps>): AssetServic
     presigner: deps?.presigner ?? new UnavailablePresigner(),
     screener: deps?.screener ?? new BuiltinEicarScreener(),
     audit: deps?.audit ?? new InMemoryAssetAuditSink(),
+    bundles: deps?.bundles ?? new InMemoryAssetBundleIndexStore(),
     limits: deps?.limits,
     now: deps?.now,
   });
@@ -970,13 +984,17 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
       // the #522 `agent_run_id` correlation exactly as the push/delete rows do.
       on("getAsset", async (c) => {
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
-        const query = parseOrThrow(platformQuerySchema, c.req.query());
+        const query = parseOrThrow(pullQuerySchema, c.req.query());
         return renderBytes(
           await serviceFor(c).pullAsset(
             await caller(c),
             { assetType: params.asset_type, name: params.name, reference: params.version },
             {
               platform: query.platform,
+              // #736: one file of an expanded `static_site` bundle. Threaded
+              // through the SAME operation, so channels/ranges/yank/variants
+              // are the ones already documented for `getAsset`.
+              bundlePath: query.path,
               headers: c.req.raw.headers,
               method: c.req.method,
             },

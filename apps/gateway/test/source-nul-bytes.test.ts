@@ -1,5 +1,5 @@
 /**
- * NO SOURCE FILE MAY CONTAIN A RAW NUL BYTE.
+ * NO SOURCE OR TEST FILE MAY CONTAIN A RAW NUL BYTE.
  *
  * This is not style. `grep` classifies a file containing a NUL as BINARY and
  * skips it silently — no warning, no non-zero exit, just a file that is not in
@@ -16,6 +16,26 @@
  * The fix is never to remove the separator — it is to write `"\0"`, which
  * produces the identical one-character string at runtime and leaves the source
  * file text.
+ *
+ * ## Why this guard scans TEST files too (issue #736)
+ *
+ * It did not, and that omission cost a whole review. `#736` shipped a raw NUL
+ * in `src/assets/ports.ts` — caught here — but ALSO two of them in
+ * `test/assets/bundle.test.ts`, in an `"MZ\0\0"` DOS-header fixture, and that
+ * one this guard could not see: it globbed `src/` only.
+ *
+ * The consequence was not cosmetic. Git classifies a file containing a NUL as
+ * BINARY, so `git diff --stat` reported that 684-line test file as
+ * `Bin 0 -> 24797 bytes` and `gh pr diff` emitted NO HUNK for it at all. A
+ * reviewer checking whether the PR had server-side security tests saw only the
+ * CLI packing tests and concluded the server-side ones were missing. They were
+ * not missing; they were invisible. A test file is evidence, and evidence that
+ * cannot be diffed or grepped is worse than absent, because absent is obvious.
+ *
+ * So the scan below is the union of every app's `src/` AND every app's
+ * `test/`, at any extension — and note that widening it to `test/` is also what
+ * finally brought the OTHER apps' `src/` under the NUL scan, which `SOURCES`
+ * (this Worker's own TypeScript, and nobody else's) never covered either.
  */
 import { describe, expect, it } from "vitest";
 
@@ -86,6 +106,33 @@ const ALL_WORKER_PATHS = import.meta.glob("../../*/src/**/*", {
   eager: true,
 });
 
+/**
+ * The same sweep over every app's `test/` tree, at any extension.
+ *
+ * This is the half of the guard that was missing until issue #736 (see the file
+ * header). It must be a SEPARATE literal glob rather than a `{src,test}` brace
+ * or a variable: `import.meta.glob` is a build-time textual transform, so the
+ * pattern has to be written out where Vite can read it.
+ *
+ * Test dirs carry no binary fixtures in this repo — every file under every
+ * app's test tree is text — so inlining them with `?raw` is safe. If a real
+ * binary fixture is ever added, it belongs in a `fixtures/` dir excluded here
+ * rather than being a reason to narrow the scan back to source.
+ */
+const ALL_WORKER_TEST_PATHS = import.meta.glob("../../*/test/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+/**
+ * Everything this guard is responsible for: every app's `src/` and every app's
+ * `test/`. Vite normalises the CITING package's own matches to `../…` and every
+ * sibling's to `../../<app>/…`, and the two maps cannot collide because one is
+ * keyed under `/src/` and the other under `/test/`.
+ */
+const ALL_SCANNED_PATHS = { ...ALL_WORKER_PATHS, ...ALL_WORKER_TEST_PATHS };
+
 describe("source hygiene", () => {
   it("globbed every source file — an empty scan would assert nothing", () => {
     // Without this the test below would pass vacuously if the glob pattern ever
@@ -128,11 +175,58 @@ describe("source hygiene", () => {
     ]);
   });
 
-  it("no path under any apps/*/src contains a control character", () => {
+  it("scanned every app's test/ — a src-only glob would assert nothing", () => {
+    // The vacuity guard for the widened half. Written to fail LOUDLY if the
+    // `test/` glob ever stops resolving, because the day it silently returns
+    // `{}` is the day the NUL scan below goes back to being src-only without
+    // anyone noticing — which is exactly how issue #736 happened.
+    const names = Object.keys(ALL_WORKER_TEST_PATHS);
+    expect(names.length).toBeGreaterThan(200);
+
+    // Vite resolves the citing package's OWN matches against this file's
+    // directory, so the gateway's tests arrive as `./…` while every sibling's
+    // arrive as `../../<app>/test/…`. (Vite omits the importing module itself
+    // from its own glob, so this file is not among them — anchor on a peer.)
+    expect(names).toContain("./contract.test.ts");
+    // A sibling app's test file, so a gateway-only glob cannot pass this.
+    expect(names.some((name) => name.startsWith("../../telemetry/test/"))).toBe(true);
+    // And a nested one, so a single-level glob cannot pass it either.
+    expect(names.some((name) => name.startsWith("./assets/"))).toBe(true);
+
+    const scanned = new Set(
+      names.map((name) =>
+        // `..` for the gateway's own tests, to match the `src/` census above.
+        name.startsWith("./")
+          ? ".."
+          : (name.split("/test/")[0]?.replace(/^\.\.\/\.\.\//, "") ?? ""),
+      ),
+    );
+    // `..` is `apps/gateway` itself, exactly as in the `src/` census above.
+    expect([...scanned].sort()).toEqual([
+      "..",
+      "agent-runtime",
+      "cli",
+      "control-plane",
+      "mcp",
+      "telemetry",
+    ]);
+  });
+
+  it("contains no raw NUL byte under any apps/*/src or apps/*/test", () => {
+    // The scan that issue #736 needed and did not have. `SOURCES` above covers
+    // only THIS Worker's `src/**/*.ts`; this covers every app's source and every
+    // app's tests, at any extension.
+    const offenders = Object.entries(ALL_SCANNED_PATHS)
+      .filter(([, text]) => text.includes(NUL))
+      .map(([name]) => name);
+    expect(offenders).toEqual([]);
+  });
+
+  it("no path under any apps/*/src or apps/*/test contains a control character", () => {
     // A newline in a FILE NAME makes `grep -rn` attribute one file's text to
     // another file's path. `\p{Cc}` is the Unicode control class: C0, DEL and
     // C1. A legitimate source path in this repo contains none of them.
-    const offenders = Object.keys(ALL_WORKER_PATHS)
+    const offenders = Object.keys(ALL_SCANNED_PATHS)
       .filter((name) => /\p{Cc}/u.test(name))
       // Report the FIRST line only: printing the whole name re-injects the
       // newline into the failure message and makes the report unreadable.

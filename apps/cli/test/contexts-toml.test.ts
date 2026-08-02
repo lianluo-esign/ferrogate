@@ -42,6 +42,8 @@ function fileIo(files: Map<string, string>, env: Record<string, string>): Io {
     },
     writeFileBytes: async () => {},
     fileExists: async (path) => files.has(path),
+    // This suite is about contexts.toml, not directory walks (#736).
+    listDirectory: async () => [],
     isStdinTty: () => false,
     randomBytes: (length) => new Uint8Array(length),
     nowUnixSeconds: () => 0,
