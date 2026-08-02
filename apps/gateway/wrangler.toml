@@ -585,6 +585,20 @@ ASSET_SCANNER_ENDPOINT = ""
 TELEMETRY_ENDPOINT = ""
 TELEMETRY_SERVICE_NAME = "ferrogate-gateway"
 TELEMETRY_SIGNALS = "metric,trace,log"
+# #669 — which attribute vocabulary spans and metrics carry.
+#
+#   dual       (DEFAULT) `ferrogate.*` AND the OTel GenAI conventions
+#              (`gen_ai.system`, `gen_ai.provider.name`, `gen_ai.request.model`,
+#              `gen_ai.response.model`, `gen_ai.usage.*`, `gen_ai.operation.name`,
+#              plus `gen_ai.client.token.usage` / `.operation.duration`).
+#              The span NAME stays `ferrogate.gateway.request`.
+#   genai      `gen_ai.*` only, and the semconv `{operation} {model}` span name.
+#              Opt into this once nothing reads the legacy attributes.
+#   ferrogate  Exactly the pre-#669 wire. The escape hatch, not a destination.
+#
+# Written out rather than left to the default so the knob is discoverable; the
+# VALUE is the default, so deleting this line changes nothing.
+TELEMETRY_ATTRIBUTE_PROFILE = "dual"
 
 # ---------------------------------------------------------------------------
 # Budget-threshold alert delivery (#170/#228) — Rust `[billing_alerts]`

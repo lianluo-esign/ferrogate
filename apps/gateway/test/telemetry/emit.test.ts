@@ -301,6 +301,107 @@ describe("the emitted payload is the OTLP apps/telemetry ingests", () => {
 });
 
 // ---------------------------------------------------------------------------
+// #669 — TELEMETRY_ATTRIBUTE_PROFILE
+// ---------------------------------------------------------------------------
+
+/**
+ * The profile is resolved ONCE per env inside `telemetryEmitterFor` and the
+ * emitter is memoized on the env object, so a profile cannot be varied within
+ * one isolate through `SELF.fetch`. That is why the three profiles are pinned
+ * here — each with its own `env` — while
+ * `apps/gateway/test/telemetry/genai.test.ts` proves the DEFAULT one end to
+ * end through the deployed Worker.
+ */
+describe("TELEMETRY_ATTRIBUTE_PROFILE selects the attribute vocabulary", () => {
+  const WITH_GENAI: RequestTelemetry = {
+    ...TELEMETRY,
+    genai: {
+      operationName: "chat",
+      providerName: "anthropic",
+      requestModel: "claude-sonnet",
+      responseModel: "claude-sonnet-4-20250514",
+      inputTokens: 11,
+      outputTokens: 3,
+      durationSeconds: 0.12,
+    },
+  };
+
+  async function emitted(profile: string | undefined): Promise<{
+    readonly spanName: string;
+    readonly attributes: Record<string, string>;
+    readonly metricNames: string[];
+  }> {
+    const service = recordingService();
+    await telemetryEmitterFor({
+      TELEMETRY_COLLECTOR: service,
+      TELEMETRY_TOKEN: "tok",
+      ...(profile === undefined ? {} : { TELEMETRY_ATTRIBUTE_PROFILE: profile }),
+    }).emit(WITH_GENAI);
+    const traces = service.received[0]?.body as {
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: {
+                name: string;
+                attributes: { key: string; value: { stringValue: string } }[];
+              }[];
+            },
+          ];
+        },
+      ];
+    };
+    const span = traces.resourceSpans[0].scopeSpans[0].spans[0] as {
+      name: string;
+      attributes: { key: string; value: { stringValue: string } }[];
+    };
+    const metrics = service.received[1]?.body as {
+      resourceMetrics: [{ scopeMetrics: [{ metrics: { name: string }[] }] }];
+    };
+    return {
+      spanName: span.name,
+      attributes: Object.fromEntries(
+        span.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]),
+      ),
+      metricNames: metrics.resourceMetrics[0].scopeMetrics[0].metrics.map((m) => m.name),
+    };
+  }
+
+  it("emits BOTH vocabularies when the var is absent", async () => {
+    const wire = await emitted(undefined);
+    expect(wire.attributes["route"]).toBe("createChatCompletion");
+    expect(wire.attributes["gen_ai.request.model"]).toBe("claude-sonnet");
+    // The legacy span NAME survives the default, because that is what a saved
+    // dashboard query filters on.
+    expect(wire.spanName).toBe("ferrogate.gateway.request");
+    expect(wire.metricNames).toContain("gen_ai.client.token.usage");
+    expect(wire.metricNames).toContain("ferrogate.request_logs");
+  });
+
+  it("drops the ferrogate.* half and takes the semconv span name under `genai`", async () => {
+    const wire = await emitted("genai");
+    expect(wire.attributes["route"]).toBeUndefined();
+    expect(wire.attributes["request_id"]).toBeUndefined();
+    expect(wire.attributes["gen_ai.operation.name"]).toBe("chat");
+    expect(wire.attributes["gen_ai.system"]).toBe("anthropic");
+    expect(wire.spanName).toBe("chat claude-sonnet");
+    expect(wire.metricNames).toContain("gen_ai.client.token.usage");
+    // The request/status COUNTERS are not the AI half and are not dropped:
+    // narrowing the attribute vocabulary must not take out an operator's HTTP
+    // error-rate panel.
+    expect(wire.metricNames).toContain("ferrogate.request_logs");
+  });
+
+  it("reproduces the exact pre-#669 wire under `ferrogate`", async () => {
+    const wire = await emitted("ferrogate");
+    expect(wire.spanName).toBe("ferrogate.gateway.request");
+    expect(wire.attributes["route"]).toBe("createChatCompletion");
+    expect(Object.keys(wire.attributes).some((key) => key.startsWith("gen_ai."))).toBe(false);
+    expect(wire.metricNames.some((name) => name.startsWith("gen_ai."))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // A telemetry outage is a NO-OP for the request
 // ---------------------------------------------------------------------------
 

@@ -60,6 +60,7 @@
 import type { MiddlewareHandler } from "hono";
 import type { GatewayEnv } from "../ports.js";
 import { emitRequestTelemetry } from "./emit.js";
+import { genAiInvocationFor } from "./genai.js";
 import type { RequestTelemetry } from "./ports.js";
 
 /**
@@ -90,7 +91,20 @@ export function requestTelemetry(): MiddlewareHandler<GatewayEnv> {
     const startedAtMs = Date.now();
     await next();
 
+    const endedAtMs = Date.now();
     const auth = c.get("auth");
+    // #669 — whatever the inference handler observed about this request's
+    // model/provider/tokens, in semconv terms. `undefined` for the 25
+    // non-inference operations, which then carry no `gen_ai.*` at all.
+    //
+    // The duration is the GATEWAY-observed one (`await next()` to the response
+    // object), not the provider's own latency: the gateway is the client in
+    // `gen_ai.client.operation.duration`, and what a customer's dashboard needs
+    // to see is what their caller waited for, queueing and policy included.
+    const genai = genAiInvocationFor(c.req.raw, {
+      durationSeconds: (endedAtMs - startedAtMs) / 1000,
+      ...(c.res.status >= 400 ? { errorType: String(c.res.status) } : {}),
+    });
     const telemetry: RequestTelemetry = {
       // The id the CLIENT was told, read off the response the client got —
       // not `c.get("requestId")`. The two are usually the same string, but the
@@ -112,7 +126,8 @@ export function requestTelemetry(): MiddlewareHandler<GatewayEnv> {
       route: c.get("operation")?.operationId ?? "unmatched",
       statusCode: c.res.status,
       startedAtMs,
-      endedAtMs: Date.now(),
+      endedAtMs,
+      ...(genai === undefined ? {} : { genai }),
       // `auth.tenancy.tenantId` is the AUTHENTICATED tenant — never a
       // client-declared header. A platform-operator credential carries none,
       // and the collector indexes those under its own `unknown` sentinel

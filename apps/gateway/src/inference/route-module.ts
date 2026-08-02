@@ -42,7 +42,7 @@ import {
   INFERENCE_OPERATION_IDS,
   type RouteModule,
 } from "../routes/index.js";
-import { emitRequestTelemetry } from "../telemetry/index.js";
+import { emitRequestTelemetry, genAiInvocationFor } from "../telemetry/index.js";
 import { createInferenceRouter } from "./handlers.js";
 import type { InferenceEnv } from "./handlers.js";
 import {
@@ -167,6 +167,17 @@ function emitInferenceTelemetry(
 ): void {
   const auth = c.get("auth");
   const requestId = response.headers.get("x-request-id") ?? c.get("requestId");
+  const endedAtMs = Date.now();
+  // #669. Derived exactly as `src/telemetry/middleware.ts` derives it, and that
+  // is a REQUIREMENT rather than a coincidence: `test/telemetry/mount.test.ts`
+  // pins that the two mounts produce one de-duplicated emission, so the moment
+  // they disagree about a field the surviving emission is whichever one ran
+  // first — a non-deterministic payload. If this expression and the
+  // middleware's ever diverge, one of them is wrong.
+  const genai = genAiInvocationFor(c.req.raw, {
+    durationSeconds: (endedAtMs - startedAtMs) / 1000,
+    ...(response.status >= 400 ? { errorType: String(response.status) } : {}),
+  });
   emitRequestTelemetry(c.env, executionCtxOf(c), c.req.raw, {
     requestId,
     traceId: c.get("traceparent") ? (c.get("traceId") ?? requestId) : requestId,
@@ -175,7 +186,8 @@ function emitInferenceTelemetry(
     route: operationId,
     statusCode: response.status,
     startedAtMs,
-    endedAtMs: Date.now(),
+    endedAtMs,
+    ...(genai === undefined ? {} : { genai }),
     // The AUTHENTICATED tenant, never a client-declared header. Absent for a
     // platform-operator credential, which the collector indexes under its own
     // `unknown` sentinel rather than under a fabricated tenant.
