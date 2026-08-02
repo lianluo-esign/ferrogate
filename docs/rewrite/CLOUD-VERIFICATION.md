@@ -20,9 +20,11 @@ yet resolvable is called out **before** the deploy rather than discovered by a
 500 afterwards.
 
 Read §0 first — several of the committed defaults must be changed or the
-deployed Workers will run in a dev posture: `FG_DEV_IN_MEMORY_PORTS` (B1),
-`FG_REQUIRE_PRODUCTION_MTLS` (B6), and the two commented-out cross-script
-`RATE_LIMIT` stanzas (B10). None of the three can be gated by a local test.
+deployed Workers will run in a dev posture: `FG_DEV_IN_MEMORY_PORTS` (B1) and
+`FG_REQUIRE_PRODUCTION_MTLS` (B6). Neither can be gated by a local test. **B10
+(the two cross-script `RATE_LIMIT` stanzas) is CLOSED as of issue #666**: both
+stanzas are committed LIVE, are gated offline, and the only thing left of B10 is
+the deploy ORDER, which now fails the deploy rather than failing silently.
 
 ---
 
@@ -39,7 +41,7 @@ deployed Workers will run in a dev posture: `FG_DEV_IN_MEMORY_PORTS` (B1),
 | B7 | **The admin console + every SSO login is DOWN without `ADMIN_CONSOLE_JWT_SECRET`** on **apps/control-plane** | `apps/control-plane/wrangler.toml` (documented, never declared in `[vars]`) | **Added wave 18**, with the surface itself. `wrangler secret put ADMIN_CONSOLE_JWT_SECRET --name ferrogate-control-plane` BEFORE the first console request. Unset is fail-closed and loud — `POST /v1/admin/login`, `/register`, `/refresh`, `GET /me`, `/team*`, and both SSO callbacks answer `503 admin_console_unconfigured` — so nothing is silently forgeable; but the console is simply unusable until it is set. It must NOT be added to `[vars]`: that file is committed. |
 | B8 | **SSO per-tenant IdP secrets are `env://` references, and the referenced secrets must exist** | `sso_provider_configs.oidc_client_secret_ref` (a D1 row, not config) | **Added wave 18.** A tenant's OIDC config stores `env://<NAME>`, never the secret, so the control-plane row can never leak a live IdP credential. Each `<NAME>` must be provisioned with `wrangler secret put <NAME> --name ferrogate-control-plane`. An unresolvable reference fails the login CLOSED (`500`, no session), which is correct but indistinguishable from an IdP outage in the logs — check this explicitly during the run. SAML needs no secret at all: its trust anchor is the certificate the tenant owner pasted into `POST /v1/admin/team/sso-config`. |
 | B9 | **The control migrations are now TWO files** | `sql/d1-ts/control/` | **Added wave 18.** `0002_sso_flow_nonce.sql` adds the OIDC `nonce` column to `sso_pending_flows`. `wrangler d1 migrations apply` runs both in order; a database migrated by an earlier wave needs the second file applied or every OIDC callback refuses (the nonce rung cannot be checked). §3's command is unchanged — only the file count is. |
-| B10 | **The shared RPM counter is ONE counter on `apps/gateway` only. `apps/mcp` and `apps/agent-runtime` carry the cross-script `RATE_LIMIT` stanza COMMENTED OUT** | `apps/mcp/wrangler.toml:225-231`, `apps/agent-runtime/wrangler.toml:170-176` | **Added wave 19.** Uncomment both stanzas at deploy time, AFTER `ferrogate-gateway` is deployed (a `script_name` binding is resolved by name at deploy time — see §1's deploy order; the gateway is step 3, so both of these move after it). They are committed commented out because workerd cannot resolve a `script_name` binding offline: uncommenting takes each app's suite to **0 collected tests** (`binding "RATE_LIMIT" refers to a service "core:user:ferrogate-gateway", but no such service is defined`), so this can never be gated by a local test and is a **human step with no mechanical backstop**. Left commented, a credential capped at 60 rpm is charged **60 on the gateway PLUS 60×N across N MCP isolates PLUS 60×M across M agent-runtime isolates** — i.e. the RPM ceiling is not enforced fleet-wide. The other four admission legs (quota scope, monthly USD budget, prepaid-wallet hold, counter-key derivation) ARE shared and durable across all three and are proven by `apps/gateway/test/admission-consistency.test.ts`. **Do NOT instead define a local `RateLimiterDurableObject` in either Worker**: that compiles, deploys and passes every test while handing each Worker its own private counter and a second full RPM allowance — a quieter version of the admission bypass wave 16 closed. `apps/{mcp,agent-runtime}/test/env-var-drift.test.ts` pins the three ways the commented stanza can rot (uncommented locally, `script_name` dropped, or a `new_sqlite_classes` added for a class the script does not export). |
+| B10 | **CLOSED by #666.** ~~The shared RPM counter is ONE counter on `apps/gateway` only; `apps/mcp` and `apps/agent-runtime` carry the cross-script `RATE_LIMIT` stanza COMMENTED OUT~~ | `apps/mcp/wrangler.toml`, `apps/agent-runtime/wrangler.toml` | **Added wave 19; closed 2026-08-02 (#666).** Both stanzas are now committed LIVE, so there is nothing to uncomment and no human step to forget. The reason they were commented — workerd refusing to start on a `script_name` it cannot resolve — was a property of the SESSION, not of workerd: each borrower's `vitest.config.ts` now registers an auxiliary worker named `ferrogate-gateway` carrying the gateway's real `RateLimiterDurableObject` (`apps/gateway/test/support/rate-limit-aux-worker.ts`), and `apps/{mcp,agent-runtime}/test/shared-rate-limit.test.ts` charge a window through the binding as the gateway would and require the borrower to find it spent. **What survives of B10 is the deploy ORDER**: `ferrogate-gateway` must be deployed FIRST, because a `script_name` binding to a script that does not exist is rejected by `wrangler deploy` — loudly, which is the mechanical backstop this row used to say did not exist. **Do NOT define a local `RateLimiterDurableObject` in either Worker**: that compiles, deploys and passes the app's own suite while handing each Worker its own private counter and a second full RPM allowance. The config gates in `apps/{mcp,agent-runtime}/test/{env-var-drift,wrangler-bindings}.test.ts` and `apps/gateway/test/{fleet-consistency,fleet-control-matrix}.test.ts` fail on every route to that. |
 
 | B11 | **`POST /admin/v1/drain` is now a REAL fleet control, and it needs `CONTROL_DB` bound on all three spend Workers to be one** | `apps/{gateway,mcp,agent-runtime}` | **Added wave 22 (FLEET-CONSISTENCY FC-1, all three legs closed).** The operator drain used to be a no-op: the control plane wrote the durable `runtime-state/drain` document and nothing read it, while `apps/gateway` refused off the unrelated deploy-time `GATEWAY_DRAIN` var. All three spend Workers now read that document per request and refuse the spend-producing operations with the same `503 node_draining`. **No new binding was introduced** — each Worker reads it through the control-database handle it already declares (`CONTROL_DB` on gateway and agent-runtime, `DB` on mcp), so there is no new stanza, no new placeholder id, no `[[migrations]]` tag and no `src/worker.ts` re-export. `apps/gateway/test/env-var-drift.test.ts` ("FC-1's durable drain needed NO new binding — wave 22 is wrangler-INERT") asserts that rather than asserting it in prose. The DEPLOY consequence is the one to check during the run: **agent-runtime's two `[[d1_databases]]` stanzas are still committed commented out (B4)**, so on a deployment that leaves them commented `POST /admin/v1/drain` shuts the gateway and mcp and NOT agent-runtime — the same partial-control shape FC-1 was, reintroduced by configuration rather than by code. Uncomment them (B4) or record explicitly that agent-runtime was not covered. `GATEWAY_DRAIN` survives as a gateway-only DEPLOY-TIME override, OR-ed with the document, never "latest wins": either source drains and neither cancels the other, so a stale var cannot silently un-drain a deployment an operator just drained by API. |
 
@@ -278,18 +280,17 @@ Deploy, in this order: `telemetry` → `control-plane` → `gateway` → `mcp` �
 `agent-runtime`. (§1 explains why it is not arbitrary: `TELEMETRY_COLLECTOR` and
 `RATE_LIMIT` are both resolved **by name at deploy time**.)
 
-20. **AFTER `ferrogate-gateway` is deployed and BEFORE `ferrogate-mcp` and
-    `ferrogate-agent-runtime`: uncomment the cross-script `RATE_LIMIT` stanza in
-    BOTH** `apps/mcp/wrangler.toml` (~:225) and `apps/agent-runtime/wrangler.toml`
-    (~:170) — see **B10**. This step has **no mechanical backstop of any kind**:
-    it cannot be gated locally (uncommenting takes each app's suite to 0
-    collected tests, because workerd cannot resolve a `script_name` binding
-    offline), it does not fail the deploy, and it does not error at runtime.
-    Skipped, the fleet-wide RPM ceiling is silently multiplied by the isolate
-    count. **Do NOT "fix" this by defining a local `RateLimiterDurableObject` in
-    either Worker** — that deploys cleanly, passes everything, and hands each
-    Worker its own private counter and a second full RPM allowance.
-    Confirm with **V-B10**.
+20. **NOTHING TO UNCOMMENT — closed by #666.** This step used to read "uncomment
+    the cross-script `RATE_LIMIT` stanza in BOTH `apps/mcp/wrangler.toml` and
+    `apps/agent-runtime/wrangler.toml`", and it was the one item in the whole run
+    with no mechanical backstop of any kind. Both stanzas are now committed LIVE.
+    What remains is the ORDER above, and it is now self-enforcing: deploy
+    `ferrogate-mcp` or `ferrogate-agent-runtime` before `ferrogate-gateway` and
+    `wrangler deploy` REFUSES — a `script_name` binding cannot resolve a script
+    that does not exist yet. **Do NOT "fix" such a refusal by defining a local
+    `RateLimiterDurableObject` in either Worker** — that deploys cleanly, passes
+    the app's own suite, and hands each Worker its own private counter and a
+    second full RPM allowance. Confirm the sharing with **V-B10**.
 
 Verify with real requests — the smallest set that actually proves the wiring:
 
@@ -330,7 +331,7 @@ controls are whole, and three of them are not. These rows exist so the live run
 |---|---|---|---|
 | **V-R1** ✅ **FIX SHIPPED, WAVE 24 — now expected to PASS** | Set `plans.mcp_enabled = 0` for the verification tenant (or bind it to a plan that never granted MCP — `mcp_enabled INTEGER NOT NULL DEFAULT 0`, so the schema default is OFF), then call MCP `tools/call` **and** `POST /v1/tools/execute` with that tenant's credential. The tenant MUST have a `tenants` row (denial requires a REGISTERED tenant, exactly as Rust's `tenant_account_exists &&` first conjunct) and MUST NOT hold a bound role granting `mcp.execute` | **PASSES.** `resolvePorts` binds `D1ToolEntitlements` (`apps/mcp/src/entitlements.ts`, seam `MCP-P15`) over the CONTROL `DB` — the same `plans` rows the control plane writes. Mutation-proven: unmounting it takes `test/entitlements.test.ts` to 5 failed / 3 passed (8). **This row is the account-side evidence; nothing local can prove the CONTROL D1 is the deployed one** | `403 mcp_tools_disabled` on BOTH transports, matching Rust `local.rs:137 tool_execution_entitlement_denial`. Grant the tenant a role naming `mcp.execute` (with the `permissions` row DECLARED) and both must ADMIT — the plan-OR-role arm |
 | **V-R2** | `UPDATE api_keys SET monthly_token_budget = 0` for a test credential, then call all three spend Workers | **PARTIAL: `429 token_budget_exceeded` on the gateway ONLY.** `apps/mcp/src/auth.ts::TENANT_KEY_SQL` and `apps/agent-runtime/src/durable/adapters.ts::FIND_KEYS_BY_PREFIX_SQL` open the same `api_keys` row and do not select the column; neither Worker can emit the code at all | `429 token_budget_exceeded` on all three, as Rust's shared `authenticate_durable` (`auth.rs:1344`) gave every handler |
-| **V-B10** | Drive **N > 1 concurrent isolates** on `apps/mcp` against a credential capped at 60 rpm and count the admitted requests | **FAILS unless both `RATE_LIMIT` stanzas were uncommented at deploy (B10).** Left commented, `counterFromEnv` degrades to a per-isolate counter and roughly 60×N are admitted, with nothing logged and nothing errored | exactly one 60-request window fleet-wide |
+| **V-B10** | Drive **N > 1 concurrent isolates** on `apps/mcp` against a credential capped at 60 rpm and count the admitted requests | **Expected to PASS since #666** — both stanzas are committed live and offline-gated. It is still worth running: what no offline gate can see is whether the DEPLOYED `ferrogate-gateway` is the script the binding resolved to. A per-isolate degradation would show as roughly 60×N admitted, with nothing logged and nothing errored | exactly one 60-request window fleet-wide |
 
 **Run V-R1 and V-R2 anyway.** They cost one admin write each. **V-R1 flipped to
 expected-PASS in wave 24** and is now the only account-side evidence that the
@@ -423,10 +424,12 @@ in §3, the secret semantics in §4 ("absent = inert, never absent = insecure"),
 the declared-but-unreadable table in §5, and the expected-FAIL rows in §7 were
 all re-read and are accurate. In particular:
 
-* **`V-R2` and `V-B10` are still expected to FAIL**, and they must still be run.
-  A verification plan that omits a known-failing check is worse than one that
-  admits it: an operator who runs §6 and sees every row pass will reasonably
-  conclude the fleet controls are whole, and two of them are not.
+* **`V-R2` is still expected to FAIL**, and it must still be run. A verification
+  plan that omits a known-failing check is worse than one that admits it: an
+  operator who runs §6 and sees every row pass will reasonably conclude the fleet
+  controls are whole, and one of them is not. (**`V-B10` moved to expected-PASS
+  on 2026-08-02**, when issue #666 made both cross-script `RATE_LIMIT` stanzas
+  live and offline-provable.)
 * **`V-R1` is expected to PASS** since wave 24, and it is now the only
   account-side evidence that the entitlement ladder reads the *deployed* control
   database rather than a placeholder `database_id`.
