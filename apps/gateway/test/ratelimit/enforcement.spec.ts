@@ -55,10 +55,60 @@ describe("admission", () => {
     expect(body.error.message).toBe(
       `API key request rate limit is exhausted for request ${body.error.request_id}`,
     );
-    // Rust attaches NO Retry-After to its 429s (`write_json_error` writes
-    // content-type/length + the request/trace ids + CORS, nothing else).
-    expect(denied.headers.get("retry-after")).toBeNull();
     expect(denied.headers.get("x-request-id")).not.toBeNull();
+  });
+
+  test("the 429 tells the caller WHEN to come back, and against WHICH limit", async () => {
+    // CHANGED BEHAVIOUR (#726). This assertion used to read
+    //
+    //     // Rust attaches NO Retry-After to its 429s (`write_json_error` writes
+    //     // content-type/length + the request/trace ids + CORS, nothing else).
+    //     expect(denied.headers.get("retry-after")).toBeNull();
+    //
+    // i.e. it PINNED the defect: byte-parity with a Rust gateway that emitted
+    // no pacing headers. That parity has a client-visible cost — both official
+    // SDKs fall back to a blind exponential schedule with no `retry-after` —
+    // and #726 decides the cost is not worth paying. The old assertion is
+    // replaced deliberately, not deleted quietly.
+    //
+    // `fg_rl_a1`'s tenant window (rpm_limit 3) is already exhausted by the
+    // tests above, so this request is refused by that window and by no other.
+    const denied = await get("fg_rl_a1");
+    expect(denied.status).toBe(429);
+
+    // The LIMIT is the tenant's real configured cap, read off the window that
+    // refused — not a constant, and not the plan floor of 2.
+    expect(denied.headers.get("x-ratelimit-limit-requests")).toBe("3");
+    // A window that refused has, by definition, nothing left.
+    expect(denied.headers.get("x-ratelimit-remaining-requests")).toBe("0");
+
+    // `retry-after` is whole seconds until THIS window rolls, so it is
+    // somewhere in (0, 60] — never absent, never a fixed number. A constant
+    // would synchronise every client in the fleet onto one retry instant.
+    const retryAfter = Number(denied.headers.get("retry-after"));
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(60);
+    // The reset marker is the same number in OpenAI's documented duration form,
+    // which is what a client parsing `x-ratelimit-reset-*` expects to find.
+    expect(denied.headers.get("x-ratelimit-reset-requests")).toBe(`${retryAfter}s`);
+
+    // A SECOND refusal, later in the same window, must count DOWN rather than
+    // repeat a canned value. This is the assertion a hard-coded `retry-after`
+    // cannot satisfy and the reason the check is not just "is it present".
+    const again = await get("fg_rl_a1");
+    const secondRetryAfter = Number(again.headers.get("retry-after"));
+    expect(secondRetryAfter).toBeLessThanOrEqual(retryAfter);
+  });
+
+  test("a 403 quota refusal carries NO retry-after — waiting cannot fix it", async () => {
+    // `fg_rl_disabled`'s policy is switched off: there is no window, so there
+    // is no honest number to give. Emitting one would tell a client to retry
+    // into a permanent refusal.
+    const response = await get("fg_rl_disabled");
+    expect(response.status).toBe(403);
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(response.headers.get("x-ratelimit-limit-requests")).toBeNull();
   });
 
   test("a tenant-scope cap is ONE aggregate window across every key under it", async () => {

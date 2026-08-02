@@ -131,8 +131,19 @@ export {
   TokenWindow,
   WalletLedger,
   emptyWindow,
+  remainingInWindow,
   secondsUntilWindowReset,
 } from "./window.js";
+
+// #726 — the pacing headers a refusal carries. Exported so a composition that
+// renders a 429 outside this middleware cannot invent its own header names.
+export {
+  type RateLimitDenial,
+  type RateLimitDimension,
+  RETRY_AFTER_HEADER,
+  rateLimitDenialHeaders,
+  rateLimitHeaderNames,
+} from "./headers.js";
 
 export {
   type DoRequestResult,

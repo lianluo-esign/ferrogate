@@ -179,7 +179,7 @@ describe("openai SDK — error taxonomy", () => {
     }
   });
 
-  it("DIVERGENCE: a provider 429's `retry-after` never reaches the client", async () => {
+  it("a provider 429's `retry-after` reaches the client (#726, was a DIVERGENCE)", async () => {
     const upstream = interceptUpstream(
       () =>
         new Response(
@@ -203,15 +203,19 @@ describe("openai SDK — error taxonomy", () => {
       expect(error).toBeInstanceOf(RateLimitError);
       expect(error.message).toContain("slow down");
 
-      // DIVERGENCE, reported not fixed: the gateway answers with its OWN header
-      // set (`gatewayHeaders`, apps/gateway/src/inference/errors.ts) and drops
-      // every upstream header. Both SDKs read `retry-after` / `retry-after-ms`
-      // to time their backoff, and OpenAI documents the `x-ratelimit-*` family
-      // as the way clients pace themselves. Behind FerroGate a client sees
-      // NEITHER, so it falls back to a blind exponential schedule and cannot
-      // pace at all.
-      expect(error.headers?.get("retry-after")).toBeNull();
-      expect(error.headers?.get("x-ratelimit-remaining-requests")).toBeNull();
+      // FIXED by #726. This block previously asserted BOTH of these were
+      // `null`, and said so as a reported-not-fixed divergence: the gateway
+      // answered with its own `gatewayHeaders` set and dropped every upstream
+      // header, so an SDK behind FerroGate fell back to a blind exponential
+      // schedule. `relayedRateLimitHeaders`
+      // (apps/gateway/src/inference/errors.ts) now relays the two documented
+      // pacing families, and the assertions are inverted deliberately.
+      //
+      // Read off the exception the SDK CONSTRUCTED, which is what its own
+      // `calculateDefaultRetryTimeoutMillis` reads when retries are enabled.
+      expect(error.headers?.get("retry-after")).toBe("7");
+      expect(error.headers?.get("x-ratelimit-remaining-requests")).toBe("0");
+      expect(error.headers?.get("x-ratelimit-reset-requests")).toBe("7s");
     } finally {
       upstream.restore();
     }
@@ -245,13 +249,21 @@ describe("openai SDK — error taxonomy", () => {
       expect(error).toBeInstanceOf(RateLimitError);
       expect(error.status).toBe(429);
       expect(error.code).toBe("rate_limit_exceeded");
-      // DIVERGENCE, and the one with real client consequences: FerroGate emits
-      // NO `Retry-After`. `apps/gateway/src/ratelimit/ports.ts:269` documents
-      // this as deliberate parity with the Rust gateway (which emitted none
-      // either), but both SDKs read `retry-after` / `retry-after-ms` to time
-      // their backoff and fall back to a blind exponential schedule without it.
-      // So a throttled client retries on ITS schedule, not the gateway's.
-      expect(error.headers?.get("retry-after")).toBeNull();
+      // FIXED by #726. This used to assert `retry-after` was `null` and called
+      // it "the divergence with real client consequences": FerroGate's own 429
+      // told a throttled client nothing, so it retried on ITS schedule rather
+      // than the gateway's. The values are derived from the window that refused
+      // (`apps/gateway/src/ratelimit/headers.ts`), never constants.
+      const retryAfter = Number(error.headers?.get("retry-after"));
+      expect(Number.isInteger(retryAfter)).toBe(true);
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+      // The tenant's seeded cap is 2/min (see the `beforeAll` above) — the
+      // number an SDK needs to size its own concurrency, and one no constant
+      // implementation would produce.
+      expect(error.headers?.get("x-ratelimit-limit-requests")).toBe("2");
+      expect(error.headers?.get("x-ratelimit-remaining-requests")).toBe("0");
+      expect(error.headers?.get("x-ratelimit-reset-requests")).toBe(`${retryAfter}s`);
     } finally {
       upstream.restore();
     }

@@ -32,7 +32,11 @@
  */
 import type { MiddlewareHandler } from "hono";
 import { describe, expect, it } from "vitest";
-import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
+import {
+  InMemoryModelResolver,
+  estimateChatCompletionUsage,
+  inferenceRouteModule,
+} from "../../src/inference/index.js";
 import type { GatewayEnv } from "../../src/ports.js";
 import { InMemoryRateLimiter, rateLimit } from "../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
@@ -202,6 +206,77 @@ describe("the mounted module enforces the resolved TPM window", () => {
       // The refusal happened BEFORE dispatch — the whole point of a
       // pre-dispatch gate is not paying a provider for a request it refuses.
       expect(provider.requests).toHaveLength(1);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("tells the caller how big the TOKEN window is and what is left of it (#726)", async () => {
+    // The TPM refusal is the one place where "remaining" is NOT trivially zero:
+    // `TokenWindow.tryConsume` refuses on `used + estimate > limit`, so a
+    // refused caller can still have real headroom — just not enough for THIS
+    // request. Emitting a constant `0` here (the shape a presence-only test
+    // cannot tell apart) would tell a client with 84 tokens left that it has
+    // none, and it would stop sending the small requests that still fit.
+    const provider = interceptProviderFetch(() => okChatCompletion());
+    try {
+      const call = gateway(TPM_ENV, [rateLimit({ limiter: new InMemoryRateLimiter() })]);
+      const post = () =>
+        call(CHAT, { method: "POST", headers: bearer("fg_other_tenant"), body: CHAT_BODY });
+
+      expect((await post()).status).toBe(200);
+      const denied = await post();
+      expect(denied.status).toBe(429);
+
+      // The window's own configured cap, not the RPM one (1000) and not a
+      // constant: `GATEWAY_QUOTA_POLICIES` above says 600.
+      expect(denied.headers.get("x-ratelimit-limit-tokens")).toBe("600");
+      // Exactly what the first request left behind. The estimator is imported
+      // rather than a number being pinned, so this stays true if the default
+      // completion reservation changes — and stays FALSE for any implementation
+      // that reports a constant.
+      const charged = estimateChatCompletionUsage(JSON.parse(CHAT_BODY), "gpt-4o-mini")
+        .totalTokens;
+      expect(charged).toBeGreaterThan(0);
+      expect(denied.headers.get("x-ratelimit-remaining-tokens")).toBe(String(600 - charged));
+
+      const retryAfter = Number(denied.headers.get("retry-after"));
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+      expect(denied.headers.get("x-ratelimit-reset-tokens")).toBe(`${retryAfter}s`);
+      // The REQUESTS dimension is untouched: this window did not refuse, and
+      // reporting it would be inventing a number.
+      expect(denied.headers.get("x-ratelimit-limit-requests")).toBeNull();
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("counts `retry-after` down from where the window actually is (#726)", async () => {
+    // THE ASSERTION A CONSTANT CANNOT PASS. A `retry-after` hard-coded to the
+    // window length is worse than none: it is wrong for every caller except one
+    // that arrived at the instant the window opened, and it wakes the whole
+    // fleet together. So the clock is driven explicitly and the value is pinned
+    // to an exact mid-window number rather than a range.
+    //
+    // The window opens at t=1000 (first request). At t=1025, 25 of the 60
+    // seconds are gone and the honest answer is 35 — not 60, and not 0.
+    const clock = { now: 1000 };
+    const provider = interceptProviderFetch(() => okChatCompletion());
+    try {
+      const call = gateway(TPM_ENV, [
+        rateLimit({ limiter: new InMemoryRateLimiter({ clock: () => clock.now }) }),
+      ]);
+      const post = () =>
+        call(CHAT, { method: "POST", headers: bearer("fg_other_tenant"), body: CHAT_BODY });
+
+      expect((await post()).status).toBe(200);
+      clock.now = 1025;
+      const denied = await post();
+
+      expect(denied.status).toBe(429);
+      expect(denied.headers.get("retry-after")).toBe("35");
+      expect(denied.headers.get("x-ratelimit-reset-tokens")).toBe("35s");
     } finally {
       provider.restore();
     }
