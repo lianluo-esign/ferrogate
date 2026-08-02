@@ -22,6 +22,10 @@ import {
   openaiEmbeddingsResponse,
   parseEmbeddingsResponseBody,
 } from "./gemini.js";
+import {
+  applyStructuredOutputToBedrockConverse,
+  structuredOutputFromChatBody,
+} from "./structured.js";
 import { sign } from "./sigv4.js";
 import type { AwsCredentials, SigningRequest } from "./sigv4.js";
 import { asStr, asU64, getField, isArray, isObject, parseJson } from "./json.js";
@@ -48,6 +52,12 @@ export class BedrockAdapter extends BaseProviderAdapter {
     if (system !== undefined) bedrockBody["system"] = system;
     const config = inferenceConfig(body);
     if (config !== undefined) bedrockBody["inferenceConfig"] = config;
+    // Converse has no `response_format`; the schema becomes a forced `toolConfig`
+    // tool, the Anthropic coercion in Converse's envelope (issue #674).
+    const structured = structuredOutputFromChatBody(body);
+    if (structured !== undefined) {
+      applyStructuredOutputToBedrockConverse(bedrockBody, structured, provider.kind);
+    }
 
     const path = `/model/${percentEncodePathSegment(request.providerModel)}/converse`;
     return signBedrockRequest(provider, credentials, path, bedrockBody, request.stream);

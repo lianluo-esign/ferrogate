@@ -734,6 +734,25 @@ export function resolveControlDatabase(env: ControlPlaneBindings): D1Database | 
   return env.DB ?? null;
 }
 
+/**
+ * The audit-anchor bucket (#684), or `null` when the deployment binds none.
+ *
+ * Deliberately NOT gated on `CONTROL_PLANE_STORE`, unlike its siblings above:
+ * the anchor is evidence ABOUT the control database, and the reason to keep it
+ * in a separate store is precisely that a database operator should not be able
+ * to remove it. Coupling it to the store switch would mean a deployment could
+ * turn off the audit chain's anchor by changing a var about something else.
+ *
+ * `null` is a supported DEGRADED posture: the chain still detects an edited or
+ * mid-trail-deleted row, but a tail deletion or a full re-forge goes unseen.
+ * `runScheduledTick` reports that as `audit_anchor: "unconfigured"` rather than
+ * failing the tick, because a control plane that refused to run without an
+ * evidence bucket would be down for a compliance feature.
+ */
+export function resolveAuditAnchorBucket(env: ControlPlaneBindings): R2Bucket | null {
+  return env.AUDIT_ANCHORS ?? null;
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},

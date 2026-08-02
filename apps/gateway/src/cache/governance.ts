@@ -12,7 +12,7 @@
  * an operator control at all, it is a deploy artefact.
  *
  * This module is the durable source: `semantic_cache_policies` on `CONTROL_DB`
- * (`sql/d1-ts/control/0003_semantic_cache_policies.sql`), written by
+ * (`sql/d1-ts/control/0004_semantic_cache_policies.sql`), written by
  * `/admin/v1/semantic-cache-policies/**` in `apps/control-plane` and read here
  * on the request path.
  *

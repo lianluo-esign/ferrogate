@@ -49,6 +49,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   RequestWindow,
+  SpendLedger,
   TokenBudgetLedger,
   TokenWindow,
   WalletLedger,
@@ -85,6 +86,8 @@ export class RateLimiterDurableObject extends DurableObject {
   #tpm = new TokenWindow();
   #tokenBudget = new TokenBudgetLedger();
   #wallet = new WalletLedger();
+  /** #679 — in-flight USD against this scope's monthly budget. */
+  #monthlyBudget = new SpendLedger();
 
   /**
    * Unix-seconds clock. Rust threaded `now_unix_seconds()` into every
@@ -153,6 +156,25 @@ export class RateLimiterDurableObject extends DurableObject {
     this.#tokenBudget.release(tokens);
   }
 
+  /**
+   * #679 — hold `estimatedUsd` against this scope's monthly USD budget.
+   * `committedUsd` is the `usage_monthly_rollups` figure the caller read.
+   *
+   * THIS IS THE SERIALISATION POINT. The equivalent D1 sequence (read
+   * `cost_usd`, compare, admit) has no critical section, so N requests that
+   * arrive together all read the same figure and all pass. A Durable Object
+   * runs one call at a time on one instance per counter key, so the Nth caller
+   * necessarily observes the N-1 holds ahead of it.
+   */
+  reserveMonthlyBudget(committedUsd: number, budgetUsd: number, estimatedUsd: number): boolean {
+    return this.#monthlyBudget.tryReserve(committedUsd, budgetUsd, estimatedUsd);
+  }
+
+  /** Release a {@link reserveMonthlyBudget} hold — the caller's `finally`. */
+  releaseMonthlyBudget(usd: number): void {
+    this.#monthlyBudget.release(usd);
+  }
+
   /** Rust `try_reserve_wallet_credits`. `true` = hold taken. */
   reserveWalletCredits(balanceCredits: number, estimatedCredits: number): boolean {
     return this.#wallet.tryReserve(balanceCredits, estimatedCredits);
@@ -169,12 +191,14 @@ export class RateLimiterDurableObject extends DurableObject {
     readonly tpm: WindowState;
     readonly reservedTokens: number;
     readonly reservedWalletCredits: number;
+    readonly reservedBudgetUsd: number;
   } {
     return {
       rpm: { ...this.#rpm.state },
       tpm: { ...this.#tpm.state },
       reservedTokens: this.#tokenBudget.reserved,
       reservedWalletCredits: this.#wallet.reserved,
+      reservedBudgetUsd: this.#monthlyBudget.reserved,
     };
   }
 }

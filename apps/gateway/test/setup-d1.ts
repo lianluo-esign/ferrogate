@@ -34,9 +34,10 @@ import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sq
 // `semantic_cache_policies` on the request path of every cacheable call, and a
 // bound CONTROL_DB whose table is missing makes the cache fail CLOSED (bypass)
 // — which would look like "the cache is off" rather than "the suite forgot a
-// migration". `0002` is not listed because it is an `ALTER TABLE` on a control
-// table no `apps/gateway` code path reads.
-import semanticCacheMigrationSql from "../../../sql/d1-ts/control/0003_semantic_cache_policies.sql?raw";
+// migration". `0002` / `0003_audit_chain` / `0003_request_log_columns` are not
+// listed because they are `ALTER TABLE`s and tables no `apps/gateway` code path
+// reads; add one here the moment a gateway module queries it.
+import semanticCacheMigrationSql from "../../../sql/d1-ts/control/0004_semantic_cache_policies.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;

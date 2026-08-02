@@ -2,7 +2,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 /**
  * `ferrogate-agent-runtime` — the agent execution / isolation front.
  *
- * Owns 15 of the 257 contract operations (`ROUTE-MAP.md`):
+ * Owns 15 of the 252 contract operations (`ROUTE-MAP.md`):
  *
  * | surface | ops | auth |
  * |---|---:|---|

@@ -20,7 +20,7 @@
  *
  * ## These are NOT contract operations, and that is correct
  *
- * `docs/openapi/runtime-api-contract.json` has 251 operations and none of them
+ * `docs/openapi/runtime-api-contract.json` has 252 operations and none of them
  * is `/v1/admin/login` — the contract describes the GATEWAY runtime API, while
  * this is the auth SERVICE's own surface, which the Rust tree served from a
  * separate binary on a separate port. `PORT-PLAN.md` folds

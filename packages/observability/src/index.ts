@@ -12,6 +12,12 @@
  *                    (+ Zod wire schemas, inventory §4.5).
  *  - `metrics`     — `GatewayMetricsSnapshot` and its sub-totals.
  *  - `spans`       — the 6 canonical gateway span templates.
+ *  - `genai`       — the OTel **GenAI semantic conventions** (#669): `gen_ai.*`
+ *                    attribute keys, the FerroGate-provider-kind → semconv
+ *                    provider-name map, the two client metrics, and the
+ *                    dual-emission profile. NOT a port of anything Rust — the
+ *                    Rust crate had no `gen_ai.*` either; this is new surface,
+ *                    pinned to semconv v1.43.0 (see the module docs).
  *  - `otlp`        — OTLP/JSON record types + metrics/traces/logs builders.
  *  - `backend`     — the `TelemetryBackend` contract + `OtlpBackend`.
  *  - `cloudflare`  — `CloudflareBackend` (bearer-authed collector Worker, #520).
@@ -101,6 +107,7 @@
 export * from "./config.js";
 export * from "./metrics.js";
 export * from "./spans.js";
+export * from "./genai.js";
 export * from "./otlp.js";
 export * from "./backend.js";
 export * from "./cloudflare.js";

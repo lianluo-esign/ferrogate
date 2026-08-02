@@ -7,6 +7,7 @@
  * for the counter ranges FerroGate emits); the `Default`-derived zero snapshot
  * is reproduced by {@link defaultGatewayMetricsSnapshot}.
  */
+import type { GenAiInvocation } from "./genai.js";
 
 /** Structured request logs grouped by HTTP status code. */
 export interface RequestStatusMetric {
@@ -143,6 +144,22 @@ export interface GatewayMetricsSnapshot {
   assetPresignAbortedTotal: number;
   /** #368: aborts that found staged bytes and failed to delete them. */
   assetPresignAbortReclaimFailedTotal: number;
+  /**
+   * #669 — the OTel GenAI observations this snapshot carries.
+   *
+   * The odd one out in a struct that is otherwise a flat counter bag, and
+   * deliberately so. Every other field is a CUMULATIVE total that an exporter
+   * renders as a monotonic sum; these are individual OBSERVATIONS rendered as
+   * DELTA histogram points (`gen_ai.client.token.usage`,
+   * `gen_ai.client.operation.duration`), because that is what the convention
+   * specifies and because a Worker has no process to accumulate a histogram in
+   * anyway — the same limit `prometheus.ts` marks.
+   *
+   * OPTIONAL so that every existing `GatewayMetricsSnapshot` literal in the
+   * tree keeps compiling, and empty for every request that reached no model.
+   * `defaultGatewayMetricsSnapshot()` supplies `[]`.
+   */
+  genAiInvocations?: readonly GenAiInvocation[] | undefined;
 }
 
 /** Reproduces Rust's `#[derive(Default)]` zero snapshot. */
@@ -199,5 +216,6 @@ export function defaultGatewayMetricsSnapshot(): GatewayMetricsSnapshot {
     assetPresignCommitRejectedTotal: 0,
     assetPresignAbortedTotal: 0,
     assetPresignAbortReclaimFailedTotal: 0,
+    genAiInvocations: [],
   };
 }

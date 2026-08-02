@@ -12,6 +12,9 @@
  * | `token_reservations: HashMap<String,u64>`   | {@link TokenBudgetLedger}|
  * | `wallet_reservations: HashMap<String,i64>`  | {@link WalletLedger}     |
  *
+ * Plus one structure Rust never had, because Rust never bounded it:
+ * {@link SpendLedger}, the in-flight half of a monthly USD budget (#679).
+ *
  * The Rust map key was the counter key and the value the per-key state. On
  * Workers the map itself disappears: one Durable Object INSTANCE is addressed
  * per counter key (`idFromName(counterKey)`), so each instance holds exactly one
@@ -170,6 +173,30 @@ export class TokenBudgetLedger {
     this.#reserved = saturatingSub(this.#reserved, tokens);
   }
 }
+
+/**
+ * In-flight holds against a MONTHLY USD BUDGET — the #679 counter.
+ *
+ * Same arithmetic as {@link TokenBudgetLedger} and deliberately a DIFFERENT
+ * object, because the two are different money in different units against
+ * different caps. They share a Durable Object instance whenever a budget rung
+ * is `key`-scoped (`"key:{id}"` addresses one instance), so folding them into
+ * one pool would let a monthly-TOKEN reservation consume a scope's USD budget
+ * and vice versa.
+ *
+ * `committed` is the durable `usage_monthly_rollups.cost_usd` the caller has
+ * already read; this ledger only owns the in-flight portion, which is precisely
+ * the part D1 cannot serialise. Because settlement only ever INCREASES
+ * `committed` and every increase is paired with a `release`, a slightly stale
+ * (lower) `committed` still cannot let the summed in-flight holds exceed the
+ * budget.
+ *
+ * Money is a float here, as it is in `usage_monthly_rollups.cost_usd` (REAL) and
+ * in `quota_policies.monthly_budget_usd`. The comparison inherits float
+ * behavior; at the magnitudes involved (cents against dollars) the error is
+ * many orders of magnitude below one credit (1e-6 USD).
+ */
+export class SpendLedger extends TokenBudgetLedger {}
 
 /**
  * In-flight prepaid-wallet credit holds. Rust `wallet_reservations` +

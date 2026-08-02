@@ -53,7 +53,7 @@
  * back to the `f64` `credits` field, rounded — lossy, and marked as such,
  * rather than silently reading zero.
  */
-import type { LedgerListFilter } from "@ferrogate/billing";
+import type { BillingEvent, LedgerListFilter } from "@ferrogate/billing";
 import { meteredTotals } from "./ledger.js";
 import { sameSettlement } from "./ledger.js";
 import type {
@@ -373,6 +373,35 @@ export class D1LedgerStore implements LedgerStore {
     return sameSettlement(existing, charge)
       ? { status: "duplicate" }
       : { status: "conflict", existing };
+  }
+
+  /**
+   * The cost-less metering row for a usage nothing could price (#663) — see
+   * {@link LedgerStore.recordEvent}.
+   *
+   * ONE statement, not a batch, because there is deliberately nothing to commit
+   * it with: no ledger row (that would be a $0 bill) and no outbox intent (a
+   * report of an unpriced charge has no charge to report, and
+   * `BILLING_OUTBOX_LIST_DUE_SQL` joins `billing_ledger`, so such a row could
+   * never be swept anyway). The atomicity the #150 batch exists to protect is
+   * between a CHARGE and its delivery intent; this row is neither.
+   *
+   * It reuses `BILLING_EVENT_INSERT_SQL` verbatim, so the id, the conflict
+   * behaviour and the column projection are the same ones a priced settlement
+   * writes — which is what makes the row indistinguishable from the priced case
+   * apart from its `cost_usd`, and therefore re-priceable in place.
+   */
+  async recordEvent(event: BillingEvent, id: string, occurredAtUnix: number): Promise<void> {
+    await this.#db
+      .prepare(BILLING_EVENT_INSERT_SQL)
+      .bind(
+        id,
+        event.request_id,
+        event.provider_attempt.provider_attempt_index,
+        occurredAtUnix,
+        JSON.stringify(billingEventToWire(event)),
+      )
+      .all();
   }
 
   async get(id: string): Promise<MeteredCharge | undefined> {

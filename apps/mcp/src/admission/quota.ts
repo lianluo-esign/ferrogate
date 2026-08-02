@@ -747,6 +747,41 @@ export function monthlyBudgetScope(
   return null;
 }
 
+/**
+ * The full ladder of monthly budgets a request must satisfy (#679), broadest
+ * scope first.
+ *
+ * EVERY rung is enforced, because each is measured against a different
+ * aggregate: a project rung against the project's rollup (every key under it),
+ * a key rung against that one credential. Enforcing only the scope that won the
+ * chain's `min` — which is all {@link monthlyBudgetScope} can name — leaves
+ * every ancestor cap unevaluated, and a cap that is never evaluated is not a
+ * cap: `project = $5,000` with `key = $100` mins to $100 at the key, so fifty
+ * keys spend $100 each of a project that is already at $5,000.
+ *
+ * The fallback keeps the pre-#679 behaviour for a quota that carries a budget
+ * but no ladder (a plan floor on a chain with no tenant id, or a hand-built
+ * `EffectiveQuota`): the single scope {@link monthlyBudgetScope} picks.
+ */
+export function monthlyBudgetCharges(
+  quota: EffectiveQuota,
+  chain: QuotaScopeChain,
+): { readonly kind: QuotaScopeKind; readonly id: string; readonly limitUsd: number }[] {
+  const ladder = quota.monthlyBudgets ?? [];
+  if (ladder.length > 0) {
+    return ladder.map((rung) => ({
+      kind: rung.scope.kind,
+      id: rung.scope.id,
+      limitUsd: rung.limitUsd,
+    }));
+  }
+  const budgetUsd = quota.monthlyBudgetUsd;
+  if (budgetUsd === undefined) return [];
+  const scope = monthlyBudgetScope(quota, chain);
+  if (scope === null) return [];
+  return [{ kind: scope.kind, id: scope.id, limitUsd: budgetUsd }];
+}
+
 /** The current UTC `YYYY-MM`, Rust `AppState::current_period_month`. */
 export function currentPeriodMonth(nowUnixSeconds: number = Math.floor(Date.now() / 1000)): string {
   return periodMonthFromUnix(nowUnixSeconds);

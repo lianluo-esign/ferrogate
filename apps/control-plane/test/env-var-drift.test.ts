@@ -344,7 +344,10 @@ describe("the env-var drift gate itself", () => {
       "TENANCY_LIFECYCLE",
       "TENANT_RBAC_ACTIONS",
     ]);
-    expect([...DECLARED.bindings.keys()]).toEqual(["DB"]);
+    // `AUDIT_ANCHORS` is the R2 bucket the audit-anchor pass writes (#684); it
+    // joined `DB` when the tamper-evidence slice landed, and this list is
+    // asserted exactly so a binding cannot appear or vanish unremarked.
+    expect([...DECLARED.bindings.keys()]).toEqual(["DB", "AUDIT_ANCHORS"]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the
     // scanner shrinks the read set loudly instead of silently.

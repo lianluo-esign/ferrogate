@@ -63,6 +63,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/messages/count_tokens",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/images/generations",
       "group": "inference"
     },
@@ -2137,6 +2141,17 @@
       "path": "/v1/messages",
       "method": "post",
       "operation_id": "createMessage",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "messages.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/messages/count_tokens",
+      "method": "post",
+      "operation_id": "countMessageTokens",
       "visibility": "public",
       "auth": {
         "kind": "bearer",

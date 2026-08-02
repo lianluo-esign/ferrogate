@@ -152,6 +152,12 @@ export const MAX_CACHEABLE_BODY_BYTES = 1024 * 1024;
  * serves all five; `listModels` is a `GET` projection of the registry and was
  * never cached). Named by `operation_id`, so a path change in the contract
  * cannot silently widen or narrow this set.
+ *
+ * `countMessageTokens` (issue #671) is not here: the cache exists to avoid
+ * paying a provider twice for the same prompt, and counting never pays one. Its
+ * answer is a few microseconds of local arithmetic, so a cache lookup — which
+ * costs a body read, a hash and a Cache API round trip — would be slower than
+ * the work it replaced.
  */
 export const CACHEABLE_OPERATION_IDS: ReadonlySet<string> = new Set([
   "createChatCompletion",

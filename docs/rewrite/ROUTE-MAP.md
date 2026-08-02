@@ -1,7 +1,7 @@
-# FerroGate — route map (251 operations → Hono apps)
+# FerroGate — route map (258 operations → Hono apps)
 
 Derived from the authoritative contract `docs/openapi/runtime-api-contract.json`
-(`version: 1`, 251 operations, 37 route groups). **That JSON is the source of
+(`version: 1`, 258 operations, 37 route groups). **That JSON is the source of
 truth** — this document only assigns each operation to a Worker and records the
 auth/visibility invariants the Hono port must preserve.
 
@@ -10,24 +10,30 @@ auth/visibility invariants the Hono port must preserve.
 | App | Ops | Surface |
 |---|---:|---|
 | `apps/control-plane` | **203** | `/admin/v1/**` (198) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
-| `apps/gateway` | **31** | inference `/v1/{chat/completions,messages,responses,embeddings,images/generations,models}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions, `/.well-known/agent.json` |
+| `apps/gateway` | **32** | inference `/v1/{chat/completions,messages,messages/count_tokens,responses,embeddings,images/generations,models}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions, `/.well-known/agent.json` |
 | `apps/agent-runtime` | **15** | `/v1/agent-jobs/**` (5), `/v1/agents/**` (3), `/v1/agent-runs` (1), `/v1/self-hosted-workers/**` (6) |
 | `apps/mcp` | **6** | `/v1/mcp`, `/v1/mcp/tool/execute`, `/v1/mcp/identity/**` |
 | shared | **2** | `/healthz`, `/readyz` — implemented in **every** Worker |
-| **total** | **257** | |
+| **total** | **258** | |
 
 `apps/telemetry` owns no contract route: it is the observability sink
 (Analytics Engine / Logpush), fed by the other Workers.
 
 ## Invariants the port MUST preserve
 
-**Auth kinds** (257): `bearer` 244 · `internal` 6 · `anonymous` 6 · `method_dependent` 1.
-**Visibility**: `admin` 199 · `public` 51 · `internal` 7.
-**Methods**: GET 118 · POST 80 · DELETE 25 · PUT 18 · PATCH 16.
+**Auth kinds** (258): `bearer` 245 · `internal` 6 · `anonymous` 6 · `method_dependent` 1.
+**Visibility**: `admin` 199 · `public` 52 · `internal` 7.
+**Methods**: GET 118 · POST 81 · DELETE 25 · PUT 18 · PATCH 16.
+
+> The 252nd operation is `countMessageTokens`
+> (`POST /v1/messages/count_tokens`, issue #671): the Anthropic-native
+> token-count pre-flight. It is bearer-`messages.create` — the SAME scope as
+> the `createMessage` it pre-flights, so no already-provisioned key has to be
+> re-scoped and no unauthenticated counting oracle exists.
 
 1. **Every operation carries `visibility`, `auth.kind`, `auth.scope`, and
    `rbac_action`.** Port these as Hono middleware driven by the contract, not as
-   hand-written per-route guards — one table-driven middleware keeps all 257 in sync.
+   hand-written per-route guards — one table-driven middleware keeps all 258 in sync.
 2. **`auth.kind: "internal"`** — the 6 `/v1/self-hosted-workers/*` operations
    (`artifacts`, `checkpoints`, `events`, `heartbeat`, `runs/ack`, `runs/poll`)
    are worker-plane callbacks. They must NOT be reachable with a normal tenant
@@ -44,7 +50,7 @@ auth/visibility invariants the Hono port must preserve.
 7. **`/control/v1/*` → `/admin/v1/*` alias canonicalization** must be kept
    (`ferrogate-admin`'s naming contract).
 
-## Dynamic surfaces (NOT in the 251)
+## Dynamic surfaces (NOT in the 258)
 
 From `dynamic_surfaces` in the contract — these are data, not contract:
 
@@ -59,7 +65,7 @@ From `dynamic_surfaces` in the contract — these are data, not contract:
 
 - Generate the route table from the JSON at build time (or import it directly)
   so a contract change can't silently drift from the implementation. Add a test
-  asserting **`routes.length === 251`** and that every contract `operation_id`
+  asserting **`routes.length === 252`** and that every contract `operation_id`
   has a handler — this is the anti-drift gate.
 - Zod schemas per operation live in `@ferrogate/schemas`; the validator is
   `@hono/zod-validator`.

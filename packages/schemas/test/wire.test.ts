@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 257.
+ * ANTI-DRIFT GATE for the third copy of 258.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(257);
+    expect(OPENAPI_OPERATION_COUNT).toBe(258);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -246,7 +246,7 @@ describe("registerWireSchema", () => {
 /**
  * The FACTUAL CLAIM the surviving PORT-TODO in `src/index.ts` makes, asserted
  * rather than asserted-in-prose: this package seeds exactly the cross-plane
- * envelopes plus the `ferrogate-core` primitives, and nothing else. The 247
+ * envelopes plus the `ferrogate-core` primitives, and nothing else. The 241
  * remaining contract operations are registered by `apps/*` at their own
  * composition time (nothing does so yet — that is the open half of the marker).
  *
@@ -274,6 +274,8 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
   test("the baseline is far short of the contract, and says so in numbers", () => {
     const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
     expect(seeded).toBe(10);
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(247);
+    // 241 -> 242: `countMessageTokens` (issue #671) added a 252nd contract
+    // operation and no wire schema, so the shortfall grew by exactly one.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(248);
   });
 });

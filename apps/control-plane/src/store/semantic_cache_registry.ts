@@ -38,7 +38,7 @@
 import { HttpError } from "../middleware/errors.js";
 import type { StoreRecord } from "../ports.js";
 
-/** The typed table in `sql/d1-ts/control/0003_semantic_cache_policies.sql`. */
+/** The typed table in `sql/d1-ts/control/0004_semantic_cache_policies.sql`. */
 export const SEMANTIC_CACHE_POLICIES_TABLE = "semantic_cache_policies";
 
 /** Scope kinds a governance row may be written for. Mirrors the gateway's. */

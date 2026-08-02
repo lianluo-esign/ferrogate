@@ -42,8 +42,17 @@
  * what makes "disconnect mid-stream still meters" deterministic rather than
  * lucky. It adds no buffering: `pull` reads exactly one upstream chunk per
  * downstream demand, so backpressure and first-token latency are unchanged.
+ *
+ * That wrapper now lives in `../middleware/body-completion.ts` rather than
+ * here, because the request-log writer (#664) needs the identical property for
+ * the identical reason — its token counts come from the same tap. It was MOVED,
+ * not reimplemented: a second copy of a stream-lifetime primitive is how the
+ * two diverge on the disconnect path, which is the leg nobody exercises by
+ * hand. The disconnect cases in `test/metering/durable.test.ts` still hold this
+ * behaviour from the money side.
  */
 import type { Context, MiddlewareHandler } from "hono";
+import { isEventStream, observeBodyCompletion } from "../middleware/body-completion.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
 import { AGENT_RUN_ID_HEADER, agentRunIdFor } from "./agent-run.js";
 import { executionContextOf } from "./runtime.js";
@@ -91,57 +100,6 @@ export function attributionFrom(
     ...(auth.subject === null ? {} : { apiKeyId: auth.subject }),
     ...(agentRunId === undefined ? {} : { agentRunId }),
   };
-}
-
-/** Responses whose usage frame lands AFTER the headers are flushed. */
-function isEventStream(response: Response): boolean {
-  return (response.headers.get("content-type") ?? "").includes("text/event-stream");
-}
-
-/**
- * Wrap a body so `settled` resolves once the client has either finished it or
- * abandoned it — and, in the abandon case, only after the cancel has propagated
- * all the way up through the usage tap.
- */
-function observeBodyCompletion(body: ReadableStream<Uint8Array>): {
-  readonly body: ReadableStream<Uint8Array>;
-  readonly settled: Promise<void>;
-} {
-  const reader = body.getReader();
-  let resolve: () => void = () => undefined;
-  const settled = new Promise<void>((done) => {
-    resolve = done;
-  });
-
-  const wrapped = new ReadableStream<Uint8Array>({
-    async pull(controller): Promise<void> {
-      try {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          controller.close();
-          resolve();
-          return;
-        }
-        controller.enqueue(chunk.value);
-      } catch (error) {
-        // The upstream broke. Whatever the tap scraped before it broke is still
-        // a real charge, so settle rather than stranding the outbox.
-        controller.error(error);
-        resolve();
-      }
-    },
-    async cancel(reason): Promise<void> {
-      try {
-        // Awaited: this is what runs the usage tap's `cancel()` and therefore
-        // what makes the consumed-tokens charge exist before the drain looks.
-        await reader.cancel(reason);
-      } finally {
-        resolve();
-      }
-    },
-  });
-
-  return { body: wrapped, settled };
 }
 
 /**
