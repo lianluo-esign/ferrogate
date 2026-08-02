@@ -22,6 +22,7 @@ export const guardrailProtocolSchema = z.enum([
   "chat_completions",
   "responses",
   "embeddings",
+  "rerank",
   "images",
   "managed_action",
   "a2a",
@@ -115,6 +116,8 @@ function protocolName(protocol: GuardrailProtocol): string {
       return "responses";
     case "embeddings":
       return "embeddings";
+    case "rerank":
+      return "rerank";
     case "images":
       return "images";
     case "managed_action":
@@ -240,6 +243,9 @@ export function normalizeRequest(protocol: GuardrailProtocol, body: unknown): Gu
     case "embeddings":
       extractEmbeddingsRequest(body, builder);
       break;
+    case "rerank":
+      extractRerankRequest(body, builder);
+      break;
     case "images":
       extractImagesRequest(body, builder);
       break;
@@ -263,6 +269,7 @@ export function normalizeResponse(
   const builder = new EnvelopeBuilder(protocol, "response");
   if (
     protocol === "embeddings" ||
+    protocol === "rerank" ||
     protocol === "images" ||
     protocol === "managed_action" ||
     protocol === "a2a"
@@ -333,6 +340,46 @@ function extractEmbeddingsRequest(body: unknown, builder: EnvelopeBuilder): void
       }
     });
   }
+  extractMetadata(get(body, "metadata"), builder);
+}
+
+/**
+ * `POST /v1/rerank` (issue #676) — the QUERY and every DOCUMENT.
+ *
+ * Both halves are user content on its way to a provider, so both are screened.
+ * The documents especially: a RAG pipeline reranks chunks it just pulled out of
+ * a corpus, which is precisely where a secret or a customer record nobody meant
+ * to send to a vendor comes from. A policy that redacts a card number out of a
+ * chat prompt and lets the same number through inside a document being ranked
+ * has not been enforced — it has been routed around.
+ *
+ * The `{ text }` document spelling the ingress also admits is read here too. The
+ * path strings (`documents[i]`) name the CALLER's index on purpose: a patch is
+ * applied by path, so a redaction has to land in the document the caller sent
+ * rather than in the flattened array the adapter builds later.
+ */
+function extractRerankRequest(body: unknown, builder: EnvelopeBuilder): void {
+  const query = asString(get(body, "query"));
+  if (query !== undefined) {
+    builder.push("user", "query", "text", query);
+  }
+  const documents = asArray(get(body, "documents"));
+  documents?.forEach((document, index) => {
+    const plain = asString(document);
+    if (plain !== undefined) {
+      builder.push("user", `documents[${index}]`, "text", plain);
+      return;
+    }
+    // The `{ text }` spelling. The path descends to `.text` rather than stopping
+    // at the element, because `applyContentPatchesToDocument` refuses to write a
+    // path whose value is not a string — so a path of `documents[i]` would make
+    // every redaction on an object-shaped document a `protected_path` error
+    // instead of a redaction.
+    const wrapped = asString(get(document, "text"));
+    if (wrapped !== undefined) {
+      builder.push("user", `documents[${index}].text`, "text", wrapped);
+    }
+  });
   extractMetadata(get(body, "metadata"), builder);
 }
 

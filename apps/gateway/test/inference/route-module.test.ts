@@ -1,5 +1,5 @@
 /**
- * The inference `RouteModule` seam — the adapter that mounts the eight inference
+ * The inference `RouteModule` seam — the adapter that mounts the nine inference
  * operations on the contract-driven gateway router.
  *
  * `test/inference/*.test.ts` drives the standalone `createInferenceRouter`
@@ -51,15 +51,17 @@ function gateway(limits?: { inferenceBodyMaxBytes?: number }) {
 }
 
 describe("inferenceRouteModule", () => {
-  it("claims exactly the 8 contract inference operation ids", () => {
+  it("claims exactly the 9 contract inference operation ids", () => {
     expect(new Set(inferenceRouteModule().operationIds)).toEqual(new Set(INFERENCE_OPERATION_IDS));
-    // 6 -> 7 with `countMessageTokens` (issue #671) and 7 -> 8 with `getModel`
-    // (GET /v1/models/{model}, issue #670). Both sides wrote 7 independently,
-    // so the merge kept 7 silently; 8 is the re-derived truth.
-    expect(inferenceRouteModule().operationIds).toHaveLength(8);
+    // 6 -> 7 with `countMessageTokens` (issue #671), 7 -> 8 with `getModel`
+    // (GET /v1/models/{model}, issue #670) and 8 -> 9 with `createRerank`
+    // (POST /v1/rerank, issue #676). #671 and #670 both wrote 7 independently,
+    // so that merge kept 7 silently; this number is COUNTED off the list rather
+    // than incremented from a parent's.
+    expect(inferenceRouteModule().operationIds).toHaveLength(9);
   });
 
-  it("registers all 8 on the contract-driven router", () => {
+  it("registers all 9 on the contract-driven router", () => {
     const { router } = gateway();
     for (const operationId of INFERENCE_OPERATION_IDS) {
       expect(router.registeredOperationIds(), operationId).toContain(operationId);

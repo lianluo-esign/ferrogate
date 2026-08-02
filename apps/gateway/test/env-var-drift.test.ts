@@ -409,7 +409,13 @@ describe("the env-var drift gate itself", () => {
     // #672 committed `GATEWAY_CLOUDFLARE`, the account-level `[cloudflare]`
     // block AI Gateway routing needs, so 56. Re-derived by running this gate
     // against the merged `wrangler.toml` — the parser's own count, not 55 + 1.
-    expect(DECLARED.vars.size).toBe(56);
+    //
+    // #678 committed `GATEWAY_ATTRIBUTION_POLICIES` ("[]"), the no-control-database
+    // fallback for the required-tag policy, so 57. Re-derived the same way and
+    // cross-checked independently against the committed file
+    // (`grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml` ⇒ 57), not
+    // arrived at by adding one to the previous line.
+    expect(DECLARED.vars.size).toBe(57);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -638,7 +644,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(56);
+    // #678: 56 -> 57 (`GATEWAY_ATTRIBUTION_POLICIES`). Same re-derivation as
+    // the `DECLARED.vars.size` pin above.
+    expect(rows.length).toBe(57);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -687,8 +695,14 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // whole table), so the committed value configures no AI Gateway routing for
     // the suite. `test/inference/cloudflare-ai-gateway-mount.test.ts` supplies
     // its own account block on the env it drives, in its own isolate.
+    //
+    // #678: 51 -> 52. `GATEWAY_ATTRIBUTION_POLICIES` ("[]") is observable and
+    // INERT — an empty table means no tenant requires tags, which is the
+    // pre-#678 posture, so the committed value enforces nothing in this suite.
+    // `test/attribution/enforcement.test.ts` supplies its own policies on the
+    // env it drives, so the committed blank cannot shadow them.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(51);
+    expect(observable.length).toBe(52);
     expect(rows.length - observable.length).toBe(5);
   });
 });

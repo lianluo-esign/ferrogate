@@ -32,10 +32,11 @@
  *
  * ## What is NOT here
  *
- * Workers AI's task-typed surfaces other than text-generation and
- * text-embeddings — text classification (`{ text }` → `[{ label, score }]`),
- * reranking, image generation — have no ingress operation in the gateway
- * contract to carry them, so there is no code for them here. The one
+ * Workers AI's task-typed surfaces other than text-generation, text-embeddings
+ * and reranking — text classification (`{ text }` → `[{ label, score }]`),
+ * image generation — have no ingress operation in the gateway contract to carry
+ * them, so there is no code for them here. (Reranking left this list with issue
+ * #676, which added `POST /v1/rerank`; see {@link runOnBinding}.) The one
  * classification path FerroGate actually uses on-platform today is the
  * Llama-Guard guardrail detector, which is chat-shaped and already mounted
  * (`src/guardrails/config.ts` → `@ferrogate/guardrails`'
@@ -203,6 +204,24 @@ async function runOnBinding(
   // `translateEmbeddingsResponse` shape it, which is the seam that already
   // exists for exactly this and is where the Gemini/Vertex translations live.
   if (record !== undefined && Array.isArray(record["data"])) {
+    return jsonResponse(record);
+  }
+  // Rerank (issue #676): same deal, through `translateRerankResponse`.
+  //
+  // The discriminator is `response` being an ARRAY. That is not a heuristic
+  // reaching for a marker — it is the exact difference between the two run
+  // surfaces this branch has to tell apart: a text-generation answer is
+  // `{ response: "some text" }` and a reranker answer is
+  // `{ response: [{ id, score }] }`. Matching on the request body instead
+  // (`"contexts" in input`) would work too, but it would put the decision on
+  // the request while the ambiguity is in the RESPONSE, so a family that ever
+  // grows a third array-shaped surface breaks in the wrong file.
+  //
+  // Without this arm the reranker's scores fall into `openAiCompletion` below
+  // and are rendered as a chat completion whose `content` is `""` — a 200 with
+  // an empty answer, which is the worst possible failure for a governance
+  // surface: silent, and metered.
+  if (record !== undefined && Array.isArray(record["response"])) {
     return jsonResponse(record);
   }
   return jsonResponse(openAiCompletion(record, model));

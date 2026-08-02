@@ -65,6 +65,7 @@ const CAPABILITY_ORDER: readonly ModelCapability[] = [
   "vision",
   "images",
   "embeddings",
+  "rerank",
   "tools",
   "structured_output",
 ];
@@ -77,8 +78,16 @@ const CAPABILITY_ORDER: readonly ModelCapability[] = [
  * because the alternative (calling an embeddings model's output `text`) would be
  * false, and omitting the output entirely would make the field unusable for
  * exactly the routing decision a client asks it for.
+ *
+ * `score` (issue #676) is here for that same reason, one step further: a
+ * reranker emits a relevance number per document. Calling that `text` would be
+ * false and calling it `embedding` would be worse — a client that reads
+ * `embedding` will try to do vector arithmetic on a scalar. Leaving the output
+ * EMPTY was the other candidate, and is rejected on this file's own rule: an
+ * empty output array says "produces nothing", which is a different claim from
+ * "produces something this vocabulary cannot name".
  */
-export type ModelModality = "text" | "image" | "embedding";
+export type ModelModality = "text" | "image" | "embedding" | "score";
 
 /** Input/output modality support for one logical model. */
 export interface ModelModalities {
@@ -161,6 +170,9 @@ export function modalitiesFor(capabilities: readonly ModelCapability[]): ModelMo
   }
   if (declared.has("embeddings")) {
     output.push("embedding");
+  }
+  if (declared.has("rerank")) {
+    output.push("score");
   }
   return { input, output };
 }

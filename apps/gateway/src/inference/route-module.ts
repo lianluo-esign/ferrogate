@@ -1,5 +1,5 @@
 /**
- * The `RouteModule` seam for the eight inference operations.
+ * The `RouteModule` seam for the nine inference operations.
  *
  * `createInferenceRouter` (see `./handlers.ts`) is a standalone `Hono` built
  * around ABSOLUTE contract paths and per-route middleware chains — a bounded
@@ -18,7 +18,7 @@
  *    twice and the 401/403 taxonomy stays owned by the single table-driven
  *    guard (ROUTE-MAP invariant 1).
  *  - `contractAuth` reads the request BODY only for `method_dependent`
- *    operations (`POST /v1/mcp`). All eight inference operations are `bearer`, so
+ *    operations (`POST /v1/mcp`). All nine inference operations are `bearer`, so
  *    the body arrives at the inner reader unread and the cap is still enforced
  *    before any bytes are materialized.
  *  - The inner app answers with the provider's `Response` object itself on the
@@ -30,6 +30,7 @@
  * per-request rebuild would throw away the isolate's warm state.
  */
 import type { Context, Hono } from "hono";
+import { attributionDefaultsFor } from "../attribution/index.js";
 import type { GatewayEnv } from "../ports.js";
 import {
   admitTokensPerMinute,
@@ -133,7 +134,7 @@ export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
  * gateway sent it nothing: the only `@ferrogate/observability` import anywhere
  * in `apps/gateway/src` was an `import type` in `cache/metrics.ts`, which is
  * ERASED at build time, so not one byte of the package reached the deployed
- * bundle. This call is what changes that for the eight inference operations, and
+ * bundle. This call is what changes that for the nine inference operations, and
  * `test/telemetry/mount.test.ts` drives it through `SELF.fetch` so removing the
  * line turns that suite RED.
  *
@@ -214,7 +215,7 @@ function publishRequestScope(c: Context<GatewayEnv>): void {
   const request = c.req.raw;
   setInferenceRequestScope(request, {
     // `auth` is absent only for a contract-`anonymous` operation, which none of
-    // the eight inference operations is; leaving it undefined keeps the injected
+    // the nine inference operations is; leaving it undefined keeps the injected
     // `deps.caller` in charge rather than fabricating an identity.
     ...(auth === null || auth === undefined ? {} : { caller: callerFromAuth(auth) }),
     tokens: honoTokenGovernor(c),
@@ -225,6 +226,11 @@ function publishRequestScope(c: Context<GatewayEnv>): void {
     // (`readInferenceBody()` re-presents it), which is why the identity is
     // captured here rather than inside the callback.
     log: (facts) => contributeRequestLogFacts(request, facts),
+    // #678 — whatever `attributionTags()` defaulted for this request, read back
+    // off the SAME `Request` object it keyed them by. Empty for every request
+    // the gate did not touch, which is every request under a deployment that
+    // configured no policy.
+    attributionDefaults: attributionDefaultsFor(request),
   });
 }
 

@@ -21,6 +21,7 @@
  * | chat/responses | whole body, minus the non-prompt fields  | `max_completion_tokens` ?? `max_tokens` ?? 512, times `n` |
  * | messages       | `messages` only, minus `type` keys        | `max_tokens` ?? 512 (no `n`) |
  * | embeddings     | `input` only, pre-tokenized ids count 1   | 0 |
+ * | rerank         | `query` + every `document` (#676)         | 0 |
  * | images         | 0                                         | `n` (default 1, clamped to 100) generated images |
  *
  * ## PORT-TODO(P: inventory-request-path §1.6 "Budgets", issue #282): the local
@@ -347,6 +348,55 @@ export function estimateEmbeddingsUsage(body: unknown, _model: string): Estimate
     promptTokens = Math.max(counted, 1);
   }
   return usage(promptTokens, 0);
+}
+
+// ---------------------------------------------------------------------------
+// rerank
+// ---------------------------------------------------------------------------
+
+/**
+ * The pre-dispatch estimate for `POST /v1/rerank` (issue #676).
+ *
+ * No Rust ancestor — this surface is new — so the rule is derived from what a
+ * cross-encoder actually reads: it scores the (query, document) pair for EVERY
+ * document, so the query is read once per document and the whole corpus is read
+ * once. The reservation is `query + Σ documents` on the prompt side.
+ *
+ * Counting only the query would leave the gate a formality. The documents are
+ * the bulk of a reranking request by one to three orders of magnitude — a RAG
+ * pipeline sends a twenty-word question and fifty retrieved chunks — so a
+ * query-only estimate would let a caller drive unbounded reranking compute past
+ * the TPM window, the token budget and the wallet, which is exactly the class of
+ * bypass `estimate_embeddings_usage`'s pre-tokenized-input arm exists to stop
+ * (issue #207).
+ *
+ * The completion side is 0: a reranker generates nothing. `top_n` therefore does
+ * not enter the estimate at all — it bounds the ANSWER, not the work, and the
+ * scoring pass is over every document whatever the caller asked to see.
+ *
+ * The floor mirrors `estimateEmbeddingsUsage`: a present, non-empty request
+ * reserves at least one token so a tiny input still engages the gates.
+ */
+export function estimateRerankUsage(body: unknown): EstimatedUsage {
+  const query = get(body, "query");
+  let chars = typeof query === "string" ? charCount(query) : 0;
+
+  const documents = asArray(get(body, "documents"));
+  for (const document of documents ?? []) {
+    if (typeof document === "string") {
+      chars += charCount(document);
+      continue;
+    }
+    // The `{ text }` spelling the ingress schema also admits. Tolerated rather
+    // than rejected here: validation already ran, and an estimator that threw on
+    // a shape the schema accepted would 500 a valid request.
+    const text = get(document, "text");
+    if (typeof text === "string") chars += charCount(text);
+  }
+
+  const counted = charsToTokens(chars);
+  const nonEmpty = (typeof query === "string" && query.length > 0) || (documents?.length ?? 0) > 0;
+  return usage(nonEmpty ? Math.max(counted, 1) : counted, 0);
 }
 
 // ---------------------------------------------------------------------------

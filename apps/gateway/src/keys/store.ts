@@ -29,6 +29,9 @@ const API_KEY_COLUMNS = [
   "request_limit_per_minute",
   "expires_at_unix",
   "revoked_at_unix",
+  // #678 — the tags this virtual key stands for, defaulted onto a request whose
+  // tenant policy says `default_from_key`. `sql/d1-ts/tenant/0003_*.sql`.
+  "attribution_tags_json",
 ].join(", ");
 
 /**
@@ -64,6 +67,7 @@ interface ApiKeyRow {
   readonly request_limit_per_minute: number | null;
   readonly expires_at_unix: number | null;
   readonly revoked_at_unix: number | null;
+  readonly attribution_tags_json?: string | null;
 }
 
 /** Rust `StoredApiKey`, narrowed to the fields authentication actually uses. */
@@ -84,6 +88,12 @@ export interface StoredApiKey {
   readonly requestLimitPerMinute: number | null;
   readonly expiresAtUnix: number | null;
   readonly revokedAtUnix: number | null;
+  /**
+   * #678 — `attribution_tags_json`, the tags this key stands for. Empty means
+   * the key declares no attribution, which under a `default_from_key` policy is
+   * a refusal rather than a pass (`attribution/policy.ts`).
+   */
+  readonly attributionTags: Readonly<Record<string, string>>;
 }
 
 /**
@@ -137,7 +147,33 @@ export function storedApiKeyFromRow(row: ApiKeyRow): StoredApiKey {
     requestLimitPerMinute: parseOptionalUnsigned(row.request_limit_per_minute),
     expiresAtUnix: parseOptionalUnsigned(row.expires_at_unix),
     revokedAtUnix: parseOptionalUnsigned(row.revoked_at_unix),
+    attributionTags: parseJsonStringMap(row.attribution_tags_json ?? null),
   };
+}
+
+/**
+ * `serde(default)` for the `attribution_tags_json` column: a NULL, blank,
+ * malformed, or non-object value reads as the EMPTY map.
+ *
+ * Fail-CLOSED here, unlike the allowlist columns above: an unreadable
+ * attribution map degrades to "this key declares nothing", which under a
+ * `default_from_key` policy REFUSES the request rather than admitting untagged
+ * spend. Non-string values are dropped rather than coerced, so a corrupted
+ * entry can never satisfy a required tag with `"[object Object]"`.
+ */
+function parseJsonStringMap(raw: string | null): Readonly<Record<string, string>> {
+  if (raw === null || raw.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const map: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "string" && value !== "") map[key] = value;
+    }
+    return map;
+  } catch {
+    return {};
+  }
 }
 
 /**

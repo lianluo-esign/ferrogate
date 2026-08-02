@@ -5,7 +5,7 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 267
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 268
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
@@ -16,6 +16,7 @@
  * they need no change to the router, the guard, or the contract table.
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
+import { attributionTags } from "./attribution/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -167,7 +168,8 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * ingress order (`docs/legacy/inventory-request-path.md` §"Cross-crate
  * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
  *
- *   contractAuth → meteringDrain → requestTelemetry → rateLimit → guardrails
+ *   contractAuth → meteringDrain → requestTelemetry → requestLogging
+ *                → rateLimit → attributionTags → guardrails
  *                → tenantDatabase → responseCache → validate → dispatch
  *
  * (`responseCache` is mounted by `createGatewayApp` itself, immediately after
@@ -279,6 +281,29 @@ export const GATEWAY_MIDDLEWARE = [
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),
+  // #678 — `403 attribution_tags_required` on the five spend-producing
+  // operations, per the CALLING TENANT's policy.
+  //
+  // BETWEEN admission and screening, and both edges are the decision:
+  //
+  //  - AFTER `rateLimit()` so an untagged request still burns the caller's
+  //    RPM/quota window. Ahead of it, an untagged flood would be an UNMETERED
+  //    flood — the refusal would cost the caller nothing and the limiter would
+  //    never see it.
+  //  - BEFORE `guardrails()` for the reason the paragraph above gives about
+  //    admission and screening: detector work can include PAID provider calls,
+  //    and a request this gate refuses reaches no model at all. Spending
+  //    screening budget on it would be the worse bug.
+  //
+  // The refusal is still recorded: `requestLogging()` is mounted two entries
+  // above and wraps everything below it, so a 403 from here lands in the #664
+  // trail exactly like `rateLimit()`'s 429 and `guardrails()`' 403.
+  //
+  // Inert until an operator sets `quota_policies.required_tags_json` +
+  // `on_missing_tags` on a TENANT-scope row (or the
+  // `GATEWAY_ATTRIBUTION_POLICIES` var): with no policy for the calling tenant
+  // it is one cached lookup and `next()`.
+  attributionTags(),
   // Provider-scoped policies need the model→provider join, and `/v1/messages`
   // must be screened over the same document `inference/handlers.ts` dispatches.
   // `guardrailDepsFromEnv` is ASYNC whenever `CONTROL_DB` is bound: the durable

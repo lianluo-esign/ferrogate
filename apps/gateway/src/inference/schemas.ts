@@ -1,5 +1,5 @@
 /**
- * Zod request/response schemas for the eight inference operations.
+ * Zod request/response schemas for the nine inference operations.
  *
  * Clean-room port of the Rust ingress extractors:
  *  - `ChatCompletionRequest`   (`server/chat.rs`, shared by `/v1/chat/completions`
@@ -288,6 +288,54 @@ export const embeddingsRequestSchema = z
 export type EmbeddingsRequest = z.infer<typeof embeddingsRequestSchema>;
 
 // ---------------------------------------------------------------------------
+// POST /v1/rerank — operation `createRerank` (issue #676)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ingress grammar, and why it is Cohere's rather than an invention.
+ *
+ * OpenAI has no rerank endpoint, so there is no OpenAI dialect to be compatible
+ * with and no Rust ancestor to port. Every other vendor that ships one — Cohere,
+ * Jina, Voyage, and the unified APIs that aggregate them — spells it
+ * `{ model, query, documents, top_n }`, so that is what a client's existing
+ * code already sends. Inventing a fourth spelling would mean every caller
+ * writes a FerroGate-specific branch, which is the opposite of the reason this
+ * operation exists.
+ *
+ * A document is a string OR `{ text }`: Cohere v1 accepted objects, v2 accepts
+ * strings, and clients in the wild send both. They are normalized to text once,
+ * at the adapter boundary ({@link rerankDocumentTexts} in `@ferrogate/providers`),
+ * so nothing downstream carries two shapes.
+ */
+const rerankDocumentField = z.union([
+  z.string(),
+  z.object({ text: z.string() }).passthrough(),
+]);
+
+/**
+ * `documents` must be a NON-EMPTY array.
+ *
+ * Empty is rejected rather than answered with an empty result list: a reranking
+ * request with nothing to rank is a caller bug, and admitting it would spend an
+ * upstream call (and a TPM reservation) to return `[]`.
+ */
+export const rerankRequestSchema = z
+  .object({
+    model: modelField,
+    query: z.string().min(1, 'rerank request must include a non-empty "query" field'),
+    documents: z
+      .array(rerankDocumentField)
+      .min(1, 'rerank request must include a non-empty "documents" array'),
+    /** How many ranked results to return. Cohere's spelling; `top_k` upstream. */
+    top_n: z.number().int().positive().optional(),
+    /** Echo the ranked document text back, for a client that did not keep it. */
+    return_documents: z.boolean().optional(),
+    metadata: requestMetadataSchema.optional(),
+  })
+  .passthrough();
+export type RerankRequest = z.infer<typeof rerankRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // POST /v1/images/generations — operation `createImage`
 // ---------------------------------------------------------------------------
 
@@ -327,14 +375,15 @@ const modelCapabilitySchema = z.enum([
   "vision",
   "images",
   "embeddings",
+  "rerank",
   "tools",
   "structured_output",
 ]);
 
 /** Input/output media a model supports — DERIVED, see `./model-metadata.ts`. */
 const modelModalitiesSchema = z.object({
-  input: z.array(z.enum(["text", "image", "embedding"])),
-  output: z.array(z.enum(["text", "image", "embedding"])),
+  input: z.array(z.enum(["text", "image", "embedding", "score"])),
+  output: z.array(z.enum(["text", "image", "embedding", "score"])),
 });
 
 /**

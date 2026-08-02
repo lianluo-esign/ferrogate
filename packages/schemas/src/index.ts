@@ -90,7 +90,7 @@ export type { GatewayErrorData, GatewayResult } from "@ferrogate/core";
  * LIMIT, NOT CLOSED HERE AND NOT CLOSABLE HERE.
  *
  * The remaining per-operation request/response shapes of the committed
- * 267-operation runtime contract (`docs/openapi/runtime-api-contract.json`) are
+ * 268-operation runtime contract (`docs/openapi/runtime-api-contract.json`) are
  * OWNED by the surfaces that serve them — `apps/gateway`, `apps/control-plane`,
  * `apps/mcp`. Defining them in this package would invert the dependency (a
  * shared leaf package would have to know every route's body) and would

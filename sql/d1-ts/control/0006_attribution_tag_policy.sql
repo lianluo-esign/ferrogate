@@ -1,0 +1,59 @@
+-- ===========================================================================
+-- Attribution-tag requirement on `quota_policies` (#678)
+--
+-- #677 made per-request cost queryable by tenant, project, key, model, TAG and
+-- agent run. The tag half of that is only as good as the tags that arrive, and
+-- nothing made one arrive: a request with no `metadata` map settles a
+-- `billing_events` row whose `metadata` is `{}`, and no later query can recover
+-- who it was for. Cost allocation decays silently as teams forget — silently,
+-- because every one of those requests SUCCEEDED.
+--
+-- ## Why these two columns live on `quota_policies` rather than a new table
+--
+-- `quota_policies` is already the per-scope governance row: it is what
+-- `PUT /admin/v1/quota-policies/{scope_type}/{scope_id}` writes, what
+-- `store/quota_registry.ts` projects into, and what the gateway already reads on
+-- the admission path. Two columns there give the operator a configuration
+-- surface that already exists, already has RBAC and already carries the #185
+-- scoped-authorization rule that stops a tenant-scoped admin from editing
+-- another tenant's governance. A separate `attribution_policies` table would
+-- have needed its own admin group — six more contract operations and a second
+-- copy of that authorization rule — to express one enum and one string list.
+--
+-- ## The gateway reads the TENANT scope only
+--
+-- `apps/gateway/src/attribution/source.ts` matches
+-- `scope_type = 'tenant' AND scope_id = ?` against the AUTHENTICATED tenant.
+-- The columns are physically settable on any scope (the table has one shape),
+-- and a `project`/`workspace`/`key` row's values are simply not read today: the
+-- issue asks for a per-tenant policy, and a chain merge would have to answer
+-- "does a project row that requires nothing relax the tenant's requirement?" —
+-- a question with two defensible answers where the wrong one silently drops a
+-- finance control. Stated here so the next owner adds the merge rule
+-- deliberately instead of inheriting it.
+--
+-- ## Defaults, and why `on_missing_tags` is NULLABLE with no default
+--
+-- `required_tags_json` defaults to `'[]'` — every existing row means "this
+-- tenant requires no tags", which is exactly the behaviour before this
+-- migration, so applying it changes nothing for anyone.
+--
+-- `on_missing_tags` has NO default and is NULL for every existing row. That is
+-- the point of the issue: the operator picks `reject` or `default_from_key`
+-- EXPLICITLY. A NULL (or any unrecognised string) means the tenant is not
+-- enforced at all, even if `required_tags_json` is non-empty — half a policy is
+-- not a policy, and picking the softer branch on the operator's behalf would be
+-- exactly the kind of implicit behaviour this issue exists to remove.
+--
+-- No CHECK constraint on `on_missing_tags`: this file follows the dialect rule
+-- inherited in `0001_init_control.sql` — descriptive enumerations are validated
+-- by Zod before the write (`quota_policy.ts::quotaPolicySchema`) and again by
+-- the reader (`attribution/policy.ts::parseMissingTagAction`), which fails to
+-- "not enforced" rather than raising.
+--
+-- No index: the columns are read as part of a row already located by the
+-- existing `UNIQUE (scope_type, scope_id)` / `idx_quota_policies_scope` seek.
+-- ===========================================================================
+
+ALTER TABLE quota_policies ADD COLUMN required_tags_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE quota_policies ADD COLUMN on_missing_tags TEXT;

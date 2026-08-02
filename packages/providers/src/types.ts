@@ -116,6 +116,20 @@ export interface ImagesPlan {
   body: Json;
 }
 
+/**
+ * Plan for `POST /v1/rerank` (issue #676); never streams.
+ *
+ * Field-identical to {@link EmbeddingsPlan} — a separate interface rather than a
+ * reuse because the two carry DIFFERENT body grammars (`{ input }` vs
+ * `{ query, documents }`) and the type is what tells a reader which one an
+ * adapter method is about to be handed.
+ */
+export interface RerankPlan {
+  logicalModel: string;
+  providerModel: string;
+  body: Json;
+}
+
 // ---------------------------------------------------------------------------
 // Prepared HTTP requests + responses
 // ---------------------------------------------------------------------------
@@ -311,7 +325,19 @@ export interface ProviderAdapter {
   prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest;
   prepareEmbeddings(provider: ProviderConfig, request: EmbeddingsPlan): ProviderHttpRequest;
   prepareImages(provider: ProviderConfig, request: ImagesPlan): ProviderHttpRequest;
+  prepareRerank(provider: ProviderConfig, request: RerankPlan): ProviderHttpRequest;
   translateEmbeddingsResponse(body: Uint8Array, model: string): Json | null;
+  /**
+   * Provider rerank dialect → the gateway's canonical `{ object, model, results }`.
+   *
+   * Takes the caller's REQUEST body as well, which
+   * {@link ProviderAdapter.translateEmbeddingsResponse} does not need: no
+   * reranker echoes the documents back, so `return_documents` can only be
+   * answered by joining the provider's indices against the documents the caller
+   * sent. Returning `null` means "pass the upstream body through", the same
+   * `Ok(None)` convention the embeddings translation uses.
+   */
+  translateRerankResponse(body: Uint8Array, model: string, request: Json): Json | null;
   prepareModelCatalog(provider: ProviderConfig): ProviderCatalogRequest;
   parseModelCatalog(body: Uint8Array): ProviderCatalogModel[];
   normalizeErrorResponse(
@@ -359,7 +385,25 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
     throw AdapterError.unsupportedCapability("image generation", this.kind());
   }
 
+  /**
+   * Fail CLOSED, and as a capability rather than an unknown kind.
+   *
+   * `unsupportedCapability` is the arm `prepareImages` uses for the same
+   * situation — the family is real, this surface is not one of its. It matters
+   * beyond the message: the gateway's failover ladder treats a capability
+   * refusal as "this route cannot serve this request, try the next candidate",
+   * which is exactly right for a deployment that mixes an OpenAI route and a
+   * Workers AI reranker under one logical model.
+   */
+  prepareRerank(_provider: ProviderConfig, _request: RerankPlan): ProviderHttpRequest {
+    throw AdapterError.unsupportedCapability("reranking", this.kind());
+  }
+
   translateEmbeddingsResponse(_body: Uint8Array, _model: string): Json | null {
+    return null;
+  }
+
+  translateRerankResponse(_body: Uint8Array, _model: string, _request: Json): Json | null {
     return null;
   }
 

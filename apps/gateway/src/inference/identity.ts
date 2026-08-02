@@ -6,7 +6,7 @@
  *
  * `inferenceRouteModule` delegates by calling `inner.fetch(c.req.raw, c.env,
  * ctx)`. That is deliberate — it is what keeps ROUTE-MAP invariant 1 (one
- * table-driven auth guard for all 267 operations) intact, because the inner app
+ * table-driven auth guard for all 268 operations) intact, because the inner app
  * carries no auth of its own. But `inner.fetch` starts a FRESH Hono context, so
  * everything the outer middleware chain resolved onto `c` — `c.get("auth")`
  * from `contractAuth`, the merged quota windows from `rateLimit()` — is
@@ -193,6 +193,20 @@ export interface InferenceRequestScope {
    * `createInferenceRouter` directly is unaffected.
    */
   readonly log?: ((facts: InferenceLogFacts) => void) | undefined;
+  /**
+   * #678 — the attribution tags the OUTER gate defaulted onto this request from
+   * the virtual key, for the required tags the caller did not state.
+   *
+   * It travels here for the same reason `caller` and `tokens` do: the gate runs
+   * on the outer app and `inner.fetch` opens a fresh Hono context. It carries
+   * ONLY the defaults, never the caller's own tags — those are already in the
+   * body this app parses, and a second copy of them would be a second source of
+   * truth for one fact.
+   *
+   * Absent (an inner-app unit test, or a request nothing defaulted) leaves the
+   * caller's `metadata` exactly as it arrived.
+   */
+  readonly attributionDefaults?: Readonly<Record<string, string>> | undefined;
 }
 
 /**

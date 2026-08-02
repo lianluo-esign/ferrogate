@@ -252,6 +252,7 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       "chat.completions": "chat completion request body",
       responses: "responses request body",
       embeddings: "embeddings request body",
+      rerank: "rerank request body",
       images: "image generation request body",
       model_catalog: "model catalog request body",
     }[plan.operation];
@@ -325,6 +326,11 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
             stream: false,
           },
         };
+      case "rerank":
+        // No OpenAI-compatible rerank surface exists to address (that absence is
+        // the whole premise of issue #676), so this family refuses rather than
+        // inventing a `/rerank` path an upstream would 404.
+        return rerankUnsupported(plan.route.providerKind.trim().toLowerCase());
       case "images":
         return {
           ok: true,
@@ -508,6 +514,23 @@ function operationUnsupported(kind: string): AdapterResult {
 }
 
 /**
+ * The `prepare_rerank` refusal (issue #676), mirroring
+ * `BaseProviderAdapter.prepareRerank` in `@ferrogate/providers` byte for byte.
+ *
+ * `unsupported_capability` and not `unsupported_provider_kind`: the family is
+ * real, this surface is not one of its. The distinction is load-bearing on the
+ * failover ladder, which treats a capability refusal as "try the next
+ * candidate" — which is what a deployment mixing an OpenAI route and a Workers
+ * AI reranker under one logical model needs.
+ */
+function rerankUnsupported(kind: string): AdapterResult {
+  return {
+    ok: false,
+    error: { kind: "unsupported_capability", capability: "reranking", providerKind: kind },
+  };
+}
+
+/**
  * `ferrogate-providers/src/grok.rs::GrokAdapter`.
  *
  * A pure delegation: xAI's API is OpenAI's. Grok overrides only
@@ -529,6 +552,8 @@ export const grokAdapter: ProviderAdapter = {
         return openAiCompatibleAdapter.buildUpstreamRequest(asOpenAiCompatible(plan));
       case "images":
         return imagesUnsupported("grok");
+      case "rerank":
+        return rerankUnsupported("grok");
       case "embeddings":
       case "model_catalog":
         return operationUnsupported("grok");
@@ -603,6 +628,8 @@ export const openRouterAdapter: ProviderAdapter = {
     switch (plan.operation) {
       case "images":
         return imagesUnsupported("openrouter");
+      case "rerank":
+        return rerankUnsupported("openrouter");
       case "embeddings":
         return operationUnsupported("openrouter");
       case "chat.completions":
@@ -718,6 +745,8 @@ export const azureOpenAiAdapter: ProviderAdapter = {
     switch (plan.operation) {
       case "images":
         return imagesUnsupported("azure-openai");
+      case "rerank":
+        return rerankUnsupported("azure-openai");
       case "responses":
       case "embeddings":
       case "model_catalog":
@@ -870,7 +899,9 @@ export function packageProviderAdapter(
               ? adapter.prepareResponses(provider, { ...base, stream: plan.stream })
               : plan.operation === "embeddings"
                 ? adapter.prepareEmbeddings(provider, base)
-                : adapter.prepareImages(provider, base);
+                : plan.operation === "rerank"
+                  ? adapter.prepareRerank(provider, base)
+                  : adapter.prepareImages(provider, base);
         return {
           ok: true,
           request: {
@@ -892,6 +923,19 @@ export function packageProviderAdapter(
       const translated = adapter.translateEmbeddingsResponse(encoded, logicalModel);
       // The package returns `null` for "pass the upstream body through"
       // (the Rust `Ok(None)`); `./ports.ts` spells that `undefined`.
+      return translated === null ? undefined : translated;
+    },
+
+    translateRerankResponse(
+      body: unknown,
+      logicalModel: string,
+      request: Record<string, unknown>,
+    ): unknown | undefined {
+      const encoded = new TextEncoder().encode(JSON.stringify(body) ?? "null");
+      // A family with no rerank leg answers `null` from the base class, which is
+      // the pass-through arm — reachable only if such a family somehow served a
+      // rerank plan, since `prepareRerank` refuses first.
+      const translated = adapter.translateRerankResponse(encoded, logicalModel, request as Json);
       return translated === null ? undefined : translated;
     },
   };
@@ -1013,10 +1057,15 @@ export const workersAiAdapter: ProviderAdapter = packageProviderAdapter(
  * registry class was never on the deployed path (see the note on
  * {@link withCloudflareAiGatewayRouting}).
  *
- * `images` and `model_catalog` return `null` deliberately: `cloudflare.ts`'s
- * `CloudflareAiGatewaySurface` has no member for either, and inventing a path
- * for them would send a request somewhere Cloudflare does not serve. They keep
- * dialling the vendor directly, which is what they did before this wiring.
+ * `images`, `rerank` and `model_catalog` return `null` deliberately:
+ * `cloudflare.ts`'s `CloudflareAiGatewaySurface` has no member for any of them,
+ * and inventing a path would send a request somewhere Cloudflare does not serve.
+ * They keep dialling the vendor directly, which is what they did before this
+ * wiring. `rerank` (issue #676) is the sharpest case: the AI Gateway's
+ * Workers-AI passthrough is a `/workers-ai/...` prefix over the SAME run
+ * surface, so a rerank call already reaches Cloudflare and adding a surface
+ * member is a real (and separately reviewable) change to `cloudflare.ts`, not a
+ * `default` arm this file may quietly widen.
  */
 function cloudflareAiGatewaySurface(
   operation: InferenceOperation,
@@ -1145,17 +1194,33 @@ export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): Provid
       };
     },
   };
-  return adapter.translateEmbeddingsResponse === undefined
-    ? routed
-    : {
-        ...routed,
-        // Delegated with `adapter` as the receiver: the response leg is not
-        // affected by routing, and re-binding it here keeps the decorator
-        // transparent for the families that translate embeddings (gemini,
-        // vertex, bedrock, workers-ai).
-        translateEmbeddingsResponse: (body: unknown, logicalModel: string): unknown | undefined =>
-          adapter.translateEmbeddingsResponse?.(body, logicalModel),
-      };
+  // Delegated with `adapter` as the receiver: the response legs are not affected
+  // by routing, and re-binding them here keeps the decorator transparent for the
+  // families that translate embeddings (gemini, vertex, bedrock, workers-ai) or
+  // rerank (workers-ai). Each is attached only when the wrapped adapter actually
+  // has it, so an adapter with no leg is not given one that answers `undefined`
+  // — the handler distinguishes "no translation" from "translated to nothing".
+  return {
+    ...routed,
+    ...(adapter.translateEmbeddingsResponse === undefined
+      ? {}
+      : {
+          translateEmbeddingsResponse: (
+            body: unknown,
+            logicalModel: string,
+          ): unknown | undefined => adapter.translateEmbeddingsResponse?.(body, logicalModel),
+        }),
+    ...(adapter.translateRerankResponse === undefined
+      ? {}
+      : {
+          translateRerankResponse: (
+            body: unknown,
+            logicalModel: string,
+            request: Record<string, unknown>,
+          ): unknown | undefined =>
+            adapter.translateRerankResponse?.(body, logicalModel, request),
+        }),
+  };
 }
 
 /**

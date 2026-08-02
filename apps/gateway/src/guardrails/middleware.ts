@@ -96,9 +96,15 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
     dialect: "anthropic.messages",
     screensResponse: true,
   },
-  // Embeddings/Images are REQUEST-only: `normalize_response` returns an empty
-  // envelope for them (`envelope.ts`), matching the Rust.
+  // Embeddings/Rerank/Images are REQUEST-only: `normalize_response` returns an
+  // empty envelope for them (`envelope.ts`), matching the Rust.
   createEmbedding: { protocol: "embeddings", dialect: "openai.chat", screensResponse: false },
+  // Issue #676. Its own protocol, not `embeddings`: the embeddings extractor
+  // walks `input`, and a rerank body carries `query` + `documents`, so binding
+  // it there would produce an EMPTY envelope — screening that is green, costs an
+  // evidence row, and enforces nothing. That is the exact shape of hole this
+  // table is supposed to make impossible.
+  createRerank: { protocol: "rerank", dialect: "openai.chat", screensResponse: false },
   createImage: { protocol: "images", dialect: "openai.chat", screensResponse: false },
 };
 
@@ -313,7 +319,13 @@ export function guardrails(
     return cachedResolution;
   };
 
-  return async (c: Context, next: Next) => {
+  // NAMED, not an arrow: `GATEWAY_MIDDLEWARE` is asserted structurally by
+  // runtime handler name (`test/metering/wiring.test.ts` for the drain,
+  // `test/attribution/enforcement.test.ts` for #678's position between
+  // admission and screening), and an anonymous handler is invisible to that
+  // gate — which is how a REORDERING, the one defect no behavioural test can
+  // see, would slip through.
+  return async function guardrailsMiddleware(c: Context, next: Next) {
     const operationId = (c.get("operation") as { operationId?: string } | null)?.operationId;
     const binding = operationId === undefined ? undefined : GUARDRAIL_OPERATIONS[operationId];
     if (binding === undefined) {

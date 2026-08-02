@@ -86,13 +86,24 @@ export function routingStrategyFromStr(value: string): RoutingStrategy {
   return entry[0];
 }
 
-/** Closed vocabulary for capabilities declared by one physical model route. */
+/**
+ * Closed vocabulary for capabilities declared by one physical model route.
+ *
+ * `Rerank` is the one member with no Rust ancestor (issue #676). It is a
+ * capability of its own rather than a reading of `Embeddings` because the two
+ * are different model architectures answering different questions: an embedding
+ * model returns a vector per input, a cross-encoder reranker returns a score per
+ * (query, document) pair. Folding them together would let the eligibility gate
+ * route `POST /v1/rerank` at an embedding model, which would answer 200 with a
+ * body that scores nothing.
+ */
 export type ModelCapability =
   | "Chat"
   | "Streaming"
   | "Vision"
   | "Images"
   | "Embeddings"
+  | "Rerank"
   | "Tools"
   | "StructuredOutput";
 
@@ -102,6 +113,7 @@ const CAPABILITY_STRINGS: Record<ModelCapability, string> = {
   Vision: "vision",
   Images: "images",
   Embeddings: "embeddings",
+  Rerank: "rerank",
   Tools: "tools",
   StructuredOutput: "structured_output",
 };
@@ -116,7 +128,7 @@ export function modelCapabilityFromStr(value: string): ModelCapability {
   );
   if (!entry) {
     throw new Error(
-      `unknown model capability ${JSON.stringify(value)}; expected one of chat, streaming, vision, images, embeddings, tools, structured_output`,
+      `unknown model capability ${JSON.stringify(value)}; expected one of chat, streaming, vision, images, embeddings, rerank, tools, structured_output`,
     );
   }
   return entry[0];
