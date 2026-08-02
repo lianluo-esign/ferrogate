@@ -41,7 +41,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { SIEM_EXPORT_SINKS_VAR, parseSiemSinks } from "../src/siem/config.js";
-import { readSiemCursor } from "../src/siem/cursor.js";
+import { advanceSiemCursor, readSiemCursor } from "../src/siem/cursor.js";
+import { redactSecrets } from "../src/siem/destination.js";
 import { type SiemExportReport, runSiemExportPass } from "../src/siem/pump.js";
 import { applySchema, db, resetD1, seedAuditEvents, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
@@ -347,6 +348,43 @@ describe("the replayable cursor", () => {
     expect(deliveredIds()).toEqual(["acme-000", "acme-001", "acme-002", "acme-003"]);
   });
 
+  it("never moves backwards when a slower tick acknowledges an older batch", async () => {
+    // Found by mutation: deleting the forward-only `WHERE` on the upsert left
+    // every other test green, because nothing else drives two acknowledgements
+    // out of order. D1 has no interactive transaction, so this IS the ordering
+    // control — two overlapping ticks (a cron tick that overran, a retry) would
+    // otherwise let the older one drag the cursor back over rows the newer one
+    // already delivered, and every later tick would re-send them forever.
+    await seedRequestLogs(rows("acme", "acme", 3));
+    await runSiemExportPass(bindings(), NOW);
+    const ahead = { ts: OLD + 2, id: "acme-002" };
+    expect((await readSiemCursor(db(), "acme-splunk", "request_logs"))?.position).toEqual(ahead);
+
+    // An older position, as a straggler tick would report it.
+    await advanceSiemCursor(db(), {
+      sinkId: "acme-splunk",
+      stream: "request_logs",
+      tenant: "acme",
+      position: { ts: OLD, id: "acme-000" },
+      rows: 1,
+      replayEpoch: 0,
+      now: NOW,
+    });
+    expect((await readSiemCursor(db(), "acme-splunk", "request_logs"))?.position).toEqual(ahead);
+
+    // And the tiebreaker arm: the same second, a lower id.
+    await advanceSiemCursor(db(), {
+      sinkId: "acme-splunk",
+      stream: "request_logs",
+      tenant: "acme",
+      position: { ts: OLD + 2, id: "acme-001" },
+      rows: 1,
+      replayEpoch: 0,
+      now: NOW,
+    });
+    expect((await readSiemCursor(db(), "acme-splunk", "request_logs"))?.position).toEqual(ahead);
+  });
+
   it("records the durable cursor an operator can read back", async () => {
     await seedRequestLogs(rows("acme", "acme", 3));
     await runSiemExportPass(bindings(), NOW);
@@ -390,6 +428,27 @@ describe("the customer sink credential", () => {
     expect(JSON.stringify(report)).not.toContain(HEC_TOKEN);
     expect(logs.join("\n")).not.toContain(HEC_TOKEN);
     expect(report.streams[0]?.error ?? "").toMatch(/401/);
+    // THE PRIMARY CONTROL, asserted separately from its outcome: the response
+    // BODY is never consumed at all. Without this line the test passes even
+    // when the body IS pasted into the error message, because `redactSecrets`
+    // then removes the token on the way out — measured, not assumed: reverting
+    // to `HTTP ${status}: ${await response.text()}` left all 16 tests green.
+    // Two independent controls deserve two independent assertions.
+    expect(
+      (responses[0] as Response).bodyUsed,
+      "the sink's error body must never be read — real collectors echo the presented token in it",
+    ).toBe(false);
+  });
+
+  it("redacts a credential that reaches an error message anyway", () => {
+    // The second lock, held on its own: even if some future edit builds a
+    // message out of credential-bearing material, nothing reported carries it.
+    expect(redactSecrets(`Invalid token: ${HEC_TOKEN} (401)`, [HEC_TOKEN])).toBe(
+      "Invalid token: [redacted] (401)",
+    );
+    // Short strings are left alone deliberately — redacting a 2-character
+    // "secret" would scrub unrelated text and make a log unreadable.
+    expect(redactSecrets("abc def", ["ab"])).toBe("abc def");
   });
 
   it("refuses a configuration that inlines a secret instead of referencing one", () => {
@@ -407,6 +466,26 @@ describe("the customer sink credential", () => {
     // `wrangler.toml`'s `[vars]` are committed plaintext, so a parser that
     // accepted a literal token would invite one into git.
     expect(() => parseSiemSinks(inline)).toThrow(/secret reference/i);
+  });
+
+  it("refuses a secret reference this Worker cannot resolve", () => {
+    // Found by mutation: disabling the `kind !== "env"` branch left every test
+    // green, because a bare literal is already rejected one line earlier as an
+    // unknown SCHEME. A `vault://` reference is the case that reaches it — it
+    // parses fine and resolves to nothing inside a Worker, so accepting it
+    // would mean a sink that looks configured and never delivers.
+    const vault = JSON.stringify([
+      {
+        id: "bad",
+        tenant: "acme",
+        destination: {
+          kind: "http",
+          endpoint: ENDPOINT,
+          auth: { header: "Authorization", secret_ref: "vault://secret/data/siem#token" },
+        },
+      },
+    ]);
+    expect(() => parseSiemSinks(vault)).toThrow(/env:\/\//);
   });
 
   it("refuses a plaintext http endpoint", () => {

@@ -15,6 +15,7 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import type { StoreRecord } from "../src/ports.js";
+import { SIEM_CURSOR_TABLE } from "../src/siem/cursor.js";
 import {
   AUDIT_TABLE,
   GUARDRAIL_CHECK_TABLE,
@@ -64,6 +65,10 @@ export async function resetD1(): Promise<void> {
     // guarantee.
     db().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`),
     db().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`),
+    // #683: the SIEM export cursors. A leftover cursor is the one kind of stale
+    // row that makes a LATER test see nothing and call it correct — the pump
+    // would report `idle` over rows it had never sent, in this run.
+    db().prepare(`DELETE FROM ${SIEM_CURSOR_TABLE}`),
   ]);
 }
 
