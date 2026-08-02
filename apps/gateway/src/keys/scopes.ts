@@ -13,11 +13,27 @@
  */
 
 /**
- * The six data-plane inference scopes, taken from
- * `docs/openapi/runtime-api-contract.json` (the `auth.scope` of the six
- * inference operations). These are what a key needs to reach the model path;
+ * The seven data-plane inference scopes, taken from
+ * `docs/openapi/runtime-api-contract.json` (the distinct `auth.scope` values of
+ * the inference operations). These are what a key needs to reach the model path;
  * none of them is privileged (`admin.*`), which is why an unscoped virtual key
  * can still call inference but can never call the control plane.
+ *
+ * `audio.create` is the seventh (issue #703), and the first data-plane scope
+ * minted since the port began. It covers all three audio operations
+ * (`createTranscription`, `createTranslation`, `createSpeech`) because they are
+ * one family with one billing story, exactly as `images.generate` covers image
+ * generation.
+ *
+ * A seventh scope rather than a reuse, which is the OPPOSITE of the call #676
+ * made for `createRerank` — and the two are consistent, because the rule is
+ * "take the family's scope" and audio HAS no family here. Reranking is the
+ * second half of the retrieval pipeline whose first half is embedding, so
+ * `embeddings.create` was already the right name for it; nothing on this list
+ * is the right name for transcribing a voice memo. The cost of minting one is
+ * that a key issued before audio existed cannot reach audio until it is
+ * re-scoped — which is fail-CLOSED, the safe direction, and cannot silently
+ * widen any credential in the field.
  */
 export const INFERENCE_SCOPES: readonly string[] = [
   "models.read",
@@ -26,6 +42,7 @@ export const INFERENCE_SCOPES: readonly string[] = [
   "messages.create",
   "embeddings.create",
   "images.generate",
+  "audio.create",
 ];
 
 /**

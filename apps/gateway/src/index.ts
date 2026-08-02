@@ -5,15 +5,16 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 268
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 272
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
- * the 33 operations this Worker owns.
+ * the 38 operations this Worker owns.
  *
- * The inference (6 ops) and asset (18 ops) handlers arrive as `RouteModule`s
- * from their own directories and are mounted in `GATEWAY_ROUTE_MODULES` below;
- * they need no change to the router, the guard, or the contract table.
+ * The inference (12 ops), asset (18 ops) and site (1 op) handlers arrive as
+ * `RouteModule`s from their own directories and are mounted in
+ * `GATEWAY_ROUTE_MODULES` below; they need no change to the router, the guard,
+ * or the contract table.
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";

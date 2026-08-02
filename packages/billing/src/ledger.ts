@@ -18,6 +18,7 @@ import { z } from "zod";
 import { BillingError, type BillingEvent } from "./event.js";
 import { PriceBook } from "./pricing.js";
 import {
+  audioQuantityUnpriced,
   billingUsageSourceSchema,
   costEstimateSchema,
   estimateCost,
@@ -29,6 +30,7 @@ import {
   u16,
   u32,
   u64,
+  type AudioQuantity,
   type BillingUsageSource,
   type CostEstimate,
   type ModelPrice,
@@ -345,9 +347,10 @@ function settledBreakdown(
   total: number,
   usage: TokenUsage,
   price: ModelPrice | undefined,
+  audio?: AudioQuantity,
 ): CostEstimate {
   if (price) {
-    const est = estimateCost(price, usage);
+    const est = estimateCost(price, usage, audio);
     if (est.total_cost > 0.0) {
       const scale = total / est.total_cost;
       return {
@@ -357,6 +360,18 @@ function settledBreakdown(
         currency: price.currency,
       };
     }
+  }
+  // #703. With no token counts at all — an audio row — the ratio split has
+  // nothing to divide by, and the fallback below would put the WHOLE settled
+  // cost on the output side. For both audio operations the billable quantity is
+  // the input, so the fallback is stated here rather than reached by accident.
+  const audioOnly =
+    usage.prompt_tokens === 0 &&
+    usage.completion_tokens === 0 &&
+    audio !== undefined &&
+    ((audio.audio_seconds ?? 0) > 0 || (audio.audio_characters ?? 0) > 0);
+  if (audioOnly) {
+    return { input_cost: total, output_cost: 0.0, total_cost: total, currency: "USD" };
   }
   const denominator = usage.prompt_tokens + usage.completion_tokens;
   const input_cost = denominator > 0 ? (total * usage.prompt_tokens) / denominator : 0.0;
@@ -395,10 +410,20 @@ export function charge(
   let unit_price: ModelPrice;
   let cost_source: CostSource;
 
+  // #703. The audio quantities travel on the EVENT, not inside `usage`; see
+  // `BillingEvent.audio_seconds`. Passing them through here is what arms the
+  // divergence check for a transcription — before it, `expected` was $0 for
+  // every audio row, so the check was either disarmed (no card entry) or
+  // permanently firing (a card entry with no quantity to price).
+  const audio: AudioQuantity = {
+    ...(event.audio_seconds !== undefined ? { audio_seconds: event.audio_seconds } : {}),
+    ...(event.audio_characters !== undefined ? { audio_characters: event.audio_characters } : {}),
+  };
+
   const settled = authoritativeCost(event);
   if (settled !== undefined) {
     if (priceOpt) {
-      const expected = estimateCost(priceOpt, usage).total_cost;
+      const expected = estimateCost(priceOpt, usage, audio).total_cost;
       if (costDiverges(settled, expected)) {
         onDivergence?.({
           request_id: event.request_id,
@@ -409,7 +434,7 @@ export function charge(
         });
       }
     }
-    cost = settledBreakdown(settled, usage, priceOpt);
+    cost = settledBreakdown(settled, usage, priceOpt, audio);
     unit_price = priceOpt ?? modelPriceUsd(0.0, 0.0);
     cost_source = CostSource.GatewaySettled;
   } else {
@@ -419,7 +444,17 @@ export function charge(
         `no rate-card price for provider '${event.provider}' model '${event.provider_model}' and the event carried no settled cost`,
       );
     }
-    cost = estimateCost(priceOpt, usage);
+    // #703. A card that matches the model but states no rate for the UNIT this
+    // row is measured in cannot price it, and the token arithmetic below would
+    // quietly answer $0 — the free-inference bug #129 named, one unit over. So
+    // it is the same refusal as no entry at all.
+    if (audioQuantityUnpriced(priceOpt, audio)) {
+      throw new BillingError(
+        "price_not_found",
+        `rate-card entry for provider '${event.provider}' model '${event.provider_model}' states no audio rate for this row, and the event carried no settled cost`,
+      );
+    }
+    cost = estimateCost(priceOpt, usage, audio);
     unit_price = priceOpt;
     cost_source = CostSource.BillingPriceBook;
   }

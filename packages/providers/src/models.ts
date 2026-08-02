@@ -104,6 +104,12 @@ export type ModelCapability =
   | "Images"
   | "Embeddings"
   | "Rerank"
+  // Issue #703. Two members rather than one `Audio`, for the reason `Rerank` is
+  // not a reading of `Embeddings`: speech-to-text and text-to-speech are
+  // opposite directions on different architectures, and collapsing them would
+  // let the eligibility gate serve `POST /v1/audio/speech` from Whisper.
+  | "Transcription"
+  | "Speech"
   | "Tools"
   | "StructuredOutput";
 
@@ -114,6 +120,8 @@ const CAPABILITY_STRINGS: Record<ModelCapability, string> = {
   Images: "images",
   Embeddings: "embeddings",
   Rerank: "rerank",
+  Transcription: "transcription",
+  Speech: "speech",
   Tools: "tools",
   StructuredOutput: "structured_output",
 };
@@ -128,7 +136,7 @@ export function modelCapabilityFromStr(value: string): ModelCapability {
   );
   if (!entry) {
     throw new Error(
-      `unknown model capability ${JSON.stringify(value)}; expected one of chat, streaming, vision, images, embeddings, rerank, tools, structured_output`,
+      `unknown model capability ${JSON.stringify(value)}; expected one of chat, streaming, vision, images, embeddings, rerank, transcription, speech, tools, structured_output`,
     );
   }
   return entry[0];

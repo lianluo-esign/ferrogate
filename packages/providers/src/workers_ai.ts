@@ -53,6 +53,9 @@ import type {
   ProviderUsage,
   RerankPlan,
   ResponsesPlan,
+  AudioBytes,
+  SpeechPlan,
+  TranscriptionPlan,
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
 import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
@@ -234,6 +237,156 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
       results.push(entry);
     }
     return { object: "list", model, results };
+  }
+
+  // -------------------------------------------------------------------------
+  // Audio (issue #703)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Workers AI Whisper (`@cf/openai/whisper-large-v3-turbo`) takes
+   * `{ audio: "<base64>", task, language?, initial_prompt? }`.
+   *
+   * Three deliberate mappings:
+   *
+   *  - the audio is BASE64, not a byte array. Cloudflare's turbo model documents
+   *    base64 and the older `@cf/openai/whisper` documents `number[]`; base64 is
+   *    chosen because a 25 MiB clip as a JSON array of integers is roughly 100 MB
+   *    of JSON text, which a Worker cannot serialize, while base64 is 1.33x. The
+   *    older model is reachable by an operator who wants it and would need its
+   *    own leg — stated rather than silently half-supported.
+   *  - `task` carries the transcribe/translate distinction, which is the ONE
+   *    difference between the two ingress operations.
+   *  - `initial_prompt` is Whisper's spelling of OpenAI's `prompt` decoder hint.
+   *    Translating the name here is what keeps the ingress OpenAI-compatible
+   *    without leaking Cloudflare's vocabulary to the caller.
+   *
+   * `response_format` and `temperature` are deliberately NOT forwarded: the run
+   * surface has no such knobs, and forwarding an unknown member to a task-typed
+   * binding is how a 400 with no explanation happens. The caller's
+   * `response_format` is honoured on the way OUT, by the gateway.
+   */
+  override prepareTranscription(
+    provider: ProviderConfig,
+    request: TranscriptionPlan,
+  ): ProviderHttpRequest {
+    validateKind(provider.kind);
+    const body = ensureObjectBody(request.body, "audio transcription request body");
+    const bytes = audioUploadBytes(body);
+    const input: JsonObject = {
+      audio: base64Encode(bytes),
+      task: request.translate ? "translate" : "transcribe",
+    };
+    const language = asStr(getField(body, "language"));
+    if (language !== undefined && language.length > 0) input["language"] = language;
+    const prompt = asStr(getField(body, "prompt"));
+    if (prompt !== undefined && prompt.length > 0) input["initial_prompt"] = prompt;
+    return {
+      provider: provider.name,
+      endpoint: runEndpoint(provider.baseUrl, request.providerModel),
+      body: input,
+      stream: false,
+      headers: workersAiHeaders(provider.apiKey),
+    };
+  }
+
+  /**
+   * Workers AI text-to-speech (`@cf/myshell-ai/melotts`) takes
+   * `{ prompt, lang }` and answers `{ audio: "<base64 mp3>" }`.
+   *
+   * `prompt`, not `input`: the run surface's own spelling. `lang` takes the
+   * caller's `language` and falls back to `voice` — a caller writing against
+   * OpenAI sends `voice`, and MeloTTS's voice selection IS its language, so
+   * mapping one onto the other is the closest honest reading of the request
+   * rather than dropping it. Neither is invented when the caller sent neither:
+   * MeloTTS's own default is what an operator's model card documents, and
+   * defaulting to `en` here would silently change the answer for a caller who
+   * asked for nothing.
+   */
+  override prepareSpeech(provider: ProviderConfig, request: SpeechPlan): ProviderHttpRequest {
+    validateKind(provider.kind);
+    const body = ensureObjectBody(request.body, "speech request body");
+    const text = asStr(getField(body, "input"));
+    if (text === undefined || text.length === 0) {
+      throw AdapterError.invalidRequest('speech request body must include a non-empty "input"');
+    }
+    const input: JsonObject = { prompt: text };
+    const lang = asStr(getField(body, "language")) ?? asStr(getField(body, "voice"));
+    if (lang !== undefined && lang.length > 0) input["lang"] = lang;
+    return {
+      provider: provider.name,
+      endpoint: runEndpoint(provider.baseUrl, request.providerModel),
+      body: input,
+      stream: false,
+      headers: workersAiHeaders(provider.apiKey),
+    };
+  }
+
+  /**
+   * `{ text, word_count, segments }` → OpenAI's `{ text, duration, segments }`.
+   *
+   * `duration` is DERIVED — the largest segment `end` — because Whisper does not
+   * report one and it is the quantity this operation is billed on. Taking the
+   * maximum rather than the last element's `end` is deliberate: segment order is
+   * the model's, not necessarily monotonic, and a duration read off a
+   * mis-ordered last row would under-bill a long recording.
+   *
+   * When there are no segments at all the field is OMITTED rather than set to
+   * zero. The gateway meters on exactly this value, and `0` would settle a real
+   * call authoritatively at $0 where an absent field correctly falls through to
+   * the rate card. That distinction is the whole reason `Usage.audioSeconds` is
+   * optional.
+   */
+  override translateTranscriptionResponse(body: Uint8Array, _model: string): Json | null {
+    const parsed = parseJson(body);
+    if (parsed === undefined) {
+      throw AdapterError.invalidRequest("provider transcription response must be JSON");
+    }
+    const result = unwrapCloudflareEnvelope(parsed);
+    const text = asStr(getField(result, "text"));
+    if (text === undefined) {
+      throw AdapterError.invalidRequest("workers ai transcription response is missing text");
+    }
+    const out: JsonObject = { text };
+    const segments = getField(result, "segments");
+    if (Array.isArray(segments) && segments.length > 0) {
+      let duration = 0;
+      for (const segment of segments) {
+        const end = getField(segment, "end");
+        if (typeof end === "number" && Number.isFinite(end) && end > duration) duration = end;
+      }
+      if (duration > 0) out["duration"] = duration;
+      out["segments"] = segments as Json;
+    }
+    const language = asStr(getField(result, "language"));
+    if (language !== undefined) out["language"] = language;
+    return out;
+  }
+
+  /**
+   * `{ audio: "<base64>" }` → the decoded MP3.
+   *
+   * Without this leg the base64 STRING is what reaches the caller under an
+   * `audio/*` content type — a 200 that every audio player rejects. That is the
+   * silent, metered failure `runOnBinding`'s reranker arm exists to prevent one
+   * surface over, and it is why this method returns bytes rather than `Json`.
+   *
+   * `audio/mpeg` is asserted rather than read off the upstream: the Cloudflare
+   * run surface answers `application/json` (it IS JSON), so relaying its content
+   * type would label an MP3 as JSON. MeloTTS emits MP3, which is also the OpenAI
+   * default `response_format`, so the two dialects agree on the common case.
+   */
+  override translateSpeechResponse(body: Uint8Array, contentType: string): AudioBytes | null {
+    // Not JSON at all ⇒ the upstream already answered with audio. Relay it.
+    const parsed = parseJson(body);
+    if (parsed === undefined || !isObject(parsed)) return null;
+    const result = unwrapCloudflareEnvelope(parsed);
+    const encoded = asStr(getField(result, "audio"));
+    if (encoded === undefined) {
+      throw AdapterError.invalidRequest("workers ai speech response is missing audio");
+    }
+    void contentType;
+    return { bytes: base64Decode(encoded), contentType: "audio/mpeg" };
   }
 
   /**
@@ -556,6 +709,55 @@ function runEndpoint(baseUrl: string, providerModel: string): string {
     );
   }
   return `${trimEndSlashes(baseUrl)}/run/${model}`;
+}
+
+/**
+ * The decoded upload bytes off the gateway's normalized `file` part (#703).
+ *
+ * Exported for the same reason `rerankDocumentTexts` is: it reads the GATEWAY's
+ * ingress grammar, not Cloudflare's, so the next family to grow an audio leg
+ * reuses it instead of writing a second reading of `file`. Two readings would be
+ * two chances to disagree about which bytes were sent — and the byte count is
+ * what the pre-dispatch reservation was computed from.
+ */
+export function audioUploadBytes(body: Json): Uint8Array {
+  const file = getField(body, "file");
+  const bytes = isObject(file) ? (file as { bytes?: unknown }).bytes : undefined;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+    throw AdapterError.invalidRequest('audio request must include a non-empty "file" part');
+  }
+  return bytes;
+}
+
+/**
+ * Base64 in CHUNKS, which is not a micro-optimization.
+ *
+ * `String.fromCharCode(...bytes)` spreads every byte as a separate argument, and
+ * a 25 MiB upload is 26 million arguments — past every engine's call-stack limit
+ * — so the naive spelling does not merely run slowly, it THROWS on exactly the
+ * large uploads this surface exists to accept. 8 KiB per call keeps the argument
+ * count bounded while staying a handful of allocations.
+ */
+function base64Encode(bytes: Uint8Array): string {
+  const CHUNK = 8192;
+  let binary = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** The inverse. Throws `invalid_request` on a provider answer that is not base64. */
+function base64Decode(encoded: string): Uint8Array {
+  let binary: string;
+  try {
+    binary = atob(encoded);
+  } catch {
+    throw AdapterError.invalidRequest("provider speech response is not valid base64 audio");
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 const toolResultContentToString = (value: Json): string =>

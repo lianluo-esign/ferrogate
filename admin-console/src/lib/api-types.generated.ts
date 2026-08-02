@@ -5522,6 +5522,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/audio/transcriptions": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transcribe audio in its source language, served by Workers AI Whisper or a provider passthrough. */
+        post: operations["createTranscription"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/audio/translations": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Translate audio into English, served by Workers AI Whisper or a provider passthrough. */
+        post: operations["createTranslation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/audio/speech": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Synthesize speech from text. The 2xx body is AUDIO BYTES, relayed byte-for-byte; an error is always the FerroGate envelope. */
+        post: operations["createSpeech"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -9805,6 +9889,35 @@ export interface components {
             certificate_status: components["schemas"]["AdminSiteDomainCertificateStatus"];
             certificate: components["schemas"]["AdminSiteDomainCertificate"];
             verification?: components["schemas"]["AdminSiteDomainVerification"];
+        };
+        /** @description The OpenAI-compatible transcription. `text` is always present; `duration` and `segments` only when the provider reported them. */
+        AudioTranscription: {
+            text: string;
+            language?: string;
+            /** @description Length of the source audio in seconds - the unit this call is metered on. */
+            duration?: number;
+            segments?: ({
+                start?: number;
+                end?: number;
+                text?: string;
+            } & {
+                [key: string]: unknown;
+            })[];
+        } & {
+            [key: string]: unknown;
+        };
+        AudioSpeechRequest: {
+            model: string;
+            /** @description The text to synthesize. Its CHARACTER count is the billable unit. */
+            input: string;
+            voice?: string;
+            /** @enum {string} */
+            response_format?: "mp3" | "opus" | "aac" | "flac" | "wav" | "pcm";
+            speed?: number;
+            language?: string;
+            metadata?: {
+                [key: string]: string;
+            };
         };
     };
     responses: {
@@ -20845,6 +20958,162 @@ export interface operations {
             404: components["responses"]["NotFound"];
             405: components["responses"]["MethodNotAllowed"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createTranscription: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description The audio to transcribe, uploaded inline. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read. Mutually exclusive with `file_ref`.
+                     */
+                    file?: string;
+                    model: string;
+                    language?: string;
+                    prompt?: string;
+                    /** @enum {string} */
+                    response_format?: "json" | "text" | "verbose_json";
+                    temperature?: number;
+                    /** @description A recording already published to the deployment's object store, addressed as "{asset_type}/{name}/{version}" - the same coordinate POST /v1/assets/presign/upload/{asset_type}/{name}/{version} registers. The bytes are read from R2 by reference and never traverse this request, so the by-reference ceiling is a separate, larger limit enforced against the size the object store recorded. Resolves inside the CALLING tenant's own namespace only. Mutually exclusive with `file`. */
+                    file_ref?: string;
+                } & (unknown | unknown);
+            };
+        };
+        responses: {
+            /** @description The transcript, plus the duration the call is metered on when the provider reported one. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioTranscription"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createTranslation: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description The audio to transcribe, uploaded inline. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read. Mutually exclusive with `file_ref`.
+                     */
+                    file?: string;
+                    model: string;
+                    language?: string;
+                    prompt?: string;
+                    /** @enum {string} */
+                    response_format?: "json" | "text" | "verbose_json";
+                    temperature?: number;
+                    /** @description A recording already published to the deployment's object store, addressed as "{asset_type}/{name}/{version}" - the same coordinate POST /v1/assets/presign/upload/{asset_type}/{name}/{version} registers. The bytes are read from R2 by reference and never traverse this request, so the by-reference ceiling is a separate, larger limit enforced against the size the object store recorded. Resolves inside the CALLING tenant's own namespace only. Mutually exclusive with `file`. */
+                    file_ref?: string;
+                } & (unknown | unknown);
+            };
+        };
+        responses: {
+            /** @description The English transcript, plus the duration the call is metered on when the provider reported one. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioTranscription"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createSpeech: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AudioSpeechRequest"];
+            };
+        };
+        responses: {
+            /** @description The synthesized audio, passed through untouched. Metered on the CHARACTER count of `input`. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/mpeg": string;
+                    "audio/wav": string;
+                    "application/octet-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }

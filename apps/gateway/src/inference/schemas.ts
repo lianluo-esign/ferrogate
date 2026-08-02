@@ -1,5 +1,5 @@
 /**
- * Zod request/response schemas for the nine inference operations.
+ * Zod request/response schemas for the twelve inference operations.
  *
  * Clean-room port of the Rust ingress extractors:
  *  - `ChatCompletionRequest`   (`server/chat.rs`, shared by `/v1/chat/completions`
@@ -336,6 +336,176 @@ export const rerankRequestSchema = z
 export type RerankRequest = z.infer<typeof rerankRequestSchema>;
 
 // ---------------------------------------------------------------------------
+// The audio surface — `createTranscription` / `createTranslation` /
+// `createSpeech` (issue #703)
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /v1/audio/{transcriptions,translations}` — the MULTIPART upload, after
+ * the form has been parsed.
+ *
+ * ## Why this validates a normalized object rather than the `FormData`
+ *
+ * Every other operation on this surface hands Zod a JSON document, and the
+ * error envelope, the metadata bounds check, the model gate and the estimator
+ * all read `Record<string, unknown>`. Reshaping the form into that shape ONCE,
+ * at the reader (`readAudioUpload` in `./handlers.ts`), means the twelve stages
+ * downstream are untouched by the fact that this ingress happens to be
+ * multipart — which is the whole point of #676's "structural twin" rule.
+ *
+ * `file` carries the decoded bytes plus the two things a provider needs to
+ * label them. It is `unknown` to Zod on purpose: a `Uint8Array` is not a shape
+ * Zod can usefully describe, and re-validating bytes it never parsed would be
+ * theatre. What IS checked is that the part existed and was non-empty, which is
+ * the caller error that actually happens.
+ */
+export const audioUploadRequestSchema = z
+  .object({
+    model: modelField,
+    file: z.custom<AudioUploadFile>(
+      (value) =>
+        typeof value === "object" &&
+        value !== null &&
+        (value as AudioUploadFile).bytes instanceof Uint8Array &&
+        (value as AudioUploadFile).bytes.byteLength > 0,
+      { message: 'audio request must include a non-empty "file" part' },
+    ),
+    /** ISO-639-1 hint. Improves accuracy; never required. */
+    language: z.string().optional(),
+    /** A text hint that biases the decoder — OpenAI's `prompt` field. */
+    prompt: z.string().optional(),
+    response_format: z.enum(["json", "text", "verbose_json", "srt", "vtt"]).optional(),
+    temperature: z.number().min(0).max(1).optional(),
+    metadata: requestMetadataSchema.optional(),
+  })
+  .passthrough();
+export type AudioUploadRequest = z.infer<typeof audioUploadRequestSchema>;
+
+/**
+ * The BY-REFERENCE spelling of the same request (issue #703): no `file` part,
+ * a `file_ref` naming a recording the caller already published to R2 through
+ * `/v1/assets/presign/upload/**`.
+ *
+ * A SECOND schema rather than a `file`-or-`file_ref` union on the first one,
+ * for the error message. A union reports "no branch matched" and lists both
+ * failures, so a caller who simply forgot the `file` part would be told about a
+ * `file_ref` field they have never heard of. Two schemas, selected on which
+ * field is present, means each caller error is reported in the vocabulary of
+ * the request they actually sent.
+ *
+ * `file_ref` is validated here only as a non-empty string;
+ * `parseAudioObjectReference` owns its grammar, because the grammar is the
+ * asset coordinate's and belongs beside the resolver that uses it.
+ */
+export const audioReferenceRequestSchema = z
+  .object({
+    model: modelField,
+    file_ref: z.string().min(1, 'audio request must include a non-empty "file_ref"'),
+    language: z.string().optional(),
+    prompt: z.string().optional(),
+    response_format: z.enum(["json", "text", "verbose_json", "srt", "vtt"]).optional(),
+    temperature: z.number().min(0).max(1).optional(),
+    metadata: requestMetadataSchema.optional(),
+  })
+  .passthrough();
+
+/**
+ * The audio-upload ceiling, in bytes — the DEFAULT for
+ * `InferenceLimits.audioUploadMaxBytes` (issue #703).
+ *
+ * 25 MiB, chosen for three reasons that agree:
+ *
+ *  1. it is OpenAI's own documented limit on `/v1/audio/transcriptions`, so a
+ *     client that already works against OpenAI works here unchanged, and a
+ *     client that would be refused there is refused here with the same shape of
+ *     answer rather than after a wasted upstream round trip;
+ *  2. it is roughly two hours of 24 kbit/s voice, which covers the workloads
+ *     this surface exists for (meetings, calls, voice memos);
+ *  3. it fits comfortably inside a Worker's memory bound even counting the
+ *     base64 expansion the Workers AI leg applies (25 MiB → ~34 MiB), with room
+ *     for the response and the isolate itself.
+ *
+ * It lives HERE, beside the schema, rather than in `handlers.ts`, because
+ * `defaults.ts` needs it for `DEFAULT_INFERENCE_LIMITS` and `handlers.ts`
+ * imports `defaults.ts` — the constant in the handler would be an import cycle.
+ * The same reason `DEFAULT_IMAGE_COUNT` lives in this file rather than in the
+ * estimator that clamps against it.
+ */
+export const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * The BY-REFERENCE ceiling — the DEFAULT for
+ * `InferenceLimits.audioReferenceMaxBytes` (issue #703).
+ *
+ * 40 MiB, and it is a different number from {@link MAX_AUDIO_UPLOAD_BYTES}
+ * because it answers a different question. The inline ceiling bounds an
+ * UNTRUSTED STREAM whose length the gateway cannot know until it has read it;
+ * this one bounds an object whose exact size R2 already reported, so the risk
+ * it manages is not ingest at all — it is how much of a 128 MiB isolate one
+ * request may hold.
+ *
+ * The arithmetic, stated so it can be argued with:
+ *
+ *  - the OpenAI-compatible passthrough builds a `FormData` over the bytes, so
+ *    peak residency is ~1x the object;
+ *  - the Workers AI leg base64-encodes them (`workers_ai.ts`), so peak is the
+ *    object PLUS its 4/3 encoding — 40 MiB → ~93 MiB. That is the binding
+ *    constraint, and it is what picked 40 rather than 64.
+ *
+ * What that buys: ~2.8 hours of 32 kbit/s voice, ~1.4 hours at 64 kbit/s. The
+ * 90-minute meeting recording this path exists for fits at any bitrate a voice
+ * codec actually uses, and it fits WITHOUT the caller having to push it through
+ * this Worker in one shot.
+ *
+ * What it does NOT claim: this is not unbounded, and pretending otherwise would
+ * be the more comfortable lie. The bound exists because the by-reference read
+ * still MATERIALIZES the object. Removing it means streaming `R2ObjectBody.body`
+ * straight into a provider's multipart request body — genuinely possible, and
+ * genuinely nicer here than on the inline path because an R2 object can be
+ * re-opened per failover attempt where a consumed request stream cannot — but it
+ * is a change to the dispatcher's body contract, not to this constant, and it is
+ * not done. An operator whose isolate budget allows more raises
+ * `audioReferenceMaxBytes`; the default is the one that is safe on the leg that
+ * expands.
+ */
+export const MAX_AUDIO_REFERENCE_BYTES = 40 * 1024 * 1024;
+
+/** One decoded upload part: the bytes plus how to label them upstream. */
+export interface AudioUploadFile {
+  readonly bytes: Uint8Array;
+  readonly filename: string;
+  readonly contentType: string;
+}
+
+/**
+ * `POST /v1/audio/speech` — OpenAI's text-to-speech body.
+ *
+ * `input` is `min(1)` for the same reason `rerank.documents` is `min(1)`:
+ * synthesizing nothing is a caller bug, and admitting it would spend an upstream
+ * call and a TPM reservation to return an empty audio file.
+ *
+ * `voice` is OPTIONAL, which is a deviation from OpenAI (it requires one). The
+ * reason is that the deployments this surface actually serves first are Workers
+ * AI models whose voice selection is a `lang` code, and rejecting a request for
+ * omitting a field the served provider does not have would make the OpenAI
+ * dialect a liability rather than a compatibility layer. A caller targeting
+ * OpenAI still sends it and it is forwarded verbatim.
+ */
+export const speechRequestSchema = z
+  .object({
+    model: modelField,
+    input: z.string().min(1, 'speech request must include a non-empty "input" field'),
+    voice: z.string().optional(),
+    response_format: z.enum(["mp3", "opus", "aac", "flac", "wav", "pcm"]).optional(),
+    speed: z.number().min(0.25).max(4).optional(),
+    /** Workers AI's MeloTTS spelling of voice selection. */
+    language: z.string().optional(),
+    metadata: requestMetadataSchema.optional(),
+  })
+  .passthrough();
+export type SpeechRequest = z.infer<typeof speechRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // POST /v1/images/generations — operation `createImage`
 // ---------------------------------------------------------------------------
 
@@ -376,14 +546,16 @@ const modelCapabilitySchema = z.enum([
   "images",
   "embeddings",
   "rerank",
+  "transcription",
+  "speech",
   "tools",
   "structured_output",
 ]);
 
 /** Input/output media a model supports — DERIVED, see `./model-metadata.ts`. */
 const modelModalitiesSchema = z.object({
-  input: z.array(z.enum(["text", "image", "embedding", "score"])),
-  output: z.array(z.enum(["text", "image", "embedding", "score"])),
+  input: z.array(z.enum(["text", "image", "embedding", "score", "audio"])),
+  output: z.array(z.enum(["text", "image", "embedding", "score", "audio"])),
 });
 
 /**

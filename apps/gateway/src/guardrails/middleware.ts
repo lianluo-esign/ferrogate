@@ -70,7 +70,25 @@ import { type StreamDialect, screenSseBody } from "./stream.js";
 interface OperationBinding {
   readonly protocol: GuardrailProtocol;
   readonly dialect: StreamDialect;
-  /** Response normalization is only defined for chat/responses (see `normalizeResponse`). */
+  /**
+   * Whether the REQUEST stage runs (issue #703).
+   *
+   * Every operation on this table but the two audio uploads sends a JSON body,
+   * and for those the flag is `true` and nothing about the middleware changed.
+   * `createTranscription` / `createTranslation` send `multipart/form-data`
+   * wrapping opaque audio: there is no text to hand a detector, so the request
+   * stage does not run AT ALL for them, and — the part that matters — NO
+   * `allowed` verdict is recorded for it. That distinction is the whole reason
+   * this is a flag rather than an empty envelope evaluated for form's sake: an
+   * empty envelope would pass every check, write an evidence row, and report a
+   * control that read nothing.
+   */
+  readonly screensRequest: boolean;
+  /**
+   * Whether the RESPONSE stage runs. Defined for chat/responses (model-generated
+   * text) and, since #703, for the two audio uploads (an attacker-supplied
+   * transcript). See `normalizeResponse`.
+   */
   readonly screensResponse: boolean;
 }
 
@@ -84,28 +102,102 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
   createChatCompletion: {
     protocol: "chat_completions",
     dialect: "openai.chat",
+    screensRequest: true,
     screensResponse: true,
   },
   createResponse: {
     protocol: "responses",
     dialect: "openai.responses",
+    screensRequest: true,
     screensResponse: true,
   },
   createMessage: {
     protocol: "chat_completions",
     dialect: "anthropic.messages",
+    screensRequest: true,
     screensResponse: true,
   },
   // Embeddings/Rerank/Images are REQUEST-only: `normalize_response` returns an
   // empty envelope for them (`envelope.ts`), matching the Rust.
-  createEmbedding: { protocol: "embeddings", dialect: "openai.chat", screensResponse: false },
+  createEmbedding: {
+    protocol: "embeddings",
+    dialect: "openai.chat",
+    screensRequest: true,
+    screensResponse: false,
+  },
   // Issue #676. Its own protocol, not `embeddings`: the embeddings extractor
   // walks `input`, and a rerank body carries `query` + `documents`, so binding
   // it there would produce an EMPTY envelope — screening that is green, costs an
   // evidence row, and enforces nothing. That is the exact shape of hole this
   // table is supposed to make impossible.
-  createRerank: { protocol: "rerank", dialect: "openai.chat", screensResponse: false },
-  createImage: { protocol: "images", dialect: "openai.chat", screensResponse: false },
+  createRerank: {
+    protocol: "rerank",
+    dialect: "openai.chat",
+    screensRequest: true,
+    screensResponse: false,
+  },
+  // ---- the audio surface (issue #703) --------------------------------------
+  //
+  // Three operations, two protocols, and the asymmetry between them IS the
+  // entry. "Audio is opaque, so audio cannot be guarded" is only half true, and
+  // shipping the half would have left the more dangerous direction open.
+  //
+  // `createSpeech` — REQUEST-screened. Its body is JSON carrying the `input`
+  // text a caller wants spoken, which is ordinary user content and the last
+  // point at which it is still a string: once synthesized it is past every text
+  // control a tenant owns (a DLP scan of transcripts, a log scrubber, a
+  // redaction policy on `/v1/chat/completions`; none of them reads audio).
+  // `screensResponse` is false because the answer is MP3 bytes — decoding those
+  // as UTF-8 to hand a detector would produce mojibake and an evidence row
+  // about nothing.
+  //
+  // `createTranscription` / `createTranslation` — RESPONSE-screened, and NOT
+  // request-screened. Both halves are deliberate:
+  //
+  //  - the INPUT is opaque and stays that way. Their bodies are
+  //    `multipart/form-data` wrapping audio; `readJsonBodyBounded` below returns
+  //    `undefined` for a non-JSON body, no detector in this tree reads a
+  //    waveform, and `normalizeRequest("audio_transcription", …)` extracts
+  //    nothing on purpose. `screensRequest: false` says exactly that, and the
+  //    middleware records NO verdict for a stage it did not run — which is the
+  //    difference between an absence an auditor can see and a no-op that looks
+  //    like a control.
+  //
+  //  - the OUTPUT is not opaque, and it is the direction the attack travels. A
+  //    transcript is text chosen by whoever supplied the recording — anyone who
+  //    can email your customer an audio file — returned to a caller who will
+  //    usually put it straight into the next prompt. That is the same class
+  //    issue #688 closes for tool results and retrieved documents, and a
+  //    transcript is a textbook instance of it. So the answer goes through the
+  //    ordinary response stage, over the `audio_transcription` protocol, with
+  //    the same evidence shape and the same deny/redact effects as every other
+  //    text egress on this table. `envelope.ts` walks the three shapes
+  //    `response_format` can produce, because otherwise the bypass would be one
+  //    form field long.
+  createSpeech: {
+    protocol: "audio_speech",
+    dialect: "openai.chat",
+    screensRequest: true,
+    screensResponse: false,
+  },
+  createTranscription: {
+    protocol: "audio_transcription",
+    dialect: "openai.chat",
+    screensRequest: false,
+    screensResponse: true,
+  },
+  createTranslation: {
+    protocol: "audio_transcription",
+    dialect: "openai.chat",
+    screensRequest: false,
+    screensResponse: true,
+  },
+  createImage: {
+    protocol: "images",
+    dialect: "openai.chat",
+    screensRequest: true,
+    screensResponse: false,
+  },
 };
 
 export interface GuardrailMiddlewareOptions extends GuardrailEngineDeps {
@@ -341,57 +433,97 @@ export function guardrails(
     try {
       const tenant = tenantFrom(c);
 
-      const body = await readJsonBodyBounded(
-        c.req.raw,
-        options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES,
-      );
-      if (body === undefined) {
-        // Not JSON, or over the cap: the downstream reader owns the 400/413. A
-        // guardrail cannot screen what it cannot parse, and inventing a verdict
-        // here would shadow the correct error code.
-        return next();
+      let context: GuardrailEvaluationContext;
+      let plan: ReturnType<GuardrailEngine["streamingGuardrailPlan"]>;
+
+      if (binding.screensRequest) {
+        const body = await readJsonBodyBounded(
+          c.req.raw,
+          options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES,
+        );
+        if (body === undefined) {
+          // Not JSON, or over the cap: the downstream reader owns the 400/413. A
+          // guardrail cannot screen what it cannot parse, and inventing a verdict
+          // here would shadow the correct error code.
+          return next();
+        }
+
+        const model = typeof body.model === "string" ? body.model : undefined;
+        const provider = model !== undefined ? options.providerForModel?.(model, env) : undefined;
+        const streaming = body.stream === true;
+
+        const screenedBody =
+          operationId === "createMessage" && options.translateAnthropicRequest !== undefined
+            ? (options.translateAnthropicRequest(body) ?? body)
+            : body;
+
+        context = {
+          requestId,
+          tenant,
+          ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(provider !== undefined ? { provider } : {}),
+          streaming,
+          envelope: normalizeRequest(binding.protocol, screenedBody),
+        };
+
+        // ---- INPUT screening -----------------------------------------------
+        const requestMatch = await engine.matchGuardrail("request", context);
+        if (requestMatch !== null) {
+          await auditBlock(options.audit, context, requestMatch, "request");
+          recordGuardrailVerdict(c, "blocked", requestMatch);
+          // Any match — deny OR redact — refuses. See the module doc.
+          return guardrailBlockedResponse(requestMatch, requestId);
+        }
+        // Screening RAN and passed. The request log distinguishes this from
+        // `not_screened` (#664): the early `return next()` paths above — an
+        // operation no policy binds, a body that could not be parsed — leave the
+        // verdict unset, and recording those as "allowed" would tell an auditor a
+        // control ran when none did.
+        recordGuardrailVerdict(c, "allowed");
+
+        // A `reject_streaming` policy denies a streaming request before dispatch;
+        // `matchGuardrail` above already produced that verdict, so by here the plan
+        // only distinguishes enforcement from shadow.
+        plan = engine.streamingGuardrailPlan(context);
+
+        await next();
+      } else {
+        // ---- NO input screening (issue #703) --------------------------------
+        //
+        // The two audio uploads. Their bodies are `multipart/form-data` wrapping
+        // opaque audio, so there is nothing to hand a detector — and the
+        // difference between this branch and "evaluate an empty envelope" is the
+        // entire reason the branch exists: an empty envelope passes every check,
+        // buffers an evidence row, and records `allowed`, which tells an auditor
+        // a control read content that no detector ever saw. Nothing is recorded
+        // here; the verdict is written after the RESPONSE stage, by whatever the
+        // response stage actually decided.
+        //
+        // The body is not read at all, not even to find `model`. Reading it
+        // would either duplicate the bounded multipart parse `readAudioUpload`
+        // already performs (a second full copy of the upload, in a 128 MiB
+        // isolate) or race it for the same stream. So the model and provider —
+        // which policy SCOPE selection keys on — are taken after `next()` from
+        // the facts the inference route publishes for the request log (#664),
+        // which is the seam that already crosses the inner/outer Hono boundary.
+        await next();
+
+        const facts = requestLogFactsFor(c.req.raw);
+        context = {
+          requestId,
+          tenant,
+          ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
+          ...(facts.logicalModel !== undefined ? { model: facts.logicalModel } : {}),
+          ...(facts.provider !== undefined ? { provider: facts.provider } : {}),
+          streaming: false,
+          // Empty by construction — `normalizeRequest` extracts nothing for
+          // `audio_transcription`. It is here only so the response stage has a
+          // context to extend, and it is NEVER evaluated.
+          envelope: normalizeRequest(binding.protocol, {}),
+        };
+        plan = engine.streamingGuardrailPlan(context);
       }
-
-      const model = typeof body.model === "string" ? body.model : undefined;
-      const provider = model !== undefined ? options.providerForModel?.(model, env) : undefined;
-      const streaming = body.stream === true;
-
-      const screenedBody =
-        operationId === "createMessage" && options.translateAnthropicRequest !== undefined
-          ? (options.translateAnthropicRequest(body) ?? body)
-          : body;
-
-      const context: GuardrailEvaluationContext = {
-        requestId,
-        tenant,
-        ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
-        ...(model !== undefined ? { model } : {}),
-        ...(provider !== undefined ? { provider } : {}),
-        streaming,
-        envelope: normalizeRequest(binding.protocol, screenedBody),
-      };
-
-      // ---- INPUT screening -------------------------------------------------
-      const requestMatch = await engine.matchGuardrail("request", context);
-      if (requestMatch !== null) {
-        await auditBlock(options.audit, context, requestMatch, "request");
-        recordGuardrailVerdict(c, "blocked", requestMatch);
-        // Any match — deny OR redact — refuses. See the module doc.
-        return guardrailBlockedResponse(requestMatch, requestId);
-      }
-      // Screening RAN and passed. The request log distinguishes this from
-      // `not_screened` (#664): the early `return next()` paths above — an
-      // operation no policy binds, a body that could not be parsed — leave the
-      // verdict unset, and recording those as "allowed" would tell an auditor a
-      // control ran when none did.
-      recordGuardrailVerdict(c, "allowed");
-
-      // A `reject_streaming` policy denies a streaming request before dispatch;
-      // `matchGuardrail` above already produced that verdict, so by here the plan
-      // only distinguishes enforcement from shadow.
-      const plan = engine.streamingGuardrailPlan(context);
-
-      await next();
 
       // The inference route REPLACES the request id
       // (`inference/handlers.ts:1190`), and from here on the client's id is the
@@ -420,6 +552,13 @@ export function guardrails(
       };
 
       // ---- OUTPUT screening ------------------------------------------------
+      //
+      // For a `screensRequest: false` binding (#703) EVERY early return below
+      // leaves the request-log verdict unset, and that is the correct reading:
+      // nothing screened this request at either stage, so `not_screened` is
+      // exactly what an auditor should see. The `allowed` verdict for those
+      // operations is written at one place only — after a response screen that
+      // really ran and really passed.
       const response = c.res;
       if (!binding.screensResponse || response === undefined || response.body === null) {
         return;
@@ -514,6 +653,11 @@ export function guardrails(
       };
       const responseMatch = await engine.matchGuardrail("response", responseContext);
       if (responseMatch === null) {
+        // #703. The ONLY place a response-only binding earns `allowed`: a
+        // response stage that ran, over an envelope built from real bytes, and
+        // decided nothing matched. For a request-screened binding the verdict is
+        // already `allowed` from the input stage and this is a no-op.
+        recordGuardrailVerdict(c, "allowed");
         c.res = new Response(raw, response);
         return;
       }

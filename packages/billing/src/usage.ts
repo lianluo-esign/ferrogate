@@ -190,6 +190,26 @@ export interface ModelPrice {
   cache_write_price_per_1m?: number;
   /** USD per 1M reasoning/thinking tokens (#667). Absent ⇒ `output_price_per_1m`. */
   reasoning_price_per_1m?: number;
+  /**
+   * USD per 1M SECONDS of transcribed audio (issue #703).
+   *
+   * A rate on its own unit, not a token rate in disguise. A transcription
+   * produces no tokens at all, so a card that priced it in tokens would value
+   * every audio row at $0 — which is not merely wrong, it would make
+   * `charge()`'s divergence check fire on every CORRECT row and turn the one
+   * mispricing detector in the tree into a permanent false alarm.
+   *
+   * Per 1M for the same reason the token rates are: one denominator across the
+   * whole card, so an operator comparing two lines is comparing two numbers
+   * rather than two numbers and a unit.
+   *
+   * Absent ⇒ this model does not price transcription, and an audio row with no
+   * settled cost is `price_not_found`. Never zero by default: a free
+   * transcription is the #129 bug.
+   */
+  audio_second_price_per_1m?: number;
+  /** USD per 1M CHARACTERS synthesized (issue #703). Same rules as above. */
+  audio_character_price_per_1m?: number;
   currency: string;
 }
 
@@ -204,6 +224,8 @@ export const modelPriceSchema = z.object({
   cached_input_price_per_1m: optRate,
   cache_write_price_per_1m: optRate,
   reasoning_price_per_1m: optRate,
+  audio_second_price_per_1m: optRate,
+  audio_character_price_per_1m: optRate,
   currency: z.string(),
 });
 
@@ -282,6 +304,66 @@ export function outputTokenSplit(usage: TokenUsage): {
 }
 
 /**
+ * The audio quantities one billing event may carry (issue #703).
+ *
+ * A separate parameter rather than two more fields on {@link TokenUsage},
+ * because they are not tokens and `reconcileSplit` must never try to reconcile
+ * them against a total: seconds and characters have no `total_tokens` to add up
+ * to, and folding them in would have made every token invariant in this file
+ * conditional on which surface produced the row.
+ */
+export interface AudioQuantity {
+  /** Seconds of audio transcribed. Absent — never zero — when unreported. */
+  readonly audio_seconds?: number | undefined;
+  /** Characters synthesized. Known before dispatch, so never estimated. */
+  readonly audio_characters?: number | undefined;
+}
+
+/**
+ * The audio component of an estimate, on the INPUT side (issue #703).
+ *
+ * Input and not output, and the reason is not convenience: for both audio
+ * operations the billable quantity IS the input — the recording that was
+ * decoded, the text that was synthesized. Attributing it to output would put
+ * the figure in the column an operator reads as "what the model produced", and
+ * would make `settledBreakdown`'s ratio split a transcription's cost into an
+ * output component that describes nothing.
+ *
+ * A quantity the card does not price contributes 0 rather than throwing: the
+ * caller decides what an unpriceable row means. `charge()` decides it by
+ * refusing (`price_not_found`) when there is no settled cost, which is the
+ * fail-closed direction and matches `metering/route-price.ts`'s own rule.
+ */
+function audioCostUsd(price: ModelPrice, audio: AudioQuantity | undefined): number {
+  if (audio === undefined) return 0;
+  const seconds = positive(audio.audio_seconds);
+  const characters = positive(audio.audio_characters);
+  const secondRate = positive(price.audio_second_price_per_1m) ?? 0;
+  const characterRate = positive(price.audio_character_price_per_1m) ?? 0;
+  return ((seconds ?? 0) * secondRate + (characters ?? 0) * characterRate) / 1_000_000.0;
+}
+
+/** A quantity/rate is usable only if it is a finite, positive number. */
+function positive(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * True when this event carries an audio quantity the card CANNOT price — the
+ * case that must stay `price_not_found` rather than settling at $0 (#129).
+ */
+export function audioQuantityUnpriced(price: ModelPrice, audio: AudioQuantity | undefined): boolean {
+  if (audio === undefined) return false;
+  if (positive(audio.audio_seconds) !== undefined && positive(price.audio_second_price_per_1m) === undefined) {
+    return true;
+  }
+  return (
+    positive(audio.audio_characters) !== undefined &&
+    positive(price.audio_character_price_per_1m) === undefined
+  );
+}
+
+/**
  * Mirrors `ModelPrice::estimate` — price token usage into a {@link CostEstimate}.
  *
  * Cached/cache-write tokens are billed out of the input side and reasoning
@@ -290,7 +372,11 @@ export function outputTokenSplit(usage: TokenUsage): {
  * arithmetic collapses to `prompt * input + completion * output`, which is
  * exactly what it was.
  */
-export function estimateCost(price: ModelPrice, usage: TokenUsage): CostEstimate {
+export function estimateCost(
+  price: ModelPrice,
+  usage: TokenUsage,
+  audio?: AudioQuantity,
+): CostEstimate {
   const { cachedRead, cacheWrite, fresh } = inputTokenSplit(usage);
   const { reasoning, visible } = outputTokenSplit(usage);
 
@@ -299,6 +385,7 @@ export function estimateCost(price: ModelPrice, usage: TokenUsage): CostEstimate
   const reasoningRate = price.reasoning_price_per_1m ?? price.output_price_per_1m;
 
   const input_cost =
+    audioCostUsd(price, audio) +
     (fresh * price.input_price_per_1m +
       cachedRead * cachedRate +
       cacheWrite * writeRate) /

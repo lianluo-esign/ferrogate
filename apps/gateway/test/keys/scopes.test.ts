@@ -22,10 +22,17 @@ import {
 } from "../../src/keys/index.js";
 import { hasScope, isPrivilegedScope } from "../../src/ports.js";
 
-describe("the six inference scopes", () => {
+describe("the seven inference scopes", () => {
   test("are exactly the contract's inference scopes, and none is privileged", () => {
+    // Six until issue #703 added `audio.create`, the first data-plane scope
+    // minted since the port began. It is not a widening of anything: `hasScope`
+    // gives an UNSCOPED key every non-privileged scope (asserted below), and a
+    // key with an explicit scope list simply does not hold this one until it is
+    // re-minted — which is the fail-closed direction and exactly what a new
+    // capability should do to credentials issued before it existed.
     expect([...INFERENCE_SCOPES].sort()).toEqual(
       [
+        "audio.create",
         "chat.completions",
         "embeddings.create",
         "images.generate",
@@ -34,7 +41,7 @@ describe("the six inference scopes", () => {
         "responses.create",
       ].sort(),
     );
-    expect(INFERENCE_SCOPES).toHaveLength(6);
+    expect(INFERENCE_SCOPES).toHaveLength(7);
     for (const scope of INFERENCE_SCOPES) {
       expect(isPrivilegedScope(scope)).toBe(false);
     }

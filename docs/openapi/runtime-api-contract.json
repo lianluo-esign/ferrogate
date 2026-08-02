@@ -79,6 +79,18 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/audio/transcriptions",
+      "group": "inference"
+    },
+    {
+      "pattern": "/v1/audio/translations",
+      "group": "inference"
+    },
+    {
+      "pattern": "/v1/audio/speech",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/tools",
       "group": "tool"
     },
@@ -2301,6 +2313,39 @@
       "auth": {
         "kind": "bearer",
         "scope": "embeddings.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/audio/transcriptions",
+      "method": "post",
+      "operation_id": "createTranscription",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "audio.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/audio/translations",
+      "method": "post",
+      "operation_id": "createTranslation",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "audio.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/audio/speech",
+      "method": "post",
+      "operation_id": "createSpeech",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "audio.create"
       },
       "rbac_action": null
     },

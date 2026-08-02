@@ -15,6 +15,7 @@ import {
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
+import { audioObjectsFromEnv } from "./audio-objects.js";
 import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
@@ -44,6 +45,7 @@ import type {
   Usage,
   UsageSink,
 } from "./ports.js";
+import { MAX_AUDIO_REFERENCE_BYTES, MAX_AUDIO_UPLOAD_BYTES } from "./schemas.js";
 import { ProviderRoutingMetrics } from "./strategy.js";
 import type { RoutingMetrics } from "./strategy.js";
 import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
@@ -60,6 +62,14 @@ import type { WorkflowGateBindings } from "./workflow.js";
 export const DEFAULT_INFERENCE_LIMITS: InferenceLimits = {
   inferenceBodyMaxBytes: 1024 * 1024,
   providerResponseMaxBytes: 8 * 1024 * 1024,
+  // Issue #703. Imported rather than re-spelled: the handler enforces this cap
+  // and the test suite asserts against the constant, and a second literal here
+  // is exactly how a ceiling stops matching the thing that enforces it.
+  audioUploadMaxBytes: MAX_AUDIO_UPLOAD_BYTES,
+  // Issue #703, the by-reference ceiling. Deliberately LARGER than the inline
+  // one and bounded by isolate memory rather than by ingest risk — the object's
+  // exact size is known from R2 before a byte is read. See the constant.
+  audioReferenceMaxBytes: MAX_AUDIO_REFERENCE_BYTES,
   dispatchTimeoutMs: 120_000,
 };
 
@@ -260,7 +270,13 @@ export const fetchDispatcher: UpstreamDispatcher = {
       ...(signal !== undefined ? { signal } : {}),
     };
     if (request.method !== "GET" && request.body !== undefined) {
-      init.body = JSON.stringify(request.body);
+      // `FormData` (issue #703) is handed to `fetch` UNTOUCHED, and the
+      // `content-type` header the adapter deliberately omitted is what makes
+      // that work: `fetch` writes `multipart/form-data; boundary=...` itself,
+      // with the boundary it will actually use to serialize the parts. A
+      // hand-written header would name a boundary that does not appear in the
+      // bytes and every upstream would answer 400.
+      init.body = request.body instanceof FormData ? request.body : JSON.stringify(request.body);
     }
     return await globalThis.fetch(request.endpoint, init);
   },
@@ -448,5 +464,14 @@ export function resolveDeps(
         : typeof deps.byok === "function"
           ? deps.byok(env)
           : deps.byok,
+    // Issue #703. Env-resolved like `circuit`: the SAME R2 bucket and the SAME
+    // tenant database `/v1/assets/**` already uses, so a deployment that can
+    // publish a recording can transcribe it with no further configuration —
+    // and one that binds neither gets `NO_AUDIO_OBJECTS`, which refuses a
+    // `file_ref` with 503 rather than pretending the request was malformed.
+    audioObjects:
+      typeof deps.audioObjects === "function"
+        ? deps.audioObjects(env)
+        : (deps.audioObjects ?? audioObjectsFromEnv(env as Record<string, unknown>)),
   };
 }

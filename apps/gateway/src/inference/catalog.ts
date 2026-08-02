@@ -70,6 +70,8 @@ const capabilitySchema = z.enum([
   "images",
   "embeddings",
   "rerank",
+  "transcription",
+  "speech",
   "tools",
   "structured_output",
 ]);
@@ -305,6 +307,24 @@ const routeFieldsSchema = {
   cache_write_price_per_1m: z.number().nonnegative().optional(),
   /** `ModelRoute.reasoning_price_per_1m` — USD per 1M reasoning tokens. */
   reasoning_price_per_1m: z.number().nonnegative().optional(),
+  /**
+   * `ModelRoute.audio_second_price_per_1m` — USD per 1M SECONDS of transcribed
+   * audio (issue #703). Whisper's $0.006/minute is `100`.
+   *
+   * "Per 1M" of a unit nobody quotes in millions is deliberate: every other rate
+   * on this row is per 1M and `metering/route-price.ts` divides all of them by
+   * one constant. A per-minute or per-1k rate would put two denominators in one
+   * settlement function, which is one typo away from a bill that is off by 60x.
+   * Settlement-only, like the three above: a duration is a property of a request
+   * that has already happened.
+   */
+  audio_second_price_per_1m: z.number().nonnegative().optional(),
+  /**
+   * `ModelRoute.audio_character_price_per_1m` — USD per 1M CHARACTERS of
+   * synthesized text (issue #703). This one every TTS vendor already quotes per
+   * 1M: OpenAI's `tts-1` is `15`.
+   */
+  audio_character_price_per_1m: z.number().nonnegative().optional(),
 } as const;
 
 /** One `[[models]].fallbacks` entry — a `ModelRoute` with no rollout split. */
@@ -892,6 +912,15 @@ export function buildModelCatalog(
           : {}),
         ...(leg.reasoning_price_per_1m !== undefined
           ? { reasoningPricePer1m: leg.reasoning_price_per_1m }
+          : {}),
+        // #703. Same absent-key rule: `route-price.ts` refuses to settle an
+        // audio call the route states no audio rate for, and a `undefined`
+        // VALUE would be indistinguishable from a rate of zero once spread.
+        ...(leg.audio_second_price_per_1m !== undefined
+          ? { audioSecondPricePer1m: leg.audio_second_price_per_1m }
+          : {}),
+        ...(leg.audio_character_price_per_1m !== undefined
+          ? { audioCharacterPricePer1m: leg.audio_character_price_per_1m }
           : {}),
         // `routing_strategy` belongs to the registry ENTRY, so it is copied from
         // `model` onto EVERY leg — never read off `leg`, which for a fallback
