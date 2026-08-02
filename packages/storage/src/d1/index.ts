@@ -40,3 +40,6 @@ export * from "./assets-d1.js";
 export * from "./site-domain-d1.js";
 export * from "./retention-d1.js";
 export * from "./agent-schedule-d1.js";
+// Per-tenant BYOK alias rows (issue #682). Control database; the credential
+// value never passes through this module — only the sealed envelope.
+export * from "./provider-credential-d1.js";

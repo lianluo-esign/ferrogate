@@ -48,10 +48,10 @@
  * ## MOUNTING — one line, in `./index.ts`, not in the composition root
  *
  * `mountSharedProbes(app)` is called from {@link registerRoutes} — the function
- * `src/index.ts` already calls for the 206 contract operations — and NOT from
+ * `src/index.ts` already calls for the 209 contract operations — and NOT from
  * `src/index.ts` itself, which is a composition root this slice may not edit.
  * The probes are mounted without being appended to the record `registerRoutes`
- * returns, so the 206-operation count `test/wiring.test.ts` pins does not move.
+ * returns, so the 209-operation count `test/wiring.test.ts` pins does not move.
  *
  * The two inline handlers that used to live in `src/index.ts` are DELETED rather
  * than left in place: Hono runs every matching handler in registration order, so
@@ -145,7 +145,7 @@ export function readinessReport(env: ControlPlaneBindings | undefined): {
  * them into `registerRoutes`'s loop would move them inside the operation count
  * `test/wiring.test.ts` pins, and they are owned by no group. `contractAuth`
  * still runs over them — it is an `app.use("*", …)` — and passes them through
- * because neither path is one of the 206 operations it guards, which is how
+ * because neither path is one of the 209 operations it guards, which is how
  * `/health` and `/version` have always been treated.
  */
 export function mountSharedProbes(app: Hono<ControlPlaneEnv>): void {

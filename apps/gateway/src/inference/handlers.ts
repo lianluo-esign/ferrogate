@@ -32,7 +32,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 261 operations, and duplicating a per-route
+ * table-driven middleware for all 264 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -48,6 +48,7 @@ import {
   servableCandidates,
 } from "./candidates.js";
 import type { ModelEndpointKind } from "./candidates.js";
+import { byokScopedModels } from "./byok.js";
 import { resolveCandidates, resolveDeps } from "./defaults.js";
 import { dispatchWithFailover } from "./reliability.js";
 import type { AttemptCandidate } from "./reliability.js";
@@ -945,10 +946,25 @@ function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstr
 function routePricing(route: PhysicalRoute): {
   inputPricePer1m?: number;
   outputPricePer1m?: number;
+  cachedInputPricePer1m?: number;
+  cacheWritePricePer1m?: number;
+  reasoningPricePer1m?: number;
 } {
   return {
     ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
     ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
+    // #667 — the cached/reasoning rates travel with the other two, for the same
+    // reason: a failover means the route that ANSWERED is not the route that
+    // was planned, and the two can be priced differently.
+    ...(route.cachedInputPricePer1m !== undefined
+      ? { cachedInputPricePer1m: route.cachedInputPricePer1m }
+      : {}),
+    ...(route.cacheWritePricePer1m !== undefined
+      ? { cacheWritePricePer1m: route.cacheWritePricePer1m }
+      : {}),
+    ...(route.reasoningPricePer1m !== undefined
+      ? { reasoningPricePer1m: route.reasoningPricePer1m }
+      : {}),
   };
 }
 
@@ -1009,7 +1025,15 @@ function observeInvocation(
 function recordUsage(
   c: InferenceContext,
   deps: ResolvedInferenceDeps,
-  base: Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">,
+  base: Omit<
+    Usage,
+    | "promptTokens"
+    | "completionTokens"
+    | "totalTokens"
+    | "cachedInputTokens"
+    | "cacheWriteTokens"
+    | "reasoningTokens"
+  >,
   providerKind: string,
   usage: ProviderUsage | undefined,
 ): void {
@@ -1033,6 +1057,19 @@ function recordUsage(
         ? { completionTokens: usage.completionTokens }
         : {}),
       ...(usage?.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+      // #667. Absent stays absent all the way to the billing event, where the
+      // wire schema defaults it to 0 — so "the provider reported no cached
+      // tokens" and "this response predates the counter" settle identically,
+      // and neither can be mistaken for an observed zero mid-stream.
+      ...(usage?.cachedInputTokens !== undefined
+        ? { cachedInputTokens: usage.cachedInputTokens }
+        : {}),
+      ...(usage?.cacheWriteTokens !== undefined
+        ? { cacheWriteTokens: usage.cacheWriteTokens }
+        : {}),
+      ...(usage?.reasoningTokens !== undefined
+        ? { reasoningTokens: usage.reasoningTokens }
+        : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
@@ -1156,10 +1193,35 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // the injected resolver otherwise (an inner-app unit test, or a deployment
     // where the guard has not run). Never both — an authenticated request must
     // not be re-described by a default that grants platform-operator scope.
-    c.set("inferenceCaller", scope?.caller ?? resolved.caller(c.req.raw));
+    const caller = scope?.caller ?? resolved.caller(c.req.raw);
+    c.set("inferenceCaller", caller);
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
     c.set("inferenceLog", scope?.log ?? noInferenceLog);
+
+    // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
+    // provider credential for the platform one before anything is planned.
+    //
+    // Here, and not in `planUpstream`, for two structural reasons: the
+    // credential must be in place before `adapter.buildUpstreamRequest` bakes it
+    // into the `Authorization` header, and `planUpstream` is synchronous while
+    // the lookup is a D1 read. Doing it once in the shared middleware also means
+    // every dispatching surface is covered by construction — a new one cannot
+    // forget it, which is the same argument `dispatchCandidates` makes for
+    // firing the shadow mirror from one place.
+    //
+    // Returning the rejection here rather than degrading to the platform
+    // credential is the fail-closed half: a tenant that asked to be billed on
+    // its own agreement must never be silently served on FerroGate's key.
+    const models = await byokScopedModels(resolved.models, resolved.byok, caller, c.req.raw);
+    if (isRejection(models)) {
+      return errorResponse(models, c.get("requestId"));
+    }
+    if (models !== resolved.models) {
+      c.set("inferenceDeps", { ...resolved, models });
+    }
+
     await next();
+    return;
   });
 
   const body = readInferenceBody();

@@ -223,6 +223,14 @@
       "group": "admin_config_ops"
     },
     {
+      "pattern": "/admin/v1/provider-credentials",
+      "group": "admin_provider_credential"
+    },
+    {
+      "pattern": "/admin/v1/provider-credentials/{*rest}",
+      "group": "admin_provider_credential"
+    },
+    {
       "pattern": "/admin/v1/providers",
       "group": "admin_provider"
     },
@@ -759,6 +767,39 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/provider-credentials",
+      "method": "get",
+      "operation_id": "listProviderCredentials",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/provider-credentials/{alias}",
+      "method": "put",
+      "operation_id": "putProviderCredential",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/provider-credentials/{alias}",
+      "method": "delete",
+      "operation_id": "revokeProviderCredential",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     },

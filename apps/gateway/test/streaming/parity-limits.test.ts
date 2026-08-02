@@ -1,5 +1,10 @@
 /**
- * PINS FOR THE THREE DELIBERATE NON-PARITIES in `src/streaming/`.
+ * PINS FOR THE DELIBERATE NON-PARITIES in `src/streaming/`.
+ *
+ * There were THREE. Issue #667 CLOSED the third — Anthropic's cache counters
+ * are now read and priced — and this file therefore changed from asserting that
+ * they are ignored to asserting how they are normalized. See the third block
+ * below; the change was made on purpose and is not a relaxation.
  *
  * Each of these is a PORT-TODO that is deliberately NOT closed, because closing
  * it would add behavior the Rust tree does not have. That makes them the most
@@ -123,15 +128,35 @@ describe("an Anthropic text delta is emitted TWICE on the Responses ingress", ()
 });
 
 // ---------------------------------------------------------------------------
-// 3. Anthropic prompt-cache counters are not metered
+// 3. Anthropic prompt-cache counters — WAS a non-parity, CLOSED by #667
 // ---------------------------------------------------------------------------
 
-describe("Anthropic cache_* token counters are deliberately not read", () => {
-  test("input_tokens alone is the prompt count, cache counters are ignored", () => {
-    // `ferrogate-providers/src/anthropic.rs::extract_usage` reads exactly
-    // `input_tokens` / `output_tokens`. Folding the cache counters in would
-    // change what the gateway BILLS, which is a metering decision that belongs
-    // with `@ferrogate/providers`, not a normalization gap to be patched here.
+describe("Anthropic cache_* token counters are read and normalized (#667)", () => {
+  /**
+   * ## This assertion was INVERTED on purpose. Read this before changing it.
+   *
+   * It used to read:
+   *
+   * ```ts
+   * expect(usage?.promptTokens).toBe(11);
+   * // Not 11 + 900 + 4000, and not 11 + 900.
+   * expect(usage?.promptTokens).not.toBe(4911);
+   * ```
+   *
+   * and its comment said folding the cache counters in "would change what the
+   * gateway BILLS, which is a metering decision that belongs with
+   * `@ferrogate/providers`". That reasoning was RIGHT, and issue #667 is the
+   * metering decision it was waiting for: the rate card gained
+   * `cached_input_price_per_1m` / `cache_write_price_per_1m` in the same change,
+   * so the counters are now summed into the prompt count AND carried separately
+   * so each bills at its own rate.
+   *
+   * It is inverted rather than deleted because the old assertion was pinning a
+   * real, consequential behaviour — a tenant on Anthropic prompt caching was
+   * billed for 11 tokens out of 4 911 — and a reader who arrives here needs to
+   * see that the change was deliberate, not that a test quietly vanished.
+   */
+  test("cache read + cache write are ADDED to input_tokens, and carried separately", () => {
     const usage = extractUsage(
       {
         message: {
@@ -146,9 +171,13 @@ describe("Anthropic cache_* token counters are deliberately not read", () => {
       "anthropic",
     );
 
-    expect(usage?.promptTokens).toBe(11);
-    // Not 11 + 900 + 4000, and not 11 + 900.
-    expect(usage?.promptTokens).not.toBe(4911);
+    // 11 fresh + 900 written into the cache + 4 000 read out of it. Anthropic
+    // charges for all three; `input_tokens` alone names only the first.
+    expect(usage?.promptTokens).toBe(4911);
+    // And the split survives, which is what lets `estimateCost` bill the 4 000
+    // at 0.1x and the 900 at 1.25x instead of all 4 911 at the fresh rate.
+    expect(usage?.cachedInputTokens).toBe(4000);
+    expect(usage?.cacheWriteTokens).toBe(900);
   });
 
   test("a payload carrying ONLY cache counters reports no usage at all", () => {

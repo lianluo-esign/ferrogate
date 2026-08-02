@@ -20,7 +20,7 @@
  * ```
  *
  * and add the nine routes to `NON_CONTRACT_ROUTES` in `test/wiring.test.ts`
- * (that suite pins the exported app's Hono table to "the 206 + the four
+ * (that suite pins the exported app's Hono table to "the 209 + the four
  * probes", by exact length, so an unlisted extra mount is a deliberate RED).
  *
  * ### The mount gate

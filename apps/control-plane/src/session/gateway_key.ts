@@ -68,7 +68,7 @@ const SECRET_PREFIX = "fg_";
 /**
  * The Recovery-seam probe the lifecycle gate is asked with.
  *
- * `TenancyLifecycleGatePort.admit` is operation-shaped because the 206
+ * `TenancyLifecycleGatePort.admit` is operation-shaped because the 209
  * contract routes are, and the seam a request is decided on IS the operation's
  * identity (`RECOVERY_OPERATION_IDS` in `store/lifecycle.ts`). The console's
  * session endpoints are Rust `LifecycleSeam::Recovery`, so they borrow a

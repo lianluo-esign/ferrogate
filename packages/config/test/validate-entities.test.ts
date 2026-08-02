@@ -87,7 +87,7 @@ describe("validate_providers", () => {
       "unsupported secret_ref scheme",
       { providers: [provider({ secret_ref: "http://vault/x" })] },
       "field providers[0].secret_ref: unsupported secret reference scheme " +
-        "(expected env://, vault://, or cf://): http://vault/x",
+        "(expected env://, vault://, cf://, or byok://): http://vault/x",
     ],
     [
       "vault secret_ref without #field",

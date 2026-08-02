@@ -61,7 +61,7 @@ export default defineConfig({
    * Vitest's 5s default is too tight for THIS suite specifically.
    *
    * `test/wiring.test.ts` proves its invariants by sweeping the WHOLE contract
-   * surface — several tests issue ~203 real `fetch`es through `export default`
+   * surface — several tests issue ~209 real `fetch`es through `export default`
    * in workerd, one per contract operation, because a sampled subset would let
    * exactly the un-swept operation be the one that drifted. That is inherently
    * O(operations), and on a 2-core GitHub runner three of those sweeps hit the

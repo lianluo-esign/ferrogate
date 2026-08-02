@@ -27,7 +27,7 @@
  * ALSO knows the pair. So a row-priced model that is also on the card keeps the
  * card as a cross-check rather than losing it.
  */
-import { reconcileSplit } from "@ferrogate/billing";
+import { inputTokenSplit, outputTokenSplit, reconcileSplit } from "@ferrogate/billing";
 import type { Usage } from "../inference/ports.js";
 
 /** USD per token, from a USD-per-1M-tokens rate. */
@@ -81,15 +81,42 @@ export function routePriceSettledCostUsd(usage: Usage): number | undefined {
     prompt_tokens: usage.promptTokens ?? 0,
     completion_tokens: usage.completionTokens ?? 0,
     total_tokens: usage.totalTokens ?? 0,
+    cached_input_tokens: usage.cachedInputTokens ?? 0,
+    cache_write_tokens: usage.cacheWriteTokens ?? 0,
+    reasoning_tokens: usage.reasoningTokens ?? 0,
   });
 
   // (2) a billable side the route does not price ⇒ refuse the whole settlement.
   if (tokens.prompt_tokens > 0 && input === undefined) return undefined;
   if (tokens.completion_tokens > 0 && output === undefined) return undefined;
 
+  // #667. The split is taken from `@ferrogate/billing` rather than recomputed,
+  // because THIS figure and `charge()`'s rate-card estimate are compared against
+  // each other by the divergence check (#152). Two settlement paths that split
+  // the same tokens differently would trip that warning on every cached request
+  // — a false alarm loud enough to be ignored, which is how a real divergence
+  // gets missed.
+  //
+  // A rate the route does not state falls back to the ordinary input/output
+  // rate, matching `estimateCost`'s rule exactly: a `[[models]]` row that names
+  // no cached rate has not stated a discount, and inventing one would shrink an
+  // invoice by a number no operator chose. The cost is that a cache-heavy call
+  // on a row-priced model bills its cache reads at the fresh rate until the
+  // operator adds `cached_input_price_per_1m` — conservative, visible, and
+  // fixable in config.
+  const { cachedRead, cacheWrite, fresh } = inputTokenSplit(tokens);
+  const { reasoning, visible } = outputTokenSplit(tokens);
+  const cachedRate = priceOrUndefined(usage.cachedInputPricePer1m) ?? input ?? 0;
+  const writeRate = priceOrUndefined(usage.cacheWritePricePer1m) ?? input ?? 0;
+  const reasoningRate = priceOrUndefined(usage.reasoningPricePer1m) ?? output ?? 0;
+
   return (
-    (tokens.prompt_tokens / PER_1M) * (input ?? 0) +
-    (tokens.completion_tokens / PER_1M) * (output ?? 0)
+    (fresh * (input ?? 0) +
+      cachedRead * cachedRate +
+      cacheWrite * writeRate +
+      visible * (output ?? 0) +
+      reasoning * reasoningRate) /
+    PER_1M
   );
 }
 
