@@ -193,14 +193,11 @@ describe("the audio rails meet an invoice (#703)", () => {
   });
 
   it("prices SPEECH on characters, on the same seam", () => {
-    const entry = charge(
-      PriceBook.withDefaultRateCard(),
-      {
-        ...audioEvent("req-audio-6", { audio_characters: 100_000 }),
-        provider_model: "@cf/myshell-ai/melotts",
-        logical_model: "edge-tts",
-      },
-    );
+    const entry = charge(PriceBook.withDefaultRateCard(), {
+      ...audioEvent("req-audio-6", { audio_characters: 100_000 }),
+      provider_model: "@cf/myshell-ai/melotts",
+      logical_model: "edge-tts",
+    });
     expect(entry.cost.total_cost).toBeGreaterThan(0);
     expect(entry.cost.input_cost).toBeCloseTo(entry.cost.total_cost, 12);
   });
