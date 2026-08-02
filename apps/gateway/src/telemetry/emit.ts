@@ -75,6 +75,7 @@ import {
 import type {
   GatewayMetricsSnapshot,
   OtlpAttribute,
+  OtlpGaugePoint,
   OtlpHttpRequest,
   OtlpSpanRecord,
 } from "@ferrogate/observability";
@@ -93,6 +94,9 @@ export const NO_TELEMETRY: TelemetryEmitter = {
   transport: "none",
   async emit(): Promise<void> {
     // No destination: nothing to build, nothing to send, nothing to fail.
+  },
+  async emitGauges(): Promise<void> {
+    // Ditto.
   },
 };
 
@@ -196,6 +200,22 @@ export function telemetryEmitterFor(env: GatewayTelemetryBindings): TelemetryEmi
         if (request !== null) {
           await send(service, request);
         }
+      }
+    },
+    async emitGauges(points): Promise<void> {
+      // The tenant index is taken from the FIRST point's `tenant` attribute
+      // rather than from a caller argument, so a batch cannot be filed under a
+      // tenant none of its points belong to. `apps/telemetry` reads this header
+      // only as the Analytics Engine index for records that carry no tenant
+      // attribute of their own; every point built by `evals/metrics.ts` carries
+      // one.
+      const tenant = points
+        .flatMap((point) => point.attributes)
+        .find((attribute) => attribute.key === "tenant")?.value;
+      backend.withDefaultTenant(tenant);
+      const request = backend.gaugeMetricsRequest(serviceName, points);
+      if (request !== null) {
+        await send(service, request);
       }
     },
   };

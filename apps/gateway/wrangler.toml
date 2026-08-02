@@ -408,6 +408,46 @@ GATEWAY_RESPONSES_STORE = "opt_in"
 GATEWAY_RESPONSES_RETENTION = "24"
 
 # ---------------------------------------------------------------------------
+# [vars] — online evaluation of sampled traffic, the OPT-IN table (#692)
+#
+# Read by `onlineEvalPolicySourceFromEnv` (src/evals/source.ts) ONLY when no
+# control database is bound. The DURABLE source is `CONTROL_DB`'s
+# `quota_policies.online_eval_*` columns
+# (sql/d1-ts/control/0009_online_eval.sql), so on a deployment with
+# `CONTROL_DB` this var is never consulted — exactly like the two policy tables
+# above it.
+#
+# A JSON array of `{ tenant_id, enabled, sample_rate, sampling_unit,
+# judge_model, criteria, regression_drop, regression_min_samples }`:
+#
+#   GATEWAY_ONLINE_EVAL_POLICIES = """
+#   [{ "tenant_id": "tenant_acme",
+#      "enabled": true,
+#      "sample_rate": 0.05,
+#      "sampling_unit": "conversation",
+#      "judge_model": "judge-small",
+#      "criteria": [{ "id": "answer_relevance",
+#                     "definition": "Does the answer address the question asked?" }] }]
+#   """
+#
+# EMPTY, the shipped default, is the OFF posture and it is the ONLY safe
+# default: evaluating a tenant's traffic copies their prompts and their model's
+# responses to a judge model, so it is a per-tenant opt-in and never a fleet
+# switch. A ZERO-DATA-RETENTION tenant (`GATEWAY_RESIDENCY_POLICIES` /
+# `require_zero_data_retention`) is NEVER sampled even if listed here.
+#
+# `sample_rate` is required for an enabled entry and is not defaulted: a tenant
+# who switched evaluation on without saying how much of their traffic to copy
+# has not expressed a policy. Same for `judge_model` — the judge IS the
+# measuring instrument, and a default would make the meaning of their scores
+# depend on a choice they never made.
+#
+# Nothing is evaluated without the `ONLINE_EVAL` queue binding below: the judge
+# runs in the queue consumer, never in the request's own `waitUntil`.
+# ---------------------------------------------------------------------------
+GATEWAY_ONLINE_EVAL_POLICIES = "[]"
+
+# ---------------------------------------------------------------------------
 # [vars] — deny/allow policy rules and the prepaid-wallet hold
 #
 # GATEWAY_POLICY_RULES is read by `policyRulesFromEnv` (src/ratelimit/policy.ts):
@@ -1176,6 +1216,50 @@ max_batch_size = 100
 max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "replace-at-deploy-ferrogate-request-logs-dlq"
+
+# ---------------------------------------------------------------------------
+# Queues — the online-evaluation sample fan-in  (#692)
+#
+# Read as `env.ONLINE_EVAL` by `onlineEvalQueueFrom` (src/evals/sink.ts) and
+# produced from `onlineEvaluation()` (src/evals/middleware.ts) on
+# `ctx.waitUntil`, i.e. never in front of a client byte.
+#
+# PRODUCER **AND** CONSUMER, like `REQUEST_LOG` above and for the same reason:
+# everything the work needs — the model catalogue, the provider credentials and
+# `CONTROL_DB` — is already bound to THIS Worker, so a second deploy unit would
+# buy nothing but a second copy of the provider credentials.
+#
+# THE QUEUE IS WHAT KEEPS THE JUDGE OFF THE REQUEST PATH. A judge call is a
+# paid model inference of unbounded latency; running it inside the sampled
+# request's own `waitUntil` would hold that isolate (and charge its CPU) for
+# the length of a second inference. With this binding absent the sampler counts
+# its samples as dropped and evaluates nothing — deliberately, rather than
+# falling back to an inline judge.
+#
+# The body is `OnlineEvalSampleWire` (src/evals/record.ts), discriminated by
+# `object = "online_eval_sample"`. `src/index.ts::gatewayQueue` routes on that
+# field rather than on the queue NAME, because these names are placeholders the
+# deploy step substitutes.
+#
+# `max_batch_size` is 10, not 100: each message costs one judge inference, so a
+# batch is bounded by what one invocation can finish rather than by what one D1
+# `batch()` can write. `max_retries` is 2 for the same reason — a redelivery
+# re-judges, and the scores upsert on `(request_id, criterion_id)` so a
+# re-applied delivery corrects a row instead of doubling the sample.
+#
+# `queue` is a DOCUMENTED PLACEHOLDER; the deploy step substitutes the real
+# queues (`wrangler queues create …`).
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "ONLINE_EVAL"
+queue = "replace-at-deploy-ferrogate-online-eval"
+
+[[queues.consumers]]
+queue = "replace-at-deploy-ferrogate-online-eval"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 2
+dead_letter_queue = "replace-at-deploy-ferrogate-online-eval-dlq"
 
 # ---------------------------------------------------------------------------
 # Durable Objects — the rate-limit / quota counters

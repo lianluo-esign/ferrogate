@@ -436,9 +436,17 @@ describe("the env-var drift gate itself", () => {
     //
     // #689 committed TWO: `GATEWAY_RESPONSES_STORE` ("opt_in") and
     // `GATEWAY_RESPONSES_RETENTION` ("24"), the operator ladder and the
-    // retention window for Responses conversation state. 60 -> 62, re-derived
-    // by the same grep against the file rather than added.
-    expect(DECLARED.vars.size).toBe(62);
+    // retention window for Responses conversation state. #692 committed
+    // `GATEWAY_ONLINE_EVAL_POLICIES` ("[]"), the no-control-database fallback
+    // for the per-tenant online-evaluation OPT-IN.
+    //
+    // Those two landed in parallel off the same base of 60 and each wrote its
+    // own increment — 62 on one branch, 61 on the other — so the merged figure
+    // is NEITHER, and taking either side would have shipped a green test
+    // asserting a wrong count. Re-derived here by counting the MERGED file with
+    // the same grep (`grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml`
+    // ⇒ 63), which is the whole point of this comment block.
+    expect(DECLARED.vars.size).toBe(63);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -671,8 +679,11 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // the `DECLARED.vars.size` pin above.
     // #681: 57 -> 59 (`GATEWAY_RESIDENCY_POLICIES`, `GATEWAY_LOG_REGION`);
     // #737: + `GATEWAY_SITES`. Counted off the merged file, not summed.
-    // #689: 60 -> 62 (`GATEWAY_RESPONSES_STORE`, `GATEWAY_RESPONSES_RETENTION`).
-    expect(rows.length).toBe(62);
+    // #689 (`GATEWAY_RESPONSES_STORE`, `GATEWAY_RESPONSES_RETENTION`) and #692
+    // (`GATEWAY_ONLINE_EVAL_POLICIES`) both branched off 60 and wrote 62 and 61
+    // respectively; the merged file holds all three, so 63. Counted off the
+    // merged file, not summed and not inherited from either parent.
+    expect(rows.length).toBe(63);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -749,8 +760,19 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // request asks, and no pre-existing test sends `store: true`.
     // `test/inference/responses-conversation.test.ts` injects its own store and
     // its own mode, so the committed values cannot shadow what it asserts.
+    //
+    // #692: + `GATEWAY_ONLINE_EVAL_POLICIES` ("[]"), observable and INERT for
+    // the same reason — an empty policy table means no tenant opted into having
+    // its traffic evaluated, which is the pre-#692 posture and the only safe
+    // default for a control that copies prompts to a judge. `test/evals/*`
+    // supply their own policies to the middleware they drive, so the committed
+    // blank cannot shadow them.
+    //
+    // 54 + 1 (#737) + 2 (#689) + 1 (#692) = 58, and the same parallel-branch
+    // hazard applies: one parent wrote 57 and the other 56. Re-derived as
+    // `rows.length - overridden` off the MERGED file (63 - 5).
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(57);
+    expect(observable.length).toBe(58);
     expect(rows.length - observable.length).toBe(5);
   });
 });

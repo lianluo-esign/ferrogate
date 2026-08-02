@@ -19,6 +19,14 @@
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
 import { delegationChain } from "./delegation/index.js";
+import {
+  consumeOnlineEvalBatch,
+  createOnlineEvalSink,
+  onlineEvalSampleFromWire,
+  onlineEvaluation,
+  sweepAllOnlineEvalRegressions,
+} from "./evals/index.js";
+import type { OnlineEvalMessageBatch } from "./evals/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -121,6 +129,25 @@ const usage = createMeteringUsageSink({
  * whichever request is being served.
  */
 const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
+
+/**
+ * The online-evaluation sample producer (#692) — the fraction of production
+ * traffic a tenant asked to have scored.
+ *
+ * Module scope for the same reason `usage` and `requestLogs` are: the
+ * middleware is built once and Worker bindings are per request, so the sink
+ * resolves `env.ONLINE_EVAL` (the Queue producer) off whichever request is
+ * being served rather than capturing one.
+ *
+ * INERT until two things are true together: a tenant has opted in on its
+ * `quota_policies` row (or `GATEWAY_ONLINE_EVAL_POLICIES`), AND the queue is
+ * bound. With no opt-in it is one map lookup per request; with an opt-in and no
+ * queue the samples are counted as dropped rather than judged inline, because
+ * running a judge inference inside the request's own `waitUntil` would keep the
+ * isolate — and its CPU budget — alive for the length of a model call on every
+ * sampled request.
+ */
+const onlineEvals = createOnlineEvalSink();
 
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
@@ -356,6 +383,34 @@ export const GATEWAY_MIDDLEWARE = [
   // `GATEWAY_RESIDENCY_POLICIES` var): with no policy for the calling tenant it
   // is one cached lookup and `next()`.
   residency(),
+  // #692 — online evaluation of SAMPLED traffic, on `ctx.waitUntil`.
+  //
+  // IMMEDIATELY AFTER `residency()`, and that edge is the whole reason it is
+  // here rather than anywhere else: `residency()` is what resolves and
+  // publishes the tenant's zero-data-retention posture for this request, and
+  // this middleware must be able to read it BEFORE it clones a body. A ZDR
+  // tenant is never sampled (evaluating a prompt means copying it), and a
+  // sampler mounted ahead of the resolver would have no way to know.
+  //
+  // Nothing it does is in front of a client byte: before `next()` it takes one
+  // in-memory policy peek, one hash and — only for a request already SELECTED
+  // — one `Request.clone()`, which tees a stream and reads nothing. The judge
+  // does not run here at all; it runs in the queue consumer below, in a
+  // different Worker invocation.
+  //
+  // Being INSIDE `guardrails()` would also have worked (it only reads the
+  // final response), and outside is preferred for one reason: a request a
+  // guardrail blocks answers 403, and this middleware then declines it as
+  // not-evaluable and COUNTS the skip, so a deployment whose traffic is mostly
+  // being blocked can see that in the sampler's own diagnostics.
+  //
+  // It sits ABOVE `responseStateCommit()` rather than below it because that is
+  // the only order satisfying BOTH adjacency claims — this one's "immediately
+  // after `residency()`" and the next one's "immediately above `guardrails()`,
+  // with nothing in between that touches a response body". Either order is
+  // safe for THIS middleware (it only clones a request, never rewrites a
+  // response), so the stricter claim wins the slot next to the screener.
+  onlineEvaluation(onlineEvals),
   // #689 — the `/v1/responses` conversation-state WRITE.
   //
   // IMMEDIATELY ABOVE `guardrails()`, and the position is the entire security
@@ -368,7 +423,8 @@ export const GATEWAY_MIDDLEWARE = [
   // the defect the first shape of #689 shipped, with every guardrail test green.
   //
   // Nothing between it and the screener may rewrite a response body; today
-  // nothing between here and `guardrails()` touches one at all.
+  // nothing between here and `guardrails()` touches one at all — the list below
+  // this entry is `guardrails()` and nothing else.
   //
   // Inert for every request that is not a STORING `/v1/responses` call: one
   // `WeakMap` lookup after `next()` and nothing else. See
@@ -467,6 +523,12 @@ export async function gatewayScheduled(
   // eviction there needs a per-object alarm — which is #765, where MCP sessions
   // are never evicted because nothing walks the namespace. Never throws.
   await sweepResponseConversations(env, Math.floor(Date.now() / 1000));
+  // #692 — compare the last day of judge scores against the last week's
+  // baseline and record the drops that clear each tenant's own threshold. On
+  // the SAME tick as the other two sweeps and after them, because it is the
+  // one that can be skipped without consequence: it never throws, and a
+  // quality measurement must not be able to delay money recovery.
+  await sweepAllOnlineEvalRegressions(env, Math.floor(Date.now() / 1000));
 }
 
 /**
@@ -507,7 +569,43 @@ async function gatewayRequestLogRetention(env: unknown): Promise<void> {
  * dead-letter with nothing consuming it.
  */
 export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown): Promise<void> {
-  await consumeRequestLogBatch(batch, env);
+  // TWO queues now arrive at this one entry point (#692), so the delivery is
+  // routed on the message body's `object` discriminator rather than on the
+  // queue NAME: the names in `wrangler.toml` are documented placeholders that
+  // the deploy step substitutes, so a name comparison would be a routing rule
+  // that works on one account and silently misroutes on another.
+  //
+  // Discriminating BEFORE decoding is the rule `requestlog/queue.ts` already
+  // states: `requestLogFromWire` is permissive and would turn an
+  // online-evaluation sample into a plausible, wrong `request_logs` row rather
+  // than an error. A Cloudflare batch never mixes queues, so in production this
+  // partition is all-or-nothing; it is written as a partition anyway so the
+  // code is honest about what it does with a mixed batch.
+  // The view is BUILT rather than spread: `MessageBatch.retryAll` lives on the
+  // platform object's PROTOTYPE, so `{ ...batch }` would silently produce a
+  // batch with no `retryAll` — and a consumer that cannot arm a retry loses
+  // every message in a delivery D1 rejected, quietly, which is the worst
+  // available failure here.
+  const view = (
+    messages: readonly { readonly body: unknown; ack?(): void }[],
+  ): OnlineEvalMessageBatch => ({
+    queue: batch.queue,
+    messages,
+    retryAll: (options?: unknown) => batch.retryAll?.(options),
+  });
+
+  const evalMessages = batch.messages.filter(
+    (message) => onlineEvalSampleFromWire(message.body) !== undefined,
+  );
+  if (evalMessages.length > 0) {
+    await consumeOnlineEvalBatch(view(evalMessages), env);
+  }
+  const rest = batch.messages.filter(
+    (message) => onlineEvalSampleFromWire(message.body) === undefined,
+  );
+  if (rest.length > 0) {
+    await consumeRequestLogBatch(view(rest) as RequestLogMessageBatch, env);
+  }
 }
 
 export { createGatewayApp, GatewayRouter } from "./routes/index.js";
