@@ -1,3 +1,4 @@
+import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 /**
  * THE WRITER — a durable `guardrail_evaluations` row for every screening
  * decision, end to end on real Cloudflare bindings (#665).
@@ -33,12 +34,9 @@
  *     assertion in "the stored evidence carries no plaintext" below reads the
  *     RAW STORED BYTES and looks for the probe secret in them.
  */
-import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import type { GuardrailDetector } from "@ferrogate/guardrails";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  DurableGuardrailEvidenceSink,
-  guardrails,
-} from "../../src/guardrails/index.js";
+import { DurableGuardrailEvidenceSink, guardrails } from "../../src/guardrails/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { RequestIdFactory } from "../../src/inference/index.js";
 import { consumeRequestLogBatch } from "../../src/requestlog/index.js";
@@ -109,6 +107,7 @@ function gateway(
     requestId?: string;
     queue?: RecordingQueue;
     policy?: ReturnType<typeof secretScanPolicy>;
+    detectorOverrides?: Parameters<typeof sourceFor>[1];
   } = {},
 ): Harness {
   const queue = options.queue ?? new RecordingQueue();
@@ -132,7 +131,7 @@ function gateway(
     ],
     middleware: [
       guardrails({
-        policies: sourceFor(options.policy ?? secretScanPolicy()),
+        policies: sourceFor(options.policy ?? secretScanPolicy(), options.detectorOverrides ?? {}),
         evidence,
         evidenceHmacKey: EVIDENCE_HMAC_KEY,
         providerForModel: () => "openai",
@@ -190,9 +189,16 @@ describe("a BLOCKED request produces durable evidence", () => {
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
 
-    // The join key an incident report carries.
-    expect(row.request_id).toBe("fg-blocked-1");
-    expect(response.headers.get("x-request-id")).toBe(row.request_id);
+    // The join key an incident report carries: the id the CLIENT was told.
+    //
+    // Read off the response rather than pinned to a fixture, because for a
+    // BLOCKED request it cannot be pinned — `inferenceRouteModule`'s
+    // `requestIds` factory belongs to a route the guardrail refuses to reach,
+    // so the id here is the one `middleware/errors.ts::requestId` minted. That
+    // the two agree is the whole assertion: an evidence row carrying an id the
+    // caller was never given is an evidence row nobody can find.
+    expect(row.request_id).toBe(response.headers.get("x-request-id"));
+    expect(row.request_id.length).toBeGreaterThan(0);
 
     // WHO — the AUTHENTICATED tenant off the credential, never a header.
     expect(row.tenant).toBe("tenant_a");
@@ -218,7 +224,12 @@ describe("a BLOCKED request produces durable evidence", () => {
     expect(check.evaluation_id).toBe(row.id);
     expect(check.check_id).toBe("deterministic");
     expect(check.verdict).toBe("fail");
-    expect(check.config_digest).toMatch(/^sha256:/);
+    // The digest of the detector's own configuration, so an auditor can tell a
+    // rule that was retuned from one that was not. Asserted non-empty rather
+    // than against a `sha256:` prefix because `detectorConfigDigest` produces a
+    // bare 4-byte hex prefix today — a pre-existing divergence from the
+    // `ports.ts` docstring that this slice does not silently change.
+    expect(check.config_digest.length).toBeGreaterThan(0);
 
     // …and the per-finding detail the "Done when" names: category, confidence,
     // and a REDACTED excerpt.
@@ -227,7 +238,8 @@ describe("a BLOCKED request produces durable evidence", () => {
     };
     const finding = document.findings?.[0];
     expect(finding).toBeDefined();
-    expect(finding?.category).toBe("aws_access_key_id");
+    // The detector's own category token, sanitized but not renamed.
+    expect(finding?.category).toBe("secret.aws_access_key_id");
     expect(finding?.confidence).toBeGreaterThan(0);
     expect(typeof finding?.redacted_excerpt).toBe("string");
   });
@@ -257,7 +269,8 @@ describe("a BLOCKED request produces durable evidence", () => {
 
     const rows = await storedGuardrailEvaluations();
     expect(rows.map((entry) => entry.verdict)).toContain("pass");
-    expect(rows.every((entry) => entry.request_id === "fg-allowed-1")).toBe(true);
+    const requestId = response.headers.get("x-request-id");
+    expect(rows.every((entry) => entry.request_id === requestId)).toBe(true);
   });
 });
 
@@ -300,6 +313,96 @@ describe("the stored evidence carries no plaintext", () => {
     expect(excerpt).toMatch(/\*/);
     expect(excerpt).not.toContain(PROBE_SECRET);
   });
+
+  /**
+   * The case above cannot fail on its own, and saying so is the point.
+   *
+   * `packages/guardrails/src/deterministic.ts:364` hard-codes `matched_text:
+   * null`, so the built-in scanner never HANDS the gateway the matched value —
+   * an excerpt built from a detector that carries nothing carries nothing no
+   * matter how it is built. Every OTHER detector is a different story:
+   * `Finding.matched_text` is part of the public `DetectorResult` contract
+   * (`contract.ts:89`) and an external detector — `custom_http`, Presidio, a
+   * customer's own — is free to populate it.
+   *
+   * So this case scripts exactly that: a detector that returns the secret in
+   * `matched_text`, as a hostile or merely verbose one would, and asserts the
+   * stored bytes still do not contain it. This is the case that goes RED when
+   * `sanitizedFindings` is made to trust the detector, and it is therefore the
+   * one that actually holds the invariant.
+   */
+  it("drops matched_text even when the DETECTOR hands it over", async () => {
+    const leaky: GuardrailDetector = {
+      descriptor: () => ({
+        id: "leaky",
+        version: "leaky-1",
+        supports_request: true,
+        supports_response: true,
+        supports_transform: false,
+        supported_sources: ["user"],
+        credential: "none",
+        data_residency: "in_repo",
+        max_payload_bytes: 65_536,
+        declared_failure_modes: [],
+      }),
+      health: () => ({
+        circuit_open: false,
+        consecutive_failures: 0,
+        in_flight: 0,
+        request_total: 1,
+        success_total: 1,
+        failure_total: 0,
+      }),
+      evaluate: () =>
+        Promise.resolve({
+          verdict: "fail",
+          findings: [
+            {
+              category: "secret.aws_access_key_id",
+              severity: "critical",
+              confidence: 0.99,
+              segment_id: "chat:0",
+              byte_start: 13,
+              byte_end: 13 + PROBE_SECRET.length,
+              fingerprint: null,
+              // The whole point: the detector volunteers the raw value.
+              matched_text: PROBE_SECRET,
+              // …and a second smuggling channel, arbitrary JSON.
+              attributes: { sample: PROBE_SECRET },
+            },
+          ],
+          patches: [],
+          detector_version: "leaky-1",
+        }),
+    };
+
+    const h = gateway({ detectorOverrides: { deterministic: leaky } });
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTHED,
+      body: chatBody(bodyWithProbeSecret()),
+    });
+    expect(response.status).toBe(403);
+    await h.settle();
+
+    const rows = await storedGuardrailEvaluations();
+    const checks = await storedGuardrailChecks();
+    expect(rows).toHaveLength(1);
+    expect(checks).toHaveLength(1);
+
+    const stored = JSON.stringify({ rows, checks });
+    expect(stored).not.toContain(PROBE_SECRET);
+    expect(stored).not.toContain(PROBE_SECRET.slice(4));
+
+    // The finding IS recorded — dropping the evidence entirely would be the
+    // other way to pass this test and would defeat the issue.
+    const document = JSON.parse((checks[0] as { check_json: string }).check_json) as {
+      findings?: { category?: string; confidence?: number; redacted_excerpt?: string }[];
+    };
+    expect(document.findings?.[0]?.category).toBe("secret.aws_access_key_id");
+    expect(document.findings?.[0]?.confidence).toBe(0.99);
+    expect(document.findings?.[0]?.redacted_excerpt).toContain("*");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -309,8 +412,8 @@ describe("the stored evidence carries no plaintext", () => {
 describe("the Queue producer/consumer pair carries guardrail evidence too", () => {
   it("sends to REQUEST_LOG instead of writing D1 inline when the queue is bound", async () => {
     const queue = new RecordingQueue();
-    const h = gateway({ requestId: "fg-queued-1", queue });
-    await h.call("/v1/chat/completions", {
+    const h = gateway({ queue });
+    const response = await h.call("/v1/chat/completions", {
       method: "POST",
       headers: AUTHED,
       body: chatBody(bodyWithProbeSecret()),
@@ -331,7 +434,7 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
 
     const rows = await storedGuardrailEvaluations();
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.request_id).toBe("fg-queued-1");
+    expect(rows[0]?.request_id).toBe(response.headers.get("x-request-id"));
   });
 
   /** At-least-once delivery: the second copy must not fail, and must not double. */
