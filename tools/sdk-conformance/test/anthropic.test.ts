@@ -410,18 +410,18 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     );
   });
 
-  it("DIVERGENCE: messages.countTokens() is not routed", async () => {
-    const error = await captured(() =>
-      anthropicClient().messages.countTokens({
-        model: "claude-3-5-sonnet-20241022",
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    );
+  it("answers messages.countTokens() in the SDK's own shape", async () => {
+    // `POST /v1/messages/count_tokens` landed in #671 while this suite was being
+    // written — it 404'd on the branch point and passes on `main`, which is
+    // exactly why the suite is worth having. No upstream call: the count is
+    // served from the gateway's estimator.
+    const count = await anthropicClient().messages.countTokens({
+      model: "claude-3-5-sonnet-20241022",
+      messages: [{ role: "user", content: "hi" }],
+    });
 
-    // `POST /v1/messages/count_tokens` is part of the Anthropic surface the SDK
-    // exposes; FerroGate routes `/v1/messages` only. Reported, not fixed.
-    expect(error.status).toBe(404);
-    expect(error.message).toContain("no route for POST /v1/messages/count_tokens");
+    expect(count.input_tokens).toEqual(expect.any(Number));
+    expect(count.input_tokens).toBeGreaterThan(0);
   });
 
   it("DIVERGENCE: models.list() answers in the OpenAI dialect", async () => {
