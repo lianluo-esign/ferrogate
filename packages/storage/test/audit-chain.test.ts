@@ -25,6 +25,7 @@ import {
   type AuditChainAnchor,
   type AuditChainRow,
   auditChainKey,
+  auditChainRowFromAdminDocument,
   auditRowHash,
   verifyAuditChain,
   verifyAuditTrail,
@@ -292,12 +293,21 @@ describe("a tampered trail", () => {
     expect(anchored.failures.map((f) => f.code)).toContain("truncated_below_anchor");
   });
 
-  test("re-ordering two rows is caught", async () => {
+  /**
+   * The order the CLIENT holds the rows in is not evidence, and treating it as
+   * evidence would be a false alarm the real trail produces on its own:
+   * `GET /admin/v1/audit-events` orders by `occurred_at_unix ASC, id ASC` with
+   * a second-granular timestamp and a random-uuid tiebreak, so two rows written
+   * in the same second come back in an order unrelated to `seq`. Verification
+   * sorts by `seq` — which every digest commits to — so a shuffled export of an
+   * intact trail still verifies.
+   */
+  test("a shuffled export of an intact trail still verifies", async () => {
     const rows = await buildChain("t-1", 4);
-    const swapped = [rows[0], rows[2], rows[1], rows[3]] as AuditChainRow[];
-    const result = await verifyAuditChain(swapped, { anchors: [anchorFor(rows, "t-1")] });
-    expect(result.status).toBe("failed");
-    expect(result.failures.map((f) => f.code)).toContain("seq_disorder");
+    const shuffled = [rows[2], rows[0], rows[3], rows[1]] as AuditChainRow[];
+    const result = await verifyAuditChain(shuffled, { anchors: [anchorFor(rows, "t-1")] });
+    expect(result.failures).toEqual([]);
+    expect(result.status).toBe("verified");
   });
 
   test("a duplicated sequence number is caught", async () => {
@@ -479,6 +489,57 @@ describe("rows with no chain columns", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The admin-export mapping the published procedure depends on
+// ---------------------------------------------------------------------------
+
+describe("auditChainRowFromAdminDocument", () => {
+  /** A document shaped exactly like one element of `GET /admin/v1/audit-events`. */
+  const document = {
+    object: "control_plane_mutation",
+    action: "create",
+    collection: "policies",
+    resource_id: "pol_a",
+    id: "evt-1",
+    request_id: "req-1",
+    agent_run_id: null,
+    tenant_id: "t-1",
+    occurred_at_unix: 1_700_000_001,
+    audit_json: '{"object":"control_plane_mutation","action":"create"}',
+    chain_key: "t-1",
+    seq: 1,
+    prev_hash: AUDIT_CHAIN_GENESIS_HASH,
+    row_hash: "a".repeat(64),
+  };
+
+  test("maps the wire's tenant_id back onto the column the digest commits to", () => {
+    expect(auditChainRowFromAdminDocument(document).tenant).toBe("t-1");
+  });
+
+  test("carries audit_json through as the exact stored string", () => {
+    // Re-serializing the parsed fields would reorder keys and change
+    // whitespace, failing an intact row. Byte-identical or nothing.
+    expect(auditChainRowFromAdminDocument(document).audit_json).toBe(document.audit_json);
+  });
+
+  test("keeps an unchained row as unchained rather than inventing columns", () => {
+    const row = auditChainRowFromAdminDocument({
+      ...document,
+      chain_key: null,
+      seq: null,
+      prev_hash: null,
+      row_hash: null,
+    });
+    expect(row).toMatchObject({ chain_key: null, seq: null, prev_hash: null, row_hash: null });
+  });
+
+  test("refuses a document that cannot be an audit row", () => {
+    // A build that does not publish `audit_json` cannot be verified against,
+    // and saying so beats verifying a row of nulls and blaming the database.
+    expect(() => auditChainRowFromAdminDocument({ id: "evt-1" })).toThrow(/audit_json/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Whole-trail verification (what the published script runs)
 // ---------------------------------------------------------------------------
 
@@ -507,6 +568,18 @@ describe("verifyAuditTrail", () => {
     expect(result.status).toBe("failed");
     expect(result.chains.find((c) => c.chainKey === "t-1")?.status).toBe("failed");
     expect(result.chains.find((c) => c.chainKey === "")?.status).toBe("verified");
+  });
+
+  /**
+   * An empty export with no anchors groups into ZERO chains, and "no chain
+   * reported a problem" must not become `verified` — that is the clean bill of
+   * health a total wipe is looking for.
+   */
+  test("an entirely empty export is inconclusive, never verified", async () => {
+    const result = await verifyAuditTrail([], []);
+    expect(result.status).toBe("inconclusive");
+    expect(result.chains).toHaveLength(1);
+    expect(result.chains[0]?.reasons).toContain("empty_chain");
   });
 
   test("an anchor naming a chain with no rows at all is a full-chain deletion", async () => {

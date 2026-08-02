@@ -133,6 +133,56 @@ export function auditChainKey(tenant: string | null): string {
   return tenant ?? "";
 }
 
+/** A `string | null` field of an untrusted document, or `null` for anything else. */
+function optionalText(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Turn one `GET /admin/v1/audit-events` document into a verifiable row.
+ *
+ * This exists so the published procedure is `export → verify` and not
+ * `export → read the docs → rename three fields → verify`. Two renames are
+ * unavoidable at the wire boundary and both are handled here:
+ *
+ *   * the admin envelope publishes the row's `tenant` column as `tenant_id`
+ *     (every other admin document uses that name, and the audit reader is not
+ *     the place to break the convention), while the DIGEST commits to the
+ *     column; and
+ *   * `audit_json` is published as the exact stored STRING alongside its parsed
+ *     fields, because the chain commits to BYTES. Re-serializing the parsed
+ *     object would reorder keys and change whitespace, so a re-serialized
+ *     document would fail to verify a perfectly intact row — a false alarm,
+ *     which is the one thing worse than a missed one.
+ *
+ * Throws on a document that cannot be a row at all. A `null`-filled placeholder
+ * would verify as a malformed row and blame the database for a client bug.
+ */
+export function auditChainRowFromAdminDocument(document: Record<string, unknown>): AuditChainRow {
+  const id = document.id;
+  const auditJson = document.audit_json;
+  const occurredAt = document.occurred_at_unix;
+  if (typeof id !== "string" || typeof auditJson !== "string" || typeof occurredAt !== "number") {
+    throw new Error(
+      "audit trail: document is missing id / audit_json / occurred_at_unix — is this a " +
+        "GET /admin/v1/audit-events response from a build that publishes the chain columns?",
+    );
+  }
+  const seq = document.seq;
+  return {
+    id,
+    request_id: typeof document.request_id === "string" ? document.request_id : "",
+    agent_run_id: optionalText(document.agent_run_id),
+    tenant: optionalText(document.tenant_id ?? document.tenant),
+    occurred_at_unix: occurredAt,
+    audit_json: auditJson,
+    chain_key: optionalText(document.chain_key),
+    seq: typeof seq === "number" ? seq : null,
+    prev_hash: optionalText(document.prev_hash),
+    row_hash: optionalText(document.row_hash),
+  };
+}
+
 /**
  * One preimage field: `<utf8-byte-length>:<value>\n`, or `-\n` for SQL NULL.
  *
@@ -299,8 +349,6 @@ export type AuditChainFailureCode =
   | "missing_head_of_chain"
   /** A sequence number is missing: a row was deleted from the middle. */
   | "seq_gap"
-  /** Rows are not in ascending sequence order. */
-  | "seq_disorder"
   /** The same sequence number appears twice. */
   | "duplicate_seq"
   /** The trail stops below an anchored head, or the anchored row is gone: truncation. */
@@ -351,10 +399,20 @@ const HEX64 = /^[0-9a-f]{64}$/;
 /**
  * Verify ONE chain.
  *
- * Rows may arrive in any order from the caller's point of view, but order is
- * itself evidence: the admin API returns them oldest-first, so a trail whose
- * `seq` values are not ascending has been re-ordered and that is reported
- * (`seq_disorder`) rather than quietly sorted away.
+ * ## Why the rows are SORTED rather than trusted in the order given
+ *
+ * `seq` is the chain's canonical order; the order a client happens to hold the
+ * rows in carries no security meaning, because every hash commits to `seq`
+ * itself. Treating a shuffled export as evidence of tampering would be a FALSE
+ * ALARM, and it is one this trail would really produce:
+ * `GET /admin/v1/audit-events` orders by `occurred_at_unix ASC, id ASC`, and
+ * `occurred_at_unix` is second-granular with a random-uuid tiebreak, so two
+ * rows written in the same second come back in an order unrelated to `seq`.
+ * A verifier that cried tamper on that would be turned off within a week.
+ *
+ * What the sort does NOT hide: a missing `seq` (`seq_gap`), a repeated one
+ * (`duplicate_seq`), a chain that does not start at 1 (`missing_head_of_chain`)
+ * and any broken link or edited field — none of which a re-order can fake.
  */
 export async function verifyAuditChain(
   rows: readonly AuditChainRow[],
@@ -363,7 +421,9 @@ export async function verifyAuditChain(
   const failures: AuditChainFailure[] = [];
   const reasons: AuditChainReason[] = [];
 
-  const chained = rows.filter((row) => row.row_hash !== null || row.seq !== null);
+  const chained = rows
+    .filter((row) => row.row_hash !== null || row.seq !== null)
+    .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
   const unchainedRows = rows.length - chained.length;
   const chainKey = options.chainKey ?? chained[0]?.chain_key ?? rows[0]?.tenant ?? "" ?? "";
   const anchors = (options.anchors ?? []).filter((anchor) => anchor.chain_key === chainKey);
@@ -419,13 +479,6 @@ export async function verifyAuditChain(
         seq,
         id: row.id,
         detail: `sequence ${seq} appears more than once`,
-      });
-    } else if (seq < previousSeq) {
-      failures.push({
-        code: "seq_disorder",
-        seq,
-        id: row.id,
-        detail: `sequence ${seq} follows ${previousSeq}: the trail is out of order`,
       });
     } else if (seq !== previousSeq + 1) {
       failures.push({
@@ -580,6 +633,12 @@ export interface AuditTrailVerification {
  * with no rows at all still produces a chain report — otherwise deleting every
  * row of a tenant's trail would delete the evidence that the trail existed,
  * which is the attack this whole module is about.
+ *
+ * PASS THE ANCHORS FOR THE CHAINS YOU EXPORTED. A tenant holding its own
+ * (tenant-fenced) export must pass its own anchors: handing it the platform
+ * chain's anchor as well would correctly report that chain as fully truncated,
+ * because the tenant cannot see a single one of its rows. The anchor set is a
+ * claim about which chains the export is supposed to contain.
  */
 export async function verifyAuditTrail(
   rows: readonly AuditChainRow[],
@@ -588,6 +647,11 @@ export async function verifyAuditTrail(
   const keys = new Set<string>();
   for (const row of rows) keys.add(row.chain_key ?? auditChainKey(row.tenant));
   for (const anchor of anchors) keys.add(anchor.chain_key);
+  // An EMPTY export with no anchors would otherwise group into ZERO chains and
+  // report `verified` for having found nothing wrong — precisely the clean bill
+  // of health a total wipe is looking for. Fall back to the platform chain so
+  // there is always a report, and it says `empty_chain`.
+  if (keys.size === 0) keys.add("");
 
   const chains: AuditChainVerification[] = [];
   for (const key of [...keys].sort()) {
