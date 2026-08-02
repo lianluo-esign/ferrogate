@@ -1,5 +1,5 @@
 /**
- * The `RouteModule` seam for the six inference operations.
+ * The `RouteModule` seam for the seven inference operations.
  *
  * `createInferenceRouter` (see `./handlers.ts`) is a standalone `Hono` built
  * around ABSOLUTE contract paths and per-route middleware chains — a bounded
@@ -7,7 +7,7 @@
  * `validateBody` that owns `invalid_request`. That chain is the port of the
  * Rust request pipeline and its ORDER is load-bearing, so this adapter does not
  * re-implement it and does not reach past it to the handlers: it registers the
- * six contract operation ids on the gateway router and DELEGATES the untouched
+ * seven contract operation ids on the gateway router and DELEGATES the untouched
  * `Request` into the inner app.
  *
  * Why delegation is safe here, given `contractAuth` is an `app.use("*")` guard
@@ -18,7 +18,7 @@
  *    twice and the 401/403 taxonomy stays owned by the single table-driven
  *    guard (ROUTE-MAP invariant 1).
  *  - `contractAuth` reads the request BODY only for `method_dependent`
- *    operations (`POST /v1/mcp`). All six inference operations are `bearer`, so
+ *    operations (`POST /v1/mcp`). All seven inference operations are `bearer`, so
  *    the body arrives at the inner reader unread and the cap is still enforced
  *    before any bytes are materialized.
  *  - The inner app answers with the provider's `Response` object itself on the

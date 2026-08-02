@@ -280,14 +280,55 @@ export type ImagesRequest = z.infer<typeof imagesRequestSchema>;
 
 // ---------------------------------------------------------------------------
 // GET /v1/models — operation `listModels`
+// GET /v1/models/{model} — operation `getModel`
 // ---------------------------------------------------------------------------
 
-/** `OpenAiModel` (`responses.rs`). `created` is hard-coded 0 in the Rust tree. */
+/** The closed capability vocabulary, as `catalog.ts` parses it out of config. */
+const modelCapabilitySchema = z.enum([
+  "chat",
+  "streaming",
+  "vision",
+  "images",
+  "embeddings",
+  "tools",
+  "structured_output",
+]);
+
+/** Input/output media a model supports — DERIVED, see `./model-metadata.ts`. */
+const modelModalitiesSchema = z.object({
+  input: z.array(z.enum(["text", "image", "embedding"])),
+  output: z.array(z.enum(["text", "image", "embedding"])),
+});
+
+/**
+ * Per-1M-token prices. `null` is UNPRICED and is NOT the same as `0`, which is
+ * a genuinely free route — see `./model-metadata.ts` for why both states exist.
+ */
+const modelPricingSchema = z.object({
+  currency: z.literal("USD"),
+  unit: z.literal("per_1m_tokens"),
+  input: z.number().nullable(),
+  output: z.number().nullable(),
+});
+
+/**
+ * `OpenAiModel` (`responses.rs`), plus the discovery metadata issue #670 added.
+ *
+ * `created` is hard-coded 0 in the Rust tree. The first four fields are the
+ * OpenAI object unchanged; the rest are ADDITIVE, so an OpenAI-shaped SDK keeps
+ * parsing this body while an integrator can finally see what a model does and
+ * what it costs without reading operator config. The derivation — including
+ * which leg of a multi-route model answers — lives in `./model-metadata.ts`.
+ */
 export const openAiModelSchema = z.object({
   id: z.string(),
   object: z.literal("model"),
   created: z.number().int(),
   owned_by: z.string(),
+  capabilities: z.array(modelCapabilitySchema),
+  context_window: z.number().int().positive().nullable(),
+  modalities: modelModalitiesSchema,
+  pricing: modelPricingSchema,
 });
 export type OpenAiModel = z.infer<typeof openAiModelSchema>;
 

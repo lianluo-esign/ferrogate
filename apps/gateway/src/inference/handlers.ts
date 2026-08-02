@@ -4,6 +4,7 @@
  * | contract operation      | method + path              | scope              | Rust handler |
  * |-------------------------|----------------------------|--------------------|--------------|
  * | `listModels`            | GET  /v1/models            | `models.read`      | `local.rs::handle_models` |
+ * | `getModel`              | GET  /v1/models/{model}    | `models.read`      | issue #670 (no Rust twin) |
  * | `createChatCompletion`  | POST /v1/chat/completions  | `chat.completions` | `chat.rs::handle_chat_completions` |
  * | `createResponse`        | POST /v1/responses         | `responses.create` | `chat.rs::handle_responses` |
  * | `createMessage`         | POST /v1/messages          | `messages.create`  | `messages.rs::handle_messages` |
@@ -25,7 +26,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 251 operations, and duplicating a per-route
+ * table-driven middleware for all 252 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -63,6 +64,8 @@ import {
 import type { EstimatedUsage } from "./estimate.js";
 import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
 import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { describeModel } from "./model-metadata.js";
+import type { ModelDescriptor } from "./model-metadata.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -1021,6 +1024,13 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   // -- GET /v1/models --------------------------------------------------------
   app.get("/v1/models", (c) => handleModels(c, c.get("inferenceDeps")));
 
+  // -- GET /v1/models/{model} ------------------------------------------------
+  // Registered AFTER the collection route; Hono matches in registration order
+  // for equal specificity, and these two cannot collide anyway (different
+  // segment counts). The path is the contract's `honoPath` — `route-module.ts`
+  // asserts that at construction, so a contract move cannot leave this a 404.
+  app.get("/v1/models/:model", (c) => handleModel(c, c.get("inferenceDeps")));
+
   // -- POST /v1/chat/completions --------------------------------------------
   app.post(
     "/v1/chat/completions",
@@ -1096,31 +1106,94 @@ function envScopedDeps(deps: InferenceDeps): (env: unknown) => ResolvedInference
 
 // ---------------------------------------------------------------------------
 // GET /v1/models — `local.rs::handle_models`
+// GET /v1/models/{model} — `getModel` (issue #670)
 // ---------------------------------------------------------------------------
+
+/**
+ * The catalog rows THIS caller may discover — one row per logical model.
+ *
+ * Three filters, and each one is a gate that already exists on the invocation
+ * path. Discovery that disagrees with invocation is an ORACLE, which is the
+ * lesson of issue #515: the listing leaked other tenants' private logical names
+ * and their provider mapping while invocation was blocked downstream, so a
+ * tenant could enumerate what it could not call.
+ *
+ *  1. `enabled` — Rust's `ModelRegistryEntry.enabled`.
+ *  2. `scopeCanSeeModel` — the tenant/project visibility filter (issue #515),
+ *     matching `planUpstream`'s own check.
+ *  3. `callerCanUseModel` — the credential's `allowed_models` / denylist, i.e.
+ *     `AuthContext::can_use_model`, the predicate behind the 403
+ *     `model_not_allowed` on invocation. It was MISSING here (issue #670): a key
+ *     scoped to one model still listed the whole catalog, so the allowlist was
+ *     enforced on the call and not on the discovery of what to call.
+ */
+function discoverableModels(
+  deps: ResolvedInferenceDeps,
+  caller: Caller,
+): readonly PhysicalRoute[] {
+  return deps.models
+    .catalog()
+    .filter((route) => route.enabled)
+    .filter((route) => scopeCanSeeModel(caller.scope, caller.projectId, route))
+    .filter((route) => callerCanUseModel(caller, route.logicalModel));
+}
+
+/** `describeModel` over the model's full candidate ladder — see `model-metadata.ts`. */
+function describeCatalogEntry(
+  deps: ResolvedInferenceDeps,
+  entry: PhysicalRoute,
+): ModelDescriptor {
+  return describeModel(entry, resolveCandidates(deps.models, entry.logicalModel));
+}
 
 function handleModels(c: InferenceContext, deps: ResolvedInferenceDeps): Response {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
 
-  // A platform-operator key sees every ENABLED model; a tenant-scoped key sees
-  // only the models visible to its tenant/project, matching the invocation gate
-  // in `planUpstream`. Without this the listing leaked other tenants' private
-  // logical names and their upstream provider mapping (issue #515), even though
-  // invocation was blocked downstream.
-  const data = deps.models
-    .catalog()
-    .filter((route) => route.enabled)
-    .filter((route) => scopeCanSeeModel(caller.scope, caller.projectId, route))
-    .map((route) => ({
-      id: route.logicalModel,
-      object: "model" as const,
-      // Hard-coded 0 in the Rust tree; the config carries no creation time.
-      created: 0,
-      owned_by: route.ownedBy ?? route.provider,
-    }));
+  const data = discoverableModels(deps, caller).map((entry) =>
+    describeCatalogEntry(deps, entry),
+  );
 
   const listing: OpenAiModelList = { object: "list", data };
   return jsonResponse(listing, requestId);
+}
+
+/**
+ * `GET /v1/models/{model}` — the single-model read.
+ *
+ * ## Why 404, when invocation answers 400 `model_not_found`
+ *
+ * They are different questions. On `POST /v1/chat/completions` the ROUTE exists
+ * and the caller's BODY names something unusable, which is a bad request — that
+ * is Rust's 400 and it is unchanged. Here the model name is the resource
+ * identity in the URL, and a resource that is not there is 404; every
+ * OpenAI-compatible client already expects 404 from `GET /v1/models/{id}`.
+ *
+ * ## Why every refusal is the SAME 404
+ *
+ * Unknown, disabled, another tenant's, and outside this key's `allowed_models`
+ * all answer `404 model_not_found` with one message. Distinguishing them would
+ * turn this operation into an existence oracle for exactly the names the
+ * filters above exist to hide — "403 not allowed" on a model tells you the model
+ * is real, which is the leak issue #515 closed on the listing. The invocation
+ * path keeps its finer taxonomy (`model_disabled` vs `model_not_found`, and the
+ * 403 `model_not_allowed`) because a caller there already knows the name.
+ */
+function handleModel(c: InferenceContext, deps: ResolvedInferenceDeps): Response {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const requested = c.req.param("model");
+
+  const entry = discoverableModels(deps, caller).find(
+    (route) => route.logicalModel === requested,
+  );
+  if (entry === undefined) {
+    return errorResponse(
+      reject(404, "model_not_found", `unknown model ${requested}`),
+      requestId,
+    );
+  }
+  return jsonResponse(describeCatalogEntry(deps, entry), requestId);
 }
 
 // ---------------------------------------------------------------------------

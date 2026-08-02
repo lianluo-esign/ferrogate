@@ -5,11 +5,11 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 251
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 252
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
- * the 31 operations this Worker owns.
+ * the 32 operations this Worker owns.
  *
  * The inference (6 ops) and asset (18 ops) handlers arrive as `RouteModule`s
  * from their own directories and are mounted in `GATEWAY_ROUTE_MODULES` below;
@@ -59,7 +59,7 @@ const usage = createMeteringUsageSink({ bindings: meteringBindingsFromEnv });
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
  * the deployed data plane serves. `test/contract.test.ts` imports this exact
- * array (never a bespoke copy) and asserts all 31 gateway-owned operation ids
+ * array (never a bespoke copy) and asserts all 32 gateway-owned operation ids
  * are registered, so a module dropped from this list fails the suite.
  *
  * The inference module is wired to the REAL data plane here:
@@ -125,7 +125,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * including paid provider calls — on requests that were never admitted.
  *
  * `createGatewayApp` mounts these after the auth guard and before every route,
- * so all 31 gateway operations are covered (see `CreateGatewayAppOptions`).
+ * so all 32 gateway operations are covered (see `CreateGatewayAppOptions`).
  *
  * ## The two PRE-AUTH ingress steps are NOT in this array — by construction
  *
@@ -192,7 +192,7 @@ export const GATEWAY_MIDDLEWARE = [
   // operations pass through two emitters; `emitRequestTelemetry` de-duplicates
   // on the inbound `Request` object, so they still produce exactly one span
   // and one metric point. Mounting here is what widens the coverage from those
-  // six to all 31 gateway operations.
+  // six to all 32 gateway operations.
   //
   // Inert until `TELEMETRY_TOKEN` is set (a secret, never a committed var):
   // `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a no-op.

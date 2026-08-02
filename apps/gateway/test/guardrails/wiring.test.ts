@@ -37,12 +37,16 @@ describe("guardrail operation bindings match the contract", () => {
   });
 
   test("every model-content inference operation is screened", () => {
-    // `listModels` carries no model content — it is the ONLY inference
-    // operation that may be absent. Anything else missing is a hole.
+    // `listModels` and `getModel` are the CATALOGUE reads: no request body, no
+    // model-generated text, nothing for a guardrail to screen. They are the
+    // only two inference operations that may be absent. Anything else missing
+    // is a hole. (`getModel` joined the list with issue #670; it is spelled out
+    // rather than matched by prefix so a third unscreened operation still has
+    // to be argued for here.)
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened).toEqual(["listModels"]);
+    expect(unscreened).toEqual(["listModels", "getModel"]);
   });
 
   test("only chat/responses/messages screen the RESPONSE stage", () => {

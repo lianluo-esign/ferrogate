@@ -8867,6 +8867,75 @@
         }
       }
     },
+    "/v1/models/{model}": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "getModel",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Describe one enabled model.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "models.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Describe one enabled model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAiModel"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/v1/chat/completions": {
       "parameters": [
         {
@@ -28868,6 +28937,84 @@
           },
           "owned_by": {
             "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "streaming",
+                "vision",
+                "images",
+                "embeddings",
+                "tools",
+                "structured_output"
+              ]
+            }
+          },
+          "context_window": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "modalities": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "image",
+                    "embedding"
+                  ]
+                }
+              },
+              "output": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "image",
+                    "embedding"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "input",
+              "output"
+            ]
+          },
+          "pricing": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "const": "USD"
+              },
+              "unit": {
+                "const": "per_1m_tokens"
+              },
+              "input": {
+                "type": "number",
+                "nullable": true
+              },
+              "output": {
+                "type": "number",
+                "nullable": true
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "currency",
+              "unit",
+              "input",
+              "output"
+            ]
           }
         },
         "additionalProperties": false,
