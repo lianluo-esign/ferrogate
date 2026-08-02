@@ -45,25 +45,30 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 258 operations", () => {
+  it("carries exactly 264 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 258 unique operation ids", () => {
+  it("has 264 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
   it("reproduces the documented auth-kind census", () => {
-    // ROUTE-MAP.md: bearer 245 · internal 6 · anonymous 6 · method_dependent 1.
+    // ROUTE-MAP.md: bearer 251 · internal 6 · anonymous 6 · method_dependent 1.
     // bearer went 238 -> 239 with `countMessageTokens` (issue #671), which is
     // bearer-`messages.create` like the `createMessage` it pre-flights, then
     // 239 -> 242 with the three prompt-deployment-label operations (issue
-    // #694), which are bearer-guarded like the rest of the prompt registry, and
-    // 242 -> 245 with the three `/admin/v1/provider-credentials*` operations
-    // issue #682 added (BYOK alias list/register-rotate/revoke). All seven
-    // additions are bearer; none is anonymous or internal.
+    // #694), which are bearer-guarded like the rest of the prompt registry.
+    // From that shared 242 the two parents of this merge diverged: `main`
+    // reached 245 with the three `/admin/v1/provider-credentials*` BYOK-alias
+    // operations (issue #682), and this branch reached 248 with the six
+    // `/admin/v1/semantic-cache-policies/**` operations (issue #695), which are
+    // `admin.read` / `admin.write` like every other admin surface. Both sets
+    // landed, so the merged figure is 242 + 3 + 6 = 251 — neither parent's
+    // number. All twelve additions since 238 are bearer; none is anonymous or
+    // internal.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 245,
+      bearer: 251,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -73,10 +78,12 @@ describe("contract table", () => {
   it("reproduces the documented visibility census", () => {
     expect(census(OPERATIONS.map<Visibility>((operation) => operation.visibility))).toEqual({
       // 193 -> 196 with the three prompt-deployment-label operations (issue
-      // #694): prompt-registry management is admin-visibility; then 196 -> 199
-      // with the three #682 BYOK-alias operations, which are admin for the same
-      // reason. BOTH sets landed, so this is 199 and not either side's 196.
-      admin: 199,
+      // #694): prompt-registry management is admin-visibility. From that 196
+      // `main` reached 199 with the three #682 BYOK-alias operations and this
+      // branch reached 202 with the six #695 semantic-cache-policy operations,
+      // all admin for the same reason. BOTH sets landed, so this is
+      // 196 + 3 + 6 = 205 and not either parent's number.
+      admin: 205,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded.
       public: 52,
@@ -87,16 +94,24 @@ describe("contract table", () => {
   it("reproduces the documented method census", () => {
     expect(census(OPERATIONS.map<HttpMethod>((operation) => operation.method))).toEqual({
       // GET/PUT/DELETE each +1 with the prompt-deployment-label operations
-      // (issue #694: list/read, upsert, delete of a label pointer) and +1 AGAIN
-      // with #682's GET /provider-credentials, PUT and DELETE
-      // /provider-credentials/{alias}. Both sides independently moved these
-      // three from 116/24/17 to 117/25/18; the COMBINED figures are 118/26/19,
-      // which is neither side's number.
-      GET: 118,
-      // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671).
-      POST: 79,
-      DELETE: 26,
-      PUT: 19,
+      // (issue #694: list/read, upsert, delete of a label pointer), moving
+      // GET/DELETE/PUT from 116/24/17 to 117/25/18. Then both parents moved the
+      // same three counters again, independently: `main` with #682's
+      // GET /provider-credentials plus PUT and DELETE
+      // /provider-credentials/{alias}, and this branch with the six #695
+      // semantic-cache-policy operations (GET +2 / POST +2 / PUT +1 /
+      // DELETE +1, whose POSTs are `create` and `invalidate`). Because both
+      // parents had independently written GET 118 / DELETE 26 / PUT 19 for
+      // their own increment, git merged those three lines with NO conflict —
+      // the true combined figures are 120/27/20, which is neither parent's
+      // number and had to be re-derived from
+      // `docs/openapi/runtime-api-contract.json`.
+      GET: 120,
+      // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
+      // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
+      POST: 81,
+      DELETE: 27,
+      PUT: 20,
       PATCH: 16,
     });
   });

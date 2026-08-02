@@ -3,7 +3,7 @@
  *
  * `ROUTE-MAP.md` invariant 1: "Port these as Hono middleware driven by the
  * contract, not as hand-written per-route guards — one table-driven middleware
- * keeps all 258 in sync." This is that middleware for this Worker's slice. It
+ * keeps all 264 in sync." This is that middleware for this Worker's slice. It
  * matches the request against `contract.ts`, then enforces whatever the matched
  * operation *declares* (`auth.kind`, `auth.scope`, `rbac_action`). Adding an
  * operation to the contract brings its guard with it; nothing here names a path.

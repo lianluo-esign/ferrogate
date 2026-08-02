@@ -6,7 +6,7 @@
  * one that DEFINES the contract. It is a full, honest implementation of the
  * port, not a stub: create/replace/merge/
  * remove/list all behave, and — the part that actually matters — **tenant
- * isolation is enforced here rather than in each of the 200 handlers.**
+ * isolation is enforced here rather than in each of the 209 handlers.**
  *
  * That placement is deliberate. The repeat defect class in the Rust tree
  * (issues #185, #186) was a handler that resolved a row by bare id and forgot

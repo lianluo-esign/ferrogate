@@ -472,7 +472,7 @@ FERROGATE_ASSET_PUBLISHER_MINISIGN_KEYS = ""
 # in `docs/rewrite/parity-audit-request-path.md`).
 #
 # Read by `routeTableFromEnv` (src/routes/reverse-proxy.ts), which
-# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 258 contract
+# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 264 contract
 # operations and after `/health`, so nothing it does can shadow a contract
 # route.
 #

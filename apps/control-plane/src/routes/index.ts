@@ -54,6 +54,7 @@ import { plansRoutes } from "./plans.js";
 import { promptRoutes } from "./prompt.js";
 import { quotaPolicyRoutes } from "./quota_policy.js";
 import { rbacRoutes } from "./rbac.js";
+import { semanticCachePolicyRoutes } from "./admin_semantic_cache.js";
 import { selfHostedWorkerRoutes } from "./self_hosted_worker.js";
 import { siteDomainRoutes } from "./site_domain.js";
 import { skillRoutes } from "./skill.js";
@@ -90,6 +91,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   quotaPolicyRoutes,
   rbacRoutes,
   selfHostedWorkerRoutes,
+  semanticCachePolicyRoutes,
   siteDomainRoutes,
   skillRoutes,
   tenantHierarchyRoutes,
@@ -220,7 +222,7 @@ export function registeredRoutes(): readonly RegisteredRoute[] {
 export function registerRoutes(app: Hono<ControlPlaneEnv>): readonly RegisteredRoute[] {
   // The two SHARED probes (`/healthz`, `/readyz`), which belong to no group and
   // are therefore NOT contract operations of this app — they are not appended to
-  // `mounted`, so the 200-operation count `test/wiring.test.ts` pins does not
+  // `mounted`, so the 209-operation count `test/wiring.test.ts` pins does not
   // move. They are mounted HERE, from the one function `src/index.ts` already
   // calls, because `src/index.ts` is a composition root this slice may not edit
   // and its two inline probe handlers answered a document that had drifted from
