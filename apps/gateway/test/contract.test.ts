@@ -84,8 +84,11 @@ describe("contract table", () => {
     // declared `bearer` and what enforces its credential instead. #703 and #737
     // landed in parallel: bearer 258 and anonymous 7 are both COUNTED off the
     // MERGED document, which is the only side that holds both.
+    //
+    // 258 -> 261 with #743's three asset-fleet operations, all bearer: an
+    // operator inventory of what tenants are hosting has no anonymous reading.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 258,
+      bearer: 261,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -101,8 +104,11 @@ describe("contract table", () => {
       // all admin for the same reason. BOTH sets landed, so that leg is
       // 196 + 3 + 6 = 205 and not either parent's number; #677's two
       // chargeback reads then take it to 207, admin because a per-request cost
-      // record is the most identity-dense report in the product.
-      admin: 207,
+      // record is the most identity-dense report in the product. #743's three
+      // asset-fleet operations then take it to 210 — admin because a fleet
+      // inventory and a quarantine verdict are operator surfaces, never
+      // caller-facing ones.
+      admin: 210,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -140,13 +146,16 @@ describe("contract table", () => {
       // re-counted off the merged document rather than added up. #737's
       // `GET /sites/{*rest}` then takes GET to 124 — the contract's first
       // operation whose path is a CATCH-ALL, because a static site is a tree of
-      // unknown depth and a fixed segment count cannot address it.
-      GET: 124,
+      // unknown depth and a fixed segment count cannot address it. #743 then
+      // takes GET to 126 (`/admin/v1/assets` and
+      // `/admin/v1/assets/quarantine`).
+      GET: 126,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
-      // #676's `/v1/rerank` and 85 with #703's three audio POSTs. Re-counted off
+      // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
+      // #743's `POST /admin/v1/assets/quarantine/{asset_id}`. Re-counted off
       // the merged document, never summed.
-      POST: 85,
+      POST: 86,
       DELETE: 27,
       PUT: 20,
       PATCH: 16,

@@ -303,8 +303,21 @@ export async function readFleetAssets(
   return { rows, unreadableTenants: unreadable.sort() };
 }
 
+/**
+ * The cross-tenant ordering key.
+ *
+ * The separator is the `"\0"` ESCAPE, never a literal NUL byte — a source file
+ * containing one is classified as binary by `grep` and by `git diff`, so it
+ * silently drops out of audits and out of pull-request diffs
+ * (`apps/gateway/test/source-nul-bytes.test.ts` is the gate, and this line was
+ * its third catch). It has to be NUL rather than a space or a colon because
+ * every component is tenant-controllable: with a printable separator,
+ * `("a b", "c")` and `("a", "b c")` produce the same key, and two distinct rows
+ * that compare equal make the page boundary depend on which tenant answered
+ * first.
+ */
 function fleetSortKey(row: FleetAssetRow): string {
-  return [row.tenant_id, row.asset_type, row.name, row.version, row.variant, row.id].join(" ");
+  return [row.tenant_id, row.asset_type, row.name, row.version, row.variant, row.id].join("\0");
 }
 
 /**

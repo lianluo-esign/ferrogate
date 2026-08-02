@@ -295,10 +295,18 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
     // merged truth: it is 258 + 3 + 1 = 262.
     //
+    // #743's three asset-fleet operations (`listFleetAssets`,
+    // `listQuarantinedAssets`, `reviewQuarantinedAsset`) are the same story
+    // again: their response shapes are declared in
+    // `docs/openapi/admin-api.openapi.json` and their one request body is
+    // validated at the route by an inline Zod schema in
+    // `apps/control-plane/src/routes/admin_asset.ts`, so none of the three
+    // seeds a WIRE shape here. 262 + 3 = 265.
+    //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 272 - 10. The running sum is narrative, and #703 and #737
+    // `seeded`, i.e. 275 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(262);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(265);
   });
 });

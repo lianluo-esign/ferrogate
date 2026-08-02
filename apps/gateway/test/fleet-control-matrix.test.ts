@@ -777,6 +777,38 @@ const CONTROLS: readonly FleetControl[] = [
     authorityText: /BasicPolicyEngine/,
     deployVar: /GATEWAY_POLICIES|\bpolicies\b/,
   },
+  {
+    /**
+     * `stored_assets.visibility` — the #366 screener's withholding, and since
+     * #743 a control an OPERATOR applies rather than only one a scanner writes.
+     *
+     * It is registered here because §4.3 caught it: `stored_assets` became a
+     * table two Workers read the day the control plane grew the quarantine
+     * review, and this file's whole subject is "one authority, two Workers, do
+     * they agree". They do, and the shape is the GOOD one rather than the
+     * defect one:
+     *
+     *  - `apps/gateway` ENFORCES it, and only by filtering — `isDownloadable`
+     *    inside `AssetService.#resolveArtifact`, so a withheld version drops
+     *    out of resolution before any read path can name it. That is why there
+     *    is no `refusalCode` on this row: the refusal is the ordinary `404` a
+     *    version that does not exist gets, deliberately indistinguishable, and
+     *    a literal code to scan for would have to be invented for this table.
+     *  - `apps/control-plane` enforces the OTHER half of the same predicate at
+     *    the review verb — `asset_not_withheld` refuses a decision on a live
+     *    version — and it WRITES the authority.
+     *
+     * Both resolve it `durable`, out of the same tenant-database column, which
+     * is what §3.3 checks. The failure this entry now makes impossible is the
+     * one that would matter most: a control plane that released an asset by
+     * writing something the gateway does not read.
+     */
+    id: "asset-withholding",
+    title: "the screener's withholding of an asset version, and its operator release (#366, #743)",
+    required: "self",
+    enforcement: /isDownloadable\(|"asset_not_withheld"/,
+    authorityTables: ["stored_assets"],
+  },
 ];
 
 /** The Workers that ENFORCE a control. */
