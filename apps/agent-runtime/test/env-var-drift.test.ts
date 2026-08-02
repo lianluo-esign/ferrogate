@@ -244,6 +244,53 @@ function referencedInCode(name: string): boolean {
 const READS = envReads();
 const DECLARED = declared();
 
+/** One LIVE `[[durable_objects.bindings]]` stanza. */
+interface DurableObjectBinding {
+  readonly name: string;
+  readonly className: string;
+  /** Present ⇒ the class is defined and migrated by ANOTHER script. */
+  readonly scriptName?: string;
+}
+
+/**
+ * The LIVE Durable Object bindings, split by who owns the class.
+ *
+ * The split is the whole point (#666). Two of this Worker's three bindings name
+ * classes `src/worker.ts` exports and `[[migrations]]` introduces; the third,
+ * `RATE_LIMIT`, names `apps/gateway`'s `RateLimiterDurableObject` through
+ * `script_name`, which this Worker must NOT export and must NOT migrate. A gate
+ * that treats all three the same either fails on the correct config or — the
+ * way this file used to be written — only stays green while the shared counter
+ * is commented out and therefore not shared at all.
+ */
+function durableObjectBindings(): DurableObjectBinding[] {
+  const out: DurableObjectBinding[] = [];
+  let current: Record<string, string> | null = null;
+  const flush = (): void => {
+    if (current?.name !== undefined && current.class_name !== undefined) {
+      out.push({
+        name: current.name,
+        className: current.class_name,
+        ...(current.script_name === undefined ? {} : { scriptName: current.script_name }),
+      });
+    }
+    current = null;
+  };
+  for (const line of TOML_LINES) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#") || trimmed === "") continue;
+    if (trimmed.startsWith("[")) {
+      flush();
+      if (trimmed === "[[durable_objects.bindings]]") current = {};
+      continue;
+    }
+    const m = /^([A-Za-z0-9_]+)\s*=\s*"([^"]+)"/.exec(trimmed);
+    if (m !== null && current !== null) current[m[1] as string] = m[2] as string;
+  }
+  flush();
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The exception table — the ONLY hand-written part of this file.
 // ---------------------------------------------------------------------------
@@ -273,29 +320,22 @@ const SECRETS: readonly string[] = [];
  *    and a committed empty would SHADOW the dev fallback the A2A tests seed.
  *  - `FG_DEV_AGENT_UPSTREAMS` — the dev fallback itself, named in that same
  *    block.
- *  - `RATE_LIMIT` — the SHARED admission counter namespace `src/admission/
- *    counter.ts` charges the per-minute request window against. Its stanza is
- *    written out IN FULL but COMMENTED, and it MUST carry
- *    `script_name = "ferrogate-gateway"`: a `RateLimiterDurableObject` defined
- *    in THIS Worker would compile, deploy and pass every test while creating a
- *    SECOND namespace that hands `/v1/agent-jobs` its own full RPM quota — a
- *    quieter version of the bypass wave 16 closes. Commented for a MEASURED
- *    reason: `vitest.config.ts` loads `wrangler.toml`, and workerd refuses to
- *    START with a cross-script binding whose target script is not in the
- *    session ("binding RATE_LIMIT refers to a service
- *    core:user:ferrogate-gateway, but no such service is defined") — 0 tests
- *    collected on a correct tree, and no "Ready on" from `wrangler dev
- *    --local`. DEPLOY-ONLY per `docs/rewrite/MOUNT-SEAMS.md` §1. Until it is
- *    uncommented `counterFromEnv` falls back to `InMemoryRequestCounter`:
- *    correct arithmetic, per-isolate blast radius, while the quota-scope,
- *    monthly-budget and wallet legs stay durable and shared.
+ *
+ * `RATE_LIMIT` — the SHARED admission counter namespace — WAS the fifth entry
+ * here, and its removal is issue #666. Its stanza was written out IN FULL but
+ * COMMENTED, with "UNCOMMENT AT DEPLOY TIME" above it, which made the committed
+ * tree the broken configuration: a deploy that forgot the two lines gave
+ * `/v1/agent-jobs` its own full RPM quota, silently, on a control customers pay
+ * for. It is now a LIVE cross-script binding, resolvable offline through the
+ * auxiliary `ferrogate-gateway` worker `vitest.config.ts` registers, and
+ * `keeps RATE_LIMIT LIVE, CROSS-SCRIPT, and claimed by no migration` below is
+ * where that is now held.
  */
 const DOCUMENTED_BUT_UNDECLARED = [
   "AGENT_UPSTREAMS",
   "CONTROL_DB",
   "DB",
   "FG_DEV_AGENT_UPSTREAMS",
-  "RATE_LIMIT",
 ] as const;
 
 /**
@@ -382,7 +422,13 @@ describe("the env-var drift gate itself", () => {
       "FG_DEV_IN_MEMORY_PORTS",
       "FG_REQUIRE_PRODUCTION_MTLS",
     ]);
-    expect([...DECLARED.bindings.keys()].sort()).toEqual(["AGENT_RUN_STATE", "WORKER_PLANE"]);
+    expect([...DECLARED.bindings.keys()].sort()).toEqual([
+      "AGENT_RUN_STATE",
+      // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
+      // because it is LIVE; while it was commented out it was not.
+      "RATE_LIMIT",
+      "WORKER_PLANE",
+    ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(14);
     expect(READS.named.has("AGENT_JOB_MAX_OPEN_PER_TENANT")).toBe(true);
     expect(READS.named.has("WORKER_PLANE")).toBe(true);
@@ -405,10 +451,11 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
-    // Not vacuous: five entries today — the two commented-out D1 stanzas, the
-    // two upstream-catalog knobs, and the commented cross-script RATE_LIMIT
-    // binding, each of whose whole justification lives in that prose.
-    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(5);
+    // Not vacuous: four entries today — the two commented-out D1 stanzas and
+    // the two upstream-catalog knobs, each of whose whole justification lives
+    // in that prose. It was five until #666 made the cross-script RATE_LIMIT
+    // binding live.
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(4);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name), `${name} is read but no longer documented`).toBe(true);
     }
@@ -430,20 +477,24 @@ describe("every var the source reads is declared or explicitly excepted", () => 
     expect(WRANGLER_TOML).toContain('#   binding = "CONTROL_DB"');
   });
 
-  it("keeps RATE_LIMIT commented, CROSS-SCRIPT, and claimed by no migration", () => {
-    // The admission counter must be the SAME Durable Object namespace
-    // `apps/gateway` charges, or `/v1/agent-jobs` silently gets its own full
-    // RPM quota — the quiet re-opening of the bypass wave 16 closed. Three
-    // separate ways that can rot, all pinned:
-    //
-    //  1. uncommenting it: workerd then refuses to start this Worker offline
-    //     (no `ferrogate-gateway` service in the session), so the whole suite
-    //     collapses to 0 collected tests. It is a DEPLOY-ONLY seam.
-    expect(DECLARED.bindings.has("RATE_LIMIT")).toBe(false);
-    expect(WRANGLER_TOML).toContain('#   name = "RATE_LIMIT"');
+  /**
+   * WAS "keeps RATE_LIMIT commented, CROSS-SCRIPT, and claimed by no
+   * migration". The first third of that title was the defect (#666): a counter
+   * stanza that only becomes real when a human remembers to uncomment it is
+   * not a shared counter. The other two thirds are unchanged, and are still
+   * the two edits that would silently un-share it.
+   */
+  it("keeps RATE_LIMIT LIVE, CROSS-SCRIPT, and claimed by no migration", () => {
+    const rateLimit = durableObjectBindings().find((b) => b.name === "RATE_LIMIT");
+
+    //  1. commenting it out (its state until #666): `counterFromEnv` falls back
+    //     to `InMemoryRequestCounter` and a 60 rpm cap becomes 60·N, silently.
+    expect(rateLimit, "RATE_LIMIT is not a LIVE [[durable_objects.bindings]]").toBeDefined();
+    expect(DECLARED.bindings.has("RATE_LIMIT")).toBe(true);
     //  2. dropping `script_name`: deploys cleanly, creates a SECOND private
     //     namespace, doubles every credential's RPM allowance.
-    expect(WRANGLER_TOML).toContain('#   script_name = "ferrogate-gateway"');
+    expect(rateLimit?.className).toBe("RateLimiterDurableObject");
+    expect(rateLimit?.scriptName).toBe("ferrogate-gateway");
     //  3. adding a migration for it here: this script does not export the
     //     class, so claiming to introduce it is rejected at deploy.
     expect(WRANGLER_TOML).not.toMatch(

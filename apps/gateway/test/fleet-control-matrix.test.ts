@@ -1001,22 +1001,19 @@ describe("§3.6 the shared RPM counter stays ONE namespace", () => {
       ),
     );
     for (const app of SPEND.filter((a) => !definers.includes(a))) {
-      // Live declaration of the class WITHOUT `script_name` is a private
-      // namespace by another route, so the LIVE config must not name it...
-      expect(
-        new RegExp(CLASS).test(TOML[app]?.live ?? ""),
-        `${app} declares the limiter class in its live config`,
-      ).toBe(false);
-      // ...while the deploy-time stanza (commented out because workerd refuses
-      // a cross-script DO binding under `wrangler dev --local`) must survive,
-      // pointed at the one definer. Deleting it is how the shared counter
-      // silently stops being shared at the next deploy.
-      expect(TOML[app]?.full, `${app} lost the RATE_LIMIT deploy stanza`).toContain(
-        `class_name = "${CLASS}"`,
-      );
-      expect(TOML[app]?.full, `${app} lost script_name — a private namespace at deploy`).toMatch(
+      // The borrowed stanza must be LIVE and must name the one definer's
+      // script. It was asserted against the whole file INCLUDING comments until
+      // issue #666, because the stanza was committed commented out — an
+      // assertion that could not tell a deployed binding from a comment about
+      // one, which is the defect itself. Deleting it, or dropping `script_name`
+      // from it, is how the shared counter silently stops being shared.
+      const live = TOML[app]?.live ?? "";
+      expect(live, `${app} lost the LIVE RATE_LIMIT stanza`).toContain(`class_name = "${CLASS}"`);
+      expect(live, `${app} lost script_name — a private namespace at deploy`).toMatch(
         /script_name\s*=\s*"[^"]+"/,
       );
+      // ...and it must still introduce no migration for a class it does not
+      // define; that half is the `definers.length === 1` assertion above.
     }
   });
 });

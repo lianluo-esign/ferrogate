@@ -42,6 +42,7 @@
 import { readFileSync } from "node:fs";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { gatewayRateLimiterAuxWorker } from "../gateway/test/support/rate-limit-aux-worker.js";
 
 /**
  * The COMMITTED deploy config, bound verbatim so a test can assert against the
@@ -75,6 +76,17 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
         d1Databases: ["TENANT_DB_A"],
+        // The `ferrogate-gateway` script this Worker's committed
+        // `[[durable_objects.bindings]] RATE_LIMIT` points at with
+        // `script_name`. Without it workerd refuses to START the session
+        // ("binding RATE_LIMIT refers to a service core:user:ferrogate-gateway,
+        // but no such service is defined"), which is why that stanza used to be
+        // committed COMMENTED OUT and uncommented by hand at deploy time —
+        // issue #666, the defect being that the committed tree was the broken
+        // configuration. The auxiliary worker carries the gateway's REAL
+        // `RateLimiterDurableObject`, so `test/shared-rate-limit.test.ts` can
+        // charge a window as the gateway and watch THIS Worker find it spent.
+        workers: [gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url))],
         bindings: {
           TEST_CONTROL_D1_SCHEMA: controlMigrations,
           TEST_TENANT_D1_SCHEMA: tenantMigrations,

@@ -691,15 +691,19 @@ describe("FC-5 the RPM window is ONE counter across the three spend Workers", ()
    * instance from all three and a credential at 60 rpm is charged one window
    * across `/v1/chat/completions`, `tools/call` and `/v1/agent-jobs`.
    *
-   * Neither of the two binding stanzas can be committed live: workerd refuses
-   * to start on a cross-script DO binding under `wrangler dev --local` and
-   * `@cloudflare/vitest-pool-workers`, so both are written out and commented
-   * for deploy time. That leaves an obvious and catastrophic "fix" available
-   * to the next person who meets the boot error: define a private
-   * `RateLimiterDurableObject` in the app that fails. It compiles, deploys,
-   * passes every suite — and hands that Worker its own full RPM quota, which
-   * is the wave-16 bypass restored quietly. THIS is the assertion that stops
-   * it.
+   * Both binding stanzas are LIVE since issue #666. They were written out and
+   * COMMENTED until then, because a bare `@cloudflare/vitest-pool-workers`
+   * session refuses to start on a `script_name` it cannot resolve — which made
+   * the committed tree the broken configuration and left the sharing to a human
+   * remembering two lines at deploy time. The borrowers' harnesses now register
+   * an auxiliary `ferrogate-gateway` worker carrying this app's real limiter
+   * (`test/support/rate-limit-aux-worker.ts`), so the stanzas are live and
+   * offline-provable.
+   *
+   * The catastrophic "fix" this block exists to stop is unchanged: define a
+   * private `RateLimiterDurableObject` in the borrowing app. It compiles,
+   * deploys, passes every suite — and hands that Worker its own full RPM quota,
+   * which is the wave-16 bypass restored quietly.
    */
   it("all three spend Workers read the same binding name", () => {
     expect(appsMatching(PROBE.readsRateLimitBinding)).toEqual(SPEND_WORKERS);
@@ -714,29 +718,36 @@ describe("FC-5 the RPM window is ONE counter across the three spend Workers", ()
     ]);
   });
 
-  it("neither borrower declares the class in its LIVE config", () => {
-    // A live `[[durable_objects.bindings]]` naming the class WITHOUT
-    // `script_name` is the same private namespace by another route.
+  it("neither borrower declares the class WITHOUT script_name", () => {
+    // A live `[[durable_objects.bindings]]` naming the class and NOT naming a
+    // script is the same private namespace by another route: it deploys, and
+    // it silently gives that Worker its own full RPM allowance.
     for (const app of ["mcp", "agent-runtime"] as const) {
+      const stanza = /\[\[durable_objects\.bindings\]\][^[]*?RateLimiterDurableObject[^[]*/.exec(
+        tomlOf(app).live,
+      );
+      expect(stanza, `${app} no longer binds RateLimiterDurableObject at all`).not.toBeNull();
       expect(
-        /RateLimiterDurableObject/.test(tomlOf(app).live),
-        `${app} wrangler.toml declares the limiter class live`,
-      ).toBe(false);
+        /script_name\s*=\s*"ferrogate-gateway"/.test(stanza?.[0] ?? ""),
+        `${app} binds the limiter class without script_name — a private namespace`,
+      ).toBe(true);
     }
   });
 
-  it("both borrowers keep the deploy-time stanza, pointed at the gateway script", () => {
-    // The stanza is the deploy instruction; deleting it is how the shared
-    // counter silently stops being shared at the next deploy.
+  it("both borrowers keep the stanza LIVE, pointed at the gateway script", () => {
+    // WAS asserted against the whole file (`full`) INCLUDING comments, because
+    // the stanza was committed commented out. That is precisely what issue #666
+    // was: the assertion could not tell a deployed binding from a comment about
+    // one. It is asserted against `live` now.
     for (const app of ["mcp", "agent-runtime"] as const) {
-      const { full } = tomlOf(app);
-      expect(full, `${app} lost the RATE_LIMIT deploy stanza`).toContain(
+      const { live } = tomlOf(app);
+      expect(live, `${app} lost the LIVE RATE_LIMIT stanza`).toContain(
         'class_name = "RateLimiterDurableObject"',
       );
-      expect(full, `${app} lost script_name — a private namespace at deploy`).toContain(
+      expect(live, `${app} lost script_name — a private namespace at deploy`).toContain(
         'script_name = "ferrogate-gateway"',
       );
-      expect(full, `${app} lost the RATE_LIMIT binding name`).toContain('name = "RATE_LIMIT"');
+      expect(live, `${app} lost the RATE_LIMIT binding name`).toContain('name = "RATE_LIMIT"');
     }
   });
 
