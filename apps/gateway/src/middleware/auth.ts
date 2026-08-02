@@ -172,8 +172,102 @@ async function methodDependentRequiredScope(
   return scope;
 }
 
+/**
+ * The method the CONTRACT is matched on — HEAD folded onto GET (issue #737).
+ *
+ * RFC 9110 §9.3.2: "The HEAD method is identical to GET except that the server
+ * MUST NOT send content in the response." A HEAD row of its own would be a
+ * second place for a scope, a visibility and an RBAC action to live, and the
+ * failure that produces is silent: a HEAD row whose scope drifts below its GET
+ * twin leaks the existence and the size of everything the GET protects.
+ *
+ * Before this, `matchOperation("HEAD", …)` found nothing, `pathIsDocumented`
+ * found the path, and every GET operation in the contract answered
+ * `405 method_not_allowed` to a HEAD — including the asset pull, whose service
+ * layer has handled `method: "HEAD"` since the port. Browsers and CDNs issue
+ * HEAD, and a static site that 405s them is not servable, so the fold lands
+ * here rather than as a `/sites`-only special case: it is a property of HTTP,
+ * not of one route.
+ *
+ * Hono already completes the other half — `app.on("GET", …)` answers a HEAD
+ * request with the handler's headers and an EMPTY body — so nothing downstream
+ * has to remember to strip content. A handler that wants to skip the work
+ * reads `c.req.method`, which is untouched: only the contract LOOKUP is folded.
+ */
+export function contractMethod(method: string): string {
+  return method.toUpperCase() === "HEAD" ? "GET" : method;
+}
+
 /** Ports, or a factory that derives them from the Worker bindings per request. */
 export type DepsResolver = GatewayDeps | ((env: GatewayBindings) => GatewayDeps);
+
+/**
+ * The bearer ladder, as ONE function: credential → scope → tenancy lifecycle →
+ * RBAC, throwing the exact refusal at each rung.
+ *
+ * Extracted from the middleware below (issue #737) so the `/sites/*` handler
+ * can run the SAME ladder rather than a second copy of it. The site serve
+ * operation is `anonymous` in the contract — a site's credential requirement is
+ * per-site data, which `auth.kind` cannot express — so its handler has to
+ * authenticate for itself; the one thing it must not do is re-implement this.
+ * A duplicated ladder is how a surface ends up honouring the scope check and
+ * forgetting that a suspended tenant is a 403.
+ *
+ * Throws {@link HttpError}; returns the resolved {@link AuthContext} on success.
+ * The caller decides what to do with it (the middleware puts it on the context;
+ * the site handler derives a tenant-scoped asset caller from it).
+ */
+export async function authenticateBearer(
+  ports: GatewayDeps,
+  headers: Headers,
+  requiredScope: string,
+  operation: ApiOperation,
+): Promise<AuthContext> {
+  const presentedKey = extractApiKey(headers);
+  if (presentedKey === null) {
+    throw new HttpError(401, "missing_api_key", MISSING_API_KEY_MESSAGE);
+  }
+
+  const auth = resolveOrThrow(await ports.apiKeys.authenticate(presentedKey));
+
+  // Authenticated but under-scoped is 403 — never 401.
+  if (!hasScope(auth.scopes, requiredScope)) {
+    throw new HttpError(403, "scope_denied", `API key does not have required scope ${requiredScope}`);
+  }
+
+  // Tenancy lifecycle: a suspended/deleted TENANT — or any suspended ANCESTOR
+  // in the tenant → project → workspace chain — is authenticated-but-forbidden
+  // (403 `tenancy_suspended`), distinct from a suspended KEY (401).
+  //
+  // A lifecycle lookup that FAILS is 503, never an admission: Rust
+  // `LifecycleGateError::Unavailable`. Fail-open here would make "flap the
+  // control plane" a suspension bypass, so it is checked before `!admitted`
+  // (the string `"unavailable"` is truthy, and reading it as "admitted" is
+  // exactly the bug this ordering forbids).
+  const lifecycle = await ports.lifecycle.admit(auth, operation);
+  if (lifecycle.admitted === "unavailable") {
+    throw new HttpError(
+      503,
+      "lifecycle_status_unavailable",
+      `tenancy lifecycle lookup failed: ${lifecycle.detail}`,
+    );
+  }
+  if (!lifecycle.admitted) {
+    throw new HttpError(403, lifecycle.code, lifecycle.message);
+  }
+
+  if (operation.rbacAction !== null) {
+    const decision = await ports.rbac.authorize(auth, operation.rbacAction);
+    if (decision.allowed === "unavailable") {
+      throw new HttpError(503, "rbac_unavailable", `failed to resolve role permissions: ${decision.detail}`);
+    }
+    if (!decision.allowed) {
+      throw new HttpError(403, decision.code, decision.message);
+    }
+  }
+
+  return auth;
+}
 
 /**
  * The table-driven guard. Mount it once, before every route:
@@ -199,7 +293,8 @@ export function contractAuth(deps: DepsResolver): MiddlewareHandler<GatewayEnv> 
     const path = canonicalRequestPath(c.req.path);
     c.set("canonicalPath", path);
 
-    const matched = matchOperation(c.req.method, path);
+    // HEAD is matched as GET — see {@link contractMethod}.
+    const matched = matchOperation(contractMethod(c.req.method), path);
     if (matched === undefined) {
       if (pathIsDocumented(path)) {
         // Rust: a documented path reached with an undocumented method is 405,
@@ -250,58 +345,9 @@ export function contractAuth(deps: DepsResolver): MiddlewareHandler<GatewayEnv> 
       );
     }
 
-    const presentedKey = extractApiKey(c.req.raw.headers);
-    if (presentedKey === null) {
-      throw new HttpError(401, "missing_api_key", MISSING_API_KEY_MESSAGE);
-    }
-
-    const auth = resolveOrThrow(await ports.apiKeys.authenticate(presentedKey));
-
-    // Authenticated but under-scoped is 403 — never 401.
-    if (!hasScope(auth.scopes, requiredScope)) {
-      throw new HttpError(
-        403,
-        "scope_denied",
-        `API key does not have required scope ${requiredScope}`,
-      );
-    }
-
-    // Tenancy lifecycle: a suspended/deleted TENANT — or any suspended ANCESTOR
-    // in the tenant → project → workspace chain — is authenticated-but-forbidden
-    // (403 `tenancy_suspended`), distinct from a suspended KEY (401).
-    //
-    // A lifecycle lookup that FAILS is 503, never an admission: Rust
-    // `LifecycleGateError::Unavailable`. Fail-open here would make "flap the
-    // control plane" a suspension bypass, so it is checked before `!admitted`
-    // (the string `"unavailable"` is truthy, and reading it as "admitted" is
-    // exactly the bug this ordering forbids).
-    const lifecycle = await ports.lifecycle.admit(auth, operation);
-    if (lifecycle.admitted === "unavailable") {
-      throw new HttpError(
-        503,
-        "lifecycle_status_unavailable",
-        `tenancy lifecycle lookup failed: ${lifecycle.detail}`,
-      );
-    }
-    if (!lifecycle.admitted) {
-      throw new HttpError(403, lifecycle.code, lifecycle.message);
-    }
-
-    if (operation.rbacAction !== null) {
-      const decision = await ports.rbac.authorize(auth, operation.rbacAction);
-      if (decision.allowed === "unavailable") {
-        throw new HttpError(
-          503,
-          "rbac_unavailable",
-          `failed to resolve role permissions: ${decision.detail}`,
-        );
-      }
-      if (!decision.allowed) {
-        throw new HttpError(403, decision.code, decision.message);
-      }
-    }
-
-    c.set("auth", auth);
+    // The ladder itself lives in `authenticateBearer` so the `/sites/*` handler
+    // can run this exact code rather than a second copy — see its docstring.
+    c.set("auth", await authenticateBearer(ports, c.req.raw.headers, requiredScope, operation));
     await next();
   };
 }

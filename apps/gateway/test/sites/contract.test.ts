@@ -15,6 +15,7 @@
  */
 import { describe, expect, test } from "vitest";
 import { matchOperation, matchRouteGroup, operationById } from "../../src/contract.js";
+import { contractMethod } from "../../src/middleware/auth.js";
 import { SITE_OPERATION_IDS } from "../../src/routes/index.js";
 
 describe("the `site` route group carries the serve operation", () => {
@@ -34,8 +35,18 @@ describe("the `site` route group carries the serve operation", () => {
   test("HEAD is the same operation as GET, never a second one", () => {
     // RFC 9110 §9.3.2: HEAD is identical to GET with the content omitted. A
     // separate contract row would be a second place for the scope, the
-    // visibility and the RBAC action to drift apart.
-    expect(matchOperation("HEAD", "/sites/docs/")?.operation.operationId).toBe("serveSite");
+    // visibility and the RBAC action to drift apart, and a HEAD row whose scope
+    // drifted BELOW its GET twin leaks the existence and the size of everything
+    // the GET protects. So the contract has no HEAD rows at all and the guard
+    // folds the method — `contractMethod` — before it looks anything up.
+    expect(contractMethod("HEAD")).toBe("GET");
+    expect(matchOperation(contractMethod("HEAD"), "/sites/docs/")?.operation.operationId).toBe(
+      "serveSite",
+    );
+    // The fold is a LOOKUP rule and nothing more: no other method moves.
+    for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+      expect(contractMethod(method), method).toBe(method);
+    }
   });
 
   test("the operation is anonymous at the contract layer, by decision", () => {

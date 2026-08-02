@@ -116,7 +116,7 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 268;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 269;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`

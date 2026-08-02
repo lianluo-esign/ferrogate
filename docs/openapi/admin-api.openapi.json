@@ -16642,6 +16642,202 @@
         }
       }
     },
+    "/sites/{*rest}": {
+      "get": {
+        "operationId": "serveSite",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Serve one file of a published static-site bundle.",
+        "description": "Serves a file out of a `static_site` bundle version published through `PUT /v1/assets/static_site/{name}/{version}`. The path is `/sites/{site}/{file path}`: the first segment names the site and the rest is the bundle-relative path. Resolution runs through the SAME registry machinery as `getAsset` (channel pointer, default `latest`, then platform variant), so a yanked, withheld or quarantined version is unresolvable and answers 404 exactly as an unknown site does. A directory URL (empty path, or a path ending in `/`) serves that directory's `index.html`; a path that names a directory holding an `index.html` answers `308` to the directory URL, and an explicit `.../index.html` answers `308` to the same place, so one document has exactly one URL. A miss inside a real site serves the bundle's own `404.html` with status 404 when it has one, or the SPA entry document with status 200 when the site opted in, otherwise a JSON error envelope. A site is private by default and requires `Authorization: Bearer` with the `assets.read` scope, tenant-scoped to the credential; anonymous serving is a per-site, per-channel operator opt-in, and an anonymous read is still egress-quota'd, metered and audited against the OWNING tenant. Conditional requests, single byte ranges and HEAD are handled exactly as on `getAsset`.",
+        "x-ferrogate-data-plane": true,
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "anonymous",
+            "scope": null
+          },
+          "rbac_action": null
+        },
+        "parameters": [
+          {
+            "name": "*rest",
+            "in": "path",
+            "required": true,
+            "description": "Catch-all: `{site}` followed by the optional bundle-relative file path, e.g. `docs/assets/app.4f3a9c21.js`. The path may contain `/`; it may not contain `..`, a backslash, a control character or a percent-encoded separator.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's bytes, with the content type recorded for it in the bundle index at publish time.",
+            "headers": {
+              "ETag": {
+                "description": "Strong SHA-256 entity validator for the served file.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "description": "Publish time of the resolved bundle version in HTTP-date form.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "Per-response policy: `immutable` with a one-year max-age for a fingerprinted filename, revalidated for HTML, short-lived otherwise; `private` whenever the response was served to a credential rather than anonymously.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Vary": {
+                "description": "Always includes the credential headers, because the same URL can serve a private site to one caller and refuse another.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-ferrogate-asset-resolved": {
+                "description": "How the site's channel pointer resolved to a concrete version.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-ferrogate-asset-version": {
+                "description": "Concrete bundle version the file was served from.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-ferrogate-site-path": {
+                "description": "Bundle-relative path actually served, after index resolution and any SPA fallback.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested single byte range of the file.",
+            "headers": {
+              "Content-Range": {
+                "description": "Served byte range and the file's full length.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Strong SHA-256 entity validator for the served file.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The supplied validator matches; no response body is sent."
+          },
+          "308": {
+            "description": "The document's canonical URL. Emitted for a directory that has an index document but was requested without a trailing slash, and for an explicit `.../index.html`, so one document is never reachable as three bodies at three URLs.",
+            "headers": {
+              "Location": {
+                "description": "Canonical URL for the requested document, query string preserved.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path is not a legal bundle path (traversal, backslash, control character or an encoded separator).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The site is private and no credential was presented, or the credential is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credential is valid but does not carry the `assets.read` scope, or its tenancy is suspended.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such site, no resolvable (visible, non-yanked) bundle version, or no such file inside one. A site that ships a `404.html` gets that document as the body with this status; otherwise the body is the JSON error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string",
+                  "description": "The site's own 404 document, served verbatim from the bundle."
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The requested byte range is outside the file; the runtime sends no JSON body."
+          },
+          "429": {
+            "description": "The owning tenant's asset egress budget is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No object bucket is configured on this deployment, so no site bytes can be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/assets/storage/summary": {
       "parameters": [
         {

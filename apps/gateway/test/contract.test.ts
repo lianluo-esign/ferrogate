@@ -45,11 +45,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 268 operations", () => {
+  it("carries exactly 269 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 268 unique operation ids", () => {
+  it("has 269 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -74,10 +74,15 @@ describe("contract table", () => {
     // parallel and each parent wrote its own increment, which is the collision
     // this file's header warns about. `Counter(o["auth"]["kind"] for o in
     // operations)` over the merged JSON is what produced it.
+    //
+    // `anonymous` moves 6 -> 7 with `serveSite` (issue #737) — the FIRST
+    // addition since the cutover that is not bearer, and a deliberate one. See
+    // the "may skip auth" case below for why the site serve route cannot be
+    // declared `bearer` and what enforces its credential instead.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
       bearer: 255,
       internal: 6,
-      anonymous: 6,
+      anonymous: 7,
       method_dependent: 1,
     });
   });
@@ -98,8 +103,11 @@ describe("contract table", () => {
       // `getModel` (issue #670), public for the same reason as `listModels`.
       // Both parents independently wrote 52, so git merged that clean — 53 was
       // the merged truth, and `createRerank` (issue #676) takes it to 54: a
-      // data-plane operation, publicly reachable, bearer-guarded.
-      public: 54,
+      // data-plane operation, publicly reachable, bearer-guarded. `serveSite`
+      // (issue #737) takes it to 55 — publicly reachable in the strongest
+      // sense of the word, since an opted-in site may be read with no
+      // credential at all.
+      public: 55,
       internal: 7,
     });
   });
@@ -121,8 +129,11 @@ describe("contract table", () => {
       // adds two more GETs (`/admin/v1/cost-records` and
       // `/admin/v1/cost-record-exports`) for 123, and #676 one more POST
       // (`/v1/rerank`) for 82. Both landed in parallel, so both figures were
-      // re-counted off the merged document rather than added up.
-      GET: 123,
+      // re-counted off the merged document rather than added up. #737's
+      // `GET /sites/{*rest}` then takes GET to 124 — the contract's first
+      // operation whose path is a CATCH-ALL, because a static site is a tree of
+      // unknown depth and a fixed segment count cannot address it.
+      GET: 124,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
       POST: 82,
@@ -132,8 +143,32 @@ describe("contract table", () => {
     });
   });
 
-  it("names exactly the 6 operations that may skip auth", () => {
+  it("names exactly the 7 operations that may skip auth", () => {
     // ROUTE-MAP invariant 3 — nothing else may be unauthenticated.
+    //
+    // ## `serveSite` is the SEVENTH, and it is a decision (issue #737)
+    //
+    // It was 6 for the whole port. `serveSite` is added here deliberately, and
+    // this comment is the record of why, because "an operation moved into the
+    // anonymous set" is otherwise indistinguishable from an auth hole.
+    //
+    // A site's credential requirement is DATA, not a property of the route: a
+    // site is PRIVATE by default (bearer + `assets.read`, tenant-scoped), and
+    // anonymous serving is a per-site, per-channel operator opt-in. `auth.kind`
+    // has exactly four values and none of them can say that. Declaring
+    // `bearer` would make the opt-in unreachable — the middleware would 401
+    // every anonymous reader before a handler ran — so the only expressible
+    // choice is `anonymous` at the contract layer with the ladder in the
+    // handler.
+    //
+    // What keeps that from being a bypass is that the handler does NOT
+    // re-implement the ladder: `src/sites/index.ts` calls
+    // `authenticateBearer` — the exact function `contractAuth` itself calls —
+    // so key resolution, scope, tenancy-lifecycle admission and RBAC are the
+    // same code, not a copy that can drift. `test/sites/serve.test.ts` proves
+    // the refusals on the wire (no credential, wrong scope, other tenant), and
+    // `test/sites/access.test.ts` proves the opt-in is the ONLY thing that
+    // opens a site to an anonymous reader.
     const anonymous = OPERATIONS.filter((operation) => operation.auth.kind === "anonymous").map(
       (operation) => operation.operationId,
     );
@@ -145,6 +180,7 @@ describe("contract table", () => {
         "getAdminDashboardSlash",
         "getAdminDashboardAlias",
         "completeMcpIdentityOauth",
+        "serveSite",
       ]),
     );
   });
