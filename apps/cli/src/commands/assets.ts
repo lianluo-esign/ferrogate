@@ -77,7 +77,11 @@ function decode(bytes: Uint8Array): string {
 }
 
 /** Print a JSON response, or fail with the server's own exit class. */
-function printJsonOrRaise(runtime: CliRuntime, response: BinaryResponse, what: string): number {
+export function printJsonOrRaise(
+  runtime: CliRuntime,
+  response: BinaryResponse,
+  what: string,
+): number {
   const text = decode(response.bytes);
   if (response.status < 200 || response.status > 299) {
     runtime.io.stderr(`error: ${what} failed: status=${response.status} body=${text}\n`);

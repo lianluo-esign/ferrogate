@@ -485,6 +485,17 @@ export function createFetchGatewayClient(
 // Process seams
 // ---------------------------------------------------------------------------
 
+/** One entry of a directory walk (`Io.listDirectory`). */
+export interface DirectoryEntry {
+  /** Path relative to the walked root, `/`-separated. */
+  readonly path: string;
+  /**
+   * What the entry IS on disk. `symlink` is its own kind rather than being
+   * resolved to `file`/`other`, so the refusal in `site push` can name it.
+   */
+  readonly kind: "file" | "symlink" | "other";
+}
+
 /** Everything the CLI reads from or writes to the outside world. */
 export interface Io {
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -498,6 +509,15 @@ export interface Io {
   writeFile(path: string, contents: string): Promise<void>;
   writeFileBytes(path: string, bytes: Uint8Array): Promise<void>;
   fileExists(path: string): Promise<boolean>;
+  /**
+   * Recursively enumerate `path`, for `site push` (#736).
+   *
+   * Symlinks are REPORTED, never followed: the caller refuses them, because
+   * following one would silently upload whatever it pointed at — a `dist/`
+   * containing `secrets -> ~/.ssh/id_rsa` must be a refusal, not a publish. A
+   * seam that resolved links here would make that decision unreachable.
+   */
+  listDirectory(path: string): Promise<readonly DirectoryEntry[]>;
   /** True when stdin is an interactive terminal (drives the confirmation prompt). */
   isStdinTty(): boolean;
   /** Cryptographically-strong random bytes (action-id minting). */
@@ -548,6 +568,30 @@ export function createNodeIo(): Io {
       } catch {
         return false;
       }
+    },
+    listDirectory: async (path) => {
+      const mod = await fs;
+      const entries: DirectoryEntry[] = [];
+      // `withFileTypes` reports the entry itself, so a symlink is reported as a
+      // symlink rather than as whatever it resolves to — which is the whole
+      // point (`lstat` semantics, not `stat`).
+      const walk = async (absolute: string, relative: string): Promise<void> => {
+        for (const dirent of await mod.readdir(absolute, { withFileTypes: true })) {
+          const childRelative = relative === "" ? dirent.name : `${relative}/${dirent.name}`;
+          const childAbsolute = `${absolute}/${dirent.name}`;
+          if (dirent.isSymbolicLink()) {
+            entries.push({ path: childRelative, kind: "symlink" });
+          } else if (dirent.isDirectory()) {
+            await walk(childAbsolute, childRelative);
+          } else if (dirent.isFile()) {
+            entries.push({ path: childRelative, kind: "file" });
+          } else {
+            entries.push({ path: childRelative, kind: "other" });
+          }
+        }
+      };
+      await walk(path.replace(/\/+$/, ""), "");
+      return entries;
     },
     isStdinTty: () => process.stdin.isTTY === true,
     randomBytes: (length) => {

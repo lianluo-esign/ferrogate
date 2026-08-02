@@ -8,6 +8,7 @@ import type { JsonValue } from "@ferrogate/core";
 import { type ContextStore, createMemoryContextStorage } from "../src/context.js";
 import type {
   ConfigValidator,
+  DirectoryEntry,
   FakeControlPlaneClient,
   FakeGatewayClient,
   FakeResponse,
@@ -39,6 +40,8 @@ export interface TestRuntimeOptions {
   readonly isTty?: boolean;
   readonly configValidator?: ConfigValidator;
   readonly keyHasher?: KeyHasher;
+  /** Fake directory trees for `Io.listDirectory` (#736). */
+  readonly directories?: Readonly<Record<string, readonly DirectoryEntry[]>>;
 }
 
 export function createTestRuntime(options: TestRuntimeOptions = {}): TestRuntime {
@@ -79,6 +82,14 @@ export function createTestRuntime(options: TestRuntimeOptions = {}): TestRuntime
       binaryFiles.set(path, value);
     },
     fileExists: async (path) => files.has(path) || binaryFiles.has(path),
+    // #736: `site push` walks a directory. The fake tree is declared per test
+    // through `options.directories`, keyed by the path the command is given, so
+    // a symlink entry can be presented WITHOUT a filesystem that supports one.
+    listDirectory: async (path) => {
+      const tree = (options.directories ?? {})[path.replace(/\/+$/, "")];
+      if (tree === undefined) throw new Error(`no such test directory: ${path}`);
+      return tree;
+    },
     isStdinTty: () => options.isTty ?? false,
     // A fixed, obviously-fake byte pattern: deterministic action ids make the
     // receipt assertions exact instead of regex-shaped.
