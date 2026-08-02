@@ -103,7 +103,23 @@ describe("ProviderAdapterRegistry", () => {
   });
 });
 
-describe("Cloudflare AI Gateway routing (issue #406)", () => {
+/**
+ * Issue #672 REWROTE the first two cases in this block, and the rewrite is the
+ * point rather than a tidy-up.
+ *
+ * They used to read `registry.prepareChatCompletions(provider("openai", {
+ * cloudflareAiGateway: routing(...) }), ...)` and assert the gateway endpoint —
+ * green the entire time AI Gateway routing was unreachable in production,
+ * because `ProviderAdapterRegistry` is not what `apps/gateway` dispatches
+ * through. `ProviderConfig.cloudflareAiGateway` and the registry's routing leg
+ * are both deleted now (see the docblock on `src/registry.ts`), so these cases
+ * exercise `applyCloudflareAiGatewayRouting` directly, which is what this
+ * package actually owns. The claim they used to make — "a prepared request comes
+ * out addressed at the AI Gateway" — is now made where it can be false:
+ * `apps/gateway/test/inference/cloudflare-ai-gateway-mount.test.ts`, through
+ * `SELF.fetch` into the deployed Worker.
+ */
+describe("Cloudflare AI Gateway routing (issue #406, mounted by #672)", () => {
   const routing = (overrides: Partial<CloudflareAiGatewayRouting> = {}): CloudflareAiGatewayRouting => ({
     accountId: "acct",
     gatewayId: "gw",
@@ -114,10 +130,22 @@ describe("Cloudflare AI Gateway routing (issue #406)", () => {
   });
   const registry = new ProviderAdapterRegistry();
 
+  /** What an OpenAI-compatible adapter hands over, ready to be re-addressed. */
+  const preparedOpenAi = (): ProviderHttpRequest =>
+    registry.prepareChatCompletions(provider("openai"), {
+      logicalModel: "fast",
+      providerModel: "gpt-4o-mini",
+      stream: false,
+      body: { model: "fast" },
+    });
+
   test("compat mode rewrites onto the passthrough URL, preserving BYOK auth", () => {
-    const prepared = registry.prepareChatCompletions(
-      provider("openai", { cloudflareAiGateway: routing({ aigToken: new SecretValue("cf-token") }) }),
-      { logicalModel: "fast", providerModel: "gpt-4o-mini", stream: false, body: { model: "fast" } },
+    const prepared = preparedOpenAi();
+    applyCloudflareAiGatewayRouting(
+      routing({ aigToken: new SecretValue("cf-token") }),
+      "OpenAiCompatible",
+      "ChatCompletions",
+      prepared,
     );
     expect(prepared.endpoint).toBe(
       "https://gateway.ai.cloudflare.com/v1/acct/gw/openai/chat/completions",
@@ -128,11 +156,22 @@ describe("Cloudflare AI Gateway routing (issue #406)", () => {
   });
 
   test("anthropic chat routes through the messages passthrough suffix", () => {
-    const prepared = registry.prepareChatCompletions(
-      provider("anthropic", { cloudflareAiGateway: routing() }),
-      { logicalModel: "c", providerModel: "claude", stream: false, body: { messages: [] } },
-    );
+    const prepared = registry.prepareChatCompletions(provider("anthropic"), {
+      logicalModel: "c",
+      providerModel: "claude",
+      stream: false,
+      body: { messages: [] },
+    });
+    applyCloudflareAiGatewayRouting(routing(), "Anthropic", "Messages", prepared);
     expect(prepared.endpoint).toBe("https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic/v1/messages");
+  });
+
+  test("the registry itself no longer routes — that leg is the gateway's now", () => {
+    // The anti-regression for the deletion. If a future edit re-adds a routing
+    // leg to `ProviderAdapterRegistry`, this class would once again be a second
+    // place that claims to apply AI Gateway routing while production applies it
+    // somewhere else. A prepared request must come out addressed at the VENDOR.
+    expect(preparedOpenAi().endpoint).toBe("https://api.openai.example/v1/chat/completions");
   });
 
   test("unified mode rewrites model to author/model and adds gateway-id header", () => {
