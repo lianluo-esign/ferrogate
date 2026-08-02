@@ -9,13 +9,29 @@
  */
 import { AdapterError } from "./types.js";
 import type { Json, JsonObject } from "./json.js";
-import { asArray, asObject, asStr, getField, isArray, isObject, parseJson } from "./json.js";
+import {
+  asArray,
+  asObject,
+  asStr,
+  getField,
+  isArray,
+  isObject,
+  ownBody,
+  parseJson,
+} from "./json.js";
 import {
   applyStructuredOutputToAnthropic,
   applyStructuredOutputToGemini,
   structuredOutputFromResponsesBody,
 } from "./structured.js";
 import type { CanonicalStructuredOutput } from "./structured.js";
+import {
+  applyPromptCacheToAnthropic,
+  applyPromptCacheToAutomaticFamily,
+  promptCacheFromBody,
+  stripPromptCacheDirective,
+} from "./caching.js";
+import type { CanonicalPromptCache } from "./caching.js";
 
 type CanonicalToolChoice =
   | { type: "Auto" }
@@ -62,6 +78,8 @@ export class CanonicalAiRequest {
     private readonly maxOutputTokens: Json | undefined,
     /** `text.format` — the Responses spelling of `response_format` (#674). */
     private readonly structuredOutput: CanonicalStructuredOutput | undefined,
+    /** `prompt_cache` — the provider-neutral caching directive (#690). */
+    private readonly promptCache: CanonicalPromptCache | undefined,
   ) {}
 
   static fromResponsesBody(body: Json): CanonicalAiRequest {
@@ -74,6 +92,7 @@ export class CanonicalAiRequest {
       getField(object, "instructions"),
       getField(object, "max_output_tokens"),
       structuredOutputFromResponsesBody(object),
+      promptCacheFromBody(object),
     );
   }
 
@@ -103,7 +122,12 @@ export class CanonicalAiRequest {
   }
 
   intoAnthropicBody(): Json {
-    const body: JsonObject = { ...this.sourceBody };
+    // A SHALLOW spread of `sourceBody` still shares every subtree it did not
+    // overwrite — `instructions` becomes `system` by reference — so the
+    // breakpoint placed below would land in the caller's object and reach every
+    // other candidate on the ladder. `ownBody` is the boundary that stops it,
+    // and the type the `apply*` helpers demand (issue #690).
+    const body = ownBody({ ...this.sourceBody });
     body["messages"] = canonicalMessagesToAnthropicJson(this.messages);
     if (this.tools.length > 0) body["tools"] = canonicalToolsToAnthropicJson(this.tools);
     if (this.toolChoice) body["tool_choice"] = canonicalToolChoiceToAnthropicJson(this.toolChoice);
@@ -115,11 +139,17 @@ export class CanonicalAiRequest {
     if (this.structuredOutput !== undefined) {
       applyStructuredOutputToAnthropic(body, this.structuredOutput, "anthropic");
     }
+    // The caching directive is FerroGate's own member: it is stripped from the
+    // copied source body and re-emitted as `cache_control` breakpoints (#690).
+    stripPromptCacheDirective(body);
+    if (this.promptCache !== undefined) {
+      applyPromptCacheToAnthropic(body, this.promptCache, "anthropic");
+    }
     return body;
   }
 
   intoGeminiBody(): Json {
-    const body: JsonObject = { ...this.sourceBody };
+    const body = ownBody({ ...this.sourceBody });
     body["contents"] = canonicalMessagesToGeminiJson(this.messages);
     if (this.instructions !== undefined) {
       body["systemInstruction"] = canonicalInstructionToGeminiJson(this.instructions);
@@ -134,6 +164,13 @@ export class CanonicalAiRequest {
       applyStructuredOutputToGemini(generationConfig, this.structuredOutput, "gemini");
     }
     if (Object.keys(generationConfig).length > 0) body["generationConfig"] = generationConfig;
+    // Gemini caches implicitly and has no per-request breakpoint, so the
+    // directive is adjudicated (auto accepted, explicit/off refused) and never
+    // reaches the wire (#690).
+    stripPromptCacheDirective(body);
+    if (this.promptCache !== undefined) {
+      applyPromptCacheToAutomaticFamily(this.promptCache, "gemini");
+    }
     return body;
   }
 }

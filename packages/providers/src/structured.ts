@@ -35,7 +35,7 @@
  */
 import { AdapterError } from "./types.js";
 import { asObject, asStr, getField, isArray, isObject } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
+import type { Json, JsonObject, OwnedJsonObject } from "./json.js";
 
 // ---------------------------------------------------------------------------
 // Canonical representation
@@ -170,7 +170,7 @@ export function coercionToolName(schemaName: string): string {
  * than silently resolved in the coercion's favour.
  */
 export function applyStructuredOutputToAnthropic(
-  body: JsonObject,
+  body: OwnedJsonObject,
   structured: CanonicalStructuredOutput,
   providerKind: string,
 ): void {
@@ -245,7 +245,7 @@ function assertToolChoiceAllowsCoercion(choice: Json | undefined, name: string):
  * would have preserved the bug for the pair that most needs it fixed.
  */
 export function applyStructuredOutputToBedrockConverse(
-  body: JsonObject,
+  body: OwnedJsonObject,
   structured: CanonicalStructuredOutput,
   providerKind: string,
 ): void {

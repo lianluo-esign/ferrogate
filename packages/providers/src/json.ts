@@ -57,6 +57,53 @@ export function parseJson(body: string | Uint8Array): Json | undefined {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Body ownership — the family-isolation boundary (issue #690)
+// ---------------------------------------------------------------------------
+
+declare const OWNED_BODY: unique symbol;
+
+/**
+ * A JSON object that NO caller aliases, and which an adapter may therefore
+ * mutate in place.
+ *
+ * Every candidate on a failover ladder is prepared from the SAME caller body.
+ * An adapter that builds its native request by aliasing that body's subtrees
+ * (`messages`, `system`, `tools`) and then writes into them is not decorating
+ * its own request — it is deciding what every LATER candidate sends. That is
+ * how an Anthropic `cache_control` breakpoint ended up on an OpenAI request
+ * that never asked for one: whichever candidate prepared first won.
+ *
+ * The fix that only removed the write at the one call site would have left the
+ * next adapter free to reintroduce it, so ownership is a TYPE here rather than
+ * a convention. The mutating `apply*` helpers accept nothing else, and
+ * {@link ownBody} is the only way to obtain one — which means the deep copy is
+ * not something an author can forget to do. The brand is phantom: it exists at
+ * compile time only and costs nothing at runtime.
+ */
+export type OwnedJsonObject = JsonObject & { readonly [OWNED_BODY]: true };
+
+/**
+ * Take ownership of a request body: a deep copy nothing else holds a reference
+ * into, branded so the mutators will accept it.
+ *
+ * The copy is deep because the leak was never at the top level — a shallow
+ * spread still shares the `messages` array and every message object in it. The
+ * cost is one structured clone per prepared candidate, which is the same order
+ * as the `JSON.stringify` that body is about to undergo on its way upstream;
+ * paying it is what makes "prepare for one family" independent of "prepare for
+ * another".
+ */
+export function ownBody(fields: JsonObject): OwnedJsonObject {
+  return cloneJson(fields) as OwnedJsonObject;
+}
+
+/** Deep copy of any JSON value. `structuredClone` where the runtime has it. */
+export function cloneJson<T extends Json>(value: T): T {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 /**
  * `value.as_str().and_then(from_str).unwrap_or_else(|| value.clone())` — if the
  * value is a JSON-encoded string, its parse; otherwise the value unchanged.
