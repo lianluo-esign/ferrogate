@@ -1,5 +1,5 @@
 /**
- * Zod request/response schemas for the six inference operations.
+ * Zod request/response schemas for the eight inference operations.
  *
  * Clean-room port of the Rust ingress extractors:
  *  - `ChatCompletionRequest`   (`server/chat.rs`, shared by `/v1/chat/completions`
@@ -226,6 +226,43 @@ export const anthropicMessagesRequestSchema = z
   })
   .passthrough();
 export type AnthropicMessagesRequest = z.infer<typeof anthropicMessagesRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// POST /v1/messages/count_tokens — operation `countMessageTokens` (issue #671)
+// ---------------------------------------------------------------------------
+
+/**
+ * The count-tokens request is the Messages request, and the SAME schema object
+ * is reused rather than a parallel copy of it.
+ *
+ * That is the point: the endpoint promises "this is what /v1/messages would
+ * charge you for this body". A separate schema that admitted a body
+ * `/v1/messages` rejects (or rejected one it admits) would make the promise
+ * untestable for exactly the requests where the two disagree. Anthropic's own
+ * `count_tokens` takes the Messages body too, minus the `max_tokens`
+ * requirement — and `max_tokens` is already optional on this schema because
+ * Rust left it optional, so nothing has to be relaxed.
+ *
+ * `stream` is accepted-and-ignored rather than rejected: the schema passes
+ * unknown members through, a counting request produces no stream, and refusing
+ * a member the sibling endpoint accepts would make "send the same body to
+ * either" false.
+ */
+export const anthropicCountTokensRequestSchema = anthropicMessagesRequestSchema;
+export type AnthropicCountTokensRequest = z.infer<typeof anthropicCountTokensRequestSchema>;
+
+/**
+ * `MessageTokensCount` — Anthropic's `count_tokens` response, verbatim.
+ *
+ * One member. It is declared as a schema (rather than an inline object literal
+ * in the handler) so the wire shape has a named, exported source of truth that
+ * the OpenAPI document's `input_tokens`-only response schema can be read
+ * against.
+ */
+export const anthropicTokenCountSchema = z.object({
+  input_tokens: z.number().int().nonnegative(),
+});
+export type AnthropicTokenCount = z.infer<typeof anthropicTokenCountSchema>;
 
 // ---------------------------------------------------------------------------
 // POST /v1/embeddings — operation `createEmbedding`

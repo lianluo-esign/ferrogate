@@ -265,6 +265,41 @@ export function estimateMessagesUsage(chatBody: unknown, _model: string): Estima
   return usage(promptTokens, completionTokens);
 }
 
+/**
+ * The number `POST /v1/messages/count_tokens` answers with (issue #671).
+ *
+ * It is deliberately a one-line projection of {@link estimateMessagesUsage}
+ * rather than its own traversal. The endpoint's entire value proposition is
+ * that the count a client pre-flights with is the count the gateway will
+ * reserve against that client's TPM window, monthly token budget and prepaid
+ * wallet when the identical body is actually sent — so the two numbers must be
+ * produced by ONE piece of arithmetic. A second estimator here, however
+ * faithful on the day it was written, is a number that can drift away from the
+ * bill, and a count that silently disagrees with the bill is worse than no
+ * endpoint: it converts "I could not pre-estimate" into "I pre-estimated
+ * wrongly and believed it".
+ *
+ * The argument is the TRANSLATED, OpenAI-shaped body for the same reason
+ * `handleMessages` estimates over the translated body: `to_chat_completions`
+ * folds Anthropic's top-level `system` prompt into `messages[0]`, so counting
+ * the untranslated request would under-report every request that carries one.
+ *
+ * Only the PROMPT half is returned. `estimateMessagesUsage`'s completion half
+ * is a RESERVATION against `max_tokens` (or the 512 default), i.e. an output
+ * budget the caller chose, not an input measurement — Anthropic's
+ * `count_tokens` reports `input_tokens` and nothing else, and folding an output
+ * reservation into it would answer a question nobody asked. The relationship
+ * between the two is pinned by `test/inference/count-tokens.test.ts`:
+ * `reservation === input_tokens + completion reservation`.
+ *
+ * Sharpening the estimate (the BPE leg described in this module's PORT-TODO)
+ * therefore lands in `estimateMessagesUsage` and moves both numbers together,
+ * which is the property this indirection exists to guarantee.
+ */
+export function countMessagesInputTokens(chatBody: unknown, model: string): number {
+  return estimateMessagesUsage(chatBody, model).promptTokens;
+}
+
 // ---------------------------------------------------------------------------
 // embeddings
 // ---------------------------------------------------------------------------

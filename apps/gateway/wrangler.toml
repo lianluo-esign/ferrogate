@@ -58,6 +58,30 @@ compatibility_flags = ["nodejs_compat"]
 # so every bearer credential falls through to the static table and then to
 # `401 invalid_api_key`. The Worker still serves `/healthz`, `/readyz` and the
 # other anonymous operations.
+# --- Request-log retention (#664) -------------------------------------------
+# Read by `requestLogRetentionFromEnv` (src/requestlog/retention.ts) from the
+# `[triggers] crons` tick, which is the only thing in the fleet that ever calls
+# a `@ferrogate/storage` retention planner.
+#
+# `REQUEST_LOG_RETENTION_DAYS` is the fleet-wide window and is NOT a
+# placeholder — it deploys as written. 400 days (13 months) is chosen ABOVE,
+# not at, the six-month floor an EU AI Act Art. 12 record-keeping obligation
+# implies: a window equal to the obligation deletes the evidence on a day it is
+# still owed.
+#
+# `0` or a blank value means KEEP FOREVER, never "delete everything": a
+# mistyped number must not be the one that erases an audit trail. That is also
+# why the sweep is age-only — see the module docblock for why `keep_last_n` is
+# refused rather than approximated.
+REQUEST_LOG_RETENTION_DAYS = "400"
+
+# Per-tenant overrides, for a customer whose residency or DPA terms differ from
+# the fleet's: `{"acme": {"days": 30}, "gov-eu": {"days": 2555}}`. A tenant with
+# no entry is governed by `REQUEST_LOG_RETENTION_DAYS`. A malformed table is
+# ignored (the fleet default still sweeps) rather than fatal, because this is
+# read from a Cron handler where throwing would stop retention entirely.
+REQUEST_LOG_RETENTION_POLICIES = "{}"
+
 GATEWAY_NATIVE_API_KEYS = "[]"
 
 # Read by `ConfiguredApiKeyAuthenticator.fromEnv` (src/adapters.ts).
@@ -253,9 +277,20 @@ GATEWAY_TENANT_PLANS = "{}"
 # `wallets` minus live `wallet_reservations`, which is what makes concurrent
 # requests unable to oversell a prepaid balance. The hold is released on
 # settle; unset ⇒ DEFAULT_WALLET_HOLD_CREDITS.
+#
+# GATEWAY_BUDGET_HOLD_USD is read by `budgetHoldUsdFromEnv`
+# (src/ratelimit/quota.ts): the USD reserved on the RATE_LIMIT Durable Object
+# per in-flight request against EACH rung of a nested monthly budget
+# (org → project → workspace → key, #679). It is what stops concurrent requests
+# from all passing the same `usage_monthly_rollups` read; a budget with H
+# dollars of headroom admits at most H/hold of them, and none once the budget is
+# spent. Released when the request finishes. Unset or not a positive finite
+# number ⇒ DEFAULT_BUDGET_HOLD_USD (one cent) — it is IGNORED rather than
+# applied, because a 0 hold would silently disable the guard.
 # ---------------------------------------------------------------------------
 GATEWAY_POLICY_RULES = "[]"
 GATEWAY_WALLET_HOLD_CREDITS = ""
+GATEWAY_BUDGET_HOLD_USD = ""
 
 # ---------------------------------------------------------------------------
 # [vars] — provider reliability (circuit breaker + retry), the `PROVIDER_CIRCUIT`
@@ -437,7 +472,7 @@ FERROGATE_ASSET_PUBLISHER_MINISIGN_KEYS = ""
 # in `docs/rewrite/parity-audit-request-path.md`).
 #
 # Read by `routeTableFromEnv` (src/routes/reverse-proxy.ts), which
-# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 251 contract
+# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 258 contract
 # operations and after `/health`, so nothing it does can shadow a contract
 # route.
 #
@@ -479,6 +514,38 @@ GATEWAY_UPSTREAMS = "[]"
 # ---------------------------------------------------------------------------
 GATEWAY_GUARDRAIL_POLICIES = "[]"
 GATEWAY_GUARDRAIL_BINDINGS = "[]"
+
+# ---------------------------------------------------------------------------
+# PER-TENANT BYOK (issue #682) — FERROGATE_BYOK_MASTER_KEY
+# ---------------------------------------------------------------------------
+# The FLEET-WIDE AES-256 key that seals every tenant's own provider credential
+# in the control database's `tenant_provider_credentials` table. It is a SECRET
+# and is deliberately NOT declared here — set it with
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put FERROGATE_BYOK_MASTER_KEY
+#
+# (or `@ferrogate/secrets`' `generateByokMasterKey()`), or bind it through
+# Cloudflare Secrets Store; `byokPortsFromEnv` reads either shape.
+#
+# THIS IS ONE BINDING FOR THE WHOLE FLEET, NOT ONE PER TENANT. That is the
+# entire design: Secrets Store bindings resolve at DEPLOY time, so a per-tenant
+# binding would mean a deploy per tenant and a deploy per rotation. Instead the
+# binding set is fixed and the tenant-visible `alias -> credential` mapping is
+# ROW DATA — onboarding a tenant is an INSERT and rotating their key is an
+# UPDATE, neither of which is a deploy.
+#
+# Rotating THIS key (rare — an operator event, not a tenant one) adds
+# FERROGATE_BYOK_MASTER_KEY_V2 and keeps the v1 secret bound until every row has
+# been re-sealed; rows record the version that sealed them.
+#
+# Absent ⇒ BYOK is simply OFF: `byokPortsFromEnv` returns null, provider
+# credentials resolve exactly as they did before #682, and a request that
+# explicitly asks for an alias is refused 503 `byok_not_configured` rather than
+# being served — and billed — on the platform's own provider key.
+#
+# Requires the CONTROL_DB binding (declared below) and migration
+# `sql/d1-ts/control/0003_tenant_provider_credentials.sql`.
+# ---------------------------------------------------------------------------
 
 # Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
 # negative D1 key resolution may be reused inside one isolate. `"0"` (the
@@ -585,6 +652,20 @@ ASSET_SCANNER_ENDPOINT = ""
 TELEMETRY_ENDPOINT = ""
 TELEMETRY_SERVICE_NAME = "ferrogate-gateway"
 TELEMETRY_SIGNALS = "metric,trace,log"
+# #669 — which attribute vocabulary spans and metrics carry.
+#
+#   dual       (DEFAULT) `ferrogate.*` AND the OTel GenAI conventions
+#              (`gen_ai.system`, `gen_ai.provider.name`, `gen_ai.request.model`,
+#              `gen_ai.response.model`, `gen_ai.usage.*`, `gen_ai.operation.name`,
+#              plus `gen_ai.client.token.usage` / `.operation.duration`).
+#              The span NAME stays `ferrogate.gateway.request`.
+#   genai      `gen_ai.*` only, and the semconv `{operation} {model}` span name.
+#              Opt into this once nothing reads the legacy attributes.
+#   ferrogate  Exactly the pre-#669 wire. The escape hatch, not a destination.
+#
+# Written out rather than left to the default so the knob is discoverable; the
+# VALUE is the default, so deleting this line changes nothing.
+TELEMETRY_ATTRIBUTE_PROFILE = "dual"
 
 # ---------------------------------------------------------------------------
 # Budget-threshold alert delivery (#170/#228) — Rust `[billing_alerts]`
@@ -658,6 +739,31 @@ BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS = "5"
 binding = "ASSETS"
 bucket_name = "replace-at-deploy-ferrogate-assets"
 preview_bucket_name = "replace-at-deploy-ferrogate-assets-preview"
+
+# ---------------------------------------------------------------------------
+# KV — prompt deployment labels, `label -> revision` (#694)
+# ---------------------------------------------------------------------------
+#
+# READ-ONLY here. `apps/control-plane` owns the writes
+# (`PUT /admin/v1/prompt-templates/{id}/labels/{label}`); this Worker only
+# resolves the pointer, on the request path, for a caller that referenced a
+# prompt by label — `src/prompts/labels.ts`, reached from
+# `src/routes/prompts.ts` and from the inference `prompt` reference expander.
+#
+# The key derivation is `promptLabelPointerKey` in `@ferrogate/config`, shared
+# with the writer so a rename cannot silently turn every lookup into a miss. The
+# caller's SCOPE is part of the key, which is what stops one tenant's
+# `production` from ever resolving to another tenant's revision.
+#
+# An ABSENT binding is not a silent degradation: `readPromptLabelPointer` throws
+# `unavailable` and the request is refused, because "no label storage" must
+# never collapse into "render the default prompt".
+#
+# `id` is a DOCUMENTED PLACEHOLDER; it must be substituted with the SAME
+# namespace `apps/control-plane` writes to.
+[[kv_namespaces]]
+binding = "PROMPT_LABELS"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ---------------------------------------------------------------------------
 # D1 — the tenant database holding the durable `api_keys` table
@@ -805,6 +911,55 @@ migrations_dir = "../../sql/d1-ts/control"
 [[queues.producers]]
 binding = "BILLING"
 queue = "replace-at-deploy-ferrogate-billing-reports"
+
+# ---------------------------------------------------------------------------
+# Queues — the request-log fan-in  (#664)
+#
+# Read as `env.REQUEST_LOG` by `requestLogBindingsFromEnv`
+# (src/requestlog/sink.ts) and produced from `requestLogging()`
+# (src/requestlog/middleware.ts) on `ctx.waitUntil`, i.e. never in front of a
+# client byte.
+#
+# PRODUCER **AND** CONSUMER, which is the opposite of the `BILLING` stanza
+# above, and deliberately so. `BILLING` is producer-only because settling a
+# wallet is a different Worker's job; the only thing that has to happen to a
+# request-log message is an insert into the CONTROL database, and THIS Worker
+# already binds it (`CONTROL_DB` below). Routing it to a second Worker would
+# add a deploy unit and a second set of credentials to run one statement. A
+# Worker consuming a queue it produces is a supported topology — the delivery
+# is a separate invocation with its own `env`, not a re-entrant call.
+#
+# The body is `RequestLogWire` (src/requestlog/record.ts): a FLAT snake_case
+# record of primitives, because a Queue body is structured-clone encoded and a
+# nested shape is one more thing for both ends to disagree about. The D1 write
+# is an UPSERT on `request_id`, which is what makes Queues' at-least-once
+# redelivery safe here — a re-applied message rewrites the same row instead of
+# failing on the primary key.
+#
+# `max_batch_size` / `max_batch_timeout` are the point of using a queue at all:
+# a hundred decisions become ONE `db.batch()` instead of a hundred D1 round
+# trips. `dead_letter_queue` bounds how long a message that cannot be written
+# (a missing binding, a schema drift) can be retried before it is parked
+# somewhere an operator can see it, rather than looping forever.
+#
+# What breaks without it: nothing is lost — `RequestLogSink` falls back to
+# writing `CONTROL_DB` inline on `ctx.waitUntil`, through the same
+# `writeRequestLogs`. What is lost is the batching and the retry ladder, so a
+# brief D1 outage becomes a handful of missing rows instead of a redelivery.
+#
+# `queue` / `dead_letter_queue` are DOCUMENTED PLACEHOLDERS; the deploy step
+# substitutes the real queues (`wrangler queues create …`).
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "REQUEST_LOG"
+queue = "replace-at-deploy-ferrogate-request-logs"
+
+[[queues.consumers]]
+queue = "replace-at-deploy-ferrogate-request-logs"
+max_batch_size = 100
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "replace-at-deploy-ferrogate-request-logs-dlq"
 
 # ---------------------------------------------------------------------------
 # Durable Objects — the rate-limit / quota counters

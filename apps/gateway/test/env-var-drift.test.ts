@@ -268,6 +268,11 @@ const SECRETS = [
   "ASSET_S3_ACCESS_KEY_ID",
   "ASSET_S3_SECRET_ACCESS_KEY",
   "ASSET_S3_SESSION_TOKEN",
+  // Issue #682: the fleet-wide AES-256 key that seals every tenant's own
+  // provider credential. ONE binding for the whole fleet — the per-tenant part
+  // is row data in control D1, which is what keeps onboarding and rotation off
+  // the deploy path. A committed value would decrypt every tenant's key.
+  "FERROGATE_BYOK_MASTER_KEY",
   "GATEWAY_DEV_API_KEY",
   "GATEWAY_TENANT_DB_API_TOKEN",
   "GUARDRAIL_EVIDENCE_HMAC_KEY",
@@ -387,9 +392,14 @@ describe("the env-var drift gate itself", () => {
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
     // GW-T18 counted 49 `[vars]`; WAVE 20 committed the two `BILLING_ALERTS_*`
-    // knobs, so 51. Pinning the exact number makes an accidental parser
-    // regression (or a silently deleted table) loud here first.
-    expect(DECLARED.vars.size).toBe(51);
+    // knobs, so 51; #669 committed `TELEMETRY_ATTRIBUTE_PROFILE` (52) and #664
+    // committed `REQUEST_LOG_RETENTION_DAYS` + `REQUEST_LOG_RETENTION_POLICIES`
+    // (54), and #679 committed `GATEWAY_BUDGET_HOLD_USD` (55). Pinning the exact number makes an accidental parser regression (or
+    // a silently deleted table) loud here first — and it is why adding a var is
+    // deliberately a two-file change: the count below must be re-stated by
+    // whoever adds one, rather than drifting silently. Note this merge is why
+    // the number is 54 and not either branch's 52 or 53: BOTH sets landed.
+    expect(DECLARED.vars.size).toBe(55);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -606,7 +616,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(51);
+    expect(rows.length).toBe(55);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -640,8 +650,16 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // and `test/metering/budget-alerts.test.ts` supplies its own URL and secret
     // on the env it passes. The committed value is therefore inert rather than
     // absent, which is what keeps it from shadowing a fixture.
+    //
+    // #664: 46 -> 48. `REQUEST_LOG_RETENTION_DAYS` ("400") and
+    // `REQUEST_LOG_RETENTION_POLICIES` ("{}") are observable for the same
+    // reason and are NOT inert — the committed 400-day window is a live policy,
+    // which is the point (an unset window means "keep forever", and an evidence
+    // table that grows without bound is the half of #664 that is not about
+    // reading). `test/requestlog/mount.test.ts` asserts the committed value
+    // parses into a real policy rather than a blank.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(46);
+    expect(observable.length).toBe(50);
     expect(rows.length - observable.length).toBe(5);
   });
 });

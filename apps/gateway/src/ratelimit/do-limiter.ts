@@ -128,6 +128,27 @@ export class DurableObjectRateLimiter implements RateLimiter {
     }
   }
 
+  async reserveMonthlyBudget(
+    counterKey: string,
+    committedUsd: number,
+    budgetUsd: number,
+    estimatedUsd: number,
+  ): Promise<ReservationOutcome> {
+    // A hold of nothing is not a guard; taking it would only cost a round trip.
+    if (estimatedUsd <= 0) return { outcome: "not_applicable" };
+    const stub = this.#stub(counterKey);
+    try {
+      const reserved = await stub.reserveMonthlyBudget(committedUsd, budgetUsd, estimatedUsd);
+      if (!reserved) return { outcome: "insufficient" };
+      return {
+        outcome: "reserved",
+        reservation: releaseOnce(estimatedUsd, () => stub.releaseMonthlyBudget(estimatedUsd)),
+      };
+    } catch (error) {
+      return { outcome: "unavailable", detail: detailOf(error) };
+    }
+  }
+
   async reserveWalletCredits(
     counterKey: string,
     balanceCredits: number,

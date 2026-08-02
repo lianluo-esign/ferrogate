@@ -2,11 +2,11 @@
 
 The native TypeScript replacement for the Rust `ferrogate-gateway` +
 `ferrogate-runtime` + the Pingora container (eliminated — no Rust in the request
-path). A Hono streaming proxy that serves the **32 gateway-owned operations** of
-`docs/openapi/runtime-api-contract.json`: 7 inference, 18 assets, and the
+path). A Hono streaming proxy that serves the **33 gateway-owned operations** of
+`docs/openapi/runtime-api-contract.json`: 8 inference, 18 assets, and the
 tools/skills/prompts/functions + `/.well-known/agent.json` surface.
 
-Routing and auth are contract-driven: `src/contract.ts` is the 252-operation
+Routing and auth are contract-driven: `src/contract.ts` is the 259-operation
 table, `src/middleware/auth.ts` is the single guard that enforces each
 operation's `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts`
 mounts what this Worker owns. The deployed module list is

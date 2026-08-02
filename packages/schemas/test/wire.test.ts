@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 252.
+ * ANTI-DRIFT GATE for the third copy of 259.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(252);
+    expect(OPENAPI_OPERATION_COUNT).toBe(259);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -185,7 +185,7 @@ describe("wireSchemas registry", () => {
 
 /**
  * The registration MECHANISM, which is this package's half of inventory
- * §1.3/§1.4. The 249 remaining per-operation bodies are owned by the surfaces
+ * §1.3/§1.4. The 244 remaining per-operation bodies are owned by the surfaces
  * that serve them (`apps/gateway`, `apps/control-plane`, `apps/mcp`) — defining
  * them here would invert the dependency and guarantee drift. What this package
  * owes is a registry that cannot silently swap a route's validator, and that is
@@ -274,6 +274,11 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
   test("the baseline is far short of the contract, and says so in numbers", () => {
     const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
     expect(seeded).toBe(10);
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(242);
+    // 241 -> 249: `countMessageTokens` (#671) added one contract operation, the
+    // prompt-deployment-label operations (#694) added three more, the
+    // BYOK-alias operations (#682) added three more again, and `getModel`
+    // (#670) one more — none of the eight with a wire schema, so the shortfall
+    // grew by exactly eight.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(249);
   });
 });

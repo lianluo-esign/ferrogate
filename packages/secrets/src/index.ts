@@ -20,8 +20,35 @@ export type {
   EnvRef,
   VaultRef,
   CfSecretRef,
+  ByokRef,
 } from "./secret-ref.js";
-export { parseSecretRef, isSecretRef, describeSecretRef } from "./secret-ref.js";
+export {
+  parseSecretRef,
+  isSecretRef,
+  describeSecretRef,
+  BYOK_ALIAS_PATTERN,
+} from "./secret-ref.js";
+
+// Per-tenant BYOK (issue #682) — `byok://<alias>`, resolved against the
+// AUTHENTICATED caller's tenant. Read `./byok.ts` before using any of it: the
+// tenant fence lives in the shape of these types, not in a call-site check.
+export type {
+  SealedTenantCredential,
+  TenantCredentialInput,
+  TenantCredentialStore,
+  TenantByokResolverOptions,
+} from "./byok.js";
+export {
+  ByokKeyring,
+  TenantByokResolver,
+  byokKeyringFromEnv,
+  byokKeyringFromEnvAsync,
+  generateByokMasterKey,
+  openTenantCredential,
+  sealTenantCredential,
+  BYOK_MASTER_KEY_ENV,
+  BYOK_KEY_VERSION_ENV_PREFIX,
+} from "./byok.js";
 
 // Resolver contract + env backend.
 export type { SecretResolver } from "./resolver.js";

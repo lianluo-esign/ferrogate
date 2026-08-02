@@ -32,11 +32,53 @@
 import { canonicalProviderKind } from "./adapters.js";
 import type { ProviderUsageWire } from "./schemas.js";
 
-/** `ferrogate_providers::ProviderUsage`. */
+/**
+ * `ferrogate_providers::ProviderUsage`, extended with the cached/reasoning
+ * counters (issue #667).
+ *
+ * ## The normalization, and why it lives HERE and not in the billing package
+ *
+ * The three new counters are SUBSETS of the two headline counts:
+ *
+ *     cachedInputTokens ⊆ promptTokens
+ *     cacheWriteTokens  ⊆ promptTokens   (disjoint from cachedInputTokens)
+ *     reasoningTokens   ⊆ completionTokens
+ *
+ * The vendors do NOT agree on that, which is the whole reason the conversion is
+ * a capture-time concern:
+ *
+ *  - OpenAI's `prompt_tokens` already INCLUDES `prompt_tokens_details.
+ *    cached_tokens`, and `completion_tokens` already INCLUDES
+ *    `completion_tokens_details.reasoning_tokens`. Nothing to adjust.
+ *  - Anthropic's `input_tokens` EXCLUDES both `cache_read_input_tokens` and
+ *    `cache_creation_input_tokens`, so {@link extractAnthropicUsage} ADDS them
+ *    in. Before #667 those tokens were invisible to metering entirely — the
+ *    under-bill the deferral comment in `../streaming/usage.ts` described.
+ *  - Gemini's `promptTokenCount` INCLUDES `cachedContentTokenCount` but its
+ *    `candidatesTokenCount` EXCLUDES `thoughtsTokenCount`, so
+ *    {@link extractGeminiUsage} adds thoughts into the completion count — which
+ *    is what `totalTokenCount` already assumed, so the identity
+ *    `prompt + completion == total` survives.
+ *
+ * Normalizing here means `@ferrogate/billing` holds ONE pricing rule
+ * (`estimateCost`) instead of one per family, and a new provider family is a
+ * change to one extractor rather than to the money path.
+ *
+ * A counter the provider did not report stays `undefined` — NOT `0`. "No cached
+ * tokens" and "this response predates the counter" price the same, but the
+ * distinction is what keeps {@link mergeUsage} from letting a later frame that
+ * omits the field erase an earlier frame that reported it.
+ */
 export interface ProviderUsage {
   readonly promptTokens?: number | undefined;
   readonly completionTokens?: number | undefined;
   readonly totalTokens?: number | undefined;
+  /** Prompt tokens served from a prompt cache — a SUBSET of `promptTokens`. */
+  readonly cachedInputTokens?: number | undefined;
+  /** Prompt tokens written INTO a prompt cache — a SUBSET of `promptTokens`. */
+  readonly cacheWriteTokens?: number | undefined;
+  /** Reasoning/thinking tokens — a SUBSET of `completionTokens`. */
+  readonly reasoningTokens?: number | undefined;
 }
 
 function asUint(value: unknown): number | undefined {
@@ -51,7 +93,14 @@ function member(value: unknown, key: string): unknown {
     : undefined;
 }
 
-/** True when at least one count was reported (`then_some` guard in Rust). */
+/**
+ * True when at least one count was reported (`then_some` guard in Rust).
+ *
+ * The cached/reasoning counters are deliberately NOT part of the guard: they
+ * are subsets, so a payload carrying `cached_tokens` and nothing else is a
+ * malformed usage object, not a usage report, and treating it as one would let
+ * it clobber a real earlier reading in {@link mergeUsage}.
+ */
 function nonEmpty(usage: ProviderUsage): ProviderUsage | undefined {
   return usage.promptTokens !== undefined ||
     usage.completionTokens !== undefined ||
@@ -60,39 +109,123 @@ function nonEmpty(usage: ProviderUsage): ProviderUsage | undefined {
     : undefined;
 }
 
-/** `OpenAiCompatibleAdapter::extract_usage` — top-level `usage.{prompt,completion,total}_tokens`. */
+/** Drop the `undefined`-valued keys so an absent counter stays ABSENT. */
+function withCounters(
+  base: ProviderUsage,
+  counters: {
+    cachedInputTokens?: number | undefined;
+    cacheWriteTokens?: number | undefined;
+    reasoningTokens?: number | undefined;
+  },
+): ProviderUsage {
+  return {
+    ...base,
+    ...(counters.cachedInputTokens !== undefined
+      ? { cachedInputTokens: counters.cachedInputTokens }
+      : {}),
+    ...(counters.cacheWriteTokens !== undefined
+      ? { cacheWriteTokens: counters.cacheWriteTokens }
+      : {}),
+    ...(counters.reasoningTokens !== undefined
+      ? { reasoningTokens: counters.reasoningTokens }
+      : {}),
+  };
+}
+
+/**
+ * `OpenAiCompatibleAdapter::extract_usage` — top-level
+ * `usage.{prompt,completion,total}_tokens`, plus the cached/reasoning details
+ * (issue #667).
+ *
+ * BOTH detail spellings are read. Chat Completions nests them under
+ * `prompt_tokens_details` / `completion_tokens_details`; the Responses API uses
+ * `input_tokens_details` / `output_tokens_details`, and `/v1/responses` streams
+ * are metered with THIS extractor by `usageProviderKindFor` (they are normalized
+ * to the OpenAI shape before metering sees them). Reading only one spelling
+ * would therefore silently drop the discount on exactly one of the two
+ * ingresses, which is the shape of bug this issue is about.
+ *
+ * Both counts are already SUBSETS of `prompt_tokens` / `completion_tokens` in
+ * OpenAI's own accounting, so nothing is added in. There is no cache-WRITE
+ * counter: OpenAI's automatic prompt caching charges nothing to populate the
+ * cache, so claiming one would be an invention.
+ */
 export function extractOpenAiUsage(payload: unknown): ProviderUsage | undefined {
   const usage = member(payload, "usage");
   if (usage === undefined) {
     return undefined;
   }
-  return nonEmpty({
-    promptTokens: asUint(member(usage, "prompt_tokens")),
-    completionTokens: asUint(member(usage, "completion_tokens")),
-    totalTokens: asUint(member(usage, "total_tokens")),
-  });
+  const promptDetails =
+    member(usage, "prompt_tokens_details") ?? member(usage, "input_tokens_details");
+  const completionDetails =
+    member(usage, "completion_tokens_details") ?? member(usage, "output_tokens_details");
+  return nonEmpty(
+    withCounters(
+      {
+        promptTokens: asUint(member(usage, "prompt_tokens")),
+        completionTokens: asUint(member(usage, "completion_tokens")),
+        totalTokens: asUint(member(usage, "total_tokens")),
+      },
+      {
+        cachedInputTokens: asUint(member(promptDetails, "cached_tokens")),
+        reasoningTokens: asUint(member(completionDetails, "reasoning_tokens")),
+      },
+    ),
+  );
 }
 
 /**
  * `AnthropicAdapter::extract_usage` — `usage.{input,output}_tokens`, falling
  * back to `message.usage` (the `message_start` SSE frame nests it there).
  * `total_tokens` is derived only when BOTH halves are present, as in Rust.
+ *
+ * ## The cache counters are ADDED to `input_tokens` (issue #667)
+ *
+ * This is the one family where the subset normalization costs an addition, and
+ * it is the defect this issue names. Anthropic reports `input_tokens` as the
+ * FRESH input only: a request that read 20 000 tokens out of the prompt cache
+ * and wrote 5 000 into it reports `input_tokens: 1000`, and every one of the
+ * other 25 000 tokens is billable. Summing them into `promptTokens` is what
+ * makes them visible at all; carrying them ALSO as their own counters is what
+ * lets `estimateCost` bill them at the cache rates instead of at the fresh rate
+ * (Anthropic prices a cache read at 0.1x and a 5-minute cache write at 1.25x,
+ * so folding them in without the split would be a different wrong answer — the
+ * exact objection the deferral comment in `../streaming/usage.ts` raised).
+ *
+ * `output_tokens` needs no such treatment: Anthropic counts extended-thinking
+ * tokens INSIDE `output_tokens` and publishes no separate counter, so
+ * `reasoningTokens` is left absent rather than invented. Thinking already bills
+ * at the output rate, which is what the absent counter produces.
  */
 export function extractAnthropicUsage(payload: unknown): ProviderUsage | undefined {
   const usage = member(payload, "usage") ?? member(member(payload, "message"), "usage");
   if (usage === undefined) {
     return undefined;
   }
-  const promptTokens = asUint(member(usage, "input_tokens"));
+  const freshInput = asUint(member(usage, "input_tokens"));
+  const cachedInputTokens = asUint(member(usage, "cache_read_input_tokens"));
+  const cacheWriteTokens = asUint(member(usage, "cache_creation_input_tokens"));
   const completionTokens = asUint(member(usage, "output_tokens"));
-  return nonEmpty({
-    promptTokens,
-    completionTokens,
-    totalTokens:
-      promptTokens !== undefined && completionTokens !== undefined
-        ? promptTokens + completionTokens
-        : undefined,
-  });
+  // Only widen a reported `input_tokens`; a frame that carries cache counters
+  // and no `input_tokens` at all must not manufacture a prompt count out of
+  // them, because `mergeUsage` would then let it overwrite the real one.
+  const promptTokens =
+    freshInput === undefined
+      ? undefined
+      : freshInput + (cachedInputTokens ?? 0) + (cacheWriteTokens ?? 0);
+  return nonEmpty(
+    withCounters(
+      {
+        promptTokens,
+        completionTokens,
+        totalTokens:
+          promptTokens !== undefined && completionTokens !== undefined
+            ? promptTokens + completionTokens
+            : undefined,
+      },
+      { cachedInputTokens, cacheWriteTokens },
+    ),
+  );
 }
 
 /**
@@ -100,18 +233,42 @@ export function extractAnthropicUsage(payload: unknown): ProviderUsage | undefin
  * candidatesTokenCount, totalTokenCount}`.
  *
  * Gemini reports a `totalTokenCount` of its own; unlike the Anthropic
- * extractor, nothing is derived here, because `gemini.rs` derives nothing.
+ * extractor, the TOTAL is not derived here, because `gemini.rs` derives none.
+ *
+ * ## Thoughts are ADDED to the visible completion count (issue #667)
+ *
+ * `candidatesTokenCount` EXCLUDES `thoughtsTokenCount`, while `totalTokenCount`
+ * INCLUDES it. So before #667 a thinking model's reasoning tokens were billed
+ * at nothing at all, and `prompt + completion` silently disagreed with the
+ * `total` the same object reported. Adding thoughts into `completionTokens`
+ * fixes both at once and restores `prompt + completion == total`.
+ *
+ * `cachedContentTokenCount` needs no addition — it is already inside
+ * `promptTokenCount` — and there is no token-denominated cache-WRITE counter:
+ * Gemini's explicit caching bills storage by the hour, which is a different
+ * meter and is deliberately not modelled as a token count.
  */
 export function extractGeminiUsage(payload: unknown): ProviderUsage | undefined {
   const usage = member(payload, "usageMetadata");
   if (usage === undefined) {
     return undefined;
   }
-  return nonEmpty({
-    promptTokens: asUint(member(usage, "promptTokenCount")),
-    completionTokens: asUint(member(usage, "candidatesTokenCount")),
-    totalTokens: asUint(member(usage, "totalTokenCount")),
-  });
+  const visible = asUint(member(usage, "candidatesTokenCount"));
+  const reasoningTokens = asUint(member(usage, "thoughtsTokenCount"));
+  return nonEmpty(
+    withCounters(
+      {
+        promptTokens: asUint(member(usage, "promptTokenCount")),
+        completionTokens:
+          visible === undefined ? undefined : visible + (reasoningTokens ?? 0),
+        totalTokens: asUint(member(usage, "totalTokenCount")),
+      },
+      {
+        cachedInputTokens: asUint(member(usage, "cachedContentTokenCount")),
+        reasoningTokens,
+      },
+    ),
+  );
 }
 
 /** Extractor selection by the dialect the payload is written in. */
@@ -186,11 +343,24 @@ export function mergeUsage(
     promptTokens !== undefined && completionTokens !== undefined
       ? promptTokens + completionTokens
       : undefined;
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: next.totalTokens ?? derivedTotal ?? prior.totalTokens,
-  };
+  // The cached/reasoning counters follow the SAME prefer-new-fall-back-to-old
+  // rule (#667), and that is load-bearing on the Anthropic stream: the cache
+  // counters arrive once, on `message_start`, and the terminal `message_delta`
+  // frame reports only `output_tokens`. A merge that let the newer frame's
+  // absence win would erase them at the last possible moment — the whole
+  // request's cache discount, lost on the final frame.
+  return withCounters(
+    {
+      promptTokens,
+      completionTokens,
+      totalTokens: next.totalTokens ?? derivedTotal ?? prior.totalTokens,
+    },
+    {
+      cachedInputTokens: next.cachedInputTokens ?? prior.cachedInputTokens,
+      cacheWriteTokens: next.cacheWriteTokens ?? prior.cacheWriteTokens,
+      reasoningTokens: next.reasoningTokens ?? prior.reasoningTokens,
+    },
+  );
 }
 
 /** The `[DONE]` sentinel, which carries no usage and must not be JSON-parsed. */

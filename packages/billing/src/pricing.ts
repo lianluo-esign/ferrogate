@@ -8,7 +8,12 @@
  * ($/GB) dimension (issue #262).
  */
 import { z } from "zod";
-import { modelPriceSchema, modelPriceUsd, type ModelPrice } from "./usage.js";
+import {
+  modelPriceSchema,
+  modelPriceUsd,
+  withCacheMultipliers,
+  type ModelPrice,
+} from "./usage.js";
 
 /** 1 USD == 1_000_000 credits (1 credit == 1 micro-USD). */
 export const DEFAULT_CREDITS_PER_USD = 1_000_000.0;
@@ -182,20 +187,58 @@ export class PriceBook {
    * proxies (per-1M-token USD), keyed on the wildcard provider `"*"` and the
    * concrete model id, plus a seeded egress rate (#262). Mirrors
    * `PriceBook::with_default_rate_card`.
+   *
+   * ## Cache rates as MULTIPLIERS (issue #667)
+   *
+   * Each family's cache rates are stated as a ratio of the base input rate the
+   * entry already carries, using each vendor's own published cache structure:
+   *
+   *  - **Anthropic** — cache read 0.1x input, 5-minute cache write 1.25x. The
+   *    ratio is model-independent, which is why it can be stated once here.
+   *  - **OpenAI** — automatic prompt caching discounts cached input and charges
+   *    nothing to write, so only a read multiplier is given (0.5x on the 4o
+   *    family, 0.1x on the 5 family).
+   *  - **Gemini** — context caching bills cached tokens at 0.25x input. The
+   *    storage-hour component of explicit caching is a different meter entirely
+   *    and is deliberately not modelled as a token rate.
+   *  - **DeepSeek** — publishes a cache-hit input price directly rather than a
+   *    ratio; the multiplier below reproduces it (0.07/0.27, 0.14/0.55).
+   *
+   * These are DEFAULTS for a card an operator is expected to replace, exactly
+   * like the base rates beside them. A model whose entry states no cache rate
+   * prices cached tokens at its ordinary input rate — never at zero — so the
+   * failure direction of a missing multiplier is a slightly high bill, not a
+   * free one.
    */
   static withDefaultRateCard(): PriceBook {
     const entries: PriceEntry[] = [
-      priceEntry("*", "gpt-5.5", modelPriceUsd(5.0, 15.0)),
-      priceEntry("*", "gpt-5", modelPriceUsd(5.0, 15.0)),
-      priceEntry("*", "gpt-4o", modelPriceUsd(2.5, 10.0)),
-      priceEntry("*", "gpt-4o-mini", modelPriceUsd(0.15, 0.6)),
-      priceEntry("*", "claude-sonnet-4", modelPriceUsd(3.0, 15.0)),
-      priceEntry("*", "claude-opus-4", modelPriceUsd(15.0, 75.0)),
-      priceEntry("*", "gemini-2.5-pro", modelPriceUsd(1.25, 10.0)),
-      priceEntry("*", "gemini-2.5-flash", modelPriceUsd(0.3, 2.5)),
-      priceEntry("*", "grok-4", modelPriceUsd(3.0, 15.0)),
-      priceEntry("*", "deepseek-chat", modelPriceUsd(0.27, 1.1)),
-      priceEntry("*", "deepseek-reasoner", modelPriceUsd(0.55, 2.19)),
+      priceEntry("*", "gpt-5.5", withCacheMultipliers(modelPriceUsd(5.0, 15.0), 0.1)),
+      priceEntry("*", "gpt-5", withCacheMultipliers(modelPriceUsd(5.0, 15.0), 0.1)),
+      priceEntry("*", "gpt-4o", withCacheMultipliers(modelPriceUsd(2.5, 10.0), 0.5)),
+      priceEntry("*", "gpt-4o-mini", withCacheMultipliers(modelPriceUsd(0.15, 0.6), 0.5)),
+      priceEntry(
+        "*",
+        "claude-sonnet-4",
+        withCacheMultipliers(modelPriceUsd(3.0, 15.0), 0.1, 1.25),
+      ),
+      priceEntry(
+        "*",
+        "claude-opus-4",
+        withCacheMultipliers(modelPriceUsd(15.0, 75.0), 0.1, 1.25),
+      ),
+      priceEntry("*", "gemini-2.5-pro", withCacheMultipliers(modelPriceUsd(1.25, 10.0), 0.25)),
+      priceEntry("*", "gemini-2.5-flash", withCacheMultipliers(modelPriceUsd(0.3, 2.5), 0.25)),
+      priceEntry("*", "grok-4", withCacheMultipliers(modelPriceUsd(3.0, 15.0), 0.25)),
+      priceEntry(
+        "*",
+        "deepseek-chat",
+        withCacheMultipliers(modelPriceUsd(0.27, 1.1), 0.07 / 0.27),
+      ),
+      priceEntry(
+        "*",
+        "deepseek-reasoner",
+        withCacheMultipliers(modelPriceUsd(0.55, 2.19), 0.14 / 0.55),
+      ),
     ];
     return PriceBook.new(entries).withEgressPricePerGb(DEFAULT_EGRESS_PRICE_PER_GB);
   }

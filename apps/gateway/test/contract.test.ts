@@ -45,18 +45,27 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 252 operations", () => {
+  it("carries exactly 259 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 252 unique operation ids", () => {
+  it("has 259 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
   it("reproduces the documented auth-kind census", () => {
-    // ROUTE-MAP.md: bearer 239 · internal 6 · anonymous 6 · method_dependent 1.
+    // ROUTE-MAP.md: bearer 246 · internal 6 · anonymous 6 · method_dependent 1.
+    // bearer went 238 -> 239 with `countMessageTokens` (issue #671), which is
+    // bearer-`messages.create` like the `createMessage` it pre-flights, then
+    // 239 -> 242 with the three prompt-deployment-label operations (issue
+    // #694), which are bearer-guarded like the rest of the prompt registry, and
+    // 242 -> 245 with the three `/admin/v1/provider-credentials*` operations
+    // issue #682 added (BYOK alias list/register-rotate/revoke), and finally
+    // 245 -> 246 with `getModel` (issue #670), bearer-`models.read` like the
+    // `listModels` it narrows. All eight additions are bearer; none is
+    // anonymous or internal.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 239,
+      bearer: 246,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -65,18 +74,35 @@ describe("contract table", () => {
 
   it("reproduces the documented visibility census", () => {
     expect(census(OPERATIONS.map<Visibility>((operation) => operation.visibility))).toEqual({
-      admin: 193,
-      public: 52,
+      // 193 -> 196 with the three prompt-deployment-label operations (issue
+      // #694): prompt-registry management is admin-visibility; then 196 -> 199
+      // with the three #682 BYOK-alias operations, which are admin for the same
+      // reason. BOTH sets landed, so this is 199 and not either side's 196.
+      admin: 199,
+      // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
+      // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
+      // `getModel` (issue #670), public for the same reason as `listModels`.
+      // Both parents independently wrote 52, so git merged that clean — 53 is
+      // the merged truth and neither side's number.
+      public: 53,
       internal: 7,
     });
   });
 
   it("reproduces the documented method census", () => {
     expect(census(OPERATIONS.map<HttpMethod>((operation) => operation.method))).toEqual({
-      GET: 117,
-      POST: 78,
-      DELETE: 24,
-      PUT: 17,
+      // GET/PUT/DELETE each +1 with the prompt-deployment-label operations
+      // (issue #694: list/read, upsert, delete of a label pointer) and +1 AGAIN
+      // with #682's GET /provider-credentials, PUT and DELETE
+      // /provider-credentials/{alias}. Both sides independently moved these
+      // three from 116/24/17 to 117/25/18; the COMBINED figures are 118/26/19,
+      // which is neither side's number. GET takes one more (119) from
+      // `GET /v1/models/{model}` (issue #670).
+      GET: 119,
+      // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671).
+      POST: 79,
+      DELETE: 26,
+      PUT: 19,
       PATCH: 16,
     });
   });
@@ -252,12 +278,15 @@ describe("route registration", () => {
   // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
   // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
   // here: a local module list is exactly how the deployed Worker came to mount
-  // 7 of its 32 operations while this suite stayed green.
+  // 7 of its 33 operations while this suite stayed green.
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 32 operations ROUTE-MAP assigns to apps/gateway", () => {
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(32);
+  it("owns exactly the 33 operations ROUTE-MAP assigns to apps/gateway", () => {
+    // 31 -> 32 with `countMessageTokens` (issue #671) and 32 -> 33 with
+    // `getModel` (issue #670). Both parents wrote 32 independently, so the
+    // merge kept 32 with no conflict — 33 is the re-derived truth.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(33);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -271,14 +300,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 32 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 33 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 32 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 33 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 32nd owned
@@ -375,7 +404,7 @@ async function envelope(response: Response): Promise<{ code: string; message: st
 }
 
 describe("the deployed Worker serves the mounted modules", () => {
-  it("mounts the 7 inference operations", async () => {
+  it("mounts the 8 inference operations", async () => {
     // GET /v1/models reaches the inference handler: an empty catalog, not a 404.
     const models = await SELF.fetch(`${BASE}/v1/models`, { headers: ROOT });
     expect(models.status).toBe(200);
@@ -395,6 +424,9 @@ describe("the deployed Worker serves the mounted modules", () => {
       "/v1/chat/completions",
       "/v1/responses",
       "/v1/messages",
+      // `count_tokens` shares the Messages schema, so `{}` is the same
+      // `invalid_request` (issue #671).
+      "/v1/messages/count_tokens",
       "/v1/embeddings",
       "/v1/images/generations",
     ];

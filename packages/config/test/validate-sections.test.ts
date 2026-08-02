@@ -1023,7 +1023,7 @@ describe("validate_cloudflare + validate_cloudflare_ai_gateway_providers (issues
       "an AI Gateway token reference that is not a secret ref",
       provider({ gateway_id: "gw", aig_token_secret_ref: "raw-token" }, { cloudflare }),
       "field providers[0].cloudflare_ai_gateway.aig_token_secret_ref: unsupported secret " +
-        "reference scheme (expected env://, vault://, or cf://): raw-token",
+        "reference scheme (expected env://, vault://, cf://, or byok://): raw-token",
     ],
   ];
   test.each(cases)("rejects %s", (_name, raw, expected) => {

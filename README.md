@@ -274,6 +274,13 @@ The current architecture is documented under `docs/rewrite/`:
 - Cross-Worker consistency invariants: [`FLEET-CONSISTENCY.md`](docs/rewrite/FLEET-CONSISTENCY.md)
 - Where each mounted surface is proven: [`MOUNT-SEAMS.md`](docs/rewrite/MOUNT-SEAMS.md)
 
+Compliance procedures a customer runs themselves:
+
+- Verifying the audit trail has not been altered:
+  [`audit-tamper-evidence.md`](docs/audit-tamper-evidence.md) — the hash chain,
+  the R2 anchor, the digest format, and `scripts/verify-audit-chain.mjs` with
+  the exit codes to wire into a job.
+
 The API contracts are in `docs/openapi/`. Other documents under `docs/` predate
 the TypeScript implementation and describe the earlier system; treat
 `docs/rewrite/` and the contracts as authoritative where they disagree.

@@ -93,6 +93,10 @@ import {
   UnboundLifecycleGate,
 } from "./lifecycle.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
+// `./rbac.js` imports the `AuthContext` TYPE back out of this module. The cycle
+// is safe for the same reason `./auth.js`'s is: the import is type-only, so
+// nothing is evaluated in either direction at module load.
+import { type RbacAuthorizerPort, UnboundRbacAuthorizer, rbacAuthorizerFromEnv } from "./rbac.js";
 // TYPE-ONLY. `./session.js` imports `McpTool` back out of this module, also
 // type-only, so nothing is evaluated in either direction at module load.
 import type { FerroGateMcpSession } from "./session.js";
@@ -923,6 +927,23 @@ export interface McpPorts {
    * suspended tenant must never reach the step that authorizes spend.
    */
   lifecycle: TenancyLifecycleGatePort;
+  /**
+   * THE RBAC GATE — an operation's `rbac_action` (`docs/rewrite/
+   * FLEET-CONSISTENCY.md` finding **FC-7**), see `src/rbac.ts`.
+   *
+   * Distinct from {@link entitlements}, which asks a different question and
+   * gets a different answer: that port is the PLAN-or-ROLE tool-execution
+   * ladder (`plans.mcp_enabled` OR the `mcp.execute` permission, either
+   * granting), while this one is the operation's own declared action, where the
+   * role graph is the only authority. Collapsing them would let a plan flag
+   * grant an action an operator's role explicitly withholds.
+   *
+   * It runs AFTER {@link lifecycle} and BEFORE {@link admission}, which is
+   * where `apps/gateway` and `apps/control-plane` run it: an authorization
+   * refusal must not first charge the caller's RPM window, or a client looping
+   * on a denied action would deny service to its own permitted ones.
+   */
+  rbac: RbacAuthorizerPort;
   entitlements: EntitlementPort;
   upstreams: McpUpstreamPort;
   guardrails: GuardrailsPort;
@@ -1487,6 +1508,12 @@ export function inMemoryPorts(): InMemoryMcpPorts {
     // exists so a unit test that builds the bundle by hand is not forced to
     // provide a control database.
     lifecycle: ALWAYS_ADMIT_LIFECYCLE,
+    // Same reasoning again, and the same guarantee: `resolvePorts` overrides
+    // `rbac` in every posture, so the deployed Worker's authorizer is never
+    // this one. The unbound default REFUSES (503) rather than admitting,
+    // because an operation that declares an `rbac_action` cannot be authorized
+    // with no grant graph to read — see `./rbac.ts`.
+    rbac: new UnboundRbacAuthorizer(),
     entitlements: new InMemoryEntitlements(),
     upstreams: new InMemoryUpstreams(),
     // The singleton default is an UNCONFIGURED detector — it matches nothing,
@@ -1830,6 +1857,11 @@ export function resolvePorts(env: McpEnv): McpPorts {
   const approvals = durableApprovals(env);
   const admission = durableAdmission(env);
   const lifecycle = durableLifecycle(env);
+  // FC-7. THE MOUNT of the RBAC gate. Deleting this line returns the Worker to
+  // the state FLEET-CONSISTENCY records: `rbac_action` parsed off the contract
+  // and never read, so a role an operator uses to withhold an action is
+  // enforced on `apps/gateway` and silently ignored here.
+  const rbac = rbacAuthorizerFromEnv(env);
   const entitlements = durableEntitlements(env);
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
     return {
@@ -1840,6 +1872,7 @@ export function resolvePorts(env: McpEnv): McpPorts {
       approvals,
       admission,
       lifecycle,
+      rbac,
       entitlements,
     };
   const ports = {
@@ -1850,6 +1883,7 @@ export function resolvePorts(env: McpEnv): McpPorts {
     approvals,
     admission,
     lifecycle,
+    rbac,
     entitlements,
   };
   if (durableIdentityBound(env)) {

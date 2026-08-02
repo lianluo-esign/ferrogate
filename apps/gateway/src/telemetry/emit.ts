@@ -63,11 +63,18 @@ import {
   CloudflareBackend,
   GATEWAY_REQUEST_SPAN,
   ObservabilitySignal,
+  TelemetryAttributeProfile,
   defaultGatewayMetricsSnapshot,
+  genAiSpanAttributes,
+  genAiSpanName,
   otlpAttribute,
+  profileEmitsFerrogate,
+  profileEmitsGenAi,
+  telemetryAttributeProfile,
 } from "@ferrogate/observability";
 import type {
   GatewayMetricsSnapshot,
+  OtlpAttribute,
   OtlpHttpRequest,
   OtlpSpanRecord,
 } from "@ferrogate/observability";
@@ -169,6 +176,10 @@ export function telemetryEmitterFor(env: GatewayTelemetryBindings): TelemetryEmi
     return NO_TELEMETRY;
   }
 
+  // #669. Resolved ONCE here rather than per emission, alongside the signal
+  // set, because it is deployment configuration and not per-request state.
+  const profile = telemetryAttributeProfile(env.TELEMETRY_ATTRIBUTE_PROFILE);
+
   return {
     enabled: true,
     transport: service !== undefined ? "service" : "https",
@@ -178,8 +189,8 @@ export function telemetryEmitterFor(env: GatewayTelemetryBindings): TelemetryEmi
       backend.withDefaultTenant(telemetry.tenantId);
       const ids = await telemetryIds(telemetry);
       const requests: (OtlpHttpRequest | null)[] = [
-        backend.tracesRequest(serviceName, [spanFor(telemetry, ids)]),
-        backend.metricsRequest(snapshotFor(telemetry, serviceName)),
+        backend.tracesRequest(serviceName, [spanFor(telemetry, ids, profile)]),
+        backend.metricsRequest(snapshotFor(telemetry, serviceName, profile)),
       ];
       for (const request of requests) {
         if (request !== null) {
@@ -229,13 +240,29 @@ async function hashHex(value: string, bytes: number): Promise<string> {
 }
 
 /**
- * `GATEWAY_REQUEST_SPAN` as an OTLP span record.
+ * `GATEWAY_REQUEST_SPAN` as an OTLP span record, in whichever attribute
+ * vocabulary the deployment publishes (#669).
  *
- * The attribute keys are read OFF the template rather than typed out, so a
- * field added to `@ferrogate/observability`'s canonical span is a compile-time
- * — and test-time — obligation here instead of silent drift.
+ * The `ferrogate.*` attribute keys are read OFF the template rather than typed
+ * out, so a field added to `@ferrogate/observability`'s canonical span is a
+ * compile-time — and test-time — obligation here instead of silent drift.
+ *
+ * ## The span NAME is not changed by the default profile, on purpose
+ *
+ * The convention asks for `{gen_ai.operation.name} {gen_ai.request.model}`, and
+ * a deployment gets exactly that under the `genai` profile. Under `dual` — the
+ * default — the name stays `ferrogate.gateway.request`, because a span name is
+ * what a saved Grafana/Datadog query filters on and renaming it on upgrade
+ * would break every existing dashboard, which is the one thing #669 says not to
+ * do. The `gen_ai.*` ATTRIBUTES are what Datadog, Langfuse and Arize key their
+ * LLM views off, and those arrive under `dual` too, so the recognition the
+ * issue asks for does not depend on the rename.
  */
-export function spanFor(telemetry: RequestTelemetry, ids: TelemetryIds): OtlpSpanRecord {
+export function spanFor(
+  telemetry: RequestTelemetry,
+  ids: TelemetryIds,
+  profile: TelemetryAttributeProfile = TelemetryAttributeProfile.Dual,
+): OtlpSpanRecord {
   const values: Record<string, string> = {
     request_id: telemetry.requestId,
     trace_id: ids.traceId,
@@ -244,16 +271,33 @@ export function spanFor(telemetry: RequestTelemetry, ids: TelemetryIds): OtlpSpa
     route: telemetry.route,
     status_code: String(telemetry.statusCode),
   };
+  const attributes: OtlpAttribute[] = [];
+  if (profileEmitsFerrogate(profile)) {
+    attributes.push(
+      ...GATEWAY_REQUEST_SPAN.fields.map((field) => otlpAttribute(field, values[field] ?? "")),
+    );
+  }
+  const genai = profileEmitsGenAi(profile) ? telemetry.genai : undefined;
+  if (genai !== undefined) {
+    attributes.push(...genAiSpanAttributes(genai));
+  }
+
+  // The semconv name is only taken when the legacy half is GONE. Under `dual`
+  // both vocabularies are present and the legacy name is the compatible one;
+  // under `ferrogate` there is no GenAI invocation to name it after anyway.
+  const name =
+    genai !== undefined && !profileEmitsFerrogate(profile)
+      ? genAiSpanName(genai)
+      : GATEWAY_REQUEST_SPAN.name;
+
   const MS_TO_NS = 1_000_000;
   return {
     traceId: ids.traceId,
     spanId: ids.spanId,
-    name: GATEWAY_REQUEST_SPAN.name,
+    name,
     startTimeUnixNano: telemetry.startedAtMs * MS_TO_NS,
     endTimeUnixNano: telemetry.endedAtMs * MS_TO_NS,
-    attributes: GATEWAY_REQUEST_SPAN.fields.map((field) =>
-      otlpAttribute(field, values[field] ?? ""),
-    ),
+    attributes,
   };
 }
 
@@ -265,17 +309,27 @@ export function spanFor(telemetry: RequestTelemetry, ids: TelemetryIds): OtlpSpa
  * request logs with errors or 4xx/5xx statuses" — so a 4xx the gateway itself
  * produced (a `model_not_found`, a `scope_denied`) counts as an error, which is
  * what makes the ratio actionable.
+ *
+ * `genAiInvocations` carries at most ONE entry — this is a per-request
+ * snapshot, not an accumulator — and is empty for every request that reached no
+ * model. The `ferrogate.*` counters are unaffected by the profile: they are the
+ * request/status series the gateway has always published for all 33 operations,
+ * not the AI-specific half #669 is about, and suppressing them for a deployment
+ * that opted into `genai` would take out its HTTP error-rate panel too.
  */
 export function snapshotFor(
   telemetry: RequestTelemetry,
   serviceName: string,
+  profile: TelemetryAttributeProfile = TelemetryAttributeProfile.Dual,
 ): GatewayMetricsSnapshot {
+  const genai = profileEmitsGenAi(profile) ? telemetry.genai : undefined;
   return {
     ...defaultGatewayMetricsSnapshot(),
     serviceName,
     requestLogTotal: 1,
     requestErrorTotal: telemetry.statusCode >= 400 ? 1 : 0,
     requestStatusTotals: [{ statusCode: telemetry.statusCode, count: 1 }],
+    genAiInvocations: genai === undefined ? [] : [genai],
   };
 }
 
@@ -303,7 +357,7 @@ async function send(service: TelemetryService | undefined, built: OtlpHttpReques
  *
  * The `WeakSet` keyed on the inbound `Request` makes a second call for the same
  * request a no-op. That is not defensive coding: this is mounted today inside
- * `inference/route-module.ts` (the six inference operations), and the
+ * `inference/route-module.ts` (the eight inference operations), and the
  * integrate step is expected to ALSO mount it app-wide in `GATEWAY_MIDDLEWARE`
  * so the other 25 operations are covered — see the WIRING block in
  * `./index.ts`. Without the guard that second mount would double every

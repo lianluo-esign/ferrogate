@@ -2,7 +2,7 @@
  * Shared external-wire-boundary schemas and the OpenAPI contract surface.
  *
  * These are the cross-cutting envelopes every FerroGate surface agrees on. The
- * per-operation request/response shapes of the committed 252-operation contract
+ * per-operation request/response shapes of the committed 259-operation contract
  * (`docs/openapi/runtime-api-contract.json`) are ported incrementally by the
  * request-path cluster ports and registered in {@link wireSchemas}.
  */
@@ -36,7 +36,7 @@ import type { Scope } from "@ferrogate/core";
  * unfailable — it would agree with the contract by construction, which is the
  * vacuous-assertion shape this repo keeps getting bitten by.
  */
-export const OPENAPI_OPERATION_COUNT = 252 as const;
+export const OPENAPI_OPERATION_COUNT = 259 as const;
 
 /** Tenancy scope, the wire twin of `@ferrogate/core`'s `Scope`. */
 export const scopeSchema = z.object({

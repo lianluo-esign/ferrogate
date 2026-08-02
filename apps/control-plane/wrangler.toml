@@ -40,6 +40,28 @@ compatibility_flags = ["nodejs_compat"]
 # configured the `OPTIONS /admin/{*rest}` preflight surface does not exist at
 # all, which is the contract's `dynamic_surfaces` semantics. Set it only for a
 # deployment that actually fronts an admin console.
+# ---------------------------------------------------------------------------
+# PER-TENANT BYOK (issue #682) — FERROGATE_BYOK_MASTER_KEY
+# ---------------------------------------------------------------------------
+# The FLEET-WIDE AES-256 key `PUT /admin/v1/provider-credentials/{alias}` seals
+# a tenant's own provider credential with, and the SAME key `apps/gateway`
+# opens it with — the two Workers must be given the identical secret or the
+# gateway cannot use what this Worker registers.
+#
+# It is a SECRET and is deliberately NOT declared in [vars]:
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put FERROGATE_BYOK_MASTER_KEY
+#
+# ONE binding for the whole fleet, NOT one per tenant: Cloudflare Secrets Store
+# bindings resolve at DEPLOY time, so a per-tenant binding would mean a deploy
+# per tenant. The tenant-visible `alias -> credential` mapping is row data in
+# `tenant_provider_credentials` (sql/d1-ts/control/0003_*) instead, so
+# onboarding and rotation are an INSERT and an UPDATE.
+#
+# Absent ⇒ the three `/admin/v1/provider-credentials*` operations answer
+# 503 `byok_not_configured`; nothing else on this Worker is affected.
+# ---------------------------------------------------------------------------
+
 [vars]
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"
@@ -84,6 +106,67 @@ binding = "DB"
 database_name = "ferrogate-control"
 database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 migrations_dir = "../../sql/d1-ts/control"
+
+# ---------------------------------------------------------------------------
+# PROMPT DEPLOYMENT LABELS — the `label -> revision` pointer (#694)
+# ---------------------------------------------------------------------------
+#
+# KV rather than D1, and the asymmetry is deliberate. The label RECORD is a D1
+# document like every other admin resource (`prompt-template-labels`), because
+# it is operator state that must survive, be listed, and be tenant-fenced by the
+# store. The POINTER is read by `apps/gateway` on the inference hot path, once
+# per request that references a prompt by label — a D1 query per request would
+# put a database round trip in front of every inference call, which is exactly
+# what an edge cache is for.
+#
+# Writes go D1-first, then KV (`src/routes/prompt.ts`): a crash between the two
+# leaves a label the operator can see that the edge has not adopted yet, which
+# is the safe direction. Deletes go KV-first for the mirror-image reason.
+#
+# `apps/gateway/wrangler.toml` declares the SAME namespace under the same
+# binding name. They must point at one namespace id at deploy time or the
+# gateway reads an empty key space and every labelled request fails closed —
+# loudly, but universally. See `docs/rewrite/CLOUD-VERIFICATION.md`.
+[[kv_namespaces]]
+binding = "PROMPT_LABELS"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
+# R2: the tamper-evidence ANCHOR bucket (#684)
+# ---------------------------------------------------------------------------
+#
+# `src/audit/anchor.ts` publishes each audit chain's head — `(chain_key,
+# head_seq, head_hash, row_count)`, a few hundred bytes — to this bucket on
+# every cron tick. `audit_events` rows are hash-chained in `DB`, which makes an
+# edit or a mid-trail deletion detectable from an export alone; it does NOT
+# catch a TAIL deletion or a wholesale re-forge, because both leave a perfect
+# chain. Comparing the trail against a head published OUTSIDE the database is
+# what catches those, so this binding is the half of the feature that a
+# database operator cannot quietly undo.
+#
+# ABSENT IS A SUPPORTED, DEGRADED POSTURE, not a crash: with no bucket bound the
+# tick reports `audit_anchor: "unconfigured"` and the deployment keeps the chain
+# but loses truncation detection. It is a WARN rather than a boot failure
+# because refusing to serve the control plane over a missing evidence bucket
+# would take the whole admin surface down for a compliance feature.
+#
+# TWO DEPLOYMENT NOTES THIS CODE CANNOT ENFORCE, both in
+# `docs/audit-tamper-evidence.md`:
+#
+#   1. Turn on R2 OBJECT LOCK / a retention policy for this bucket. The job
+#      never overwrites an anchor it has already written, so anchors are
+#      append-only from this Worker — but a principal holding R2 credentials can
+#      still delete one. Only a bucket-level retention rule closes that, and
+#      only the account owner can set it.
+#   2. Prefer an account (or at least credentials) SEPARATE from the one that
+#      owns the D1 database. An anchor is worth exactly as much as the
+#      difficulty of forging it and the database in the same breath.
+#
+# `bucket_name` is a documented PLACEHOLDER — the deploy step substitutes the
+# account's real bucket. R2 names are lowercase alphanumerics and hyphens.
+[[r2_buckets]]
+binding = "AUDIT_ANCHORS"
+bucket_name = "replace-at-deploy-ferrogate-audit-anchors"
 
 # ---------------------------------------------------------------------------
 # ENTERPRISE IDENTITY (wave 18) — the deploy-time secrets, as PLACEHOLDERS

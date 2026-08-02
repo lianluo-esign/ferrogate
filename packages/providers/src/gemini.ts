@@ -19,6 +19,7 @@ import type {
   ResponsesPlan,
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
+import { applyStructuredOutputToGemini, structuredOutputFromChatBody } from "./structured.js";
 import { asI64, asStr, asU64, getField, isObject, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
@@ -38,7 +39,7 @@ export class GeminiAdapter extends BaseProviderAdapter {
     const geminiBody: JsonObject = { contents: openaiMessagesToGeminiContents(body) };
     const instruction = systemInstruction(body);
     if (instruction !== undefined) geminiBody["systemInstruction"] = instruction;
-    const config = generationConfig(body);
+    const config = structuredGenerationConfig(body, provider.kind);
     if (config !== undefined) geminiBody["generationConfig"] = config;
 
     return {
@@ -242,6 +243,26 @@ export function generationConfig(body: Json): Json | undefined {
   if (typeof stop === "string") config["stopSequences"] = [stop];
   else if (Array.isArray(stop)) config["stopSequences"] = [...stop];
   return Object.keys(config).length > 0 ? config : undefined;
+}
+
+/**
+ * `generationConfig` including the caller's structured-output requirement.
+ *
+ * Gemini expresses `response_format` as `responseMimeType` + `responseSchema`
+ * INSIDE the generation config, so the sampling params and the output contract
+ * share one object: building them separately is how the requirement got dropped
+ * (issue #674). Shared with Vertex, which speaks the same body.
+ */
+export function structuredGenerationConfig(
+  body: Json,
+  providerKind: string,
+): Json | undefined {
+  const config = generationConfig(body);
+  const structured = structuredOutputFromChatBody(body);
+  if (structured === undefined) return config;
+  const merged: JsonObject = isObject(config) ? { ...config } : {};
+  applyStructuredOutputToGemini(merged, structured, providerKind);
+  return merged;
 }
 
 function copyConfig(body: Json, config: JsonObject, source: string, target: string): void {
