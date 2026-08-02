@@ -3125,6 +3125,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/rerank": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rerank documents against a query, served by Workers AI reranker models. */
+        post: operations["createRerank"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/messages": {
         parameters: {
             query?: never;
@@ -5249,6 +5277,68 @@ export interface paths {
          * @description Surfaces the durable, accumulating per-agent runtime cost-burn (#428) in the observability/billing admin surface. One row per (tenant_id, agent_key, period): accumulated_usd folds every run of the stable agent key inside the YYYY-MM billing window, so CF-hosted-agent runtime cost is visible per tenant/agent. Optional period=YYYY-MM query selects the billing window (default: the current UTC month). Tenant-isolated: a tenant-scoped admin sees only its own tenant's burn; the platform operator sees all. Read-only surfacing -- enforcement of the per-agent ceiling is a separate concern -- so a durable-store failure is reported as service_unavailable, never a fabricated empty (zero-burn) list.
          */
         get: operations["listAdminAgentCostBurn"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/cost-records": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List per-request cost attribution records, newest first.
+         * @description One row per REQUEST, joining the decision (request_logs, #664) to the priced provider attempts (billing_events, #663/#667) so a chargeback question can be answered down to the customer, project, key, model, tag and agent run that produced a charge (#677). It is a JOIN, not a third durable figure: there is no cost_records table, so this surface can never disagree with the billing ledger. Tenant-fenced -- a tenant-scoped admin sees only its own traffic, and the total is computed after the fence, so it cannot leak the existence of another tenant's requests. metered/priced/cost_usd are three separate answers on purpose: cost_usd null with metered false means nothing metered the request (refused, rate-limited), metered true with priced false means some or all attempts could not be priced, and unpriced_attempts names exactly how many -- collapsing any of those into $0 would make a finance total quietly low. The paginated envelope is answered unconditionally, so an un-queried call cannot be mistaken for the whole month.
+         */
+        get: operations["listAdminCostRecords"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/cost-record-exports": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the per-request cost records as CSV, JSONL or Parquet.
+         * @description The same fenced, filtered, ordered records as listAdminCostRecords -- both operations run one query, so an export can never see a row the list cannot -- projected onto a downloadable file (#677). `?format=` selects the body: csv (the default, RFC 4180 with a header row), jsonl (one cost record document per line) or parquet (the tabular projection as a Parquet file). The CSV and Parquet column ORDER is part of the contract because chargeback pipelines index it positionally; new columns are appended rather than inserted, and `tags` is one JSON-encoded column rather than a column per key so two months of the same query concatenate. Every response carries content-disposition with a filename. The page is bounded (default 1000 rows, maximum 10000) because a Worker materializes the whole file in memory: pull further pages with `?offset=`.
+         */
+        get: operations["exportAdminCostRecords"];
         put?: never;
         post?: never;
         delete?: never;
@@ -8062,6 +8152,18 @@ export interface components {
                 [key: string]: string;
             };
         };
+        RerankRequest: {
+            model: string;
+            query: string;
+            documents: (string | {
+                text: string;
+            })[];
+            top_n?: number;
+            return_documents?: boolean;
+            metadata?: {
+                [key: string]: string;
+            };
+        };
         MachineTransportRequest: {
             [key: string]: unknown;
         };
@@ -8992,6 +9094,69 @@ export interface components {
         DeleteWorkspaceResponse: components["schemas"]["DeleteResponse"] & {
             /** @constant */
             object?: "workspace";
+        };
+        /** @description The paginated envelope listAdminCostRecords answers UNCONDITIONALLY. The three paging fields are always present, unlike the collection reads that omit them for an un-queried call: on a spend report, a first page that looks like the whole set is a wrong number rather than a missing one. */
+        PaginatedList_CostRecord: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["CostRecord"][];
+            /** @description Records matching the fence and the filters, computed in the same statement as the page so the two cannot disagree under a concurrent write. */
+            total: number;
+            offset: number;
+            limit: number;
+        };
+        /** @description The cost of ONE request: the authenticated attribution and resolved model from the request log, joined to the priced provider attempts from the metering events (#677). The chargeback unit is the request, so `id` is the request id and every other evidence surface (request-logs, investigations, audit-events) is addressable by the same key. */
+        CostRecord: {
+            /** @constant */
+            object: "cost_record";
+            /** @description The request id -- the same value as request_id, repeated because every admin document carries an id. */
+            id: string;
+            request_id: string;
+            trace_id: string | null;
+            /** @description The agent run this request belongs to, when one declared itself. */
+            agent_run_id: string | null;
+            tenant_id: string | null;
+            project_id: string | null;
+            workspace_id: string | null;
+            /** @description The key that authenticated the request -- the identifier, never the key material. */
+            api_key_id: string | null;
+            provider: string | null;
+            /** @description The model name the caller asked for. */
+            logical_model: string | null;
+            /** @description The model the provider was actually asked for, which for a dated snapshot differs from logical_model. */
+            provider_model: string | null;
+            route: string | null;
+            status_code: number | null;
+            error_code: string | null;
+            cache_status: string | null;
+            streamed: boolean;
+            latency_ms: number | null;
+            /** @description Whole seconds. The list is ordered by this descending, with request_id ascending as the tiebreaker, so a page boundary inside a busy second cannot re-serve one row and skip another. */
+            started_at_unix: number;
+            completed_at_unix: number | null;
+            prompt_tokens: number | null;
+            completion_tokens: number | null;
+            total_tokens: number | null;
+            /** @description Null rather than 0 when nothing metered the request: 0 would assert the provider reported no cached tokens, which nobody ever asked it. */
+            cached_input_tokens: number | null;
+            /** @description Null when the request was never metered; see cached_input_tokens. */
+            cache_write_tokens: number | null;
+            /** @description Null when the request was never metered; see cached_input_tokens. */
+            reasoning_tokens: number | null;
+            /** @description Summed cost of the priced attempts, or null when nothing could be priced. Read it together with metered and priced: null with metered false means nothing metered the request at all (refused, rate-limited), and a number with priced false means SOME attempts were priced and others could not be. */
+            cost_usd: number | null;
+            /** @description True when at least one provider attempt was metered (billed_attempts > 0). */
+            metered: boolean;
+            /** @description True only when the request was metered AND every metered attempt carried a price. False with a non-null cost_usd means the figure is incomplete. */
+            priced: boolean;
+            /** @description Provider attempts that produced a metering event. */
+            billed_attempts: number;
+            /** @description Metered attempts with no price-book entry. Non-zero means a re-price would change this row, which is how an operator finds the rows a low total came from. */
+            unpriced_attempts: number;
+            /** @description The request's attribution metadata, bounded to string values at ingress. `{}` when there is none. */
+            tags: {
+                [key: string]: string;
+            };
         };
         AdminAgentCostBurnList: {
             /** @constant */
@@ -15539,6 +15704,47 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    createRerank: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RerankRequest"];
+            };
+        };
+        responses: {
+            /** @description Ranked results, in the order the provider ranked them. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     createMessage: {
         parameters: {
             query?: never;
@@ -20103,6 +20309,127 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listAdminCostRecords: {
+        parameters: {
+            query?: {
+                /** @description Narrow to one tenant id. AND-ed with the caller's tenant fence rather than replacing it, so a tenant-scoped caller asking for another tenant gets the empty set. */
+                tenant?: string;
+                /** @description Narrow to one project id. */
+                project?: string;
+                /** @description Narrow to one workspace id. */
+                workspace?: string;
+                /** @description Narrow to the API key that authenticated the request. */
+                api_key_id?: string;
+                /** @description Narrow to one agent run, so an agent's spend can be totalled across its requests. */
+                agent_run_id?: string;
+                /** @description Narrow to one upstream provider id. */
+                provider?: string;
+                /** @description Matches EITHER spelling of the model -- the logical name the caller asked for or the provider model actually invoked -- because matching only one would silently drop half of that model's spend. */
+                model?: string;
+                /** @description Unix seconds, INCLUSIVE lower bound on the request start. */
+                since?: number;
+                /** @description Unix seconds, EXCLUSIVE upper bound on the request start, so two adjacent billing periods partition the traffic instead of both claiming the boundary second. */
+                until?: number;
+                /** @description Attribution metadata filter. `key` matches the presence of the key; `key:value` matches the pair, and only the FIRST colon splits, so a value may itself contain colons (owner:svc:checkout is owner -> svc:checkout). */
+                tag?: string;
+                offset?: components["parameters"]["Offset"];
+                /** @description Clamped by storage.admin_list_max_limit. */
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of per-request cost records, ordered by start time descending with the request id as a stable tiebreaker. `total` counts the records the caller may see after the tenant fence and the filters. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedList_CostRecord"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    exportAdminCostRecords: {
+        parameters: {
+            query?: {
+                /** @description Export encoding. An unrecognised value is refused with 400 rather than silently falling back to CSV, so a pipeline that asked for Parquet never parses bytes as something they are not. */
+                format?: "csv" | "jsonl" | "parquet";
+                /** @description Narrow to one tenant id. AND-ed with the caller's tenant fence rather than replacing it. */
+                tenant?: string;
+                /** @description Narrow to one project id. */
+                project?: string;
+                /** @description Narrow to one workspace id. */
+                workspace?: string;
+                /** @description Narrow to the API key that authenticated the request. */
+                api_key_id?: string;
+                /** @description Narrow to one agent run. */
+                agent_run_id?: string;
+                /** @description Narrow to one upstream provider id. */
+                provider?: string;
+                /** @description Matches either the logical model or the provider model actually invoked. */
+                model?: string;
+                /** @description Unix seconds, INCLUSIVE lower bound on the request start. */
+                since?: number;
+                /** @description Unix seconds, EXCLUSIVE upper bound on the request start. */
+                until?: number;
+                /** @description Attribution metadata filter: `key` or `key:value`, split on the first colon. */
+                tag?: string;
+                offset?: components["parameters"]["Offset"];
+                /** @description Rows in this export. Larger default than the list because a finance pull wants a month, and bounded because the whole file is built in memory before it is written. */
+                limit?: number;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The export file. Exactly ONE of the three media types below is returned, selected by `?format=`; the body is a download rather than an inline document, so content-disposition names the file. */
+            200: {
+                headers: {
+                    /** @description Always `attachment` with a filename -- ferrogate-cost-records.csv, .jsonl or .parquet, matching `?format=`. */
+                    "content-disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                    "application/x-ndjson": string;
+                    "application/vnd.apache.parquet": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     listX402SpendPolicies: {
