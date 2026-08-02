@@ -118,6 +118,22 @@ export const REQUEST_LOG_TABLE = "request_logs";
 export const GUARDRAIL_EVALUATION_TABLE = "guardrail_evaluations";
 export const GUARDRAIL_CHECK_TABLE = "guardrail_check_evaluations";
 
+/**
+ * The settled metering events (`sql/d1-ts/control/0001_init_control.sql`).
+ *
+ * READ-ONLY from this Worker for the same reason the two above are: the writer
+ * is `apps/gateway`'s `src/metering/d1.ts` on the same CONTROL database. Named
+ * here because #677's chargeback reader JOINS it onto {@link
+ * REQUEST_LOG_TABLE}, and a per-request cost surface that spelled the table
+ * itself could drift from the investigation view that already reads it.
+ *
+ * The table has NO `tenant` column — its rows are keyed by `request_id` — so it
+ * is never the fenced side of a join. See
+ * `routes/admin_cost_record.ts::costRecordPage` for the ordering rule that
+ * makes reading it safe.
+ */
+export const BILLING_EVENT_TABLE = "billing_events";
+
 /** `audit_json.object` — names the document shape for a later reader. */
 export const AUDIT_OBJECT = "control_plane_mutation";
 

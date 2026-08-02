@@ -2,7 +2,7 @@
  * Representative CRUD round-trips through `SELF` against the in-memory store.
  *
  * These cover the shapes the generic machinery in `routes/resource.ts` derives
- * for ~170 of the 209 operations, plus the bespoke ones most likely to be got
+ * for ~170 of the 211 operations, plus the bespoke ones most likely to be got
  * wrong: the composite-key resource (quota policies), the natural-key resource
  * (MCP servers), the revision lifecycle (guardrail policies), the ledger-backed
  * mutation (wallets), and — the one that actually keeps tenants apart — the
