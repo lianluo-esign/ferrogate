@@ -88,3 +88,9 @@ export * from "./x402-scope.js";
 
 // Signed cluster config snapshots (Ed25519).
 export * from "./signed-snapshot.js";
+
+// Prompt deployment labels: the `label -> revision` pointer and its KV key.
+// Exported from the CONFIG package rather than either Worker because
+// `apps/control-plane` writes the pointer and `apps/gateway` reads it, and a
+// key derivation that exists twice is a key derivation that drifts silently.
+export * from "./prompt-label.js";

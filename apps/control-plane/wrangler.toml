@@ -86,6 +86,30 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 migrations_dir = "../../sql/d1-ts/control"
 
 # ---------------------------------------------------------------------------
+# PROMPT DEPLOYMENT LABELS — the `label -> revision` pointer (#694)
+# ---------------------------------------------------------------------------
+#
+# KV rather than D1, and the asymmetry is deliberate. The label RECORD is a D1
+# document like every other admin resource (`prompt-template-labels`), because
+# it is operator state that must survive, be listed, and be tenant-fenced by the
+# store. The POINTER is read by `apps/gateway` on the inference hot path, once
+# per request that references a prompt by label — a D1 query per request would
+# put a database round trip in front of every inference call, which is exactly
+# what an edge cache is for.
+#
+# Writes go D1-first, then KV (`src/routes/prompt.ts`): a crash between the two
+# leaves a label the operator can see that the edge has not adopted yet, which
+# is the safe direction. Deletes go KV-first for the mirror-image reason.
+#
+# `apps/gateway/wrangler.toml` declares the SAME namespace under the same
+# binding name. They must point at one namespace id at deploy time or the
+# gateway reads an empty key space and every labelled request fails closed —
+# loudly, but universally. See `docs/rewrite/CLOUD-VERIFICATION.md`.
+[[kv_namespaces]]
+binding = "PROMPT_LABELS"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
 # R2: the tamper-evidence ANCHOR bucket (#684)
 # ---------------------------------------------------------------------------
 #

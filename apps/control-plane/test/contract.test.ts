@@ -7,7 +7,7 @@
  * parser it is supposed to police. If `src/contract.ts` silently dropped an
  * operation, the derived table would agree with itself and disagree with this.
  *
- * It fails LISTING the offending operation ids, because "197 !== 196" tells you
+ * It fails LISTING the offending operation ids, because "200 !== 199" tells you
  * nothing at 3am.
  *
  * SCOPE, precisely: this file proves every contract operation has a HANDLER,
@@ -66,12 +66,12 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 252 operations", () => {
+  it("is version 1 and carries all 255 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 197 operations to apps/control-plane", () => {
+  it("assigns exactly 200 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });
