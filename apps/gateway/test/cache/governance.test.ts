@@ -95,7 +95,7 @@ function completion(marker: string) {
 }
 
 interface Gateway {
-  post(key: string, prompt: string): Promise<Response>;
+  post(key: string, prompt: string): Response | Promise<Response>;
 }
 
 /**

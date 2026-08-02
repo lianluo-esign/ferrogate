@@ -39,6 +39,25 @@
  * every key, so a body screened under the old rules can never be served under
  * the new ones.
  *
+ * ## Per-tenant governance (#695)
+ *
+ * The `[cache]` vars are the DEPLOYMENT's answer. `cache/governance.ts` reads
+ * the tenant's own `semantic_cache_policies` row off `CONTROL_DB` and overlays
+ * it, so mode, similarity threshold, TTL, model scope and an invalidation epoch
+ * are all admin-API state rather than deploy state. Three rules govern the
+ * overlay and each is enforced here rather than left implicit:
+ *
+ *  - `GATEWAY_CACHE_ENABLED=false` is the operator MASTER SWITCH and a tenant
+ *    row cannot override it upward — the var gate above runs first and returns.
+ *  - an UNREADABLE governance row is `bypass`, never a silent fall-back to the
+ *    vars, because every fall-back is in the widening direction (re-enabling a
+ *    cache the tenant disabled, ignoring a purge they just performed).
+ *  - the effective governed values go into the KEY
+ *    (`CacheKeyInput.governanceFingerprint`), so a governance change makes the
+ *    entries admitted under the old rules unreachable instead of re-matching
+ *    them. That is the same guarantee the guardrail fingerprint gives, extended
+ *    to the cache's own rules now that they can change without a deploy.
+ *
  * ## What is cacheable
  *
  * Rust: `if request.stream { None } else { ai_cache_enabled(...).then(...) }`,
@@ -81,6 +100,13 @@ import {
   responseCachePolicyFromEnv,
 } from "../cache/config.js";
 import { guardrailPolicyFingerprint, modelRegistryFingerprint } from "../cache/fingerprint.js";
+import {
+  type CacheGovernance,
+  type CacheGovernanceSource,
+  cacheGovernanceFingerprint,
+  cacheGovernanceSourceFromEnv,
+  mergeCacheGovernance,
+} from "../cache/governance.js";
 import {
   type CacheKeyInput,
   aiResponseCacheKey,
@@ -144,6 +170,12 @@ export interface ResponseCacheOptions {
    * `cache/semantic.ts` for the platform limit that makes it per-isolate.
    */
   readonly semanticStore?: SemanticResponseCache;
+  /**
+   * Override the DURABLE per-tenant governance source (#695). Production
+   * derives it from the `CONTROL_DB` binding; `null` means "this deployment is
+   * var-only", which is what an unbound gateway gets.
+   */
+  readonly governance?: CacheGovernanceSource | null;
   /** Unix seconds, for the semantic layer's TTL. Overridden by tests. */
   readonly now?: () => number;
 }
@@ -274,6 +306,44 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
       return;
     }
 
+    // ---- DURABLE per-tenant governance (#695) -----------------------------
+    //
+    // Read BEFORE the guardrail fingerprint, for two reasons. It can turn the
+    // cache off outright (a tenant opt-out, a model outside the tenant's cache
+    // scope), and doing that first saves the guardrail round trip on exactly
+    // the requests that were never going to be cached. And its failure mode is
+    // reported — `bypass` — where the guardrail one is silent, so evaluating it
+    // second would hide a governance outage behind a guardrail one.
+    //
+    // Only reached for a request that is ALREADY cacheable: enabled, non-
+    // streaming, JSON, bounded, a cacheable operation, past every var-level
+    // opt-out. So this is not a new amplification surface.
+    const tenantId = auth.tenancy.tenantId ?? null;
+    const governanceSource =
+      options.governance === undefined ? cacheGovernanceSourceFromEnv(env) : options.governance;
+    let governance: CacheGovernance | null = null;
+    if (governanceSource !== null && tenantId !== null) {
+      const lookup = await governanceSource.governanceFor(tenantId);
+      if (lookup.kind === "unavailable") {
+        // Fail CLOSED, and SAY SO. Falling back to the deployment vars here
+        // would re-enable caching for a tenant that had turned it off and would
+        // ignore an invalidation that had just been performed — see
+        // `cache/governance.ts` §2.
+        await next();
+        markCacheStatus(c, "bypass");
+        return;
+      }
+      if (lookup.kind === "found") governance = lookup.governance;
+    }
+
+    const effective = mergeCacheGovernance(policy, governance, facts.logicalModel);
+    if (!effective.enabled) {
+      // The tenant's own opt-out (or a model outside its cache scope). Silent,
+      // exactly like the var-level opt-outs above: nothing is misconfigured.
+      await next();
+      return;
+    }
+
     // Fail CLOSED on an unreadable guardrail policy set: neither serve nor
     // store. See `cache/fingerprint.ts`.
     const guardrailFingerprint = await guardrailPolicyFingerprint(env);
@@ -298,6 +368,11 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
       requestBody: facts.body,
       guardrailPolicyFingerprint: guardrailFingerprint,
       registryFingerprint: await modelRegistryFingerprint(env),
+      // The EFFECTIVE governed rules, not the row: a threshold inherited from
+      // the deployment var and one written into the row must produce the same
+      // key when they are the same number, or a tenant that pins the value it
+      // was already getting would needlessly cold-start its own cache.
+      governanceFingerprint: cacheGovernanceFingerprint(effective, governance),
     };
     const key = await aiResponseCacheKey(identity);
 
@@ -307,7 +382,7 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
     // guardrail policy) instead of re-deriving any of it, and is `None` in
     // `exact_match` mode so the layer is a strict no-op there.
     const semantic: SemanticCacheContext | null =
-      policy.mode === "semantic"
+      effective.mode === "semantic"
         ? {
             scope: await semanticScopeHash(identity),
             embedding: embedText(promptTextForEmbedding(facts.body, canonicalJson)),
@@ -316,7 +391,7 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
 
     const hit = await store.get(key);
     if (hit !== undefined) {
-      recordCacheHit();
+      recordCacheHit(tenantId);
       // Returning the Response short-circuits the chain WITHOUT calling
       // `next()`, so the route never runs and no upstream call is made — which
       // is the whole point, and is what `test/cache/middleware.test.ts` asserts
@@ -331,24 +406,24 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
       const similar = semanticStore.lookup(
         semantic.scope,
         semantic.embedding,
-        policy.semanticSimilarityThreshold,
+        effective.semanticSimilarityThreshold,
         now(),
       );
       if (similar !== undefined) {
         // Rust records BOTH: `record_semantic_cache_hit` inside the lookup, and
         // `record_ai_cache_hit` at the shared hit site (`chat.rs:485`).
-        recordSemanticCacheHit();
-        recordCacheHit();
+        recordSemanticCacheHit(tenantId);
+        recordCacheHit(tenantId);
         return respondFromCache(similar.response);
       }
     }
-    recordCacheMiss();
+    recordCacheMiss(tenantId);
 
     await next();
 
     const stored = await cacheableEntry(c.res);
     if (stored !== undefined) {
-      await storeInBackground(c, store.put(key, stored, policy.ttlSeconds));
+      await storeInBackground(c, store.put(key, stored, effective.ttlSeconds));
       // Rust `chat.rs:1986` — "Mirror the store into the semantic layer so a
       // later paraphrase can match this embedding." Same TTL and same
       // `max_records` as the exact store, and behind the same success check
@@ -358,8 +433,8 @@ export function responseCache(options: ResponseCacheOptions = {}): MiddlewareHan
           semantic.scope,
           semantic.embedding,
           stored,
-          policy.ttlSeconds,
-          policy.maxRecords,
+          effective.ttlSeconds,
+          effective.maxRecords,
           now(),
         );
       }

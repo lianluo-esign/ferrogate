@@ -476,6 +476,7 @@ describe("semanticScopeMaterial is the exact key minus the body", () => {
     requestBody: { messages: [{ content: "hello" }] },
     guardrailPolicyFingerprint: "gp",
     registryFingerprint: "rf",
+    governanceFingerprint: "ungoverned",
   };
 
   it("drops the body and the stream flag, and NOTHING else", () => {
@@ -499,6 +500,12 @@ describe("semanticScopeMaterial is the exact key minus the body", () => {
       "logical_model",
       "provider_registry_fingerprint",
       "guardrail_policy_fingerprint",
+      // #695: the governed rules an entry was admitted under travel into the
+      // BUCKET, not just into the exact key. Drop it here and a tenant's
+      // threshold change or invalidation stops reaching the similarity layer —
+      // the one place a stale entry is hardest to notice, because a semantic
+      // hit does not have to match the request byte for byte to be served.
+      "governance_fingerprint",
     ]) {
       expect(material).toHaveProperty(field);
     }
@@ -515,6 +522,9 @@ describe("semanticScopeMaterial is the exact key minus the body", () => {
       base,
     );
     expect(semanticScopeMaterial({ ...identity, registryFingerprint: "rf2" })).not.toBe(base);
+    expect(
+      semanticScopeMaterial({ ...identity, governanceFingerprint: "scope=tenant:a|epoch=1" }),
+    ).not.toBe(base);
   });
 });
 
