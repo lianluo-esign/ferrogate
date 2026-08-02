@@ -35,7 +35,7 @@
 import { SELF } from "cloudflare:test";
 import { parquetReadObjects } from "hyparquet";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
+import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 interface ListBody {
@@ -376,6 +376,38 @@ describe("GET /admin/v1/cost-records answers cost per REQUEST, joined not duplic
       { id: "be-orphan", requestId: "fg-no-log", occurredAtUnix: 1_700_000_101, event: EVENT },
     ]);
     expect((await readCosts(operatorKey.secret)).data).toHaveLength(0);
+  });
+
+  /**
+   * A metering document that does not parse must not take the whole chargeback
+   * surface down with it. `json_extract` RAISES on malformed JSON, so an
+   * unguarded query would answer 500 for every caller because of one bad row —
+   * and the row must not silently become a priced $0 either.
+   */
+  it("survives a corrupt metering document, counting it as an unknown cost", async () => {
+    await seedRequestLogs([REQUEST]);
+    await db()
+      .prepare(
+        `INSERT INTO billing_events
+           (billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .bind("be-corrupt", REQUEST.requestId, 0, 1_700_000_101, "{not json")
+      .run();
+
+    const record = (await readCosts(operatorKey.secret)).data[0];
+    expect(record).toMatchObject({
+      request_id: REQUEST.requestId,
+      metered: true,
+      priced: false,
+      cost_usd: null,
+      billed_attempts: 1,
+      unpriced_attempts: 1,
+      tags: {},
+    });
+    // …and the tag filter, which is the other place a raw document is read,
+    // must not raise on it either.
+    expect(await ids(operatorKey.secret, "?tag=team:growth")).toEqual([]);
   });
 
   it("orders newest first with request_id as the tiebreaker and reports the total", async () => {
