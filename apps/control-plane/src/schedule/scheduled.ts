@@ -40,13 +40,21 @@
  * the platform calls it.
  */
 
-import { resolveDeps } from "../adapters.js";
+import { resolveAuditAnchorBucket, resolveControlDatabase, resolveDeps } from "../adapters.js";
+import { anchorAuditChains } from "../audit/anchor.js";
 import type { ControlPlaneBindings } from "../ports.js";
 import { type ScheduleTickSummary, runScheduleTick } from "./engine.js";
 
 /** What `scheduled` reports back, so a tail log says something useful. */
 export interface ScheduledTickReport extends ScheduleTickSummary {
   readonly at: number;
+  /**
+   * What the audit-anchor pass did (#684): how many anchors were written, or
+   * why none were. `"unconfigured"` means the deployment binds no R2 bucket and
+   * therefore has a hash chain with NOTHING pinning its head — visible in a tail
+   * log rather than silent, because that gap is invisible from every response.
+   */
+  readonly auditAnchor: "unconfigured" | "failed" | { written: number; skipped: number };
 }
 
 /**
@@ -72,7 +80,45 @@ export async function runScheduledTick(
     { store: deps.store, lifecycle: deps.lifecycle, nodeId: "control-plane-cron" },
     now,
   );
-  return { at: now, ...summary };
+  return { at: now, ...summary, auditAnchor: await anchorPass(env, now) };
+}
+
+/**
+ * The audit-anchor pass (#684), riding the SAME minute tick as the scheduler.
+ *
+ * It runs on every tick rather than on a slower cadence of its own because the
+ * anchor cadence IS the detection window: a row appended and deleted between
+ * two anchors was never pinned and cannot be missed by comparison. A tick that
+ * finds no new chain head writes nothing (the job skips an already-anchored
+ * head), so the cost of the fast cadence is one grouped query and one R2 `head`
+ * per chain.
+ *
+ * Failures are caught and reported, never thrown: a `scheduled` handler that
+ * throws is retried by the platform, and retrying would re-run the SCHEDULE
+ * half of the tick — dispatching schedules a second time because an evidence
+ * write failed is a worse outcome than a late anchor.
+ */
+async function anchorPass(
+  env: ControlPlaneBindings,
+  now: number,
+): Promise<ScheduledTickReport["auditAnchor"]> {
+  const db = resolveControlDatabase(env);
+  const bucket = resolveAuditAnchorBucket(env);
+  if (db === null) return "unconfigured";
+  try {
+    const result = await anchorAuditChains(db, bucket, now);
+    if (result.unconfigured) {
+      console.warn(
+        "control-plane: audit chains are NOT anchored — no [[r2_buckets]] AUDIT_ANCHORS binding; " +
+          "a truncated audit trail will not be detectable (see docs/audit-tamper-evidence.md)",
+      );
+      return "unconfigured";
+    }
+    return { written: result.written, skipped: result.skipped };
+  } catch (error) {
+    console.warn("control-plane: audit anchor pass failed", error);
+    return "failed";
+  }
 }
 
 /**

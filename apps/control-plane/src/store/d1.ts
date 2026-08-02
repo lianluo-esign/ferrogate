@@ -76,6 +76,7 @@
  * `apps/cli/src/receipt.ts` carries the `endpoint_returns_no_audit_id` absence
  * reason — so the evidence lives in the table, not in the body.
  */
+import { AUDIT_CHAIN_GENESIS_HASH, auditChainKey, auditRowHash } from "@ferrogate/storage";
 import {
   type CallerScope,
   type ControlPlaneStore,
@@ -106,6 +107,18 @@ export type AuditAction = "create" | "replace" | "merge" | "remove";
  * can realistically need.
  */
 const UPDATE_ATTEMPTS = 3;
+
+/**
+ * Attempts at the chain-guarded audit append (#684).
+ *
+ * Higher than {@link UPDATE_ATTEMPTS} because the contended resource is
+ * different: two operators editing the SAME ROW in the same second is rare,
+ * but every mutation in a tenant appends to that tenant's ONE audit chain, so
+ * the head is contended by all of them at once. Five bounds a livelock while
+ * leaving room for a burst (a bulk import, a console doing several PATCHes in
+ * parallel) to land without dropping evidence.
+ */
+const AUDIT_APPEND_ATTEMPTS = 5;
 
 /**
  * Insertion-order listing, deterministic across calls, matching the in-memory
@@ -937,13 +950,31 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
   // -------------------------------------------------------------------------
 
   /**
-   * Append the durable evidence row for an APPLIED mutation.
+   * Append the durable evidence row for an APPLIED mutation, LINKED to the row
+   * before it (#684).
    *
    * A failure here is warned about and swallowed, matching the Rust backend's
    * documented `()`-returning evidence surfaces ("swallow-with-warn like the
    * Postgres backend"): the mutation has already landed, so answering the
    * operator with an error would report a failure for a change that happened —
    * a worse lie than a missing audit row.
+   *
+   * ## The chain
+   *
+   * The row's digest commits to its own fields AND to its predecessor's digest
+   * (`packages/storage/src/audit-chain.ts`), so editing or deleting any row
+   * invalidates every row after it. That is what turns "append-only by
+   * convention" into "alteration is detectable", which is the whole of #684.
+   *
+   * ## Why read-then-insert is safe here without a transaction
+   *
+   * D1 has no interactive transactions, so this reads the chain head, computes
+   * the digest in the isolate, and inserts — a classic lost-update shape. What
+   * makes it sound is the UNIQUE `(chain_key, seq)` index
+   * (`sql/d1-ts/control/0003_audit_chain.sql`): a racing writer that read the
+   * same head inserts the same `seq` and the constraint REFUSES it, so the
+   * loser retries against the new head instead of forking the chain. Same
+   * argument as `#updateGuarded`'s revision guard, one table over.
    */
   async #audit(
     action: AuditAction,
@@ -963,19 +994,73 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       actor_tenant_id: scope.kind === "tenant" ? scope.tenantId : null,
       resource_tenant_id: tenantId,
     });
-    try {
-      await this.#db
-        .prepare(
-          `INSERT INTO ${AUDIT_TABLE} (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json)
-           VALUES (?, ?, NULL, ?, ?, ?)`,
-        )
-        .bind(this.#newId(), this.#requestId, tenantId, this.#now(), auditJson)
-        .run();
-    } catch (error) {
-      console.warn(
-        `control-plane: audit append failed for ${action} ${collection}/${String(record.id)}`,
-        error,
-      );
+
+    // ONE CHAIN PER TENANT. The audit READ fence is strict equality on
+    // `tenant`, so a tenant only ever sees its own rows; a single global chain
+    // would look like a trail full of holes to every tenant and be
+    // unverifiable by any of them. See `auditChainKey`'s docblock.
+    const chainKey = auditChainKey(tenantId);
+    const id = this.#newId();
+    const occurredAt = this.#now();
+
+    for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
+      try {
+        const head = await this.#db
+          .prepare(
+            `SELECT seq, row_hash FROM ${AUDIT_TABLE}
+              WHERE chain_key = ? AND seq IS NOT NULL
+              ORDER BY seq DESC LIMIT 1`,
+          )
+          .bind(chainKey)
+          .first<{ seq: number; row_hash: string | null }>();
+
+        const seq = (head?.seq ?? 0) + 1;
+        const prevHash = head?.row_hash ?? AUDIT_CHAIN_GENESIS_HASH;
+        const rowHash = await auditRowHash({
+          chain_key: chainKey,
+          seq,
+          prev_hash: prevHash,
+          id,
+          request_id: this.#requestId,
+          agent_run_id: null,
+          tenant: tenantId,
+          occurred_at_unix: occurredAt,
+          audit_json: auditJson,
+        });
+
+        await this.#db
+          .prepare(
+            `INSERT INTO ${AUDIT_TABLE}
+               (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+                chain_key, seq, prev_hash, row_hash)
+             VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            id,
+            this.#requestId,
+            tenantId,
+            occurredAt,
+            auditJson,
+            chainKey,
+            seq,
+            prevHash,
+            rowHash,
+          )
+          .run();
+        return;
+      } catch (error) {
+        // A UNIQUE violation on `(chain_key, seq)` is the EXPECTED outcome of a
+        // race and is retried; anything else (and a race that keeps losing) is
+        // reported on the last attempt. The two are not distinguished by
+        // message on purpose — D1 wraps SQLite's text and matching on it is how
+        // an error handler silently stops handling anything.
+        if (attempt === AUDIT_APPEND_ATTEMPTS) {
+          console.warn(
+            `control-plane: audit append failed for ${action} ${collection}/${String(record.id)}`,
+            error,
+          );
+        }
+      }
     }
   }
 }

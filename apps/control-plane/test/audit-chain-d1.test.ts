@@ -36,6 +36,7 @@ import {
 } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AUDIT_ANCHOR_PREFIX, anchorAuditChains } from "../src/audit/anchor.js";
+import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 
@@ -89,6 +90,21 @@ async function exportTrail(secret: string): Promise<AuditChainRow[]> {
   return body.data.map(auditChainRowFromAdminDocument);
 }
 
+/**
+ * The export, in CHAIN order for one chain.
+ *
+ * The admin surface orders by `occurred_at_unix ASC, id ASC`, and three
+ * mutations in the same second are tie-broken by a RANDOM uuid — so the wire
+ * order genuinely is not `seq` order, as this suite discovered by failing.
+ * Verification sorts for exactly that reason; assertions about linkage have to
+ * do the same, or they would be asserting the tiebreak rather than the chain.
+ */
+function inChainOrder(rows: readonly AuditChainRow[], chainKey: string): AuditChainRow[] {
+  return rows
+    .filter((row) => row.chain_key === chainKey)
+    .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
+}
+
 /** Run the periodic anchor job the cron tick runs, then read the anchors back out of R2. */
 async function anchorAndRead(now = TICK_AT): Promise<AuditChainAnchor[]> {
   await anchorAuditChains(db(), bucket(), now);
@@ -139,10 +155,12 @@ describe("the durable writer", () => {
       expect((await createPolicy(operatorKey.secret, name)).status).toBe(201);
     }
 
-    const rows = await exportTrail(operatorKey.secret);
-    expect(rows).toHaveLength(3);
+    const exported = await exportTrail(operatorKey.secret);
+    expect(exported).toHaveLength(3);
+    expect(exported.map((row) => row.chain_key)).toEqual(["", "", ""]);
+
+    const rows = inChainOrder(exported, "");
     expect(rows.map((row) => row.seq)).toEqual([1, 2, 3]);
-    expect(rows.map((row) => row.chain_key)).toEqual(["", "", ""]);
     // Each row commits to its predecessor; the first to the genesis constant.
     expect(rows[0]?.prev_hash).toBe("0".repeat(64));
     expect(rows[1]?.prev_hash).toBe(rows[0]?.row_hash);
@@ -181,7 +199,7 @@ describe("the durable writer", () => {
     expect((await createTenantPolicy("k-tenant", "pol_tenant_2", "t-1")).status).toBe(201);
 
     const tenantRows = await exportTrail("k-tenant");
-    expect(tenantRows.map((row) => row.seq)).toEqual([1, 2]);
+    expect(inChainOrder(tenantRows, "t-1").map((row) => row.seq)).toEqual([1, 2]);
     expect(tenantRows.every((row) => row.chain_key === "t-1")).toBe(true);
 
     // The tenant verifies its OWN chain, holding only its own export and its
@@ -208,7 +226,10 @@ describe("the periodic anchor", () => {
     expect(anchors.map((anchor) => anchor.chain_key).sort()).toEqual(["", "t-1"]);
     const platform = anchors.find((anchor) => anchor.chain_key === "");
     expect(platform).toMatchObject({ first_seq: 1, head_seq: 1, row_count: 1 });
-    expect(platform?.head_hash).toBe((await exportTrail(operatorKey.secret))[0]?.row_hash);
+    // The operator's export spans BOTH chains, so the platform head is the
+    // seq-1 row OF THE PLATFORM CHAIN, not simply the first row on the wire.
+    const platformHead = inChainOrder(await exportTrail(operatorKey.secret), "")[0];
+    expect(platform?.head_hash).toBe(platformHead?.row_hash);
     expect(platform?.anchored_at_unix).toBe(TICK_AT);
   });
 
@@ -251,6 +272,27 @@ describe("the periodic anchor", () => {
         anchored_at_unix: TICK_AT,
       },
     ]);
+  });
+
+  /**
+   * THE MOUNT PROOF. Every case above calls `anchorAuditChains` directly, and
+   * a job nothing invokes anchors nothing: a deployment would carry a hash
+   * chain, a bucket, a green suite and no anchors at all. This drives the CRON
+   * TICK — the same `runScheduledTick` `scheduled` dispatches — so removing the
+   * anchor pass from it fails here.
+   */
+  it("is written by the cron tick, not only by a direct call", async () => {
+    expect((await createPolicy(operatorKey.secret, "pol_a")).status).toBe(201);
+
+    const report = await runScheduledTick(
+      { ...(env as unknown as Record<string, unknown>), CONTROL_PLANE_STORE: undefined } as never,
+      TICK_AT,
+    );
+    expect(report.auditAnchor).toEqual({ written: 1, skipped: 0 });
+
+    const anchors = await readAnchors();
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]).toMatchObject({ chain_key: "", head_seq: 1, anchored_at_unix: TICK_AT });
   });
 
   it("does nothing, loudly, when no bucket is bound", async () => {
@@ -365,7 +407,9 @@ describe("tampering with the stored trail", () => {
    */
   it("detects a re-forged chain whose hashes were recomputed", async () => {
     const anchors = await seedAndAnchor();
-    const forged = await exportTrail(operatorKey.secret);
+    // In CHAIN order: a re-forge has to walk the chain, and the wire order is
+    // not it (see `inChainOrder`).
+    const forged = inChainOrder(await exportTrail(operatorKey.secret), "");
     const { auditRowHash } = await import("@ferrogate/storage");
 
     let prev = "0".repeat(64);
