@@ -6,6 +6,7 @@
  * JSON ⇄ JSON, no I/O.
  */
 import { AdapterError } from "./types.js";
+import { PROMPT_CACHE_MEMBER } from "./caching.js";
 import { asStr, asU64, getField, isArray, isObject, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 
@@ -46,7 +47,40 @@ export function toChatCompletions(body: Json): Json {
     if (converted !== undefined) out["tool_choice"] = converted;
   }
 
+  // Every conversion above rebuilds its blocks, so a native `cache_control`
+  // marker was dropped on the floor here and an Anthropic-native caller lost
+  // its prefix discount on its OWN protocol. The intent (not the placement,
+  // which the OpenAI grammar cannot hold) is carried forward as the canonical
+  // directive, which then re-emits per family — issue #690, and see the twin of
+  // this function in `apps/gateway/src/inference/anthropic.ts`.
+  const promptCache = promptCacheFromCacheControl(object);
+  if (promptCache !== undefined) out[PROMPT_CACHE_MEMBER] = promptCache;
+
   return out;
+}
+
+function promptCacheFromCacheControl(body: Json): Json | undefined {
+  const marker = findCacheControl(body);
+  if (marker === undefined) return undefined;
+  const ttl = asStr(getField(marker, "ttl"));
+  return { mode: "explicit", ...(ttl === "1h" ? { ttl } : {}) };
+}
+
+function findCacheControl(value: Json | undefined): Json | undefined {
+  if (isArray(value)) {
+    for (const entry of value) {
+      const found = findCacheControl(entry);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (!isObject(value)) return undefined;
+  if (value["cache_control"] !== undefined) return value["cache_control"];
+  for (const entry of Object.values(value)) {
+    const found = findCacheControl(entry);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 function anthropicSystemToText(system: Json): string | undefined {
@@ -223,7 +257,6 @@ export function chatCompletionToMessage(chat: Json, fallbackModel: string): Json
   }
 
   const usage = getField(chat, "usage");
-  const inputTokens = asU64(getField(usage, "prompt_tokens")) ?? 0;
   const outputTokens = asU64(getField(usage, "completion_tokens")) ?? 0;
 
   return {
@@ -234,7 +267,28 @@ export function chatCompletionToMessage(chat: Json, fallbackModel: string): Json
     content,
     stop_reason: finishReasonToStopReason(finishReason, sawToolUse),
     stop_sequence: null,
-    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    usage: { ...anthropicUsageCounters(usage), output_tokens: outputTokens },
+  };
+}
+
+/**
+ * The OpenAI input counters in Anthropic's vocabulary, cache split kept (#690).
+ *
+ * OpenAI's `prompt_tokens` INCLUDES `prompt_tokens_details.cached_tokens`;
+ * Anthropic's `input_tokens` EXCLUDES `cache_read_input_tokens`. The fresh
+ * count is therefore the difference — emitting both unreduced would make a
+ * native client double-count the prompt. A response with no cached tokens
+ * reported emits exactly the counter it always did.
+ */
+function anthropicUsageCounters(usage: Json | undefined): JsonObject {
+  const promptTokens = asU64(getField(usage, "prompt_tokens")) ?? 0;
+  const details =
+    getField(usage, "prompt_tokens_details") ?? getField(usage, "input_tokens_details");
+  const cached = asU64(getField(details, "cached_tokens"));
+  if (cached === undefined) return { input_tokens: promptTokens };
+  return {
+    input_tokens: Math.max(promptTokens - cached, 0),
+    cache_read_input_tokens: cached,
   };
 }
 

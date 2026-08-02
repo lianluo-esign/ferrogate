@@ -25,7 +25,9 @@ import {
   SecretValue,
   VertexAiAdapter,
   WorkersAiAdapter,
+  chatCompletionToMessage,
   promptCacheFromBody,
+  toChatCompletions,
 } from "../src/index.js";
 import type { ProviderConfig } from "../src/index.js";
 
@@ -365,6 +367,63 @@ describe("no family may silently ignore the directive", () => {
       expect(() => prepare(), family).not.toThrow();
       expect(JSON.stringify(prepare()), family).not.toContain("prompt_cache");
     }
+  });
+});
+
+// --- the /v1/messages translator -------------------------------------------
+
+describe("the Anthropic-native ingress keeps the caller's caching intent", () => {
+  test("a native cache_control becomes the canonical directive", () => {
+    const translated = toChatCompletions({
+      model: "claude-logical",
+      system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } }],
+      messages: [{ role: "user", content: "is claim 91 covered?" }],
+    } as never) as Record<string, any>;
+    // Every block above is REBUILT by the translation, so the marker itself
+    // cannot survive; the intent is what has to, or a Claude-native caller
+    // loses its whole prefix discount on FerroGate's own Claude ingress.
+    expect(translated["prompt_cache"]).toEqual({ mode: "explicit", ttl: "1h" });
+  });
+
+  test("a request with no marker states no intent", () => {
+    const translated = toChatCompletions({
+      model: "claude-logical",
+      messages: [{ role: "user", content: "hi" }],
+    } as never) as Record<string, any>;
+    expect(translated["prompt_cache"]).toBeUndefined();
+  });
+
+  test("the response carries the hit/miss split back in Anthropic's vocabulary", () => {
+    const message = chatCompletionToMessage(
+      {
+        id: "chatcmpl-1",
+        choices: [{ message: { role: "assistant", content: "covered" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 9_012,
+          completion_tokens: 3,
+          prompt_tokens_details: { cached_tokens: 9_000 },
+        },
+      } as never,
+      "claude-logical",
+    ) as Record<string, any>;
+    // OpenAI's prompt_tokens INCLUDES the cached tokens; Anthropic's
+    // input_tokens excludes them, so the fresh count is the difference.
+    expect(message["usage"]).toEqual({
+      input_tokens: 12,
+      output_tokens: 3,
+      cache_read_input_tokens: 9_000,
+    });
+  });
+
+  test("a response with no cached tokens keeps exactly the counters it had", () => {
+    const message = chatCompletionToMessage(
+      {
+        choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 5, completion_tokens: 2 },
+      } as never,
+      "claude-logical",
+    ) as Record<string, any>;
+    expect(message["usage"]).toEqual({ input_tokens: 5, output_tokens: 2 });
   });
 });
 

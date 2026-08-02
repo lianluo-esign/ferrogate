@@ -46,12 +46,16 @@
  */
 import {
   applyCloudflareAiGatewayRouting,
+  applyPromptCacheToAnthropic,
   applyStructuredOutputToAnthropic,
+  assertPromptCacheForAutomaticFamily,
   BedrockAdapter,
   canonicalProviderAdapterFamily,
   GeminiAdapter,
   AdapterError as PackageAdapterError,
+  promptCacheFromBody,
   SecretValue,
+  stripPromptCacheDirective,
   structuredOutputFromChatBody,
   structuredOutputFromResponsesBody,
   VertexAiAdapter,
@@ -257,6 +261,18 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     }
 
     const body: Record<string, unknown> = { ...plan.body };
+    // Prompt caching (issue #690). This family caches long prefixes
+    // automatically and exposes no per-request breakpoint, so `auto` is already
+    // satisfied and anything stronger is refused — which takes the route out of
+    // the ladder rather than serving the request under OpenAI's own rules. The
+    // directive itself is FerroGate's member on a body copied WHOLESALE, so it
+    // has to be removed here or the caching hint becomes an upstream 400.
+    try {
+      assertPromptCacheForAutomaticFamily(body as Json, plan.route.providerKind);
+    } catch (error) {
+      return { ok: false, error: packageAdapterError(error) };
+    }
+    stripPromptCacheDirective(body as Record<string, Json>);
     // The adapter OWNS these two fields — a caller cannot pin the physical model
     // or contradict the resolved stream decision.
     body["model"] = plan.providerModel;
@@ -414,6 +430,17 @@ export const anthropicAdapter: ProviderAdapter = {
           : structuredOutputFromChatBody(source as Json);
       if (structured !== undefined) {
         applyStructuredOutputToAnthropic(anthropicBody as Record<string, Json>, structured, "anthropic");
+      }
+      // Prompt caching (issue #690), same story one field over: this adapter
+      // rebuilds a minimal native body, so a caller's caching intent used to
+      // vanish here while an OpenAI upstream cached the prefix automatically —
+      // the same request, two different bills, with no way to tell which one
+      // ran. The directive becomes Anthropic's `cache_control` breakpoint (or
+      // strips the caller's markers, for `mode: "off"`), using the SAME
+      // canonical translation as `@ferrogate/providers`, not a second copy.
+      const promptCache = promptCacheFromBody(source as Json);
+      if (promptCache !== undefined) {
+        applyPromptCacheToAnthropic(anthropicBody as Record<string, Json>, promptCache, "anthropic");
       }
     } catch (error) {
       return { ok: false, error: packageAdapterError(error) };
