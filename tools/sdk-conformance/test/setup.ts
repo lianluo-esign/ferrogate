@@ -22,6 +22,7 @@ import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sq
 interface D1TestBindings {
   readonly DB?: D1Database;
   readonly BILLING_DB?: D1Database;
+  readonly CONTROL_DB?: D1Database;
   readonly TEST_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
 }
 
@@ -37,7 +38,7 @@ function sqlStatements(migration: string): string[] {
 }
 
 beforeAll(async () => {
-  const { DB, BILLING_DB, TEST_D1_SCHEMA } = env as unknown as D1TestBindings;
+  const { DB, BILLING_DB, CONTROL_DB, TEST_D1_SCHEMA } = env as unknown as D1TestBindings;
   if (DB === undefined || TEST_D1_SCHEMA === undefined) {
     // Loud, never a silent skip: both are supplied by this project's
     // `vitest.config.ts` + `apps/gateway/wrangler.toml`. An absent one means the
@@ -49,9 +50,16 @@ beforeAll(async () => {
   }
   await applyD1Migrations(DB, TEST_D1_SCHEMA);
 
-  if (BILLING_DB !== undefined) {
+  // BOTH control bindings, because `apps/gateway/wrangler.toml` declares both
+  // (`BILLING_DB` is the historical name, `CONTROL_DB` the purpose-named one)
+  // and miniflare gives each binding its own local SQLite file even though they
+  // name one database in production. Whichever the gateway happens to prefer —
+  // quota reads take `CONTROL_DB ?? BILLING_DB` — the tables exist. Every
+  // statement is `CREATE … IF NOT EXISTS`, so this is idempotent.
+  for (const control of [CONTROL_DB, BILLING_DB]) {
+    if (control === undefined) continue;
     for (const statement of sqlStatements(controlMigrationSql)) {
-      await BILLING_DB.prepare(statement).run();
+      await control.prepare(statement).run();
     }
   }
 });
