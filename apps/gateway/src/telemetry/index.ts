@@ -61,7 +61,7 @@
  * ```
  *
  * **3. `apps/gateway/src/index.ts` (OPTIONAL, widens coverage)** — the mount
- * above covers the six inference operations. To cover all 31, add
+ * above covers the seven inference operations. To cover all 32, add
  * `requestTelemetry()` to `GATEWAY_MIDDLEWARE`. It is safe to mount BOTH: the
  * emitter de-duplicates on the inbound `Request` object, so an inference
  * request that passes through the middleware AND the route module emits once.
