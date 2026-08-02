@@ -109,8 +109,8 @@ interface Gateway {
  * reason (an empty cache always misses).
  */
 function gateway(
-  overrides: Record<string, unknown> = {},
   stores: { exact: MemoryResponseCacheStore; semantic: SemanticResponseCache },
+  overrides: Record<string, unknown> = {},
 ): Gateway {
   const { app } = createGatewayApp({
     modules: [
@@ -200,14 +200,14 @@ describe("a tenant can enable the semantic cache the deployment vars leave off",
       await setPolicy("tenant_a", { mode: "semantic", similarityThreshold: 0.9 });
       const stores = freshStores();
 
-      const first = await gateway({}, stores).post("fg_a", PROMPT);
+      const first = await gateway(stores).post("fg_a", PROMPT);
       expect(first.status).toBe(200);
       expect(provider.requests).toHaveLength(1);
 
       // A DIFFERENT body, so a different EXACT key. Only the similarity layer
       // can answer it — and the deployment var says `exact_match`, so the only
       // thing that could have turned it on is the durable row.
-      const second = await gateway({}, stores).post("fg_a", PARAPHRASE);
+      const second = await gateway(stores).post("fg_a", PARAPHRASE);
       expect(second.status).toBe(200);
       expect(provider.requests).toHaveLength(1);
       expect(await second.json()).toEqual(completion("first"));
@@ -220,8 +220,8 @@ describe("a tenant can enable the semantic cache the deployment vars leave off",
     const provider = interceptProviderFetch(() => providerJson(completion("first")));
     try {
       const stores = freshStores();
-      await gateway({}, stores).post("fg_a", PROMPT);
-      await gateway({}, stores).post("fg_a", PARAPHRASE);
+      await gateway(stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PARAPHRASE);
       expect(provider.requests).toHaveLength(2);
     } finally {
       provider.restore();
@@ -234,8 +234,8 @@ describe("a tenant can enable the semantic cache the deployment vars leave off",
       await setPolicy("tenant_a", { enabled: 0 });
       const stores = freshStores();
 
-      const first = await gateway({}, stores).post("fg_a", PROMPT);
-      const second = await gateway({}, stores).post("fg_a", PROMPT);
+      const first = await gateway(stores).post("fg_a", PROMPT);
+      const second = await gateway(stores).post("fg_a", PROMPT);
       // Identical body, identical credential: the exact layer would hit. The
       // tenant's own opt-out is what stops it.
       expect(provider.requests).toHaveLength(2);
@@ -252,8 +252,8 @@ describe("a tenant can enable the semantic cache the deployment vars leave off",
       await setPolicy("tenant_a", { enabled: 1, mode: "semantic", similarityThreshold: 0.5 });
       const stores = freshStores();
       const off = { GATEWAY_CACHE_ENABLED: "" };
-      await gateway(off, stores).post("fg_a", PROMPT);
-      await gateway(off, stores).post("fg_a", PROMPT);
+      await gateway(stores, off).post("fg_a", PROMPT);
+      await gateway(stores, off).post("fg_a", PROMPT);
       expect(provider.requests).toHaveLength(2);
     } finally {
       provider.restore();
@@ -271,8 +271,8 @@ describe("the similarity threshold is tunable per tenant", () => {
     try {
       await setPolicy("tenant_a", { mode: "semantic", similarityThreshold: 0.9 });
       const stores = freshStores();
-      await gateway({}, stores).post("fg_a", PROMPT);
-      await gateway({}, stores).post("fg_a", PARAPHRASE);
+      await gateway(stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PARAPHRASE);
       expect(provider.requests).toHaveLength(1);
     } finally {
       provider.restore();
@@ -286,8 +286,8 @@ describe("the similarity threshold is tunable per tenant", () => {
       // one; an f32 round-trip of a re-ordered bag lands just under it.
       await setPolicy("tenant_a", { mode: "semantic", similarityThreshold: 1.0 });
       const stores = freshStores();
-      await gateway({}, stores).post("fg_a", PROMPT);
-      await gateway({}, stores).post("fg_a", `${PARAPHRASE} urgently`);
+      await gateway(stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", `${PARAPHRASE} urgently`);
       expect(provider.requests).toHaveLength(2);
     } finally {
       provider.restore();
@@ -307,7 +307,7 @@ describe("a governance change rotates the cache key", () => {
       const stores = freshStores();
 
       // Stored while the tenant was strict.
-      await gateway({}, stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PROMPT);
       expect(provider.requests).toHaveLength(1);
 
       // The tenant loosens. The stored entry is a ~1.0 match for the
@@ -315,7 +315,7 @@ describe("a governance change rotates the cache key", () => {
       // count stays at 1 — an entry admitted under the old governance being
       // reused under the new one, with nothing recording that it was.
       await setPolicy("tenant_a", { mode: "semantic", similarityThreshold: 0.6 });
-      await gateway({}, stores).post("fg_a", PARAPHRASE);
+      await gateway(stores).post("fg_a", PARAPHRASE);
       expect(provider.requests).toHaveLength(2);
     } finally {
       provider.restore();
@@ -327,14 +327,14 @@ describe("a governance change rotates the cache key", () => {
     try {
       await setPolicy("tenant_a", { ttlSeconds: 300 });
       const stores = freshStores();
-      await gateway({}, stores).post("fg_a", PROMPT);
-      await gateway({}, stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PROMPT);
       // Same governance, identical body: a hit, so the next assertion is about
       // the CHANGE and not about a cache that never worked.
       expect(provider.requests).toHaveLength(1);
 
       await setPolicy("tenant_a", { ttlSeconds: 60 });
-      await gateway({}, stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PROMPT);
       expect(provider.requests).toHaveLength(2);
     } finally {
       provider.restore();
@@ -353,13 +353,13 @@ describe("explicit invalidation", () => {
       await setPolicy("tenant_a", { invalidationEpoch: 0 });
       const stores = freshStores();
 
-      await gateway({}, stores).post("fg_a", PROMPT);
-      const hit = await gateway({}, stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PROMPT);
+      const hit = await gateway(stores).post("fg_a", PROMPT);
       expect(hit.headers.get(CACHE_STATUS_HEADER)).toBe("hit");
       expect(provider.requests).toHaveLength(1);
 
       await setPolicy("tenant_a", { invalidationEpoch: 1 });
-      const afterPurge = await gateway({}, stores).post("fg_a", PROMPT);
+      const afterPurge = await gateway(stores).post("fg_a", PROMPT);
       expect(afterPurge.headers.get(CACHE_STATUS_HEADER)).toBe("miss");
       expect(provider.requests).toHaveLength(2);
     } finally {
@@ -372,8 +372,8 @@ describe("explicit invalidation", () => {
     try {
       await setPolicy("tenant_a", { mode: "semantic", similarityThreshold: 0.9 });
       const stores = freshStores();
-      await gateway({}, stores).post("fg_a", PROMPT);
-      await gateway({}, stores).post("fg_a", PARAPHRASE);
+      await gateway(stores).post("fg_a", PROMPT);
+      await gateway(stores).post("fg_a", PARAPHRASE);
       expect(provider.requests).toHaveLength(1);
 
       await setPolicy("tenant_a", {
@@ -381,7 +381,7 @@ describe("explicit invalidation", () => {
         similarityThreshold: 0.9,
         invalidationEpoch: 7,
       });
-      await gateway({}, stores).post("fg_a", PARAPHRASE);
+      await gateway(stores).post("fg_a", PARAPHRASE);
       expect(provider.requests).toHaveLength(2);
     } finally {
       provider.restore();
@@ -406,10 +406,10 @@ describe("the tenant fence survives governance", () => {
       await setPolicy("tenant_b", { mode: "semantic", similarityThreshold: 0.5 });
       const stores = freshStores();
 
-      const a = await gateway({}, stores).post("fg_a", PROMPT);
+      const a = await gateway(stores).post("fg_a", PROMPT);
       expect(await a.json()).toEqual(completion("tenant_a_secret"));
 
-      const b = await gateway({}, stores).post("fg_b", PROMPT);
+      const b = await gateway(stores).post("fg_b", PROMPT);
       expect(provider.requests).toHaveLength(2);
       expect(await b.json()).toEqual(completion("tenant_b_own"));
     } finally {
@@ -421,14 +421,14 @@ describe("the tenant fence survives governance", () => {
     const provider = interceptProviderFetch(() => providerJson(completion("first")));
     try {
       const stores = freshStores();
-      await gateway({}, stores).post("fg_b", PROMPT);
+      await gateway(stores).post("fg_b", PROMPT);
       expect(provider.requests).toHaveLength(1);
 
       // tenant_a purges. tenant_b's entry must be untouched — an invalidation
       // that reached every tenant would be a denial-of-service one tenant can
       // inflict on the whole deployment's cache spend.
       await setPolicy("tenant_a", { invalidationEpoch: 99 });
-      const stillHit = await gateway({}, stores).post("fg_b", PROMPT);
+      const stillHit = await gateway(stores).post("fg_b", PROMPT);
       expect(stillHit.headers.get(CACHE_STATUS_HEADER)).toBe("hit");
       expect(provider.requests).toHaveLength(1);
     } finally {
@@ -465,8 +465,8 @@ describe("an unreadable governance table fails closed", () => {
         batch: (statements: unknown) =>
           (CONTROL_DB as unknown as { batch(s: unknown): unknown }).batch(statements),
       };
-      const first = await gateway({ CONTROL_DB: brokenGovernance }, stores).post("fg_a", PROMPT);
-      const second = await gateway({ CONTROL_DB: brokenGovernance }, stores).post("fg_a", PROMPT);
+      const first = await gateway(stores, { CONTROL_DB: brokenGovernance }).post("fg_a", PROMPT);
+      const second = await gateway(stores, { CONTROL_DB: brokenGovernance }).post("fg_a", PROMPT);
 
       // Availability is never traded for a cache: both requests are served.
       expect(first.status).toBe(200);
