@@ -892,6 +892,29 @@ function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstr
   return gate.kind === "admitted" ? gate.constraint : null;
 }
 
+/**
+ * The SERVED route's own prices, in the shape `Usage` carries them (#663).
+ *
+ * `dispatchCandidates` can fail over, so the route that ANSWERED is not
+ * necessarily the route that was planned — and the two can be priced
+ * differently. Reading them off `servedRoute` at each meter site is therefore
+ * not a convenience: billing the planned route's price for a fallback provider's
+ * response would be a confidently wrong number.
+ *
+ * Absent keys, never `undefined` values, because `Usage` is spread into the
+ * billing event and `metering/route-price.ts` distinguishes "unpriced" from
+ * "priced at zero".
+ */
+function routePricing(route: PhysicalRoute): {
+  inputPricePer1m?: number;
+  outputPricePer1m?: number;
+} {
+  return {
+    ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
+    ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
+  };
+}
+
 /** Record a metering event; never allowed to fail the response. */
 function recordUsage(
   deps: ResolvedInferenceDeps,
@@ -1188,6 +1211,7 @@ async function handleOpenAiInference(
     ...(metadata !== undefined ? { metadata } : {}),
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
@@ -1320,6 +1344,7 @@ async function handleMessages(
     status: upstreamResponse.status,
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
@@ -1441,6 +1466,7 @@ async function handleEmbeddings(
     ...(metadata !== undefined ? { metadata } : {}),
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -1562,7 +1588,8 @@ async function handleImages(
       ...(imageCount !== undefined ? { imageCount } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
       ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
-    providerAttemptIndex: attemptIndex,
+      providerAttemptIndex: attemptIndex,
+      ...routePricing(servedRoute),
     },
     undefined,
   );

@@ -462,6 +462,32 @@ export interface Usage {
    * behavior and stays correct for every single-attempt request.
    */
   readonly providerAttemptIndex?: number | undefined;
+  /**
+   * The SERVED route's own prices (`[[models]].input_price_per_1m` /
+   * `output_price_per_1m`), in USD per 1M tokens — carried onto the metering
+   * event so the request path can settle a cost the rate card has no rule for
+   * (issue #663).
+   *
+   * These are the same two numbers {@link PhysicalRoute} already carries for
+   * cost-based routing (`strategy.ts::routeEstimatedUnitCost`). Before #663
+   * that was their ONLY consumer: an operator could publish a model with a
+   * price on its registry row, serve real traffic on it, and — because the
+   * model was absent from `PriceBook.withDefaultRateCard()` — have every one of
+   * those requests fail closed in `charge()` and be recorded NOWHERE.
+   *
+   * They travel on `Usage` rather than being read from the registry inside the
+   * sink for the reason every other field here does: the sink is module-scoped
+   * and the registry is per-`env`, and the served route is only unambiguous at
+   * the point the dispatch loop actually picked it (a failover means the route
+   * that answered is not the route that was planned).
+   *
+   * Consumed by `metering/route-price.ts::routePriceSettledCostUsd`, which
+   * `src/index.ts` passes as `MeteringSinkOptions.settledCostUsd`. Absent ⇒ the
+   * rate card decides, exactly as before.
+   */
+  readonly inputPricePer1m?: number | undefined;
+  /** See {@link Usage.inputPricePer1m} — USD per 1M completion tokens. */
+  readonly outputPricePer1m?: number | undefined;
 }
 
 /**
