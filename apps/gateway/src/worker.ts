@@ -26,7 +26,8 @@
  * to this file instead of the composition root would be the drift the gate
  * exists to catch.
  */
-import app, { gatewayScheduled } from "./index.js";
+import app, { gatewayQueue, gatewayScheduled } from "./index.js";
+import type { RequestLogMessageBatch } from "./requestlog/index.js";
 
 /**
  * The deployed handler.
@@ -46,6 +47,17 @@ import app, { gatewayScheduled } from "./index.js";
 const handler: ExportedHandler<Record<string, unknown>> = {
   fetch: (request, env, ctx) => app.fetch(request, env, ctx),
   scheduled: (controller, env, ctx) => gatewayScheduled(controller, env, ctx),
+  /**
+   * `queue` is the `[[queues.consumers]]` entry point for the request-log
+   * queue (#664), and it is here for exactly the reason `scheduled` is:
+   * workerd only dispatches a queue event to a handler found on the ENTRY
+   * module's DEFAULT export. A named `export { gatewayQueue }` would be
+   * ignored — and, being a function, silently accepted as a service entrypoint
+   * instead — so the queue would fill and dead-letter with nothing consuming
+   * it, and every request log would be lost after the producer had already
+   * reported success.
+   */
+  queue: (batch, env) => gatewayQueue(batch as unknown as RequestLogMessageBatch, env),
 };
 
 export default handler;

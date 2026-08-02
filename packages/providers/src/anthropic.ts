@@ -18,6 +18,7 @@ import type {
   ResponsesPlan,
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
+import { applyStructuredOutputToAnthropic, structuredOutputFromChatBody } from "./structured.js";
 import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
@@ -44,6 +45,13 @@ export class AnthropicAdapter extends BaseProviderAdapter {
     };
     const system = getField(body, "system");
     if (system !== undefined) anthropicBody["system"] = system;
+    // `response_format` has no Anthropic equivalent, so it used to be dropped
+    // here while surviving to an OpenAI upstream — the failover shape change of
+    // issue #674. It is now coerced into a forced tool call, or refused.
+    const structured = structuredOutputFromChatBody(body);
+    if (structured !== undefined) {
+      applyStructuredOutputToAnthropic(anthropicBody, structured, provider.kind);
+    }
 
     return {
       provider: provider.name,

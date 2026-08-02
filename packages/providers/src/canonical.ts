@@ -10,6 +10,12 @@
 import { AdapterError } from "./types.js";
 import type { Json, JsonObject } from "./json.js";
 import { asArray, asObject, asStr, getField, isArray, isObject, parseJson } from "./json.js";
+import {
+  applyStructuredOutputToAnthropic,
+  applyStructuredOutputToGemini,
+  structuredOutputFromResponsesBody,
+} from "./structured.js";
+import type { CanonicalStructuredOutput } from "./structured.js";
 
 type CanonicalToolChoice =
   | { type: "Auto" }
@@ -54,6 +60,8 @@ export class CanonicalAiRequest {
     private readonly toolChoice: CanonicalToolChoice | undefined,
     private readonly instructions: Json | undefined,
     private readonly maxOutputTokens: Json | undefined,
+    /** `text.format` — the Responses spelling of `response_format` (#674). */
+    private readonly structuredOutput: CanonicalStructuredOutput | undefined,
   ) {}
 
   static fromResponsesBody(body: Json): CanonicalAiRequest {
@@ -65,6 +73,7 @@ export class CanonicalAiRequest {
       responsesToolChoiceToCanonical(getField(object, "tool_choice")),
       getField(object, "instructions"),
       getField(object, "max_output_tokens"),
+      structuredOutputFromResponsesBody(object),
     );
   }
 
@@ -100,6 +109,12 @@ export class CanonicalAiRequest {
     if (this.toolChoice) body["tool_choice"] = canonicalToolChoiceToAnthropicJson(this.toolChoice);
     if (this.instructions !== undefined) body["system"] = this.instructions;
     if (this.maxOutputTokens !== undefined) body["max_tokens"] = this.maxOutputTokens;
+    // Coerced into a forced tool call (or refused) AFTER the caller's own tools
+    // and tool_choice are in place, so a collision between the two is visible
+    // rather than silently overwritten (issue #674).
+    if (this.structuredOutput !== undefined) {
+      applyStructuredOutputToAnthropic(body, this.structuredOutput, "anthropic");
+    }
     return body;
   }
 
@@ -111,9 +126,14 @@ export class CanonicalAiRequest {
     }
     if (this.tools.length > 0) body["tools"] = canonicalToolsToGeminiJson(this.tools);
     if (this.toolChoice) body["toolConfig"] = canonicalToolChoiceToGeminiJson(this.toolChoice);
+    const generationConfig: JsonObject = {};
     if (this.maxOutputTokens !== undefined) {
-      body["generationConfig"] = { maxOutputTokens: this.maxOutputTokens };
+      generationConfig["maxOutputTokens"] = this.maxOutputTokens;
     }
+    if (this.structuredOutput !== undefined) {
+      applyStructuredOutputToGemini(generationConfig, this.structuredOutput, "gemini");
+    }
+    if (Object.keys(generationConfig).length > 0) body["generationConfig"] = generationConfig;
     return body;
   }
 }

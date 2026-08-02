@@ -36,13 +36,27 @@ describe("guardrail operation bindings match the contract", () => {
     }
   });
 
-  test("every model-content inference operation is screened", () => {
-    // `listModels` carries no model content — it is the ONLY inference
-    // operation that may be absent. Anything else missing is a hole.
+  test("every DISPATCHING model-content inference operation is screened", () => {
+    // This list is EXHAUSTIVE and each entry needs a reason. Anything else
+    // missing is a hole.
+    //
+    //  - `listModels` carries no model content at all.
+    //  - `countMessageTokens` (issue #671) carries model content but NEVER
+    //    reaches a provider: it answers `{input_tokens}` from the local
+    //    estimator and dispatches nothing. This entry was added deliberately
+    //    when that operation landed, widening the invariant from "carries model
+    //    content" to "carries model content AND dispatches it", because
+    //    screening a request that is never inferred over would (a) refuse a
+    //    caller a SIZE ESTIMATE on grounds that only bear on dispatch — the
+    //    caller cannot send the prompt either way, so the denial protects
+    //    nothing — and (b) write a guardrail evidence row asserting that
+    //    content was screened on its way to a model it never travelled to.
+    //    If `count_tokens` ever gains a dispatching leg, it belongs here on the
+    //    same day. See `inference/handlers.ts::handleCountMessageTokens`.
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened).toEqual(["listModels"]);
+    expect(unscreened.sort()).toEqual(["countMessageTokens", "listModels"]);
   });
 
   test("only chat/responses/messages screen the RESPONSE stage", () => {

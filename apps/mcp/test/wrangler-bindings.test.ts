@@ -99,37 +99,73 @@ function migratedClasses(): { sqlite: string[]; legacy: string[] } {
   return { sqlite, legacy };
 }
 
+/**
+ * A binding that names `script_name` borrows a class ANOTHER Worker defines,
+ * migrates and exports — `RATE_LIMIT` → `apps/gateway`'s
+ * `RateLimiterDurableObject` (#666). Every rule below about migrations and
+ * entry-module exports therefore applies to the LOCAL bindings only, and the
+ * borrowed ones get the opposite rules in their own describe block.
+ */
+const LOCAL = (body: readonly string[]): boolean => value(body, "script_name") === undefined;
+
 describe("every Durable Object binding is deployable", () => {
   const bindings = stanzas("durable_objects.bindings");
+  const local = bindings.filter(LOCAL);
 
   it("declares at least the two classes this Worker exports", () => {
     // A guard on the gate itself: if the parser ever stopped matching, every
     // assertion below would pass vacuously over an empty list.
-    expect(bindings.length).toBeGreaterThanOrEqual(2);
+    expect(local.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("introduces each bound class in a [[migrations]] new_sqlite_classes", () => {
+  it("introduces each LOCAL bound class in a [[migrations]] new_sqlite_classes", () => {
     const { sqlite, legacy } = migratedClasses();
-    for (const body of bindings) {
+    for (const body of local) {
       const className = value(body, "class_name");
-      expect(className, `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`)
-        .toBeDefined();
+      expect(
+        className,
+        `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`,
+      ).toBeDefined();
       expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
       expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);
     }
   });
 
-  it("resolves each bound class against the ENTRY module's exports", () => {
+  it("resolves each LOCAL bound class against the ENTRY module's exports", () => {
     // workerd resolves `class_name` against `main`. This closes the loop from
-    // the CONFIG side, so adding a third binding without its `src/worker.ts`
-    // re-export fails here rather than at `wrangler dev`.
-    for (const body of bindings) {
+    // the CONFIG side, so adding a third local binding without its
+    // `src/worker.ts` re-export fails here rather than at `wrangler dev`.
+    for (const body of local) {
       const className = value(body, "class_name") as string;
       expect(
         typeof (entry as unknown as Record<string, unknown>)[className],
         `class_name ${className} is not exported by src/worker.ts`,
       ).toBe("function");
     }
+  });
+});
+
+describe("the BORROWED counter namespace (#666)", () => {
+  const borrowed = stanzas("durable_objects.bindings").filter((body) => !LOCAL(body));
+
+  it("binds RATE_LIMIT from apps/gateway and nothing else cross-script", () => {
+    // Not vacuous, and the count is pinned: a second borrowed namespace is a
+    // second deploy-order dependency and deserves its own decision.
+    expect(borrowed.length).toBe(1);
+    const body = borrowed[0] as string[];
+    expect(value(body, "name")).toBe("RATE_LIMIT");
+    expect(value(body, "class_name")).toBe("RateLimiterDurableObject");
+    expect(value(body, "script_name")).toBe("ferrogate-gateway");
+  });
+
+  it("neither migrates nor exports the borrowed class", () => {
+    // Both are deploy-time refusals from Cloudflare ("Cannot create binding for
+    // class … because it is not currently defined" for the migration side), and
+    // an export here would be the start of a SECOND, private namespace — the
+    // per-Worker quota multiplier this issue exists to close.
+    const { sqlite, legacy } = migratedClasses();
+    expect([...sqlite, ...legacy]).not.toContain("RateLimiterDurableObject");
+    expect((entry as unknown as Record<string, unknown>).RateLimiterDurableObject).toBeUndefined();
   });
 });
 
@@ -161,7 +197,11 @@ describe("wave 24 — the S5 entitlement ladder needs no new binding, ASSERTED",
    * (or a binding added without its export) fails here.
    */
   it("binds exactly the Durable Object classes the entry module exports", () => {
+    // LOCAL bindings only: the borrowed `RATE_LIMIT` names a class this Worker
+    // must NOT export (#666), and that direction is asserted in "the BORROWED
+    // counter namespace" above.
     const bound = stanzas("durable_objects.bindings")
+      .filter(LOCAL)
       .map((body) => value(body, "class_name"))
       .filter((name): name is string => name !== undefined)
       .sort();

@@ -53,6 +53,8 @@ import { type GuardrailProtocol, normalizeRequest, normalizeResponse } from "@fe
  *   evaluates once at the end (`not_enforced`).
  */
 import type { Context, MiddlewareHandler, Next } from "hono";
+import { contributeRequestLogFacts, requestLogFactsFor } from "../requestlog/facts.js";
+import type { GuardrailVerdict } from "../requestlog/record.js";
 import { GuardrailEngine, evidenceLocation, evidenceTarget, redactText } from "./engine.js";
 import type {
   GuardrailAuditSink,
@@ -145,6 +147,37 @@ export interface GuardrailMiddlewareOptions extends GuardrailEngineDeps {
 export type GuardrailDepsResolver = (
   env: Record<string, unknown>,
 ) => GuardrailMiddlewareOptions | Promise<GuardrailMiddlewareOptions>;
+
+/**
+ * Publish what screening decided, for the request log (#664).
+ *
+ * This middleware is the ONLY thing that knows whether a guardrail ran, so
+ * without this line the trail's `guardrail_verdict` column would be
+ * `not_screened` on every row — a compliance field that is always the same
+ * value is a field that answers nothing.
+ *
+ * It writes to the per-`Request` fact collector rather than to `c.set(...)`
+ * because the reader is a different middleware and, for an inference request,
+ * the interesting facts arrive from a different Hono app entirely; see
+ * `../requestlog/facts.ts` for why the carrier is keyed by the `Request`.
+ *
+ * `blocked` wins over a later `allowed`: input screening passing and output
+ * screening then denying is ONE blocked decision, and the collector's
+ * last-write-wins merge would otherwise be order-dependent.
+ */
+function recordGuardrailVerdict(
+  c: Context,
+  verdict: GuardrailVerdict,
+  match?: GuardrailMatch,
+): void {
+  if (verdict === "allowed" && requestLogFactsFor(c.req.raw).guardrailVerdict === "blocked") {
+    return;
+  }
+  contributeRequestLogFacts(c.req.raw, {
+    guardrailVerdict: verdict,
+    ...(match === undefined ? {} : { guardrailPolicyId: match.ruleId }),
+  });
+}
 
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -265,9 +298,16 @@ export function guardrails(
     const requestMatch = await engine.matchGuardrail("request", context);
     if (requestMatch !== null) {
       await auditBlock(options.audit, context, requestMatch, "request");
+      recordGuardrailVerdict(c, "blocked", requestMatch);
       // Any match — deny OR redact — refuses. See the module doc.
       return guardrailBlockedResponse(requestMatch, requestId);
     }
+    // Screening RAN and passed. The request log distinguishes this from
+    // `not_screened` (#664): the early `return next()` paths above — an
+    // operation no policy binds, a body that could not be parsed — leave the
+    // verdict unset, and recording those as "allowed" would tell an auditor a
+    // control ran when none did.
+    recordGuardrailVerdict(c, "allowed");
 
     // A `reject_streaming` policy denies a streaming request before dispatch;
     // `matchGuardrail` above already produced that verdict, so by here the plan
@@ -335,6 +375,9 @@ export function guardrails(
           onOutcome: (outcome) => {
             if (outcome.kind === "blocked") {
               void auditBlock(options.audit, context, outcome.match, "response.stream");
+              // Mid-stream block. The request log is written when the body
+              // settles (`requestlog/middleware.ts`), so this lands in time.
+              recordGuardrailVerdict(c, "blocked", outcome.match);
             }
           },
         }),
@@ -364,6 +407,7 @@ export function guardrails(
     }
     if (responseMatch.effect === "deny") {
       await auditBlock(options.audit, responseContext, responseMatch, "response");
+      recordGuardrailVerdict(c, "blocked", responseMatch);
       c.res = guardrailBlockedResponse(responseMatch, requestId);
       return;
     }
