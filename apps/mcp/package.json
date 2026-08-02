@@ -19,5 +19,8 @@
     "@ferrogate/storage": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "agents": "^0.0.109"
+  },
+  "devDependencies": {
+    "@cfworker/json-schema": "4.1.1"
   }
 }
