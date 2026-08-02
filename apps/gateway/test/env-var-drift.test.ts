@@ -433,7 +433,13 @@ describe("the env-var drift gate itself", () => {
     // collision this comment block keeps warning about: the merged figure is
     // neither parent's. Re-derived with the same grep against the MERGED file
     // (⇒ 60), not by adding the two increments together.
-    expect(DECLARED.vars.size).toBe(60);
+    //
+    // #692 committed `GATEWAY_ONLINE_EVAL_POLICIES` ("[]"), the
+    // no-control-database fallback for the per-tenant online-evaluation OPT-IN,
+    // so 61. Re-derived with the same grep against the committed file
+    // (`grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml` ⇒ 61) rather
+    // than by adding one to the line above.
+    expect(DECLARED.vars.size).toBe(61);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -666,7 +672,8 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // the `DECLARED.vars.size` pin above.
     // #681: 57 -> 59 (`GATEWAY_RESIDENCY_POLICIES`, `GATEWAY_LOG_REGION`);
     // #737: + `GATEWAY_SITES`. Counted off the merged file, not summed.
-    expect(rows.length).toBe(60);
+    // #692: + `GATEWAY_ONLINE_EVAL_POLICIES`, 60 -> 61.
+    expect(rows.length).toBe(61);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -736,8 +743,15 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // binding would publish a site `test/sites/*` never asked for and could
     // make an anonymous read pass for a reason no test stated; those suites
     // pass their own bindings to `siteRouteModule` in their own isolate.
+    //
+    // #692: + `GATEWAY_ONLINE_EVAL_POLICIES` ("[]"), observable and INERT for
+    // the third time in the same pattern — an empty policy table means no
+    // tenant opted into having its traffic evaluated, which is the pre-#692
+    // posture and the only safe default for a control that copies prompts to a
+    // judge. `test/evals/*` supply their own policies to the middleware they
+    // drive, so the committed blank cannot shadow them.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(55);
+    expect(observable.length).toBe(56);
     expect(rows.length - observable.length).toBe(5);
   });
 });

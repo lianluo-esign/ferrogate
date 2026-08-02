@@ -13,7 +13,7 @@
  *
  * This module is the vocabulary; `./emit.ts` is the send.
  */
-import type { GenAiInvocation } from "@ferrogate/observability";
+import type { GenAiInvocation, OtlpGaugePoint } from "@ferrogate/observability";
 
 /**
  * The service binding shape — `apps/telemetry`'s Worker, reachable without
@@ -156,4 +156,15 @@ export interface TelemetryEmitter {
   /** Identifies the transport in a test assertion (`service` | `https` | `none`). */
   readonly transport: "service" | "https" | "none";
   emit(telemetry: RequestTelemetry): Promise<void>;
+  /**
+   * Emit measurements whose SERIES IS DATA — an online-evaluation score is
+   * named by a tenant's own criterion id (#692), so it cannot be a field on
+   * `GatewayMetricsSnapshot` and cannot travel through {@link emit}.
+   *
+   * Same transport, same collector, same authorization: `apps/telemetry` turns
+   * each gauge point into one Analytics Engine data point generically, which is
+   * why no change is needed there. Never rejects, for the reason every other
+   * telemetry path here gives — a metrics outage is not a caller's problem.
+   */
+  emitGauges(points: readonly OtlpGaugePoint[]): Promise<void>;
 }

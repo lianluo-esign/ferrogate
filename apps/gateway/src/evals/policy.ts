@@ -231,15 +231,17 @@ export function parseOnlineEvalPolicyRow(row: OnlineEvalPolicyRow): ParsedOnline
   }
 
   const unitRaw = row.samplingUnit;
-  const samplingUnit: OnlineEvalSamplingUnit =
-    unitRaw === undefined || unitRaw === null || unitRaw === ""
-      ? "request"
-      : unitRaw === "request" || unitRaw === "conversation"
-        ? unitRaw
-        : "invalid";
-  if (samplingUnit === ("invalid" as OnlineEvalSamplingUnit)) {
-    return { ok: false, detail: `sampling unit must be 'request' or 'conversation'` };
+  const unitAbsent = unitRaw === undefined || unitRaw === null || unitRaw === "";
+  if (!unitAbsent && unitRaw !== "request" && unitRaw !== "conversation") {
+    return { ok: false, detail: "sampling unit must be 'request' or 'conversation'" };
   }
+  // Absent reads as `request`, the unit every deployment without a multi-turn
+  // client wants; an unrecognised spelling is refused above rather than
+  // defaulted, because silently sampling per request under a policy that asked
+  // for conversations produces a series nobody can interpret.
+  const samplingUnit: OnlineEvalSamplingUnit = unitAbsent
+    ? "request"
+    : (unitRaw as OnlineEvalSamplingUnit);
 
   const judgeModel = row.judgeModel;
   if (typeof judgeModel !== "string" || judgeModel.trim() === "") {
@@ -286,6 +288,38 @@ export type OnlineEvalSkipReason =
   | "zero_data_retention"
   | "no_conversation_key"
   | "not_in_sample";
+
+/**
+ * The PRE-`next()` half of the decision: may this request's body be captured at
+ * all?
+ *
+ * ## Why the decision is split in two, and why this half is the authoritative
+ * one whenever it can be
+ *
+ * A request body can only be cloned BEFORE the inner app reads it, i.e. before
+ * `next()`. So something has to be decided there, and the temptation is to make
+ * this a cheap "probably" and take the real decision afterwards. That would be
+ * a subtle and serious bug: two independent bucket draws over two different keys
+ * (the outer request id here, the response's `x-request-id` later) both at rate
+ * `r` produce an effective rate of `r²` — a policy asking for 10% would sample
+ * 1% and nothing would say so.
+ *
+ * So the bucket is drawn EXACTLY ONCE per request, and this is where it happens
+ * whenever the key is already known: for the `request` unit (the outer request
+ * id is available) and for the `conversation` unit when the request carries a
+ * conversation header. The only provisional case is a conversation-unit request
+ * whose key is contributed later by an inner slice (the agent run id); there
+ * this returns `capture: true` with NO bucket drawn, and
+ * {@link onlineEvalSamplingDecision} draws the one and only bucket in the
+ * deferred half.
+ */
+export type OnlineEvalCapturePlan =
+  | {
+      readonly capture: true;
+      /** Set when the bucket was drawn here; the deferred half must not redraw. */
+      readonly decision?: OnlineEvalSamplingDecision | undefined;
+    }
+  | { readonly capture: false; readonly reason: OnlineEvalSkipReason };
 
 export type OnlineEvalSamplingDecision =
   | {
@@ -355,4 +389,35 @@ export function onlineEvalSamplingDecision(
   }
 
   return { sampled: true, samplingKey: key, rate: policy.sampleRate, unit: policy.samplingUnit };
+}
+
+/**
+ * The pre-`next()` gate. See {@link OnlineEvalCapturePlan} for why it exists and
+ * why it draws the bucket itself when it can.
+ *
+ * Every gate that does NOT depend on a key is applied here, so an unenrolled
+ * tenant — the overwhelming majority of traffic — costs one map lookup and no
+ * clone at all.
+ */
+export function onlineEvalCapturePlan(input: OnlineEvalSamplingInput): OnlineEvalCapturePlan {
+  const { policy, residency } = input;
+  if (policy === null || !policy.enabled) return { capture: false, reason: "not_opted_in" };
+  if (residency?.requireZeroDataRetention === true) {
+    return { capture: false, reason: "zero_data_retention" };
+  }
+  if (policy.criteria.length === 0) return { capture: false, reason: "no_criteria" };
+  if (policy.sampleRate <= 0) return { capture: false, reason: "not_in_sample" };
+
+  const keyKnown =
+    policy.samplingUnit === "conversation"
+      ? (input.conversationKey ?? "") !== ""
+      : (input.requestId ?? "") !== "";
+  if (!keyKnown) {
+    // Conversation unit, key not yet contributed. Capture provisionally and let
+    // the deferred half draw the single bucket — see the type's docs.
+    return { capture: true };
+  }
+
+  const decision = onlineEvalSamplingDecision(input);
+  return decision.sampled ? { capture: true, decision } : { capture: false, reason: decision.reason };
 }

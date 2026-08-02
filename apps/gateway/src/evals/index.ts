@@ -111,4 +111,109 @@ export type {
   ParsedOnlineEvalPolicy,
 } from "./policy.js";
 
+export { onlineEvalCapturePlan } from "./policy.js";
+export type { OnlineEvalCapturePlan } from "./policy.js";
+
 export { ONLINE_EVAL_SAMPLING_SALT, fnv1a32, sampleBucket } from "./sampling.js";
+
+export {
+  MAX_CAPTURED_CHARS,
+  captureHead,
+  captureTail,
+  completionTextFrom,
+  flattenContent,
+  promptTranscriptFrom,
+} from "./content.js";
+export type { CapturedText } from "./content.js";
+
+export {
+  DEFAULT_ONLINE_EVAL_TTL_MS,
+  NO_ONLINE_EVAL_POLICIES,
+  SELECT_TENANT_ONLINE_EVAL_POLICY,
+  cachedOnlineEvalPolicySource,
+  d1OnlineEvalPolicySource,
+  onlineEvalPolicySourceFromEnv,
+  onlineEvalPolicySourceFromVars,
+} from "./source.js";
+export type {
+  OnlineEvalBindings,
+  OnlineEvalDatabase,
+  OnlineEvalPolicySource,
+  OnlineEvalResolution,
+} from "./source.js";
+
+export {
+  ONLINE_EVAL_SAMPLE_OBJECT,
+  onlineEvalSampleFromWire,
+  onlineEvalSampleToWire,
+} from "./record.js";
+export type {
+  OnlineEvalSample,
+  OnlineEvalSampleWire,
+  OnlineEvalScoreRecord,
+} from "./record.js";
+
+export { OnlineEvalSink, createOnlineEvalSink, onlineEvalQueueFrom } from "./sink.js";
+export type {
+  OnlineEvalQueue,
+  OnlineEvalSinkOptions,
+  OnlineEvalStats,
+} from "./sink.js";
+
+export {
+  CONVERSATION_HEADER,
+  ONLINE_EVAL_OPERATION_IDS,
+  onlineEvalSampleFrom,
+  onlineEvaluation,
+} from "./middleware.js";
+export type { OnlineEvalMiddlewareOptions } from "./middleware.js";
+
+export {
+  JUDGE_SYSTEM_PROMPT,
+  MAX_RATIONALE_CHARS,
+  buildJudgeRequestBody,
+  parseJudgeVerdict,
+} from "./judge.js";
+export type { JudgeScore, JudgeVerdict } from "./judge.js";
+
+export {
+  ONLINE_EVAL_REGRESSION_CLAIM_SQL,
+  ONLINE_EVAL_REGRESSION_TABLE,
+  ONLINE_EVAL_SCORE_TABLE,
+  ONLINE_EVAL_SCORE_UPSERT_SQL,
+  ONLINE_EVAL_WINDOW_AGGREGATE_SQL,
+  onlineEvalDatabaseFrom,
+  onlineEvalScoreBindings,
+  writeOnlineEvalScores,
+} from "./d1.js";
+export type { OnlineEvalScoreDatabase } from "./d1.js";
+
+export { consumeOnlineEvalBatch } from "./consumer.js";
+export type {
+  OnlineEvalConsumeResult,
+  OnlineEvalConsumerDeps,
+  OnlineEvalMessageBatch,
+} from "./consumer.js";
+
+export {
+  ONLINE_EVAL_REGRESSION_METRIC,
+  ONLINE_EVAL_SCORE_METRIC,
+  onlineEvalScorePoints,
+  publishOnlineEvalScorePoints,
+} from "./metrics.js";
+
+export {
+  BASELINE_WINDOW_SECONDS,
+  ONLINE_EVAL_ACTIVE_TENANTS_SQL,
+  RECENT_WINDOW_SECONDS,
+  detectOnlineEvalRegressions,
+  sweepAllOnlineEvalRegressions,
+  onlineEvalWindowAggregates,
+  regressionClaimKey,
+  sweepOnlineEvalRegressions,
+} from "./regression.js";
+export type {
+  OnlineEvalRegression,
+  OnlineEvalSweepResult,
+  OnlineEvalWindowAggregate,
+} from "./regression.js";
