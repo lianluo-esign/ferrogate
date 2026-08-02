@@ -1713,6 +1713,202 @@
         }
       }
     },
+    "/admin/v1/provider-credentials": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listProviderCredentials",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List this tenant's BYOK provider credentials, redacted.",
+        "description": "Every alias the calling tenant owns, live and revoked. A platform-operator credential is refused with 403 rather than defaulting to some tenant.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Redacted provider credential listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProviderCredentialList"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/admin/v1/provider-credentials/{alias}": {
+      "parameters": [
+        {
+          "name": "alias",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z0-9._-]{1,64}$"
+          },
+          "description": "BYOK alias, held to the same grammar the `byok://` reference parser enforces (lowercase alphanumerics plus . _ -, no path separators, 1-64 characters). A segment outside it is 400 `invalid_request_body`, never a lookup."
+        },
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "put": {
+        "operationId": "putProviderCredential",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Register or rotate the BYOK credential behind one alias.",
+        "description": "Idempotent by alias: the first call registers, every later call rotates in a single request. The response never contains the submitted key.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminProviderCredentialMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored credential metadata, read back after sealing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProviderCredentialMutationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "revokeProviderCredential",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Revoke the BYOK credential behind one alias.",
+        "description": "Marks the alias revoked. An alias this tenant does not own answers the same 404 as one that never existed, so it is not a cross-tenant oracle.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Revocation acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProviderCredentialRevokeResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/admin/v1/self-hosted-workers/{id}/heartbeat": {
       "parameters": [
         {
@@ -6734,6 +6930,213 @@
             "scope": "admin.write"
           },
           "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/prompt-templates/{id}/labels": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PromptTemplateId"
+        },
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listAdminPromptTemplateLabels",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List every deployment label on one prompt template.",
+        "description": "Read from the document store, not from KV: a KV prefix scan is eventually consistent and would show an operator a stale view of a change they just made.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Deployment labels on this template, sorted by label.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPromptTemplateLabelList"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/prompt-templates/{id}/labels/{label}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PromptTemplateId"
+        },
+        {
+          "name": "label",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Deployment label name, URL-decoded and normalized before use. An illegal name is 400 `invalid_prompt_label` — an operator who typed `Production!` needs to be told the name is illegal, not sent looking for a missing resource."
+        },
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "put": {
+        "operationId": "putAdminPromptTemplateLabel",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Point a deployment label at a prompt template revision.",
+        "description": "Upsert. This is the call that replaces a deploy. The admin document is written first and the gateway's KV pointer second, so a crash between the legs leaves traffic on the previous revision and the next PUT heals it.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminPromptTemplateLabelMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored label record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPromptTemplateLabelMutationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminPromptTemplateLabel",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Retire a deployment label.",
+        "description": "Pointer first, document second — the mirror of the PUT ordering: a crash between the legs leaves a recorded label that no longer resolves at the edge, which fails loudly on the next request that names it.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Label retirement acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePromptTemplateLabelResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
         }
       }
     },
@@ -12017,6 +12420,388 @@
             }
           }
         ]
+      }
+    },
+    "/admin/v1/semantic-cache-policies": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listSemanticCachePolicies",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List semantic cache policies.",
+        "description": "The generic admin list envelope: `total`/`offset`/`limit` are present only when the request carried a query string.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Semantic cache policy listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSemanticCachePolicyList"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSemanticCachePolicy",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a semantic cache policy for one scope.",
+        "description": "`scope_type` and `scope_id` are required in the body and form the policy id. Re-creating an existing scope is 409.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSemanticCachePolicyMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSemanticCachePolicyMutationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}": {
+      "parameters": [
+        {
+          "name": "scope_type",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "tenant"
+            ]
+          },
+          "description": "Scope kind. `tenant` is the only kind accepted today; anything else answers 404, like a route miss."
+        },
+        {
+          "name": "scope_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Scope identifier. Resolved to its owning tenant before a tenant-scoped caller may touch it; resolution failure denies."
+        },
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "getSemanticCachePolicy",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get the semantic cache policy governing one scope.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The stored policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSemanticCachePolicyMutationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceSemanticCachePolicy",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace the semantic cache policy governing one scope.",
+        "description": "States the WHOLE governed policy: a field omitted from the body returns to inheriting the deployment value. There is no PATCH on this family for exactly that reason.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSemanticCachePolicyMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSemanticCachePolicyMutationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSemanticCachePolicy",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete the semantic cache policy governing one scope.",
+        "description": "Removes the admin document and the typed enforcement row the gateway reads; leaving the second behind would keep applying a policy no console shows.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Deletion acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSemanticCachePolicyResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}/invalidate": {
+      "parameters": [
+        {
+          "name": "scope_type",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "tenant"
+            ]
+          },
+          "description": "Scope kind. `tenant` is the only kind accepted today; anything else answers 404, like a route miss."
+        },
+        {
+          "name": "scope_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Scope identifier. Resolved to its owning tenant before a tenant-scoped caller may touch it; resolution failure denies."
+        },
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "invalidateSemanticCachePolicy",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Purge everything the semantic cache holds for one scope.",
+        "description": "Bumps the scope's invalidation epoch, which every cache key is derived from. Takes no request body. Unlike the write legs, this one REFUSES with 503 when the control database is unbound: a purge that cannot reach the typed row has not happened, and reporting 200 would tell an operator that bodies they are trying to stop serving are gone.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The invalidation epoch now in force.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSemanticCacheInvalidationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
       }
     },
     "/admin/v1/plans": {
@@ -21714,6 +22499,169 @@
       "AdminProviderModelCatalogList": {
         "$ref": "#/components/schemas/AdminList_AdminProviderModelCatalog"
       },
+      "AdminProviderCredentialSummary": {
+        "description": "One registered BYOK provider credential, REDACTED. Derived from `TenantProviderCredentialSummary` in `packages/storage/src/d1/provider-credential-d1.ts`, which is the type the list handler is handed: it has no `iv` and no `ciphertext` field at all, so this API cannot serve the sealed material even by accident. `last4` is the only part of the credential any response carries, and it is the empty string for credentials shorter than eight characters (for a six-character value \"the last four\" is most of it). The field names are camelCase here because the store's summary object is serialized directly; the PUT response, built by hand in the handler, uses snake_case for the same values.",
+        "type": "object",
+        "required": [
+          "alias",
+          "provider",
+          "last4",
+          "keyVersion",
+          "createdAtUnix",
+          "rotatedAtUnix"
+        ],
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "Tenant-chosen name the `byok://` reference resolves through."
+          },
+          "provider": {
+            "type": "string",
+            "description": "`[[providers]].name` this credential authenticates against."
+          },
+          "last4": {
+            "type": "string",
+            "description": "Last four characters of the credential, or \"\" when it was shorter than eight."
+          },
+          "keyVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Fleet keyring version the credential was sealed under."
+          },
+          "createdAtUnix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rotatedAtUnix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last successful PUT under this alias; equals createdAtUnix until the first rotation."
+          },
+          "revokedAtUnix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Omitted entirely while the alias is live; set once DELETE has revoked it. Revoked aliases stay in the listing."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProviderCredentialList": {
+        "description": "The un-paginated `{ object: \"list\", data }` envelope; this listing takes no pagination query.",
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminProviderCredentialSummary"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProviderCredentialMutation": {
+        "description": "Register or rotate one alias. `PUT` is idempotent-by-key: the first call registers, every later call rotates, so there is no `POST` and no create/update split a client could guess wrong. The tenant is taken from the CALLER's scope and is deliberately neither a body field nor a path segment.",
+        "type": "object",
+        "required": [
+          "provider",
+          "value"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "description": "`[[providers]].name` this credential authenticates against. Required with no default: a guessed provider could present the key to an upstream the tenant never negotiated with."
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The provider API key. Sealed with the fleet keyring before it reaches storage and never returned by any operation on this API — deliberately carries no example.",
+            "format": "password",
+            "writeOnly": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProviderCredentialMutationResponse": {
+        "description": "Read back from the store rather than echoed from the request, so it structurally cannot carry the key the caller just sent. Note the snake_case field names: this object is assembled in the handler, unlike the camelCase list rows.",
+        "type": "object",
+        "required": [
+          "object",
+          "alias",
+          "provider",
+          "last4",
+          "key_version",
+          "created_at_unix",
+          "rotated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "provider_credential"
+          },
+          "alias": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "last4": {
+            "type": "string"
+          },
+          "key_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Preserved across a rotation. `null` only if the row could not be read back after the write."
+          },
+          "rotated_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProviderCredentialRevokeResponse": {
+        "description": "Keyed by `alias`, not by `id` — this surface has no opaque record id, so it is not the shared `DeleteResponse` shape.",
+        "type": "object",
+        "required": [
+          "object",
+          "alias",
+          "deleted"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "provider_credential"
+          },
+          "alias": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "additionalProperties": false
+      },
       "ObservabilityStatusList": {
         "$ref": "#/components/schemas/AdminList_ObservabilityStatus"
       },
@@ -24526,6 +25474,122 @@
       },
       "AdminPromptTemplateList": {
         "$ref": "#/components/schemas/AdminList_AdminPromptTemplate"
+      },
+      "AdminPromptTemplateLabel": {
+        "description": "A deployment label: a mutable name pointing at one prompt template revision. Stored twice on purpose — as this admin document (listable, tenant-fenced) and as the KV pointer the gateway reads on the inference hot path. `tenant_id` is taken from the TEMPLATE, not from the caller, so a platform operator acting on a tenant's template writes into that tenant's key space.",
+        "type": "object",
+        "required": [
+          "id",
+          "template_id",
+          "label",
+          "revision",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Store id, `{template_id}::{label}`."
+          },
+          "template_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "Normalized label name. A segment outside the label grammar is 400 `invalid_prompt_label`, not 404."
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Template revision this label points at. Existence is NOT validated here; the gateway refuses an unresolvable pointer with 404 `prompt_template_version_not_found`."
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Authenticated subject that last moved the label, or null."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPromptTemplateLabelList": {
+        "description": "The un-paginated `{ object: \"list\", data }` envelope, sorted by label. The handler forces the template filter and ignores pagination, so `total`/`offset`/`limit` are never sent.",
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminPromptTemplateLabel"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPromptTemplateLabelMutation": {
+        "description": "The whole body: a label carries exactly one field.",
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Template revision the label should point at. Must be a whole number, 1 or greater."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPromptTemplateLabelMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "prompt_template_label"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "prompt_template_label"
+          },
+          "prompt_template_label": {
+            "$ref": "#/components/schemas/AdminPromptTemplateLabel"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeletePromptTemplateLabelResponse": {
+        "description": "`id` carries the LABEL name here, not the `{template_id}::{label}` store id.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "prompt_template_label"
+              }
+            }
+          }
+        ]
       },
       "AdminList_AdminPromptTemplate": {
         "type": "object",
@@ -29958,6 +31022,272 @@
           "object",
           "policy"
         ]
+      },
+      "AdminSemanticCachePolicy": {
+        "description": "The stored response-cache policy document. Every governed column is a TRI-STATE: `null` means \"inherit the deployment value\", which is why this family has `PUT` and deliberately no `PATCH` — a JSON merge patch cannot express \"set this field back to inherit\". The document schema derives from `adminRecordSchema.extend(...)` in `apps/control-plane/src/routes/admin_semantic_cache.ts`, which is a Zod `passthrough()`, so operator fields beyond those named here are accepted and stored rather than silently dropped.",
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "`{scope_type}:{scope_id}` — the composite key flattened to the store's string id."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Owning tenant, stamped by the store from the caller's scope; never taken from the body for a tenant-scoped caller."
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "tenant"
+            ],
+            "description": "Scope kind this policy governs. `tenant` is the only kind today; an unknown kind names no resource and answers 404."
+          },
+          "scope_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tri-state. `null` means \"inherit the deployment value\", which is a different thing from `false`."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "exact_match",
+              "semantic",
+              null
+            ],
+            "description": "Tri-state; `null` inherits the deployment value."
+          },
+          "similarity_threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "description": "Semantic-mode match floor, in (0, 1]. Tri-state; `null` inherits."
+          },
+          "ttl_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1,
+            "description": "Cached-entry lifetime. Tri-state; `null` inherits."
+          },
+          "scoped_models": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Narrow caching to these models. Tri-state; `null` inherits."
+          }
+        },
+        "additionalProperties": true
+      },
+      "AdminSemanticCachePolicyMutation": {
+        "description": "`POST` requires `scope_type` and `scope_id` in the body (they identify the policy being created). On `PUT` they come from the path and any body copy is overwritten by it. `PUT` states the WHOLE governed policy: an omitted field returns to inherit.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "tenant"
+            ],
+            "description": "Scope kind this policy governs. `tenant` is the only kind today; an unknown kind names no resource and answers 404."
+          },
+          "scope_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tri-state. `null` means \"inherit the deployment value\", which is a different thing from `false`."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "exact_match",
+              "semantic",
+              null
+            ],
+            "description": "Tri-state; `null` inherits the deployment value."
+          },
+          "similarity_threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "description": "Semantic-mode match floor, in (0, 1]. Tri-state; `null` inherits."
+          },
+          "ttl_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1,
+            "description": "Cached-entry lifetime. Tri-state; `null` inherits."
+          },
+          "scoped_models": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Narrow caching to these models. Tri-state; `null` inherits."
+          }
+        },
+        "additionalProperties": true
+      },
+      "AdminSemanticCachePolicyList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSemanticCachePolicy"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSemanticCachePolicyMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "semantic_cache_policy"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "semantic_cache_policy"
+          },
+          "semantic_cache_policy": {
+            "$ref": "#/components/schemas/AdminSemanticCachePolicy"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteSemanticCachePolicyResponse": {
+        "description": "`id` is the `{scope_type}:{scope_id}` composite key.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "semantic_cache_policy"
+              }
+            }
+          }
+        ]
+      },
+      "AdminSemanticCacheInvalidationResponse": {
+        "description": "The epoch now in force. Every cache key is a function of it, so a bumped epoch IS the purge — this is the number an operator correlates with the misses they expect.",
+        "type": "object",
+        "required": [
+          "object",
+          "scope_type",
+          "scope_id",
+          "invalidation_epoch"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "semantic_cache_invalidation"
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "tenant"
+            ]
+          },
+          "scope_id": {
+            "type": "string"
+          },
+          "invalidation_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Monotonic; never moved by an ordinary edit."
+          }
+        },
+        "additionalProperties": false
       },
       "AdminPlan": {
         "type": "object",
