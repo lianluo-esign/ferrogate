@@ -392,6 +392,52 @@ describe("ferrogate apply is diffable and dry-runnable", () => {
     expect(out).toContain("update quota-policies/tenant:acme");
     expect(out).toContain("rpm_limit: 60 -> 600");
   });
+
+  test("--output json emits the machine-readable plan plus one attested receipt per write", async () => {
+    const client = createStatefulControlPlane();
+    const runtime = runtimeWith({ "/desired.json": QUOTA_ONLY }, client);
+
+    expect(await main(ARGV("/desired.json", "--dry-run", "--output", "json"), runtime)).toBe(0);
+
+    const document = JSON.parse(runtime.stdout()) as {
+      object: string;
+      dry_run: boolean;
+      summary: Record<string, number>;
+      plan: { action: string; kind: string; id: string; fields: unknown[] }[];
+      receipts: { object: string; dry_run: boolean; outcome: string; verb: string }[];
+    };
+    expect(document.object).toBe("apply_result");
+    expect(document.dry_run).toBe(true);
+    expect(document.summary.create).toBe(1);
+    expect(document.plan[0]).toMatchObject({
+      action: "create",
+      kind: "quota-policies",
+      id: "tenant:acme",
+    });
+    // The #505 mutation receipt, unchanged: apply reuses `MutationPlan` rather
+    // than inventing a second, unattested write path.
+    expect(document.receipts).toHaveLength(1);
+    expect(document.receipts[0]).toMatchObject({
+      object: "mutation_receipt",
+      dry_run: true,
+      outcome: "not_sent",
+      verb: "create",
+    });
+  });
+
+  test("an applied write attests the real HTTP outcome in its receipt", async () => {
+    const client = createStatefulControlPlane();
+    const runtime = runtimeWith({ "/desired.json": QUOTA_ONLY }, client);
+
+    expect(await main(ARGV("/desired.json", "--output", "json"), runtime)).toBe(0);
+
+    const document = JSON.parse(runtime.stdout()) as {
+      receipts: { dry_run: boolean; outcome: string; http_status: { value?: number } }[];
+    };
+    expect(document.receipts[0]?.dry_run).toBe(false);
+    expect(document.receipts[0]?.outcome).toBe("applied");
+    expect(document.receipts[0]?.http_status.value).toBe(201);
+  });
 });
 
 describe("ferrogate apply never deletes silently", () => {
