@@ -11,17 +11,27 @@
  * |---|---|---|
  * | where the hostname lives | a zone **in our account** | the **tenant's own** zone |
  * | who controls the DNS | we do | the tenant does, with a CNAME to our fallback origin |
- * | certificate | the zone's, managed | one **per hostname**, with its own DCV |
- * | per-hostname status | none — a zone-level cert says nothing about one name | `status` + `ssl.status` on a row keyed by hostname |
+ * | certificate | an Advanced Certificate on our zone, per target hostname | one **per hostname**, with its own DCV |
+ * | per-hostname status | reachable: the domain row carries `cert_id`, then a second call to the certificate API | `status` + `ssl.status` on the row we already fetched |
  * | scale | one route per Worker per zone | a hostname TABLE on one zone |
  *
- * FerroGate is multi-tenant and a tenant keeps its own DNS: `acme.com` is not,
- * and must not become, a zone in our account. Workers Custom Domains would
- * require every customer to hand us their zone, and — the part that decides it
- * for this issue — a zone-level certificate exposes **no per-hostname state**,
- * so `GET /admin/v1/site-domains/{hostname}` would have nothing to report.
- * Custom hostnames are the product built for exactly this shape, and the row
- * they create is the thing the issue's certificate bullet is asking for.
+ * **What decides it is zone ownership, and that alone is enough.** FerroGate is
+ * multi-tenant and a tenant keeps its own DNS: `acme.com` is not, and must not
+ * become, a zone in our account, and you cannot create a Workers Custom Domain
+ * on a zone you do not own. Every customer would have to hand us their zone.
+ * That is the whole argument; Cloudflare for SaaS is the product built for this
+ * shape, and the row it creates is the thing the issue's certificate bullet is
+ * asking for.
+ *
+ * Stated precisely so nobody re-litigates this on a false premise: Workers
+ * Custom Domains are NOT status-blind. Creating one "will also generate an
+ * Advanced Certificate on your target zone for your target hostname", and
+ * `GET /accounts/{account_id}/workers/domains/{domain_id}` returns a `cert_id`
+ * — "ID of the TLS certificate issued for the domain". Per-hostname certificate
+ * state exists there and is addressable; it costs a second call to a different
+ * certificate API, **on a zone we would have to own**. So the endpoint could be
+ * fed either way. It is the ownership constraint that rules the product out,
+ * not a missing field.
  *
  * **What it costs, stated plainly.** Cloudflare for SaaS is a paid entitlement
  * billed per active custom hostname; it needs a dedicated fallback-origin zone

@@ -442,8 +442,11 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
-    // Not vacuous: two entries today.
-    expect(DOCUMENTED_BUT_UNDECLARED.length).toBeGreaterThan(0);
+    // Not vacuous: SIX entries today, counted off the table above — it was two
+    // before #738 added the four `SITE_DOMAIN_*` knobs, and the stale "two" is
+    // the kind of drift this whole file exists to catch, so it does not get to
+    // live here.
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(6);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name), `${name} is read but no longer documented`).toBe(true);
     }

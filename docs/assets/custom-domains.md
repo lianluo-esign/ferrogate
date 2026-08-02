@@ -168,16 +168,23 @@ FerroGate picked one:
 |---|---|---|
 | where the hostname lives | a zone in **your** account | the **tenant's** zone |
 | who controls the DNS | you do | the tenant, CNAMEd at your fallback origin |
-| certificate | the zone's, managed | **one per hostname**, with its own DCV |
-| per-hostname status | none | `status` + `ssl.status` on a hostname-keyed row |
+| certificate | an Advanced Certificate on **your** zone, for the target hostname | **one per hostname**, with its own DCV |
+| per-hostname status | reachable — the domain row carries `cert_id`, then a second call to the certificate API | `status` + `ssl.status` on the row already fetched |
 
 **Custom hostnames, and here is why.** FerroGate is multi-tenant and a tenant
 keeps its own DNS — `acme.com` is not, and must not become, a zone in our
-account. Workers Custom Domains would require every customer to hand us their
-zone. And the part that decides it for this feature: a zone-level certificate
-publishes **no per-hostname state**, so `GET /admin/v1/site-domains/{hostname}`
-would have nothing to report. The `custom_hostnames` row is exactly the thing
-the certificate field is asking for.
+account. **You cannot create a Workers Custom Domain on a zone you do not own**,
+so it would require every customer to hand us their zone. That argument decides
+it on its own, and it is the only one this choice rests on.
+
+Not the reason, stated so nobody re-opens this on a false premise: Workers
+Custom Domains are *not* status-blind. Creating one also generates an Advanced
+Certificate on the target zone for the target hostname, and
+`GET /accounts/{account_id}/workers/domains/{domain_id}` returns a `cert_id`
+("ID of the TLS certificate issued for the domain"). Per-hostname certificate
+state exists there and could feed this endpoint — at the price of a second call
+to a different certificate API, on a zone we would have to own. The
+`custom_hostnames` row simply carries it in the answer we already have.
 
 **What it costs.** Cloudflare for SaaS is a paid entitlement billed per active
 custom hostname. It needs a dedicated fallback-origin zone in your account, a

@@ -119,8 +119,10 @@ compatibility_flags = ["nodejs_compat"]
 # PRODUCT: Cloudflare for SaaS CUSTOM HOSTNAMES
 # (`/zones/{zone_id}/custom_hostnames`), not Workers Custom Domains. A Workers
 # Custom Domain needs the hostname on a zone in THIS account — i.e. every
-# customer hands us their zone — and its certificate is the zone's, so it
-# publishes no per-hostname state for this endpoint to report. See
+# customer hands us their zone — and FerroGate's tenants keep their own DNS, so
+# it is inapplicable. That is the whole reason. (Its per-hostname certificate
+# state IS readable — the domain row carries a `cert_id` — but it takes a second
+# call to a different certificate API, on a zone we would have to own.) See
 # `packages/cloudflare/src/custom-hostnames.ts` for the full comparison and what
 # the choice costs (a paid entitlement, billed per active custom hostname).
 #
