@@ -1171,6 +1171,39 @@ describe("§4 fleet-wide ratchets", () => {
       // registered as `admission`, and this table is only ever reached for a
       // request the caller has already been fenced onto.
       "billing_events",
+      // #692 — the judge scores from online evaluation, newly SHARED because
+      // #693's experiment report READS them from the control plane (the gateway
+      // queue consumer writes them). Classified exactly like `request_logs` and
+      // the guardrail evidence above and for the same reason: a score records
+      // what a JUDGE ANSWERED after the fact, and nothing consults it before
+      // deciding anything. `evals/policy.ts` is emphatic that it is not a
+      // safety or compliance control — guardrails are the control that decides,
+      // this is a measurement taken on a sample.
+      //
+      // The CONTROL nearby is the per-tenant OPT-IN, which lives on
+      // `quota_policies` and is a different table.
+      //
+      // Answering this ratchet's question explicitly — "does a change to it
+      // apply to both Workers?" — yes, and the schema enforces it rather than a
+      // registry entry: both Workers name the columns of
+      // `sql/d1-ts/control/0009_online_eval.sql` +
+      // `0010_experiment_outcomes.sql`, both suites apply the deployed
+      // migrations rather than a fixture, and a column rename breaks
+      // `apps/gateway/test/experiments/scored-arms.test.ts` and
+      // `apps/control-plane/test/experiment-report.test.ts` together.
+      //
+      // The tenant FENCE is not shared: only the control plane serves the read,
+      // and `experiment-report.test.ts` proves it. A second reading Worker
+      // makes that fence a fleet property and moves this into CONTROLS.
+      "online_eval_scores",
+      // #693 — the SHADOW arm's evidence, on identical terms: written by
+      // `apps/gateway/src/experiments/`, read by
+      // `apps/control-plane/src/routes/admin_experiment.ts`, and a record of
+      // what a mirrored dispatch DID rather than a decision anything consults.
+      // A mirror is by construction unable to influence a client's response
+      // (`inference/shadow.ts` lists the five mechanisms), so a row describing
+      // one cannot be a control over anything.
+      "experiment_shadow_legs",
       // Money the admission ladder reads; the CONTROL is the ladder, which is
       // registered as `admission`.
       "wallets",

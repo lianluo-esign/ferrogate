@@ -407,6 +407,7 @@ const AGENT_COST_BURN = new ResourceApi("/admin/v1/agent-cost-burn");
 const PAYMENT_ATTEMPTS = new ResourceApi("/admin/v1/payment-attempts");
 
 const REQUEST_LOGS = new ResourceApi("/admin/v1/request-logs");
+const EXPERIMENTS = new ResourceApi("/admin/v1/experiments");
 const REQUEST_LOG_EXPORTS = new ResourceApi("/admin/v1/request-log-exports");
 const AUDIT_EVENTS = new ResourceApi("/admin/v1/audit-events");
 const OBSERVED_AGENT_ACTIVITY = new ResourceApi("/admin/v1/observed-agent-activity");
@@ -1430,6 +1431,31 @@ export const GROUPS: readonly GroupDescriptor[] = [
     about: "List retained Admin API audit events",
     verbs: [read("list", "List audit events", "listAdminAuditEvents")],
     build: (verb, input) => buildCrud(AUDIT_EVENTS, verb, input),
+  },
+  {
+    // #693 — canary/shadow outcome metrics. Both verbs go through
+    // `EXPERIMENTS.read` rather than `buildCrud`, because `get` must carry the
+    // query string: `--filter variant=canary`, `--filter min_samples=100` and
+    // `--filter since=…` are what select the comparison, and `buildCrud`'s
+    // `get` leg drops the query. A verb that silently discarded `variant` would
+    // report whichever arm the server picked, which is the one thing that
+    // surface refuses to do.
+    name: "experiments",
+    about: "Read canary/shadow split outcomes: per-arm cost, latency, errors and quality",
+    verbs: [
+      read("list", "List traffic-splitting experiments", "listAdminExperiments"),
+      read("get", "Report one experiment's arms and quality verdict", "getAdminExperiment"),
+    ],
+    build: (verb, input) => {
+      switch (verb) {
+        case "list":
+          return EXPERIMENTS.read([], input.list);
+        case "get":
+          return EXPERIMENTS.read([firstSegment(input, "experiment")], input.list);
+        default:
+          throw CliError.usage(`verb '${verb}' is not an experiments verb`);
+      }
+    },
   },
   {
     name: "observed-agent-activity",

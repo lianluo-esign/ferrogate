@@ -164,7 +164,15 @@ export function experimentIdFor(spec: ExperimentSplitSpec): string | null {
     routeToken(spec.control),
     routeToken(spec.canary),
     routeToken(spec.shadow),
-  ].join(" ");
+  ]
+    // NUL, written as the escape so no raw NUL byte lands in a source file (the
+    // `packages/*` hygiene gate in `packages/config/test/source-hygiene.test.ts`
+    // refuses one, and #762 is the incident that put it there). It is the right
+    // separator on the merits too, and the same framing `fnv.ts` uses for
+    // `salt\0key`: a provider name or a model name may contain a space, a colon
+    // or a pipe, so any printable separator would let two different splits
+    // collide onto one experiment id.
+    .join("\u0000");
   return `exp_${fnv1a64(UTF8.encode(canonical)).toString(16).padStart(16, "0")}`;
 }
 
@@ -345,7 +353,10 @@ export interface ExperimentQualityOptions {
 }
 
 function cellKey(judgeModel: string, criterionId: string): string {
-  return `${judgeModel} ${criterionId}`;
+  // Same NUL framing, same reason: a judge model id and a criterion id are both
+  // tenant-supplied strings, and a printable separator would let
+  // `("a b", "c")` and `("a", "b c")` group as one instrument.
+  return `${judgeModel}\u0000${criterionId}`;
 }
 
 /** Sample mean and sample standard deviation from the sufficient statistics. */

@@ -167,7 +167,7 @@ describe("the mount record the composition root returned", () => {
     expect(unrecorded).toEqual([]);
   });
 
-  it("exports the PRODUCTION module list, covering exactly the 34 owned groups", () => {
+  it("exports the PRODUCTION module list, covering exactly the 35 owned groups", () => {
     expect(CONTROL_PLANE_ROUTE_MODULES).toHaveLength(CONTROL_PLANE_GROUPS.length);
     expect(CONTROL_PLANE_ROUTE_MODULES.map((module) => module.group).sort()).toEqual([
       ...CONTROL_PLANE_GROUPS,
@@ -297,6 +297,13 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["admin_api_key", "listAdminApiKeys", "GET", "/admin/v1/api-keys", 200],
   ["admin_config_ops", "validateAdminConfig", "POST", "/admin/v1/config/validate", 200],
   ["admin_cost_record", "listAdminCostRecords", "GET", "/admin/v1/cost-records", 200],
+  // 503, not 200, and that IS the mounted behaviour (issue #693). This probe
+  // runs against the MEMORY store, i.e. a deployment with no control database —
+  // and the experiment evidence tables live in the control database. "No
+  // experiments" would be a claim such a deployment cannot support, and an
+  // operator would read it as "the canary produced no traffic", so the surface
+  // refuses instead of answering an empty list.
+  ["admin_experiment", "listAdminExperiments", "GET", "/admin/v1/experiments", 503],
   ["admin_gateway_config", "listAdminGatewayConfigs", "GET", "/admin/v1/gateway-configs", 200],
   ["admin_managed_worker", "listAdminManagedWorkers", "GET", "/admin/v1/managed-workers", 200],
   ["admin_mcp_server", "listAdminMcpServers", "GET", "/admin/v1/mcp-servers", 200],
@@ -346,7 +353,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 34 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 35 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });
