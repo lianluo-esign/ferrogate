@@ -17,6 +17,13 @@ The capability vocabulary is closed:
 | `tools` | The request contains non-empty `tools`, or FerroGate will inject configured gateway tools. |
 | `structured_output` | `response_format.type`, or Responses `text.format.type`, is `json_object` or `json_schema`. A route that survives this filter must then be able to EXPRESS the requirement in its own family's dialect — see [`structured-outputs.md`](./structured-outputs.md) for the per-family translation and the refusals. |
 
+Prompt caching is deliberately NOT a capability value: `prompt_cache` states an
+intent about cost and retention rather than about what a route can produce, and
+whether a family can honour it depends on the directive's mode — see
+[`prompt-caching.md`](./prompt-caching.md) for the per-family mechanisms and the
+refusals, which take a route out of the ladder the same way a structured-output
+refusal does.
+
 Unknown values fail config parsing. An empty declaration remains compatible
 only with a chat-style request that has no explicit feature or output-token
 bound. This exemption does not apply to a non-empty declaration: a route

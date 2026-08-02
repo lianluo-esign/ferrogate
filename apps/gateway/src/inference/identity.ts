@@ -45,6 +45,7 @@
  * it in the identity middleware, which runs BEFORE `readInferenceBody()`
  * replaces `c.req.raw`.
  */
+import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AuthContext } from "../ports.js";
 import { callerScope } from "../ports.js";
 import type { InferenceRejection } from "./errors.js";
@@ -102,7 +103,10 @@ import type { Caller } from "./ports.js";
  * `callerCanUseProvider` implements the full deny-wins-then-allowlist predicate
  * and is tested on both legs, so the day the column lands this is one more line.
  */
-export function callerFromAuth(auth: AuthContext): Caller {
+export function callerFromAuth(
+  auth: AuthContext,
+  residency: ResidencyPolicy | null = null,
+): Caller {
   const projectId = auth.tenancy.projectId;
   const allowedModels = auth.allowedModels;
   const allowedProviders = auth.allowedProviders;
@@ -123,6 +127,15 @@ export function callerFromAuth(auth: AuthContext): Caller {
     ...(allowedProviders !== undefined && allowedProviders.length > 0
       ? { allowedProviders }
       : {}),
+    // #681 — the TENANT residency policy, resolved by `residency/middleware.ts`
+    // on the OUTER app and handed in by `route-module.ts`. It is a PARAMETER
+    // rather than something read off `auth` because it is not a property of the
+    // credential: it is a per-tenant governance row that needs an async D1 read,
+    // and `AuthContext` carries no such field. Passing it explicitly is also
+    // what makes the wiring falsifiable — `test/residency/enforcement.test.ts`
+    // drives the deployed chain, so dropping this argument goes red rather than
+    // silently un-arming the gate the way `regionAllowlist` was un-armed.
+    ...(residency === null ? {} : { residency }),
   };
 }
 

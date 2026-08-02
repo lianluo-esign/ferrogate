@@ -46,12 +46,17 @@
  */
 import {
   applyCloudflareAiGatewayRouting,
+  applyPromptCacheToAnthropic,
   applyStructuredOutputToAnthropic,
+  assertPromptCacheForAutomaticFamily,
   BedrockAdapter,
   canonicalProviderAdapterFamily,
   GeminiAdapter,
+  ownBody,
   AdapterError as PackageAdapterError,
+  promptCacheFromBody,
   SecretValue,
+  stripPromptCacheDirective,
   structuredOutputFromChatBody,
   structuredOutputFromResponsesBody,
   VertexAiAdapter,
@@ -60,6 +65,7 @@ import {
 import type {
   CloudflareAiGatewaySurface,
   Json,
+  OwnedJsonObject,
   ProviderAdapter as PackageProviderAdapter,
   ProviderAdapterFamily as PackageProviderAdapterFamily,
   ProviderConfig as PackageProviderConfig,
@@ -230,6 +236,49 @@ export function isOpenAiCompatibleKind(kind: string): boolean {
 // OpenAI-compatible adapter
 // ---------------------------------------------------------------------------
 
+/**
+ * Own the caller's body and adjudicate the caching directive for a family whose
+ * prompt caching is AUTOMATIC (issue #690).
+ *
+ * There are two such adapters in this file — `openAiCompatibleAdapter` and
+ * `azureOpenAiAdapter` — and Azure cannot delegate to the other the way
+ * `grokAdapter`/`openRouterAdapter` do, because its endpoint, its credential
+ * header and its deployment-in-the-path model addressing are all different.
+ * That difference is exactly how Azure came to build its body by hand and
+ * silently skip adjudication: `{"mode":"off"}` answered 200 and `prompt_cache`
+ * reached the upstream verbatim, which per this family's rules is both a
+ * retention promise broken and a live 400 risk (Azure rejects unknown members).
+ *
+ * So the adjudication lives HERE, once, and both call it. What differs between
+ * the two adapters is what they do with the body afterwards, not whether the
+ * caller's directive is honoured.
+ */
+function ownAdjudicatedAutomaticBody(
+  plan: UpstreamPlan,
+): { ok: true; body: OwnedJsonObject } | { ok: false; error: AdapterError } {
+  try {
+    // Adjudicated against the CALLER's body, then owned: this family caches
+    // long prefixes automatically and exposes no per-request breakpoint, so
+    // `auto` is already satisfied and anything stronger is refused — which
+    // takes the route out of the ladder rather than serving the request under
+    // rules the caller did not ask for.
+    assertPromptCacheForAutomaticFamily(plan.body as Json, plan.route.providerKind);
+  } catch (error) {
+    return { ok: false, error: packageAdapterError(error) };
+  }
+  // `plan.body` is the CALLER's object, shared with every other candidate on
+  // the failover ladder; `ownBody` takes the private deep copy this adapter is
+  // then free to rewrite. A shallow spread would have covered the top-level
+  // writes and nothing else — `requestOpenAiStreamUsage` reaches INTO a
+  // caller-supplied `stream_options` object, for one.
+  const body = ownBody(plan.body as Record<string, Json>);
+  // The directive is FerroGate's own member on a body this family copies
+  // WHOLESALE, so it has to come off the copy or the caching hint becomes an
+  // upstream 400.
+  stripPromptCacheDirective(body);
+  return { ok: true, body };
+}
+
 export const openAiCompatibleAdapter: ProviderAdapter = {
   kind: "openai-compatible",
 
@@ -260,7 +309,12 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       return invalid;
     }
 
-    const body: Record<string, unknown> = { ...plan.body };
+    // Prompt caching (issue #690) — see `ownAdjudicatedAutomaticBody`.
+    const owned = ownAdjudicatedAutomaticBody(plan);
+    if (!owned.ok) {
+      return owned;
+    }
+    const body = owned.body;
     // The adapter OWNS these two fields — a caller cannot pin the physical model
     // or contradict the resolved stream decision.
     body["model"] = plan.providerModel;
@@ -441,24 +495,32 @@ export const anthropicAdapter: ProviderAdapter = {
     // because Anthropic rejects unknown top-level fields. `max_tokens` is
     // REQUIRED there, hence the 1024 default when the caller omitted it.
     const source = plan.body;
-    const anthropicBody: Record<string, unknown> = {
+    const draft: Record<string, Json> = {
       model: plan.providerModel,
-      messages: source["messages"] ?? [],
-      max_tokens: source["max_tokens"] ?? 1024,
+      messages: (source["messages"] ?? []) as Json,
+      max_tokens: (source["max_tokens"] ?? 1024) as Json,
       stream: plan.stream,
     };
     if (source["system"] !== undefined) {
-      anthropicBody["system"] = source["system"];
+      draft["system"] = source["system"] as Json;
     }
     if (plan.operation === "responses") {
       // `prepare_responses` additionally forwards the canonicalized tool fields.
       if (source["tools"] !== undefined) {
-        anthropicBody["tools"] = source["tools"];
+        draft["tools"] = source["tools"] as Json;
       }
       if (source["tool_choice"] !== undefined) {
-        anthropicBody["tool_choice"] = source["tool_choice"];
+        draft["tool_choice"] = source["tool_choice"] as Json;
       }
     }
+    // Every subtree the draft just took (`messages`, `system`, `tools`) is
+    // still the CALLER's object, shared with every other candidate on the
+    // ladder — so a breakpoint or a coercion tool placed below would rewrite
+    // what a later OpenAI candidate sends. `ownBody` is the copy that makes
+    // this family's preparation the caller's business only, and it is the only
+    // way to produce the argument the `apply*` helpers accept: the next adapter
+    // that needs to normalise a field cannot skip it by forgetting to.
+    const anthropicBody = ownBody(draft);
 
     // Structured output (issue #674). This adapter REBUILDS a minimal native
     // body, which is exactly why `response_format` used to vanish here while
@@ -474,7 +536,18 @@ export const anthropicAdapter: ProviderAdapter = {
           ? structuredOutputFromResponsesBody(source as Json)
           : structuredOutputFromChatBody(source as Json);
       if (structured !== undefined) {
-        applyStructuredOutputToAnthropic(anthropicBody as Record<string, Json>, structured, "anthropic");
+        applyStructuredOutputToAnthropic(anthropicBody, structured, "anthropic");
+      }
+      // Prompt caching (issue #690), same story one field over: this adapter
+      // rebuilds a minimal native body, so a caller's caching intent used to
+      // vanish here while an OpenAI upstream cached the prefix automatically —
+      // the same request, two different bills, with no way to tell which one
+      // ran. The directive becomes Anthropic's `cache_control` breakpoint (or
+      // strips the caller's markers, for `mode: "off"`), using the SAME
+      // canonical translation as `@ferrogate/providers`, not a second copy.
+      const promptCache = promptCacheFromBody(source as Json);
+      if (promptCache !== undefined) {
+        applyPromptCacheToAnthropic(anthropicBody, promptCache, "anthropic");
       }
     } catch (error) {
       return { ok: false, error: packageAdapterError(error) };
@@ -887,7 +960,19 @@ export const azureOpenAiAdapter: ProviderAdapter = {
       return invalid;
     }
 
-    const { model: _deployment, ...body } = plan.body;
+    // Prompt caching (issue #690). Azure is OpenAI-compatible in its CACHING
+    // even though it is not in its addressing, so it goes through the same
+    // adjudication the plain family does. Building the body by hand here — the
+    // `model` delete is Azure-specific — is what let this family skip it and
+    // answer 200 to a directive it never read.
+    const owned = ownAdjudicatedAutomaticBody(plan);
+    if (!owned.ok) {
+      return owned;
+    }
+    const body = owned.body;
+    // The model is addressed as a deployment in the PATH; Azure rejects it in
+    // the body. Deleted from the owned copy, never from the caller's.
+    delete body["model"];
     body["stream"] = plan.stream;
     if (plan.stream) {
       requestOpenAiStreamUsage(body);
@@ -1404,20 +1489,44 @@ export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): Provid
  * adapters the deployed path does not use is how AI Gateway routing stayed dead
  * for as long as it did (issue #672).
  */
+const REGISTERED_ADAPTERS = [
+  ["openai-compatible", openAiCompatibleAdapter],
+  ["anthropic", anthropicAdapter],
+  ["grok", grokAdapter],
+  ["openrouter", openRouterAdapter],
+  ["azure-openai", azureOpenAiAdapter],
+  ["gemini", geminiAdapter],
+  ["bedrock", bedrockAdapter],
+  ["vertex", vertexAdapter],
+  ["workers-ai", workersAiAdapter],
+] as const;
+
+/**
+ * The canonical kind of every family the deployed path can resolve, as a
+ * literal UNION rather than `string` (issue #690).
+ *
+ * The phantom `OwnedJsonObject` brand can enforce "you copied before you
+ * mutated", but it cannot enforce "you adjudicated the caller's caching
+ * directive" — an adapter that calls no mutator sits outside that scheme
+ * entirely, which is exactly how `azure-openai` came to answer 200 to a
+ * `{"mode":"off"}` it never read. Nothing in the type system can require a call
+ * that produces no value.
+ *
+ * What CAN be required is that every family be accounted for. Exporting the
+ * union lets `test/inference/prompt-caching.test.ts` hold a
+ * `Record<GatewayProviderFamily, …>` of caching dispositions, which is TOTAL by
+ * construction: adding a tenth adapter here fails `bun run typecheck` until its
+ * disposition is declared, and fails the sweep until the adapter actually
+ * behaves the way the declaration says. That is the gap Azure fell through,
+ * closed at the only place that knows the full population.
+ */
+export type GatewayProviderFamily = (typeof REGISTERED_ADAPTERS)[number][0];
+
 const ADAPTERS_BY_FAMILY: Readonly<Record<string, ProviderAdapter>> = Object.fromEntries(
-  (
-    [
-      ["openai-compatible", openAiCompatibleAdapter],
-      ["anthropic", anthropicAdapter],
-      ["grok", grokAdapter],
-      ["openrouter", openRouterAdapter],
-      ["azure-openai", azureOpenAiAdapter],
-      ["gemini", geminiAdapter],
-      ["bedrock", bedrockAdapter],
-      ["vertex", vertexAdapter],
-      ["workers-ai", workersAiAdapter],
-    ] as const
-  ).map(([canonicalKind, adapter]) => [canonicalKind, withCloudflareAiGatewayRouting(adapter)]),
+  REGISTERED_ADAPTERS.map(([canonicalKind, adapter]) => [
+    canonicalKind,
+    withCloudflareAiGatewayRouting(adapter),
+  ]),
 );
 
 export const defaultAdapterRegistry: AdapterRegistry = {

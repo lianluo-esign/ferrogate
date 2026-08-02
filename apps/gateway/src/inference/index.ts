@@ -100,7 +100,11 @@ export {
   splitAzureBaseUrl,
   vertexAdapter,
 } from "./adapters.js";
-export type { OpenRouterProviderExtras, OpenRouterRoute } from "./adapters.js";
+export type {
+  GatewayProviderFamily,
+  OpenRouterProviderExtras,
+  OpenRouterRoute,
+} from "./adapters.js";
 export {
   ProviderBodyTooLargeError,
   ProviderEndpointError,

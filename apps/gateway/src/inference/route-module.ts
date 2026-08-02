@@ -38,6 +38,7 @@ import {
   settleTokenUsage,
 } from "../ratelimit/middleware.js";
 import type { TokenAdmission } from "../ratelimit/ports.js";
+import { residencyPolicyFor } from "../residency/carrier.js";
 import { contributeRequestLogFacts } from "../requestlog/facts.js";
 import {
   GatewayRouter,
@@ -217,7 +218,14 @@ function publishRequestScope(c: Context<GatewayEnv>): void {
     // `auth` is absent only for a contract-`anonymous` operation, which none of
     // the twelve inference operations is; leaving it undefined keeps the injected
     // `deps.caller` in charge rather than fabricating an identity.
-    ...(auth === null || auth === undefined ? {} : { caller: callerFromAuth(auth) }),
+    // #681 — the residency policy travels ON the caller, so every gate that
+    // reads a caller (route eligibility, and the shadow mirror through
+    // `planUpstream`) sees it without a second lookup. `residencyPolicyFor`
+    // reads the SAME `Request` object `residency()` keyed it by on the outer
+    // app, and answers `null` for a tenant nothing governs.
+    ...(auth === null || auth === undefined
+      ? {}
+      : { caller: callerFromAuth(auth, residencyPolicyFor(request)) }),
     tokens: honoTokenGovernor(c),
     // #664 — the request log's model/provider/token facts. `request` is the
     // OUTER inbound `Request`, which is both the key the fact collector uses

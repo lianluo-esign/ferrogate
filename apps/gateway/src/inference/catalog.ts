@@ -187,6 +187,23 @@ export const providerRecordSchema = z
      */
     region: z.string().trim().min(1).optional(),
     /**
+     * Issue #681 — does the operator ASSERT a zero-data-retention agreement over
+     * this provider ACCOUNT?
+     *
+     * `.optional()` with no default, deliberately and load-bearingly: an absent
+     * value stays `undefined`, which `residency/policy.ts` reads as
+     * **unverified** and refuses under a ZDR policy. A `.default(false)` here
+     * would be indistinguishable from an operator explicitly stating "this
+     * account retains", and a `.default(true)` would make every existing
+     * `GATEWAY_MODELS` table satisfy a ZDR policy the moment one is switched on.
+     *
+     * It sits on the PROVIDER because a ZDR agreement is a commercial fact about
+     * an account, not about one model id; a model leg may still narrow it (see
+     * `routeFieldsSchema.zero_data_retention`) for the case where one model on
+     * an otherwise-covered account is excluded from the agreement.
+     */
+    zero_data_retention: z.boolean().optional(),
+    /**
      * `Provider.aws_access_key_id` (issue #172) — NOT a secret, which is why
      * Rust keeps it in plain config and so does this table.
      */
@@ -250,6 +267,16 @@ const routeFieldsSchema = {
   capabilities: z.array(capabilitySchema).optional(),
   /** `ModelRoute.region` (issue #173). */
   region: z.string().trim().min(1).optional(),
+  /**
+   * Issue #681 — a per-leg override of the provider's ZDR assertion.
+   *
+   * The leg wins when it states anything, INCLUDING `false`: the narrowing case
+   * ("this account is covered, except for this preview model") is the whole
+   * reason the override exists, and `leg ?? provider` would make a `false` leg
+   * on a `true` provider read as covered. `?? undefined` is not usable either —
+   * see `zeroDataRetentionOf` in the builder below.
+   */
+  zero_data_retention: z.boolean().optional(),
   /** `ModelRoute.context_window` — the eligibility gate's declared ceiling. */
   context_window: z.number().int().positive().optional(),
   /** `ModelRoute.priority` — ASCENDING; `0` is tried first. */
@@ -828,6 +855,13 @@ export function buildModelCatalog(
       // provider row is the source. A model-level `region` still wins, which is
       // additive: it can only make a route MORE specific than the provider's.
       const region = leg.region ?? provider.region;
+      // The leg wins whenever it STATES something, so an explicit `false` on a
+      // leg narrows a `true` provider. `??` would be wrong for exactly that
+      // case, which is the one this override exists for.
+      const zeroDataRetention =
+        leg.zero_data_retention !== undefined
+          ? leg.zero_data_retention
+          : provider.zero_data_retention;
 
       routes.push({
         logicalModel: model.name,
@@ -853,6 +887,11 @@ export function buildModelCatalog(
           ? { capabilities: leg.capabilities as readonly ModelCapability[] }
           : {}),
         ...(region !== undefined ? { region } : {}),
+        // ABSENT, never `undefined`: `residency/policy.ts` distinguishes "the
+        // operator said no" from "nobody said", and an own property holding
+        // `undefined` would be indistinguishable from the missing one only by
+        // accident of how it is read.
+        ...(zeroDataRetention !== undefined ? { zeroDataRetention } : {}),
         ...(leg.context_window !== undefined ? { contextWindow: leg.context_window } : {}),
         ...(leg.priority !== undefined ? { priority: leg.priority } : {}),
         ...(leg.weight !== undefined ? { weight: leg.weight } : {}),

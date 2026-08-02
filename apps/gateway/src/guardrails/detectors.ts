@@ -30,12 +30,15 @@ import {
   DeterministicDetector,
   type GuardrailDetector,
   LlmGuardPromptInjectionDetector,
+  PiiDetector,
+  type PiiTokenVault,
   type PolicyRevision,
   PresidioDetector,
   type WorkersAiBinding,
   type WorkersAiClient,
   WorkersAiLlamaGuardDetector,
   configDigest,
+  piiDetectorConfig,
   validateDetectorDefinition,
   workersAiBindingClient,
 } from "@ferrogate/guardrails";
@@ -51,6 +54,12 @@ export interface DetectorBuildContext {
   readonly workersAi?: WorkersAiBinding | undefined;
   /** Escape hatch for a non-binding Workers-AI transport (tests, REST). */
   readonly workersAiClient?: WorkersAiClient | undefined;
+  /**
+   * Where a REVERSIBLE PII redaction (#680) stashes its token→value mapping.
+   * Absent by default: `redaction: "tokenize"` then fails the BUILD rather than
+   * quietly becoming irreversible.
+   */
+  readonly piiVault?: PiiTokenVault | undefined;
   /**
    * Detector overrides by check id — the seam the test suite and a future
    * shadow/canary rollout use to substitute a scripted detector without
@@ -200,6 +209,30 @@ export function buildDetector(
           "llm_guard fingerprint",
         ),
       });
+    }
+    case "pii": {
+      // Deliberately NOT the graceful-disable posture below. A PII detector the
+      // host cannot fully satisfy still answers `pass`, which reads as
+      // "screened and clean" — so the unsatisfiable parts raise instead. The
+      // translation itself lives in the package so this site and `binding.ts`
+      // cannot drift on that decision.
+      return PiiDetector.new(
+        piiDetectorConfig(
+          id,
+          definition,
+          supportedSources,
+          requireSecret(context, definition.fingerprint_secret_ref, "pii fingerprint"),
+          {
+            vault: context.piiVault,
+            workersAi:
+              context.workersAiClient ??
+              (context.workersAi !== undefined
+                ? workersAiBindingClient(context.workersAi)
+                : undefined),
+          },
+          (message) => new DetectorBuildError(message),
+        ),
+      );
     }
     case "workers_ai_llama_guard": {
       const client =

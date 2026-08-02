@@ -45,6 +45,7 @@
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
+import type { ResidencyPolicy } from "../residency/policy.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
@@ -212,6 +213,24 @@ export interface PhysicalRoute {
   readonly capabilities?: readonly ModelCapability[] | undefined;
   /** `ModelRoute.region` (issue #173) — `undefined` when the provider declares none. */
   readonly region?: string | undefined;
+  /**
+   * Issue #681 — does the operator ASSERT that a zero-data-retention agreement
+   * covers the provider account this route dials?
+   *
+   * Three states, all distinct, and the third is the one that matters:
+   * `true` (asserted), `false` (asserted NOT to be covered — the account
+   * retains) and `undefined` (**nobody has said**). A tenant policy requiring
+   * ZDR is satisfied only by `true`; `undefined` is refused with its own
+   * message, because "unverified" and "denied" call for different operator
+   * action. Reading `undefined` as `true` would let every route in every
+   * existing `GATEWAY_MODELS` table satisfy a ZDR policy the day it is switched
+   * on — a control that is hollow from the moment it is sold.
+   *
+   * It is a property of the ROUTE, not of the request: the assertion is about a
+   * commercial agreement covering a provider account, which no caller can
+   * declare on its own behalf. `residency/policy.ts` verifies it.
+   */
+  readonly zeroDataRetention?: boolean | undefined;
   /**
    * `ModelRoute.context_window` — the declared token ceiling, and half of the
    * `model_routing.rs` eligibility gate. `undefined` means "undeclared", which
@@ -860,6 +879,18 @@ export interface Caller {
    * a working catalog.
    */
   readonly regionAllowlist?: readonly string[] | undefined;
+  /**
+   * Issue #681 — the calling TENANT's residency + zero-data-retention policy,
+   * resolved by `residency/middleware.ts` on the outer app and carried in on
+   * `identity.ts::InferenceRequestScope`.
+   *
+   * Distinct from {@link regionAllowlist}, which is the per-CREDENTIAL Rust
+   * field, and combined with it by `residency/policy.ts::effectiveResidencyPolicy`
+   * — both must hold, so the region lists intersect. Keeping them separate is
+   * what lets the tenant policy be a real, sourced control while
+   * `regionAllowlist` stays exactly the ported field it has always been.
+   */
+  readonly residency?: ResidencyPolicy | undefined;
 }
 
 /** `AuthContext::can_use_model` — deny wins, then the allowlist if non-empty. */

@@ -60,8 +60,10 @@ export type {
   TranscriptionPlan,
 } from "./types.js";
 
-// JSON value model + accessors.
-export type { Json, JsonObject } from "./json.js";
+// JSON value model + accessors, and the body-ownership boundary every adapter
+// that rewrites a request has to pass through (issue #690).
+export { cloneJson, ownBody } from "./json.js";
+export type { Json, JsonObject, OwnedJsonObject } from "./json.js";
 
 // Cloudflare AI Gateway routing.
 export {
@@ -88,6 +90,18 @@ export {
   structuredOutputFromResponsesBody,
 } from "./structured.js";
 export type { CanonicalStructuredOutput } from "./structured.js";
+
+// Canonical prompt-caching directive (`prompt_cache`) — issue #690.
+export {
+  PROMPT_CACHE_MEMBER,
+  applyPromptCacheToAnthropic,
+  applyPromptCacheToAutomaticFamily,
+  applyPromptCacheToBedrockConverse,
+  assertPromptCacheForAutomaticFamily,
+  promptCacheFromBody,
+  stripPromptCacheDirective,
+} from "./caching.js";
+export type { CanonicalPromptCache, PromptCacheTtl } from "./caching.js";
 
 // Model registry.
 export {

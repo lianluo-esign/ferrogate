@@ -20,6 +20,7 @@ import type {
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
 import { applyStructuredOutputToGemini, structuredOutputFromChatBody } from "./structured.js";
+import { assertPromptCacheForAutomaticFamily } from "./caching.js";
 import { asI64, asStr, asU64, getField, isObject, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
@@ -35,6 +36,11 @@ export class GeminiAdapter extends BaseProviderAdapter {
   ): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ensureObjectBody(request.body);
+
+    // Gemini caches implicitly and exposes no per-request breakpoint, so an
+    // `auto` directive is already satisfied and anything stronger is refused
+    // rather than served under Gemini's own rules (#690).
+    assertPromptCacheForAutomaticFamily(body, provider.kind);
 
     const geminiBody: JsonObject = { contents: openaiMessagesToGeminiContents(body) };
     const instruction = systemInstruction(body);

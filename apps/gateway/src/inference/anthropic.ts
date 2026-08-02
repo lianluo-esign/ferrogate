@@ -18,6 +18,8 @@
  * This is the default implementation of the `AnthropicTranslator` port; it moves
  * to `@ferrogate/providers` when that package is ported.
  */
+import { PROMPT_CACHE_MEMBER } from "@ferrogate/providers";
+
 import type { AnthropicTranslator, TranslationResult } from "./ports.js";
 
 type Json = Record<string, unknown>;
@@ -325,7 +327,81 @@ export function toChatCompletions(body: Json): TranslationResult {
     }
   }
 
+  const promptCache = body[PROMPT_CACHE_MEMBER] ?? promptCacheFromCacheControl(body);
+  if (promptCache !== undefined) {
+    out[PROMPT_CACHE_MEMBER] = promptCache;
+  }
+
   return { ok: true, body: out };
+}
+
+/**
+ * Why `prompt_cache` is read here and not left to the native marker alone
+ * (issue #690).
+ *
+ * `/v1/messages` reaches the SAME governed chokepoint every other ingress
+ * does, and can be backed by any family on the ladder. A directive this
+ * translation dropped was a directive the route quietly declined to honour
+ * while answering 200 — and `off` is a retention/isolation control, not a cost
+ * knob, so a 200 there means the prompt WAS written into a provider cache the
+ * caller told the gateway to keep it out of. #674's rule is that what a family
+ * cannot express is REFUSED, and a directive the route never reads cannot be
+ * refused. Carrying it forward is what puts `/v1/messages` under that rule.
+ *
+ * The member is deliberately not in {@link SCALAR_PASSTHROUGH}: it is an
+ * object, and it is FerroGate's own rather than a member of either protocol.
+ * It is passed through UNVALIDATED because `@ferrogate/providers`'
+ * `promptCacheFromBody` is the one canonical parser, and a second validation
+ * here is a second thing to drift.
+ *
+ * A STATED directive beats an INFERRED one: a caller that both left native
+ * `cache_control` markers and wrote `prompt_cache` has said two things, and the
+ * one it wrote out is the deliberate one. That ordering matters most for
+ * `{"mode":"off"}`, where reading the markers instead would cache a prompt the
+ * caller had just asked not to be cached.
+ */
+
+/**
+ * A native `cache_control` marker, read as the canonical caching directive
+ * (issue #690).
+ *
+ * Every rebuild above — `systemToText`, `messageToChat`, `toolToOpenAi` —
+ * constructs fresh blocks, so the caller's markers were DROPPED here and an
+ * Anthropic-native client lost its whole prefix discount on FerroGate's own
+ * `/v1/messages` ingress: the request the caller wrote was cached, the request
+ * FerroGate sent was not. Carrying the intent forward as `prompt_cache` fixes
+ * that and, because the directive is provider-neutral, keeps it alive across a
+ * failover to a family with a different mechanism — which is the whole point of
+ * the issue.
+ *
+ * The marker's PLACEMENT is not carried, only its intent: the OpenAI grammar
+ * has nowhere to put it, and the re-emitted breakpoint lands at the canonical
+ * static-prefix boundary. That is a change for a caller that had marked
+ * something else — and still strictly better than the erasure it replaces.
+ */
+function promptCacheFromCacheControl(body: Json): Json | undefined {
+  const marker = findCacheControl(body);
+  if (marker === undefined) return undefined;
+  const ttl = asString(get(marker, "ttl"));
+  return { mode: "explicit", ...(ttl === "1h" ? { ttl } : {}) };
+}
+
+function findCacheControl(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = findCacheControl(entry);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  const record = asRecord(value);
+  if (record === undefined) return undefined;
+  if (record["cache_control"] !== undefined) return record["cache_control"];
+  for (const entry of Object.values(record)) {
+    const found = findCacheControl(entry);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +466,6 @@ export function chatCompletionToMessage(chat: unknown, fallbackModel: string): u
   }
 
   const usage = get(chat, "usage");
-  const inputTokens = asUint(get(usage, "prompt_tokens")) ?? 0;
   const outputTokens = asUint(get(usage, "completion_tokens")) ?? 0;
 
   return {
@@ -401,7 +476,35 @@ export function chatCompletionToMessage(chat: unknown, fallbackModel: string): u
     content,
     stop_reason: finishReasonToStopReason(finishReason, sawToolUse),
     stop_sequence: null,
-    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    usage: { ...anthropicUsageCounters(usage), output_tokens: outputTokens },
+  };
+}
+
+/**
+ * `prompt_tokens` → the Anthropic input counters, with the cache split kept
+ * (issue #690).
+ *
+ * The two vocabularies disagree about what the headline number MEANS: OpenAI's
+ * `prompt_tokens` INCLUDES `prompt_tokens_details.cached_tokens`, while
+ * Anthropic's `input_tokens` EXCLUDES `cache_read_input_tokens`. So the fresh
+ * count is the difference, and reporting the unreduced 9012 alongside a 9000
+ * cache read would make an Anthropic-native client double-count the prompt —
+ * which is why this is a subtraction and not merely an extra field.
+ *
+ * A response with no cached tokens reported emits exactly the two counters it
+ * always did: an absent counter stays absent rather than becoming a zero, the
+ * same rule #667 applies on the metering side.
+ */
+function anthropicUsageCounters(usage: unknown): Record<string, number> {
+  const promptTokens = asUint(get(usage, "prompt_tokens")) ?? 0;
+  const details = get(usage, "prompt_tokens_details") ?? get(usage, "input_tokens_details");
+  const cached = asUint(get(details, "cached_tokens"));
+  if (cached === undefined) {
+    return { input_tokens: promptTokens };
+  }
+  return {
+    input_tokens: Math.max(promptTokens - cached, 0),
+    cache_read_input_tokens: cached,
   };
 }
 

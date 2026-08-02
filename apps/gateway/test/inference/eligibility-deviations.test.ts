@@ -20,6 +20,7 @@
  * answer it is not giving. That way the pin goes red if the deviation widens,
  * AND it names the exact assertion a future 1:1 pass has to flip.
  */
+import type { ResidencyPolicy } from "../../src/residency/index.js";
 import { describe, expect, it } from "vitest";
 import { eligibleCandidates, routeExclusionReasons, routeRequirements } from "../../src/inference/index.js";
 import type { PhysicalRoute, RouteRequirements } from "../../src/inference/index.js";
@@ -57,7 +58,7 @@ describe("deviation 1 — an undeclared `capabilities` is neutral for EVERY endp
     // (`missing_capability` for each). Here it survives.
     const requirements = routeRequirements("chat.completions", CHAT_BODY, true, 8);
     expect(requirements.capabilities).toEqual(expect.arrayContaining(["chat", "streaming"]));
-    expect(routeExclusionReasons(UNDECLARED, requirements, [])).toEqual([]);
+    expect(routeExclusionReasons(UNDECLARED, requirements, null)).toEqual([]);
   });
 
   it("does not exclude an undeclared route from an EMBEDDINGS request", () => {
@@ -65,7 +66,7 @@ describe("deviation 1 — an undeclared `capabilities` is neutral for EVERY endp
     // and the undeclared route is `missing_capability=embeddings`.
     const requirements = routeRequirements("embeddings", { model: "m", input: "hi" }, false, 4);
     expect(requirements.capabilities).toContain("embeddings");
-    expect(routeExclusionReasons(UNDECLARED, requirements, [])).toEqual([]);
+    expect(routeExclusionReasons(UNDECLARED, requirements, null)).toEqual([]);
   });
 
   it("STILL holds a route that DID declare capabilities to the exact Rust test", () => {
@@ -73,7 +74,7 @@ describe("deviation 1 — an undeclared `capabilities` is neutral for EVERY endp
     // "declare to arm" rule: declaring the field arms the full Rust gate.
     const requirements = routeRequirements("chat.completions", CHAT_BODY, true, 8);
     const declared: PhysicalRoute = { ...UNDECLARED, capabilities: ["chat"] };
-    const reasons = routeExclusionReasons(declared, requirements, []);
+    const reasons = routeExclusionReasons(declared, requirements, null);
     expect(reasons.map((reason) => reason.code)).toEqual(["missing_capability"]);
     expect(reasons[0]?.detail).toBe("required_capability=streaming");
   });
@@ -88,12 +89,12 @@ describe("deviation 2 — an undeclared `context_window` never excludes", () => 
 
   it("admits a route with no declared window against a huge requirement", () => {
     // Rust: `ContextWindowUndeclared { required: 100000 }`.
-    expect(routeExclusionReasons(UNDECLARED, requirements, [])).toEqual([]);
+    expect(routeExclusionReasons(UNDECLARED, requirements, null)).toEqual([]);
   });
 
   it("excludes a DECLARED window that is too small, exactly as Rust does", () => {
     const small: PhysicalRoute = { ...UNDECLARED, contextWindow: 8_192 };
-    const reasons = routeExclusionReasons(small, requirements, []);
+    const reasons = routeExclusionReasons(small, requirements, null);
     expect(reasons.map((reason) => reason.code)).toEqual(["context_window_too_small"]);
     expect(reasons[0]?.detail).toBe(
       "required_context_window=100000;declared_context_window=8192",
@@ -121,9 +122,9 @@ describe("deviation 3 — unbounded media context does NOT exclude a window-less
     // content-part array form" from 200 to 400. Those two edits are the whole
     // change; they are named here so the next owner does not have to find them.
     const requirements = routeRequirements("chat.completions", IMAGE_BODY, false, 64);
-    expect(routeExclusionReasons(UNDECLARED, requirements, [])).toEqual([]);
+    expect(routeExclusionReasons(UNDECLARED, requirements, null)).toEqual([]);
 
-    const decision = eligibleCandidates([UNDECLARED], requirements, []);
+    const decision = eligibleCandidates([UNDECLARED], requirements, null);
     expect(decision.eligible).toHaveLength(1);
     expect(decision.exclusions).toEqual([]);
   });
@@ -135,10 +136,31 @@ describe("deviation 3 — unbounded media context does NOT exclude a window-less
     // would read as "the deviation got worse" rather than "it got fixed".
     const requirements = routeRequirements("chat.completions", IMAGE_BODY, false, 64);
     const declaring: PhysicalRoute = { ...UNDECLARED, contextWindow: 200_000 };
-    const reasons = routeExclusionReasons(declaring, requirements, []);
+    const reasons = routeExclusionReasons(declaring, requirements, null);
     expect(reasons.map((reason) => reason.code)).toEqual(["media_context_unbounded"]);
   });
 });
+
+/**
+ * The residency policy shape #681 replaced the bare `regionAllowlist` argument
+ * with, restricted to the REGION leg so the four assertions below still say
+ * exactly what they said before.
+ *
+ * The signature change was deliberate and is stated in the PR: the region gate
+ * moved into `residency/policy.ts::residencyViolations` so that the SHADOW
+ * MIRROR — which is not a candidate and never reaches `routeExclusionReasons` —
+ * applies the identical rule. The BEHAVIOUR these cases pin is unchanged: an
+ * absent policy is no gate, an armed one excludes an undeclared region, a
+ * declared region outside the list, and nothing else.
+ */
+function regionsOnly(...allowedRegions: readonly string[]): ResidencyPolicy {
+  return {
+    regionGated: true,
+    allowedRegions,
+    requireZeroDataRetention: false,
+    logResidency: "unconstrained",
+  };
+}
 
 describe("region is NOT deviated from", () => {
   const requirements: RouteRequirements = {
@@ -146,26 +168,26 @@ describe("region is NOT deviated from", () => {
     unboundedMediaContext: false,
   };
 
-  it("is no gate at all when the allowlist is empty", () => {
-    expect(routeExclusionReasons(UNDECLARED, requirements, [])).toEqual([]);
+  it("is no gate at all when the tenant has no policy", () => {
+    expect(routeExclusionReasons(UNDECLARED, requirements, null)).toEqual([]);
   });
 
-  it("excludes an UNDECLARED region once the allowlist is non-empty", () => {
+  it("excludes an UNDECLARED region once the policy is armed", () => {
     // The one leg where an omitted field DOES exclude in this port, because it
     // does in Rust (`None => reasons.push(RegionUndeclared)`).
-    const reasons = routeExclusionReasons(UNDECLARED, requirements, ["eu"]);
+    const reasons = routeExclusionReasons(UNDECLARED, requirements, regionsOnly("eu"));
     expect(reasons.map((reason) => reason.code)).toEqual(["region_undeclared"]);
   });
 
   it("excludes a declared region outside the allowlist", () => {
     const us: PhysicalRoute = { ...UNDECLARED, region: "us" };
-    const reasons = routeExclusionReasons(us, requirements, ["eu"]);
+    const reasons = routeExclusionReasons(us, requirements, regionsOnly("eu"));
     expect(reasons.map((reason) => reason.code)).toEqual(["region_not_allowed"]);
     expect(reasons[0]?.detail).toBe("declared_region=us");
   });
 
   it("admits a declared region INSIDE the allowlist", () => {
     const eu: PhysicalRoute = { ...UNDECLARED, region: "eu" };
-    expect(routeExclusionReasons(eu, requirements, ["eu"])).toEqual([]);
+    expect(routeExclusionReasons(eu, requirements, regionsOnly("eu"))).toEqual([]);
   });
 });

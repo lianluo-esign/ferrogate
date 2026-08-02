@@ -83,6 +83,13 @@ export function messageToAnthropicFrames(message: unknown): SseFrame[] {
   const usage = get(message, "usage");
   const inputTokens = getUint(usage, "input_tokens") ?? 0;
   const outputTokens = getUint(usage, "output_tokens") ?? 0;
+  // The cache split rides alongside `input_tokens`, which on this path is
+  // reported on `message_start` (#690). The message reaching here has already
+  // been through `chatCompletionToMessage`, so the counters are in Anthropic's
+  // vocabulary — carrying them is the difference between a caller seeing the
+  // discount it was billed at and seeing one undifferentiated number.
+  const cacheRead = getUint(usage, "cache_read_input_tokens");
+  const cacheWrite = getUint(usage, "cache_creation_input_tokens");
 
   const frames: SseFrame[] = [
     jsonSseFrame("message_start", {
@@ -95,7 +102,12 @@ export function messageToAnthropicFrames(message: unknown): SseFrame[] {
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: inputTokens, output_tokens: 0 },
+        usage: {
+          input_tokens: inputTokens,
+          output_tokens: 0,
+          ...(cacheRead !== undefined ? { cache_read_input_tokens: cacheRead } : {}),
+          ...(cacheWrite !== undefined ? { cache_creation_input_tokens: cacheWrite } : {}),
+        },
       },
     }),
   ];
@@ -200,6 +212,8 @@ export class OpenAiToAnthropicNormalizer {
   #sawToolUse = false;
   #promptTokens: number | undefined;
   #completionTokens: number | undefined;
+  /** `prompt_tokens_details.cached_tokens`, kept for the split (#690). */
+  #cachedInputTokens: number | undefined;
 
   constructor(options: OpenAiToAnthropicOptions) {
     this.#fallbackModel = options.fallbackModel;
@@ -240,6 +254,13 @@ export class OpenAiToAnthropicNormalizer {
       this.#promptTokens = getUint(usage, "prompt_tokens") ?? this.#promptTokens;
       this.#completionTokens =
         getUint(usage, "completion_tokens") ?? this.#completionTokens;
+      // Both detail spellings, as in `./usage.ts`: Chat Completions nests the
+      // count under `prompt_tokens_details` and the Responses API under
+      // `input_tokens_details`, and both dialects reach this normalizer.
+      const promptDetails =
+        nonNull(get(usage, "prompt_tokens_details")) ?? nonNull(get(usage, "input_tokens_details"));
+      this.#cachedInputTokens =
+        getUint(promptDetails, "cached_tokens") ?? this.#cachedInputTokens;
     }
 
     if (frame.event === "error" || get(payload, "error") !== undefined) {
@@ -321,7 +342,18 @@ export class OpenAiToAnthropicNormalizer {
       output_tokens: this.#completionTokens ?? 0,
     };
     if (this.#promptTokens !== undefined) {
-      usage["input_tokens"] = this.#promptTokens;
+      // The cache split, in Anthropic's vocabulary (#690). OpenAI's
+      // `prompt_tokens` INCLUDES the cached tokens while Anthropic's
+      // `input_tokens` excludes them, so the fresh count is the difference —
+      // reporting both unreduced would make a native client double-count the
+      // prompt. With nothing cached reported, the frame is byte-identical to
+      // what it was before: an absent counter stays absent, never a zero.
+      if (this.#cachedInputTokens !== undefined) {
+        usage["input_tokens"] = Math.max(this.#promptTokens - this.#cachedInputTokens, 0);
+        usage["cache_read_input_tokens"] = this.#cachedInputTokens;
+      } else {
+        usage["input_tokens"] = this.#promptTokens;
+      }
     }
     out.push(
       jsonSseFrame("message_delta", {

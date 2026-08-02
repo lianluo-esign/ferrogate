@@ -19,6 +19,7 @@ import {
   runCommand,
   storageCommand,
 } from "./commands/serve.js";
+import { siteCommand } from "./commands/site.js";
 import type { CommandNode } from "./runtime.js";
 
 /** Every top-level command, in help order. */
@@ -34,6 +35,7 @@ export const COMMANDS: readonly CommandNode[] = [
   applyCommand,
   hashKeyCommand,
   assetsCommand,
+  siteCommand,
   plansCommand,
   contextCommand,
   opsCommand,

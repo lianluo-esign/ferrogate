@@ -221,7 +221,15 @@ interface TextMatch {
   end: number;
 }
 
-interface CoalescedGroup {
+/**
+ * A run of ADJACENT same-source segments joined into one scannable string, with
+ * the byte offset each segment starts at. Exported (with
+ * {@link coalesceSelectedSegments} and {@link regexByteMatches}) because
+ * `pii.ts` must join chunks the SAME way this detector does: two detectors with
+ * two joins is two different answers to "is this value split across a streaming
+ * frame boundary", and the one that drifts fails silently.
+ */
+export interface CoalescedGroup {
   text: string;
   segments: ContentSegment[];
   starts: number[];
@@ -239,7 +247,7 @@ export function isMutableTextSegment(segment: ContentSegment): boolean {
   return mutableSource && (segment.content_type === "text" || segment.content_type === "text_attachment");
 }
 
-function coalesceSelectedSegments(selected: ContentSegment[]): CoalescedGroup[] {
+export function coalesceSelectedSegments(selected: ContentSegment[]): CoalescedGroup[] {
   const groups: CoalescedGroup[] = [];
   for (const segment of selected) {
     const last = groups[groups.length - 1];
@@ -264,7 +272,7 @@ class TextMatchSink {
 }
 
 /** Regex byte matches over `text`, non-overlapping, mirroring `find_iter`. */
-function regexByteMatches(source: string, text: string): Array<[number, number]> {
+export function regexByteMatches(source: string, text: string): Array<[number, number]> {
   const map = byteOffsetMap(text);
   const re = new RegExp(source, "g");
   const out: Array<[number, number]> = [];

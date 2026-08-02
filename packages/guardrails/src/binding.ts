@@ -69,9 +69,7 @@
 // re-exports THIS file, and a module that imports its own barrel is a cycle
 // esbuild resolves by evaluation order rather than by declaration — which is
 // how a `class extends undefined` boot failure reaches production.
-import {
-  LlmGuardPromptInjectionDetector,
-} from "./adapters/llm_guard.js";
+import { LlmGuardPromptInjectionDetector } from "./adapters/llm_guard.js";
 import { PresidioDetector } from "./adapters/presidio.js";
 import {
   type WorkersAiBinding,
@@ -81,14 +79,15 @@ import {
 } from "./adapters/workers_ai_llama_guard.js";
 import {
   DetectorError,
-  DetectorSecret,
   type DetectorInput,
+  DetectorSecret,
   type DetectorStage,
   type GuardrailDetector,
 } from "./contract.js";
 import { CustomHttpDetector } from "./custom_http.js";
 import { DeterministicDetector } from "./deterministic.js";
 import { ALL_CONTENT_SOURCES, type ContentSource } from "./envelope.js";
+import { PiiDetector, type PiiTokenVault, piiDetectorConfig } from "./pii.js";
 import {
   type ActionKind,
   type CheckOutcome,
@@ -293,9 +292,7 @@ export async function loadActivatedPolicyPointers(
  * while advancing the generation, so a fingerprint without it would report "no
  * change" across a round trip an operator performed deliberately.
  */
-export function activatedPolicyFingerprint(
-  pointers: readonly ActivatedPolicyPointer[],
-): string {
+export function activatedPolicyFingerprint(pointers: readonly ActivatedPolicyPointer[]): string {
   return pointers
     .map((p) => `${p.policyId}@${p.activeRevision ?? "none"}#${p.generation}`)
     .join(",");
@@ -376,6 +373,12 @@ export interface GuardrailDetectorBuildContext {
   readonly workersAi?: WorkersAiBinding | undefined;
   /** Escape hatch for a non-binding Workers-AI transport (tests, REST). */
   readonly workersAiClient?: WorkersAiClient | undefined;
+  /**
+   * Where a REVERSIBLE PII redaction stashes its token→value mapping. Absent by
+   * default, which makes `redaction: "tokenize"` a hard build error rather than
+   * a silent downgrade to irreversible — see `pii.ts::piiDetectorConfig`.
+   */
+  readonly piiVault?: PiiTokenVault | undefined;
 }
 
 /**
@@ -527,6 +530,25 @@ export function buildGuardrailDetector(
           "llm_guard fingerprint",
         ),
       });
+    }
+    case "pii": {
+      return PiiDetector.new(
+        piiDetectorConfig(
+          id,
+          definition,
+          supportedSources,
+          requireSecret(context, definition.fingerprint_secret_ref, "pii fingerprint"),
+          {
+            vault: context.piiVault,
+            workersAi:
+              context.workersAiClient ??
+              (context.workersAi !== undefined
+                ? workersAiBindingClient(context.workersAi)
+                : undefined),
+          },
+          (message) => new GuardrailDetectorBuildError(message),
+        ),
+      );
     }
     case "workers_ai_llama_guard": {
       const client =
@@ -858,9 +880,7 @@ export async function screenGuardrailPolicies(
         ? await Promise.all(
             stageChecks.map((check) => evaluateCheck(check, request.input, deadline)),
           )
-        : await sequential(stageChecks, (check) =>
-            evaluateCheck(check, request.input, deadline),
-          );
+        : await sequential(stageChecks, (check) => evaluateCheck(check, request.input, deadline));
 
     const aggregate = aggregateCheckOutcomes(
       policy.revision.aggregation,

@@ -28,6 +28,13 @@
  * bucketing here would have kept it that way while looking wired.
  */
 import { canarySelected } from "@ferrogate/routing";
+import {
+  type ResidencyConstraint,
+  type ResidencyPolicy,
+  isRegionConstraint,
+  residencyRequirementSummary,
+  residencyViolations,
+} from "../residency/policy.js";
 import type { Caller, ModelCapability, PhysicalRoute } from "./ports.js";
 
 // ---------------------------------------------------------------------------
@@ -210,8 +217,13 @@ export type RouteExclusionCode =
   | "missing_capability"
   | "media_context_unbounded"
   | "context_window_too_small"
-  | "region_undeclared"
-  | "region_not_allowed";
+  // Issue #681: the four RESIDENCY codes. The two `region_*` spellings are the
+  // Rust ones and are unchanged; the two `zero_data_retention_*` ones are new,
+  // and there are two rather than one because "the operator asserted this
+  // account retains" and "nobody has said" need different operator action.
+  // They are `residency/policy.ts::ResidencyConstraint` verbatim — one
+  // vocabulary, so a refusal message and a route exclusion cannot drift.
+  | ResidencyConstraint;
 
 /** One reason a candidate route was refused. */
 export interface RouteExclusion {
@@ -294,12 +306,15 @@ export interface RouteExclusion {
  *     decision is outstanding.
  *
  * Region is not deviated from at all: an empty allowlist is no gate in both
- * trees, and a non-empty one excludes an undeclared `region` in both.
+ * trees, and a non-empty one excludes an undeclared `region` in both. Issue
+ * #681 moved that leg into `residency/policy.ts::residencyViolations` — same
+ * reading, plus the zero-data-retention leg — because the SHADOW MIRROR has to
+ * apply the identical rule and never reaches this function.
  */
 export function routeExclusionReasons(
   route: PhysicalRoute,
   requirements: RouteRequirements,
-  regionAllowlist: readonly string[],
+  residencyPolicy: ResidencyPolicy | null,
 ): readonly RouteExclusion[] {
   const declared = route.capabilities ?? [];
   const capabilityNeutral = declared.length === 0;
@@ -345,12 +360,16 @@ export function routeExclusionReasons(
     }
   }
 
-  if (regionAllowlist.length > 0) {
-    if (route.region === undefined) {
-      push("region_undeclared", "declared_region=none");
-    } else if (!regionAllowlist.includes(route.region)) {
-      push("region_not_allowed", `declared_region=${route.region}`);
-    }
+  // Issue #681 — the RESIDENCY legs, delegated whole to `residency/policy.ts`.
+  //
+  // Delegated rather than inlined for one reason, and it is the reason this
+  // slice exists: the SHADOW MIRROR (`shadow.ts::shadowMirrorFor`) also has to
+  // apply them, and it is not a candidate — it never reaches this function. Two
+  // copies of "may this route carry this tenant's prompt" is precisely how the
+  // mirror leg came to have none. There is one implementation and both legs
+  // call it.
+  for (const violation of residencyViolations(route, residencyPolicy)) {
+    push(violation.constraint, violation.detail);
   }
 
   return reasons;
@@ -366,12 +385,12 @@ export interface RoutingDecision {
 export function eligibleCandidates(
   routes: readonly PhysicalRoute[],
   requirements: RouteRequirements,
-  regionAllowlist: readonly string[],
+  residencyPolicy: ResidencyPolicy | null,
 ): RoutingDecision {
   const eligible: PhysicalRoute[] = [];
   const exclusions: RouteExclusion[] = [];
   for (const route of routes) {
-    const reasons = routeExclusionReasons(route, requirements, regionAllowlist);
+    const reasons = routeExclusionReasons(route, requirements, residencyPolicy);
     if (reasons.length === 0) {
       eligible.push(route);
     } else {
@@ -381,35 +400,78 @@ export function eligibleCandidates(
   return { eligible, exclusions };
 }
 
+/** Is this exclusion a RESIDENCY refusal rather than a request-requirement one? */
+function isResidencyCode(code: RouteExclusionCode): code is ResidencyConstraint {
+  return (
+    code === "region_undeclared" ||
+    code === "region_not_allowed" ||
+    code === "zero_data_retention_unverified" ||
+    code === "zero_data_retention_denied"
+  );
+}
+
 /**
  * `ModelRoutingDecision::rejection` — the status/code pair for "nothing
  * survived".
  *
- * A region-only exclusion is `403 region_not_allowed` (a TENANT policy refused
- * the route); anything else is `400 invalid_request` (the REQUEST asked for
- * something no route offers). Rust splits them on
- * `has_request_requirement_exclusion`, and the split matters: a data-residency
- * refusal must not read as a malformed request.
+ * A residency-only exclusion is `403` (a TENANT POLICY refused the route);
+ * anything else is `400 invalid_request` (the REQUEST asked for something no
+ * route offers). Rust splits them on `has_request_requirement_exclusion`, and
+ * the split matters: a data-residency refusal must not read as a malformed
+ * request, because the caller cannot fix it by changing the request.
+ *
+ * ## The refusal has to say WHICH constraint could not be met (#681)
+ *
+ * The message this function used to return was
+ * `"no candidate route for model X satisfies this tenant's region allowlist"` —
+ * true, and useless. It does not say which regions would have satisfied it, it
+ * cannot say anything at all about zero data retention, and an operator reading
+ * it in the #664 request log has no next action. Both halves are now stated:
+ *
+ *  - `code` distinguishes the three shapes, so a client can branch on it:
+ *    `region_not_allowed` (the Rust spelling, preserved for existing clients),
+ *    `zero_data_retention_required`, and `residency_policy_not_satisfiable`
+ *    when a route failed BOTH — collapsing that into either half would tell an
+ *    operator to fix one thing and leave them refused on the other;
+ *  - `message` names the REQUIREMENT (`region in [eu-west-1] and zero data
+ *    retention`), rendered from the policy. Rendered from the POLICY and not
+ *    from the offending routes on purpose: listing the routes would leak one
+ *    operator's catalogue into a tenant-visible error, and the requirement is
+ *    the only half the reader can act on.
  */
 export function routingRejectionFor(
   logicalModel: string,
   exclusions: readonly RouteExclusion[],
+  residencyPolicy: ResidencyPolicy | null,
 ): { readonly status: 400 | 403; readonly code: string; readonly message: string } {
-  const requestRequirement = exclusions.some(
-    (exclusion) =>
-      exclusion.code !== "region_undeclared" && exclusion.code !== "region_not_allowed",
-  );
-  return requestRequirement
-    ? {
-        status: 400,
-        code: "invalid_request",
-        message: `no physical route for model ${logicalModel} satisfies the request requirements`,
-      }
-    : {
-        status: 403,
-        code: "region_not_allowed",
-        message: `no candidate route for model ${logicalModel} satisfies this tenant's region allowlist`,
-      };
+  const requestRequirement = exclusions.some((exclusion) => !isResidencyCode(exclusion.code));
+  if (requestRequirement || residencyPolicy === null) {
+    // `residencyPolicy === null` cannot produce a residency exclusion, so if it
+    // is somehow the only reason left there is no policy to describe and the
+    // request-requirement message is the honest one.
+    return {
+      status: 400,
+      code: "invalid_request",
+      message: `no physical route for model ${logicalModel} satisfies the request requirements`,
+    };
+  }
+
+  const constraints = exclusions.map((exclusion) => exclusion.code).filter(isResidencyCode);
+  const region = constraints.some(isRegionConstraint);
+  const retention = constraints.some((constraint) => !isRegionConstraint(constraint));
+  const code =
+    region && retention
+      ? "residency_policy_not_satisfiable"
+      : region
+        ? "region_not_allowed"
+        : "zero_data_retention_required";
+  return {
+    status: 403,
+    code,
+    message:
+      `no candidate route for model ${logicalModel} satisfies this tenant's residency ` +
+      `policy (requires ${residencyRequirementSummary(residencyPolicy)})`,
+  };
 }
 
 // ---------------------------------------------------------------------------

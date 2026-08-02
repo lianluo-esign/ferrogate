@@ -17,6 +17,7 @@
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
+import { residency } from "./residency/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -169,7 +170,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
  *
  *   contractAuth → meteringDrain → requestTelemetry → requestLogging
- *                → rateLimit → attributionTags → guardrails
+ *                → rateLimit → attributionTags → residency → guardrails
  *                → tenantDatabase → responseCache → validate → dispatch
  *
  * (`responseCache` is mounted by `createGatewayApp` itself, immediately after
@@ -304,6 +305,26 @@ export const GATEWAY_MIDDLEWARE = [
   // `GATEWAY_ATTRIBUTION_POLICIES` var): with no policy for the calling tenant
   // it is one cached lookup and `next()`.
   attributionTags(),
+  // #681 — the calling TENANT's data-residency + zero-data-retention policy.
+  //
+  // It makes no ROUTING decision here (the candidate list does not exist yet):
+  // it resolves the policy, refuses what this deployment cannot satisfy at all
+  // — `503 residency_policy_unavailable` when the policy cannot be READ, `403
+  // log_residency_unsatisfiable` when the durable log cannot stay in region —
+  // and publishes the policy for `inference/candidates.ts` and
+  // `inference/shadow.ts` to enforce per route.
+  //
+  // BETWEEN `attributionTags()` and `guardrails()`, and the second edge is the
+  // one that is a residency argument rather than an economic one: guardrail
+  // screening can call OUT (an LLM judge, a hosted detector) with the prompt
+  // itself, so screening ahead of this gate would send a governed prompt to the
+  // detector's region and ask about residency afterwards.
+  //
+  // Inert until an operator sets `quota_policies.residency_regions_json` /
+  // `require_zero_data_retention` on a TENANT-scope row (or the
+  // `GATEWAY_RESIDENCY_POLICIES` var): with no policy for the calling tenant it
+  // is one cached lookup and `next()`.
+  residency(),
   // Provider-scoped policies need the model→provider join, and `/v1/messages`
   // must be screened over the same document `inference/handlers.ts` dispatches.
   // `guardrailDepsFromEnv` is ASYNC whenever `CONTROL_DB` is bound: the durable
