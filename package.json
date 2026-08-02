@@ -10,6 +10,7 @@
     "apps/*",
     "e2e",
     "tools/sdk-conformance",
+    "tools/generated-clients",
     "sdks/typescript"
   ],
   "scripts": {

@@ -1,0 +1,9 @@
+{
+  "name": "ferrogate-generated-clients",
+  "private": true,
+  "type": "module",
+  "description": "Regenerates and gates every client generated from docs/openapi/admin-api.openapi.json. A Bun workspace so root `bun run test` reaches the gate — including admin-console's, which is not a workspace of its own (#766).",
+  "scripts": {
+    "test": "vitest run"
+  }
+}
