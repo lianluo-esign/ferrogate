@@ -215,6 +215,46 @@ describe("the terminal response.completed frame is screened (#778)", () => {
     expect(outcome()?.kind).toBe("blocked");
   });
 
+  test("a marker split across two content parts of ONE frame is caught", async () => {
+    // The terminal frame can hold several text positions, and a screener that
+    // evaluated each in isolation would miss a marker that spans two of them —
+    // the within-frame twin of the across-frame straddle the carry window
+    // exists for. All positions are joined into ONE segment for the detector,
+    // and its offsets are mapped back onto the position they landed in.
+    const head = PROBE_SECRET.slice(0, 8);
+    const tail = PROBE_SECRET.slice(8);
+    const { text } = screen([
+      frame("response.completed", {
+        response: {
+          id: "resp_778",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [
+                { type: "output_text", text: `key ${head}` },
+                { type: "output_text", text: `${tail} done` },
+              ],
+            },
+          ],
+        },
+      }),
+      "data: [DONE]\n\n",
+    ]);
+    const out = await text;
+    expect(out).not.toContain(PROBE_SECRET);
+    // The replacement lands ONCE, in the first position the finding touched,
+    // and the straddled range is removed from the second — not duplicated into
+    // both, and not left behind in either.
+    const response = payload(out, "response.completed")?.["response"] as {
+      output: Array<{ content: Array<{ text: string }> }>;
+    };
+    expect(response.output[0]?.content.map((part) => part.text)).toEqual([
+      "key [REDACTED]",
+      " done",
+    ]);
+  });
+
   test("response.incomplete carries the same output and is screened the same way", async () => {
     const { text } = screen([
       frame("response.incomplete", {
