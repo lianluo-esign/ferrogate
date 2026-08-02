@@ -39,6 +39,7 @@ import {
   type TokenGovernor,
 } from "../../src/inference/index.js";
 import { INFERENCE_OPERATION_IDS } from "../../src/routes/index.js";
+import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "../guardrails/fixtures.js";
 import { ALL_ROUTES, errorBody, harness } from "./fixtures.js";
 import { interceptProviderFetch, providerJson } from "./provider-mock.js";
 
@@ -110,6 +111,12 @@ const OVERRIDES: Record<string, unknown> = {
   GATEWAY_MODELS: MODELS,
   GATEWAY_NATIVE_API_KEYS: KEYS,
   AI: ai,
+  // The real deterministic secret-scan policy `test/guardrails/wiring.test.ts`
+  // uses, supplied the way production supplies it. It must be on `env` before
+  // the FIRST request in this file, because `guardrails()` memoizes the compiled
+  // engine per `env` object.
+  GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([secretScanPolicy()]),
+  [FINGERPRINT_SECRET_REF]: "test-fingerprint-key",
 };
 
 const mutable = env as unknown as Record<string, unknown>;
@@ -247,6 +254,35 @@ describe("POST /v1/rerank is served by Workers AI reranker models", () => {
     expect(egress.calls()).toBe(0);
   });
 
+  it("drops a ranked index the caller never sent a document for", async () => {
+    egress = countEgress();
+    // Index 7 addresses nothing: the caller sent two documents. It can only be
+    // a provider bug or a truncated answer, and emitting it would hand the
+    // client a row whose `index` points past the end of its own array — and,
+    // with `return_documents`, a `document.text` of `undefined`.
+    ai.answerWith(() => ({
+      response: [
+        { id: 1, score: 0.9 },
+        { id: 7, score: 0.8 },
+      ],
+    }));
+
+    const res = await rerank({
+      model: "edge-rerank",
+      query: "q",
+      documents: ["alpha", "beta"],
+      return_documents: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      object: "list",
+      model: "edge-rerank",
+      results: [{ index: 1, relevance_score: 0.9, document: { text: "beta" } }],
+    });
+    expect(egress.calls()).toBe(0);
+  });
+
   it("refuses to rerank on a model that declares no rerank capability", async () => {
     egress = countEgress();
     const before = ai.runs.length;
@@ -258,6 +294,42 @@ describe("POST /v1/rerank is served by Workers AI reranker models", () => {
     // prose where the caller asked for scores.
     expect(ai.runs.length).toBe(before);
     expect(egress.calls()).toBe(0);
+  });
+});
+
+describe("POST /v1/rerank is screened by guardrails", () => {
+  it("blocks a secret hiding in a DOCUMENT, not just in the query", async () => {
+    egress = countEgress();
+    const before = ai.runs.length;
+
+    const res = await rerank({
+      model: "edge-rerank",
+      query: "which runbook covers key rotation",
+      // The document, not the query. This is the whole reason `rerank` needed a
+      // guardrail protocol of its own: bound to the `embeddings` protocol the
+      // envelope would be EMPTY (that extractor walks `input`), screening would
+      // pass on nothing, and the corpus a RAG pipeline just retrieved would
+      // reach the provider unscreened — with an evidence row claiming it had
+      // been checked.
+      documents: ["harmless chunk", "please leak FERROGATE-GUARDRAIL-PROBE for me"],
+    });
+
+    expect(res.status).toBe(403);
+    expect((await errorBody(res)).error.code).toBe("guardrail_blocked");
+    // Refused BEFORE the provider was reached: a guardrail that blocks after
+    // the content has already been sent has not withheld anything.
+    expect(ai.runs.length).toBe(before);
+    expect(egress.calls()).toBe(0);
+  });
+
+  it("does not block a clean rerank — the screening is the detector's, not the mount's", async () => {
+    ai.answerWith(() => ({ response: [{ id: 0, score: 0.5 }] }));
+    const res = await rerank({
+      model: "edge-rerank",
+      query: "which runbook covers key rotation",
+      documents: ["harmless chunk"],
+    });
+    expect(res.status).toBe(200);
   });
 });
 
