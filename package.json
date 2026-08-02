@@ -8,7 +8,8 @@
   "workspaces": [
     "packages/*",
     "apps/*",
-    "e2e"
+    "e2e",
+    "tools/sdk-conformance"
   ],
   "scripts": {
     "typecheck": "bun run --filter '*' typecheck",
