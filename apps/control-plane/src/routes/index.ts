@@ -40,6 +40,7 @@ import { adminModelRoutes } from "./admin_model.js";
 import { adminOverviewRoutes } from "./admin_overview.js";
 import { adminPluginRoutes } from "./admin_plugin.js";
 import { adminPolicyRoutes } from "./admin_policy.js";
+import { adminProviderCredentialRoutes } from "./admin_provider_credential.js";
 import { adminProviderRoutes } from "./admin_provider.js";
 import { adminRequestLogRoutes } from "./admin_request_log.js";
 import { adminToolRoutes } from "./admin_tool.js";
@@ -76,6 +77,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   adminPluginRoutes,
   adminPolicyRoutes,
   adminProviderRoutes,
+  adminProviderCredentialRoutes,
   adminRequestLogRoutes,
   adminToolRoutes,
   adminVirtualKeyRoutes,

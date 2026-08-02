@@ -40,6 +40,28 @@ compatibility_flags = ["nodejs_compat"]
 # configured the `OPTIONS /admin/{*rest}` preflight surface does not exist at
 # all, which is the contract's `dynamic_surfaces` semantics. Set it only for a
 # deployment that actually fronts an admin console.
+# ---------------------------------------------------------------------------
+# PER-TENANT BYOK (issue #682) — FERROGATE_BYOK_MASTER_KEY
+# ---------------------------------------------------------------------------
+# The FLEET-WIDE AES-256 key `PUT /admin/v1/provider-credentials/{alias}` seals
+# a tenant's own provider credential with, and the SAME key `apps/gateway`
+# opens it with — the two Workers must be given the identical secret or the
+# gateway cannot use what this Worker registers.
+#
+# It is a SECRET and is deliberately NOT declared in [vars]:
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put FERROGATE_BYOK_MASTER_KEY
+#
+# ONE binding for the whole fleet, NOT one per tenant: Cloudflare Secrets Store
+# bindings resolve at DEPLOY time, so a per-tenant binding would mean a deploy
+# per tenant. The tenant-visible `alias -> credential` mapping is row data in
+# `tenant_provider_credentials` (sql/d1-ts/control/0003_*) instead, so
+# onboarding and rotation are an INSERT and an UPDATE.
+#
+# Absent ⇒ the three `/admin/v1/provider-credentials*` operations answer
+# 503 `byok_not_configured`; nothing else on this Worker is affected.
+# ---------------------------------------------------------------------------
+
 [vars]
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"

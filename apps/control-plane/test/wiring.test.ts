@@ -304,6 +304,20 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["admin_plugin", "listAdminPlugins", "GET", "/admin/v1/plugins", 200],
   ["admin_policy", "listAdminPolicies", "GET", "/admin/v1/policies", 200],
   ["admin_provider", "listAdminProviders", "GET", "/admin/v1/providers", 200],
+  // 403, not 200, and that IS the mounted behaviour (issue #682): a per-tenant
+  // BYOK credential belongs to a tenant, and this probe drives a PLATFORM
+  // OPERATOR key, which has no tenant scope to register or list one in.
+  // Answering 200 with someone's aliases would mean the handler had picked a
+  // tenant on the caller's behalf, which is the cross-tenant read the feature
+  // exists to prevent. `isRouterMiss` still distinguishes this from an
+  // unmounted route, so the probe keeps proving the mount.
+  [
+    "admin_provider_credential",
+    "listProviderCredentials",
+    "GET",
+    "/admin/v1/provider-credentials",
+    403,
+  ],
   ["admin_request_log", "listAdminRequestLogs", "GET", "/admin/v1/request-logs", 200],
   ["admin_tool", "listAdminTools", "GET", "/admin/v1/tools", 200],
   ["admin_virtual_key", "listVirtualKeys", "GET", "/admin/v1/virtual-keys", 200],
