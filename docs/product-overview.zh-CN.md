@@ -27,15 +27,15 @@
   `server/discover`，`ping` 仅属于 legacy。
 - **原生 MCP JSON-RPC 入口**：`POST /v1/mcp` 支持 legacy `initialize`/`ping`、
   `tools/list`、`tools/call`，以及基于托管资产注册表的
-  `resources/list`/`resources/read`。入口还实现了基于官方 commit
-  `71e306956a4959c9655e5036be215d41986596e6` 固定的 MCP 2026-07-28 候选规范：
-  无状态 `server/discover` 和逐请求校验。入口和出站客户端切片已有仓库内聚焦
-  对端覆盖；可选命令 `ferrogate-test mcp-candidate-client-official` 固定使用由该
-  候选规范生成的官方 TypeScript client，并让无状态现代请求交替经过两个网关
-  实例。候选 cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。
-  候选请求体 schema 错误返回 `-32602`，
-  Streamable-HTTP header 错误返回 `-32020`。命令已实现不等于已执行通过，最终
-  规范一致性也仍需独立验证。
+  `resources/list`/`resources/read`。入口实现的是 **正式版** MCP 2026-07-28
+  规范：无状态 `server/discover`（并公布空的 `extensions` map）、逐请求校验、
+  每个 modern result 都带 `resultType` 与 `io.modelcontextprotocol/serverInfo`，
+  cacheable result 带短 `ttlMs` 和授权私有的 `cacheScope`。请求体 schema 错误
+  返回 `-32602`，Streamable-HTTP header 错误返回 `-32020`，不支持的协议版本
+  返回 `-32022` 并在 `error.data` 中列出所有受支持版本。**尚未实现**（一律明确
+  拒绝，而非半实现）：`subscriptions/listen`、`io.modelcontextprotocol/tasks`
+  与 MCP Apps 扩展、`prompts/*`、`resources/templates/list`，以及 MRTR 的客户端
+  侧。对官方 SDK 的外部互操作运行仍需独立验证。
 - **托管资产闭环**：`/v1/assets/*` 上的版本化 publish/pull/delete 带租户
   配额记账、artifact registry 语义（latest/stable/canary 等 channel、
   semver 解析、平台/架构 variant、yank）、供应链信任门禁（恶意软件扫描、

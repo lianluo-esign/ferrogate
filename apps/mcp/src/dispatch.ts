@@ -37,7 +37,7 @@ import {
 } from "./jsonrpc.js";
 import {
   completeModernResult,
-  FERROGATE_CLIENT_INFO,
+  FERROGATE_SERVER_INFO,
   ingressErrorCode,
   ingressErrorData,
   ingressErrorDisplay,
@@ -46,6 +46,7 @@ import {
   isSupportedModernMethod,
   MCP_PROTOCOL_VERSION,
   negotiateProtocolVersion,
+  SERVER_INFO_META,
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   validateIngress,
 } from "./protocol.js";
@@ -305,6 +306,12 @@ export async function handleRequest(
   }
 }
 
+/**
+ * The LEGACY `initialize` result. Deliberately untouched by the `2026-07-28`
+ * work: `extensions` is a field of that revision's `ServerCapabilities`, and
+ * putting it in a `2025-11-25` handshake result would be advertising a
+ * negotiation the revision the client asked for does not define.
+ */
 function initializeResult(protocolVersion: string): JsonValue {
   return {
     protocolVersion,
@@ -314,16 +321,36 @@ function initializeResult(protocolVersion: string): JsonValue {
     },
     instructions:
       "Use FerroGate as a governed MCP gateway. Follow the server's auth, policy, approval, and billing rules for all tool calls.",
-    serverInfo: { ...FERROGATE_CLIENT_INFO },
+    serverInfo: { ...FERROGATE_SERVER_INFO },
   };
 }
 
+/**
+ * The modern `server/discover` result.
+ *
+ * Every claim here is one this server honours, which is the only rule that
+ * matters for a capability advertisement — a client that believes an
+ * unimplemented claim fails LATER and more confusingly than one told "no" up
+ * front:
+ *
+ *  - `tools` / `resources` are advertised as bare objects, so no `listChanged`
+ *    and no `subscribe` is promised. `subscriptions/listen` (major change 4) is
+ *    not served, and advertising either flag would invite a client to wait for
+ *    notifications that never arrive.
+ *  - `extensions` is present and EMPTY (minor change 1). Present, because a
+ *    2026-07-28 client must be able to tell "no extensions" apart from "server
+ *    predates the framework"; empty, because neither
+ *    `io.modelcontextprotocol/tasks` nor MCP Apps is implemented.
+ *  - `supportedVersions` names all three spoken revisions, newest first, which
+ *    is what makes this RPC the up-front half of the dual-era promise: an older
+ *    client sees its own revision offered rather than being told to upgrade.
+ */
 function discoverResult(): JsonValue {
   return {
     resultType: "complete",
     supportedVersions: [...SUPPORTED_MCP_PROTOCOL_VERSIONS],
-    capabilities: { tools: {}, resources: {} },
-    _meta: { "io.modelcontextprotocol/serverInfo": { ...FERROGATE_CLIENT_INFO } },
+    capabilities: { tools: {}, resources: {}, extensions: {} },
+    _meta: { [SERVER_INFO_META]: { ...FERROGATE_SERVER_INFO } },
     instructions:
       "Use FerroGate as a governed MCP gateway. Follow the server's auth, policy, approval, and billing rules for all tool calls.",
     ttlMs: 3_600_000,
