@@ -58,6 +58,8 @@ interface DeliveredAlert {
   readonly body: Record<string, unknown>;
 }
 
+let seedSequence = 0;
+
 const realFetch = globalThis.fetch;
 let delivered: DeliveredAlert[] = [];
 let webhookStatus = 200;
@@ -104,11 +106,15 @@ async function seedHour(
   const start = WINDOW_START - windowIndex * HOUR + 60;
   const logs = [];
   const events = [];
+  // A monotonic suffix, because a test may seed the SAME hour twice (a
+  // baseline pass plus a deliberate outlier on one of its hours) and
+  // `request_logs.request_id` is a primary key.
+  seedSequence += 1;
   for (let n = 0; n < requests; n += 1) {
-    const requestId = `req_${tenant}_${windowIndex}_${n}`;
+    const requestId = `req_${tenant}_${windowIndex}_${seedSequence}_${n}`;
     logs.push({ requestId, tenant, startedAtUnix: start + n, completedAtUnix: start + n });
     events.push({
-      id: `be_${tenant}_${windowIndex}_${n}`,
+      id: `be_${tenant}_${windowIndex}_${seedSequence}_${n}`,
       requestId,
       occurredAtUnix: start + n,
       event: { cost_usd: costUsd / requests, usage: { total_tokens: 100 } },
@@ -202,12 +208,14 @@ describe("burn-rate anomaly detection", () => {
   });
 
   it("stays silent for a customer that is merely growing", async () => {
-    // 12% hour-on-hour growth for a day, ending 4x the day's opening rate. A
-    // detector that fires on this is one an operator mutes within a week.
+    // 3% hour on hour — a customer whose spend DOUBLES EVERY DAY, which is
+    // faster than any real product grows for long. A detector that pages on
+    // this is one an operator mutes within a week, and a muted detector loses
+    // the runaway above as well.
     let usd = 2;
     for (let index = 24; index >= 1; index -= 1) {
       await seedHour("grower", index, usd, 4);
-      usd *= 1.12;
+      usd *= 1.03;
     }
     await seedHour("grower", 0, usd, 4);
 
@@ -215,5 +223,30 @@ describe("burn-rate anomaly detection", () => {
 
     expect(await episodes()).toEqual([]);
     expect(delivered).toEqual([]);
+  });
+
+  it("still catches a spike when yesterday's incident is in the baseline", async () => {
+    // THE REASON THE BASELINE IS median/MAD AND NOT mean/stddev.
+    //
+    // 23 quiet hours at $2 and one $200 hour — a real incident, yesterday. The
+    // mean of that baseline is $10.25 with a standard deviation of ~$40, so a
+    // `mean + 3σ` detector sets its bar at ~$130 and is BLIND to today's $60
+    // recurrence: one incident buys immunity from the next. The median is $2
+    // and the MAD is $0 (half the baseline can be garbage before the median
+    // moves), so the operator's own 4x ratio bar binds at $8 and today's $60
+    // fires.
+    await seedFlatBaseline("repeat", 2, 24);
+    await seedHour("repeat", 7, 200, 20);
+    await seedHour("repeat", 0, 60, 30);
+
+    await runScheduledTick(bindings(), NOW);
+
+    const open = await episodes();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.signal).toBe("burn_rate_spike");
+    expect(open[0]?.baseline_usd).toBeCloseTo(2, 6);
+    // `mean + 3σ` would have been ~$130 and would have said nothing.
+    expect(open[0]?.threshold_usd).toBeCloseTo(8, 6);
+    expect(open[0]?.bound_by).toBe("ratio");
   });
 });

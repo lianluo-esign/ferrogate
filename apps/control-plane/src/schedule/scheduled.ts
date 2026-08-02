@@ -42,6 +42,7 @@
 
 import { resolveAuditAnchorBucket, resolveControlDatabase, resolveDeps } from "../adapters.js";
 import { anchorAuditChains } from "../audit/anchor.js";
+import { type SpendAnomalyReport, runSpendAnomalyPass } from "../finops/pass.js";
 import type { ControlPlaneBindings } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
 import { type ScheduleTickSummary, runScheduleTick } from "./engine.js";
@@ -66,6 +67,18 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
    * look identical.
    */
   readonly siemExport: SiemExportReport;
+  /**
+   * What the spend-anomaly detector did (#697): how many scopes it evaluated,
+   * how many episodes opened, how many notifications went out — or WHY it did
+   * nothing.
+   *
+   * On the report for the same reason the other two passes are: "the detector
+   * ran and nothing was anomalous" and "the detector did not run" are the two
+   * states an operator most needs to tell apart, and in an alert channel they
+   * are indistinguishable. `skipped: "already_evaluated"` is the ordinary
+   * answer on 59 of every 60 ticks.
+   */
+  readonly spendAnomaly: SpendAnomalyReport;
 }
 
 /**
@@ -96,6 +109,15 @@ export async function runScheduledTick(
     ...summary,
     auditAnchor: await anchorPass(env, now),
     siemExport: await siemPass(env, now),
+    // MOUNT GATE (#697). Delete this line and `test/spend-anomaly.test.ts` goes
+    // red on every assertion: the detector would exist, be unit-tested, and
+    // never once run — which is the `docs/rewrite/parity-audit-storage.md` §4.2
+    // defect this file's own docblock warns about, one layer further out.
+    //
+    // `runSpendAnomalyPass` never rejects; it folds every failure into its
+    // report, so it cannot make the platform retry this tick and re-dispatch
+    // the schedules above.
+    spendAnomaly: await runSpendAnomalyPass(env, now),
   };
 }
 
