@@ -198,6 +198,12 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
   });
 
   test("api_keys keeps every per-key allowlist/budget column", async () => {
+    // `attribution_tags_json` is LAST because `0003_api_key_attribution_tags.sql`
+    // (#678) appended it; see the `usage_monthly_rollups` note below for why that
+    // position is an assertion and not a formatting accident. Append new columns
+    // here in migration order — never insert one alphabetically, and never
+    // relax this to `toContain`: both would silently accept an in-place edit of
+    // `0001_init_tenant.sql`, which is the drift this test exists to catch.
     expect(await columnNames(env.TENANT_DB_A, "api_keys")).toEqual([
       "id",
       "workspace_id",
@@ -218,6 +224,7 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
       "rotated_at_unix",
       "expires_at_unix",
       "revoked_at_unix",
+      "attribution_tags_json",
     ]);
   });
 
