@@ -382,6 +382,34 @@ export const audioUploadRequestSchema = z
 export type AudioUploadRequest = z.infer<typeof audioUploadRequestSchema>;
 
 /**
+ * The BY-REFERENCE spelling of the same request (issue #703): no `file` part,
+ * a `file_ref` naming a recording the caller already published to R2 through
+ * `/v1/assets/presign/upload/**`.
+ *
+ * A SECOND schema rather than a `file`-or-`file_ref` union on the first one,
+ * for the error message. A union reports "no branch matched" and lists both
+ * failures, so a caller who simply forgot the `file` part would be told about a
+ * `file_ref` field they have never heard of. Two schemas, selected on which
+ * field is present, means each caller error is reported in the vocabulary of
+ * the request they actually sent.
+ *
+ * `file_ref` is validated here only as a non-empty string;
+ * `parseAudioObjectReference` owns its grammar, because the grammar is the
+ * asset coordinate's and belongs beside the resolver that uses it.
+ */
+export const audioReferenceRequestSchema = z
+  .object({
+    model: modelField,
+    file_ref: z.string().min(1, 'audio request must include a non-empty "file_ref"'),
+    language: z.string().optional(),
+    prompt: z.string().optional(),
+    response_format: z.enum(["json", "text", "verbose_json", "srt", "vtt"]).optional(),
+    temperature: z.number().min(0).max(1).optional(),
+    metadata: requestMetadataSchema.optional(),
+  })
+  .passthrough();
+
+/**
  * The audio-upload ceiling, in bytes — the DEFAULT for
  * `InferenceLimits.audioUploadMaxBytes` (issue #703).
  *
@@ -404,6 +432,43 @@ export type AudioUploadRequest = z.infer<typeof audioUploadRequestSchema>;
  * estimator that clamps against it.
  */
 export const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * The BY-REFERENCE ceiling — the DEFAULT for
+ * `InferenceLimits.audioReferenceMaxBytes` (issue #703).
+ *
+ * 40 MiB, and it is a different number from {@link MAX_AUDIO_UPLOAD_BYTES}
+ * because it answers a different question. The inline ceiling bounds an
+ * UNTRUSTED STREAM whose length the gateway cannot know until it has read it;
+ * this one bounds an object whose exact size R2 already reported, so the risk
+ * it manages is not ingest at all — it is how much of a 128 MiB isolate one
+ * request may hold.
+ *
+ * The arithmetic, stated so it can be argued with:
+ *
+ *  - the OpenAI-compatible passthrough builds a `FormData` over the bytes, so
+ *    peak residency is ~1x the object;
+ *  - the Workers AI leg base64-encodes them (`workers_ai.ts`), so peak is the
+ *    object PLUS its 4/3 encoding — 40 MiB → ~93 MiB. That is the binding
+ *    constraint, and it is what picked 40 rather than 64.
+ *
+ * What that buys: ~2.8 hours of 32 kbit/s voice, ~1.4 hours at 64 kbit/s. The
+ * 90-minute meeting recording this path exists for fits at any bitrate a voice
+ * codec actually uses, and it fits WITHOUT the caller having to push it through
+ * this Worker in one shot.
+ *
+ * What it does NOT claim: this is not unbounded, and pretending otherwise would
+ * be the more comfortable lie. The bound exists because the by-reference read
+ * still MATERIALIZES the object. Removing it means streaming `R2ObjectBody.body`
+ * straight into a provider's multipart request body — genuinely possible, and
+ * genuinely nicer here than on the inline path because an R2 object can be
+ * re-opened per failover attempt where a consumed request stream cannot — but it
+ * is a change to the dispatcher's body contract, not to this constant, and it is
+ * not done. An operator whose isolate budget allows more raises
+ * `audioReferenceMaxBytes`; the default is the one that is safe on the leg that
+ * expands.
+ */
+export const MAX_AUDIO_REFERENCE_BYTES = 40 * 1024 * 1024;
 
 /** One decoded upload part: the bytes plus how to label them upstream. */
 export interface AudioUploadFile {

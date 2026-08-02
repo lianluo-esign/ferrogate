@@ -56,6 +56,7 @@ import {
   servableCandidates,
 } from "./candidates.js";
 import type { ModelEndpointKind } from "./candidates.js";
+import { parseAudioObjectReference } from "./audio-objects.js";
 import { byokScopedModels } from "./byok.js";
 import { resolveCandidates, resolveDeps } from "./defaults.js";
 import { dispatchWithFailover } from "./reliability.js";
@@ -127,6 +128,7 @@ import type {
 import {
   anthropicCountTokensRequestSchema,
   anthropicMessagesRequestSchema,
+  audioReferenceRequestSchema,
   audioUploadRequestSchema,
   chatCompletionRequestSchema,
   embeddingsRequestSchema,
@@ -416,7 +418,30 @@ function readAudioUpload(): MiddlewareHandler<InferenceEnv> {
       } satisfies AudioUploadFile;
     }
 
-    const parsed = audioUploadRequestSchema.safeParse(body);
+    // ---- which ingress is this? (issue #703) -------------------------------
+    //
+    // `file_ref` names a recording the caller already published to R2 out of
+    // band; `file` carries the bytes inline. Exactly one, never both: a request
+    // carrying both is ambiguous, and silently preferring either is how a
+    // caller ends up billed for transcribing something other than what they
+    // attached. Refused HERE rather than in a Zod union so the message names
+    // the actual mistake.
+    const hasReference = typeof body["file_ref"] === "string" && body["file_ref"] !== "";
+    const hasInlineFile = body["file"] !== undefined;
+    if (hasReference && hasInlineFile) {
+      return errorResponse(
+        reject(
+          400,
+          "invalid_request",
+          'audio request must carry either a "file" part or a "file_ref", not both',
+        ),
+        requestId,
+      );
+    }
+
+    const parsed = hasReference
+      ? audioReferenceRequestSchema.safeParse(body)
+      : audioUploadRequestSchema.safeParse(body);
     if (!parsed.success) {
       return errorResponse(
         reject(400, "invalid_request", `invalid audio request: ${formatZodError(parsed.error)}`),
@@ -2513,6 +2538,28 @@ async function handleAudioUpload(
   const logicalModel = String(request["model"]);
   const metadata = attributedMetadata(c, request);
 
+  // ---- the by-reference ingress (issue #703) --------------------------------
+  //
+  // Resolved HERE, before anything else reads the body, and the position is the
+  // whole design: from the next line down this handler cannot tell a
+  // by-reference request from an inline one. The estimator, the workflow gate,
+  // the model/eligibility ladder, the TPM reservation, the adapters and the
+  // metering rail all see one shape — `request.file` holding bytes — which is
+  // why "R2 for large uploads" is an INGRESS, not a second pipeline with its own
+  // half of every control.
+  //
+  // It runs BEFORE admission because the estimate is a function of the byte
+  // count and there is no honest estimate without it. What that costs is one D1
+  // read and one R2 read on a request the model gate may then refuse; what it
+  // would cost to invert is a reservation sized against a number nobody
+  // measured. The expensive half is bounded either way: the ceiling is checked
+  // against the size R2 recorded, so an oversized reference is refused with no
+  // read at all.
+  const resolved = await resolveAudioReference(deps, caller, request);
+  if (isRejection(resolved)) {
+    return errorResponse(resolved, requestId);
+  }
+
   const estimated = estimateAudioUploadUsage(request);
 
   const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
@@ -2646,6 +2693,69 @@ function audioDurationOf(body: unknown): number | undefined {
   return typeof duration === "number" && Number.isFinite(duration) && duration > 0
     ? duration
     : undefined;
+}
+
+/**
+ * Turn a `file_ref` into the `file` part the rest of the pipeline reads
+ * (issue #703). A no-op for an inline upload.
+ *
+ * Mutating `request` in place is deliberate and is the reason this leg adds no
+ * branch anywhere downstream: `estimateAudioUploadUsage`, `planUpstream`, both
+ * provider adapters and the metering rail all read `request.file`, and giving
+ * the by-reference path its own shape would have meant teaching each of them a
+ * second one. `file_ref` is deleted at the same time so the adapters do not
+ * forward a private field as a provider form part.
+ *
+ * ## Why the tenant comes from the CREDENTIAL and never from the request
+ *
+ * `storedAssetId` folds the tenant id into the row's primary key, so a caller
+ * asking for `recording/meeting/1.0.0` can only ever address its OWN
+ * `recording/meeting/1.0.0`. There is no field in which another tenant could be
+ * named, which is a stronger property than checking one: a check can be
+ * forgotten on a later code path, an address that cannot express the attack
+ * cannot be.
+ *
+ * A caller with no tenant scope — a platform operator — has no namespace to
+ * resolve within, so a reference from one is refused rather than resolved
+ * against some default. That is the fail-closed direction: the alternative is a
+ * credential that can read every tenant's recordings.
+ */
+async function resolveAudioReference(
+  deps: ResolvedInferenceDeps,
+  caller: Caller,
+  request: Record<string, unknown>,
+): Promise<undefined | InferenceRejection> {
+  const raw = request["file_ref"];
+  if (typeof raw !== "string" || raw === "") {
+    return undefined;
+  }
+  const reference = parseAudioObjectReference(raw);
+  if (reference === null) {
+    return reject(
+      400,
+      "invalid_request",
+      '"file_ref" must be "{asset_type}/{name}/{version}", naming a recording published through /v1/assets/presign/upload',
+    );
+  }
+  const tenantId = caller.scope.kind === "tenant" ? caller.scope.tenantId : "";
+  if (tenantId === "") {
+    return reject(
+      400,
+      "invalid_request",
+      '"file_ref" resolves inside the calling tenant\'s own object namespace, and this credential is not tenant-scoped',
+    );
+  }
+  const opened = await deps.audioObjects.open(
+    tenantId,
+    reference,
+    deps.limits.audioReferenceMaxBytes,
+  );
+  if (isRejection(opened)) {
+    return opened;
+  }
+  request["file"] = opened;
+  delete request["file_ref"];
+  return undefined;
 }
 
 /**

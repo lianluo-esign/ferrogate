@@ -46,6 +46,7 @@
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import type { ResidencyPolicy } from "../residency/policy.js";
+import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
@@ -1079,6 +1080,20 @@ export interface InferenceLimits {
    * denial of service on ourselves.
    */
   readonly audioUploadMaxBytes: number;
+  /**
+   * The BY-REFERENCE audio ceiling (issue #703), in bytes — the cap on an
+   * object resolved from `file_ref` rather than streamed in the request.
+   *
+   * A separate number from {@link audioUploadMaxBytes} because the two bound
+   * different risks: that one bounds a stream whose length cannot be trusted
+   * until it has been read, this one bounds how much of the isolate one
+   * already-measured object may occupy. R2 reports the exact size before a byte
+   * is allocated, so this cap is enforced with no read at all.
+   *
+   * Default `MAX_AUDIO_REFERENCE_BYTES` (40 MiB); see that constant for the
+   * memory arithmetic and for what is still bounded.
+   */
+  readonly audioReferenceMaxBytes: number;
   /** Provider dispatch timeout in milliseconds. */
   readonly dispatchTimeoutMs: number;
 }
@@ -1172,6 +1187,13 @@ export interface InferenceDeps {
    * which is what lets a test assert the pre-#682 behaviour is untouched.
    */
   readonly byok?: ByokPorts | ByokPortsFactory | null;
+  /**
+   * The R2-backed source for `file_ref` audio uploads (issue #703). Absent ⇒
+   * built per Worker `env` by `audioObjectsFromEnv`, which answers
+   * `NO_AUDIO_OBJECTS` (503, fail closed) on a deployment that binds no bucket
+   * or no tenant database.
+   */
+  readonly audioObjects?: AudioObjectSource | ((env: InferenceBindings) => AudioObjectSource);
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -1194,4 +1216,6 @@ export interface ResolvedInferenceDeps {
   readonly nowUnixSeconds: () => number;
   /** `null` = BYOK is not enabled on this deployment. */
   readonly byok: ByokPorts | null;
+  /** Issue #703 — resolves a `file_ref` to a stored recording's bytes. */
+  readonly audioObjects: AudioObjectSource;
 }

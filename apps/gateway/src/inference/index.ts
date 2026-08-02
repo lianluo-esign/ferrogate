@@ -54,6 +54,13 @@ export {
 } from "./circuit-do.js";
 export type { ProviderCircuitNamespace } from "./circuit-do.js";
 export * from "./schemas.js";
+export {
+  audioObjectsFromEnv,
+  NO_AUDIO_OBJECTS,
+  parseAudioObjectReference,
+  storedAssetAudioObjects,
+} from "./audio-objects.js";
+export type { AudioObjectReference, AudioObjectSource } from "./audio-objects.js";
 export * from "./workflow.js";
 export * from "./errors.js";
 export * from "./usage.js";

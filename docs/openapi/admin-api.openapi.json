@@ -18866,6 +18866,15 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "requestBody": {
@@ -18878,7 +18887,7 @@
                   "file": {
                     "type": "string",
                     "format": "binary",
-                    "description": "The audio to transcribe. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read."
+                    "description": "The audio to transcribe, uploaded inline. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read. Mutually exclusive with `file_ref`."
                   },
                   "model": {
                     "type": "string"
@@ -18899,13 +18908,28 @@
                   },
                   "temperature": {
                     "type": "number"
+                  },
+                  "file_ref": {
+                    "type": "string",
+                    "description": "A recording already published to the deployment's object store, addressed as \"{asset_type}/{name}/{version}\" - the same coordinate POST /v1/assets/presign/upload/{asset_type}/{name}/{version} registers. The bytes are read from R2 by reference and never traverse this request, so the by-reference ceiling is a separate, larger limit enforced against the size the object store recorded. Resolves inside the CALLING tenant's own namespace only. Mutually exclusive with `file`."
                   }
                 },
                 "required": [
-                  "file",
                   "model"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "file"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "file_ref"
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -18972,6 +18996,15 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "requestBody": {
@@ -18984,7 +19017,7 @@
                   "file": {
                     "type": "string",
                     "format": "binary",
-                    "description": "The audio to translate into English. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read."
+                    "description": "The audio to transcribe, uploaded inline. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read. Mutually exclusive with `file_ref`."
                   },
                   "model": {
                     "type": "string"
@@ -19005,13 +19038,28 @@
                   },
                   "temperature": {
                     "type": "number"
+                  },
+                  "file_ref": {
+                    "type": "string",
+                    "description": "A recording already published to the deployment's object store, addressed as \"{asset_type}/{name}/{version}\" - the same coordinate POST /v1/assets/presign/upload/{asset_type}/{name}/{version} registers. The bytes are read from R2 by reference and never traverse this request, so the by-reference ceiling is a separate, larger limit enforced against the size the object store recorded. Resolves inside the CALLING tenant's own namespace only. Mutually exclusive with `file`."
                   }
                 },
                 "required": [
-                  "file",
                   "model"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "file"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "file_ref"
+                    ]
+                  }
+                ]
               }
             }
           }
