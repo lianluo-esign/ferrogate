@@ -358,7 +358,7 @@ export interface ReverseProxyOptions {
 /**
  * The catch-all. Registered LAST in `createGatewayApp`, after every contract
  * route and after `/health`, because Hono runs matched handlers in REGISTRATION
- * order and an earlier `app.all("*")` would shadow all 265 operations.
+ * order and an earlier `app.all("*")` would shadow all 266 operations.
  *
  * With no matching operator route it calls `c.notFound()`, so the gateway's own
  * `404 not_found` envelope is still what an undocumented path gets — mounting

@@ -96,9 +96,15 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
     dialect: "anthropic.messages",
     screensResponse: true,
   },
-  // Embeddings/Images are REQUEST-only: `normalize_response` returns an empty
-  // envelope for them (`envelope.ts`), matching the Rust.
+  // Embeddings/Rerank/Images are REQUEST-only: `normalize_response` returns an
+  // empty envelope for them (`envelope.ts`), matching the Rust.
   createEmbedding: { protocol: "embeddings", dialect: "openai.chat", screensResponse: false },
+  // Issue #676. Its own protocol, not `embeddings`: the embeddings extractor
+  // walks `input`, and a rerank body carries `query` + `documents`, so binding
+  // it there would produce an EMPTY envelope — screening that is green, costs an
+  // evidence row, and enforces nothing. That is the exact shape of hole this
+  // table is supposed to make impossible.
+  createRerank: { protocol: "rerank", dialect: "openai.chat", screensResponse: false },
   createImage: { protocol: "images", dialect: "openai.chat", screensResponse: false },
 };
 

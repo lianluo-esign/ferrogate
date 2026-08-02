@@ -64,9 +64,10 @@ describe("guardrail operation bindings match the contract", () => {
   });
 
   test("only chat/responses/messages screen the RESPONSE stage", () => {
-    // `normalize_response` returns an empty envelope for embeddings/images
-    // (they have no model-generated text), so screening them would be a no-op
-    // that still costs an evidence row.
+    // `normalize_response` returns an empty envelope for
+    // embeddings/rerank/images (none has model-generated text — a rerank answer
+    // is a list of indices and floats), so screening them would be a no-op that
+    // still costs an evidence row.
     const screened = Object.entries(GUARDRAIL_OPERATIONS)
       .filter(([, binding]) => binding.screensResponse)
       .map(([id]) => id)

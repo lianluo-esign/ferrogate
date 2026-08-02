@@ -6,7 +6,7 @@
  *
  * `inferenceRouteModule` delegates by calling `inner.fetch(c.req.raw, c.env,
  * ctx)`. That is deliberate — it is what keeps ROUTE-MAP invariant 1 (one
- * table-driven auth guard for all 265 operations) intact, because the inner app
+ * table-driven auth guard for all 266 operations) intact, because the inner app
  * carries no auth of its own. But `inner.fetch` starts a FRESH Hono context, so
  * everything the outer middleware chain resolved onto `c` — `c.get("auth")`
  * from `contractAuth`, the merged quota windows from `rateLimit()` — is

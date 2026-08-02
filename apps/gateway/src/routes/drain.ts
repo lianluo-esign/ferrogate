@@ -60,7 +60,8 @@ export const NODE_DRAINING_MESSAGE =
  *
  * `createChatCompletion` and `createResponse` share `plan_ai_ingress`;
  * `createEmbedding`, `createImage` and `createMessage` each carry the check in
- * their own handler. Rust's sixth site, `governed_decision.rs:502`, sits behind
+ * their own handler. `createRerank` has no Rust site at all (issue #676) and is
+ * in the list below on the rule, not the census — see the entry. Rust's sixth site, `governed_decision.rs:502`, sits behind
  * `executeTool`, which this deployment does not offer at all: it is a DROPPED
  * capability (owner decision 2026-08-02, cluster S2 —
  * `docs/rewrite/DROPPED-CAPABILITIES.md`) answering
@@ -84,6 +85,11 @@ export const DRAIN_GUARDED_OPERATION_IDS: readonly string[] = [
   "createResponse",
   "createMessage",
   "createEmbedding",
+  // `createRerank` (issue #676) has no Rust site to count against — the
+  // operation is new — but it belongs here on the rule the list encodes rather
+  // than on the census: it dispatches to a provider and it costs money, which is
+  // exactly the work a drained node is being told to stop taking.
+  "createRerank",
   "createImage",
 ];
 

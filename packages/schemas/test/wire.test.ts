@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 265.
+ * ANTI-DRIFT GATE for the third copy of 266.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(265);
+    expect(OPENAPI_OPERATION_COUNT).toBe(266);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -274,14 +274,19 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
   test("the baseline is far short of the contract, and says so in numbers", () => {
     const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
     expect(seeded).toBe(10);
-    // 241 -> 255, and the last leg is a merge of three independent increments.
+    // 241 -> 256, and the last leg is a merge of four independent increments.
     // `countMessageTokens` (#671) added one contract operation and the
     // prompt-deployment-label operations (#694) added three more, taking the
     // shortfall to 245. From there the three BYOK-alias operations (#682), the
-    // six `/admin/v1/semantic-cache-policies` operations (#695) and `getModel`
-    // (#670) all landed. None of the fourteen carries a wire schema and
-    // `seeded` is unchanged at 10, so the shortfall is
-    // 245 + 3 + 6 + 1 = 255 = 265 - 10.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(255);
+    // six `/admin/v1/semantic-cache-policies` operations (#695), `getModel`
+    // (#670) and `createRerank` (#676) all landed. None of the fifteen carries a
+    // wire schema and `seeded` is unchanged at 10, so the shortfall is
+    // 245 + 3 + 6 + 1 + 1 = 256 = 266 - 10.
+    //
+    // The right-hand side is the one to trust: it is `OPENAPI_OPERATION_COUNT`
+    // minus a counted `seeded`, and the assertion above already pins
+    // `OPENAPI_OPERATION_COUNT` against the committed JSON. The running sum is
+    // narrative.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(256);
   });
 });

@@ -1,5 +1,5 @@
 /**
- * Hono handlers for the eight inference operations owned by `apps/gateway`.
+ * Hono handlers for the nine inference operations owned by `apps/gateway`.
  *
  * | contract operation      | method + path              | scope              | Rust handler |
  * |-------------------------|----------------------------|--------------------|--------------|
@@ -10,9 +10,16 @@
  * | `createMessage`         | POST /v1/messages          | `messages.create`  | `messages.rs::handle_messages` |
  * | `countMessageTokens`    | POST /v1/messages/count_tokens | `messages.create` | *(none — new in TS, issue #671)* |
  * | `createEmbedding`       | POST /v1/embeddings        | `embeddings.create`| `embeddings.rs::handle_embeddings` |
+ * | `createRerank`          | POST /v1/rerank            | `embeddings.create`| *(none — new in TS, issue #676)* |
  * | `createImage`           | POST /v1/images/generations| `images.generate`  | `images.rs::handle_images` |
  *
- * `countMessageTokens` is the ONE row with no Rust counterpart: the Rust tree
+ * `createRerank` (issue #676) is the second row with no Rust counterpart and the
+ * only one with no OpenAI counterpart either: OpenAI ships no rerank endpoint,
+ * so every RAG pipeline that needs one wires a second vendor around the gateway
+ * and that spend leaves FerroGate's view. It reuses `embeddings.create` — see
+ * {@link handleRerank} for why a seventh data-plane scope was rejected.
+ *
+ * `countMessageTokens` is the OTHER row with no Rust counterpart: the Rust tree
  * never exposed the estimator it already computed on every dispatch, so a
  * client could not size a context window or pre-estimate spend without paying
  * for a completion (issue #671). It reuses the estimator rather than adding a
@@ -33,7 +40,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 265 operations, and duplicating a per-route
+ * table-driven middleware for all 266 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -69,6 +76,7 @@ import {
   estimateEmbeddingsUsage,
   estimateImagesUsage,
   estimateMessagesUsage,
+  estimateRerankUsage,
 } from "./estimate.js";
 import type { EstimatedUsage } from "./estimate.js";
 import {
@@ -109,6 +117,7 @@ import {
   embeddingsRequestSchema,
   formatZodError,
   imagesRequestSchema,
+  rerankRequestSchema,
   responsesRequestSchema,
   validateRequestMetadata,
 } from "./schemas.js";
@@ -177,6 +186,11 @@ const ROUTE_LABELS = {
   responses: "openai.responses",
   messages: "anthropic.messages",
   embeddings: "openai.embeddings",
+  // No vendor prefix, deliberately (issue #676): the other five labels name the
+  // INGRESS dialect they port (`openai.*`, `anthropic.*`), and reranking has no
+  // OpenAI or Anthropic surface to be a dialect of. `openai.rerank` would name a
+  // vendor endpoint that does not exist, and dashboards key off this string.
+  rerank: "rerank",
   images: "openai.images.generations",
   models: "openai.models",
 } as const;
@@ -334,6 +348,8 @@ function endpointKindFor(operation: InferenceOperation): ModelEndpointKind {
   switch (operation) {
     case "embeddings":
       return "embeddings";
+    case "rerank":
+      return "rerank";
     case "images":
       return "images";
     case "responses":
@@ -1293,6 +1309,14 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     (c) => handleEmbeddings(c, c.get("inferenceDeps")),
   );
 
+  // -- POST /v1/rerank -------------------------------------------------------
+  app.post(
+    "/v1/rerank",
+    body,
+    validateBody(rerankRequestSchema, "invalid rerank request"),
+    (c) => handleRerank(c, c.get("inferenceDeps")),
+  );
+
   // -- POST /v1/images/generations ------------------------------------------
   app.post(
     "/v1/images/generations",
@@ -1916,6 +1940,152 @@ async function handleEmbeddings(
   if (translated !== undefined) {
     return jsonResponse(translated, requestId, upstreamResponse.status);
   }
+  return rawUpstreamResponse(
+    upstreamResponse.status,
+    upstreamResponse.headers.get("content-type") ?? "application/json",
+    text,
+    requestId,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/rerank — `createRerank` (issue #676; no Rust ancestor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reranking, served through the same seven-step pipeline as every other `/v1`
+ * operation.
+ *
+ * ## Why this is a copy of `handleEmbeddings` and not a new shape
+ *
+ * That similarity is the point. The issue's complaint is a GOVERNANCE hole —
+ * teams wire a second vendor for reranking and that spend leaves the gateway's
+ * view — so the fix is worth nothing unless reranking passes through the same
+ * gates as everything else. Every line below is one of those gates: the workflow
+ * admission, the model/tenancy/eligibility ladder in `planUpstream`, the TPM
+ * reservation, the failover ladder, and `recordUsage`. A bespoke path would have
+ * closed the hole on paper and left the controls off.
+ *
+ * ## The scope is `embeddings.create`, not a seventh scope
+ *
+ * The house precedent is `countMessageTokens` reusing `messages.create` and
+ * `getModel` reusing `models.read`: a new operation inside an existing family
+ * takes that family's scope. Reranking is the second half of the retrieval
+ * pipeline whose first half is embedding, so every key already provisioned for
+ * RAG can reach it. A seventh scope would have forced a re-mint of every such
+ * key — including the console's membership-tier virtual keys and the
+ * development key — to buy a distinction nobody asked for. It stays a
+ * REVERSIBLE decision: adding `rerank.create` later is a contract edit plus one
+ * entry in `keys/scopes.ts`, and it fails closed for old keys, which is the safe
+ * direction.
+ *
+ * ## Metering when the provider reports no tokens
+ *
+ * Workers AI's rerankers report no usage at all. The usage row is still written
+ * — route, provider, physical model, tenant, status, attempt index and the
+ * route's price book — so the call is IN VIEW, which is what the issue is about;
+ * only the token counters are absent. They are left absent rather than
+ * back-filled from the estimate, for the reason `handleImages` states one
+ * function down: a number the provider did not report must not be recorded as if
+ * it had been. The consequence is deliberate and it is the fail-closed one — the
+ * TPM reservation is never settled DOWN (`settleTokens` is a no-op on
+ * `undefined`), so the caller is charged the estimate for the minute rather than
+ * zero.
+ */
+async function handleRerank(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Promise<Response> {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const request = c.get("inferenceBody") as Record<string, unknown>;
+  const logicalModel = String(request["model"]);
+  const metadata = request["metadata"] as RequestMetadata | undefined;
+
+  const estimated = estimateRerankUsage(request);
+
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
+  const planned = planUpstream(
+    deps,
+    caller,
+    "rerank",
+    logicalModel,
+    metadata,
+    false,
+    request,
+    estimated,
+    workflowConstraintOf(gate),
+  );
+  if (isRejection(planned)) {
+    return errorResponse(planned, requestId);
+  }
+
+  const admitted = await admitTokens(c, estimated);
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
+  const dispatched = await dispatchCandidates(c, deps, planned);
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
+  }
+  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
+
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
+  const meterBase = {
+    requestId,
+    route: ROUTE_LABELS.rerank,
+    logicalModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
+    stream: false,
+    status: upstreamResponse.status,
+    ...(metadata !== undefined ? { metadata } : {}),
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
+  } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
+
+  if (!upstreamResponse.ok) {
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      upstreamResponse.headers.get("content-type") ?? "application/json",
+      text,
+      requestId,
+    );
+  }
+
+  const parsed = safeJson(text);
+  // Scraped rather than assumed absent. Workers AI's rerankers report nothing,
+  // so this reads `undefined` today — but a rerank leg on a family that DOES
+  // report has to be metered on what it reported, and the `openai` dialect is
+  // the right reader for it: every vendor that ships rerank (Cohere, Jina,
+  // Voyage) reports OpenAI-NAMED counters, which is the same reason
+  // `handleEmbeddings` pins this argument to `"openai"` rather than deriving it.
+  const usage = usageFromResponseBody("openai", parsed);
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+  await settleTokens(c, admission, usage?.totalTokens);
+  settleWorkflowStep(c, deps, gate, true, usage?.totalTokens ?? estimated.totalTokens);
+
+  const adapter = deps.adapters.adapterFor(servedRoute.providerKind);
+  const translated = adapter?.translateRerankResponse?.(parsed, logicalModel, request);
+  if (translated !== undefined) {
+    return jsonResponse(translated, requestId, upstreamResponse.status);
+  }
+  // No translation leg: pass the upstream body through byte-for-byte, the same
+  // `Ok(None)` arm `/v1/embeddings` takes for the OpenAI-compatible family.
+  // Reachable only for a family whose `prepareRerank` succeeded, so it is the
+  // right answer for a future vendor that already speaks the canonical shape.
   return rawUpstreamResponse(
     upstreamResponse.status,
     upstreamResponse.headers.get("content-type") ?? "application/json",

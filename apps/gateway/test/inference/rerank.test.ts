@@ -32,6 +32,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  fetchDispatcher,
   setInferenceRequestScope,
   type PhysicalRoute,
   type TokenAdmissionHandle,
@@ -277,6 +278,20 @@ const RERANK_ROUTE: PhysicalRoute = {
 
 const ROUTES: readonly PhysicalRoute[] = [...ALL_ROUTES, RERANK_ROUTE];
 
+/**
+ * The inner router, on the REST leg.
+ *
+ * `fetchDispatcher` is passed EXPLICITLY. The default (`dispatcherFromEnv`)
+ * installs the `env.AI` wrapper, and with no binding in scope a `workers-ai`
+ * route answers the fail-closed 503 by design — correct behaviour, and not what
+ * these two describes are about. Naming the network dispatcher exercises the
+ * token-backed deployment instead: the same prepared request, dialled over
+ * HTTPS, which is what an operator without an `[ai]` stanza gets.
+ */
+function rerankHarness(): ReturnType<typeof harness> {
+  return harness({ dispatcher: fetchDispatcher }, ROUTES);
+}
+
 /** Cloudflare's REST envelope around the reranker's native answer. */
 const REST_ANSWER = {
   result: { response: [{ id: 0, score: 0.75 }] },
@@ -289,7 +304,7 @@ describe("POST /v1/rerank is metered", () => {
   it("records a usage row attributing the call to the served route", async () => {
     const provider = interceptProviderFetch(() => providerJson(REST_ANSWER));
     try {
-      const h = harness({}, ROUTES);
+      const h = rerankHarness();
       const res = await h.post("/v1/rerank", {
         model: "rerank-model",
         query: "hello",
@@ -345,7 +360,7 @@ describe("POST /v1/rerank is rate-limited", () => {
     const spy = spyGovernor();
     const provider = interceptProviderFetch(() => providerJson(REST_ANSWER));
     try {
-      const h = harness({}, ROUTES);
+      const h = rerankHarness();
       const res = await h.router.fetch(
         post(
           {
@@ -378,7 +393,7 @@ describe("POST /v1/rerank is rate-limited", () => {
     };
     const provider = interceptProviderFetch(() => providerJson(REST_ANSWER));
     try {
-      const h = harness({}, ROUTES);
+      const h = rerankHarness();
       const res = await h.router.fetch(
         post({ model: "rerank-model", query: "q", documents: ["a"] }, refusing),
       );

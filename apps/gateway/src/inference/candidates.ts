@@ -40,6 +40,7 @@ export type ModelEndpointKind =
   | "responses"
   | "messages"
   | "embeddings"
+  | "rerank"
   | "images";
 
 /** `ModelRouteRequirements`. */
@@ -127,6 +128,15 @@ export function routeRequirements(
   switch (endpoint) {
     case "embeddings":
       require("embeddings");
+      break;
+    case "rerank":
+      // Issue #676. Requiring `rerank` — and not `embeddings` — is what stops a
+      // reranking request being served by an embedding or a chat model, which
+      // would answer 200 with a body that scores nothing. It is subject to the
+      // same documented widening as every other capability leg: a route that
+      // declares NO capabilities stays neutral, so a legacy row is still
+      // servable. See deviation 1 on `routeExclusionReasons` below.
+      require("rerank");
       break;
     case "images":
       require("images");

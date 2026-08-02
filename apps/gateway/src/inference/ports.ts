@@ -52,13 +52,22 @@ import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
 
 export type ProviderAuthScheme = "bearer" | "x-api-key";
 
-/** `ferrogate_providers::ModelCapability` — the closed capability vocabulary. */
+/**
+ * `ferrogate_providers::ModelCapability` — the closed capability vocabulary.
+ *
+ * `rerank` (issue #676) is the one member with no Rust ancestor. See the note on
+ * `ModelCapability` in `@ferrogate/providers`' `models.ts` for why it is not a
+ * reading of `embeddings`: an embedding model and a cross-encoder reranker are
+ * different architectures, and collapsing them would let the eligibility gate
+ * serve `POST /v1/rerank` from a model that scores nothing.
+ */
 export type ModelCapability =
   | "chat"
   | "streaming"
   | "vision"
   | "images"
   | "embeddings"
+  | "rerank"
   | "tools"
   | "structured_output";
 
@@ -394,6 +403,7 @@ export type InferenceOperation =
   | "chat.completions"
   | "responses"
   | "embeddings"
+  | "rerank"
   | "images"
   | "model_catalog";
 
@@ -471,6 +481,20 @@ export interface ProviderAdapter {
    * body through byte-for-byte (the OpenAI-compatible family's behavior).
    */
   translateEmbeddingsResponse?(body: unknown, logicalModel: string): unknown | undefined;
+  /**
+   * `translate_rerank_response` (issue #676) — same `undefined` convention.
+   *
+   * `request` is the caller's validated rerank body. It is a parameter, and not
+   * a closure the handler could have applied, because `return_documents` can
+   * only be answered by joining the provider's indices back against the
+   * documents the CALLER sent: no reranker echoes them, and the canonical shape
+   * has to be built in one place or the two halves drift.
+   */
+  translateRerankResponse?(
+    body: unknown,
+    logicalModel: string,
+    request: Record<string, unknown>,
+  ): unknown | undefined;
 }
 
 /** Resolves the adapter for a provider kind (`ferrogate_providers::registry`). */
@@ -649,7 +673,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 265
+ * enforcement belong to the ONE contract-driven middleware that covers all 266
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
