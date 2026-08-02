@@ -45,8 +45,10 @@
  * equivalent of the Rust config validator's refusal to boot.
  */
 import {
+  applyCloudflareAiGatewayRouting,
   applyStructuredOutputToAnthropic,
   BedrockAdapter,
+  canonicalProviderAdapterFamily,
   GeminiAdapter,
   AdapterError as PackageAdapterError,
   SecretValue,
@@ -56,15 +58,19 @@ import {
   WorkersAiAdapter,
 } from "@ferrogate/providers";
 import type {
+  CloudflareAiGatewaySurface,
   Json,
   ProviderAdapter as PackageProviderAdapter,
+  ProviderAdapterFamily as PackageProviderAdapterFamily,
   ProviderConfig as PackageProviderConfig,
   ProviderHeader as PackageProviderHeader,
+  ProviderHttpRequest as PackageProviderHttpRequest,
 } from "@ferrogate/providers";
 import type {
   AdapterError,
   AdapterRegistry,
   AdapterResult,
+  InferenceOperation,
   PhysicalRoute,
   ProviderAdapter,
   ProviderAuthScheme,
@@ -967,34 +973,196 @@ export const workersAiAdapter: ProviderAdapter = packageProviderAdapter(
   new WorkersAiAdapter(),
 );
 
-/** `ferrogate_providers::registry` — kind → adapter, alias-aware. */
+// ---------------------------------------------------------------------------
+// Cloudflare AI Gateway routing (issue #406, MOUNTED by issue #672)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which AI Gateway surface an ingress operation maps onto, or `null` for the
+ * operations the gateway's surface map does not cover.
+ *
+ * Identical to the mapping `packages/providers`' `ProviderAdapterRegistry` used
+ * to carry — and that mapping is the ONLY thing that moved here, because the
+ * registry class was never on the deployed path (see the note on
+ * {@link withCloudflareAiGatewayRouting}).
+ *
+ * `images` and `model_catalog` return `null` deliberately: `cloudflare.ts`'s
+ * `CloudflareAiGatewaySurface` has no member for either, and inventing a path
+ * for them would send a request somewhere Cloudflare does not serve. They keep
+ * dialling the vendor directly, which is what they did before this wiring.
+ */
+function cloudflareAiGatewaySurface(
+  operation: InferenceOperation,
+  family: PackageProviderAdapterFamily,
+): CloudflareAiGatewaySurface | null {
+  switch (operation) {
+    case "chat.completions":
+      // Anthropic's chat ingress is served by `/v1/messages` upstream, so the
+      // passthrough suffix has to be the Messages one or the gateway 404s.
+      return family === "Anthropic" ? "Messages" : "ChatCompletions";
+    case "responses":
+      return family === "Anthropic" ? "Messages" : "Responses";
+    case "embeddings":
+      return "Embeddings";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Re-address everything `adapter` prepares onto the route's Cloudflare AI
+ * Gateway, when it has one.
+ *
+ * ## Why this decorator exists, and why it is applied HERE
+ *
+ * `applyCloudflareAiGatewayRouting` has existed since issue #406 with exactly
+ * one caller: `ProviderAdapterRegistry.prepare*` in `@ferrogate/providers`. The
+ * deployed data plane never constructs that class for dispatch — it resolves
+ * adapters through {@link defaultAdapterRegistry}, right below — so the routing
+ * was skipped on every request FerroGate has ever served, and the caching, rate
+ * limiting, analytics and unified billing the AI Gateway product provides were
+ * off for every tenant (issue #672). The fix is not to add wiring to that class;
+ * that would be equally unreachable. It is to apply the routing on the path
+ * dispatch actually takes.
+ *
+ * It is a DECORATOR over `ProviderAdapter` rather than an edit inside each of
+ * the nine adapters for two reasons:
+ *
+ *  1. the AI Gateway rewrite is defined as a post-processing step over a
+ *    *prepared* request (`cloudflare.ts` mutates endpoint + headers + body and
+ *    nothing else), so every adapter would otherwise carry the same trailing
+ *    call; and
+ *  2. {@link defaultAdapterRegistry} maps EVERY entry through it, so a tenth
+ *    family cannot be added without routing the way the ninth was added without
+ *    it. `test/inference/cloudflare-ai-gateway-mount.test.ts` drives the
+ *    deployed Worker, and `test/inference/provider-families.test.ts` asserts the
+ *    table is total.
+ *
+ * A route with no `cloudflareAiGateway` is returned byte-identical: the wrapper
+ * is a no-op for every deployment that has not configured a gateway.
+ */
+export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): ProviderAdapter {
+  const routed: ProviderAdapter = {
+    kind: adapter.kind,
+
+    buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
+      const built = adapter.buildUpstreamRequest(plan);
+      const routing = plan.route.cloudflareAiGateway;
+      if (!built.ok || routing === undefined) {
+        return built;
+      }
+      // The family, not the operator's spelling — the slug default and the
+      // Anthropic surface both key off it. `undefined` is unreachable here (the
+      // adapter already refused an unknown kind above), and returning the
+      // unrouted request is the safe reading of an impossible state.
+      const family = canonicalProviderAdapterFamily(plan.route.providerKind);
+      if (family === undefined) {
+        return built;
+      }
+      const surface = cloudflareAiGatewaySurface(plan.operation, family);
+      if (surface === null) {
+        return built;
+      }
+
+      // `cloudflare.ts` works on the PACKAGE's request shape (header list,
+      // `SecretValue` values) and mutates it in place, exactly as the Rust does.
+      // Converting here — rather than widening `UpstreamRequest` — keeps the
+      // secret-carrying representation inside the package boundary that owns it.
+      const prepared: PackageProviderHttpRequest = {
+        provider: built.request.provider,
+        endpoint: built.request.endpoint,
+        headers: Object.entries(built.request.headers).map(([name, value]) => ({
+          name,
+          value: new SecretValue(value),
+        })),
+        body: (built.request.body ?? {}) as Json,
+        stream: built.request.stream,
+      };
+      try {
+        applyCloudflareAiGatewayRouting(
+          {
+            accountId: routing.accountId,
+            gatewayId: routing.gatewayId,
+            gatewayBaseUrl: routing.gatewayBaseUrl,
+            apiBaseUrl: routing.apiBaseUrl,
+            mode: routing.mode,
+            ...(routing.providerSlug === undefined
+              ? {}
+              : { providerSlug: routing.providerSlug }),
+            ...(routing.aigToken === undefined
+              ? {}
+              : { aigToken: new SecretValue(routing.aigToken) }),
+          },
+          family,
+          surface,
+          prepared,
+        );
+      } catch (error) {
+        // A family with no default slug and no `provider_slug` raises
+        // `AdapterError::InvalidRequest` here. It surfaces as the adapter's own
+        // 400 rather than as a 500, and — critically — NOT as a request quietly
+        // sent to the vendor with the gateway skipped.
+        return { ok: false, error: packageAdapterError(error) };
+      }
+
+      return {
+        ok: true,
+        request: {
+          ...built.request,
+          endpoint: prepared.endpoint,
+          headers: exposeHeaders(prepared.headers),
+          // Unified mode rewrites `model` to `author/model` in place; the object
+          // is the same one, re-typed back to the gateway's body shape.
+          body: prepared.body as Record<string, unknown>,
+        },
+      };
+    },
+  };
+  return adapter.translateEmbeddingsResponse === undefined
+    ? routed
+    : {
+        ...routed,
+        // Delegated with `adapter` as the receiver: the response leg is not
+        // affected by routing, and re-binding it here keeps the decorator
+        // transparent for the families that translate embeddings (gemini,
+        // vertex, bedrock, workers-ai).
+        translateEmbeddingsResponse: (body: unknown, logicalModel: string): unknown | undefined =>
+          adapter.translateEmbeddingsResponse?.(body, logicalModel),
+      };
+}
+
+/**
+ * `ferrogate_providers::registry` — kind → adapter, alias-aware.
+ *
+ * Every entry is wrapped in {@link withCloudflareAiGatewayRouting} by
+ * construction: the table below names the nine adapters ONCE and the map is
+ * built from it, so an adapter cannot be registered without the gateway leg.
+ * That is the specific trap this table closes — a second registry that resolves
+ * adapters the deployed path does not use is how AI Gateway routing stayed dead
+ * for as long as it did (issue #672).
+ */
+const ADAPTERS_BY_FAMILY: Readonly<Record<string, ProviderAdapter>> = Object.fromEntries(
+  (
+    [
+      ["openai-compatible", openAiCompatibleAdapter],
+      ["anthropic", anthropicAdapter],
+      ["grok", grokAdapter],
+      ["openrouter", openRouterAdapter],
+      ["azure-openai", azureOpenAiAdapter],
+      ["gemini", geminiAdapter],
+      ["bedrock", bedrockAdapter],
+      ["vertex", vertexAdapter],
+      ["workers-ai", workersAiAdapter],
+    ] as const
+  ).map(([canonicalKind, adapter]) => [canonicalKind, withCloudflareAiGatewayRouting(adapter)]),
+);
+
 export const defaultAdapterRegistry: AdapterRegistry = {
   adapterFor(providerKind: string): ProviderAdapter | null {
     const canonical = canonicalProviderKind(providerKind);
-    switch (canonical) {
-      case "openai-compatible":
-        return openAiCompatibleAdapter;
-      case "anthropic":
-        return anthropicAdapter;
-      case "grok":
-        return grokAdapter;
-      case "openrouter":
-        return openRouterAdapter;
-      case "azure-openai":
-        return azureOpenAiAdapter;
-      case "gemini":
-        return geminiAdapter;
-      case "bedrock":
-        return bedrockAdapter;
-      case "vertex":
-        return vertexAdapter;
-      case "workers-ai":
-        return workersAiAdapter;
-      default:
-        // `canonicalProviderKind` returned `null`: the operator named a family
-        // that does not exist in `PROVIDER_ADAPTER_FAMILIES`. The handler
-        // renders the Rust `unsupported provider kind <kind>` message.
-        return null;
-    }
+    // `canonicalProviderKind` returns `null` when the operator named a family
+    // that does not exist in `PROVIDER_ADAPTER_FAMILIES`; the handler renders
+    // the Rust `unsupported provider kind <kind>` message for it.
+    return canonical === null ? null : (ADAPTERS_BY_FAMILY[canonical] ?? null);
   },
 };

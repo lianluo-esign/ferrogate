@@ -614,12 +614,26 @@ provider-adapter routing seam (§10.7).
 - **Fit:** opt-in per-provider URL rewrite + `cf-aig-*` headers on the existing
   `ProviderHttpRequest` (§1); body and BYOK auth preserved, so it is a transparent
   pass-through. FerroGate stays the gateway of record.
+- **TypeScript/Workers status (issue #672):** MOUNTED, and it was not before.
+  `applyCloudflareAiGatewayRouting` (`packages/providers/src/cloudflare.ts`) was
+  ported with #406 but its only caller was `ProviderAdapterRegistry`, which the
+  deployed data plane never dispatches through — so no request was ever routed.
+  It is now applied by `withCloudflareAiGatewayRouting` in
+  `apps/gateway/src/inference/adapters.ts`, which every entry of
+  `defaultAdapterRegistry` is built through, and the registry's own routing leg
+  was deleted so there is one mechanism rather than two. Operator surface: the
+  `GATEWAY_CLOUDFLARE` var (`{ "account_id": … }`, the `[cloudflare]` block) plus
+  `cloudflare_ai_gateway` (`{ gateway_id, mode?, provider_slug?, aig_token_var? }`)
+  on a `GATEWAY_PROVIDERS` row. `chat.completions`, `responses` and `embeddings`
+  are routed; `images` and the model catalog are not, because the AI Gateway
+  surface map covers neither. `workers-ai` is refused with the block, since that
+  family is served through the `env.AI` binding rather than over the wire.
 
 ### Seam summary
 
 | CF area | FerroGate seam | Exists today? |
 |---------|----------------|---------------|
-| AI Gateway | provider-adapter routing (`cloudflare_ai_gateway` + `apply_cloudflare_ai_gateway_routing`) | Yes (opt-in, #406) |
+| AI Gateway | provider-adapter routing (`cloudflare_ai_gateway` + `apply_cloudflare_ai_gateway_routing`) | Yes (opt-in, #406; mounted on Workers by #672) |
 | R2 static hosting | `AssetObjectStore` trait + `AssetBucketClient` | Yes |
 | Secrets Store | `SecretResolver` / `SecretRef::CfSecret` + `CloudflareSecretResolver` | Yes |
 | Managed agents | isolation-backend registry + fronting-Worker transport | Seam yes; CF backend no |

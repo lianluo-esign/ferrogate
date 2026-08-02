@@ -49,6 +49,7 @@ import type { OpenRouterRoute } from "./adapters.js";
 import { InMemoryModelResolver, emptyModelResolver } from "./defaults.js";
 import type {
   AwsRouteCredentials,
+  CloudflareAiGatewayRoute,
   GcpRouteCredentials,
   InferenceBindings,
   ModelCapability,
@@ -71,6 +72,65 @@ const capabilitySchema = z.enum([
   "tools",
   "structured_output",
 ]);
+
+/**
+ * The account-level `[cloudflare]` block (issue #672), carried in the
+ * `GATEWAY_CLOUDFLARE` var.
+ *
+ * Field names and defaults are `packages/config`'s `cloudflareConfigSchema`
+ * (`schema/entities.ts:524`) verbatim, which is itself the port of the Rust
+ * `[cloudflare]` section — an operator's TOML and a Worker var should not
+ * disagree about what the account block is called. Only the three keys AI
+ * Gateway routing reads are accepted: `api_token`, `tenant_tokens` and
+ * `r2_s3_endpoint` belong to the manage-plane clients, not to this seam, and a
+ * table that accepted them here would imply this Worker uses them.
+ *
+ * `.strict()` for the same reason every other table in this file is: a
+ * misspelled `account_ id` must fail loudly, not route to `/v1//gw/...`.
+ */
+export const cloudflareAccountRecordSchema = z
+  .object({
+    /** `[cloudflare].account_id` — required for any routed provider. */
+    account_id: z.string().trim().min(1),
+    /** `[cloudflare].ai_gateway_base_url` — the compat (passthrough) host. */
+    ai_gateway_base_url: z.string().trim().url().optional(),
+    /** `[cloudflare].api_base_url` — the unified REST host. */
+    api_base_url: z.string().trim().url().optional(),
+  })
+  .strict();
+
+export type CloudflareAccountRecord = z.infer<typeof cloudflareAccountRecordSchema>;
+
+/** Cloudflare's own public hosts — `cloudflareConfigSchema`'s defaults. */
+const DEFAULT_AI_GATEWAY_BASE_URL = "https://gateway.ai.cloudflare.com";
+const DEFAULT_CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
+
+/**
+ * `[[providers]].cloudflare_ai_gateway` — `ProviderCloudflareAiGatewayConfig`
+ * (`packages/config/src/schema/entities.ts:38`), with `aig_token_secret_ref`
+ * spelled `aig_token_var` for the same reason `api_key_env` became
+ * `api_key_var`: a Worker names a SECRET BINDING (or an `env://` / `cf://`
+ * reference) where a process names an environment variable. The value never
+ * appears in the table.
+ */
+const providerCloudflareAiGatewaySchema = z
+  .object({
+    /** The AI Gateway's name inside the account. */
+    gateway_id: z.string().trim().min(1),
+    /** `CloudflareAiGatewayMode`, lower-case as in the TOML enum. */
+    mode: z.enum(["compat", "unified"]).optional(),
+    /**
+     * Cloudflare's provider slug. Only `openai` and `anthropic` have a default
+     * derivable from the family; every other family MUST name one, and the
+     * adapter fails the request closed if it does not (`cloudflare.ts`
+     * `resolveSlug`). That check is deliberately left where Cloudflare's slug
+     * vocabulary is known rather than duplicated into a second table here.
+     */
+    provider_slug: z.string().trim().min(1).optional(),
+    /** Binding/reference holding the `cf-aig-authorization` bearer. */
+    aig_token_var: z.string().trim().min(1).optional(),
+  })
+  .strict();
 
 /**
  * One `[[providers]]` row.
@@ -147,6 +207,14 @@ export const providerRecordSchema = z
      * refreshes it — see `GcpRouteCredentials` in `./ports.ts`.
      */
     gcp_access_token_var: z.string().trim().min(1).optional(),
+    /**
+     * `Provider.cloudflare_ai_gateway` (issue #406, mounted by #672). Present ⇒
+     * every request this provider serves is re-addressed onto the account's AI
+     * Gateway. Requires the account block (`GATEWAY_CLOUDFLARE`), exactly as
+     * the Rust validator requires a top-level `[cloudflare]` section —
+     * `validateCloudflareAiGatewayProviders` in `packages/config`.
+     */
+    cloudflare_ai_gateway: providerCloudflareAiGatewaySchema.optional(),
   })
   .strict();
 
@@ -512,6 +580,86 @@ function providerCredentials(
 }
 
 /**
+ * Port of `validate_cloudflare_ai_gateway_providers` (issue #406) —
+ * `packages/config/src/validate/sections.ts:801` — plus the resolution the Rust
+ * `state_routing.rs::cloudflare_ai_gateway_routing` does when it assembles the
+ * routing from the provider block and the account section.
+ *
+ * Both halves are fail-closed at TABLE time rather than at request time,
+ * matching how `api_key_var` and the Bedrock/Vertex credentials are already
+ * treated here: a routed provider whose account block or gateway token is
+ * missing refuses the WHOLE catalog. The alternative — dropping the routing and
+ * dialling the vendor directly — is precisely the silent detachment this issue
+ * exists to end, and it would be invisible to an operator who believes their
+ * traffic is being cached, rate-limited and logged by the AI Gateway.
+ */
+function cloudflareAiGatewayRouting(
+  provider: ProviderRecord,
+  index: number,
+  secrets: Readonly<Record<string, unknown>>,
+  cloudflare: CloudflareAccountRecord | undefined,
+): { ok: true; routing?: CloudflareAiGatewayRoute } | { ok: false; reason: string } {
+  const block = provider.cloudflare_ai_gateway;
+  if (block === undefined) {
+    return { ok: true };
+  }
+  const at = (field: string) => `field providers[${index}].cloudflare_ai_gateway${field}`;
+
+  if (cloudflare === undefined) {
+    return {
+      ok: false,
+      reason: `${at("")}: requires the account-level GATEWAY_CLOUDFLARE block (issue #672) for the account id and base URLs`,
+    };
+  }
+
+  // `workers-ai` never leaves the isolate: `inference/workers-ai.ts` recognizes
+  // the prepared REST path and serves it through the `env.AI` binding instead of
+  // `fetch`. Rewriting that URL onto the AI Gateway would silently take the
+  // request OFF the binding and onto the network — a request that then needs an
+  // account API token this Worker does not carry. Cloudflare's own answer for
+  // this pairing is the binding's `gateway` option, which is a different change
+  // in a different file, so the pairing is refused loudly instead of half-done.
+  if (canonicalProviderKind(provider.kind) === "workers-ai") {
+    return {
+      ok: false,
+      reason: `${at("")}: not supported for kind = workers-ai — Workers AI is served through the AI binding, which reaches the AI Gateway via its own gateway option rather than by URL routing`,
+    };
+  }
+
+  let aigToken: string | undefined;
+  if (block.aig_token_var !== undefined) {
+    const resolved = boundSecret(secrets, block.aig_token_var);
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        reason: providerSecretRefusal(
+          provider.name,
+          "cloudflare_ai_gateway.aig_token_var",
+          block.aig_token_var,
+          resolved,
+        ),
+      };
+    }
+    aigToken = resolved.value;
+  }
+
+  return {
+    ok: true,
+    routing: {
+      accountId: cloudflare.account_id,
+      gatewayId: block.gateway_id,
+      gatewayBaseUrl: cloudflare.ai_gateway_base_url ?? DEFAULT_AI_GATEWAY_BASE_URL,
+      apiBaseUrl: cloudflare.api_base_url ?? DEFAULT_CLOUDFLARE_API_BASE_URL,
+      // The package spells the mode in the Rust enum's PascalCase; the table
+      // spells it as the TOML does. Absent is `DEFAULT_CLOUDFLARE_AI_GATEWAY_MODE`.
+      mode: block.mode === "unified" ? "Unified" : "Compat",
+      ...(block.provider_slug === undefined ? {} : { providerSlug: block.provider_slug }),
+      ...(aigToken === undefined ? {} : { aigToken }),
+    },
+  };
+}
+
+/**
  * Join the two tables into the flattened {@link PhysicalRoute}s the dispatch
  * seam carries, resolving each provider's credential out of `secrets`.
  *
@@ -529,9 +677,11 @@ export function buildModelCatalog(
   providers: readonly ProviderRecord[],
   models: readonly ModelRecord[],
   secrets: Readonly<Record<string, unknown>> = {},
+  cloudflare?: CloudflareAccountRecord,
 ): ModelCatalogResult {
   const byName = new Map<string, ProviderRecord>();
   const credentialsByName = new Map<string, ProviderCredentials>();
+  const routingByName = new Map<string, CloudflareAiGatewayRoute>();
   for (const [index, provider] of providers.entries()) {
     if (byName.has(provider.name)) {
       return { ok: false, reason: `duplicate provider ${provider.name}` };
@@ -546,8 +696,15 @@ export function buildModelCatalog(
     if (!credentials.ok) {
       return { ok: false, reason: credentials.reason };
     }
+    const routing = cloudflareAiGatewayRouting(provider, index, secrets, cloudflare);
+    if (!routing.ok) {
+      return { ok: false, reason: routing.reason };
+    }
     byName.set(provider.name, provider);
     credentialsByName.set(provider.name, credentials.credentials);
+    if (routing.routing !== undefined) {
+      routingByName.set(provider.name, routing.routing);
+    }
   }
 
   // `OpenRouterRoute` is `PhysicalRoute` plus the two optional OpenRouter
@@ -663,6 +820,12 @@ export function buildModelCatalog(
         ...(provider.byok_alias === undefined ? {} : { byokAlias: provider.byok_alias }),
         ...(credentials.aws === undefined ? {} : { awsCredentials: credentials.aws }),
         ...(credentials.gcp === undefined ? {} : { gcpCredentials: credentials.gcp }),
+        // Every leg of a routed provider is routed: the AI Gateway is a property
+        // of the PROVIDER connection, so a fallback/canary/shadow leg that
+        // reached the same provider unrouted would quietly bypass the gateway.
+        ...(routingByName.has(provider.name)
+          ? { cloudflareAiGateway: routingByName.get(provider.name) }
+          : {}),
         authScheme: provider.auth_scheme ?? defaultAuthScheme(provider.kind),
         ownedBy: model.owned_by ?? provider.name,
         ...(leg.capabilities !== undefined
@@ -716,7 +879,41 @@ export function buildModelCatalog(
   return { ok: true, routes };
 }
 
-/** `GATEWAY_PROVIDERS` + `GATEWAY_MODELS` → {@link ModelCatalogResult}. */
+/**
+ * Parse the account-level `[cloudflare]` block out of `GATEWAY_CLOUDFLARE`.
+ *
+ * Absent or blank is the OFF posture and is not an error — it is what every
+ * deployment that does not use AI Gateway routing looks like. It only becomes
+ * an error once a provider row asks to be routed, which is where
+ * {@link cloudflareAiGatewayRouting} refuses.
+ */
+function cloudflareAccountFromEnv(
+  raw: string | undefined,
+): { ok: true; cloudflare?: CloudflareAccountRecord } | { ok: false; reason: string } {
+  if (raw === undefined || raw.trim() === "") {
+    return { ok: true };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `GATEWAY_CLOUDFLARE is not valid JSON: ${detail}` };
+  }
+  const result = cloudflareAccountRecordSchema.safeParse(parsed);
+  if (!result.success) {
+    const detail = result.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    return { ok: false, reason: `GATEWAY_CLOUDFLARE is invalid: ${detail}` };
+  }
+  return { ok: true, cloudflare: result.data };
+}
+
+/**
+ * `GATEWAY_PROVIDERS` + `GATEWAY_MODELS` + `GATEWAY_CLOUDFLARE` →
+ * {@link ModelCatalogResult}.
+ */
 export function modelCatalogFromEnv(env: InferenceBindings): ModelCatalogResult {
   const providers = parseTable(
     typeof env.GATEWAY_PROVIDERS === "string" ? env.GATEWAY_PROVIDERS : undefined,
@@ -734,7 +931,13 @@ export function modelCatalogFromEnv(env: InferenceBindings): ModelCatalogResult 
   if (!models.ok) {
     return { ok: false, reason: models.reason };
   }
-  return buildModelCatalog(providers.rows, models.rows, env);
+  const cloudflare = cloudflareAccountFromEnv(
+    typeof env.GATEWAY_CLOUDFLARE === "string" ? env.GATEWAY_CLOUDFLARE : undefined,
+  );
+  if (!cloudflare.ok) {
+    return { ok: false, reason: cloudflare.reason };
+  }
+  return buildModelCatalog(providers.rows, models.rows, env, cloudflare.cloudflare);
 }
 
 /**

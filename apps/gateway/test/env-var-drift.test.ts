@@ -405,7 +405,11 @@ describe("the env-var drift gate itself", () => {
     // deliberately a two-file change: the count below must be re-stated by
     // whoever adds one, rather than drifting silently. Note this merge is why
     // the number is 54 and not either branch's 52 or 53: BOTH sets landed.
-    expect(DECLARED.vars.size).toBe(55);
+    //
+    // #672 committed `GATEWAY_CLOUDFLARE`, the account-level `[cloudflare]`
+    // block AI Gateway routing needs, so 56. Re-derived by running this gate
+    // against the merged `wrangler.toml` — the parser's own count, not 55 + 1.
+    expect(DECLARED.vars.size).toBe(56);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -634,7 +638,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(55);
+    expect(rows.length).toBe(56);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -676,8 +680,15 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // table that grows without bound is the half of #664 that is not about
     // reading). `test/requestlog/mount.test.ts` asserts the committed value
     // parses into a real policy rather than a blank.
+    //
+    // #672: 50 -> 51. `GATEWAY_CLOUDFLARE` ("") is observable and INERT — the
+    // empty account block is the OFF posture (`cloudflareAccountFromEnv` treats
+    // blank as absent, and a provider that then asks to be routed refuses the
+    // whole table), so the committed value configures no AI Gateway routing for
+    // the suite. `test/inference/cloudflare-ai-gateway-mount.test.ts` supplies
+    // its own account block on the env it drives, in its own isolate.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(50);
+    expect(observable.length).toBe(51);
     expect(rows.length - observable.length).toBe(5);
   });
 });
