@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // `test/generated-drift.test.ts` re-runs the generator off disk, so the
+    // TEST program needs the Node built-ins. `src` stays runtime-agnostic:
+    // nothing under it imports `node:*`, which `test/source-hygiene.test.ts`
+    // asserts, so this client runs unchanged in a Worker, in Bun and in Node.
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src", "test", "scripts"]
+}

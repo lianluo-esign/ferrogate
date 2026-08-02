@@ -40,3 +40,4 @@ ferrogate-wiki/wiki-site/.cache/
 ferrogate-wiki/wiki-site/tsconfig.tsbuildinfo
 scripts/release-dryrun/__pycache__/
 scripts/__pycache__/
+sdks/python/**/__pycache__/
