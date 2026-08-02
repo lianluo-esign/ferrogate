@@ -248,7 +248,16 @@ function honoTokenGovernor(c: Context<GatewayEnv>): TokenGovernor {
       const admitted = await admitTokensPerMinute(c, estimatedTokens);
       if (admitted === null) return null;
       if (isTokenAdmissionRefusal(admitted)) {
-        return { status: admitted.status, code: admitted.code, message: admitted.message };
+        return {
+          status: admitted.status,
+          code: admitted.code,
+          message: admitted.message,
+          // #726 — the pacing headers travel with the refusal. This re-shaping
+          // step is exactly where they were being dropped: the limiter computed
+          // them, `admitTokensPerMinute` attached them, and a three-field copy
+          // here silently discarded them before `errorResponse` ever saw one.
+          ...(admitted.headers === undefined ? {} : { headers: admitted.headers }),
+        };
       }
       return admitted;
     },

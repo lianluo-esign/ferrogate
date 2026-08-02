@@ -55,6 +55,7 @@ import {
   WalletLedger,
   type WindowState,
   emptyWindow,
+  remainingInWindow,
   secondsUntilWindowReset,
 } from "./window.js";
 
@@ -66,6 +67,8 @@ export interface DoRequestResult {
   readonly allowed: boolean;
   /** Whole seconds until the denying window rolls. `0` when allowed. */
   readonly retryAfterSeconds: number;
+  /** Requests left in the window against `limit` (#726). `0` when denied. */
+  readonly remaining: number;
 }
 
 /** {@link RateLimiterDurableObject.consumeTokens} reply. */
@@ -74,6 +77,12 @@ export interface DoTokenResult {
   /** Window generation the estimate was charged to; pass back to `settleTokens`. */
   readonly windowStartedAt: number;
   readonly retryAfterSeconds: number;
+  /**
+   * Tokens left in the window against `limit` (#726). Computed INSIDE the DO,
+   * on the same single-threaded read that decided the denial — deriving it in
+   * the caller would race the next request into the same window.
+   */
+  readonly remaining: number;
 }
 
 /**
@@ -122,6 +131,7 @@ export class RateLimiterDurableObject extends DurableObject {
     return {
       allowed,
       retryAfterSeconds: allowed ? 0 : secondsUntilWindowReset(this.#rpm.state, now),
+      remaining: remainingInWindow(this.#rpm.state, limit),
     };
   }
 
@@ -134,6 +144,7 @@ export class RateLimiterDurableObject extends DurableObject {
       allowed,
       windowStartedAt: this.#tpm.state.windowStartedAt,
       retryAfterSeconds: allowed ? 0 : secondsUntilWindowReset(this.#tpm.state, now),
+      remaining: remainingInWindow(this.#tpm.state, limit),
     };
   }
 

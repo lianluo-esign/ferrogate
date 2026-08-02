@@ -62,6 +62,7 @@ export class DurableObjectRateLimiter implements RateLimiter {
             allowed: false,
             counterKey: window.counterKey,
             limit: window.limit,
+            remaining: result.remaining,
             retryAfterSeconds: result.retryAfterSeconds,
           };
         }
@@ -81,6 +82,7 @@ export class DurableObjectRateLimiter implements RateLimiter {
           allowed: false,
           counterKey: window.counterKey,
           limit: window.limit,
+          remaining: result.remaining,
           retryAfterSeconds: result.retryAfterSeconds,
         };
       }

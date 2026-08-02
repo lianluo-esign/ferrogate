@@ -74,8 +74,9 @@ import {
   jsonResponse,
   rawUpstreamResponse,
   reject,
+  relayedRateLimitHeaders,
 } from "./errors.js";
-import type { InferenceRejection } from "./errors.js";
+import type { InferenceRejection, UpstreamRelay } from "./errors.js";
 import {
   countMessagesInputTokens,
   estimateChatCompletionUsage,
@@ -653,6 +654,19 @@ async function dispatchCandidates(
        * by `ON CONFLICT DO NOTHING` as a silent under-bill.
        */
       readonly attemptIndex: number;
+      /**
+       * #726 — true when the candidate that answered is NOT the caller's
+       * first-choice route.
+       *
+       * Deliberately derived from `FailoverOutcome.candidateIndex`, not from
+       * {@link attemptIndex}: a same-provider RETRY re-dials the route the
+       * caller asked for, so its rate-limit numbers are still theirs, while a
+       * move to candidate 1 (whether the ladder walked there or the breaker
+       * skipped candidate 0) reports a window the caller neither selected nor
+       * is guaranteed to be routed to again. `errors.ts::relayedRateLimitHeaders`
+       * argues what is done with it.
+       */
+      readonly failedOver: boolean;
     }
   | InferenceRejection
 > {
@@ -703,6 +717,7 @@ async function dispatchCandidates(
     route: outcome.candidate.route,
     response: outcome.response,
     attemptIndex: Math.max(0, outcome.attempts - 1),
+    failedOver: outcome.candidateIndex > 0,
   };
 }
 
@@ -1160,13 +1175,24 @@ function recordUsage(
   }
 }
 
-/** Headers a streamed response carries in addition to the gateway ones. */
-function streamingHeaders(contentType: string, requestId: string): Record<string, string> {
+/**
+ * Headers a streamed response carries in addition to the gateway ones.
+ *
+ * The relay (#726) matters MORE here than on the buffered paths, not less: a
+ * stream's headers are flushed before the first token, so they are the only
+ * pacing signal a streaming client will ever get for this request.
+ */
+function streamingHeaders(
+  contentType: string,
+  requestId: string,
+  upstream?: UpstreamRelay,
+): Record<string, string> {
   return {
     "content-type": contentType,
     // The Rust writer emitted a chunked SSE response with no caching; Workers
     // sets transfer-encoding itself, so only the cache directives are explicit.
     "cache-control": "no-cache",
+    ...relayedRateLimitHeaders(upstream),
     "x-request-id": requestId,
     "x-trace-id": requestId,
     "x-ferrogate-runtime": "workers",
@@ -1190,13 +1216,14 @@ function streamResponse(
   route: PhysicalRoute,
   requestId: string,
   onUsage: (usage: ProviderUsage | undefined) => void,
+  upstream?: UpstreamRelay,
 ): Response {
   const contentType = upstreamResponse.headers.get("content-type") ?? "text/event-stream";
   const body = upstreamResponse.body;
   if (body === null) {
     return new Response(null, {
       status: upstreamResponse.status,
-      headers: streamingHeaders(contentType, requestId),
+      headers: streamingHeaders(contentType, requestId, upstream),
     });
   }
 
@@ -1218,7 +1245,7 @@ function streamResponse(
   const outgoingContentType = normalizer === null ? contentType : "text/event-stream";
   return new Response(tapped, {
     status: upstreamResponse.status,
-    headers: streamingHeaders(outgoingContentType, requestId),
+    headers: streamingHeaders(outgoingContentType, requestId, upstream),
   });
 }
 
@@ -1581,7 +1608,12 @@ async function handleOpenAiInference(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  // #726 — the pacing headers of the response that ACTUALLY answered, plus
+  // whether the ladder moved the caller to get it. Built once here so every
+  // exit below (relayed body, translated body, stream) carries the same
+  // decision instead of five call sites re-deriving it.
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
   const routeLabel = ROUTE_LABELS[operation];
   const usageDialect = usageProviderKindFor(operation, servedRoute.providerKind);
@@ -1618,6 +1650,7 @@ async function handleOpenAiInference(
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
+      relay,
     );
   }
 
@@ -1636,6 +1669,7 @@ async function handleOpenAiInference(
       upstreamResponse.headers.get("content-type") ?? "application/json",
       text,
       requestId,
+      relay,
     );
   }
 
@@ -1649,6 +1683,7 @@ async function handleOpenAiInference(
     upstreamResponse.headers.get("content-type") ?? "application/json",
     text,
     requestId,
+    relay,
   );
 }
 
@@ -1720,7 +1755,12 @@ async function handleMessages(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  // #726 — the pacing headers of the response that ACTUALLY answered, plus
+  // whether the ladder moved the caller to get it. Built once here so every
+  // exit below (relayed body, translated body, stream) carries the same
+  // decision instead of five call sites re-deriving it.
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
   const usageDialect = usageProviderKindFor("messages", servedRoute.providerKind);
   const meterBase = {
@@ -1758,6 +1798,7 @@ async function handleMessages(
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
+      relay,
     );
   }
 
@@ -1776,6 +1817,7 @@ async function handleMessages(
       upstreamResponse.headers.get("content-type") ?? "application/json",
       text,
       requestId,
+      relay,
     );
   }
 
@@ -1788,7 +1830,7 @@ async function handleMessages(
   // OpenAI-family upstream is reshaped so a Claude client sees a native Message
   // either way.
   const message = deps.translator.chatCompletionToMessage(parsed, logicalModel);
-  return jsonResponse(message, requestId, upstreamResponse.status);
+  return jsonResponse(message, requestId, upstreamResponse.status, relay);
 }
 
 // ---------------------------------------------------------------------------
@@ -1973,7 +2015,12 @@ async function handleEmbeddings(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  // #726 — the pacing headers of the response that ACTUALLY answered, plus
+  // whether the ladder moved the caller to get it. Built once here so every
+  // exit below (relayed body, translated body, stream) carries the same
+  // decision instead of five call sites re-deriving it.
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -2004,6 +2051,7 @@ async function handleEmbeddings(
       upstreamResponse.headers.get("content-type") ?? "application/json",
       text,
       requestId,
+      relay,
     );
   }
 
@@ -2019,13 +2067,14 @@ async function handleEmbeddings(
   const adapter = deps.adapters.adapterFor(servedRoute.providerKind);
   const translated = adapter?.translateEmbeddingsResponse?.(parsed, logicalModel);
   if (translated !== undefined) {
-    return jsonResponse(translated, requestId, upstreamResponse.status);
+    return jsonResponse(translated, requestId, upstreamResponse.status, relay);
   }
   return rawUpstreamResponse(
     upstreamResponse.status,
     upstreamResponse.headers.get("content-type") ?? "application/json",
     text,
     requestId,
+    relay,
   );
 }
 
@@ -2115,7 +2164,12 @@ async function handleRerank(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  // #726 — the pacing headers of the response that ACTUALLY answered, plus
+  // whether the ladder moved the caller to get it. Built once here so every
+  // exit below (relayed body, translated body, stream) carries the same
+  // decision instead of five call sites re-deriving it.
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -2143,6 +2197,7 @@ async function handleRerank(
       upstreamResponse.headers.get("content-type") ?? "application/json",
       text,
       requestId,
+      relay,
     );
   }
 
@@ -2161,7 +2216,7 @@ async function handleRerank(
   const adapter = deps.adapters.adapterFor(servedRoute.providerKind);
   const translated = adapter?.translateRerankResponse?.(parsed, logicalModel, request);
   if (translated !== undefined) {
-    return jsonResponse(translated, requestId, upstreamResponse.status);
+    return jsonResponse(translated, requestId, upstreamResponse.status, relay);
   }
   // No translation leg: pass the upstream body through byte-for-byte, the same
   // `Ok(None)` arm `/v1/embeddings` takes for the OpenAI-compatible family.
@@ -2172,6 +2227,7 @@ async function handleRerank(
     upstreamResponse.headers.get("content-type") ?? "application/json",
     text,
     requestId,
+    relay,
   );
 }
 
@@ -2229,7 +2285,12 @@ async function handleImages(
   if (isRejection(dispatched)) {
     return errorResponse(dispatched, requestId);
   }
-  const { route: servedRoute, response: upstreamResponse, attemptIndex } = dispatched;
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  // #726 — the pacing headers of the response that ACTUALLY answered, plus
+  // whether the ladder moved the caller to get it. Built once here so every
+  // exit below (relayed body, translated body, stream) carries the same
+  // decision instead of five call sites re-deriving it.
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
   const text = await readUpstreamBody(deps, upstreamResponse);
   if (isRejection(text)) {
@@ -2286,6 +2347,7 @@ async function handleImages(
     upstreamResponse.headers.get("content-type") ?? "application/json",
     text,
     requestId,
+    relay,
   );
 }
 

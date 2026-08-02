@@ -26,6 +26,7 @@ import {
   TokenBudgetLedger,
   TokenWindow,
   WalletLedger,
+  remainingInWindow,
   secondsUntilWindowReset,
 } from "./window.js";
 
@@ -76,6 +77,7 @@ export class InMemoryRateLimiter implements RateLimiter {
           allowed: false,
           counterKey: window.counterKey,
           limit: window.limit,
+          remaining: remainingInWindow(entry.rpm.state, window.limit),
           retryAfterSeconds: secondsUntilWindowReset(entry.rpm.state, now),
         };
       }
@@ -91,6 +93,7 @@ export class InMemoryRateLimiter implements RateLimiter {
         allowed: false,
         counterKey: window.counterKey,
         limit: window.limit,
+        remaining: remainingInWindow(entry.tpm.state, window.limit),
         retryAfterSeconds: secondsUntilWindowReset(entry.tpm.state, now),
       };
     }

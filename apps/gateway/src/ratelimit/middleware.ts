@@ -88,6 +88,7 @@ import type { AuthContext, GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import { DurableObjectRateLimiter } from "./do-limiter.js";
 import type { RateLimiterNamespace } from "./durable-object.js";
+import { type RateLimitDimension, rateLimitDenialHeaders } from "./headers.js";
 import { type CounterWindow, tokenBudgetCounterKey } from "./keys.js";
 import { InMemoryRateLimiter } from "./memory.js";
 import {
@@ -280,7 +281,15 @@ export function subjectFor(c: Context<GatewayEnv>, perKeyLimit?: number): QuotaS
   };
 }
 
-/** Turn a denial into the exact Rust `AuthError`, and attach `Retry-After` if asked. */
+/**
+ * Turn a denial into the exact Rust `AuthError`, carrying the pacing headers.
+ *
+ * #726 changed the default: the headers are emitted UNLESS
+ * {@link RateLimitOptions.retryAfterHeader} is explicitly `false`. The previous
+ * shape — off by default, and when on, stashed as `error.retryAfterSeconds`
+ * for "a wrapper that wants to emit it" — meant no configuration whatsoever
+ * could produce a `Retry-After`, because no such wrapper was ever written.
+ */
 function refuse(
   outcome: Extract<RateLimitOutcome, { allowed: false }>,
   code: "rate_limit_exceeded" | "tpm_limit_exceeded",
@@ -292,14 +301,38 @@ function refuse(
     code === "rate_limit_exceeded"
       ? RATE_LIMIT_REFUSALS.rate_limit_exceeded.message(requestId)
       : RATE_LIMIT_REFUSALS.tpm_limit_exceeded.message();
-  const error = new HttpError(refusal.status, refusal.code, message);
-  if (options.retryAfterHeader === true) {
-    // Opt-in only; Rust attaches no Retry-After. `HttpError` carries no header
-    // bag, so the value rides along for a wrapper that wants to emit it.
-    (error as HttpError & { retryAfterSeconds?: number }).retryAfterSeconds =
-      outcome.retryAfterSeconds;
-  }
-  throw error;
+  throw new HttpError(
+    refusal.status,
+    refusal.code,
+    message,
+    rateLimitHeadersFor(
+      code === "rate_limit_exceeded" ? "requests" : "tokens",
+      outcome,
+      options,
+    ),
+  );
+}
+
+/**
+ * The header bag for a denial, or `{}` when an operator has opted back out.
+ *
+ * One helper for both refusal paths (the throwing middleware and the reporting
+ * one the inference handlers use) so the two cannot emit different names — the
+ * failure mode there is silent, because each path has its own tests and both
+ * would be green.
+ */
+function rateLimitHeadersFor(
+  dimension: RateLimitDimension,
+  outcome: { limit: number; remaining: number; retryAfterSeconds: number },
+  options: RateLimitOptions,
+): Record<string, string> {
+  if (options.retryAfterHeader === false) return {};
+  return rateLimitDenialHeaders({
+    dimension,
+    limit: outcome.limit,
+    remaining: outcome.remaining,
+    retryAfterSeconds: outcome.retryAfterSeconds,
+  });
 }
 
 /** Counter-backend failure → 503, never 429 (Rust `require_request_budget` `Err` arm). */
@@ -741,13 +774,15 @@ export interface TokenAdmissionRefusal {
   readonly status: number;
   readonly code: string;
   readonly message: string;
-  /**
-   * Whole seconds until the denying window rolls, present only on the 429.
-   * Whether it is EMITTED is still `RateLimitOptions.retryAfterHeader`'s
-   * decision (Rust attaches no `Retry-After`); this only carries the value so
-   * the opt-in wrapper has one.
-   */
+  /** Whole seconds until the denying window rolls, present only on the 429. */
   readonly retryAfterSeconds?: number;
+  /**
+   * The pacing headers the 429 carries (#726) — `retry-after` plus the
+   * `x-ratelimit-*-tokens` triple. Structurally identical to
+   * `InferenceRejection.headers`, which is what `errorResponse` spreads, so a
+   * refusal returned from here renders them with no conversion step.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -887,6 +922,10 @@ export async function admitTokensPerMinute(
       code: refusal.code,
       message: refusal.message(),
       retryAfterSeconds: admission.retryAfterSeconds,
+      // The TOKENS dimension only. The request window did not refuse this call
+      // and its counters were never read here, so reporting a pair for it would
+      // be inventing a number.
+      headers: rateLimitHeadersFor("tokens", admission, resolved.options),
     };
   }
   return admission;
@@ -916,16 +955,10 @@ export async function enforceTokensPerMinute(
 ): Promise<TokenAdmission | null> {
   const admitted = await admitTokensPerMinute(c, estimatedTokens);
   if (isTokenAdmissionRefusal(admitted)) {
-    const error = new HttpError(admitted.status, admitted.code, admitted.message);
-    // Opt-in only; Rust attaches no Retry-After. Same contract as `refuse`.
-    if (
-      resolvedWindows(c)?.options.retryAfterHeader === true &&
-      admitted.retryAfterSeconds !== undefined
-    ) {
-      (error as HttpError & { retryAfterSeconds?: number }).retryAfterSeconds =
-        admitted.retryAfterSeconds;
-    }
-    throw error;
+    // The headers were decided by `admitTokensPerMinute`, so the throwing and
+    // the reporting form of step 5 answer with the SAME bag rather than each
+    // re-deriving one.
+    throw new HttpError(admitted.status, admitted.code, admitted.message, admitted.headers ?? {});
   }
   return admitted;
 }

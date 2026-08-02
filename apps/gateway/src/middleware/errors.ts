@@ -42,11 +42,29 @@ export class HttpError extends Error {
   override readonly name = "HttpError";
   readonly status: number;
   readonly code: string;
+  /**
+   * Extra response headers this refusal carries (#726).
+   *
+   * The rate limiter is the only producer today: a 429 has to tell the caller
+   * when to come back and against which window (`src/ratelimit/headers.ts`).
+   * It lives on the error rather than on a wrapper because the throw is the
+   * only thing that crosses from the middleware to `onError`, and the previous
+   * attempt — stashing `retryAfterSeconds` on the error for "a wrapper that
+   * wants to emit it" — was never read by anything, which is precisely how the
+   * gateway ended up with an opt-in header that no opt-in could switch on.
+   */
+  readonly headers: Readonly<Record<string, string>>;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    headers: Readonly<Record<string, string>> = {},
+  ) {
     super(message);
     this.status = status;
     this.code = code;
+    this.headers = headers;
   }
 }
 
@@ -111,9 +129,20 @@ const STATUS_BY_CODE: Readonly<Record<string, number>> = {
 };
 
 /** Resolve `(status, code)` for any thrown value. */
-export function classifyError(error: unknown): { status: number; code: string; message: string } {
+export function classifyError(error: unknown): {
+  status: number;
+  code: string;
+  message: string;
+  /** #726 — refusal-specific headers, present only on an {@link HttpError}. */
+  headers?: Readonly<Record<string, string>>;
+} {
   if (error instanceof HttpError) {
-    return { status: error.status, code: error.code, message: error.message };
+    return {
+      status: error.status,
+      code: error.code,
+      message: error.message,
+      headers: error.headers,
+    };
   }
   if (error instanceof FerrogateError) {
     return { status: STATUS_BY_KIND[error.kind], code: error.code, message: error.message };
@@ -144,9 +173,12 @@ export function writeJsonError(
   status: number,
   code: string,
   message: string,
+  extra: Readonly<Record<string, string>> = {},
 ): Response {
   const requestId = c.get("requestId") ?? null;
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  // `extra` FIRST, so nothing a refusal supplies can displace the correlation
+  // ids or the `www-authenticate` challenge written below it.
+  const headers: Record<string, string> = { ...extra, "content-type": "application/json" };
   if (requestId !== null) {
     headers["x-request-id"] = requestId;
     // The ADOPTED trace id when the caller arrived inside a trace, else the
@@ -162,8 +194,8 @@ export function writeJsonError(
 
 /** Hono `onError` — every throw becomes the uniform envelope. */
 export const gatewayErrorHandler: ErrorHandler<GatewayEnv> = (error, c) => {
-  const { status, code, message } = classifyError(error);
-  return writeJsonError(c, status, code, message);
+  const { status, code, message, headers } = classifyError(error);
+  return writeJsonError(c, status, code, message, headers ?? {});
 };
 
 /**

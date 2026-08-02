@@ -119,11 +119,136 @@ export function gatewayHeaders(requestId: string): Record<string, string> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The pacing contract (#726) — upstream rate-limit headers, relayed
+// ---------------------------------------------------------------------------
+
+/**
+ * Header-name PREFIXES whose whole family is relayed from the upstream.
+ *
+ * A prefix rule rather than a name table, and that is the safe direction here:
+ * the values travel VERBATIM, so a provider that adds a dimension
+ * (`x-ratelimit-limit-input-images`, `anthropic-ratelimit-input-tokens-reset`)
+ * reaches the client with the name its own SDK is looking for instead of
+ * waiting on a table update here. The risk a table would guard against —
+ * emitting a subtly wrong NAME — does not exist for a pass-through.
+ *
+ * Deliberately narrow all the same: this is an allowlist of two documented
+ * rate-limit families, not "copy the upstream's headers". A blanket copy would
+ * hand the caller the provider's `x-request-id` (breaking the correlation id
+ * that is also in our body), its `set-cookie`, and its org identifiers.
+ */
+export const RATE_LIMIT_RELAY_PREFIXES: readonly string[] = [
+  // OpenAI, Azure OpenAI, Groq, Together, Fireworks, DeepSeek, xAI…
+  "x-ratelimit-",
+  // Anthropic's native family (`anthropic-ratelimit-requests-remaining`, …).
+  "anthropic-ratelimit-",
+];
+
+/**
+ * Exact header names relayed alongside the families above.
+ *
+ * `retry-after` is the RFC 9110 one both official SDKs read first;
+ * `retry-after-ms` is OpenAI's sub-second refinement, which its SDK PREFERS
+ * when present. Dropping either is what forces a client onto a blind
+ * exponential schedule.
+ */
+export const RATE_LIMIT_RELAY_HEADERS: readonly string[] = ["retry-after", "retry-after-ms"];
+
+/**
+ * Set INSTEAD of the relayed family when a failover means the numbers describe
+ * a route the caller did not ask for. See {@link relayedRateLimitHeaders}.
+ */
+export const RATE_LIMIT_RELAY_MARKER = "x-ferrogate-ratelimit-relay" as const;
+
+/** The one value {@link RATE_LIMIT_RELAY_MARKER} currently takes. */
+export const RATE_LIMIT_RELAY_SUPPRESSED = "suppressed-after-failover" as const;
+
+/** The upstream response a relay is derived from, plus how we got to it. */
+export interface UpstreamRelay {
+  /** Headers of the response that ACTUALLY answered. */
+  readonly headers: Headers;
+  /**
+   * True when the candidate that answered is not the caller's first-choice
+   * route — i.e. the ladder moved them.
+   */
+  readonly failedOver: boolean;
+}
+
+/**
+ * The rate-limit headers to put on a client response, given the upstream one.
+ *
+ * ## THE FAILOVER JUDGEMENT (#726)
+ *
+ * On a first-choice answer the numbers are relayed verbatim: they describe the
+ * exact window the caller is being measured against, and they are the only
+ * pacing signal that exists.
+ *
+ * After a FAILOVER they are DROPPED. The reasoning, stated so it is not
+ * re-litigated by accident:
+ *
+ *  - the window belongs to a provider the caller never selected. `backup`'s
+ *    `x-ratelimit-remaining-requests: 0` says nothing about `primary`, which is
+ *    where the ladder will send them first next time;
+ *  - the routing decision is not stable. Priority, weight, canary bucketing and
+ *    the circuit breaker all decide per request, so "the provider that answered
+ *    this one" is not a prediction of the next one;
+ *  - the failure mode of relaying anyway is the ACTIVE one. An SDK that reads
+ *    `retry-after: 600` off a saturated fallback sleeps ten minutes while the
+ *    primary — which it would have been routed back to — was healthy the whole
+ *    time. Emitting nothing costs the client its own (blind, but not wrong)
+ *    schedule; emitting the wrong number costs it correctness.
+ *
+ * A same-provider RETRY is NOT a failover: the second attempt hit the same
+ * route the caller asked for, so its numbers are theirs. That is why the caller
+ * passes `failedOver` (derived from the candidate index) rather than "was this
+ * the first attempt".
+ *
+ * The suppression is ANNOUNCED — {@link RATE_LIMIT_RELAY_MARKER} — and only
+ * when something was actually dropped, so "no pacing headers because we failed
+ * over" is distinguishable from "no pacing headers because the relay is
+ * broken". Without that marker the two are identical from outside and the
+ * decision above becomes indistinguishable from the bug it replaces.
+ */
+export function relayedRateLimitHeaders(
+  upstream: UpstreamRelay | undefined,
+): Record<string, string> {
+  if (upstream === undefined) return {};
+
+  const relayed: Record<string, string> = {};
+  upstream.headers.forEach((value, name) => {
+    // `Headers.forEach` already lower-cases the name in workerd; normalising
+    // again keeps this independent of that guarantee.
+    const key = name.toLowerCase();
+    if (
+      RATE_LIMIT_RELAY_HEADERS.includes(key) ||
+      RATE_LIMIT_RELAY_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
+      relayed[key] = value;
+    }
+  });
+
+  if (!upstream.failedOver) return relayed;
+  return Object.keys(relayed).length === 0
+    ? {}
+    : { [RATE_LIMIT_RELAY_MARKER]: RATE_LIMIT_RELAY_SUPPRESSED };
+}
+
 /** A rejection that has already been classified into the Rust status+code pair. */
 export interface InferenceRejection {
   readonly status: number;
   readonly code: string;
   readonly message: string;
+  /**
+   * Extra response headers this refusal carries (#726).
+   *
+   * The only producer today is the rate limiter, whose 429 has to tell the
+   * caller when to come back and against which window — see
+   * `src/ratelimit/headers.ts`. Optional because the great majority of
+   * rejections have nothing to add, and because `reject()` must stay a
+   * three-argument call at its ~40 sites.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /** Construct an {@link InferenceRejection} (mirrors the Rust `*Rejection` structs). */
@@ -145,19 +270,35 @@ export function errorResponse(rejection: InferenceRejection, requestId: string):
     headers: {
       "content-type": "application/json",
       "content-length": String(new TextEncoder().encode(body).byteLength),
+      // Before `gatewayHeaders` on purpose: a refusal must never be able to
+      // overwrite the correlation ids the body also carries.
+      ...(rejection.headers ?? {}),
       ...gatewayHeaders(requestId),
     },
   });
 }
 
-/** Success counterpart of {@link errorResponse} — `write_json_response`. */
-export function jsonResponse(value: unknown, requestId: string, status = 200): Response {
+/**
+ * Success counterpart of {@link errorResponse} — `write_json_response`.
+ *
+ * `upstream` is present on the paths that RESHAPE a provider response (the
+ * Anthropic and embeddings translations): the body is ours, but the rate-limit
+ * numbers are still the upstream's and the caller needs them just as much as on
+ * the pass-through branch. See {@link relayedRateLimitHeaders}.
+ */
+export function jsonResponse(
+  value: unknown,
+  requestId: string,
+  status = 200,
+  upstream?: UpstreamRelay,
+): Response {
   const body = JSON.stringify(value);
   return new Response(body, {
     status,
     headers: {
       "content-type": "application/json",
       "content-length": String(new TextEncoder().encode(body).byteLength),
+      ...relayedRateLimitHeaders(upstream),
       ...gatewayHeaders(requestId),
     },
   });
@@ -238,12 +379,22 @@ function safeMediaType(contentType: string): string {
  * Success bodies are untouched at any content type: `/v1/embeddings` and
  * `/v1/images` pass 2xx bytes through byte-for-byte and this rule must not
  * reach them.
- */
+ *
+ * ## Headers, which are a separate axis (issue #726)
+ *
+ * "Untouched" used to stop at the body: the response was rebuilt with
+ * `gatewayHeaders` and NOTHING else, so a provider 429 carrying `retry-after`
+ * and the `x-ratelimit-*` family reached the caller with none of it. `upstream`
+ * is how those come back — filtered to the two documented pacing families,
+ * never a blanket copy. It is orthogonal to the wrap above: a body we WRAP still
+ * relays the pacing headers, because the caller's need to back off does not
+ * depend on whether the provider's error body was readable. */
 export function rawUpstreamResponse(
   status: number,
   contentType: string,
   body: string,
   requestId: string,
+  upstream?: UpstreamRelay,
 ): Response {
   if (status >= 400 && !isJsonObjectBody(body)) {
     return errorResponse(
@@ -261,6 +412,7 @@ export function rawUpstreamResponse(
     headers: {
       "content-type": contentType,
       "content-length": String(new TextEncoder().encode(body).byteLength),
+      ...relayedRateLimitHeaders(upstream),
       ...gatewayHeaders(requestId),
     },
   });
