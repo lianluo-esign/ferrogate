@@ -13,6 +13,8 @@
  *                           `AdapterError` taxonomy, `SecretValue`, family table.
  *  - `cloudflare`         — Cloudflare AI Gateway request-rewrite (issue #406).
  *  - `canonical`          — `/v1/responses` → per-family request canonicalization.
+ *  - `structured`         — `response_format`/`text.format` → per-family output
+ *                           contract, or an explicit refusal (issue #674).
  *  - `models`             — logical→physical `ModelRegistry`.
  *  - `registry`           — `ProviderAdapterRegistry` (8 adapters + CF routing).
  *  - `sigv4`              — AWS SigV4 signing (Bedrock; byte-exact).
@@ -68,6 +70,18 @@ export type {
 
 // Canonical request model.
 export { CanonicalAiRequest } from "./canonical.js";
+
+// Canonical structured output (`response_format` / `text.format`) — issue #674.
+export {
+  applyStructuredOutputToAnthropic,
+  applyStructuredOutputToBedrockConverse,
+  applyStructuredOutputToGemini,
+  coercionToolName,
+  geminiResponseSchema,
+  structuredOutputFromChatBody,
+  structuredOutputFromResponsesBody,
+} from "./structured.js";
+export type { CanonicalStructuredOutput } from "./structured.js";
 
 // Model registry.
 export {

@@ -412,14 +412,21 @@ risk, not a *deletion* risk.
 
 ### 4.1 The four that can fail silently in production against a green tree
 
-1. **The shared RPM counter (B10). Money. No mechanical backstop of any kind.**
-   `apps/mcp` and `apps/agent-runtime` carry the cross-script `RATE_LIMIT` stanza
-   **commented out**, because workerd cannot resolve a `script_name` binding
-   offline — uncommenting takes both suites to **0 collected tests**. Left
-   commented at deploy, a credential capped at 60 rpm is charged 60 on the
-   gateway **plus 60×N mcp isolates plus 60×M agent-runtime isolates**. Nothing
-   errors. This has now survived seven waves in that state, and it is the single
-   item on this list with no local gate of any kind.
+1. ~~**The shared RPM counter (B10). Money. No mechanical backstop of any
+   kind.**~~ **CLOSED 2026-08-02 by issue #666, and the diagnosis above was
+   wrong in one load-bearing word.** `apps/mcp` and `apps/agent-runtime` carried
+   the cross-script `RATE_LIMIT` stanza **commented out** on the grounds that
+   "workerd cannot resolve a `script_name` binding offline". workerd cannot
+   resolve it against a script that is not in the SESSION — which is a property
+   of the harness, not of the runtime. Each borrower's `vitest.config.ts` now
+   registers an auxiliary worker named `ferrogate-gateway` carrying this repo's
+   real `RateLimiterDurableObject`, both stanzas are committed LIVE, and
+   `apps/{mcp,agent-runtime}/test/shared-rate-limit.test.ts` charge a window
+   through the binding as the gateway would and require the borrower to find it
+   spent. What remains is deploy ORDER (`ferrogate-gateway` first), and that
+   fails the deploy loudly instead of failing open. The residual live-only
+   question is narrower and is now the only one: whether the DEPLOYED
+   `ferrogate-gateway` is the script the binding resolved to — `V-B10`.
 2. **The half-bound `agent-runtime` (B1 + B4 → A9). Security AND money.** Fully
    unbound is loud. Bind `DB`, forget `CONTROL_DB`, leave the committed
    `FG_DEV_IN_MEMORY_PORTS = "1"`, and `resolveDeps` **succeeds** — serving
@@ -2248,6 +2255,9 @@ GREEN again. A fix whose test was never *seen* red is not recorded as closed.
 | **`ferrogate-cloudflare` — the 21st crate** (§6 item 5) | Untouched. Still the single strongest argument against deleting the Rust: four slices with no TS equivalent anywhere and no `PORT-PLAN.md` row |
 | **The other §2.2 DURABLE-BUT-UNREAD groups**, §2.3's AI-Gateway routing (#406), `sync-bridge`, the credits `number`/`bigint` boundary, §2.4's IN-MEMORY-ONLY postures | Untouched |
 | **§4.1 — everything only a real deploy can settle** | Unchanged, and now one row longer: the cross-script `RATE_LIMIT` binding above |
+
+> **2026-08-02 (#666):** that added row is closed. Both cross-script `RATE_LIMIT`
+> stanzas are committed live and gated offline; see §4.1 item 1.
 | **§6 items 6, 7, 8** — re-run all three parity certifications and the full seam pass; scope `ferrogate-auth-service`'s 11,474 unported lines; the four newly-unproven seams | Untouched. **Item 6 is what gates the verdict**, and it has not been done |
 
 **Net effect on the verdict: none, by design.** Wave 16 closed the four §6 items

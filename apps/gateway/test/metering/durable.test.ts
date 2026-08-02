@@ -415,8 +415,24 @@ describe("durable metering — a completed request", () => {
   });
 });
 
-describe("durable metering — fail closed (issue #129)", () => {
-  it("persists NOTHING for a model with no rate-card rule", async () => {
+describe("durable metering — fail closed (issue #129, corrected by #663)", () => {
+  /**
+   * CHANGED FOR #663, deliberately and not around.
+   *
+   * This block used to assert `billing_events` = 0 as CORRECT behaviour, i.e.
+   * it encoded the defect as intent: a served, billable request against a model
+   * outside the rate card was recorded NOWHERE, and the suite called that
+   * fail-closed. It is not. Rust's `state_billing_metering.rs:146-152` skipped
+   * only the WALLET DEBIT when `cost_usd` was absent and ran
+   * `append_billing_event_with_outbox_enqueue` regardless, so the same input
+   * produced an event row there and zero rows here.
+   *
+   * What #129 actually forbids is BILLING — a `billing_ledger` row, an outbox
+   * intent, a downstream report, a charge of zero. Those four assertions are
+   * unchanged and still the point of this test. The fifth, on `billing_events`,
+   * was wrong and is inverted.
+   */
+  it("bills nothing, but still records the usage (null cost_usd)", async () => {
     provider = interceptProviderFetch(() =>
       providerJson({
         ...BUFFERED_COMPLETION,
@@ -437,14 +453,36 @@ describe("durable metering — fail closed (issue #129)", () => {
     expect(response.status).toBe(200);
     await h.settle();
 
-    // No ledger row, no event row, no outbox row, no queue message. Billing at
-    // zero here would be a free-inference bug, and it would be invisible.
+    // NOTHING IS BILLED: no ledger row, no outbox intent, no queue message.
+    // Billing at zero here would be a free-inference bug, and it would be
+    // invisible. This is #129 and it is unchanged.
     expect(await rowCount("billing_ledger")).toBe(0);
-    expect(await rowCount("billing_events")).toBe(0);
     expect(await rowCount("billing_report_outbox")).toBe(0);
     expect(h.queue.sent).toHaveLength(0);
+
+    // …but the USAGE IS RECORDED (#663). Asserting 0 here — as this file used
+    // to — is asserting that a request the customer was served and the provider
+    // was paid for leaves no trace at all.
+    expect(await rowCount("billing_events")).toBe(1);
+    const stored = await billingDb()
+      .prepare("SELECT request_id, event_json FROM billing_events")
+      .first<{ request_id: string; event_json: string }>();
+    const event = JSON.parse(stored?.event_json ?? "{}") as {
+      provider_model: string;
+      cost_usd?: number | null;
+      usage: { prompt_tokens: number; completion_tokens: number };
+    };
+    expect(event.provider_model).toBe("unpriced-model-9000");
+    // NULL, never 0 — the row says "this happened and nobody could price it",
+    // which is a different statement from "this cost nothing".
+    expect(event.cost_usd ?? null).toBeNull();
+    // The token counts are what make it re-priceable once a rule is added.
+    expect(event.usage.prompt_tokens).toBe(100);
+    expect(event.usage.completion_tokens).toBe(100);
+
     // The refusal is COUNTED and inspectable, never silent.
     expect(h.sink.stats.priceNotFound).toBe(1);
+    expect(h.sink.stats.unpricedRecorded).toBe(1);
     expect(h.sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
   });
 });

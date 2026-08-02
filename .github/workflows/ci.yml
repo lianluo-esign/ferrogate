@@ -5,27 +5,30 @@
 
 # CI for the TypeScript / Cloudflare Workers tree.
 #
-# This replaces the Rust release-gate workflow, which had become a workflow that
-# could not run: it called twelve `rust-*.yml` files deleted along with the Rust
-# tree, and it only triggered on `release: published` while branch protection
-# required its `rust-ci` aggregate job — a status that could therefore never be
-# reported, on a workflow that would have failed to resolve if it had been.
+# RELEASE-GATE ONLY, by owner directive (2026-08-02): this does NOT run on push
+# or pull request. Day-to-day verification happens LOCALLY, where the same suite
+# runs under `@cloudflare/vitest-pool-workers` (real workerd, offline, no Docker,
+# no account, no credentials) in well under a minute per workspace. A hosted
+# runner takes six minutes to tell you what a local run already told you, and
+# waiting on it is the single largest source of latency in the dev loop.
 #
-# The shape is deliberately different. This runs on every push and pull request,
-# because the previous arrangement checked nothing between releases, and a tree
-# that is not checked between releases is how you accumulate the never-executed
-# test this project keeps finding.
+# This is NOT the shape the deleted Rust gate had, even though the trigger
+# matches. That one called twelve `rust-*.yml` files that no longer existed and
+# was required by branch protection, so it could never report and every push
+# bypassed the rule. This one resolves, runs, and is not a required status
+# check — it is a last look before a release goes out, not a gate people learn
+# to route around.
 #
-# The suite runs under `@cloudflare/vitest-pool-workers`, i.e. real workerd,
-# offline — no Docker, no live Cloudflare account, no credentials. That is what
-# makes it safe to run on every push.
+# The property that made per-push CI attractive — that a tree unchecked between
+# releases accumulates never-executed tests — is preserved by the local
+# discipline instead: every change is expected to run the suites it touches, and
+# every PR is audited by an independent agent that re-runs them.
 
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:

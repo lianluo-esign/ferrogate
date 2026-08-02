@@ -40,7 +40,13 @@ import {
   NOT_DRAINING,
   resolveDrain,
 } from "../drain.js";
-import { errorEnvelope, releaseAdmissionHolds, requestIdentity, respondError } from "../http.js";
+import {
+  errorEnvelope,
+  recordOperation,
+  releaseAdmissionHolds,
+  requestIdentity,
+  respondError,
+} from "../http.js";
 import { type McpEnv, portsBound } from "../ports.js";
 
 /** Service identity echoed by `/healthz` and `/readyz` (Rust `SERVICE_NAME`). */
@@ -138,6 +144,13 @@ export class McpRouter {
     }
     const method: HttpMethod = operation.method;
     this.app.on(method, operation.honoPath, async (c) => {
+      // FC-7: publish WHICH contract operation this request matched, before the
+      // handler runs. `src/http.ts::authenticateRequest` reads it back and
+      // enforces what the operation DECLARES (`rbac_action`), so the guard
+      // arrives with the route instead of being re-stated by each of the five
+      // authenticated surfaces — the same reason the `finally` below lives here
+      // rather than in every handler.
+      recordOperation(c.req.raw, operation);
       try {
         return await handler(c as Context<McpAppEnv>);
       } finally {

@@ -15,7 +15,7 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import type { StoreRecord } from "../src/ports.js";
-import { AUDIT_TABLE, RESOURCE_TABLE } from "../src/store/d1.js";
+import { AUDIT_TABLE, REQUEST_LOG_TABLE, RESOURCE_TABLE } from "../src/store/d1.js";
 
 interface D1TestBindings {
   readonly DB: D1Database;
@@ -34,7 +34,7 @@ export async function applySchema(): Promise<void> {
 }
 
 /**
- * Empty the two tables this app writes. Call in `beforeEach`.
+ * Empty the tables this app reads or writes. Call in `beforeEach`.
  *
  * The pool does NOT roll a test's D1 writes back (the old `isolatedStorage`
  * switch is gone from `@cloudflare/vitest-pool-workers` 0.18's `cloudflareTest`
@@ -42,12 +42,80 @@ export async function applySchema(): Promise<void> {
  * this a passing assertion could be a previous test's — or a previous RUN's —
  * leftover row. Truncating is also honest about what it does not do: it leaves
  * the schema alone, so the migration still only runs once.
+ *
+ * `request_logs` is truncated here even though this app never writes it (#664:
+ * the writer is `apps/gateway`), because the READER is served from this
+ * database and a leftover row would make an "empty first" precondition lie.
  */
 export async function resetD1(): Promise<void> {
   await db().batch([
     db().prepare(`DELETE FROM ${RESOURCE_TABLE}`),
     db().prepare(`DELETE FROM ${AUDIT_TABLE}`),
+    db().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
   ]);
+}
+
+/**
+ * One `request_logs` row, in the shape the gateway's writer produces (#664).
+ *
+ * This is the CROSS-WORKER seam and the only place in this app's suite where a
+ * fixture is the honest tool: `apps/gateway` owns the writer, is a different
+ * Worker with a different `wrangler.toml`, and cannot be driven from here. The
+ * end-to-end "a real inference request produces this row" proof therefore lives
+ * in `apps/gateway/test/requestlog/write.test.ts`, against the SAME columns; what
+ * these fixtures hold is that the reader returns what the table holds and fences
+ * it by tenant.
+ */
+export interface RequestLogSeed {
+  readonly requestId: string;
+  readonly tenant?: string | null;
+  readonly project?: string | null;
+  readonly apiKeyId?: string | null;
+  readonly startedAtUnix: number;
+  readonly completedAtUnix?: number | null;
+  readonly route?: string | null;
+  readonly provider?: string | null;
+  readonly logicalModel?: string | null;
+  readonly providerModel?: string | null;
+  readonly statusCode?: number | null;
+  readonly latencyMs?: number | null;
+  readonly totalTokens?: number | null;
+  readonly guardrailVerdict?: string | null;
+  readonly document?: Record<string, unknown>;
+}
+
+/** Seed `request_logs` with raw SQL — see {@link RequestLogSeed}. */
+export async function seedRequestLogs(rows: readonly RequestLogSeed[]): Promise<void> {
+  if (rows.length === 0) return;
+  await db().batch(
+    rows.map((row) =>
+      db()
+        .prepare(
+          `INSERT INTO ${REQUEST_LOG_TABLE}
+             (request_id, tenant, project, api_key_id, started_at_unix, completed_at_unix,
+              route, provider, logical_model, provider_model, status_code, latency_ms,
+              total_tokens, guardrail_verdict, request_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.requestId,
+          row.tenant ?? null,
+          row.project ?? null,
+          row.apiKeyId ?? null,
+          row.startedAtUnix,
+          row.completedAtUnix ?? null,
+          row.route ?? null,
+          row.provider ?? null,
+          row.logicalModel ?? null,
+          row.providerModel ?? null,
+          row.statusCode ?? null,
+          row.latencyMs ?? null,
+          row.totalTokens ?? null,
+          row.guardrailVerdict ?? null,
+          JSON.stringify(row.document ?? {}),
+        ),
+    ),
+  );
 }
 
 /**

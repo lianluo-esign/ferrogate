@@ -48,15 +48,31 @@
  * abandoned. See that file for why a module-scoped "current ctx" is not an
  * option on workerd.
  *
- * ## Fail-closed
+ * ## Fail-closed — on the CHARGE, not on the RECORD (#129 + #663)
  *
  * If the rate card has no rule for `(provider, provider_model)` and the request
  * path settled no cost, `charge()` throws `price_not_found` and this sink
- * records NOTHING — no ledger row, no outbox row, no delivery. That is the
- * point of the Rust behaviour (#129): the alternative to refusing is billing
- * zero, and a model that silently bills zero is a free-inference bug, not a
+ * writes NO ledger row, NO outbox row and makes NO delivery. That is the point
+ * of the Rust behaviour (#129): the alternative to refusing is billing zero,
+ * and a model that silently bills zero is a free-inference bug, not a
  * degraded-metering one. The refusal is counted and surfaced through
  * {@link MeteringDiagnostics.onPriceNotFound} and {@link MeteringUsageSink.unpriced}.
+ *
+ * What it does NOT do — and, before #663, wrongly did — is forget the request.
+ * The early return sat upstream of every durable write, so a live 200 against a
+ * model outside the 11-entry default rate card left `billing_ledger`,
+ * `billing_events` and `billing_report_outbox` all at zero rows and printed
+ * nothing. Rust never behaved that way: `state_billing_metering.rs` skipped only
+ * the WALLET DEBIT for a `cost_usd: None` and called
+ * `append_billing_event_with_outbox_enqueue` regardless. So the refusal now also
+ * queues a cost-less `billing_events` row (`#persistUnpriced` →
+ * {@link LedgerStore.recordEvent}), which carries the token counts and is
+ * therefore re-priceable once the operator adds the rule.
+ *
+ * The other half of #663 is upstream of here: `src/index.ts` passes
+ * `settledCostUsd: routePriceSettledCostUsd` (`./route-price.ts`), so a model
+ * priced on its own `[[models]]` row settles at those prices and never reaches
+ * the refusal at all.
  */
 import {
   BillingError,
@@ -151,6 +167,18 @@ interface MeteringBackend {
  * Worker's 30s CPU/wall budget for the deferred drain.
  */
 export const OUTBOX_SWEEP_GRACE_SECONDS = 60;
+
+/**
+ * How many unwritten unpriced events one isolate will hold (#663).
+ *
+ * The queue drains on the very next request's `waitUntil`, so it is normally
+ * 0–1 deep; a non-trivial depth means the durable write itself is failing. The
+ * cap exists so that failure degrades into "the oldest traces are dropped, and
+ * `priceNotFound` vs `unpricedRecorded` shows by how much" rather than into an
+ * isolate that grows until workerd evicts it — which would lose the whole queue
+ * anyway, plus everything else in the isolate.
+ */
+export const MAX_PENDING_UNPRICED_EVENTS = 256;
 
 /** A charge that could not be priced — kept for operator inspection. */
 export interface UnpricedUsage {
@@ -253,6 +281,15 @@ export class MeteringUsageSink implements UsageSink {
   readonly #settledCostUsd: ((usage: Usage) => number | undefined) | undefined;
   readonly #stats: MeteringStats = emptyMeteringStats();
   readonly #unpriced: UnpricedUsage[] = [];
+  /**
+   * Unpriced usages whose durable trace has not been written yet (#663).
+   *
+   * A SECOND list rather than a flag on {@link #unpriced}, because the two have
+   * different lifetimes: `#unpriced` is the operator's read surface and keeps
+   * everything the isolate refused, while this one is a work queue that empties
+   * as the rows land. Bounded by {@link MAX_PENDING_UNPRICED_EVENTS}.
+   */
+  readonly #pendingUnpriced: UnpricedUsage[] = [];
   readonly #bindings: MeteringBindingResolver | undefined;
   /**
    * Durable backends, memoized ON THE ENV OBJECT.
@@ -438,7 +475,17 @@ export class MeteringUsageSink implements UsageSink {
 
     const entry = this.#price(event, id);
     if (entry === undefined) {
-      return; // fail-closed; already counted and reported
+      // FAIL CLOSED ON THE CHARGE, NOT ON THE RECORD (#663).
+      //
+      // Nothing is billed and nothing is billed at zero — that is #129 and it
+      // is unchanged. What changed is that the request no longer disappears:
+      // `#price` has queued the event, and the drain scheduled below persists
+      // it as a cost-less `billing_events` row, exactly as Rust's
+      // `append_billing_event_with_outbox_enqueue` did for a `cost_usd: None`.
+      // Returning here without scheduling is what made an unpriced model
+      // produce no ledger row, no event row, no outbox row and no log line.
+      this.#scheduleDrain(rc);
+      return;
     }
 
     const charge: MeteredCharge = {
@@ -457,10 +504,18 @@ export class MeteringUsageSink implements UsageSink {
       this.#stats.outboxDuplicates += 1;
     }
 
-    // With a binding resolver but no request context, the drain is NOT ours:
-    // see `MeteringSinkOptions.bindings`. Draining here would settle the charge
-    // into the fallback ledger and then delete the outbox row, which is a lost
-    // charge dressed up as a successful one.
+    this.#scheduleDrain(rc);
+  }
+
+  /**
+   * Schedule the durable half, if it is ours to schedule.
+   *
+   * With a binding resolver but no request context, the drain is NOT ours: see
+   * {@link MeteringSinkOptions.bindings}. Draining here would settle the charge
+   * into the fallback ledger and then delete the outbox row, which is a lost
+   * charge dressed up as a successful one. `meteringDrain()` owns it then.
+   */
+  #scheduleDrain(rc: MeteringDrainContext | undefined): void {
     if (this.#bindings === undefined || rc !== undefined) {
       this.#schedule(this.flush(rc), rc);
     }
@@ -476,14 +531,19 @@ export class MeteringUsageSink implements UsageSink {
     } catch (error) {
       if (error instanceof BillingError && error.code === "price_not_found") {
         this.#stats.priceNotFound += 1;
-        this.#unpriced.push({
+        const refused: UnpricedUsage = {
           id,
           requestId: event.request_id,
           provider: event.provider,
           providerModel: event.provider_model,
           message: error.message,
           event,
-        });
+        };
+        this.#unpriced.push(refused);
+        // #663 — queue the DURABLE trace. `#unpriced` above is isolate-local
+        // and dies with the isolate, which is precisely how the live evidence
+        // came to be "recorded nowhere"; this list is what `#drain` writes out.
+        this.#queueUnpricedEvent(refused);
         this.#guard(
           () =>
             this.#diagnostics.onPriceNotFound?.({
@@ -515,6 +575,11 @@ export class MeteringUsageSink implements UsageSink {
     const attempted = new Set<string>();
     const backend = this.#backend(rc?.env);
     const attribution = rc?.attribution;
+    // #663 — FIRST, and outside the outbox loop, because an unpriced usage
+    // produces no outbox row at all: it is not a charge and there is nothing to
+    // deliver. A drain that only walked the outbox would return immediately on
+    // `due.length === 0` and the trace would never be written.
+    await this.#persistUnpriced(backend);
     try {
       for (;;) {
         const now = this.#clock.nowUnixSeconds();
@@ -533,6 +598,65 @@ export class MeteringUsageSink implements UsageSink {
       // `listDue` itself failing must not reject into `waitUntil`; the rows are
       // still queued and the next request drains them.
       this.#report("drain", error);
+    }
+  }
+
+  /**
+   * Queue an unpriced usage for its durable, cost-less trace (#663).
+   *
+   * Oldest-first eviction at the cap: a burst of refusals against ONE
+   * misconfigured model is the expected shape, so the newest entries are the
+   * ones an operator is most likely to still be able to act on, and the
+   * `priceNotFound` counter still records that the older ones happened.
+   */
+  #queueUnpricedEvent(refused: UnpricedUsage): void {
+    if (this.#pendingUnpriced.length >= MAX_PENDING_UNPRICED_EVENTS) {
+      this.#pendingUnpriced.shift();
+      this.#guard(
+        () =>
+          this.#diagnostics.onError?.(
+            "unpriced_event_dropped",
+            new Error(
+              `pending unpriced metering events exceeded ${MAX_PENDING_UNPRICED_EVENTS}; ` +
+                "the durable write is failing and the oldest trace was discarded",
+            ),
+          ),
+        "unpriced_event_dropped",
+      );
+    }
+    this.#pendingUnpriced.push(refused);
+  }
+
+  /**
+   * Write the queued unpriced usages as cost-less `billing_events` rows (#663) —
+   * the Rust behaviour `append_billing_event_with_outbox_enqueue` had, where an
+   * absent `cost_usd` skipped only the wallet debit.
+   *
+   * A store with no {@link LedgerStore.recordEvent} (the in-isolate fallback in
+   * a deployment with no `BILLING_DB`) leaves the queue ALONE rather than
+   * clearing it: the very next drain may resolve a durable backend from a
+   * request that does carry bindings, and dropping the entries here would throw
+   * away the only record that the usage happened. The cap bounds that.
+   *
+   * Best-effort and never rethrows, for the same reason every other drain step
+   * is: this runs inside `waitUntil` and a bookkeeping failure must not surface
+   * on the request path. A failed write goes back on the queue.
+   */
+  async #persistUnpriced(backend: MeteringBackend): Promise<void> {
+    const ledger = backend.ledger;
+    if (ledger.recordEvent === undefined || this.#pendingUnpriced.length === 0) {
+      return;
+    }
+    const now = this.#clock.nowUnixSeconds();
+    const pending = this.#pendingUnpriced.splice(0, this.#pendingUnpriced.length);
+    for (const refused of pending) {
+      try {
+        await ledger.recordEvent(refused.event, refused.id, refused.event.occurred_at_unix ?? now);
+        this.#stats.unpricedRecorded += 1;
+      } catch (error) {
+        this.#queueUnpricedEvent(refused);
+        this.#report("unpriced_event", error);
+      }
     }
   }
 

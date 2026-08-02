@@ -92,6 +92,15 @@ import { isUnfilteredQuery, pageOf } from "./query.js";
 export const RESOURCE_TABLE = "control_plane_resources";
 /** The durable admin-mutation evidence table (`sql/d1-ts/control/`). */
 export const AUDIT_TABLE = "audit_events";
+/**
+ * The durable per-inference-decision evidence table (`sql/d1-ts/control/`).
+ *
+ * READ-ONLY from this Worker. The writer is `apps/gateway`'s
+ * `src/requestlog/` (#664) — a different Worker on the same CONTROL database —
+ * so nothing in `D1ControlPlaneStore` inserts here; the constant lives with its
+ * siblings so the reader in `routes/admin_request_log.ts` names the table once.
+ */
+export const REQUEST_LOG_TABLE = "request_logs";
 
 /** `audit_json.object` — names the document shape for a later reader. */
 export const AUDIT_OBJECT = "control_plane_mutation";

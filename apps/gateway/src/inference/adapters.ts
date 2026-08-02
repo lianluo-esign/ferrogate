@@ -40,10 +40,13 @@
  * equivalent of the Rust config validator's refusal to boot.
  */
 import {
+  applyStructuredOutputToAnthropic,
   BedrockAdapter,
   GeminiAdapter,
   AdapterError as PackageAdapterError,
   SecretValue,
+  structuredOutputFromChatBody,
+  structuredOutputFromResponsesBody,
   VertexAiAdapter,
 } from "@ferrogate/providers";
 import type {
@@ -376,6 +379,26 @@ export const anthropicAdapter: ProviderAdapter = {
       if (source["tool_choice"] !== undefined) {
         anthropicBody["tool_choice"] = source["tool_choice"];
       }
+    }
+
+    // Structured output (issue #674). This adapter REBUILDS a minimal native
+    // body, which is exactly why `response_format` used to vanish here while
+    // surviving to an OpenAI upstream — a failover between the two silently
+    // changed the caller's output contract. Anthropic has no `response_format`,
+    // so the requirement becomes a forced tool call, and anything Anthropic
+    // cannot express is refused rather than sent unconstrained. The translation
+    // itself is `@ferrogate/providers`' canonical one, NOT a second copy of it:
+    // this file is a port of `anthropic.rs`, and the two must not drift.
+    try {
+      const structured =
+        plan.operation === "responses"
+          ? structuredOutputFromResponsesBody(source as Json)
+          : structuredOutputFromChatBody(source as Json);
+      if (structured !== undefined) {
+        applyStructuredOutputToAnthropic(anthropicBody as Record<string, Json>, structured, "anthropic");
+      }
+    } catch (error) {
+      return { ok: false, error: packageAdapterError(error) };
     }
 
     return {
