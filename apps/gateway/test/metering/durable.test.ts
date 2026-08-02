@@ -545,7 +545,18 @@ describe("durable metering — streaming", () => {
       )?.entry_json ?? "{}",
     ) as { usage?: Record<string, number>; [key: string]: unknown };
     // The FINAL usage frame wins, not the early partial one.
-    expect(entry.usage).toEqual({ prompt_tokens: 11, completion_tokens: 40, total_tokens: 51 });
+    // The three zeros are #667's counters: this fixture's provider reports no
+    // cached or reasoning tokens, and the equality stays EXACT (rather than
+    // becoming a `toMatchObject`) so a future change that started smuggling
+    // non-zero cached tokens into an uncached request would fail here.
+    expect(entry.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 40,
+      total_tokens: 51,
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+    });
     // 11 * 0.15/1e6 + 40 * 0.6/1e6 = 2.565e-5 USD ⇒ 26 credits (25.65, rounded).
     expect(entry[CREDITS_EXACT_FIELD]).toBe("26");
     expect(h.queue.sent).toHaveLength(1);
@@ -585,7 +596,15 @@ describe("durable metering — streaming", () => {
           .first<{ entry_json: string }>()
       )?.entry_json ?? "{}",
     ) as { usage?: Record<string, number>; usage_source?: string; [key: string]: unknown };
-    expect(entry.usage).toEqual({ prompt_tokens: 11, completion_tokens: 2, total_tokens: 13 });
+    expect(entry.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 2,
+      total_tokens: 13,
+      // #667 — an abandoned stream reported no cached/reasoning counters.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+    });
     // 11 * 0.15/1e6 + 2 * 0.6/1e6 = 2.85e-6 USD ⇒ 3 credits.
     expect(entry[CREDITS_EXACT_FIELD]).toBe("3");
     expect(entry.usage_source).toBe("provider_usage");

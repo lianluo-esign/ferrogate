@@ -152,6 +152,15 @@ function tokenUsageFrom(usage: Usage): TokenUsage {
     prompt_tokens: usage.promptTokens ?? 0,
     completion_tokens: usage.completionTokens ?? 0,
     total_tokens: usage.totalTokens ?? 0,
+    // #667. Subsets of the two counts above, never additions — the capture
+    // layer (`inference/usage.ts`) has already normalized every provider family
+    // onto that invariant, so `charge()` subtracts them back out and prices each
+    // at its own rate. `0` for an absent counter is right here for the same
+    // reason it is right above: `reconcileSplit`/`estimateCost` treat it as "no
+    // cached tokens", which is what a provider that reported none means.
+    cached_input_tokens: usage.cachedInputTokens ?? 0,
+    cache_write_tokens: usage.cacheWriteTokens ?? 0,
+    reasoning_tokens: usage.reasoningTokens ?? 0,
   };
 }
 

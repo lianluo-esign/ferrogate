@@ -81,6 +81,13 @@ describe("scope kind parsing + overview accumulate", () => {
       promptTokens: 10,
       completionTokens: 5,
       totalTokens: 15,
+      // #667 — subsets of the two counts above, so the overview totals below
+      // are unchanged by their presence. Stated rather than defaulted because
+      // `StoredUsageMonthlyRollup` requires them: a reader that omitted the
+      // columns would otherwise silently report every rollup as uncached.
+      cachedInputTokens: 8,
+      cacheWriteTokens: 0,
+      reasoningTokens: 3,
       costUsd: 0.5,
       requestCount: 2,
       errorCount: 1,
