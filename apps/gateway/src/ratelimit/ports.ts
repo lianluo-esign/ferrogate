@@ -166,6 +166,26 @@ export interface RateLimiter {
   ): Promise<ReservationOutcome>;
 
   /**
+   * Monthly USD BUDGET hold for one rung of a nested budget (#679).
+   *
+   * `counterKey` is the rung's scope (`"project:p1"`, `"key:k1"`, …), so the
+   * hold contends with every other request under that same scope — which is
+   * what makes a project budget ONE shared counter rather than one per key.
+   * `committedUsd` is the durable `usage_monthly_rollups` figure the caller
+   * read; this owns only the in-flight part, which is the part D1 cannot
+   * serialise.
+   *
+   * A zero/negative hold is `not_applicable`, matching
+   * {@link reserveWalletCredits}: a hold of nothing can deny nothing.
+   */
+  reserveMonthlyBudget(
+    counterKey: string,
+    committedUsd: number,
+    budgetUsd: number,
+    estimatedUsd: number,
+  ): Promise<ReservationOutcome>;
+
+  /**
    * Prepaid-wallet credit hold. Rust `try_reserve_wallet_credits(tenant_id,
    * balance_credits, estimated_credits)`. A zero/negative estimate is
    * `not_applicable` (Rust takes no hold for an unpriced route).

@@ -94,6 +94,7 @@ export {
   currentPeriodMonth,
   d1QuotaPolicySource,
   d1SpendSource,
+  monthlyBudgetCharges,
   monthlyBudgetScope,
   resolveQuotaWindows,
   spendSourceForTenant,

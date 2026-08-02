@@ -56,7 +56,7 @@ import {
   type SpendBindings,
   type SpendSource,
   currentPeriodMonth,
-  monthlyBudgetScope,
+  monthlyBudgetCharges,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
   spendSourceFromEnv,
@@ -247,35 +247,35 @@ export function admissionPort(
         );
       }
 
-      // 2. The monthly USD budget, measured against the scope that WON the
-      //    chain's `min`. BEFORE the RPM check, in Rust's order: a request
-      //    refused for being over budget must not also spend a slot from the
-      //    RPM window, or a caller that is hard-denied anyway would burn the
-      //    budget of the requests that are still allowed.
-      const budgetUsd = resolution.quota.monthlyBudgetUsd;
-      if (budgetUsd !== undefined) {
-        const scope = monthlyBudgetScope(resolution.quota, subject.chain);
-        // `null` = no attribution at all to measure spend against. Rust returns
-        // `Ok(false)` there: nothing to compare, so nothing to refuse.
-        if (scope !== null) {
-          const spent = await spend.committedSpendUsd(
-            scope.kind,
-            scope.id,
-            currentPeriodMonth(now()),
+      // 2. The monthly USD budget — EVERY rung of the nested ladder (#679),
+      //    each against its own scope's aggregate rollup. Enforcing only the
+      //    scope that won the chain's `min` left every ancestor cap
+      //    unevaluated: a $100 key under a $5,000 project mins to $100, so the
+      //    project's rollup was never read and its sibling keys could spend it
+      //    dry unnoticed.
+      //
+      //    BEFORE the RPM check, in Rust's order: a request refused for being
+      //    over budget must not also spend a slot from the RPM window, or a
+      //    caller that is hard-denied anyway would burn the budget of the
+      //    requests that are still allowed.
+      for (const charge of monthlyBudgetCharges(resolution.quota, subject.chain)) {
+        const spent = await spend.committedSpendUsd(
+          charge.kind,
+          charge.id,
+          currentPeriodMonth(now()),
+        );
+        if (!spent.ok) {
+          throw refuse(
+            ADMISSION_REFUSALS.quota_resolution_unavailable,
+            `monthly budget lookup failed: ${spent.detail}`,
           );
-          if (!spent.ok) {
-            throw refuse(
-              ADMISSION_REFUSALS.quota_resolution_unavailable,
-              `monthly budget lookup failed: ${spent.detail}`,
-            );
-          }
-          // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
-          if (spent.committedSpendUsd >= budgetUsd) {
-            throw refuse(
-              ADMISSION_REFUSALS.monthly_budget_exceeded,
-              ADMISSION_REFUSALS.monthly_budget_exceeded.message(),
-            );
-          }
+        }
+        // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
+        if (spent.committedSpendUsd >= charge.limitUsd) {
+          throw refuse(
+            ADMISSION_REFUSALS.monthly_budget_exceeded,
+            ADMISSION_REFUSALS.monthly_budget_exceeded.message(),
+          );
         }
       }
 

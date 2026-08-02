@@ -277,9 +277,20 @@ GATEWAY_TENANT_PLANS = "{}"
 # `wallets` minus live `wallet_reservations`, which is what makes concurrent
 # requests unable to oversell a prepaid balance. The hold is released on
 # settle; unset ⇒ DEFAULT_WALLET_HOLD_CREDITS.
+#
+# GATEWAY_BUDGET_HOLD_USD is read by `budgetHoldUsdFromEnv`
+# (src/ratelimit/quota.ts): the USD reserved on the RATE_LIMIT Durable Object
+# per in-flight request against EACH rung of a nested monthly budget
+# (org → project → workspace → key, #679). It is what stops concurrent requests
+# from all passing the same `usage_monthly_rollups` read; a budget with H
+# dollars of headroom admits at most H/hold of them, and none once the budget is
+# spent. Released when the request finishes. Unset or not a positive finite
+# number ⇒ DEFAULT_BUDGET_HOLD_USD (one cent) — it is IGNORED rather than
+# applied, because a 0 hold would silently disable the guard.
 # ---------------------------------------------------------------------------
 GATEWAY_POLICY_RULES = "[]"
 GATEWAY_WALLET_HOLD_CREDITS = ""
+GATEWAY_BUDGET_HOLD_USD = ""
 
 # ---------------------------------------------------------------------------
 # [vars] — provider reliability (circuit breaker + retry), the `PROVIDER_CIRCUIT`
