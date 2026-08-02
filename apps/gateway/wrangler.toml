@@ -372,6 +372,42 @@ GATEWAY_RESIDENCY_POLICIES = "[]"
 GATEWAY_LOG_REGION = ""
 
 # ---------------------------------------------------------------------------
+# [vars] — Responses API conversation state (issue #689)
+#
+# `GATEWAY_RESPONSES_STORE` is read by `resolveDeps` (src/inference/defaults.ts)
+# and decides what `POST /v1/responses` may persist for `previous_response_id`
+# and `GET`/`DELETE /v1/responses/{id}`:
+#
+#   "opt_in"     (the shipped default) — persist ONLY when the request says
+#                `store: true`.
+#   "default_on" — OpenAI parity: persist unless the request says
+#                `store: false`.
+#   "off"        — persist nothing, and REFUSE a request that asks for it
+#                (`403 response_store_disabled`) rather than accept and ignore.
+#
+# The default is deliberately NOT OpenAI's `store: true`. Conversation state is
+# prompt CONTENT — unlike the #664 request log and the #677 cost rows, which
+# hold none — so inheriting OpenAI's default would start persisting prompts on
+# every deployment the day this shipped, under a data-handling posture nobody
+# opted into. A tenant whose #681 residency policy requires zero data retention
+# is never stored whatever this is set to, and an explicit `store: true` from
+# such a tenant is refused rather than silently dropped.
+#
+# `GATEWAY_RESPONSES_RETENTION` is retention in HOURS. A bare number is the
+# fleet-wide window (what ships); a JSON object adds per-tenant overrides —
+# `{"default": 24, "acme": 2}`. A tenant entry of `0` means "never persist" and
+# is honoured as a hard zero, not rounded up to the default. An unreadable value
+# falls back to 24 hours, which is the tightest reading and cannot silently
+# extend anyone's window.
+#
+# Expired rows are refused ON READ and reclaimed by the Cron sweep
+# (`gatewayScheduled` → `sweepResponseConversations`), so state is bounded even
+# on a deployment whose Cron is not firing.
+# ---------------------------------------------------------------------------
+GATEWAY_RESPONSES_STORE = "opt_in"
+GATEWAY_RESPONSES_RETENTION = "24"
+
+# ---------------------------------------------------------------------------
 # [vars] — deny/allow policy rules and the prepaid-wallet hold
 #
 # GATEWAY_POLICY_RULES is read by `policyRulesFromEnv` (src/ratelimit/policy.ts):

@@ -433,7 +433,12 @@ describe("the env-var drift gate itself", () => {
     // collision this comment block keeps warning about: the merged figure is
     // neither parent's. Re-derived with the same grep against the MERGED file
     // (⇒ 60), not by adding the two increments together.
-    expect(DECLARED.vars.size).toBe(60);
+    //
+    // #689 committed TWO: `GATEWAY_RESPONSES_STORE` ("opt_in") and
+    // `GATEWAY_RESPONSES_RETENTION` ("24"), the operator ladder and the
+    // retention window for Responses conversation state. 60 -> 62, re-derived
+    // by the same grep against the file rather than added.
+    expect(DECLARED.vars.size).toBe(62);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -666,7 +671,8 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // the `DECLARED.vars.size` pin above.
     // #681: 57 -> 59 (`GATEWAY_RESIDENCY_POLICIES`, `GATEWAY_LOG_REGION`);
     // #737: + `GATEWAY_SITES`. Counted off the merged file, not summed.
-    expect(rows.length).toBe(60);
+    // #689: 60 -> 62 (`GATEWAY_RESPONSES_STORE`, `GATEWAY_RESPONSES_RETENTION`).
+    expect(rows.length).toBe(62);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -736,8 +742,15 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // binding would publish a site `test/sites/*` never asked for and could
     // make an anonymous read pass for a reason no test stated; those suites
     // pass their own bindings to `siteRouteModule` in their own isolate.
+    //
+    // #689: + `GATEWAY_RESPONSES_STORE` ("opt_in") and
+    // `GATEWAY_RESPONSES_RETENTION` ("24"), both observable and both INERT for
+    // the suite as committed: `opt_in` means nothing is persisted unless a
+    // request asks, and no pre-existing test sends `store: true`.
+    // `test/inference/responses-conversation.test.ts` injects its own store and
+    // its own mode, so the committed values cannot shadow what it asserts.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(55);
+    expect(observable.length).toBe(57);
     expect(rows.length - observable.length).toBe(5);
   });
 });

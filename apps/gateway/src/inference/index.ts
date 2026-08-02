@@ -1,5 +1,5 @@
 /**
- * `apps/gateway` inference surface — the twelve OpenAPI operations in the
+ * `apps/gateway` inference surface — the fourteen OpenAPI operations in the
  * `inference` route group of `docs/openapi/runtime-api-contract.json`:
  *
  *   listModels · getModel · createChatCompletion · createResponse ·
@@ -61,6 +61,25 @@ export {
   storedAssetAudioObjects,
 } from "./audio-objects.js";
 export type { AudioObjectReference, AudioObjectSource } from "./audio-objects.js";
+export * from "./conversation.js";
+export {
+  D1ConversationStore,
+  InMemoryConversationStore,
+  NO_CONVERSATION_STORE,
+  assembleChain,
+  conversationStoreFromEnv,
+  isDurableConversationStore,
+  sweepResponseConversations,
+  turnItems,
+} from "./conversation-store.js";
+export type {
+  ChainFailure,
+  ChainResolution,
+  ConversationStore,
+  StoredResponseTurn,
+} from "./conversation-store.js";
+export { assistantMessageItem, responsesOutputTap } from "./conversation-capture.js";
+export type { CapturedResponseOutput } from "./conversation-capture.js";
 export * from "./workflow.js";
 export * from "./errors.js";
 export * from "./usage.js";

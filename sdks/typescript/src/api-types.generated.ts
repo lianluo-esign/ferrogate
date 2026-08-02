@@ -3097,6 +3097,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/responses/{response_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account. */
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Retrieve a stored response (Responses API conversation state).
+         * @description Returns the response body that was served for this id, tenant-fenced. Absent, expired and another tenant's ids all answer the same 404, so the endpoint is not an existence oracle over other tenants' conversation ids.
+         */
+        get: operations["getResponse"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a stored response (Responses API conversation state).
+         * @description Deletes exactly the named response, tenant-fenced. Descendants are NOT cascaded; a later `previous_response_id` whose chain crosses the deleted turn is refused with `conversation_chain_broken` rather than served as a silently shortened conversation.
+         */
+        delete: operations["deleteResponse"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/embeddings": {
         parameters: {
             query?: never;
@@ -15798,6 +15825,66 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getResponse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account. */
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The stored response body, verbatim. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteResponse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account. */
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deletion acknowledgement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id: string;
+                        object: string;
+                        deleted: boolean;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     createEmbedding: {

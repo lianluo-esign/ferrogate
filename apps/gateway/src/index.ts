@@ -5,13 +5,13 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 272
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 274
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
- * the 38 operations this Worker owns.
+ * the 40 operations this Worker owns.
  *
- * The inference (12 ops), asset (18 ops) and site (1 op) handlers arrive as
+ * The inference (14 ops), asset (18 ops) and site (1 op) handlers arrive as
  * `RouteModule`s from their own directories and are mounted in
  * `GATEWAY_ROUTE_MODULES` below; they need no change to the router, the guard,
  * or the contract table.
@@ -26,6 +26,7 @@ import {
   dispatcherFromEnv,
   inferenceRouteModule,
   modelsFromEnv,
+  sweepResponseConversations,
 } from "./inference/index.js";
 import {
   createMeteringUsageSink,
@@ -434,6 +435,19 @@ export async function gatewayScheduled(
 ): Promise<void> {
   await usage.sweep({ env, ctx });
   await gatewayRequestLogRetention(env);
+  // #689 — expired `/v1/responses` conversation state, on the SAME tick.
+  //
+  // It is a SEPARATE call rather than a line inside `gatewayRequestLogRetention`
+  // because the two read different databases: the request log lives in
+  // `CONTROL_DB` and conversation state lives in the TENANT database (`DB`), so
+  // a deployment can bind one without the other and the sweep for either must
+  // still run.
+  //
+  // This call is the whole reason the storage decision went to D1 rather than a
+  // Durable Object per conversation: a DO namespace cannot be enumerated, so
+  // eviction there needs a per-object alarm — which is #765, where MCP sessions
+  // are never evicted because nothing walks the namespace. Never throws.
+  await sweepResponseConversations(env, Math.floor(Date.now() / 1000));
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 272-operation runtime API contract, as a
+ * The control-plane slice of the 274-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -116,7 +116,7 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 274;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -418,7 +418,7 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 272). */
+/** Every operation in the document, in document order (all 274). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
 /** The operations this Worker owns, in document order (211). */

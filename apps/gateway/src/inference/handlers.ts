@@ -1,5 +1,5 @@
 /**
- * Hono handlers for the twelve inference operations owned by `apps/gateway`.
+ * Hono handlers for the fourteen inference operations owned by `apps/gateway`.
  *
  * | contract operation      | method + path              | scope              | Rust handler |
  * |-------------------------|----------------------------|--------------------|--------------|
@@ -40,7 +40,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 272 operations, and duplicating a per-route
+ * table-driven middleware for all 274 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -58,6 +58,31 @@ import {
 import type { ModelEndpointKind } from "./candidates.js";
 import { parseAudioObjectReference } from "./audio-objects.js";
 import { byokScopedModels } from "./byok.js";
+import {
+  CONVERSATION_CHAIN_BROKEN,
+  CONVERSATION_CHAIN_TOO_LONG,
+  CONVERSATION_NOT_FOUND_STATUS,
+  CONVERSATION_STORE_UNSCOPED,
+  MAX_CONVERSATION_TURNS,
+  MAX_STORED_TURN_BYTES,
+  PREVIOUS_RESPONSE_EXPIRED,
+  PREVIOUS_RESPONSE_NOT_FOUND,
+  RESPONSE_ID_HEADER,
+  RESPONSE_STATE_TOO_LARGE,
+  RESPONSE_STORED_HEADER,
+  UPSTREAM_RESPONSE_ID_MEMBER,
+  conversationInput,
+  conversationOwner,
+  mintResponseId,
+  normalizeInputItems,
+  responseStoreDecision,
+  upstreamConversationBody,
+} from "./conversation.js";
+import type { ConversationOwner } from "./conversation.js";
+import { isDurableConversationStore, turnItems } from "./conversation-store.js";
+import type { ChainFailure, StoredResponseTurn } from "./conversation-store.js";
+import { responsesOutputTap } from "./conversation-capture.js";
+import type { CapturedResponseOutput } from "./conversation-capture.js";
 import { resolveCandidates, resolveDeps } from "./defaults.js";
 import { dispatchWithFailover } from "./reliability.js";
 import type { AttemptCandidate } from "./reliability.js";
@@ -1410,6 +1435,7 @@ function streamingHeaders(
   contentType: string,
   requestId: string,
   upstream?: UpstreamRelay,
+  extraHeaders?: Record<string, string>,
 ): Record<string, string> {
   return {
     "content-type": contentType,
@@ -1417,6 +1443,9 @@ function streamingHeaders(
     // sets transfer-encoding itself, so only the cache directives are explicit.
     "cache-control": "no-cache",
     ...relayedRateLimitHeaders(upstream),
+    // #689 — the conversation id, flushed with the headers so a streaming
+    // client holds its next `previous_response_id` before the first token.
+    ...(extraHeaders ?? {}),
     "x-request-id": requestId,
     "x-trace-id": requestId,
     "x-ferrogate-runtime": "workers",
@@ -1441,13 +1470,22 @@ function streamResponse(
   requestId: string,
   onUsage: (usage: ProviderUsage | undefined) => void,
   upstream?: UpstreamRelay,
+  /**
+   * #689 — the conversation headers this stream carries, and (when the turn is
+   * being persisted) the capture that assembles the assistant output off the
+   * client-visible frames.
+   */
+  conversation?: {
+    readonly headers: Record<string, string>;
+    readonly capture?: (captured: CapturedResponseOutput) => void;
+  },
 ): Response {
   const contentType = upstreamResponse.headers.get("content-type") ?? "text/event-stream";
   const body = upstreamResponse.body;
   if (body === null) {
     return new Response(null, {
       status: upstreamResponse.status,
-      headers: streamingHeaders(contentType, requestId, upstream),
+      headers: streamingHeaders(contentType, requestId, upstream, conversation?.headers),
     });
   }
 
@@ -1463,13 +1501,22 @@ function streamResponse(
   // client is actually served — that ordering is the fix for the metering
   // bypass documented at `chat.rs:1012`.
   const tapped = normalized.pipeThrough(sseUsageTap(usageDialect, onUsage));
+  // The conversation capture sits AFTER the usage tap for the same reason the
+  // usage tap sits after the normalizer: it must read the dialect the CLIENT is
+  // actually served, because that is the transcript being stored. Reading the
+  // upstream's native frames here would store an assistant turn in a shape the
+  // caller never saw and the next turn cannot replay.
+  const captured =
+    conversation?.capture === undefined
+      ? tapped
+      : tapped.pipeThrough(responsesOutputTap(conversation.capture));
 
   // A normalized stream is always `text/event-stream`, whatever the upstream
   // labelled itself (the Rust writer hard-codes it on the normalized branches).
   const outgoingContentType = normalizer === null ? contentType : "text/event-stream";
-  return new Response(tapped, {
+  return new Response(captured, {
     status: upstreamResponse.status,
-    headers: streamingHeaders(outgoingContentType, requestId, upstream),
+    headers: streamingHeaders(outgoingContentType, requestId, upstream, conversation?.headers),
   });
 }
 
@@ -1612,6 +1659,35 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     promptReference,
     validateBody(responsesRequestSchema, "invalid responses request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "responses"),
+  );
+
+  // -- GET/DELETE /v1/responses/{response_id} (issue #689) -------------------
+  //
+  // Registered AFTER `POST /v1/responses`; they cannot collide (different
+  // segment counts and different methods), so the order is documentary — it
+  // keeps the three Responses operations adjacent.
+  //
+  // Both are guarded on `responses.create`, NOT on new `responses.read` /
+  // `responses.delete` scopes, and that is a deliberate reuse of the kind
+  // `createRerank` made rather than the kind `audio.create` refused. Two
+  // arguments, and both have to hold:
+  //
+  //  1. **No privilege is widened.** A key that may call `POST /v1/responses`
+  //     already holds every byte this GET returns — it is the answer to a
+  //     request that key made — and DELETE can only destroy state that same key
+  //     created. There is nothing here a `responses.create` holder cannot
+  //     already do.
+  //  2. **A new scope would break the feature for every existing key.** The
+  //     migration destination for the sunsetting Assistants API is exactly
+  //     these three operations working together; minting scopes would leave
+  //     every key in the field able to start a conversation and unable to read
+  //     or end one, which is a silent half-feature — the failure mode this
+  //     issue exists to close, arrived at from the auth side.
+  app.get("/v1/responses/:response_id", (c) =>
+    handleGetResponse(c, c.get("inferenceDeps")),
+  );
+  app.delete("/v1/responses/:response_id", (c) =>
+    handleDeleteResponse(c, c.get("inferenceDeps")),
   );
 
   // -- POST /v1/messages -----------------------------------------------------
@@ -1818,7 +1894,20 @@ async function handleOpenAiInference(
 ): Promise<Response> {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
-  const request = c.get("inferenceBody") as Record<string, unknown>;
+  const sent = c.get("inferenceBody") as Record<string, unknown>;
+
+  // #689 — conversation state, and it has to be resolved HERE, ahead of the
+  // estimate and the plan. Continuing a chain REWRITES `input` to the whole
+  // prior transcript, so estimating or planning against the body the client
+  // sent would reserve tokens for one turn and dispatch twenty. Ahead of
+  // `admitWorkflowStep` too: a refused continuation must not consume a workflow
+  // step it will never take.
+  const conversation =
+    operation === "responses" ? await prepareConversation(c, deps, caller, sent) : undefined;
+  if (conversation !== undefined && isRejection(conversation)) {
+    return errorResponse(conversation, requestId);
+  }
+  const request = conversation === undefined ? sent : conversation.upstreamBody;
   const logicalModel = String(request["model"]);
   const stream = request["stream"] === true;
   const metadata = attributedMetadata(c, request);
@@ -1900,6 +1989,20 @@ async function handleOpenAiInference(
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
       relay,
+      // #689 — a streamed turn is captured off the CLIENT-VISIBLE frames and
+      // persisted when the stream ends. The id was minted before dispatch and
+      // is already on the response headers, so the caller can send it as the
+      // next `previous_response_id` before the first token has even arrived.
+      conversation !== undefined && conversation.store
+        ? {
+            headers: conversationResponseHeaders(conversation.responseId, true),
+            capture: (captured) => {
+              persistStreamedTurn(c, deps, conversation, logicalModel, captured);
+            },
+          }
+        : conversation !== undefined
+          ? { headers: conversationResponseHeaders(conversation.responseId, false) }
+          : undefined,
     );
   }
 
@@ -1927,12 +2030,405 @@ async function handleOpenAiInference(
   recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
+  if (conversation !== undefined) {
+    // #689 — rewrite `id` to the gateway's own and persist. AWAITED, never
+    // `waitUntil`: the id is in the response the caller is about to read, and a
+    // caller that continues immediately must not race the row that makes the
+    // continuation resolvable.
+    const finished = await finishBufferedTurn(deps, conversation, parsed, text, logicalModel);
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      upstreamResponse.headers.get("content-type") ?? "application/json",
+      finished.body,
+      requestId,
+      relay,
+      finished.headers,
+    );
+  }
   return rawUpstreamResponse(
     upstreamResponse.status,
     upstreamResponse.headers.get("content-type") ?? "application/json",
     text,
     requestId,
     relay,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/responses — the conversation-state legs (#689)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything one `/v1/responses` request needs to know about conversation
+ * state, decided BEFORE the upstream is dispatched.
+ *
+ * `responseId` is minted here rather than after the answer for one concrete
+ * reason: a STREAMED response has to carry the id in its headers, and headers
+ * are flushed before the first token.
+ */
+interface ConversationPlan {
+  readonly owner: ConversationOwner;
+  /** Will this turn be persisted? */
+  readonly store: boolean;
+  /** The body to dispatch — `input` expanded, `store`/`previous_response_id` gone. */
+  readonly upstreamBody: Record<string, unknown>;
+  /** The gateway id this turn will be known by. */
+  readonly responseId: string;
+  readonly previousResponseId: string | null;
+  readonly turnIndex: number;
+  /** THIS turn's own input items (the delta stored on the row). */
+  readonly turnInput: readonly unknown[];
+  readonly expiresAtUnix: number;
+}
+
+/** Turn a chain-walk failure into the refusal the caller sees. */
+function chainRejection(reason: ChainFailure, previousResponseId: string): InferenceRejection {
+  switch (reason) {
+    case "expired":
+      return reject(
+        CONVERSATION_NOT_FOUND_STATUS,
+        PREVIOUS_RESPONSE_EXPIRED,
+        `previous_response_id ${previousResponseId} has passed this tenant's ` +
+          `/v1/responses retention window and can no longer be continued; ` +
+          `start a new conversation or raise the window`,
+      );
+    case "broken":
+      return reject(
+        CONVERSATION_NOT_FOUND_STATUS,
+        CONVERSATION_CHAIN_BROKEN,
+        `the conversation ending at ${previousResponseId} is missing an earlier ` +
+          `turn (deleted or expired), so it cannot be continued without silently ` +
+          `dropping context; start a new conversation`,
+      );
+    case "too_long":
+      return reject(
+        409,
+        CONVERSATION_CHAIN_TOO_LONG,
+        `the conversation ending at ${previousResponseId} has reached the ` +
+          `${MAX_CONVERSATION_TURNS}-turn limit; start a new conversation ` +
+          `(truncating it here would drop context without telling you)`,
+      );
+    default:
+      return reject(
+        CONVERSATION_NOT_FOUND_STATUS,
+        PREVIOUS_RESPONSE_NOT_FOUND,
+        `previous_response_id ${previousResponseId} is not a stored response for ` +
+          `this credential`,
+      );
+  }
+}
+
+/**
+ * Resolve the chain, decide whether to store, and produce the upstream body.
+ *
+ * ## Every refusal happens BEFORE the provider is called
+ *
+ * A caller whose `previous_response_id` cannot be resolved is refused without a
+ * dispatch. That is not an optimisation: dispatching first and refusing after
+ * would either bill the tenant for an answer they never see, or — the shape
+ * this issue exists to prevent — tempt the handler into serving the answer
+ * anyway, which is a silently restarted conversation.
+ */
+async function prepareConversation(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  caller: Caller,
+  request: Record<string, unknown>,
+): Promise<ConversationPlan | InferenceRejection> {
+  const rawPrevious = request["previous_response_id"];
+  const previousResponseId =
+    typeof rawPrevious === "string" && rawPrevious.trim() !== "" ? rawPrevious.trim() : undefined;
+  const requestedStore = typeof request["store"] === "boolean" ? request["store"] : undefined;
+  const continuing = previousResponseId !== undefined;
+  const nowUnix = deps.nowUnixSeconds();
+  const owner = conversationOwner(caller);
+
+  // A credential that is not confined to a tenant owns no conversation state —
+  // the call `tenancy/middleware.ts` makes for the per-tenant database, for the
+  // same reason: there is no tenant whose rows these would be, and choosing one
+  // would be a cross-tenant write.
+  if (owner === null) {
+    if (continuing || requestedStore === true) {
+      return reject(
+        403,
+        CONVERSATION_STORE_UNSCOPED,
+        "this credential is not confined to a tenant, so it owns no /v1/responses " +
+          "conversation state; `store: true` and `previous_response_id` require a " +
+          "tenant-scoped credential",
+      );
+    }
+    return {
+      owner: { tenantId: "", projectId: "" },
+      store: false,
+      upstreamBody: upstreamConversationBody(request, undefined),
+      responseId: mintResponseId(),
+      previousResponseId: null,
+      turnIndex: 0,
+      turnInput: [],
+      expiresAtUnix: nowUnix,
+    };
+  }
+
+  const retentionSeconds = deps.responseRetentionSeconds(owner.tenantId);
+  const decision = responseStoreDecision({
+    requestedStore,
+    continuing,
+    mode: deps.responseStoreMode,
+    // #681 — the tenant's own residency policy, carried in on the caller by
+    // `identity.ts::callerFromAuth`. Conversation state IS prompt content, so
+    // it is exactly what a ZDR agreement is about.
+    zeroDataRetention: caller.residency?.requireZeroDataRetention === true,
+    durable: isDurableConversationStore(deps.conversations),
+    retentionSeconds,
+  });
+  if (!decision.ok) {
+    return reject(decision.status, decision.code, decision.message);
+  }
+
+  let prior: readonly { input: readonly unknown[]; output: readonly unknown[] }[] = [];
+  let parent: StoredResponseTurn | undefined;
+  if (previousResponseId !== undefined) {
+    const resolved = await deps.conversations.chain(owner, previousResponseId, nowUnix);
+    if (!resolved.ok) {
+      return chainRejection(resolved.reason, previousResponseId);
+    }
+    parent = resolved.turns.at(-1);
+    if (parent === undefined) {
+      return chainRejection("not_found", previousResponseId);
+    }
+    if (parent.turnIndex + 1 >= MAX_CONVERSATION_TURNS) {
+      return chainRejection("too_long", previousResponseId);
+    }
+    prior = turnItems(resolved.turns);
+  }
+
+  const turnInput = normalizeInputItems(request["input"]);
+  return {
+    owner,
+    store: decision.store,
+    upstreamBody: upstreamConversationBody(
+      request,
+      // Only REWRITE `input` when there is a prefix to prepend. A first turn's
+      // body must reach the provider exactly as the caller wrote it — including
+      // an `input` shape this gateway does not model — so that nothing about
+      // conversation state changes a single-turn request.
+      continuing ? conversationInput(prior, request["input"]) : undefined,
+    ),
+    responseId: mintResponseId(),
+    previousResponseId: previousResponseId ?? null,
+    turnIndex: parent === undefined ? 0 : parent.turnIndex + 1,
+    turnInput,
+    expiresAtUnix: nowUnix + retentionSeconds,
+  };
+}
+
+/** The two gateway headers a `/v1/responses` answer carries (#689). */
+function conversationResponseHeaders(
+  responseId: string,
+  stored: boolean,
+): Record<string, string> {
+  return {
+    [RESPONSE_ID_HEADER]: responseId,
+    [RESPONSE_STORED_HEADER]: stored ? "true" : "false",
+  };
+}
+
+/**
+ * Rewrite the served body's `id` to the gateway's, persist the turn, and return
+ * the bytes to send.
+ *
+ * NEVER throws. A storage failure after a successful, billed provider call is
+ * reported through the `x-ferrogate-response-stored: false` header and a Worker
+ * log — see `conversation.ts::RESPONSE_STORED_HEADER` for why destroying the
+ * completion would be the worse answer. The next turn's `previous_response_id`
+ * then refuses loudly, which is the contract this issue asks for.
+ */
+async function finishBufferedTurn(
+  deps: ResolvedInferenceDeps,
+  plan: ConversationPlan,
+  parsed: unknown,
+  original: string,
+  logicalModel: string,
+): Promise<{ body: string; headers: Record<string, string> }> {
+  const body =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>) }
+      : undefined;
+  if (body === undefined) {
+    // Not a JSON object, so there is no `id` to rewrite and no `output` to
+    // replay. Relayed untouched, and explicitly NOT stored: filing a body we
+    // cannot read would produce a chain whose replay is empty.
+    return { body: original, headers: conversationResponseHeaders(plan.responseId, false) };
+  }
+
+  const upstreamId = body["id"];
+  if (typeof upstreamId === "string" && upstreamId !== "") {
+    body[UPSTREAM_RESPONSE_ID_MEMBER] = upstreamId;
+  }
+  body["id"] = plan.responseId;
+  if (plan.previousResponseId !== null) {
+    // Echoed back so a client that logs the response can reconstruct the chain
+    // from the bodies alone — and so the member the caller sent is not simply
+    // missing from the answer.
+    body["previous_response_id"] = plan.previousResponseId;
+  }
+  body["store"] = plan.store;
+  const serialized = JSON.stringify(body);
+
+  if (!plan.store) {
+    return { body: serialized, headers: conversationResponseHeaders(plan.responseId, false) };
+  }
+
+  const stored = await persistTurn(deps, plan, logicalModel, body, serialized.length);
+  return { body: serialized, headers: conversationResponseHeaders(plan.responseId, stored) };
+}
+
+/**
+ * The one write. Bounded, and never throws.
+ *
+ * The size bound is checked against the SERIALIZED turn rather than a token
+ * count because what is being bounded is a database row, and it refuses instead
+ * of truncating for the reason `conversation.ts::MAX_STORED_TURN_BYTES` gives.
+ */
+async function persistTurn(
+  deps: ResolvedInferenceDeps,
+  plan: ConversationPlan,
+  logicalModel: string,
+  response: Record<string, unknown>,
+  approximateBytes: number,
+): Promise<boolean> {
+  if (approximateBytes > MAX_STORED_TURN_BYTES) {
+    console.warn(
+      `[ferrogate] responses: turn ${plan.responseId} is ${approximateBytes} bytes, ` +
+        `over the ${MAX_STORED_TURN_BYTES}-byte ${RESPONSE_STATE_TOO_LARGE} limit; ` +
+        "served but not stored",
+    );
+    return false;
+  }
+  try {
+    await deps.conversations.append(plan.owner, {
+      responseId: plan.responseId,
+      previousResponseId: plan.previousResponseId,
+      turnIndex: plan.turnIndex,
+      model: logicalModel,
+      input: plan.turnInput,
+      response,
+      createdAtUnix: deps.nowUnixSeconds(),
+      expiresAtUnix: plan.expiresAtUnix,
+    });
+    return true;
+  } catch (error) {
+    console.warn(
+      `[ferrogate] responses: could not persist conversation turn ${plan.responseId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Persist a STREAMED turn once the stream has finished.
+ *
+ * Runs on `ctx.waitUntil` when there is one — the response body has already
+ * been delivered by the time this fires, so there is nothing left to await it —
+ * and degrades to a detached promise otherwise, exactly as the token-settlement
+ * path does. The synthesized body carries the same members the buffered path
+ * stores, so `GET /v1/responses/{id}` answers identically for a streamed turn.
+ */
+function persistStreamedTurn(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  plan: ConversationPlan,
+  logicalModel: string,
+  captured: { readonly output: readonly unknown[]; readonly upstreamResponseId: string | undefined },
+): void {
+  const response: Record<string, unknown> = {
+    id: plan.responseId,
+    object: "response",
+    status: "completed",
+    model: logicalModel,
+    output: [...captured.output],
+    store: true,
+    ...(plan.previousResponseId === null
+      ? {}
+      : { previous_response_id: plan.previousResponseId }),
+    ...(captured.upstreamResponseId === undefined
+      ? {}
+      : { [UPSTREAM_RESPONSE_ID_MEMBER]: captured.upstreamResponseId }),
+  };
+  const work = persistTurn(deps, plan, logicalModel, response, JSON.stringify(response).length);
+  // `executionCtxOf` and not `c.executionCtx`: the raw accessor THROWS on a
+  // context built without one (every `app.request(...)` in a test), and a throw
+  // inside a stream's `flush` is an unhandled rejection with no request left to
+  // attach it to.
+  const executionCtx = executionCtxOf(c);
+  if (executionCtx !== undefined) {
+    executionCtx.waitUntil(work);
+    return;
+  }
+  // No `waitUntil` (unit tests): the write is already in flight and
+  // `persistTurn` never rejects, so nothing is lost and nothing can escape.
+  void work;
+}
+
+/**
+ * `GET /v1/responses/{response_id}` — the stored response, tenant-fenced.
+ *
+ * One 404 for absent, expired and another tenant's, for the reason
+ * `conversation.ts::CONVERSATION_NOT_FOUND_STATUS` gives: anything finer is an
+ * existence oracle over other tenants' ids. (`prepareConversation` DOES
+ * distinguish expiry, because there the row has already been proven to be the
+ * caller's own.)
+ */
+async function handleGetResponse(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Promise<Response> {
+  const requestId = c.get("requestId");
+  // `param` is typed `string | undefined` on this router; the route cannot match
+  // without the segment, and `""` addresses no row, so the fallback is inert.
+  const responseId = c.req.param("response_id") ?? "";
+  const owner = conversationOwner(c.get("inferenceCaller"));
+  if (owner === null || !isDurableConversationStore(deps.conversations)) {
+    return errorResponse(notStoredRejection(responseId), requestId);
+  }
+  const turn = await deps.conversations.get(owner, responseId, deps.nowUnixSeconds());
+  if (turn === null) {
+    return errorResponse(notStoredRejection(responseId), requestId);
+  }
+  return jsonResponse(turn.response, requestId);
+}
+
+/** `DELETE /v1/responses/{response_id}` — OpenAI's deletion envelope. */
+async function handleDeleteResponse(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Promise<Response> {
+  const requestId = c.get("requestId");
+  // `param` is typed `string | undefined` on this router; the route cannot match
+  // without the segment, and `""` addresses no row, so the fallback is inert.
+  const responseId = c.req.param("response_id") ?? "";
+  const owner = conversationOwner(c.get("inferenceCaller"));
+  if (owner === null || !isDurableConversationStore(deps.conversations)) {
+    return errorResponse(notStoredRejection(responseId), requestId);
+  }
+  const removed = await deps.conversations.remove(owner, responseId, deps.nowUnixSeconds());
+  if (!removed) {
+    return errorResponse(notStoredRejection(responseId), requestId);
+  }
+  // Descendants are deliberately NOT cascaded. OpenAI deletes one response, and
+  // a cascade would delete state the caller did not name. What a continuation
+  // from a now-orphaned child gets instead is a REFUSAL
+  // (`conversation_chain_broken`) rather than a silently shortened
+  // conversation — see `conversation-store.ts::assembleChain`.
+  return jsonResponse({ id: responseId, object: "response", deleted: true }, requestId);
+}
+
+function notStoredRejection(responseId: string): InferenceRejection {
+  return reject(
+    CONVERSATION_NOT_FOUND_STATUS,
+    PREVIOUS_RESPONSE_NOT_FOUND,
+    `${responseId} is not a stored response for this credential`,
   );
 }
 
