@@ -44,6 +44,14 @@ import semanticCacheMigrationSql from "../../../sql/d1-ts/control/0004_semantic_
 // is applied through {@link applyIgnoringDuplicateColumn} rather than being
 // listed with the `CREATE … IF NOT EXISTS` migrations above.
 import attributionPolicyMigrationSql from "../../../sql/d1-ts/control/0006_attribution_tag_policy.sql?raw";
+// Issue #697, and the same rule again: `src/ratelimit/quota.ts` reads
+// `spend_throttles` in the admission-path `db.batch()` of every authenticated
+// request. A bound CONTROL_DB whose table is missing makes that batch REJECT,
+// which `d1QuotaPolicySource` renders as `503 quota_resolution_unavailable` —
+// i.e. the whole suite would go red on an unrelated-looking error. It carries
+// `ALTER TABLE`s as well as `CREATE … IF NOT EXISTS`, so it goes through
+// {@link applyIgnoringDuplicateColumn}.
+import spendAnomalyMigrationSql from "../../../sql/d1-ts/control/0010_spend_anomaly.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;
@@ -111,6 +119,7 @@ beforeAll(async () => {
       }
     }
     await applyIgnoringDuplicateColumn(CONTROL_DB, attributionPolicyMigrationSql);
+    await applyIgnoringDuplicateColumn(CONTROL_DB, spendAnomalyMigrationSql);
   }
 });
 

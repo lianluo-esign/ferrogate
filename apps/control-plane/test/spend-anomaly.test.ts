@@ -166,6 +166,20 @@ async function episodes(): Promise<EpisodeRow[]> {
   return [...rows.results];
 }
 
+interface ThrottleRow {
+  readonly scope_id: string;
+  readonly rpm_limit: number;
+  readonly expires_at_unix: number;
+  readonly episode_id: string | null;
+}
+
+async function throttles(): Promise<ThrottleRow[]> {
+  const rows = await db()
+    .prepare("SELECT * FROM spend_throttles ORDER BY scope_id")
+    .all<ThrottleRow>();
+  return [...rows.results];
+}
+
 beforeAll(async () => {
   await applySchema();
 });
@@ -248,5 +262,316 @@ describe("burn-rate anomaly detection", () => {
     // `mean + 3σ` would have been ~$130 and would have said nothing.
     expect(open[0]?.threshold_usd).toBeCloseTo(8, 6);
     expect(open[0]?.bound_by).toBe("ratio");
+  });
+});
+
+describe("cold start and sparsity — the cases a naive detector gets loudest", () => {
+  it("says nothing about a brand-new tenant with no baseline", async () => {
+    // Four hours old, and the fourth hour is 20x the third. With an empty or
+    // near-empty baseline the median is 0, the MAD is 0, every bar collapses to
+    // 0 and the arithmetic makes this an INFINITE deviation. The gate decides
+    // it instead: three observed windows is below `min_baseline_windows`.
+    await seedHour("newborn", 3, 1, 2);
+    await seedHour("newborn", 2, 1, 2);
+    await seedHour("newborn", 1, 1, 2);
+    await seedHour("newborn", 0, 200, 50);
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+    expect(delivered).toEqual([]);
+  });
+
+  it("says nothing about a tenant with three requests a day", async () => {
+    // A full 24-window history, so the baseline COUNT gate passes — and only 4
+    // of those windows have any spend at all, so there is no distribution. The
+    // median is 0 and the MAD is 0; without the sparsity gate this tenant's
+    // every non-zero hour is an infinite deviation, forever.
+    for (const index of [19, 13, 7, 1]) {
+      await seedHour("sparse", index, 0.4, 1);
+    }
+    // One window at the far end of the lookback, so the baseline spans the full
+    // 24 windows rather than starting at the tenant's first traffic.
+    await seedHour("sparse", 24, 0.4, 1);
+    await seedHour("sparse", 0, 12, 3);
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+    expect(delivered).toEqual([]);
+  });
+
+  it("says nothing about a 40x spike on trivial amounts", async () => {
+    // $0.02/hour becoming $0.80 is a 40x burn-rate spike by every ratio in this
+    // file and is nobody's incident. The absolute floor is the third bar for
+    // exactly this, and it is the single most common shape of a false positive
+    // in a ratio detector.
+    await seedFlatBaseline("pennies", 0.02, 24);
+    await seedHour("pennies", 0, 0.8, 4);
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+    expect(delivered).toEqual([]);
+  });
+
+  it("fires on the same shape once the operator lowers the floor", async () => {
+    // The tuning story, proved rather than asserted in a doc comment: the
+    // silence above is a DECISION with a knob, not an inability.
+    await seedFlatBaseline("pennies", 0.02, 24);
+    await seedHour("pennies", 0, 0.8, 4);
+    await setPolicy("pennies", { spend_anomaly_min_window_usd: 0.1 });
+
+    await runScheduledTick(bindings(), NOW);
+
+    const open = await episodes();
+    expect(open).toHaveLength(1);
+    // Still the FLOOR that binds — $0.10 is above 4x the $0.02 median — and the
+    // episode says so, which is what lets the operator see that lowering the
+    // floor further is the next knob rather than guessing at the ratio.
+    expect(open[0]?.bound_by).toBe("floor");
+    expect(open[0]?.threshold_usd).toBeCloseTo(0.1, 6);
+    expect(delivered).toHaveLength(1);
+  });
+
+  it("watches nobody when the tenant opted out", async () => {
+    await seedFlatBaseline("optout", 2);
+    await seedHour("optout", 0, 80, 40);
+    await setPolicy("optout", { spend_anomaly_enabled: 0 });
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+    expect(delivered).toEqual([]);
+  });
+});
+
+describe("a persisting anomaly — six hours is 2 notifications, not 72", () => {
+  /**
+   * Seed a runaway that has been going for `hours` windows and run the pass for
+   * each of them in order, exactly as the cron would. The baseline is seeded
+   * far enough back that the earliest evaluated window still has one.
+   */
+  async function runawayFor(hours: number): Promise<number[]> {
+    for (let index = hours; index < hours + 24; index += 1) {
+      await seedHour("stuck", index, 2, 4);
+    }
+    for (let index = hours - 1; index >= 0; index -= 1) {
+      await seedHour("stuck", index, 80, 40);
+    }
+    const notified: number[] = [];
+    for (let index = hours - 1; index >= 0; index -= 1) {
+      const report = await runScheduledTick(bindings(), NOW - index * HOUR);
+      notified.push(report.spendAnomaly.notified);
+    }
+    return notified;
+  }
+
+  it("notifies on open and then once per cooldown, not once per window", async () => {
+    // Seven consecutive hours of the same stuck loop, evaluated seven times.
+    // The default cooldown is six hours, so the operator is told at hour 0 and
+    // again at hour 6 — and NOT at 1, 2, 3, 4 or 5.
+    const notified = await runawayFor(7);
+
+    expect(notified).toEqual([1, 0, 0, 0, 0, 0, 1]);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]?.body["reason"]).toBe("opened");
+    expect(delivered[1]?.body["reason"]).toBe("still_firing");
+
+    // ONE episode row for the whole incident, carrying how long it has run.
+    const open = await episodes();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.windows_seen).toBe(7);
+    expect(open[0]?.notified_count).toBe(2);
+    expect(open[0]?.resolved_at_unix).toBeNull();
+  });
+
+  it("breaks the cooldown when the severity escalates, once", async () => {
+    // Hour 1 is 5x the $2 baseline (a warning), hours 0 is 40x (critical).
+    // "It got worse" is new information and must not wait out the cooldown;
+    // staying critical is not, and must.
+    for (let index = 2; index < 26; index += 1) await seedHour("worse", index, 2, 4);
+    await seedHour("worse", 1, 10, 5);
+    await seedHour("worse", 0, 80, 40);
+
+    const first = await runScheduledTick(bindings(), NOW - HOUR);
+    const second = await runScheduledTick(bindings(), NOW);
+
+    expect(first.spendAnomaly.notified).toBe(1);
+    expect(second.spendAnomaly.notified).toBe(1);
+    expect(delivered.map((alert) => alert.body["severity"])).toEqual(["warning", "critical"]);
+    expect(delivered[1]?.body["reason"]).toBe("escalated");
+    const open = await episodes();
+    expect(open[0]?.severity).toBe("critical");
+    expect(open[0]?.windows_seen).toBe(2);
+  });
+
+  it("closes the episode when the window stops firing, and opens a new one later", async () => {
+    for (let index = 2; index < 26; index += 1) await seedHour("flap", index, 2, 4);
+    await seedHour("flap", 1, 80, 40);
+    await seedHour("flap", 0, 2, 4);
+
+    await runScheduledTick(bindings(), NOW - HOUR);
+    await runScheduledTick(bindings(), NOW);
+
+    const all = await episodes();
+    expect(all).toHaveLength(1);
+    expect(all[0]?.resolved_at_unix).not.toBeNull();
+    // Resolution is silent: a spike that stopped is not news, and an
+    // all-clear per window would double the traffic on the channel.
+    expect(delivered).toHaveLength(1);
+  });
+
+  it("records the episode even when the receiver is down, with notified_count 0", async () => {
+    // How an operator finds the alerts their own receiver dropped. There is no
+    // retry — the next window is the retry — so a lost notification must leave
+    // a visible trace or it is simply gone.
+    await seedFlatBaseline("downstream", 2);
+    await seedHour("downstream", 0, 80, 40);
+    webhookStatus = 503;
+
+    const report = await runScheduledTick(bindings(), NOW);
+
+    expect(report.spendAnomaly.deliveryFailed).toBe(1);
+    expect(report.spendAnomaly.notified).toBe(0);
+    const open = await episodes();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.notified_count).toBe(0);
+  });
+
+  it("detects and records with no webhook configured at all", async () => {
+    // The opposite posture from the gateway's budget alerter, and deliberate:
+    // an operator who has not wired a receiver yet still gets the history for
+    // the period BEFORE they wired one, which is when they most need it.
+    await seedFlatBaseline("nohook", 2);
+    await seedHour("nohook", 0, 80, 40);
+
+    const report = await runScheduledTick(
+      bindings({ SPEND_ANOMALY_WEBHOOK_URL: undefined, BILLING_ALERTS_WEBHOOK_URL: undefined }),
+      NOW,
+    );
+
+    expect(report.spendAnomaly.deliveryUnconfigured).toBe(true);
+    expect(await episodes()).toHaveLength(1);
+    expect(delivered).toEqual([]);
+  });
+
+  it("evaluates a window exactly once however often the cron ticks", async () => {
+    await seedFlatBaseline("once", 2);
+    await seedHour("once", 0, 80, 40);
+
+    const first = await runScheduledTick(bindings(), NOW);
+    // Four more ticks inside the same hour, which is what the every-minute
+    // Cron Trigger actually does.
+    const rest = [];
+    for (let minute = 1; minute <= 4; minute += 1) {
+      rest.push(await runScheduledTick(bindings(), NOW + minute * 60));
+    }
+
+    expect(first.spendAnomaly.opened).toBe(1);
+    expect(rest.map((report) => report.spendAnomaly.skipped)).toEqual([
+      "already_evaluated",
+      "already_evaluated",
+      "already_evaluated",
+      "already_evaluated",
+    ]);
+    expect(delivered).toHaveLength(1);
+    expect((await episodes())[0]?.windows_seen).toBe(1);
+  });
+});
+
+describe("forecast overrun — the leg that works from a tenant's first hour", () => {
+  it("alerts before the budget is hit, with no baseline at all", async () => {
+    // Three hours old, so `burn_rate_spike` is `insufficient_baseline` and
+    // silent. $600 already spent against a $1,000 budget with half a month
+    // left: at $200/hour the budget is gone before tomorrow.
+    await seedHour("fresh", 2, 200, 20);
+    await seedHour("fresh", 1, 200, 20);
+    await seedHour("fresh", 0, 200, 20);
+    await setPolicy("fresh", { monthly_budget_usd: 1000 });
+
+    await runScheduledTick(bindings(), NOW);
+
+    const open = await episodes();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.signal).toBe("forecast_overrun");
+    expect(open[0]?.severity).toBe("critical");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.body["projected_usd"]).toBeGreaterThan(1000);
+    expect(delivered[0]?.body["budget_usd"]).toBe(1000);
+    expect(String(delivered[0]?.body["means"])).toContain("linear extrapolation");
+  });
+
+  it("says nothing about a tenant with no budget configured", async () => {
+    // There is nothing to overrun. Inventing a budget would be alerting on a
+    // number the operator never set — the same class of error as a borrowed
+    // baseline.
+    await seedHour("nobudget", 2, 200, 20);
+    await seedHour("nobudget", 1, 200, 20);
+    await seedHour("nobudget", 0, 200, 20);
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+  });
+
+  it("says nothing about the first expensive request of a billing period", async () => {
+    // $40 against a $100,000 budget projects to a large number and means
+    // nothing at all. `forecast_min_pct` is the guard, and without it this is
+    // the loudest false positive the forecast leg has.
+    await seedHour("early", 0, 40, 4);
+    await setPolicy("early", { monthly_budget_usd: 100_000 });
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+    expect(delivered).toEqual([]);
+  });
+});
+
+describe("auto-throttle", () => {
+  it("does nothing unless the tenant configured an RPM", async () => {
+    await seedFlatBaseline("nobrake", 2);
+    await seedHour("nobrake", 0, 80, 40);
+
+    const report = await runScheduledTick(bindings(), NOW);
+
+    expect(report.spendAnomaly.opened).toBe(1);
+    expect(report.spendAnomaly.throttled).toBe(0);
+    expect(await throttles()).toEqual([]);
+  });
+
+  it("writes an EXPIRING throttle when a critical episode opens", async () => {
+    await seedFlatBaseline("brake", 2);
+    await seedHour("brake", 0, 80, 40);
+    await setPolicy("brake", { spend_anomaly_auto_throttle_rpm: 5 });
+
+    const report = await runScheduledTick(bindings(), NOW);
+
+    expect(report.spendAnomaly.throttled).toBe(1);
+    const rows = await throttles();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.scope_id).toBe("brake");
+    expect(rows[0]?.rpm_limit).toBe(5);
+    // EXPIRING is the load-bearing half. The control plane may never run again,
+    // and a throttle with nothing left to lift it is an outage whose cause is
+    // invisible from the request path.
+    expect(rows[0]?.expires_at_unix).toBe(NOW + 3_600);
+    expect(delivered[0]?.body["auto_throttled_rpm"]).toBe(5);
+  });
+
+  it("does not throttle on a warning", async () => {
+    // 5x the baseline is above the 4x ratio bar and below the 10x critical one.
+    // The brake is the only leg that changes what the gateway does to live
+    // traffic, and a warning is explicitly not enough to pull it.
+    await seedFlatBaseline("mild", 2);
+    await seedHour("mild", 0, 12, 6);
+    await setPolicy("mild", { spend_anomaly_auto_throttle_rpm: 5 });
+
+    const report = await runScheduledTick(bindings(), NOW);
+
+    expect(report.spendAnomaly.opened).toBe(1);
+    expect(report.spendAnomaly.throttled).toBe(0);
+    expect(await throttles()).toEqual([]);
   });
 });
