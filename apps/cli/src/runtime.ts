@@ -6,7 +6,14 @@
  */
 import type { Args, FlagSpec } from "./args.js";
 import type { ContextStorage } from "./context.js";
-import type { ConfigValidator, ControlPlaneClient, GatewayClient, Io, KeyHasher } from "./ports.js";
+import type {
+  ConfigTextParsers,
+  ConfigValidator,
+  ControlPlaneClient,
+  GatewayClient,
+  Io,
+  KeyHasher,
+} from "./ports.js";
 
 /** Everything a command handler is allowed to touch. */
 export interface CliRuntime {
@@ -17,6 +24,15 @@ export interface CliRuntime {
   readonly contextStorage: ContextStorage;
   readonly configValidator: ConfigValidator;
   readonly keyHasher: KeyHasher;
+  /**
+   * Structured-text parsers for documents the CLI reads directly rather than
+   * through {@link ConfigValidator} — today, `apply`'s desired-state file.
+   *
+   * Optional because it is a pure decode seam with a safe fallback (JSON is
+   * always available in-process); a runtime that omits it simply refuses a
+   * `.yaml` document by name instead of guessing at it.
+   */
+  readonly documentParsers?: ConfigTextParsers;
 }
 
 /** One node of the command tree. Leaves carry a handler. */
