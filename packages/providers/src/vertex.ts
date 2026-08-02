@@ -27,6 +27,7 @@ import {
   structuredGenerationConfig,
   systemInstruction,
 } from "./gemini.js";
+import { assertPromptCacheForAutomaticFamily } from "./caching.js";
 import { asU64, getField, isArray, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 
@@ -47,6 +48,9 @@ export class VertexAiAdapter extends BaseProviderAdapter {
       throw AdapterError.invalidRequest("vertex provider is missing GCP credentials");
     }
     const body = ensureObjectBody(request.body);
+
+    // Same implicit-caching story as Gemini proper (#690).
+    assertPromptCacheForAutomaticFamily(body, provider.kind);
 
     const vertexBody: JsonObject = { contents: openaiMessagesToGeminiContents(body) };
     const instruction = systemInstruction(body);

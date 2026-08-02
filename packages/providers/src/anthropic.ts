@@ -18,8 +18,9 @@ import type {
   ResponsesPlan,
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
+import { applyPromptCacheToAnthropic, promptCacheFromBody } from "./caching.js";
 import { applyStructuredOutputToAnthropic, structuredOutputFromChatBody } from "./structured.js";
-import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
+import { asStr, asU64, getField, isObject, ownBody, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
 
@@ -37,20 +38,34 @@ export class AnthropicAdapter extends BaseProviderAdapter {
     const messages = getField(body, "messages") ?? [];
     const maxTokens = getField(body, "max_tokens") ?? 1024;
 
-    const anthropicBody: JsonObject = {
+    const draft: JsonObject = {
       model: request.providerModel,
       messages,
       max_tokens: maxTokens,
       stream: request.stream,
     };
     const system = getField(body, "system");
-    if (system !== undefined) anthropicBody["system"] = system;
+    if (system !== undefined) draft["system"] = system;
+    // `messages` and `system` in the draft are still the CALLER's objects,
+    // shared with every other candidate on the failover ladder. `ownBody` takes
+    // a private deep copy, so the breakpoints and coercion tools placed below
+    // decorate THIS request and no other (issue #690). It is also the only way
+    // to obtain the argument the `apply*` helpers accept, so the copy cannot be
+    // skipped by the next adapter that needs to rewrite something.
+    const anthropicBody = ownBody(draft);
     // `response_format` has no Anthropic equivalent, so it used to be dropped
     // here while surviving to an OpenAI upstream — the failover shape change of
     // issue #674. It is now coerced into a forced tool call, or refused.
     const structured = structuredOutputFromChatBody(body);
     if (structured !== undefined) {
       applyStructuredOutputToAnthropic(anthropicBody, structured, provider.kind);
+    }
+    // Prompt caching (issue #690). Applied AFTER the structured-output coercion
+    // so a coercion tool is inside the cached prefix rather than appended after
+    // the breakpoint, where it would invalidate the cache on every request.
+    const promptCache = promptCacheFromBody(body);
+    if (promptCache !== undefined) {
+      applyPromptCacheToAnthropic(anthropicBody, promptCache, provider.kind);
     }
 
     return {
@@ -71,18 +86,22 @@ export class AnthropicAdapter extends BaseProviderAdapter {
     const messages = getField(body, "messages") ?? [];
     const maxTokens = getField(body, "max_tokens") ?? 1024;
 
-    const anthropicBody: JsonObject = {
+    const draft: JsonObject = {
       model: request.providerModel,
       messages,
       max_tokens: maxTokens,
       stream: request.stream,
     };
     const system = getField(body, "system");
-    if (system !== undefined) anthropicBody["system"] = system;
+    if (system !== undefined) draft["system"] = system;
     const tools = getField(body, "tools");
-    if (tools !== undefined) anthropicBody["tools"] = tools;
+    if (tools !== undefined) draft["tools"] = tools;
     const toolChoice = getField(body, "tool_choice");
-    if (toolChoice !== undefined) anthropicBody["tool_choice"] = toolChoice;
+    if (toolChoice !== undefined) draft["tool_choice"] = toolChoice;
+    // Owned for the same reason as the chat path: `intoAnthropicBody` copies the
+    // Responses body shallowly, so `system`/`tools` here can still be subtrees
+    // the caller — and every other candidate — holds.
+    const anthropicBody = ownBody(draft);
 
     return {
       provider: provider.name,

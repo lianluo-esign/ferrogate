@@ -26,11 +26,13 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
+import { assertPromptCacheForAutomaticFamily, stripPromptCacheDirective } from "./caching.js";
 import {
   asStr,
   asU64,
   getField,
   isObject,
+  ownBody,
   parseJson,
   parseJsonStringOrClone,
 } from "./json.js";
@@ -46,7 +48,17 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
     request: ChatCompletionPlan,
   ): ProviderHttpRequest {
     validateKind(provider.kind);
-    const body = ensureChatObjectBody(request.body);
+    // Prompt caching (#690). This adapter copies the caller's body WHOLESALE,
+    // which is exactly why the FerroGate-only `prompt_cache` member has to be
+    // removed: OpenAI rejects unknown top-level fields, so a directive left in
+    // place would turn a caching hint into a 400. The removal happens on an
+    // OWNED copy — deleting it from the caller's body would erase the directive
+    // for every LATER candidate on the ladder, so a failover to a family that
+    // CAN honour it would silently drop the contract instead. What OpenAI can
+    // and cannot honour is adjudicated first, against the caller's body.
+    assertPromptCacheForAutomaticFamily(request.body, provider.kind);
+    const body = ownBody(ensureChatObjectBody(request.body));
+    stripPromptCacheDirective(body);
     body["model"] = request.providerModel;
     body["stream"] = request.stream;
     if (request.stream) requestOpenaiStreamUsage(body);
@@ -65,7 +77,9 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
     request: ResponsesPlan,
   ): ProviderHttpRequest {
     validateKind(provider.kind);
-    const body = ensureLabeledObjectBody(request.body, "responses request body");
+    assertPromptCacheForAutomaticFamily(request.body, provider.kind);
+    const body = ownBody(ensureLabeledObjectBody(request.body, "responses request body"));
+    stripPromptCacheDirective(body);
     body["model"] = request.providerModel;
     body["stream"] = request.stream;
 
@@ -83,7 +97,9 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
     request: EmbeddingsPlan,
   ): ProviderHttpRequest {
     validateKind(provider.kind);
-    const body = ensureLabeledObjectBody(request.body, "embeddings request body");
+    // Owned before `model` is pinned: the adapter's own field must not become
+    // the caller's, on a body other candidates are still to be prepared from.
+    const body = ownBody(ensureLabeledObjectBody(request.body, "embeddings request body"));
     body["model"] = request.providerModel;
 
     return {
@@ -97,7 +113,7 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
 
   override prepareImages(provider: ProviderConfig, request: ImagesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
-    const body = ensureLabeledObjectBody(request.body, "image generation request body");
+    const body = ownBody(ensureLabeledObjectBody(request.body, "image generation request body"));
     body["model"] = request.providerModel;
 
     return {
