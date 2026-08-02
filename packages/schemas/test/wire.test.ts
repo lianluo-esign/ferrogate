@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(272);
+    expect(OPENAPI_OPERATION_COUNT).toBe(273);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -293,12 +293,16 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // no wire schema either: its response is BYTES out of an R2 object, not a
     // Zod shape. #703 and #737 landed in PARALLEL, so neither branch's own
     // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
-    // merged truth: it is 258 + 3 + 1 = 262.
+    // merged truth: it is 258 + 3 + 1 = 262. #697's `listAdminSpendAnomalies`
+    // takes it to 263, and carries no wire schema for the same reason every
+    // other admin READ does not: its response is the paginated admin envelope
+    // described in `docs/openapi/admin-api.openapi.json`, not a cross-plane
+    // shape two Workers have to agree on.
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 272 - 10. The running sum is narrative, and #703 and #737
+    // `seeded`, i.e. 273 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(262);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(263);
   });
 });

@@ -229,11 +229,7 @@ export async function dispatchSpendAnomalyAlert(options: {
 }
 
 /** The `means` sentence for one alert. See {@link SpendAnomalyWebhookPayload.means}. */
-export function meaningOf(
-  signal: SpendAnomalySignal,
-  scopeId: string,
-  windowSecs: number,
-): string {
+export function meaningOf(signal: SpendAnomalySignal, scopeId: string, windowSecs: number): string {
   const windowLabel =
     windowSecs % 3_600 === 0 ? `${windowSecs / 3_600}h` : `${Math.round(windowSecs / 60)}m`;
   if (signal === "burn_rate_spike") {

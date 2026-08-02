@@ -404,6 +404,10 @@ const USAGE_REPORTS = new ResourceApi("/admin/v1/usage-reports");
 const METERING_EVENTS = new ResourceApi("/admin/v1/metering-events");
 const METERING_EXPORT_STATUS = new ResourceApi("/admin/v1/metering-export-status");
 const AGENT_COST_BURN = new ResourceApi("/admin/v1/agent-cost-burn");
+// #697 — the burn-rate/forecast EPISODE ledger. A sibling of the cost-burn
+// report above and deliberately a different verb: cost-burn answers "how much",
+// this answers "is that unlike this tenant's own recent self, and were we told".
+const SPEND_ANOMALIES = new ResourceApi("/admin/v1/spend-anomalies");
 const PAYMENT_ATTEMPTS = new ResourceApi("/admin/v1/payment-attempts");
 
 const REQUEST_LOGS = new ResourceApi("/admin/v1/request-logs");
@@ -1347,7 +1351,7 @@ export const GROUPS: readonly GroupDescriptor[] = [
   },
   {
     name: "usage",
-    about: "Inspect usage aggregates, reports, metering, and agent cost-burn",
+    about: "Inspect usage aggregates, reports, metering, cost-burn, and spend anomalies",
     verbs: [
       read("aggregates", "List usage aggregates", "listAdminUsageAggregates"),
       read("reports", "List usage reports", "listUsageReports"),
@@ -1362,6 +1366,13 @@ export const GROUPS: readonly GroupDescriptor[] = [
         "List per-agent runtime cost-burn for a billing period (--filter period=YYYY-MM)",
         "listAdminAgentCostBurn",
       ),
+      read(
+        "spend-anomalies",
+        "List spend burn-rate and forecast-overrun episodes " +
+          "(--filter status=open|resolved [--filter signal=…] [--filter severity=…] " +
+          "[--filter scope_id=…] [--filter since=UNIX])",
+        "listAdminSpendAnomalies",
+      ),
     ],
     build: (verb, input) => {
       const api =
@@ -1375,7 +1386,9 @@ export const GROUPS: readonly GroupDescriptor[] = [
                 ? METERING_EXPORT_STATUS
                 : verb === "cost-burn"
                   ? AGENT_COST_BURN
-                  : undefined;
+                  : verb === "spend-anomalies"
+                    ? SPEND_ANOMALIES
+                    : undefined;
       if (api === undefined) throw CliError.usage(`verb '${verb}' is not a usage verb`);
       return api.read([], input.list);
     },

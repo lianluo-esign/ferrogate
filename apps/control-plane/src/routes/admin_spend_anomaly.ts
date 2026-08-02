@@ -79,9 +79,7 @@ function detailOf(raw: string | null): Record<string, unknown> {
   if (raw === null) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : {};
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
   }
@@ -226,12 +224,7 @@ function listSpendAnomaliesHandler(): Handler {
     return json(
       c,
       200,
-      adminListPaginated(
-        result.results.map(episodeDocument),
-        total,
-        query.offset,
-        query.limit,
-      ),
+      adminListPaginated(result.results.map(episodeDocument), total, query.offset, query.limit),
     );
   };
 }

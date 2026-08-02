@@ -387,9 +387,7 @@ async function evaluateWindow(
 }
 
 /** Every tenant-scope quota policy, indexed by scope id. */
-async function readTenantPolicies(
-  db: D1Database,
-): Promise<Map<string, Record<string, unknown>>> {
+async function readTenantPolicies(db: D1Database): Promise<Map<string, Record<string, unknown>>> {
   const rows = await db
     .prepare(
       `SELECT ${SPEND_ANOMALY_POLICY_COLUMNS.join(", ")}
