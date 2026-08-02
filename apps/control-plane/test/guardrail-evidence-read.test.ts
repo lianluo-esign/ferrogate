@@ -178,7 +178,7 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
 
     // The CHILD rows are joined in — an evaluation without its checks answers
     // "the policy blocked" and not "which detector, and on what".
-    const checks = row["checks"] as Record<string, unknown>[];
+    const checks = row.checks as Record<string, unknown>[];
     expect(checks).toHaveLength(1);
     expect(checks[0]).toMatchObject({
       check_id: "deterministic",
@@ -187,17 +187,14 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
       config_digest: "sha256:abcd1234",
       verdict: "fail",
     });
-    const findings = (checks[0] as Record<string, unknown>)["findings"] as Record<
-      string,
-      unknown
-    >[];
+    const findings = (checks[0] as Record<string, unknown>).findings as Record<string, unknown>[];
     expect(findings[0]).toMatchObject({
       category: "aws_access_key_id",
       confidence: 0.99,
       byte_start: 13,
       byte_end: 33,
     });
-    expect(String(findings[0]?.["redacted_excerpt"])).toContain("aws_access_key_id");
+    expect(String(findings[0]?.redacted_excerpt)).toContain("aws_access_key_id");
   });
 
   /**
@@ -212,7 +209,7 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
       { ...BLOCKED, id: "ev-c", requestId: "r-c", occurredAtUnix: 300, checks: [] },
     ]);
     const page = await readEvaluations(operatorKey.secret);
-    expect(page.data.map((row) => row["id"])).toEqual(["ev-c", "ev-a", "ev-b"]);
+    expect(page.data.map((row) => row.id)).toEqual(["ev-c", "ev-a", "ev-b"]);
   });
 
   it("reports the pre-window total alongside the page", async () => {
@@ -248,12 +245,12 @@ describe("the tenant fence on guardrail evidence", () => {
 
   it("shows a tenant only its own evaluations", async () => {
     const page = await readEvaluations("k-tenant");
-    expect(page.data.map((row) => row["id"])).toEqual(["ev-t1"]);
+    expect(page.data.map((row) => row.id)).toEqual(["ev-t1"]);
   });
 
   it("shows the OTHER tenant only its own evaluations", async () => {
     const page = await readEvaluations("k-other");
-    expect(page.data.map((row) => row["id"])).toEqual(["ev-t2"]);
+    expect(page.data.map((row) => row.id)).toEqual(["ev-t2"]);
   });
 
   /**
@@ -262,20 +259,20 @@ describe("the tenant fence on guardrail evidence", () => {
    */
   it("never shows a tenant the un-attributed platform rows", async () => {
     for (const secret of ["k-tenant", "k-other"]) {
-      const ids = (await readEvaluations(secret)).data.map((row) => row["id"]);
+      const ids = (await readEvaluations(secret)).data.map((row) => row.id);
       expect(ids).not.toContain("ev-none");
     }
   });
 
   it("shows a platform operator every row", async () => {
-    const ids = (await readEvaluations(operatorKey.secret)).data.map((row) => row["id"]);
+    const ids = (await readEvaluations(operatorKey.secret)).data.map((row) => row.id);
     expect(ids.sort()).toEqual(["ev-none", "ev-t1", "ev-t2"]);
   });
 
   it("cannot be paged past", async () => {
     const page = await readEvaluations("k-tenant", "?limit=100&offset=0");
     expect(page.total).toBe(1);
-    expect(page.data.map((row) => row["id"])).toEqual(["ev-t1"]);
+    expect(page.data.map((row) => row.id)).toEqual(["ev-t1"]);
   });
 
   /**
@@ -324,37 +321,32 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
 
     const { status, body } = await investigate(operatorKey.secret, "?request_id=fg-block-1");
     expect(status).toBe(200);
-    expect(body["object"]).toBe("guardrail_investigation");
-    expect(body["selector"]).toBe("request_id=fg-block-1");
-    expect((body["requests"] as unknown[]).length).toBe(1);
-    expect((body["audit_events"] as unknown[]).length).toBe(1);
+    expect(body.object).toBe("guardrail_investigation");
+    expect(body.selector).toBe("request_id=fg-block-1");
+    expect((body.requests as unknown[]).length).toBe(1);
+    expect((body.audit_events as unknown[]).length).toBe(1);
 
-    const evaluations = body["guardrail_evaluations"] as Record<string, unknown>[];
+    const evaluations = body.guardrail_evaluations as Record<string, unknown>[];
     expect(evaluations).toHaveLength(1);
     expect(evaluations[0]).toMatchObject({ policy_id: "secret-scan", action: "block" });
-    expect((evaluations[0]?.["checks"] as unknown[]).length).toBe(1);
+    expect((evaluations[0]?.checks as unknown[]).length).toBe(1);
 
     // WHY / TARGET / ACTION, from the one response — `docs/guardrails/investigation-view.md`.
-    expect(body["final_outcome"]).toBe("blocked");
-    expect(body["total_cost_usd"]).toBe(0);
+    expect(body.final_outcome).toBe("blocked");
+    expect(body.total_cost_usd).toBe(0);
   });
 
   it("finds the same request by trace_id", async () => {
     await seedGuardrailEvaluations([BLOCKED]);
-    const { status, body } = await investigate(
-      operatorKey.secret,
-      `?trace_id=${BLOCKED.traceId}`,
-    );
+    const { status, body } = await investigate(operatorKey.secret, `?trace_id=${BLOCKED.traceId}`);
     expect(status).toBe(200);
-    expect((body["guardrail_evaluations"] as unknown[]).length).toBe(1);
+    expect((body.guardrail_evaluations as unknown[]).length).toBe(1);
   });
 
   it("answers 404 with a typed code when nothing matches", async () => {
     const { status, body } = await investigate(operatorKey.secret, "?request_id=fg-nothing");
     expect(status).toBe(404);
-    expect((body["error"] as Record<string, unknown>)?.["code"]).toBe(
-      "guardrail_investigation_not_found",
-    );
+    expect((body.error as Record<string, unknown>)?.code).toBe("guardrail_investigation_not_found");
   });
 
   it("refuses a request that names no selector", async () => {
