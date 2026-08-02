@@ -105,6 +105,14 @@ const MOUNTED: [symbol: string, app: string][] = [
   // rot. Unmounting it now reddens here as well as in
   // `apps/gateway/test/metering/budget-alerts.test.ts`.
   ["D1BudgetAlertStore", "gateway"],
+  // #738 — the same "good news" direction, and the reason this gate is worth
+  // its cost: `apps/control-plane/src/routes/site_domain.ts` constructs one to
+  // project a completed DNS-TXT ownership proof into the typed
+  // `site_domain_verifications` table that `apps/gateway`'s custom-domain
+  // resolver joins. Before that the table had no writer anywhere, so a verified
+  // hostname served nothing. Leaving the symbol in `DEAD` made THIS suite red on
+  // the branch that mounted it, which is exactly the forcing function intended.
+  ["D1SiteDomainVerificationStore", "control-plane"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
@@ -112,7 +120,6 @@ const DEAD = [
   "D1BillingEventLedger",
   "D1RetentionPolicyStore",
   "D1AgentScheduleStore",
-  "D1SiteDomainVerificationStore",
   "TenantMonotonicUpserts",
   "ControlMonotonicUpserts",
   "R2AssetBlobStore",

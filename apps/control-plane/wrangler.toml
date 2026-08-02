@@ -107,6 +107,61 @@ compatibility_flags = ["nodejs_compat"]
 # the rewind happens exactly once however many ticks read this config.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CUSTOM DOMAIN CERTIFICATES (issue #738) — the four SITE_DOMAIN_CF_* knobs
+# ---------------------------------------------------------------------------
+# `GET /admin/v1/site-domains/{hostname}` reports a `certificate_status`. It has
+# to, because a custom domain whose certificate has not issued fails at the
+# EDGE: the request never reaches this platform, nothing is logged here, and
+# without this field an operator sees `verified: true` next to a domain that
+# does not work.
+#
+# PRODUCT: Cloudflare for SaaS CUSTOM HOSTNAMES
+# (`/zones/{zone_id}/custom_hostnames`), not Workers Custom Domains. A Workers
+# Custom Domain needs the hostname on a zone in THIS account — i.e. every
+# customer hands us their zone — and FerroGate's tenants keep their own DNS, so
+# it is inapplicable. That is the whole reason. (Its per-hostname certificate
+# state IS readable — the domain row carries a `cert_id` — but it takes a second
+# call to a different certificate API, on a zone we would have to own.) See
+# `packages/cloudflare/src/custom-hostnames.ts` for the full comparison and what
+# the choice costs (a paid entitlement, billed per active custom hostname).
+#
+#   SITE_DOMAIN_CERTIFICATES  — the backend switch. `"cloudflare_for_saas"`,
+#       `"static"`, or ABSENT. Deliberately ABSENT here and DEFAULTING to
+#       unconfigured: reading certificate state spends an outbound Cloudflare
+#       call and a token, and a deployment must not start making calls because
+#       it upgraded. Unconfigured reports `certificate_status: "unconfigured"`,
+#       which is a statement about this deployment, not about the domain.
+#
+#   SITE_DOMAIN_CF_ZONE_ID    — the FALLBACK-ORIGIN zone in this account that
+#       every tenant CNAMEs at. NEVER a tenant's own zone. Not declared in
+#       [vars] because a zone id is a real account resource and this file is
+#       committed: supply it at deploy time.
+#
+#   SITE_DOMAIN_CF_ACCOUNT_ID — the account the zone belongs to. Same reason.
+#
+#   SITE_DOMAIN_CF_API_TOKEN  — a SECRET, never a [vars] entry:
+#           wrangler secret put SITE_DOMAIN_CF_API_TOKEN --name ferrogate-control-plane
+#       It needs the ZONE-level "SSL and Certificates: Edit" permission group on
+#       the fallback-origin zone. An otherwise-complete ACCOUNT token cannot
+#       reach `/zones/.../custom_hostnames`, and the failure arrives as an opaque
+#       403 at first use — which is why `packages/cloudflare/src/scopes.ts`
+#       carries that row and `preflight()` names it.
+#
+#   SITE_DOMAIN_CERTIFICATE_RECORDS — the `"static"` backend's curated
+#       `hostname -> custom_hostnames row` table, in Cloudflare's own result
+#       shape. It is the deterministic counterpart of the DNS resolver's curated
+#       answer document, and it is safe in a way that one is not: no certificate
+#       state gates serving, so a wrong entry misleads a human rather than
+#       authorising a request.
+#
+# WHAT THIS DEPLOYMENT STILL CANNOT DO FOR YOU, and there is no code that can:
+# the Cloudflare for SaaS entitlement, the fallback-origin zone and its DNS
+# record, the Worker route that covers it, and the tenant's CNAME are all
+# deploy-time acts outside this Worker. `docs/assets/custom-domains.md` §6 has
+# the checklist.
+# ---------------------------------------------------------------------------
+
 [vars]
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"

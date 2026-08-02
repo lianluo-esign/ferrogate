@@ -24,7 +24,7 @@
  *
  * ---------------------------------------------------------------------------
  * PORT-TODO(P: inventory-data-billing §1.7 "Proposed CF/TS mapping") — THE DURABLE
- * HALF OF THIS PACKAGE IS MOUNTED IN PART. Seven exports are still dead.
+ * HALF OF THIS PACKAGE IS MOUNTED IN PART. Six exports are still dead.
  *
  * This marker used to say "not mounted on any Worker … ZERO importers". That is
  * NO LONGER TRUE, and a marker that overstates the damage is as misleading as
@@ -60,13 +60,21 @@
  *     the "already notified" answer, so two isolates crossing the same
  *     threshold concurrently send ONE webhook between them. Closing cutover
  *     HOLD item A1.
+ *   - `D1SiteDomainVerificationStore` →
+ *     `apps/control-plane/src/routes/site_domain.ts` (#738). The
+ *     `site_domain_verifications` table had NO writer at all, so a completed
+ *     DNS-TXT ownership proof lived only in the generic
+ *     `control_plane_resources` document and `apps/gateway`'s custom-domain
+ *     resolver — which joins the typed `site_domains` and
+ *     `site_domain_verifications` rows — read an empty directory on every
+ *     deployment. `verifySiteDomain` now projects the proof into the typed
+ *     table through this class.
  *
  * STILL DEAD — zero importers anywhere under `apps/`, so deleting any of them
  * would leave every suite in this repo green:
  *   - `D1BillingEventLedger`      (the billing outbox drain)
  *   - `D1RetentionPolicyStore`    (see `./retention.js` — no cron calls it)
  *   - `D1AgentScheduleStore`      (see the §1.4.7 marker below)
- *   - `D1SiteDomainVerificationStore`
  *   - `TenantMonotonicUpserts` / `ControlMonotonicUpserts`
  *   - `R2AssetBlobStore`
  *   - `D1AssetMetadataStore`      (duplicated app-locally, see below)

@@ -56,8 +56,12 @@ work belongs in [`roadmap.md`](roadmap.md).
   `GET|HEAD /sites/{site}/{path}` (issue #737: `index.html` resolution with a
   308 to one canonical URL per document, the site's own `404.html`, optional SPA
   fallback, per-site and per-channel anonymous opt-in, per-response
-  `cache-control`), and agent consumption through MCP `resources/*` plus the
-  built-in `fetch_asset` tool.
+  `cache-control`), verified custom domains for those sites (issue #738: a
+  DNS-TXT ownership challenge binds a hostname to one tenant's site, and a
+  request on that hostname is served through the same path as `/sites/*` — an
+  unverified, expired or revoked hostname is refused rather than routed), and
+  agent consumption through MCP `resources/*` plus the built-in `fetch_asset`
+  tool.
 - **Agentic Lite plugin surface** for governed capability bundles, tool
   providers, event sinks, permission declarations, tool sessions, admin views,
   and audit events.

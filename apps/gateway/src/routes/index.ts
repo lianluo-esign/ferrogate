@@ -34,6 +34,7 @@ import {
 import { networkAccess } from "../middleware/network.js";
 import { responseCache } from "../middleware/response-cache.js";
 import type { GatewayEnv } from "../ports.js";
+import { defaultSiteDomainRouting } from "../sites/host.js";
 import { agentDiscoveryHandler } from "./agent-discovery.js";
 import { nodeDrainGate } from "./drain.js";
 import { metricsHandler, requestMetrics } from "./metrics.js";
@@ -588,6 +589,20 @@ export interface CreateGatewayAppOptions {
    * ask for "no drain gate", only for a gate whose flag is off.
    */
   readonly nodeDrain?: MiddlewareHandler<GatewayEnv>;
+  /**
+   * Override the VERIFIED-CUSTOM-DOMAIN router (`../sites/host.ts`, issue #738).
+   *
+   * Production never passes this: the default reads `env.CONTROL_DB` and is
+   * inert with no control database, with no `site_domains` row for the inbound
+   * authority, or with an unreadable directory. It exists so a test can inject
+   * a pre-built `AssetService` and a fixed clock, since the real one resolves
+   * bundles out of R2 and reads the wall clock to apply verification expiry.
+   *
+   * NOT nullable, for the same reason as its four siblings: there is no way to
+   * ask for "no custom-domain routing", only for a router whose directory
+   * contains nothing.
+   */
+  readonly siteDomains?: MiddlewareHandler<GatewayEnv>;
 }
 
 /** The assembled Worker plus the registry the anti-drift test inspects. */
@@ -626,6 +641,25 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // flood or credential-stuffing scan must never pay the virtual-key/storage
   // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
   app.use("*", options.networkAccess ?? networkAccess());
+
+  // VERIFIED CUSTOM DOMAINS (issue #738) — a request that arrived on a hostname
+  // some tenant has PROVEN it controls is served from that tenant's published
+  // site bundle, through the very same `SiteServer.serve` the `/sites/{slug}`
+  // route calls.
+  //
+  // Mounted HERE, above `contractAuth` and above every route, because on such a
+  // hostname the AUTHORITY belongs to the tenant: `/healthz`, `/version`,
+  // `/metrics` and `/v1/**` are paths inside the tenant's document tree, not
+  // this gateway's API. Below the routes they would shadow the tenant's files,
+  // and — the part that actually matters — a hostname whose proof has EXPIRED
+  // would still answer on them, so its refusal would not be about the authority
+  // at all. Below the network gate, because an IP the operator refused is
+  // refused on every authority.
+  //
+  // Inert unless `CONTROL_DB` is bound AND holds a `site_domains` row for the
+  // inbound host AND that row's owner holds a live DNS ownership proof. See
+  // `../sites/host.ts`.
+  app.use("*", options.siteDomains ?? defaultSiteDomainRouting());
 
   // ONE table-driven guard for all 272 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.

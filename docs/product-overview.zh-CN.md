@@ -45,8 +45,11 @@
   策略与无引用 blob GC、静态站点服务模式
   `GET|HEAD /sites/{site}/{path}`（issue #737：index.html 解析并 308 收敛到
   唯一规范 URL、站点自带 404.html、可选 SPA fallback、按站点且按 channel 的
-  匿名访问 opt-in、逐响应 cache-control），以及通过 MCP `resources/*` 和内置
-  `fetch_asset` 工具的 agent 消费。
+  匿名访问 opt-in、逐响应 cache-control）、站点的已验证自定义域名
+  （issue #738：DNS-TXT 归属挑战把主机名绑定到某一租户的站点，命中该主机名的
+  请求走与 `/sites/*` 完全相同的服务路径；未验证、已过期或已撤销的主机名一律
+  拒绝而非回退路由），以及通过 MCP `resources/*` 和内置 `fetch_asset` 工具的
+  agent 消费。
 - **Agentic Lite 插件面**：用于治理 capability bundle、tool provider、event
   sink、权限声明、tool session、Admin 视图和审计事件。
 - **Agent runtime 与 skill package surface**：支持 agent discovery、受治理的

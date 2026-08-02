@@ -25,6 +25,11 @@ describe("REQUIRED_TOKEN_PERMISSION_GROUPS", () => {
       ["API Tokens", "Write"],
       ["Cloudflare Pages", "Edit"],
       ["Workflows (Workers Scripts)", "Write, Edit"],
+      // #738 — the only ZONE-level group in the table. `custom_hostnames` lives
+      // under `/zones/{zone_id}`, so an otherwise-complete ACCOUNT token cannot
+      // provision a custom domain and the failure would arrive as an opaque 403
+      // at first use.
+      ["SSL and Certificates", "Edit (ZONE level, on the fallback-origin zone)"],
     ]);
   });
 

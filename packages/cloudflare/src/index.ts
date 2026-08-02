@@ -21,6 +21,7 @@
  * | S3 | `client.ts` `preflight` + `scopes.ts` | operability: NAME the missing permission group |
  * | S4 | `retry.ts` + `errors.ts` + `envelope.ts` | the shared retry/backoff + typed taxonomy the tree had two partial copies of |
  * | S5 | `d1.ts` | no binding creates a D1 database |
+ * | S6 | `custom-hostnames.ts` | no binding terminates TLS for a TENANT's hostname (#738) |
  *
  * ## What is deliberately ABSENT (do not "port it back")
  *
@@ -35,11 +36,12 @@
  * ## Mount status
  *
  * `retry.ts` has a real request-path consumer today:
- * `@ferrogate/storage`'s `D1RestDatabase`. S1/S2/S5 are provisioning
- * capabilities whose control-plane call sites are not built yet; each module's
- * docblock states the exact wiring line and the gate that must open first.
- * Nothing here may acquire a request-path consumer except the retry/error
- * primitives.
+ * `@ferrogate/storage`'s `D1RestDatabase`. `custom-hostnames.ts` (S6) has ONE
+ * control-plane consumer, `GET /admin/v1/site-domains/{hostname}` (#738).
+ * S1/S2/S5 are provisioning capabilities whose control-plane call sites are not
+ * built yet; each module's docblock states the exact wiring line and the gate
+ * that must open first. Nothing here may acquire a request-path consumer except
+ * the retry/error primitives.
  */
 export {
   AUTHENTICATION_CODES,
@@ -129,3 +131,16 @@ export {
   type D1CreateDatabaseRequest,
   type D1DatabaseDescriptor,
 } from "./d1.js";
+
+export {
+  CUSTOM_HOSTNAME_DUPLICATE_CODES,
+  CustomHostnamesClient,
+  customHostnameCertificateState,
+  type CustomHostname,
+  type CustomHostnameCertificate,
+  type CustomHostnameCertificateState,
+  type CustomHostnameProvision,
+  type CustomHostnameRequest,
+  type CustomHostnameValidationMethod,
+  type CustomHostnameValidationRecord,
+} from "./custom-hostnames.js";

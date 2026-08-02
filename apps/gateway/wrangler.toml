@@ -1026,6 +1026,12 @@ migrations_dir = "../../sql/d1-ts/control"
 #       `state_rbac.rs::tenant_has_permission_result`.
 #   `guardrail_policy_revisions` / `guardrail_policy_bindings`
 #       read by `D1GuardrailPolicyStore` (src/guardrails/binding.ts).
+#   `site_domains` / `site_domain_verifications`
+#       read by `D1SiteDomainDirectory` (src/sites/domains.ts, issue #738) to
+#       route a request that arrived on a VERIFIED custom hostname to the
+#       tenant's published site. Written by `apps/control-plane`'s
+#       `/admin/v1/site-domains` family, which is why both Workers have to
+#       resolve this binding to the same database.
 #
 # Reading a role grant out of a binding called `BILLING_DB` would be a lie in
 # the one place a reader most needs the truth, and renaming `BILLING_DB` would
@@ -1040,7 +1046,9 @@ migrations_dir = "../../sql/d1-ts/control"
 # the `TENANT_RBAC_ACTIONS` var for RBAC, and `guardrailDepsFromEnv` falls back
 # to the `GATEWAY_GUARDRAIL_POLICIES` var — the pre-D1 config path, which is
 # still correct, just not durable. Neither fails open: an absent var grants
-# nothing.
+# nothing. The custom-domain router likewise finds no directory and passes
+# every authority straight through, so NO site is served on a custom hostname
+# — never "every hostname serves a site".
 # ---------------------------------------------------------------------------
 [[d1_databases]]
 binding = "CONTROL_DB"
