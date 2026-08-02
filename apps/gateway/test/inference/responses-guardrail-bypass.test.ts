@@ -309,10 +309,26 @@ describe("a DENIED turn is not stored at all (#689)", () => {
     // `GET /v1/responses/{id}` — a copy of content that was never delivered.
     expect(await storedIds()).toEqual([]);
 
-    // Stated as the reachability it implies as well: whatever ids the store does
-    // hold, none of them answers with the refused text.
-    for (const id of await storedIds()) {
+    // And the reachability it implies, stated as something that ACTUALLY RUNS.
+    // This used to be a loop over `storedIds()` — the list the line above has
+    // just proved empty — so the body never executed and it read as coverage it
+    // was not. Filing a CLEAN turn afterwards makes the same statement
+    // reachable: the store is non-empty, every id in it is readable, and none of
+    // them answers with the text the operator refused.
+    upstream?.restore();
+    upstream = stubUpstream(providerAnswer("nothing to report"));
+    const clean = await createResponse({
+      model: "guard-probe",
+      input: "anything else",
+      store: true,
+    });
+    expect(clean.status).toBe(200);
+
+    const ids = await storedIds();
+    expect(ids).toHaveLength(1);
+    for (const id of ids) {
       const read = await getResponse(id);
+      expect(read.status).toBe(200);
       expect(await read.text()).not.toContain(PROBE_SECRET);
     }
   });

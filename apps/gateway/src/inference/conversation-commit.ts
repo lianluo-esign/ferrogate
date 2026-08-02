@@ -23,27 +23,66 @@
  *    by the gateway itself.
  *
  * ============================================================================
- * THE CHOICE: PERSIST AFTER THE RESPONSE STAGE, NOT SCREEN ON THE READ
+ * PERSIST AFTER THE RESPONSE STAGE **AND** SCREEN THE READ — NOT EITHER/OR
  * ============================================================================
  *
- * Both close the reported hole. They are not equivalent:
+ * This block used to be headed "the choice", and framing the two as
+ * ALTERNATIVES is what let a false clause stand in the guardrail wiring test for
+ * two audit rounds. They are complements. Each covers something the other
+ * cannot, and #689 ships both.
  *
- *  - **Screening on the read** leaves the refused bytes AT REST for the whole
- *    retention window and leaves the chain replay unscreened — a continuation
- *    would still hand the provider content the policy redacted, unless every
- *    continuation re-screened every prior turn, which is O(depth) detector work
- *    (including PAID detector calls) on every turn of every conversation.
- *  - **Persisting after the response stage** writes exactly the bytes the caller
- *    received. Screening is paid ONCE, on the write, and the read is free. A
- *    denied turn is never written, so there is nothing to retain, nothing to
- *    read back, and nothing to replay.
+ * **Persisting after the response stage** (this module) is the primary fix, and
+ * it is the only one that reaches three of the four legs:
  *
- * The cost of the choice, stated: a policy that TIGHTENS after a turn was stored
- * does not retroactively apply to it. That is the right trade here and it is the
- * same argument the `getResponse` guardrail exception rests on — the caller
- * already holds those exact bytes, because they were delivered, so a retroactive
- * refusal protects nothing. It is only a sound argument BECAUSE of this module:
- * with a pre-screening row it would have been false for both cases that matter.
+ *  - a DENIED turn is never written, so there is nothing at rest for the
+ *    retention window, nothing to read back and nothing to replay. A read-time
+ *    screen would leave those bytes on disk for hours;
+ *  - a REDACTED turn is filed redacted, so a same-credential continuation
+ *    replays the redacted transcript upstream — the egress the policy exists to
+ *    stop. Doing that at read time instead would mean re-screening every prior
+ *    turn on every continuation: O(depth) detector work, including PAID detector
+ *    calls, on every turn of every conversation;
+ *  - screening is paid ONCE, on the write.
+ *
+ * **Screening `GET /v1/responses/{id}`** (`guardrails/middleware.ts`, the
+ * `getResponse` binding) covers the leg this module cannot see, because it is
+ * about WHO is reading rather than WHAT was written. Conversation state is
+ * fenced on `(tenantId, projectId)`; guardrail policy scope is fenced per KEY.
+ * So a turn written by an UNGOVERNED credential is correctly stored verbatim and
+ * then served, verbatim, to a GOVERNED credential of the same project whose own
+ * policy would have redacted it. The read is O(1) — one stored document, one
+ * pass, on a request that infers nothing — so the cost argument above does not
+ * apply to it at all.
+ *
+ * The cost of persist-after, stated: a policy that TIGHTENS after a turn was
+ * stored does not retroactively apply to the bytes on disk. For the credential
+ * that WROTE the turn that is the right trade — it already holds the text, so a
+ * retroactive refusal protects nothing — and for any OTHER credential the read
+ * binding above re-decides under that reader's own live policy.
+ *
+ * ============================================================================
+ * THE RESIDUAL: A CROSS-KEY CONTINUATION
+ * ============================================================================
+ *
+ * One leg is open and is deliberately not closed here. A GOVERNED credential
+ * that continues an UNGOVERNED credential's chain replays that turn's stored
+ * text UPSTREAM as `input`. Neither fix reaches it:
+ *
+ *  - this module writes what the WRITER's policy approved, which for an
+ *    ungoverned writer is the verbatim text, and that is correct for the writer;
+ *  - the `getResponse` binding screens a READ, and a continuation is not a read.
+ *
+ * It cannot be closed from the guardrail middleware at any position: the chain
+ * is assembled INSIDE the inner inference router, after the middleware's request
+ * stage has already run over the client's own body (which carries only
+ * `previous_response_id` and the new input), so the assembled document does not
+ * exist at any point the screener can observe before dispatch. Closing it means
+ * screening at the point of assembly, under a cost argument of its own —
+ * O(foreign turns), zero for the same-credential conversations that are the
+ * common case. That is a change inside the router, and it needs each stored turn
+ * to record the credential its screening was decided under, so it is tracked as
+ * #779 — with the measured upstream body in it — rather than smuggled into this
+ * one.
  *
  * ============================================================================
  * THE SEAM
@@ -65,7 +104,7 @@
  * redeemed, nothing is stored, `x-ferrogate-response-stored` stays `false`, and
  * the next `previous_response_id` refuses loudly with
  * `previous_response_not_found`. Unmounting cannot resurrect the bypass — but it
- * would silently disable conversation state, so `test/inference/wiring.test.ts`
+ * would silently disable conversation state, so `test/guardrails/wiring.test.ts`
  * pins the mount AND its position relative to `guardrails()`.
  */
 import type { Context, MiddlewareHandler, Next } from "hono";

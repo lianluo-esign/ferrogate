@@ -73,21 +73,26 @@ interface OperationBinding {
   /**
    * Whether the REQUEST stage runs (issue #703).
    *
-   * Every operation on this table but the two audio uploads sends a JSON body,
-   * and for those the flag is `true` and nothing about the middleware changed.
-   * `createTranscription` / `createTranslation` send `multipart/form-data`
-   * wrapping opaque audio: there is no text to hand a detector, so the request
-   * stage does not run AT ALL for them, and — the part that matters — NO
-   * `allowed` verdict is recorded for it. That distinction is the whole reason
-   * this is a flag rather than an empty envelope evaluated for form's sake: an
-   * empty envelope would pass every check, write an evidence row, and report a
-   * control that read nothing.
+   * `true` for every operation that sends a JSON body, and for those nothing
+   * about the middleware changed. It is `false` for three, for two different
+   * reasons that both come down to "there is no text here to hand a detector":
+   *
+   *  - `createTranscription` / `createTranslation` send `multipart/form-data`
+   *    wrapping opaque audio (#703);
+   *  - `getResponse` is a GET and has no body at all (#689).
+   *
+   * In both cases the request stage does not run AT ALL, and — the part that
+   * matters — NO `allowed` verdict is recorded for it. That distinction is the
+   * whole reason this is a flag rather than an empty envelope evaluated for
+   * form's sake: an empty envelope would pass every check, write an evidence
+   * row, and report a control that read nothing.
    */
   readonly screensRequest: boolean;
   /**
-   * Whether the RESPONSE stage runs. Defined for chat/responses (model-generated
-   * text) and, since #703, for the two audio uploads (an attacker-supplied
-   * transcript). See `normalizeResponse`.
+   * Whether the RESPONSE stage runs. Defined for chat/responses
+   * (model-generated text), since #703 for the two audio uploads (an
+   * attacker-supplied transcript), and since #689 for `getResponse` (a turn a
+   * DIFFERENT credential's policy approved). See `normalizeResponse`.
    */
   readonly screensResponse: boolean;
 }
@@ -197,6 +202,61 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
     dialect: "openai.chat",
     screensRequest: true,
     screensResponse: false,
+  },
+  // ---- the stored conversation READ (issue #689) ---------------------------
+  //
+  // `GET /v1/responses/{id}`, RESPONSE-screened, and it is here because the
+  // exception that kept it off this table turned out to be false.
+  //
+  // The write-side fix (`inference/conversation-commit.ts`) makes a stored turn
+  // byte-for-byte the turn the response stage handed the WRITER. The argument
+  // built on it was that the read therefore needs no screening: the bytes were
+  // approved, and the caller already holds them. The first clause is true. The
+  // second is not, because the two fences are different widths:
+  //
+  //   - conversation state is fenced on `(tenantId, projectId)`
+  //     (`inference/conversation.ts::conversationOwner`);
+  //   - policy scope is fenced per KEY — `api_key_ids` is the NARROWEST
+  //     administrative selector `packages/guardrails/src/policy.ts` ranks, and
+  //     it is selected from `auth.subject`.
+  //
+  // So one project's two credentials share one conversation store while sitting
+  // under different policies, and a turn written by an UNGOVERNED key is served
+  // to a GOVERNED one. Measured: a redact policy scoped to key B alone, key A
+  // stores a card verbatim (correct — no policy binds A), and key B's GET
+  // answered 200 with the card. `test/inference/responses-cross-key-guardrail.
+  // test.ts` is that measurement.
+  //
+  // This is a COMPLEMENT to the write-side fix, not a replacement for it. The
+  // cost objection that rules out screening-on-read as a SUBSTITUTE is about the
+  // chain replay, which is O(depth) detector work per turn; a `GET` is O(1) —
+  // one stored document, one screening pass, on a request that does no
+  // inference at all. And the write-side fix stays load-bearing for everything
+  // this binding cannot reach: a DENIED turn is still never written, so there is
+  // no row at rest for the retention window and none to read back.
+  //
+  // `screensRequest: false` is not a widening of the #703 exception, it is the
+  // only value that works: a GET has NO body, `readJsonBodyBounded` returns
+  // `undefined` for `request.body === null`, and the request-stage branch
+  // answers that with an early `return next()` — which would skip the response
+  // stage entirely and leave this binding inert. An operation with no request
+  // body records no request-stage verdict, which is the honest reading.
+  //
+  // WHAT THIS DOES NOT COVER, stated so it is not mistaken for covered: a
+  // CONTINUATION by the governed key from the ungoverned key's turn still
+  // replays the stored text upstream as `input`. Nothing on this table can
+  // reach it — the chain is assembled inside the inner inference router, after
+  // this middleware's request stage has already run on the client's own body,
+  // so the assembled document does not exist at any point this middleware can
+  // observe before dispatch. Closing it means screening at the point of
+  // assembly, inside the router, under a different cost argument. Tracked as
+  // #779, with the measurement in it; see also the module doc of
+  // `inference/conversation-commit.ts`.
+  getResponse: {
+    protocol: "responses",
+    dialect: "openai.responses",
+    screensRequest: false,
+    screensResponse: true,
   },
 };
 
@@ -489,10 +549,11 @@ export function guardrails(
 
         await next();
       } else {
-        // ---- NO input screening (issue #703) --------------------------------
+        // ---- NO input screening (issues #703, #689) -------------------------
         //
-        // The two audio uploads. Their bodies are `multipart/form-data` wrapping
-        // opaque audio, so there is nothing to hand a detector — and the
+        // The two audio uploads and `getResponse`. The audio bodies are
+        // `multipart/form-data` wrapping opaque audio and a GET has no body at
+        // all, so in neither case is there anything to hand a detector — and the
         // difference between this branch and "evaluate an empty envelope" is the
         // entire reason the branch exists: an empty envelope passes every check,
         // buffers an evidence row, and records `allowed`, which tells an auditor
@@ -507,6 +568,13 @@ export function guardrails(
         // which policy SCOPE selection keys on — are taken after `next()` from
         // the facts the inference route publishes for the request log (#664),
         // which is the seam that already crosses the inner/outer Hono boundary.
+        //
+        // For `getResponse` those facts are ABSENT (a stored read dispatches to
+        // no provider), so a model- or provider-scoped policy does not select
+        // for it — the same fail-open-on-SELECTION the module doc states for a
+        // missing `providerForModel`. The scope that matters for the leak this
+        // binding closes is `api_key_ids`, which comes off `auth` above and is
+        // always present.
         await next();
 
         const facts = requestLogFactsFor(c.req.raw);
@@ -517,9 +585,10 @@ export function guardrails(
           ...(facts.logicalModel !== undefined ? { model: facts.logicalModel } : {}),
           ...(facts.provider !== undefined ? { provider: facts.provider } : {}),
           streaming: false,
-          // Empty by construction — `normalizeRequest` extracts nothing for
-          // `audio_transcription`. It is here only so the response stage has a
-          // context to extend, and it is NEVER evaluated.
+          // Empty by construction — `normalizeRequest` extracts nothing from
+          // `{}` for `audio_transcription` or for `responses`. It is here only
+          // so the response stage has a context to extend, and it is NEVER
+          // evaluated.
           envelope: normalizeRequest(binding.protocol, {}),
         };
         plan = engine.streamingGuardrailPlan(context);
