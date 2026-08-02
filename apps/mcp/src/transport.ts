@@ -26,12 +26,16 @@
  * silently treating it as HTTP") and `test/durable-identity.test.ts` ("keeps a
  * stdio row decodable — it is refused at DISPATCH, not at config").
  *
- * NOTE — the server-side ingress is deliberately STATELESS, and that is PARITY,
- * not a gap: Rust's modern ingress (`mcp_ingress.rs`) mints no `Mcp-Session-Id`
- * and keeps no resumable `Last-Event-ID` replay log either, so neither does
- * this. A resumable server-side stream would be a NEW feature in both trees; on
- * CF its shape is a Durable Object per session (the `McpAgent` pattern), the
- * same primitive `src/oauth-flow.ts` already uses in this Worker.
+ * NOTE — the server-side ingress USED to be deliberately stateless, and this
+ * header used to record that as parity with Rust's `mcp_ingress.rs`, which
+ * mints no `Mcp-Session-Id` and keeps no `Last-Event-ID` replay log. #687 says
+ * that parity is the defect: a client fanning in to many upstreams loses the
+ * WHOLE fan-out on one SSE reconnect. The session and the replay log now live
+ * in `src/unified.ts` — a Durable Object per CLIENT session, addressed by
+ * `(tenant, session id)` — and this module keeps only the framing they use
+ * ({@link sseFrameResponse} emits a replayed run of frames ahead of a fresh
+ * one). Everything below is still the OUTBOUND client and the wire framing; the
+ * session state deliberately is not here.
  */
 import type { JsonValue } from "@ferrogate/core";
 
@@ -221,10 +225,27 @@ export function sseJsonRpcResponse(
 ): Response {
   const event: SseEvent = { event: "message", data: JSON.stringify(payload) };
   if (init.eventId !== undefined) event.id = init.eventId;
-  const frame = encodeSseEvent(event);
+  return sseFrameResponse([event], init);
+}
+
+/**
+ * Frame SEVERAL messages onto one `text/event-stream` response and close.
+ *
+ * This is what a `Last-Event-ID` resume needs (#687): the frames the client
+ * missed are emitted, IN THEIR ORIGINAL ORDER and carrying their ORIGINAL `id:`
+ * cursors, ahead of the answer to the request that carried the cursor. Re-using
+ * the original ids matters — a replayed frame given a fresh id would make the
+ * client's next cursor point at a position that never existed, so a second
+ * reconnect would resume from the wrong place.
+ */
+export function sseFrameResponse(
+  events: readonly SseEvent[],
+  init: { status?: number; headers?: Record<string, string> } = {},
+): Response {
+  const body = events.map((event) => encodeSseEvent(event)).join("");
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(new TextEncoder().encode(frame));
+      controller.enqueue(new TextEncoder().encode(body));
       controller.close();
     },
   });

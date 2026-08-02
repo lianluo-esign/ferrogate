@@ -265,6 +265,16 @@ export async function toolsList(
   // failure used to arrive as a silently shorter list, and an agent reading a
   // shorter list concludes the tool does not exist and stops — a worse outcome
   // than an error it can retry or route around.
+  // #687: tell the client session which upstreams this listing spans and which
+  // of them could not be reached. A degraded upstream is how a client session
+  // learns that one leg of its fan-out dropped MID-CONVERSATION; the session
+  // itself stays open, because one upstream falling over must not take the
+  // whole multiplexed conversation with it.
+  for (const tool of fan.tools) context.upstreams?.note(tool.serverName);
+  for (const failure of fan.degraded) {
+    context.upstreams?.noteFailure(failure.server, failure.message);
+  }
+
   const collisions = ambiguousToolNames(tools);
   const meta: Record<string, JsonValue> = {};
   if (fan.degraded.length > 0) meta[MULTIPLEX_DEGRADED_META] = degradedMeta(fan.degraded);
@@ -463,6 +473,10 @@ export async function executeToolWithGovernance(
   // Everything audited from here on names the upstream that actually owns the
   // tool, whatever the flat name's hyphens suggest.
   retarget(tool);
+  // #687: the same fact, told to the client session, so the replay log records
+  // WHICH upstream a frame came from. Reported here — after resolution — for
+  // exactly the reason the audit target is: only the catalogue knows.
+  context.upstreams?.note(tool.serverName);
 
   // --- approval gate -------------------------------------------------------
   if (!tool.autoExecute) {

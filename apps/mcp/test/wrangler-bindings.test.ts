@@ -115,7 +115,7 @@ describe("every Durable Object binding is deployable", () => {
   it("declares at least the two classes this Worker exports", () => {
     // A guard on the gate itself: if the parser ever stopped matching, every
     // assertion below would pass vacuously over an empty list.
-    expect(local.length).toBeGreaterThanOrEqual(2);
+    expect(local.length).toBeGreaterThanOrEqual(3);
   });
 
   it("introduces each LOCAL bound class in a [[migrations]] new_sqlite_classes", () => {
@@ -210,7 +210,13 @@ describe("wave 24 — the S5 entitlement ladder needs no new binding, ASSERTED",
       .map(([name]) => name)
       .sort();
     expect(bound).toEqual(exported);
-    expect(bound).toEqual(["FerroGateMcpSession", "McpOauthFlowClaim"]);
+    expect(bound).toEqual([
+      "FerroGateMcpSession",
+      // #687: one instance per (tenant, CLIENT session), holding the fan-out
+      // this client sees and the replay log its reconnect resumes from.
+      "FerroGateMcpUnifiedSession",
+      "McpOauthFlowClaim",
+    ]);
   });
 });
 

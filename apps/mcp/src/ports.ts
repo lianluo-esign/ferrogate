@@ -109,6 +109,9 @@ import { type RbacAuthorizerPort, UnboundRbacAuthorizer, rbacAuthorizerFromEnv }
 // TYPE-ONLY. `./session.js` imports `McpTool` back out of this module, also
 // type-only, so nothing is evaluated in either direction at module load.
 import type { FerroGateMcpSession } from "./session.js";
+// TYPE-ONLY, for the same reason: `./unified.ts` imports nothing from here at
+// runtime, so the namespace field below costs no module-load coupling.
+import type { FerroGateMcpUnifiedSession } from "./unified.js";
 
 // ---------------------------------------------------------------------------
 // Upstream MCP server configuration (port of `ferrogate-mcp/src/config.rs`)
@@ -296,6 +299,28 @@ export interface DispatchContext {
   /** Validated original bearer (`x-ferrogate-mcp-bearer`) for `original_bearer` upstreams. */
   originalBearer?: string;
   skill?: { id: string; version: string };
+  /**
+   * #687: where the code that RESOLVED an upstream reports which one it was.
+   *
+   * Optional, so every existing construction site keeps compiling and every
+   * path that has no session simply writes nowhere. The alternative — the
+   * ingress guessing the serving upstream from the flat tool name — is exactly
+   * the defect `#677/#678`'s attribution and this PR's `resolveTool` closed.
+   */
+  upstreams?: UpstreamAttributionSink;
+}
+
+/**
+ * The upstreams that contributed to one response (#687).
+ *
+ * `note` is the upstream that SERVED something; `noteFailure` is one whose own
+ * session could not be reached on this request. The second is how a client
+ * session learns that one leg of its fan-out dropped mid-conversation while the
+ * session itself stays open.
+ */
+export interface UpstreamAttributionSink {
+  note(server: string): void;
+  noteFailure(server: string, message: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,6 +1529,23 @@ export interface McpEnv {
    * health signal, same answers.
    */
   MCP_SESSION?: DurableObjectNamespace<FerroGateMcpSession>;
+
+  /**
+   * Durable Object namespace holding the UNIFIED CLIENT session (#687,
+   * `src/unified.ts`). One instance per `(tenant, client session id)` — the
+   * other axis from {@link MCP_SESSION}, which is per `(tenant, UPSTREAM)`.
+   *
+   * It holds what one client conversation sees: which upstreams its fan-out is
+   * bound to, which of them dropped, and the bounded log of emitted frames a
+   * `Last-Event-ID` reconnect replays from.
+   *
+   * OPTIONAL. Absent, the ingress mints no session and answers exactly as it
+   * did before this slice — but it then REFUSES an `Mcp-Session-Id` or a
+   * `Last-Event-ID` rather than accepting one it cannot honour. Silently
+   * ignoring a resume cursor is the failure mode; offering no sessions is a
+   * visible degradation.
+   */
+  MCP_CLIENT_SESSION?: DurableObjectNamespace<FerroGateMcpUnifiedSession>;
 
   /**
    * DEV/TEST ONLY. When `"1"`, the dev bundle resolves upstreams through the
