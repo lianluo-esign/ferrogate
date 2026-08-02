@@ -330,15 +330,24 @@ describe("every Hono app the gateway builds registers an error handler", () => {
     // router forgot", it was "delegating into a bare `new Hono` silently opts
     // out of the envelope", and nothing but a source-level gate sees that
     // before it ships.
+    //
+    // A heuristic, and stated as one: it asks only that a file constructing a
+    // Hono app also registers a handler on SOMETHING. That is enough to catch
+    // the mistake that produced #733 (a bare `new Hono` with nothing attached)
+    // and cheap enough to keep. `envelopeBoundary` is the guarantee; this is
+    // the reminder.
     const sources = import.meta.glob("../../src/**/*.ts", {
       query: "?raw",
       import: "default",
       eager: true,
     }) as Record<string, string>;
+    // Guards the glob itself — an empty match set would make this vacuously
+    // green, which is the failure mode a source-level gate is most prone to.
+    expect(Object.keys(sources).length).toBeGreaterThan(50);
 
     const offenders: string[] = [];
     for (const [path, source] of Object.entries(sources)) {
-      if (!/new Hono</.test(source)) continue;
+      if (!/\bnew Hono\s*[<(]/.test(source)) continue;
       if (!/\.onError\(/.test(source)) offenders.push(path);
     }
     expect(offenders, "a Hono app with no onError answers text/plain on a throw").toEqual([]);
