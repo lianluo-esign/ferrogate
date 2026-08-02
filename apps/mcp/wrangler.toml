@@ -295,3 +295,28 @@ migrations_dir = "../../sql/d1-ts/control"
 # cannot be forgotten, and `docs/rewrite/CLOUD-VERIFICATION.md` carries the
 # human deploy step.
 # ===========================================================================
+# --- Workers Observability ---------------------------------------------------
+# Owner directive (2026-08-02): enable Workers Observability on the whole fleet
+# so production behaviour can be read back from the CLI (`wrangler tail`) and the
+# Workers Logs query API, instead of being inferred from responses.
+#
+# THREE INDEPENDENT SWITCHES, exactly as `apps/telemetry/wrangler.toml` documents:
+# `enabled` alone does NOT turn on tracing — the traces sub-table is its own
+# opt-in, and omitting it leaves this Worker's spans unrecorded.
+#
+# `invocation_logs` is ON here, unlike the telemetry ingest Worker: the automatic
+# one-per-request event is what makes a request greppable at all when debugging,
+# which is the whole point of the directive. It roughly DOUBLES billable log
+# events, so lower `head_sampling_rate` on a high-QPS deployment rather than
+# turning this back off — a sampled invocation log still lets you find a request,
+# a missing one does not.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
