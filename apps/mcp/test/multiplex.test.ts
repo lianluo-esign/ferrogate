@@ -23,11 +23,11 @@ import {
   MULTIPLEX_SERVER_META,
 } from "../src/multiplex.js";
 import {
-  inMemoryPorts,
-  resetInMemoryPorts,
   type DispatchContext,
   type McpPorts,
   type McpServerConfig,
+  inMemoryPorts,
+  resetInMemoryPorts,
 } from "../src/ports.js";
 import { MCP_PROTOCOL_VERSION } from "../src/protocol.js";
 import { executeToolWithGovernance, toolsList } from "../src/tools.js";
@@ -157,7 +157,12 @@ describe("attribution survives multiplexing (#677/#678)", () => {
   });
 
   it("attributes the identity-resolution row to the serving upstream too", async () => {
-    await executeToolWithGovernance(ports, context, { name: "github-mcp-search", arguments: {} }, "mcp");
+    await executeToolWithGovernance(
+      ports,
+      context,
+      { name: "github-mcp-search", arguments: {} },
+      "mcp",
+    );
     const identityRow = auditEvents().find((event) => event.action === "mcp.identity.use");
     expect(identityRow?.target).toBe("mcp:github-mcp/identity");
   });

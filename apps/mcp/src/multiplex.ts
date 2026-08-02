@@ -243,7 +243,7 @@ export function toolMeta(tool: McpTool): Record<string, JsonValue> {
  */
 export function readServerSelector(params: unknown): string | undefined {
   if (typeof params !== "object" || params === null || Array.isArray(params)) return undefined;
-  const meta = (params as Record<string, unknown>)["_meta"];
+  const meta = (params as Record<string, unknown>)._meta;
   if (typeof meta !== "object" || meta === null || Array.isArray(meta)) return undefined;
   const selector = (meta as Record<string, unknown>)[MULTIPLEX_SERVER_META];
   return typeof selector === "string" && selector !== "" ? selector : undefined;
@@ -251,11 +251,7 @@ export function readServerSelector(params: unknown): string | undefined {
 
 /** The refusal message for an ambiguous flat name. Names every claimant. */
 export function ambiguousToolMessage(name: string, servers: readonly string[]): string {
-  return (
-    `MCP tool ${name} is advertised by ${servers.length} upstream servers ` +
-    `(${servers.join(", ")}); resolve it by sending _meta.${MULTIPLEX_SERVER_META} ` +
-    `on tools/call, or "server" on POST /v1/mcp/tool/execute`
-  );
+  return `MCP tool ${name} is advertised by ${servers.length} upstream servers (${servers.join(", ")}); resolve it by sending _meta.${MULTIPLEX_SERVER_META} on tools/call, or "server" on POST /v1/mcp/tool/execute`;
 }
 
 /** `_meta` rendering of a degraded upstream. */

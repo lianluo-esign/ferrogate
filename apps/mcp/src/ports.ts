@@ -92,6 +92,15 @@ import {
   type TenancyLifecycleGatePort,
   UnboundLifecycleGate,
 } from "./lifecycle.js";
+// `./multiplex.js` is a LEAF: it imports only the `McpTool` TYPE back out of
+// this module, which is erased, so there is no value-level cycle to reason
+// about even though the dependency reads both ways on paper.
+import {
+  type McpFanIn,
+  type McpToolResolution,
+  namespacedToolName,
+  resolveAcrossCatalog,
+} from "./multiplex.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
 // `./rbac.js` imports the `AuthContext` TYPE back out of this module. The cycle
 // is safe for the same reason `./auth.js`'s is: the import is type-only, so
@@ -371,9 +380,32 @@ export class McpExecutionError extends Error {
 export interface McpUpstreamPort {
   listServers(): readonly McpServerConfig[];
   getServer(name: string): McpServerConfig | undefined;
-  /** Namespaced, allowlisted tools visible to this caller. */
+  /**
+   * The multiplexed fan-in: the union of every reachable upstream's
+   * allowlisted tools, AND the upstreams that could not be reached (#687).
+   *
+   * Both halves are returned together on purpose. A signature that returned
+   * only the tools is what allowed a partial upstream failure to reach the
+   * client as a silently shorter list, which an agent reads as "that tool does
+   * not exist" — strictly worse than an error.
+   */
+  fanIn(): Promise<McpFanIn>;
+  /**
+   * Namespaced, allowlisted tools visible to this caller.
+   *
+   * The lossy half of {@link fanIn}, kept because most callers genuinely only
+   * want the union. Anything that reports to a client must use `fanIn`.
+   */
   listTools(): Promise<readonly McpTool[]>;
-  toolByName(name: string): Promise<McpTool | undefined>;
+  /**
+   * Resolve one namespaced tool name against the multiplexed catalogue (#687).
+   *
+   * Returns a RESOLUTION rather than a tool because "no such tool" and "two
+   * upstreams claim this name" are different answers and only the second one is
+   * fixable by the caller. `selector` is the caller's explicit
+   * `ferrogate/server`; see `./multiplex.ts` for the whole contract.
+   */
+  resolveTool(name: string, selector?: string | undefined): Promise<McpToolResolution>;
   /**
    * Execute an allowlisted upstream tool. `identity` carries the resolved
    * per-request grant; `context` carries the correlation chain so an upstream
@@ -1137,14 +1169,14 @@ export class InMemoryUpstreams implements McpUpstreamPort {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
-  async listTools(): Promise<readonly McpTool[]> {
+  async fanIn(): Promise<McpFanIn> {
     const listed: McpTool[] = [];
     for (const config of this.#servers.values()) {
       for (const tool of this.#tools.get(config.name) ?? []) {
         // Deny-by-default: an un-allowlisted tool is never even advertised.
         if (!toolAllowlisted(config.toolsToExecute, tool.name)) continue;
         const entry: McpTool = {
-          name: `${config.name}-${tool.name}`,
+          name: namespacedToolName(config.name, tool.name),
           serverName: config.name,
           remoteName: tool.name,
           inputSchema: tool.input_schema,
@@ -1154,11 +1186,24 @@ export class InMemoryUpstreams implements McpUpstreamPort {
         listed.push(entry);
       }
     }
-    return listed;
+    // An in-memory server cannot be unreachable, so `degraded` is always empty
+    // here — the honest answer, not a stub.
+    return { tools: listed, degraded: [] };
   }
 
-  async toolByName(name: string): Promise<McpTool | undefined> {
-    return (await this.listTools()).find((tool) => tool.name === name);
+  async listTools(): Promise<readonly McpTool[]> {
+    return (await this.fanIn()).tools;
+  }
+
+  /**
+   * #687: resolved against the materialised catalogue, exactly as
+   * `HttpMcpUpstreams` does — the two hosts used to disagree about collisions
+   * (this one took the FIRST exact match, that one the LONGEST server prefix),
+   * which meant the dev bundle and production routed the same name to different
+   * upstreams.
+   */
+  async resolveTool(name: string, selector?: string | undefined): Promise<McpToolResolution> {
+    return resolveAcrossCatalog(await this.listTools(), name, selector);
   }
 
   async callTool(
@@ -1206,26 +1251,14 @@ export function toolAllowlisted(allowlist: readonly string[], name: string): boo
   return allowlist.includes(name);
 }
 
-/**
- * Longest-prefix resolution of a namespaced `{server}-{remote}` tool name.
- * Port of `manager::resolve_namespaced_session`: a server named `a-b` wins over
- * a server named `a` for the tool `a-b-c`.
- */
-export function resolveNamespacedTool(
-  serverNames: readonly string[],
-  name: string,
-): { serverName: string; remoteName: string } | undefined {
-  let best: { serverName: string; remoteName: string } | undefined;
-  for (const serverName of serverNames) {
-    if (!name.startsWith(`${serverName}-`)) continue;
-    const remoteName = name.slice(serverName.length + 1);
-    if (remoteName.trim().length === 0) continue;
-    if (best === undefined || serverName.length > best.serverName.length) {
-      best = { serverName, remoteName };
-    }
-  }
-  return best;
-}
+// `resolveNamespacedTool` — the longest-prefix port of
+// `manager::resolve_namespaced_session` — used to live here and is DELETED
+// (#687), not moved. It answered "which single upstream owns this flat name"
+// by looking only at the string, and with two upstreams whose namespaced names
+// collide it silently picked one and made the other's tool permanently
+// unreachable. `./multiplex.ts`'s `candidateServerNames` returns EVERY prefix
+// match, and the answer then comes from those upstreams' catalogues. Leaving
+// the old helper exported would only invite a second, divergent resolver.
 
 export class InMemoryCredentialStore implements McpCredentialStorePort {
   readonly #flows = new Map<string, StoredMcpOauthFlow>();

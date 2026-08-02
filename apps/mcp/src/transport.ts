@@ -36,45 +36,52 @@
 import type { JsonValue } from "@ferrogate/core";
 
 import {
+  type McpToolExecutionResult,
+  type ParsedToolDef,
   callToolParams,
   parseCallResult,
   parseToolsList,
-  type McpToolExecutionResult,
-  type ParsedToolDef,
 } from "./jsonrpc.js";
 import {
-  discoverSupportsCurrentVersion,
-  encodeMcpHeaderValue,
-  httpLegacyDowngradeReason,
-  jsonRpcErrorCode,
+  type McpFanIn,
+  type McpToolResolution,
+  type McpUpstreamFailure,
+  candidateServerNames,
+  namespacedToolName,
+  resolveAcrossCatalog,
+} from "./multiplex.js";
+import {
+  type DispatchContext,
+  McpDispatchHeaders,
+  McpExecutionError,
+  type McpServerConfig,
+  type McpTool,
+  type McpUpstreamPort,
+  toolAllowlisted,
+} from "./ports.js";
+import {
+  FERROGATE_CLIENT_INFO,
+  MCP_LEGACY_PROTOCOL_VERSION,
   MCP_METHOD_HEADER,
   MCP_NAME_HEADER,
   MCP_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION_HEADER,
-  MCP_LEGACY_PROTOCOL_VERSION,
+  type McpNegotiatedProtocol,
+  discoverSupportsCurrentVersion,
+  encodeMcpHeaderValue,
+  httpLegacyDowngradeReason,
+  jsonRpcErrorCode,
   modernDiscoverParams,
   modernRequestParams,
   resolveLegacyProtocolVersion,
-  FERROGATE_CLIENT_INFO,
-  type McpNegotiatedProtocol,
 } from "./protocol.js";
 import {
-  McpDispatchHeaders,
-  McpExecutionError,
-  resolveNamespacedTool,
-  toolAllowlisted,
-  type DispatchContext,
-  type McpServerConfig,
-  type McpTool,
-  type McpUpstreamPort,
-} from "./ports.js";
-import {
   DEFAULT_RECONNECT_POLICY,
-  statusOf,
   type McpReconnectPolicy,
   type McpServerStatus,
   type McpSessionState,
   type McpSessionStorePort,
+  statusOf,
 } from "./session.js";
 
 /** Hard cap on any single upstream response (Rust `MAX_MCP_RESPONSE_BYTES`). */
@@ -581,26 +588,67 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     return this.#sessions.get(name)?.config;
   }
 
-  async listTools(): Promise<readonly McpTool[]> {
-    const listed: McpTool[] = [];
+  /**
+   * The multiplexed fan-in (#687).
+   *
+   * A single unreachable upstream must not blank the whole catalogue — the Rust
+   * manager keeps the other sessions' tools listed too — but it must not vanish
+   * either. Every failure is CAUGHT and RECORDED, so the caller can be told the
+   * union is incomplete instead of reading a shorter list as "that tool does
+   * not exist".
+   */
+  async fanIn(): Promise<McpFanIn> {
+    const tools: McpTool[] = [];
+    const degraded: McpUpstreamFailure[] = [];
     for (const session of this.#sessions.values()) {
       try {
-        listed.push(...(await this.#sessionTools(session)));
-      } catch {
-        // A single unreachable upstream must not blank the whole catalog; the
-        // Rust manager keeps the other sessions' tools listed too.
+        tools.push(...(await this.#sessionTools(session)));
+      } catch (cause) {
+        degraded.push({
+          server: session.config.name,
+          code:
+            cause instanceof McpExecutionError ? cause.code : ("mcp_server_unavailable" as const),
+          message: cause instanceof Error ? cause.message : String(cause),
+        });
       }
     }
-    return listed;
+    return { tools, degraded };
   }
 
-  async toolByName(name: string): Promise<McpTool | undefined> {
-    const resolved = resolveNamespacedTool([...this.#sessions.keys()], name);
-    if (resolved === undefined) return undefined;
-    const session = this.#sessions.get(resolved.serverName);
-    if (session === undefined) return undefined;
-    const tools = await this.#sessionTools(session);
-    return tools.find((tool) => tool.name === name);
+  async listTools(): Promise<readonly McpTool[]> {
+    return (await this.fanIn()).tools;
+  }
+
+  /**
+   * Resolve a flat `{server}-{remote}` name against the CATALOGUE (#687).
+   *
+   * The prefix scan only decides which upstreams are worth interrogating (so a
+   * `tools/call` does not hand-shake the whole fleet); it deliberately keeps
+   * EVERY prefix match rather than the longest, because the longest-prefix rule
+   * is what silently shadowed one of two colliding tools.
+   *
+   * An upstream that fails to list is skipped rather than propagated: it cannot
+   * claim the name, and letting its outage turn a resolvable call into an
+   * ambiguity — or into a hard failure — would let one dead server break a tool
+   * on a healthy one. The caller still learns about it through {@link fanIn}.
+   */
+  async resolveTool(name: string, selector?: string | undefined): Promise<McpToolResolution> {
+    const candidates = candidateServerNames(this.#sessions.keys(), name).filter(
+      (candidate) => selector === undefined || candidate.serverName === selector,
+    );
+    const claimants: McpTool[] = [];
+    for (const candidate of candidates) {
+      const session = this.#sessions.get(candidate.serverName);
+      if (session === undefined) continue;
+      let tools: McpTool[];
+      try {
+        tools = await this.#sessionTools(session);
+      } catch {
+        continue;
+      }
+      claimants.push(...tools.filter((tool) => tool.name === name));
+    }
+    return resolveAcrossCatalog(claimants, name, selector);
   }
 
   async callTool(
@@ -688,7 +736,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
       .filter((tool) => toolAllowlisted(session.config.toolsToExecute, tool.name))
       .map((tool) => {
         const entry: McpTool = {
-          name: `${session.config.name}-${tool.name}`,
+          name: namespacedToolName(session.config.name, tool.name),
           serverName: session.config.name,
           remoteName: tool.name,
           inputSchema: tool.input_schema,

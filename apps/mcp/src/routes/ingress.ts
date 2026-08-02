@@ -189,6 +189,13 @@ export function ingressRouteModule(): RouteModule {
         if (typeof route === "string") request.route = route;
         const sessionId = object["session_id"];
         if (typeof sessionId === "string") request.sessionId = sessionId;
+        // #687: the REST spelling of the JSON-RPC `_meta["ferrogate/server"]`
+        // selector. `_meta` is a JSON-RPC-shaped envelope that has no place in
+        // a REST body, so this transport takes the same string as a top-level
+        // field — the two transports must agree about which upstream serves a
+        // name or they are two different gateways.
+        const server = object["server"];
+        if (typeof server === "string" && server !== "") request.server = server;
 
         // THE MOUNT, on the REST transport of the same chokepoint. Both ingress
         // paths must resolve the tenant's real host or the two transports
