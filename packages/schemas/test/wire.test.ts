@@ -297,8 +297,13 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 272 - 10. The running sum is narrative, and #703 and #737
+    // `seeded`, i.e. 274 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(262);
+    //
+    // #689's `getResponse` / `deleteResponse` are that story once more — the
+    // Responses conversation-state shapes live beside their handler in
+    // `apps/gateway/src/inference/` — so `seeded` is still 10 and the shortfall
+    // is 264.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(264);
   });
 });

@@ -70,7 +70,23 @@ describe("guardrail operation bindings match the contract", () => {
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened.sort()).toEqual(["countMessageTokens", "getModel", "listModels"]);
+    //  - `getResponse` / `deleteResponse` (issue #689) join the list, and the
+    //    reason is not "no content" — `getResponse` returns a stored prompt and
+    //    completion. It is that the content was ALREADY screened, on the
+    //    `createResponse` that produced it, and already delivered to this same
+    //    credential once. Re-screening would spend detector budget (including
+    //    paid provider calls) to re-decide a decision that has been made, and
+    //    could refuse a caller their own previously-served answer because a
+    //    policy changed afterwards — a retroactive block that protects nothing,
+    //    since the caller already has the text. `deleteResponse` carries no
+    //    content in either direction.
+    expect(unscreened.sort()).toEqual([
+      "countMessageTokens",
+      "deleteResponse",
+      "getModel",
+      "getResponse",
+      "listModels",
+    ]);
   });
 
   test("the RESPONSE stage runs for chat/responses/messages and the two transcripts", () => {
