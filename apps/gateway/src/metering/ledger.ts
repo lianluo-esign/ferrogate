@@ -19,6 +19,7 @@
  *    stops counting whole credits. {@link MeteredTotals.credits} cannot.
  */
 import {
+  type BillingEvent,
   type LedgerListFilter,
   ledgerFilterMatches,
   sameProviderAttemptSettlement,
@@ -53,9 +54,17 @@ export function meteredTotals(charges: Iterable<MeteredCharge>): MeteredTotals {
   return { entries, credits, totalTokens, costUsd };
 }
 
+/** One cost-less metering event, as {@link InMemoryLedgerStore} keeps it (#663). */
+export interface RecordedEvent {
+  readonly id: string;
+  readonly event: BillingEvent;
+  readonly occurredAtUnix: number;
+}
+
 /** In-memory, idempotent {@link LedgerStore}. */
 export class InMemoryLedgerStore implements LedgerStore {
   readonly #rows = new Map<string, MeteredCharge>();
+  readonly #events = new Map<string, RecordedEvent>();
 
   // eslint-disable-next-line @typescript-eslint/require-await -- the port is async because D1 is.
   async record(charge: MeteredCharge): Promise<LedgerWriteOutcome> {
@@ -84,9 +93,28 @@ export class InMemoryLedgerStore implements LedgerStore {
     return meteredTotals(this.#matching(filter));
   }
 
+  /**
+   * The cost-less metering row for a usage nothing could price (#663) — see
+   * {@link LedgerStore.recordEvent}. Idempotent on `id`, first write wins, which
+   * is the `ON CONFLICT (billing_event_id) DO NOTHING` the D1 store issues.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await -- see `record`.
+  async recordEvent(event: BillingEvent, id: string, occurredAtUnix: number): Promise<void> {
+    if (this.#events.has(id)) return;
+    this.#events.set(id, { id, event, occurredAtUnix });
+  }
+
   /** Every stored charge, insertion-ordered. Test/admin affordance. */
   get charges(): readonly MeteredCharge[] {
     return [...this.#rows.values()];
+  }
+
+  /**
+   * Every cost-less event row, insertion-ordered — the in-memory mirror of
+   * `billing_events` rows with no `billing_ledger` sibling (#663).
+   */
+  get events(): readonly RecordedEvent[] {
+    return [...this.#events.values()];
   }
 
   get size(): number {

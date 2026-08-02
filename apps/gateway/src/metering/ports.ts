@@ -222,6 +222,31 @@ export interface LedgerStore {
    * store keeps no durable intent", never as an error.
    */
   readonly outbox?: DurableOutboxStore | undefined;
+  /**
+   * Persist the metering EVENT alone — no ledger row, no outbox intent, no
+   * downstream report (#663).
+   *
+   * The one caller is the fail-closed path: a request that was served and
+   * cannot be priced. Rust did exactly this —
+   * `state_billing_metering.rs::settle_request` skipped only the WALLET DEBIT
+   * when `cost_usd` was `None` and called
+   * `append_billing_event_with_outbox_enqueue` regardless — and the TS port
+   * dropped it, so a served, billable request against a model outside the rate
+   * card was recorded nowhere at all.
+   *
+   * Deliberately NOT `record()` with a zero-cost entry: a `billing_ledger` row
+   * saying $0 is a BILL, and billing zero for a real call is the
+   * free-inference bug #129 exists to prevent. An event row with a null
+   * `cost_usd` is a different statement — "this happened, nobody could price
+   * it" — and it carries the token counts, so the operator can add the rule and
+   * re-price it.
+   *
+   * Idempotent on `id` (the same `ledgerEntryId` a charge would use), so a
+   * replayed drain writes one row. OPTIONAL for the same reason
+   * {@link LedgerStore.outbox} is: a store may keep no such table, and absence
+   * must read as "nowhere to write", never as an error.
+   */
+  recordEvent?(event: BillingEvent, id: string, occurredAtUnix: number): Promise<void>;
 }
 
 /**
@@ -505,6 +530,15 @@ export interface MeteringStats {
    * non-zero value here means spend exists that no budget check can ever see.
    */
   unattributed: number;
+  /**
+   * Unpriced usages whose cost-less `billing_events` row was persisted (#663) —
+   * the durable trace that keeps an unbilled request RECOVERABLE.
+   *
+   * Read against `priceNotFound`: those two being equal means every refusal
+   * left a re-priceable record, and a gap between them is usage that the
+   * gateway served and then forgot.
+   */
+  unpricedRecorded: number;
 }
 
 /** A zeroed {@link MeteringStats}. */
@@ -522,5 +556,6 @@ export function emptyMeteringStats(): MeteringStats {
     deadLettered: 0,
     aggregated: 0,
     unattributed: 0,
+    unpricedRecorded: 0,
   };
 }
