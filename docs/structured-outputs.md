@@ -33,6 +33,7 @@ family passes its own field through untouched and lets OpenAI adjudicate it.
 | Anthropic | a forced tool call: the schema becomes `tools: [{name, input_schema}]` with `tool_choice: {"type":"tool","name":…}` |
 | Bedrock (Converse) | the same coercion in Converse's envelope: `toolConfig.tools[].toolSpec.inputSchema.json` + `toolConfig.toolChoice.tool` |
 | Gemini / Vertex | `generationConfig.responseMimeType: "application/json"` plus `generationConfig.responseSchema` |
+| Workers AI | native `response_format`, but the schema is re-emitted UNWRAPPED under `json_schema` — Workers AI's JSON Mode takes the schema itself there, where OpenAI nests `{name, schema, strict}`. Passing the caller's object through verbatim would hand the model a schema whose top level is `{name, schema, strict}`, which constrains nothing the caller asked for. |
 
 The tool name is the schema's `name`, sanitized to `[a-zA-Z0-9_-]{1,64}`, so it
 stays readable in the upstream request and in the `tool_use` block that comes

@@ -19,7 +19,7 @@ import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { guardrailDepsFromEnv, guardrails } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
-  fetchDispatcher,
+  dispatcherFromEnv,
   inferenceRouteModule,
   modelsFromEnv,
 } from "./inference/index.js";
@@ -130,10 +130,16 @@ const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
  *    per request while this array is built at module scope; the router calls it
  *    once per `env` and memoizes. With neither var set the registry is empty and
  *    every model answers `400 model_not_found`, which is the old behavior.
- *  - `dispatcher: fetchDispatcher` — the provider egress
+ *  - `dispatcher: dispatcherFromEnv` — the provider egress
  *    (`server/dispatch.rs`): `redirect: "manual"`, no transparent content
  *    re-encoding, the streaming body handed back untouched, and the inbound
  *    request's abort signal forwarded so a client disconnect stops the upstream.
+ *    A FACTORY, for the same reason `models` is: it wraps that `fetch` egress
+ *    with the `env.AI` short-circuit the `workers-ai` family dispatches through
+ *    (issue #673), and a Worker binding only exists per request. Passing the
+ *    bare `fetchDispatcher` here — which is what this line used to do — would
+ *    leave the ninth family registered and unreachable, the exact defect class
+ *    `packages/providers/src/registry.ts` warns about.
  *
  * The asset module is wired to the REAL object storage the same way, and for
  * the same reason a factory is used: `env.ASSETS` is a per-request binding
@@ -152,7 +158,7 @@ const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
  * authenticated and scope-checked.
  */
 export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
-  inferenceRouteModule({ models: modelsFromEnv, dispatcher: fetchDispatcher, usage }),
+  inferenceRouteModule({ models: modelsFromEnv, dispatcher: dispatcherFromEnv, usage }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
 ];
 
