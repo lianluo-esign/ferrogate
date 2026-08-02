@@ -42,6 +42,7 @@
       "dependencies": {
         "@ferrogate/config": "workspace:*",
         "@ferrogate/core": "workspace:*",
+        "@ferrogate/guardrails": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "^22.10.2",

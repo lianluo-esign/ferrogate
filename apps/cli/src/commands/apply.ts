@@ -42,6 +42,7 @@ import {
  * like `ctl`'s own confirmation-required verbs.
  */
 import type { JsonValue } from "@ferrogate/core";
+import { policyRevisionSchema } from "@ferrogate/guardrails";
 import { ClientActionIdentity, fingerprintEnvFrom } from "../action-identity.js";
 import type { Args, FlagSpec } from "../args.js";
 import type { EffectiveContext } from "../context.js";
@@ -215,6 +216,40 @@ const GUARDRAIL_SERVER_FIELDS = [
   "activated_at",
 ] as const;
 
+/**
+ * Fill a declared revision with everything the CONTROL PLANE'S OWN SCHEMA
+ * fills, so an unchanged file diffs to nothing.
+ *
+ * `policyRevisionSchema` is the schema `apps/control-plane`'s `admitRevision`
+ * runs on the body of every create and every append (via
+ * `@ferrogate/guardrails`' `admitPolicyRevision`), and the control plane stores
+ * its OUTPUT. Six top-level fields are defaulted there today — `scope`,
+ * `aggregation`, `execution`, `mode`, `streaming`, `deadline_ms` — plus
+ * `enabled` and `sources` inside every check binding.
+ *
+ * A file that omits them is therefore compared against a server record that has
+ * them, and a field the server has and the file has not is a REMOVAL: an
+ * unchanged file plans as an update, appends a revision AND ACTIVATES it on
+ * every apply. Run from CI that moves the live policy pointer on every pipeline
+ * run, for no reason at all.
+ *
+ * This runs the real schema rather than naming the defaulted fields, so there
+ * is no list to fall out of date when the next default lands, and the nested
+ * check-binding defaults — which no top-level name list could ever reach — are
+ * covered by the same call.
+ *
+ * Total by construction: a revision the schema REFUSES is returned untouched.
+ * The control plane, not the planner, decides what is admissible; a second
+ * validator here would be a second set of rules to drift. `safeParse` (not
+ * `admitPolicyRevision`) for the same reason and one more: admission also
+ * demands `revision` and `created_by`, which the SERVER stamps and a desired
+ * state file must never carry.
+ */
+function normalizeGuardrailRevision(record: DesiredRecord): DesiredRecord {
+  const parsed = policyRevisionSchema.safeParse(record);
+  return parsed.success ? (parsed.data as unknown as DesiredRecord) : record;
+}
+
 /** The revision number a policy record says is live, or `null`. */
 function activeRevisionOf(policy: DesiredRecord): number | null {
   const value = policy.active_revision;
@@ -254,6 +289,7 @@ const GUARDRAIL_POLICIES: ApplyKind = {
   shape: {
     kind: "guardrail-policies",
     serverManaged: [...GUARDRAIL_SERVER_FIELDS],
+    normalizeDesired: normalizeGuardrailRevision,
     identity: (record) => {
       const id = requiredString(record, "policy_id");
       return id === undefined

@@ -15,6 +15,7 @@
  *    when the operator says `--prune`.
  */
 import type { JsonValue } from "@ferrogate/core";
+import { admitPolicyRevision } from "@ferrogate/guardrails";
 import { describe, expect, test } from "vitest";
 import { CliError } from "../src/errors.js";
 import { main } from "../src/index.js";
@@ -56,6 +57,37 @@ function asObject(body: JsonValue | undefined): Record_ {
   return body !== undefined && body !== null && typeof body === "object" && !Array.isArray(body)
     ? (body as Record_)
     : {};
+}
+
+/** What the control plane stamps on a revision the caller must not send. */
+const STAMPED = { created_by: "platform_operator", created_at_unix: 1_700_000_000 } as const;
+
+/**
+ * The REAL admission, run by the fake — `apps/control-plane`'s
+ * `guardrail_policy.ts::admitRevision`, verbatim, down to the stamped fields
+ * and the 400 it raises.
+ *
+ * This is the difference between a test double and a second implementation. The
+ * fake used to store `{...body}`, so it accepted documents the control plane
+ * 400s (`on_pass` as a string rather than an array of actions, a policy with no
+ * check at all) AND it skipped every default `policyRevisionSchema` fills. The
+ * convergence proof therefore ran against a shape production rejects, and the
+ * six filled defaults — which make an unchanged file diff to six phantom
+ * removals, i.e. a new revision and a new ACTIVATION on every apply — could not
+ * be seen from here at all. Validating through the shipped schema closes both:
+ * the fixture cannot drift from the contract, and whatever the server fills the
+ * fake fills too.
+ */
+function admitRevision(body: Record_, policyId: string, revision: number): Record_ {
+  const admission = admitPolicyRevision({ ...body, ...STAMPED, policy_id: policyId, revision });
+  if (!admission.ok) {
+    throw CliError.api({
+      httpStatus: 400,
+      code: admission.error.code,
+      message: admission.error.detail,
+    });
+  }
+  return admission.revision as unknown as Record_;
 }
 
 /**
@@ -133,14 +165,7 @@ function createStatefulControlPlane(seed: Partial<StatefulState> = {}): Stateful
       // Create the policy and its revision 1.
       if (spec.method === "POST" && segments.length === 0) {
         const created = String(body.policy_id);
-        const stored = {
-          ...body,
-          revision: 1,
-          id: `${created}@1`,
-          status: "draft",
-          created_by: "platform_operator",
-          created_at_unix: 1_700_000_000,
-        };
+        const stored = { ...admitRevision(body, created, 1), id: `${created}@1`, status: "draft" };
         state.guardrailRevisions.set(stored.id, stored);
         state.guardrailPolicies.set(created, {
           id: created,
@@ -154,13 +179,9 @@ function createStatefulControlPlane(seed: Partial<StatefulState> = {}): Stateful
         const policy = state.guardrailPolicies.get(policyId);
         const next = Number(policy?.head_revision ?? 0) + 1;
         const stored = {
-          ...body,
-          policy_id: policyId as JsonValue,
-          revision: next,
+          ...admitRevision(body, policyId, next),
           id: `${policyId}@${next}`,
           status: "draft",
-          created_by: "platform_operator",
-          created_at_unix: 1_700_000_000,
         };
         state.guardrailRevisions.set(stored.id, stored);
         if (policy !== undefined) policy.head_revision = next;
@@ -227,22 +248,41 @@ const QUOTA_ONLY = JSON.stringify({
   },
 });
 
+/**
+ * ONE declared guardrail policy, written the way an operator would: the fields
+ * it owns and NOT ONE MORE.
+ *
+ * Every omission here is load-bearing. `scope`, `aggregation`, `execution`,
+ * `mode`, `streaming` and `deadline_ms` are filled by `policyRevisionSchema` on
+ * the way in, and `enabled`/`sources` are filled inside the check binding — so
+ * this fixture is exactly the shape whose second apply used to diff against the
+ * server's filled record and write again.
+ *
+ * The action fields are ARRAYS of policy actions because that is what the
+ * control plane requires; the check is real, enabled and carries a
+ * deterministic constraint because `validatePolicyRevision` refuses a policy
+ * that screens nothing. {@link admitRevision} in the fake enforces both.
+ */
+const GUARDRAIL_POLICY = {
+  policy_id: "pii",
+  name: "pii-redaction",
+  enforced: true,
+  checks: [
+    {
+      id: "ssn",
+      stage: "request",
+      detector: { kind: "local", regex: ["\\d{3}-\\d{2}-\\d{4}"] },
+    },
+  ],
+  on_pass: [{ kind: "allow" }],
+  on_fail: [{ kind: "block", code: "pii_detected", message: "request contains PII" }],
+  on_error: [{ kind: "allow" }],
+} as const;
+
 const GUARDRAIL_ONLY = JSON.stringify({
   apiVersion: "ferrogate.io/v1alpha1",
   kind: "DesiredState",
-  resources: {
-    "guardrail-policies": [
-      {
-        policy_id: "pii",
-        name: "pii-redaction",
-        enforced: true,
-        checks: [],
-        on_pass: "allow",
-        on_fail: "block",
-        on_error: "allow",
-      },
-    ],
-  },
+  resources: { "guardrail-policies": [GUARDRAIL_POLICY] },
 });
 
 const ARGV = (file: string, ...rest: string[]) => [
@@ -335,6 +375,59 @@ describe("ferrogate apply is idempotent", () => {
 
     expect(client.mutations()).toHaveLength(2);
     expect(client.state.guardrailRevisions.size).toBe(1);
+  });
+
+  test("the second guardrail apply issues ZERO writes -- not merely a quiet report", async () => {
+    const client = createStatefulControlPlane();
+    expect(
+      await main(ARGV("/desired.json"), runtimeWith({ "/desired.json": GUARDRAIL_ONLY }, client)),
+    ).toBe(0);
+
+    // The boundary in the REQUEST LOG, not in the output. What `apply` prints
+    // is a claim; what it sent is the fact, and a CI pipeline that churns a
+    // revision per run does so whether or not it says "unchanged" while doing
+    // it.
+    const boundary = client.requests.length;
+    const second = runtimeWith({ "/desired.json": GUARDRAIL_ONLY }, client);
+    expect(await main(ARGV("/desired.json"), second)).toBe(0);
+
+    const secondRun = client.requests.slice(boundary);
+    expect(secondRun.length).toBeGreaterThan(0); // it did read the server
+    expect(secondRun.filter((entry) => entry.spec.method !== "GET")).toEqual([]);
+
+    // …and the consequence those writes would have had: the file is unchanged,
+    // so history must not have grown and the live pointer must not have moved.
+    expect(client.state.guardrailRevisions.size).toBe(1);
+    expect(client.state.guardrailPolicies.get("pii")?.active_revision).toBe(1);
+  });
+
+  test("the declared fields survive the round trip the server's own schema performs", async () => {
+    const client = createStatefulControlPlane();
+    expect(
+      await main(ARGV("/desired.json"), runtimeWith({ "/desired.json": GUARDRAIL_ONLY }, client)),
+    ).toBe(0);
+
+    // The six defaults `policyRevisionSchema` fills are REALLY on the stored
+    // record — this is what the second apply diffs against, and what used to
+    // read as six removals. If the fake ever stops filling them, the
+    // zero-writes proof above becomes vacuous and this fails first.
+    const stored = client.state.guardrailRevisions.get("pii@1") as Record<string, JsonValue>;
+    expect(Object.keys(stored)).toEqual(
+      expect.arrayContaining([
+        "scope",
+        "aggregation",
+        "execution",
+        "mode",
+        "streaming",
+        "deadline_ms",
+      ]),
+    );
+    expect(stored.mode).toBe("enforce");
+    expect(stored.deadline_ms).toBe(2000);
+    // Nested, too: no top-level field list could ever have reached these.
+    const check = (stored.checks as Record<string, JsonValue>[])[0] as Record<string, JsonValue>;
+    expect(check.enabled).toBe(true);
+    expect(Array.isArray(check.sources)).toBe(true);
   });
 
   test("a guardrail policy whose content changed appends the next revision and activates it", async () => {
@@ -558,5 +651,48 @@ describe("ferrogate apply refuses documents it cannot honour", () => {
 
     expect(await main(ARGV("/desired.json"), runtime)).toBe(5);
     expect(client.mutations()).toHaveLength(0);
+  });
+});
+
+describe("the fake control plane is never more permissive than the real one", () => {
+  test("the document the convergence proof drives is one the CONTROL PLANE accepts", () => {
+    // Run the shipped admission — `policyRevisionSchema` + `validatePolicyRevision`,
+    // the same pair `apps/control-plane/src/routes/guardrail_policy.ts` runs on
+    // every create — over the fixture, with only the fields the SERVER stamps
+    // added. A fixture that fails here proves nothing about production no
+    // matter how green the suite is: it was the earlier version of this file
+    // (`on_pass: "allow"`, a string where the contract requires an array of
+    // actions, and no check at all) that let the phantom-removal defect survive
+    // to review.
+    const admission = admitPolicyRevision({
+      ...GUARDRAIL_POLICY,
+      ...STAMPED,
+      revision: 1,
+    });
+    expect(admission.ok ? null : admission.error).toBeNull();
+  });
+
+  test("a revision shape the contract refuses is refused by the fake too", async () => {
+    const client = createStatefulControlPlane();
+    const document = JSON.stringify({
+      apiVersion: "ferrogate.io/v1alpha1",
+      kind: "DesiredState",
+      resources: {
+        "guardrail-policies": [{ ...GUARDRAIL_POLICY, on_pass: "allow" }],
+      },
+    });
+    const runtime = runtimeWith({ "/desired.json": document }, client);
+
+    // 5 is the validation class a 400 maps to (`exitClassFromHttpStatus`) —
+    // named, not just "non-zero", because a CLI with no `apply` command at all
+    // also exits non-zero. The refusal must carry the CONTROL PLANE's own
+    // message, which is what proves the fake ran the real admission rather than
+    // rejecting on some rule of its own.
+    expect(await main(ARGV("/desired.json"), runtime)).toBe(5);
+    expect(runtime.stderr()).toContain("on_pass");
+    expect(client.state.guardrailRevisions.size).toBe(0);
+    // The POST was attempted and REFUSED — the fake is the gate here, not the
+    // planner declining to send.
+    expect(client.mutations().length).toBeGreaterThan(0);
   });
 });

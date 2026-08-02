@@ -6,6 +6,7 @@
  * only observe them through requests that did or did not leave. Here they are
  * asserted directly, with no server anywhere.
  */
+import { policyRevisionSchema } from "@ferrogate/guardrails";
 import { describe, expect, test } from "vitest";
 import {
   DESIRED_STATE_API_VERSION,
@@ -193,5 +194,101 @@ describe("rendering", () => {
       [{ name: "a", b: 9, z: 9 }],
     ];
     expect(renderPlan(plan(...inputs))).toBe(renderPlan(plan(...inputs)));
+  });
+});
+
+describe("a server whose write schema FILLS defaults", () => {
+  // The real thing: `policyRevisionSchema` is what `apps/control-plane`'s
+  // `admitRevision` runs on every guardrail write, and the control plane stores
+  // its OUTPUT. Six top-level fields are defaulted there, plus two inside each
+  // check binding. Nothing here is a stand-in.
+  const DECLARED: DesiredRecord = {
+    policy_id: "pii",
+    name: "pii-redaction",
+    enforced: true,
+    checks: [{ id: "ssn", stage: "request", detector: { kind: "local", regex: ["\\d{3}"] } }],
+    on_pass: [{ kind: "allow" }],
+    on_fail: [{ kind: "block", code: "pii", message: "no" }],
+    on_error: [{ kind: "allow" }],
+  };
+  /** What the server holds after admitting {@link DECLARED}. */
+  const STORED = policyRevisionSchema.parse({
+    ...DECLARED,
+    revision: 1,
+    created_by: "operator",
+    created_at_unix: 1,
+  }) as unknown as DesiredRecord;
+
+  const SERVER_OWNED = ["revision", "created_by", "created_at_unix"];
+  const shapeOf = (normalize: boolean): ResourceKindShape => ({
+    kind: "guardrail-policies",
+    serverManaged: SERVER_OWNED,
+    identity: (record) => ({ id: String(record.policy_id) }),
+    normalizeDesired: normalize
+      ? (record) => {
+          const parsed = policyRevisionSchema.safeParse(record);
+          return parsed.success ? (parsed.data as unknown as DesiredRecord) : record;
+        }
+      : undefined,
+  });
+
+  test("without normalization an UNCHANGED file diffs to phantom removals", () => {
+    // The defect, stated. Every one of these would be a write — and for an
+    // append-only family, a new revision and a new ACTIVATION — per apply.
+    const changes = planKind({
+      shape: shapeOf(false),
+      desired: [DECLARED],
+      actual: [STORED],
+      prune: false,
+    });
+    expect(changes[0]?.action).toBe("update");
+    expect(changes[0]?.fields.map((field) => field.field)).toEqual([
+      "aggregation",
+      "checks",
+      "deadline_ms",
+      "execution",
+      "mode",
+      "scope",
+      "streaming",
+    ]);
+    // …and `checks` is there because of defaults NESTED in an array element,
+    // which no list of top-level server-managed names could ever have reached.
+    const check = changes[0]?.fields.find((field) => field.field === "checks");
+    expect(check?.from).not.toEqual(check?.to);
+  });
+
+  test("with normalization the same pair is unchanged, and a real edit still shows", () => {
+    const shape = shapeOf(true);
+    expect(
+      planKind({ shape, desired: [DECLARED], actual: [STORED], prune: false }).map((c) => c.action),
+    ).toEqual(["unchanged"]);
+
+    // Normalization must not blind the diff: a field the operator actually
+    // changed — including one the schema also has a default for — still reads
+    // as drift.
+    const edited = { ...DECLARED, enforced: false, mode: "shadow" };
+    const fields = planKind({
+      shape,
+      desired: [edited],
+      actual: [STORED],
+      prune: false,
+    })[0];
+    expect(fields?.action).toBe("update");
+    expect(fields?.fields.map((field) => field.field)).toEqual(["enforced", "mode"]);
+  });
+
+  test("a record the server's schema REFUSES is planned on unchanged, not rewritten", () => {
+    // The planner is not a second validator: an inadmissible record is passed
+    // through as authored so the CONTROL PLANE gets to refuse it, with its own
+    // message.
+    const nonsense: DesiredRecord = { policy_id: "pii", name: 7 as unknown as string };
+    const changes = planKind({
+      shape: shapeOf(true),
+      desired: [nonsense],
+      actual: [],
+      prune: false,
+    });
+    expect(changes[0]?.action).toBe("create");
+    expect(changes[0]?.fields.map((field) => field.field)).toEqual(["name", "policy_id"]);
   });
 });

@@ -23,6 +23,12 @@
  * operator DELETED from the file shows up as a removal rather than being
  * silently kept. That is the property that makes the file the source of truth
  * instead of a suggestion.
+ *
+ * The mirror image of that is {@link ResourceKindShape.normalizeDesired}: where
+ * the server's own write schema FILLS a field the file omitted, the file is
+ * compared after running that schema, so a default the server supplies is not
+ * mistaken for a field the operator deleted. Without it, a family with schema
+ * defaults writes on every single apply.
  */
 import { z } from "zod";
 
@@ -127,6 +133,34 @@ export interface ResourceKindShape {
    * comparison, so bookkeeping never reads as operator drift.
    */
   readonly serverManaged: readonly string[];
+  /**
+   * Fill in what the SERVER'S OWN SCHEMA would fill in, so the record the file
+   * declares is compared against the record the server will actually hold.
+   *
+   * This is not a convenience: without it a family whose write schema has
+   * defaults is **not idempotent**. The server stores the parsed record, so an
+   * omitted field comes back set; {@link diffFields} sees a field the server has
+   * and the file has not, which is a REMOVAL by construction — and every apply
+   * of an unchanged file therefore writes. For an append-only family like
+   * guardrail revisions that means a new revision, and an activation, per CI
+   * run.
+   *
+   * Stripping the defaulted names via {@link serverManaged} would be the wrong
+   * cure twice over: it goes blind to a field the operator really did change,
+   * it cannot reach defaults NESTED inside an array element (a check binding's
+   * `enabled`/`sources`), and it is a hand-written list that silently rots the
+   * next time a default is added. Running the real schema is derivation, so
+   * there is nothing to keep in sync.
+   *
+   * MUST be total: a record the schema rejects is returned unchanged, because
+   * the server — not this diff — is the authority on what it refuses, and a
+   * plan is not the place to relitigate admission.
+   *
+   * Comparison only. The request body stays exactly as the operator wrote it,
+   * so a CLI whose idea of the defaults has drifted from the deployment's
+   * cannot freeze its own version of them into the stored record.
+   */
+  normalizeDesired?(record: DesiredRecord): DesiredRecord;
 }
 
 /** How one field differs between the file and the server. */
@@ -280,18 +314,23 @@ export function planKind(input: PlanKindInput): readonly PlannedChange[] {
     }
     claimed.add(id);
 
+    // Compare what the server WILL hold, not the shorthand the file carries:
+    // see {@link ResourceKindShape.normalizeDesired}. `desired` below stays the
+    // authored record, because that is what gets sent.
+    const comparable = shape.normalizeDesired?.(record) ?? record;
+
     const actual = actualById.get(id);
     if (actual === undefined) {
       changes.push({
         kind: shape.kind,
         id,
         action: "create",
-        fields: diffFields(record, {}, shape.serverManaged),
+        fields: diffFields(comparable, {}, shape.serverManaged),
         desired: record,
       });
       continue;
     }
-    const fields = diffFields(record, actual, shape.serverManaged);
+    const fields = diffFields(comparable, actual, shape.serverManaged);
     changes.push({
       kind: shape.kind,
       id,
