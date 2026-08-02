@@ -20,11 +20,11 @@ import { extractHost } from "./bedrock.js";
 import {
   ensureObjectBody,
   embeddingsTextInputs,
-  generationConfig,
   GeminiAdapter,
   openaiEmbeddingsResponse,
   openaiMessagesToGeminiContents,
   parseEmbeddingsResponseBody,
+  structuredGenerationConfig,
   systemInstruction,
 } from "./gemini.js";
 import { asU64, getField, isArray, parseJson } from "./json.js";
@@ -51,7 +51,9 @@ export class VertexAiAdapter extends BaseProviderAdapter {
     const vertexBody: JsonObject = { contents: openaiMessagesToGeminiContents(body) };
     const instruction = systemInstruction(body);
     if (instruction !== undefined) vertexBody["systemInstruction"] = instruction;
-    const config = generationConfig(body);
+    // Gemini-on-Vertex speaks the same body, so it inherits the structured
+    // output translation (`responseMimeType`/`responseSchema`) unchanged (#674).
+    const config = structuredGenerationConfig(body, provider.kind);
     if (config !== undefined) vertexBody["generationConfig"] = config;
 
     const endpoint = generateContentEndpoint(

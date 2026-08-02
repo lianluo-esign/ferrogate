@@ -1,5 +1,5 @@
 /**
- * This app's slice of the 254-operation runtime API contract.
+ * This app's slice of the 258-operation runtime API contract.
  *
  * `docs/rewrite/ROUTE-MAP.md` assigns `apps/mcp` **6** operations
  * (`/v1/mcp`, `/v1/mcp/tool/execute`, `/v1/mcp/identity/**`) plus the **2**

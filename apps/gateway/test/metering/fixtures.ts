@@ -70,7 +70,20 @@ export function chargeFixture(
     logical_model: "gpt-4o-mini",
     provider: PRICED_PROVIDER,
     provider_model: PRICED_MODEL,
-    usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+    // #667 — the three cached/reasoning counters are stated as explicit zeros,
+    // not omitted, because that is what `charge()` produces (`reconcileSplit`
+    // normalizes them) and what a reload through `tokenUsageSchema` produces.
+    // An omission here would make this hand-built entry differ from its own
+    // JSON round-trip, which is precisely the asymmetry that would turn an
+    // honest outbox redelivery into `billing_idempotency_conflict`.
+    usage: {
+      prompt_tokens: 11,
+      completion_tokens: 4,
+      total_tokens: 15,
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+    },
     usage_source: "provider_usage",
     status_code: 200,
     cost: { input_cost: 1.65e-6, output_cost: 2.4e-6, total_cost: 4.05e-6, currency: "USD" },

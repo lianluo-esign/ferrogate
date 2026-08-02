@@ -161,6 +161,12 @@ describe("metering through the composed gateway — non-streaming", () => {
       prompt_tokens: 11,
       completion_tokens: 4,
       total_tokens: 15,
+      // #667 — this fixture's provider reports no cached or reasoning
+      // tokens, and the equality stays EXACT so a change that started
+      // inventing cached tokens on an uncached request would fail here.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
     });
     expect(charge?.entry.logical_model).toBe("gpt-4o-mini");
     expect(charge?.entry.provider_model).toBe("gpt-4o-mini-2024-07-18");
@@ -241,6 +247,12 @@ describe("metering through the composed gateway — streaming", () => {
       prompt_tokens: 11,
       completion_tokens: 40,
       total_tokens: 51,
+      // #667 — this fixture's provider reports no cached or reasoning
+      // tokens, and the equality stays EXACT so a change that started
+      // inventing cached tokens on an uncached request would fail here.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
     });
     // 11 * 0.15/1e6 + 40 * 0.6/1e6 = 2.565e-5 USD ⇒ 26 credits (25.65, rounded).
     expect(h.ledger.charges[0]?.credits).toBe(26n);
@@ -321,6 +333,12 @@ describe("metering through the composed gateway — streaming", () => {
       prompt_tokens: 11,
       completion_tokens: 2,
       total_tokens: 13,
+      // #667 — this fixture's provider reports no cached or reasoning
+      // tokens, and the equality stays EXACT so a change that started
+      // inventing cached tokens on an uncached request would fail here.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
     });
     // 11 * 0.15/1e6 + 2 * 0.6/1e6 = 2.85e-6 USD ⇒ 3 credits.
     expect(charge?.credits).toBe(3n);
@@ -368,7 +386,16 @@ describe("metering through the composed gateway — streaming", () => {
 });
 
 describe("metering through the composed gateway — fail closed", () => {
-  it("bills NOTHING for a model with no rate-card rule", async () => {
+  /**
+   * CHANGED FOR #663. The old assertions (`ledger.size === 0`, zero credits)
+   * are all still here and still correct — nothing may be BILLED for a model
+   * nothing can price. What they did not say, and what let the defect hide, is
+   * what happens to the USAGE: this test passed identically whether the sink
+   * kept a recoverable record of the request or forgot it completely, and the
+   * shipped behaviour was the second one. The `ledger.events` assertion below
+   * is the observation that distinguishes them.
+   */
+  it("bills NOTHING for a model with no rate-card rule, but records the usage", async () => {
     provider = interceptProviderFetch(() =>
       providerJson({
         id: "chatcmpl-1",
@@ -404,10 +431,18 @@ describe("metering through the composed gateway — fail closed", () => {
     expect(response.status).toBe(200);
     await scheduler.idle();
 
+    // Nothing billed — #129, unchanged.
     expect(ledger.size).toBe(0);
     expect((await ledger.totals()).credits).toBe(0n);
     expect(sink.stats.priceNotFound).toBe(1);
     expect(sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
+
+    // …and the usage is still on record, with a null cost (#663).
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.events[0]?.event.provider_model).toBe("unpriced-model-9000");
+    expect(ledger.events[0]?.event.cost_usd).toBeUndefined();
+    expect(ledger.events[0]?.event.usage.total_tokens).toBe(200);
+    expect(sink.stats.unpricedRecorded).toBe(1);
   });
 });
 

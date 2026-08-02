@@ -63,6 +63,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/messages/count_tokens",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/images/generations",
       "group": "inference"
     },
@@ -1749,6 +1753,39 @@
       "rbac_action": null
     },
     {
+      "path": "/admin/v1/prompt-templates/{id}/labels",
+      "method": "get",
+      "operation_id": "listAdminPromptTemplateLabels",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/prompt-templates/{id}/labels/{label}",
+      "method": "put",
+      "operation_id": "putAdminPromptTemplateLabel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/prompt-templates/{id}/labels/{label}",
+      "method": "delete",
+      "operation_id": "deleteAdminPromptTemplateLabel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/v1/prompts/{id}/render",
       "method": "post",
       "operation_id": "renderPromptTemplate",
@@ -2170,6 +2207,17 @@
       "path": "/v1/messages",
       "method": "post",
       "operation_id": "createMessage",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "messages.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/messages/count_tokens",
+      "method": "post",
+      "operation_id": "countMessageTokens",
       "visibility": "public",
       "auth": {
         "kind": "bearer",

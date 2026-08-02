@@ -14,6 +14,7 @@
  * `AuthError`), `crates/ferrogate-storage/src/lifecycle_gate.rs`, and the admin
  * handler family in `crates/ferrogate-gateway/src/server/*.rs`.
  */
+import type { PromptLabelKv } from "@ferrogate/config";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { ApiOperation } from "./contract.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
@@ -221,7 +222,7 @@ export interface ListPage {
  * The narrow persistence surface every route module talks to.
  *
  * Deliberately generic over a collection name rather than one method per
- * resource: the 197 operations are overwhelmingly CRUD over ~60 named
+ * resource: the 200 operations are overwhelmingly CRUD over ~60 named
  * collections, and a per-resource method-per-operation interface would be the
  * hand-written-197-handlers problem moved down a layer.
  *
@@ -427,6 +428,21 @@ export interface ControlPlaneDeps {
    * remove.
    */
   readonly controlDatabase: D1Database | null;
+  /**
+   * The KV namespace `apps/gateway` resolves prompt deployment labels from
+   * (`PROMPT_LABELS`), or `null` when this deployment binds none.
+   *
+   * The label RECORD is a store document like every other admin resource; this
+   * is the EDGE POINTER that makes a label readable on the inference hot path
+   * without a database round trip per request.
+   *
+   * `null` is not a silent downgrade. `routes/prompt.ts` answers `503` rather
+   * than writing only the document, for the same reason
+   * {@link ControlPlaneDeps.controlDatabase} does: a label the operator is told
+   * moved, that the data plane never sees, is worse than a refusal — the
+   * operator's next action is to stop looking.
+   */
+  readonly promptLabels: PromptLabelKv | null;
   readonly runtime: RuntimeStatusPort;
   /**
    * The DNS seam `POST /admin/v1/site-domains/{hostname}/verify` resolves the
@@ -546,6 +562,29 @@ export interface ControlPlaneBindings {
    * `CONTROL_PLANE_STORE = "memory"`.
    */
   readonly DB: D1Database;
+  /**
+   * The prompt-label KV namespace (`[[kv_namespaces]] binding = "PROMPT_LABELS"`).
+   *
+   * The SAME namespace `apps/gateway` reads. Both sides derive the key with
+   * `promptLabelPointerKey` from `@ferrogate/config`, so the only way to break
+   * the link is to bind two different namespace ids at deploy time — which is
+   * why both `wrangler.toml`s say so where an operator will read it.
+   */
+  readonly PROMPT_LABELS?: KVNamespace;
+  /**
+   * The audit-anchor bucket (`[[r2_buckets]] binding = "AUDIT_ANCHORS"`) — the
+   * tamper-evidence half that does not live in the database (#684).
+   *
+   * `src/audit/anchor.ts` writes one small object per audit chain per new head,
+   * and never overwrites one. OPTIONAL, and absent is a supported degraded
+   * posture: the hash chain still detects an edited or mid-trail-deleted row
+   * from an export alone, but a TAIL deletion and a wholesale re-forge both
+   * leave a perfect chain and are only caught by comparing against a head
+   * published outside the database. The scheduled tick reports
+   * `audit_anchor: "unconfigured"` so the gap is visible in a tail log rather
+   * than silent.
+   */
+  readonly AUDIT_ANCHORS?: R2Bucket;
 }
 
 /** Per-request context values set by the middleware chain. */

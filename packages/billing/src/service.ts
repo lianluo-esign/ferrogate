@@ -177,7 +177,7 @@ export async function chargeAndRecord(
  * declared out of the Cloudflare topology. **Declared out of it**, for three
  * reasons that are each independently checkable:
  *
- *  1. The committed 251-operation route contract
+ *  1. The committed 258-operation route contract
  *     (`docs/openapi/runtime-api-contract.json`) carries NO `/v1/billing/*`
  *     operation. Mounting these would mean ADDING operations to the contract —
  *     a product change, not a port.

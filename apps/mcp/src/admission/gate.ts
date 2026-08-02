@@ -55,7 +55,7 @@ import {
   type WalletHold,
   currentPeriodMonth,
   d1QuotaPolicySource,
-  monthlyBudgetScope,
+  monthlyBudgetCharges,
   resolveQuotaWindows,
   spendSourceForTenant,
   tenantSpendResolver,
@@ -230,31 +230,27 @@ export class McpAdmissionGate implements AdmissionPort {
       return refuse(ADMISSION_REFUSALS.quota_resolution_unavailable(spend.detail));
     }
 
-    // 3. The monthly USD budget, measured against the scope that WON the
-    //    chain's `min` so a tenant/project/workspace budget holds across every
-    //    key beneath it.
-    const budgetUsd = resolution.quota.monthlyBudgetUsd;
-    if (budgetUsd !== undefined) {
-      const scope = monthlyBudgetScope(resolution.quota, subject.chain);
-      // `null` = no attribution at all to measure spend against. Rust returns
-      // `Ok(false)` there: nothing to compare, so nothing to refuse.
-      if (scope !== null) {
-        const spent = await spend.source.committedSpendUsd(
-          scope.kind,
-          scope.id,
-          currentPeriodMonth(this.#now()),
+    // 3. The monthly USD budget — EVERY rung of the nested ladder (#679), each
+    //    against its own scope's aggregate rollup. Enforcing only the scope
+    //    that won the chain's `min` left every ancestor cap unevaluated: a
+    //    $100 key under a $5,000 project mins to $100, so the project's rollup
+    //    was never read and its sibling keys could spend it dry unnoticed.
+    for (const charge of monthlyBudgetCharges(resolution.quota, subject.chain)) {
+      const spent = await spend.source.committedSpendUsd(
+        charge.kind,
+        charge.id,
+        currentPeriodMonth(this.#now()),
+      );
+      if (!spent.ok) {
+        return refuse(
+          ADMISSION_REFUSALS.quota_resolution_unavailable(
+            `monthly budget lookup failed: ${spent.detail}`,
+          ),
         );
-        if (!spent.ok) {
-          return refuse(
-            ADMISSION_REFUSALS.quota_resolution_unavailable(
-              `monthly budget lookup failed: ${spent.detail}`,
-            ),
-          );
-        }
-        // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
-        if (spent.committedSpendUsd >= budgetUsd) {
-          return refuse(ADMISSION_REFUSALS.monthly_budget_exceeded());
-        }
+      }
+      // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
+      if (spent.committedSpendUsd >= charge.limitUsd) {
+        return refuse(ADMISSION_REFUSALS.monthly_budget_exceeded());
       }
     }
 

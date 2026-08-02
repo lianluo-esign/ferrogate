@@ -1,5 +1,5 @@
 /**
- * Hono handlers for the six inference operations owned by `apps/gateway`.
+ * Hono handlers for the seven inference operations owned by `apps/gateway`.
  *
  * | contract operation      | method + path              | scope              | Rust handler |
  * |-------------------------|----------------------------|--------------------|--------------|
@@ -7,8 +7,15 @@
  * | `createChatCompletion`  | POST /v1/chat/completions  | `chat.completions` | `chat.rs::handle_chat_completions` |
  * | `createResponse`        | POST /v1/responses         | `responses.create` | `chat.rs::handle_responses` |
  * | `createMessage`         | POST /v1/messages          | `messages.create`  | `messages.rs::handle_messages` |
+ * | `countMessageTokens`    | POST /v1/messages/count_tokens | `messages.create` | *(none — new in TS, issue #671)* |
  * | `createEmbedding`       | POST /v1/embeddings        | `embeddings.create`| `embeddings.rs::handle_embeddings` |
  * | `createImage`           | POST /v1/images/generations| `images.generate`  | `images.rs::handle_images` |
+ *
+ * `countMessageTokens` is the ONE row with no Rust counterpart: the Rust tree
+ * never exposed the estimator it already computed on every dispatch, so a
+ * client could not size a context window or pre-estimate spend without paying
+ * for a completion (issue #671). It reuses the estimator rather than adding a
+ * second one — see {@link handleCountMessageTokens}.
  *
  * The Rust pipeline for every POST is the same six steps, and the ORDER is
  * load-bearing (`chat.rs:158`: "authenticate before reading the body, so an
@@ -25,7 +32,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 254 operations, and duplicating a per-route
+ * table-driven middleware for all 258 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -56,14 +63,20 @@ import {
 import { errorResponse, jsonResponse, rawUpstreamResponse, reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import {
+  countMessagesInputTokens,
   estimateChatCompletionUsage,
   estimateEmbeddingsUsage,
   estimateImagesUsage,
   estimateMessagesUsage,
 } from "./estimate.js";
 import type { EstimatedUsage } from "./estimate.js";
-import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
-import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import {
+  genAiOperationForRouteLabel,
+  observeGenAiInvocation,
+} from "../telemetry/genai.js";
+import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
+import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { expandPromptReference } from "./prompt-reference.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -87,6 +100,7 @@ import type {
   Usage,
 } from "./ports.js";
 import {
+  anthropicCountTokensRequestSchema,
   anthropicMessagesRequestSchema,
   chatCompletionRequestSchema,
   embeddingsRequestSchema,
@@ -95,7 +109,7 @@ import {
   responsesRequestSchema,
   validateRequestMetadata,
 } from "./schemas.js";
-import type { OpenAiModelList, RequestMetadata } from "./schemas.js";
+import type { AnthropicTokenCount, OpenAiModelList, RequestMetadata } from "./schemas.js";
 import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
@@ -126,6 +140,29 @@ export interface InferenceEnv {
      * (see `./identity.ts`). Inert when the inner router is driven directly.
      */
     inferenceTokens: TokenGovernor;
+    /**
+     * #664 — where this app reports the facts a REQUEST LOG needs, bound to the
+     * OUTER request (see `./identity.ts`). Inert when the inner router is
+     * driven directly, exactly like {@link inferenceTokens}.
+     */
+    inferenceLog: (facts: InferenceLogFacts) => void;
+
+    /**
+     * replaces `c.req.raw`.
+     *
+     * #669. The GenAI observation seam (`src/telemetry/genai.ts`) is a
+     * `WeakMap` keyed on the request the OUTER gateway layers hold, and after
+     * the body reader has run `c.req.raw` is a DIFFERENT, re-presented object —
+     * so writing the observation against `c.req.raw` from a handler files it
+     * under a key nothing outside this router can look up, and the telemetry
+     * middleware finds nothing. That is not hypothetical: it is exactly what
+     * the first cut of #669 did, and every `gen_ai.*` assertion stayed red with
+     * the whole chain otherwise wired.
+     *
+     * `inferenceClientSignal` above exists for the same reason (the replacement
+     * Request carries a fresh signal); this is the same hazard, one field over.
+     */
+    inferenceOriginRequest: Request;
   };
 }
 
@@ -893,12 +930,125 @@ function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstr
   return gate.kind === "admitted" ? gate.constraint : null;
 }
 
-/** Record a metering event; never allowed to fail the response. */
-function recordUsage(
-  deps: ResolvedInferenceDeps,
+/**
+ * The SERVED route's own prices, in the shape `Usage` carries them (#663).
+ *
+ * `dispatchCandidates` can fail over, so the route that ANSWERED is not
+ * necessarily the route that was planned — and the two can be priced
+ * differently. Reading them off `servedRoute` at each meter site is therefore
+ * not a convenience: billing the planned route's price for a fallback provider's
+ * response would be a confidently wrong number.
+ *
+ * Absent keys, never `undefined` values, because `Usage` is spread into the
+ * billing event and `metering/route-price.ts` distinguishes "unpriced" from
+ * "priced at zero".
+ */
+function routePricing(route: PhysicalRoute): {
+  inputPricePer1m?: number;
+  outputPricePer1m?: number;
+  cachedInputPricePer1m?: number;
+  cacheWritePricePer1m?: number;
+  reasoningPricePer1m?: number;
+} {
+  return {
+    ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
+    ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
+    // #667 — the cached/reasoning rates travel with the other two, for the same
+    // reason: a failover means the route that ANSWERED is not the route that
+    // was planned, and the two can be priced differently.
+    ...(route.cachedInputPricePer1m !== undefined
+      ? { cachedInputPricePer1m: route.cachedInputPricePer1m }
+      : {}),
+    ...(route.cacheWritePricePer1m !== undefined
+      ? { cacheWritePricePer1m: route.cacheWritePricePer1m }
+      : {}),
+    ...(route.reasoningPricePer1m !== undefined
+      ? { reasoningPricePer1m: route.reasoningPricePer1m }
+      : {}),
+  };
+}
+
+/**
+ * Publish the ROUTING half of this request's GenAI observation (#669) — what
+ * model, on which provider, under which operation.
+ *
+ * Called the moment `meterBase` exists, which is BEFORE the response is built,
+ * because that is the only ordering under which a STREAMED request gets a model
+ * on its span at all: {@link recordUsage} does not run for an SSE body until
+ * the usage frame arrives, which is after the telemetry emission. See
+ * `src/telemetry/genai.ts` for the merge rule that lets the two halves land
+ * separately.
+ *
+ * `providerKind` travels separately from `meterBase` because `Usage` does not
+ * carry one — it records the CONFIGURED provider name (`ProviderConfig.name`,
+ * an operator's label like `probe` or `openai-eu`), and `gen_ai.provider.name`
+ * needs the adapter FAMILY. Publishing the configured name would put a
+ * deployment-private string where every backend expects `openai`.
+ */
+function observeInvocation(
+  request: Request,
   base: Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">,
+  providerKind: string,
+): void {
+  const operationName = genAiOperationForRouteLabel(base.route);
+  if (operationName === undefined) return;
+  observeGenAiInvocation(request, {
+    operationName,
+    providerKind,
+    requestModel: base.logicalModel,
+    responseModel: base.providerModel,
+  });
+}
+/**
+ * Record a metering event AND the request log's share of the same facts; never
+ * allowed to fail the response.
+ *
+ * ## Why the request-log contribution belongs exactly here
+ *
+ * This is the single chokepoint every dispatched request passes through, on
+ * every ending it can have: the buffered success path, the upstream-ERROR path
+ * (which calls it with no usage — a 502 is still a decision, and an audit trail
+ * that omitted provider failures would omit the interesting half), and the SSE
+ * tap's `flush()`/`cancel()`. It is also the only place that holds `base`,
+ * which already carries the route label, the provider, BOTH model names and
+ * the dispatch attempt index — i.e. everything about this request that only
+ * this app knows.
+ *
+ * The alternative — assembling the same facts in the outer middleware — cannot
+ * work: `inner.fetch` opens a fresh context, so none of this is visible there.
+ * See `./identity.ts::InferenceRequestScope.log`.
+ *
+ * The two sinks are reported to independently and both are wrapped, because a
+ * metering failure must not cost the evidence row and an evidence failure must
+ * certainly not cost the charge.
+ */
+function recordUsage(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  base: Omit<
+    Usage,
+    | "promptTokens"
+    | "completionTokens"
+    | "totalTokens"
+    | "cachedInputTokens"
+    | "cacheWriteTokens"
+    | "reasoningTokens"
+  >,
+  providerKind: string,
   usage: ProviderUsage | undefined,
 ): void {
+  // #669 — the TOKEN half of the observation, from the same provider usage
+  // frame the charge is built from, so a span and its charge can never disagree
+  // about how many tokens were used. Kept OUTSIDE the try/catch below on
+  // purpose: that catch exists to stop a failing metering SINK from failing the
+  // response, and swallowing a telemetry bug under it would hide it.
+  observeInvocation(c.get("inferenceOriginRequest"), base, providerKind);
+  if (usage !== undefined) {
+    observeGenAiInvocation(c.get("inferenceOriginRequest"), {
+      ...(usage.promptTokens === undefined ? {} : { inputTokens: usage.promptTokens }),
+      ...(usage.completionTokens === undefined ? {} : { outputTokens: usage.completionTokens }),
+    });
+  }
   try {
     deps.usage.record({
       ...base,
@@ -907,10 +1057,38 @@ function recordUsage(
         ? { completionTokens: usage.completionTokens }
         : {}),
       ...(usage?.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+      // #667. Absent stays absent all the way to the billing event, where the
+      // wire schema defaults it to 0 — so "the provider reported no cached
+      // tokens" and "this response predates the counter" settle identically,
+      // and neither can be mistaken for an observed zero mid-stream.
+      ...(usage?.cachedInputTokens !== undefined
+        ? { cachedInputTokens: usage.cachedInputTokens }
+        : {}),
+      ...(usage?.cacheWriteTokens !== undefined
+        ? { cacheWriteTokens: usage.cacheWriteTokens }
+        : {}),
+      ...(usage?.reasoningTokens !== undefined
+        ? { reasoningTokens: usage.reasoningTokens }
+        : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
     // to the caller. Same contract here.
+  }
+  try {
+    c.get("inferenceLog")({
+      route: base.route,
+      provider: base.provider,
+      logicalModel: base.logicalModel,
+      providerModel: base.providerModel,
+      streamed: base.stream,
+      providerAttemptIndex: base.providerAttemptIndex,
+      promptTokens: usage?.promptTokens,
+      completionTokens: usage?.completionTokens,
+      totalTokens: usage?.totalTokens,
+    });
+  } catch {
+    // Same contract: evidence is best-effort at the seam, never a 500.
   }
 }
 
@@ -1007,6 +1185,9 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     const scope = inferenceRequestScope(c.req.raw);
     c.set("inferenceDeps", resolved);
     c.set("inferenceClientSignal", inboundSignal(c.req.raw));
+    // Same "before the body reader swaps it" rule as the signal above — see
+    // the field's doc on `InferenceEnv`.
+    c.set("inferenceOriginRequest", c.req.raw);
     c.set("requestId", c.req.header("x-request-id") ?? resolved.requestIds.next());
     // The AUTHENTICATED caller when the module is mounted on the gateway app;
     // the injected resolver otherwise (an inner-app unit test, or a deployment
@@ -1015,6 +1196,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     const caller = scope?.caller ?? resolved.caller(c.req.raw);
     c.set("inferenceCaller", caller);
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
+    c.set("inferenceLog", scope?.log ?? noInferenceLog);
 
     // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
     // provider credential for the platform one before anything is planned.
@@ -1043,6 +1225,15 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   });
 
   const body = readInferenceBody();
+  // Prompt-by-reference (#694). Between the body read and Zod, because the
+  // expansion is what PRODUCES the `model` and `messages` Zod is about to
+  // require — after validation it would always be too late. Mounted only on the
+  // two OpenAI-dialect operations: `prompt_templates.target` is
+  // `chat_completions | responses`, so those are the two bodies a rendered
+  // template is shaped for. Anthropic `/v1/messages`, embeddings and images
+  // pass it through untouched and refuse the unknown member on their own
+  // schema, which is the honest answer for a body the renderer cannot produce.
+  const promptReference = expandPromptReference();
 
   // -- GET /v1/models --------------------------------------------------------
   app.get("/v1/models", (c) => handleModels(c, c.get("inferenceDeps")));
@@ -1051,6 +1242,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/chat/completions",
     body,
+    promptReference,
     validateBody(chatCompletionRequestSchema, "invalid chat completion request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "chat.completions"),
   );
@@ -1059,6 +1251,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/responses",
     body,
+    promptReference,
     validateBody(responsesRequestSchema, "invalid responses request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "responses"),
   );
@@ -1069,6 +1262,17 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     body,
     validateBody(anthropicMessagesRequestSchema, "invalid Anthropic messages request"),
     (c) => handleMessages(c, c.get("inferenceDeps")),
+  );
+
+  // -- POST /v1/messages/count_tokens ---------------------------------------
+  // Registered AFTER `/v1/messages`; Hono matches both statically, so neither
+  // shadows the other and the order is documentary only (it keeps the two
+  // Anthropic-native surfaces adjacent).
+  app.post(
+    "/v1/messages/count_tokens",
+    body,
+    validateBody(anthropicCountTokensRequestSchema, "invalid Anthropic count_tokens request"),
+    (c) => handleCountMessageTokens(c, c.get("inferenceDeps")),
   );
 
   // -- POST /v1/embeddings ---------------------------------------------------
@@ -1214,7 +1418,12 @@ async function handleOpenAiInference(
     ...(metadata !== undefined ? { metadata } : {}),
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
+  // #669 — publish the routing half NOW, before the streaming branch returns a
+  // response whose usage frame has not arrived yet. `recordUsage` publishes it
+  // again (harmlessly — the merge is idempotent) for the buffered paths.
+  observeInvocation(c.get("inferenceOriginRequest"), meterBase, servedRoute.providerKind);
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
     const dialect: StreamDialect =
@@ -1227,7 +1436,7 @@ async function handleOpenAiInference(
       servedRoute,
       requestId,
       (usage) => {
-        recordUsage(deps, meterBase, usage);
+        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
@@ -1239,7 +1448,7 @@ async function handleOpenAiInference(
     return errorResponse(text, requestId);
   }
   if (!upstreamResponse.ok) {
-    recordUsage(deps, meterBase, undefined);
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
     // An upstream ERROR settles the step as un-succeeded: it still counted
     // against `max_model_calls` (it was admitted), but it must not advance the
     // graph's edge gate.
@@ -1254,7 +1463,7 @@ async function handleOpenAiInference(
 
   const parsed = safeJson(text);
   const usage = usageFromResponseBody(usageDialect, parsed);
-  recordUsage(deps, meterBase, usage);
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   return rawUpstreamResponse(
@@ -1346,7 +1555,11 @@ async function handleMessages(
     status: upstreamResponse.status,
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
+  // #669 — see the same call in `handleChatCompletionsLike`: the streaming
+  // branch below returns before any usage frame exists.
+  observeInvocation(c.get("inferenceOriginRequest"), meterBase, servedRoute.providerKind);
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
     // A non-Anthropic upstream is run through `MessagesStreamNormalizer`
@@ -1363,7 +1576,7 @@ async function handleMessages(
       servedRoute,
       requestId,
       (usage) => {
-        recordUsage(deps, meterBase, usage);
+        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
@@ -1375,7 +1588,7 @@ async function handleMessages(
     return errorResponse(text, requestId);
   }
   if (!upstreamResponse.ok) {
-    recordUsage(deps, meterBase, undefined);
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
     // An upstream ERROR settles the step as un-succeeded: it still counted
     // against `max_model_calls` (it was admitted), but it must not advance the
     // graph's edge gate.
@@ -1390,7 +1603,7 @@ async function handleMessages(
 
   const parsed = safeJson(text);
   const usage = usageFromResponseBody(usageDialect, parsed);
-  recordUsage(deps, meterBase, usage);
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   // An Anthropic upstream answered natively → passed through unchanged; an
@@ -1398,6 +1611,138 @@ async function handleMessages(
   // either way.
   const message = deps.translator.chatCompletionToMessage(parsed, logicalModel);
   return jsonResponse(message, requestId, upstreamResponse.status);
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/messages/count_tokens — `countMessageTokens` (issue #671)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Anthropic-native token-count pre-flight.
+ *
+ * A client cannot size a context window or pre-estimate spend without sending
+ * the request and paying for it. This answers the same question the gateway
+ * already asks itself before every `/v1/messages` dispatch, and answers it with
+ * the SAME arithmetic (`countMessagesInputTokens` is a projection of
+ * `estimateMessagesUsage`, see `./estimate.ts`) so the number a caller budgets
+ * against is the number that will be reserved against their TPM window, their
+ * monthly token budget and their prepaid wallet.
+ *
+ * ## Which parts of the `/v1/messages` ladder this runs, and which it does not
+ *
+ * Kept, because they decide what the ANSWER even means or who may ask:
+ *
+ *  - auth + scope. Registered as a contract operation (`countMessageTokens`,
+ *    bearer, `messages.create`), so the ONE table-driven guard in
+ *    `middleware/auth.ts` covers it and the request-rate/quota middleware the
+ *    app mounts for every operation covers it too. A free, unauthenticated
+ *    counting oracle is an abuse surface with no owner, so this is not
+ *    negotiable and it is asserted directly by `test/inference/count-tokens.test.ts`.
+ *  - the MODEL gate — `can_use_model` (403), then resolution (400
+ *    `model_not_found` / `model_disabled`), then the tenant visibility check
+ *    (400 `model_not_found`). Without it the endpoint becomes exactly the
+ *    enumeration oracle issue #515 closed: a probe that reveals which logical
+ *    model names exist and which tenants own the private ones.
+ *
+ * Deliberately NOT run, each for a stated reason:
+ *
+ *  - **the rest of `planUpstream`** — eligibility, canary/shadow, strategy
+ *    ordering, adapter preparation. Beyond being pure waste for a request that
+ *    dispatches nothing, the context-window leg of the eligibility gate would
+ *    REFUSE a body larger than the model's window — i.e. refuse to tell the
+ *    caller the number precisely when they most need it, which inverts the
+ *    endpoint's purpose. It also builds an upstream request carrying provider
+ *    credentials, which no counting request should ever materialize.
+ *  - **the TPM admission** (`admitTokens`). The window meters tokens spent at a
+ *    provider and this request spends none; charging it would bill a caller for
+ *    asking what something would cost. The per-request rate limit above still
+ *    bounds the surface.
+ *  - **the workflow graph gate + metering.** Both record a MODEL CALL, and
+ *    counting is not one. A step written here would consume `max_model_calls`
+ *    and put a row in the ledger for a call that never happened.
+ *  - **guardrail screening.** See `guardrails/middleware.ts`: the prompt is
+ *    never inferred over, so a denial would block a size estimate on grounds
+ *    that apply to dispatch, and an evidence row would record a screening of
+ *    content that never reached a provider.
+ *  - **the operator drain gate.** Draining refuses new AI requests so a node
+ *    can be retired; a count consumes no capacity and produces no spend, so
+ *    refusing it would turn a decided "stop spending" into "stop answering".
+ */
+function handleCountMessageTokens(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Response {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const request = c.get("inferenceBody") as Record<string, unknown>;
+  const logicalModel = String(request["model"]);
+
+  const gate = countTokensModelGate(deps, caller, logicalModel);
+  if (gate !== null) {
+    return errorResponse(gate, requestId);
+  }
+
+  // Translate first, exactly as `handleMessages` does: `to_chat_completions`
+  // folds Anthropic's top-level `system` prompt into `messages[0]`, and the
+  // estimator reads `messages`. Counting the untranslated body would silently
+  // report a smaller number than the one that is later reserved, for every
+  // request that carries a system prompt.
+  const translated = deps.translator.toChatCompletions(request);
+  if (!translated.ok) {
+    return errorResponse(
+      reject(
+        400,
+        "invalid_request",
+        `could not translate Anthropic messages request: ${adapterErrorMessage(translated.error)}`,
+      ),
+      requestId,
+    );
+  }
+
+  const count: AnthropicTokenCount = {
+    input_tokens: countMessagesInputTokens(translated.body, logicalModel),
+  };
+  return jsonResponse(count, requestId);
+}
+
+/**
+ * The model half of `planUpstream`, and only that half.
+ *
+ * Extracted rather than inlined so the three refusals stay recognisably the
+ * same three refusals `/v1/messages` produces — same order, same codes, same
+ * messages. Returns `null` when the caller may count against this model.
+ */
+function countTokensModelGate(
+  deps: ResolvedInferenceDeps,
+  caller: Caller,
+  logicalModel: string,
+): InferenceRejection | null {
+  // BEFORE resolution, so a denied key cannot probe which model names exist.
+  if (!callerCanUseModel(caller, logicalModel)) {
+    return reject(
+      403,
+      "model_not_allowed",
+      `API key is not allowed to use model ${logicalModel}`,
+    );
+  }
+
+  const resolved = resolveCandidates(deps.models, logicalModel);
+  if (resolved.length === 0) {
+    const known = deps.models
+      .catalog()
+      .find((candidate) => candidate.logicalModel === logicalModel);
+    return known === undefined
+      ? reject(400, "model_not_found", `unknown model ${logicalModel}`)
+      : reject(400, "model_disabled", `model ${logicalModel} is disabled`);
+  }
+
+  // Tenancy lives on the registry ENTRY, so every candidate carries the same
+  // answer and checking the primary checks all of them (issue #515).
+  if (!scopeCanSeeModel(caller.scope, caller.projectId, resolved[0] as PhysicalRoute)) {
+    return reject(400, "model_not_found", `unknown model ${logicalModel}`);
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,10 +1812,11 @@ async function handleEmbeddings(
     ...(metadata !== undefined ? { metadata } : {}),
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
-    recordUsage(deps, meterBase, undefined);
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
     // An upstream ERROR settles the step as un-succeeded: it still counted
     // against `max_model_calls` (it was admitted), but it must not advance the
     // graph's edge gate.
@@ -1485,7 +1831,7 @@ async function handleEmbeddings(
 
   const parsed = safeJson(text);
   const usage = usageFromResponseBody("openai", parsed);
-  recordUsage(deps, meterBase, usage);
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
 
@@ -1576,6 +1922,7 @@ async function handleImages(
     : undefined;
 
   recordUsage(
+    c,
     deps,
     {
       requestId,
@@ -1588,8 +1935,15 @@ async function handleImages(
       ...(imageCount !== undefined ? { imageCount } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
       ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
-    providerAttemptIndex: attemptIndex,
+      providerAttemptIndex: attemptIndex,
+      ...routePricing(servedRoute),
     },
+    servedRoute.providerKind,
+    // `/v1/images` settles on IMAGES, not tokens, so there is no
+    // `ProviderUsage` here and the span carries `gen_ai.request.model` /
+    // `gen_ai.operation.name` with no `gen_ai.usage.*`. That is correct: the
+    // convention has no image-count attribute, and a fabricated zero token
+    // count would be worse than none.
     undefined,
   );
 

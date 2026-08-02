@@ -143,6 +143,7 @@ export {
   currentPeriodMonth,
   d1QuotaPolicySource,
   d1SpendSource,
+  monthlyBudgetCharges,
   monthlyBudgetScope,
   quotaPolicySourceFromEnv,
   quotaPolicySourceFromVars,

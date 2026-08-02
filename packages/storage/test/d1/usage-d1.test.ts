@@ -152,6 +152,59 @@ describe("D1UsageLedger — capture", () => {
     const ledger = new D1UsageLedger(handleA);
     expect(await ledger.getUsageMonthlyRollup(PERIOD, "project", "nope")).toBeUndefined();
   });
+
+  test("cached / cache-write / reasoning tokens accumulate on both rollups (#667)", async () => {
+    // The cached-read discount and the reasoning premium are priced into
+    // `cost_usd` and, before #667, into nothing else — so a tenant could see
+    // WHAT it spent but had no table that said WHY. These columns are what make
+    // an unexpected invoice explainable.
+    const ledger = new D1UsageLedger(handleA);
+    const cached = call({
+      promptTokens: 26_000,
+      completionTokens: 2_000,
+      totalTokens: 28_000,
+      cachedInputTokens: 20_000,
+      cacheWriteTokens: 5_000,
+      reasoningTokens: 1_500,
+    });
+    await ledger.persistUsageAggregate(cached);
+    await ledger.persistUsageAggregate(cached);
+
+    const rollup = await ledger.getUsageMonthlyRollup(PERIOD, "tenant", TENANT_A);
+    expect(rollup?.cachedInputTokens).toBe(40_000);
+    expect(rollup?.cacheWriteTokens).toBe(10_000);
+    expect(rollup?.reasoningTokens).toBe(3_000);
+    // SUBSETS, not additions: the headline counters must be untouched by them,
+    // or every budget read that sums `total_tokens` silently doubles.
+    expect(rollup?.promptTokens).toBe(52_000);
+    expect(rollup?.totalTokens).toBe(56_000);
+
+    const agg = await handleA.db
+      .prepare(
+        "SELECT cached_input_tokens, cache_write_tokens, reasoning_tokens " +
+          "FROM usage_aggregate_rollups WHERE tenant_context_id = 'ctx_1'",
+      )
+      .first<{
+        cached_input_tokens: number;
+        cache_write_tokens: number;
+        reasoning_tokens: number;
+      }>();
+    expect(agg?.cached_input_tokens).toBe(40_000);
+    expect(agg?.cache_write_tokens).toBe(10_000);
+    expect(agg?.reasoning_tokens).toBe(3_000);
+  });
+
+  test("a caller that reports no cached counters accumulates zeros, not nulls", async () => {
+    // `UsageAggregateWrite`'s three new fields are OPTIONAL so a pre-#667
+    // caller still compiles. It must also still WRITE — a NULL in an accumulated
+    // column poisons every later `existing + excluded` on that row.
+    const ledger = new D1UsageLedger(handleA);
+    await ledger.persistUsageAggregate(call());
+    const rollup = await ledger.getUsageMonthlyRollup(PERIOD, "tenant", TENANT_A);
+    expect(rollup?.cachedInputTokens).toBe(0);
+    expect(rollup?.cacheWriteTokens).toBe(0);
+    expect(rollup?.reasoningTokens).toBe(0);
+  });
 });
 
 /**

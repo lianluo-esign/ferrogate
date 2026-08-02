@@ -151,6 +151,14 @@ export * from "./site-domain.js";
 export * from "./references.js";
 export * from "./payment-attempt.js";
 export * from "./agent-schedule.js";
+/**
+ * Tamper-evidence for `audit_events` (#684): the row hash chain, the anchor
+ * document, and the verifier. Pure and dependency-free on purpose — the
+ * customer-facing procedure (`scripts/verify-audit-chain.mjs`) imports the SAME
+ * code the control-plane writer uses, so the published algorithm cannot drift
+ * from the implemented one.
+ */
+export * from "./audit-chain.js";
 
 /**
  * The D1 persistence foundation (JOBs 1–4).

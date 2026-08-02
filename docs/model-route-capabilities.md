@@ -15,7 +15,7 @@ The capability vocabulary is closed:
 | `images` | The request enters `POST /v1/images/generations`. |
 | `embeddings` | The request enters `POST /v1/embeddings`. |
 | `tools` | The request contains non-empty `tools`, or FerroGate will inject configured gateway tools. |
-| `structured_output` | `response_format.type`, or Responses `text.format.type`, is `json_object` or `json_schema`. |
+| `structured_output` | `response_format.type`, or Responses `text.format.type`, is `json_object` or `json_schema`. A route that survives this filter must then be able to EXPRESS the requirement in its own family's dialect — see [`structured-outputs.md`](./structured-outputs.md) for the per-family translation and the refusals. |
 
 Unknown values fail config parsing. An empty declaration remains compatible
 only with a chat-style request that has no explicit feature or output-token

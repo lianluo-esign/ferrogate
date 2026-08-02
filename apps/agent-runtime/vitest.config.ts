@@ -15,6 +15,7 @@
 import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { gatewayRateLimiterAuxWorker } from "../gateway/test/support/rate-limit-aux-worker.js";
 
 /**
  * The COMMITTED deploy config, bound verbatim so a test can assert against the
@@ -146,6 +147,40 @@ const DEV_API_KEYS = [
     workspaceId: "ws-q",
     scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
   },
+  // ------------------------------------------------------------------------
+  // SHARED-COUNTER fixtures (`test/shared-rate-limit.test.ts`, #666). They are
+  // separate credentials from the ones above for the reason stated there: the
+  // pool keeps ONE workerd for the project, so a window shared with another
+  // file's test would make either file's assertion depend on run order.
+  // ------------------------------------------------------------------------
+  // Charged once by the test AS THE GATEWAY before its first request here.
+  {
+    key: "sk-shared-rpm-spent",
+    subject: "key-shared-rpm-spent",
+    tenantId: "tenant-shared-rpm-spent",
+    workspaceId: "ws-shared",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+    requestLimitPerMinute: 1,
+  },
+  // Two slots: one spent through this Worker, then the gateway side must find
+  // exactly one left.
+  {
+    key: "sk-shared-rpm-split",
+    subject: "key-shared-rpm-split",
+    tenantId: "tenant-shared-rpm-split",
+    workspaceId: "ws-shared",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+    requestLimitPerMinute: 2,
+  },
+  // The negative control: never charged, must not be affected by the two above.
+  {
+    key: "sk-shared-rpm-untouched",
+    subject: "key-shared-rpm-untouched",
+    tenantId: "tenant-shared-rpm-untouched",
+    workspaceId: "ws-shared",
+    scopes: ["agents.invoke", "agent.runs.create", "agent.runs.read"],
+    requestLimitPerMinute: 1,
+  },
   // Ungoverned: no per-key cap, no policy row anywhere in its chain. The
   // negative control — every refusal above must NOT fire for this one.
   {
@@ -234,6 +269,17 @@ export default defineConfig({
       main: "./src/worker.ts",
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
+        // The `ferrogate-gateway` script this Worker's committed
+        // `[[durable_objects.bindings]] RATE_LIMIT` points at with
+        // `script_name`. Without it workerd refuses to START the session
+        // ("binding RATE_LIMIT refers to a service core:user:ferrogate-gateway,
+        // but no such service is defined"), which is why that stanza used to be
+        // committed COMMENTED OUT and uncommented by hand at deploy time —
+        // issue #666, the defect being that the committed tree was the broken
+        // configuration. The auxiliary worker carries the gateway's REAL
+        // `RateLimiterDurableObject`, so `test/shared-rate-limit.test.ts` can
+        // charge a window as the gateway and watch THIS Worker find it spent.
+        workers: [gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url))],
         bindings: {
           TEST_WRANGLER_TOML: WRANGLER_TOML,
           FG_DEV_IN_MEMORY_PORTS: "1",

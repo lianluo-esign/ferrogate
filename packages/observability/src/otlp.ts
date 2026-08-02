@@ -13,6 +13,7 @@ import {
   ObservabilityConfigError,
   ObservabilityExporterKind,
 } from "./config.js";
+import { genAiMetricsJson } from "./genai.js";
 import type { GatewayMetricsSnapshot } from "./metrics.js";
 
 /** Version stamped into the OTLP instrumentation scope. */
@@ -390,6 +391,19 @@ function gatewayMetricsJson(snapshot: GatewayMetricsSnapshot): unknown[] {
         [otlpAttribute("status_code", String(status.statusCode))],
       ),
     );
+  }
+
+  // #669 — the OTel GenAI metrics, alongside the `ferrogate.*` counters rather
+  // than instead of them. They are HISTOGRAMS with a DELTA temporality, which
+  // is why they are built by `genai.ts` and spliced in here rather than folded
+  // into `sumMetricJson`'s cumulative-sum shape: a per-request token count is
+  // an observation, not a running total, and publishing it as a monotonic sum
+  // would make every backend's rate() read it as a counter reset.
+  //
+  // Empty for every request that reached no model, which is the whole
+  // non-inference surface — see `GatewayMetricsSnapshot.genAiInvocations`.
+  for (const invocation of snapshot.genAiInvocations ?? []) {
+    metrics.push(...genAiMetricsJson(invocation));
   }
 
   for (const total of snapshot.modelProviderTotals) {
