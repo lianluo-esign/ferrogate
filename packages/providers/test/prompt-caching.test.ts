@@ -370,6 +370,68 @@ describe("no family may silently ignore the directive", () => {
   });
 });
 
+// --- family isolation ------------------------------------------------------
+
+describe("preparing one family never rewrites the caller's body", () => {
+  /**
+   * Every candidate on a failover ladder is prepared from the SAME caller body.
+   * An adapter that applies its family's mechanism by writing through to that
+   * object is not adding a field to its own request — it is deciding what every
+   * other candidate sends.
+   *
+   * So this asserts the invariant rather than any one field: after an adapter
+   * has prepared, the caller's body is byte-identical to what it was. `#690`'s
+   * `cache_control` is only the field that made the leak observable; the seam
+   * would carry anything an adapter decided to normalise.
+   */
+  const preparers: Array<[string, (body: Record<string, unknown>) => unknown]> = [
+    ["anthropic", (b) => new AnthropicAdapter().prepareChatCompletions(anthropicProvider, chatPlan(b))],
+    ["bedrock", (b) => new BedrockAdapter().prepareChatCompletions(bedrockProvider, chatPlan(b))],
+    [
+      "openai-compatible",
+      (b) => new OpenAiCompatibleAdapter().prepareChatCompletions(openaiProvider, chatPlan(b)),
+    ],
+    ["gemini", (b) => new GeminiAdapter().prepareChatCompletions(geminiProvider, chatPlan(b))],
+    ["vertex", (b) => new VertexAiAdapter().prepareChatCompletions(vertexProvider, chatPlan(b))],
+    [
+      "workers-ai",
+      (b) => new WorkersAiAdapter().prepareChatCompletions(workersAiProvider, chatPlan(b)),
+    ],
+  ];
+
+  test("no adapter mutates the body it was handed", () => {
+    for (const [family, prepare] of preparers) {
+      // `auto` is the one directive every family accepts, so each adapter runs
+      // its FULL preparation rather than bailing out at a refusal.
+      const body = chatBody({ mode: "auto" });
+      const pristine = structuredClone(body);
+      prepare(body as Record<string, unknown>);
+      expect(body, family).toEqual(pristine);
+    }
+  });
+
+  test("a body prepared for one family is unchanged for the next", () => {
+    // The ladder in miniature: one body, two families, in both orders. The
+    // second family must send exactly what it would have sent alone.
+    for (const order of [
+      ["anthropic", "openai-compatible"],
+      ["openai-compatible", "anthropic"],
+    ]) {
+      const shared = chatBody({ mode: "auto" });
+      const solo = chatBody({ mode: "auto" });
+      const [first, second] = order as [string, string];
+      const prepareFirst = preparers.find(([name]) => name === first)![1];
+      const prepareSecond = preparers.find(([name]) => name === second)![1];
+
+      prepareFirst(shared as Record<string, unknown>);
+      expect(
+        JSON.stringify(prepareSecond(shared as Record<string, unknown>)),
+        `${first} then ${second}`,
+      ).toBe(JSON.stringify(prepareSecond(solo as Record<string, unknown>)));
+    }
+  });
+});
+
 // --- the /v1/messages translator -------------------------------------------
 
 describe("the Anthropic-native ingress keeps the caller's caching intent", () => {

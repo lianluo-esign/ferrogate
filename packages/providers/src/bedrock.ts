@@ -29,7 +29,7 @@ import {
 import { applyPromptCacheToBedrockConverse, promptCacheFromBody } from "./caching.js";
 import { sign } from "./sigv4.js";
 import type { AwsCredentials, SigningRequest } from "./sigv4.js";
-import { asStr, asU64, getField, isArray, isObject, parseJson } from "./json.js";
+import { asStr, asU64, getField, isArray, isObject, ownBody, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 
 export class BedrockAdapter extends BaseProviderAdapter {
@@ -48,11 +48,16 @@ export class BedrockAdapter extends BaseProviderAdapter {
     }
     const body = ensureObjectBody(request.body);
 
-    const bedrockBody: JsonObject = { messages: openaiMessagesToBedrockMessages(body) };
+    const draft: JsonObject = { messages: openaiMessagesToBedrockMessages(body) };
     const system = systemBlocks(body);
-    if (system !== undefined) bedrockBody["system"] = system;
+    if (system !== undefined) draft["system"] = system;
     const config = inferenceConfig(body);
-    if (config !== undefined) bedrockBody["inferenceConfig"] = config;
+    if (config !== undefined) draft["inferenceConfig"] = config;
+    // Converse's shape is rebuilt block by block above, so nothing here aliases
+    // the caller today — but the `apply*` helpers below take an owned body by
+    // TYPE, and passing through the same boundary as every other family is what
+    // keeps that true after the next field is added (issue #690).
+    const bedrockBody = ownBody(draft);
     // Converse has no `response_format`; the schema becomes a forced `toolConfig`
     // tool, the Anthropic coercion in Converse's envelope (issue #674).
     const structured = structuredOutputFromChatBody(body);

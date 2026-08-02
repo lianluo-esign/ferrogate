@@ -52,6 +52,7 @@ import {
   BedrockAdapter,
   canonicalProviderAdapterFamily,
   GeminiAdapter,
+  ownBody,
   AdapterError as PackageAdapterError,
   promptCacheFromBody,
   SecretValue,
@@ -261,7 +262,12 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       return invalid;
     }
 
-    const body: Record<string, unknown> = { ...plan.body };
+    // `plan.body` is the CALLER's object, shared with every other candidate on
+    // the failover ladder; `ownBody` takes the private deep copy this adapter
+    // is then free to rewrite. A shallow spread would have covered the two
+    // top-level writes below and nothing else, which is exactly the kind of
+    // "not-mutated today" that the next field to be normalised would undo.
+    const body = ownBody(plan.body as Record<string, Json>);
     // Prompt caching (issue #690). This family caches long prefixes
     // automatically and exposes no per-request breakpoint, so `auto` is already
     // satisfied and anything stronger is refused — which takes the route out of
@@ -273,7 +279,7 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     } catch (error) {
       return { ok: false, error: packageAdapterError(error) };
     }
-    stripPromptCacheDirective(body as Record<string, Json>);
+    stripPromptCacheDirective(body);
     // The adapter OWNS these two fields — a caller cannot pin the physical model
     // or contradict the resolved stream decision.
     body["model"] = plan.providerModel;
@@ -402,24 +408,32 @@ export const anthropicAdapter: ProviderAdapter = {
     // because Anthropic rejects unknown top-level fields. `max_tokens` is
     // REQUIRED there, hence the 1024 default when the caller omitted it.
     const source = plan.body;
-    const anthropicBody: Record<string, unknown> = {
+    const draft: Record<string, Json> = {
       model: plan.providerModel,
-      messages: source["messages"] ?? [],
-      max_tokens: source["max_tokens"] ?? 1024,
+      messages: (source["messages"] ?? []) as Json,
+      max_tokens: (source["max_tokens"] ?? 1024) as Json,
       stream: plan.stream,
     };
     if (source["system"] !== undefined) {
-      anthropicBody["system"] = source["system"];
+      draft["system"] = source["system"] as Json;
     }
     if (plan.operation === "responses") {
       // `prepare_responses` additionally forwards the canonicalized tool fields.
       if (source["tools"] !== undefined) {
-        anthropicBody["tools"] = source["tools"];
+        draft["tools"] = source["tools"] as Json;
       }
       if (source["tool_choice"] !== undefined) {
-        anthropicBody["tool_choice"] = source["tool_choice"];
+        draft["tool_choice"] = source["tool_choice"] as Json;
       }
     }
+    // Every subtree the draft just took (`messages`, `system`, `tools`) is
+    // still the CALLER's object, shared with every other candidate on the
+    // ladder — so a breakpoint or a coercion tool placed below would rewrite
+    // what a later OpenAI candidate sends. `ownBody` is the copy that makes
+    // this family's preparation the caller's business only, and it is the only
+    // way to produce the argument the `apply*` helpers accept: the next adapter
+    // that needs to normalise a field cannot skip it by forgetting to.
+    const anthropicBody = ownBody(draft);
 
     // Structured output (issue #674). This adapter REBUILDS a minimal native
     // body, which is exactly why `response_format` used to vanish here while
@@ -435,7 +449,7 @@ export const anthropicAdapter: ProviderAdapter = {
           ? structuredOutputFromResponsesBody(source as Json)
           : structuredOutputFromChatBody(source as Json);
       if (structured !== undefined) {
-        applyStructuredOutputToAnthropic(anthropicBody as Record<string, Json>, structured, "anthropic");
+        applyStructuredOutputToAnthropic(anthropicBody, structured, "anthropic");
       }
       // Prompt caching (issue #690), same story one field over: this adapter
       // rebuilds a minimal native body, so a caller's caching intent used to
@@ -446,7 +460,7 @@ export const anthropicAdapter: ProviderAdapter = {
       // canonical translation as `@ferrogate/providers`, not a second copy.
       const promptCache = promptCacheFromBody(source as Json);
       if (promptCache !== undefined) {
-        applyPromptCacheToAnthropic(anthropicBody as Record<string, Json>, promptCache, "anthropic");
+        applyPromptCacheToAnthropic(anthropicBody, promptCache, "anthropic");
       }
     } catch (error) {
       return { ok: false, error: packageAdapterError(error) };

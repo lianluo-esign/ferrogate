@@ -9,7 +9,16 @@
  */
 import { AdapterError } from "./types.js";
 import type { Json, JsonObject } from "./json.js";
-import { asArray, asObject, asStr, getField, isArray, isObject, parseJson } from "./json.js";
+import {
+  asArray,
+  asObject,
+  asStr,
+  getField,
+  isArray,
+  isObject,
+  ownBody,
+  parseJson,
+} from "./json.js";
 import {
   applyStructuredOutputToAnthropic,
   applyStructuredOutputToGemini,
@@ -113,7 +122,12 @@ export class CanonicalAiRequest {
   }
 
   intoAnthropicBody(): Json {
-    const body: JsonObject = { ...this.sourceBody };
+    // A SHALLOW spread of `sourceBody` still shares every subtree it did not
+    // overwrite — `instructions` becomes `system` by reference — so the
+    // breakpoint placed below would land in the caller's object and reach every
+    // other candidate on the ladder. `ownBody` is the boundary that stops it,
+    // and the type the `apply*` helpers demand (issue #690).
+    const body = ownBody({ ...this.sourceBody });
     body["messages"] = canonicalMessagesToAnthropicJson(this.messages);
     if (this.tools.length > 0) body["tools"] = canonicalToolsToAnthropicJson(this.tools);
     if (this.toolChoice) body["tool_choice"] = canonicalToolChoiceToAnthropicJson(this.toolChoice);
@@ -135,7 +149,7 @@ export class CanonicalAiRequest {
   }
 
   intoGeminiBody(): Json {
-    const body: JsonObject = { ...this.sourceBody };
+    const body = ownBody({ ...this.sourceBody });
     body["contents"] = canonicalMessagesToGeminiJson(this.messages);
     if (this.instructions !== undefined) {
       body["systemInstruction"] = canonicalInstructionToGeminiJson(this.instructions);

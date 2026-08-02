@@ -57,8 +57,10 @@ export type {
   ResponsesPlan,
 } from "./types.js";
 
-// JSON value model + accessors.
-export type { Json, JsonObject } from "./json.js";
+// JSON value model + accessors, and the body-ownership boundary every adapter
+// that rewrites a request has to pass through (issue #690).
+export { cloneJson, ownBody } from "./json.js";
+export type { Json, JsonObject, OwnedJsonObject } from "./json.js";
 
 // Cloudflare AI Gateway routing.
 export {

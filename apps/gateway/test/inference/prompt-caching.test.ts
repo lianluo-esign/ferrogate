@@ -43,12 +43,34 @@ const FAILOVER_ANTHROPIC: PhysicalRoute = {
   priority: 1,
 };
 
+/**
+ * The other order: an ANTHROPIC primary with an OpenAI fallback.
+ *
+ * This is the ladder that reaches two families with ONE caller body — the
+ * Anthropic candidate is prepared and dispatched first, and when it fails the
+ * OpenAI candidate is prepared from the same `plan.body`. Any write-through an
+ * adapter performed while preparing the first candidate is visible on the
+ * second candidate's wire body.
+ */
+const ISOLATION_ANTHROPIC: PhysicalRoute = {
+  ...ANTHROPIC_ROUTE,
+  logicalModel: "isolation-cached",
+  priority: 0,
+};
+const ISOLATION_OPENAI: PhysicalRoute = {
+  ...OPENAI_ROUTE,
+  logicalModel: "isolation-cached",
+  priority: 1,
+};
+
 const ROUTES = [
   ANTHROPIC_ROUTE,
   OPENAI_ROUTE,
   GEMINI_ROUTE,
   FAILOVER_OPENAI,
   FAILOVER_ANTHROPIC,
+  ISOLATION_ANTHROPIC,
+  ISOLATION_OPENAI,
 ];
 
 const SYSTEM_PROMPT = "You are a claims adjuster. <10k tokens of policy text>";
@@ -123,6 +145,88 @@ describe("the directive reaches the selected family's mechanism", () => {
       // `prompt_cache` is FerroGate's member on a body OpenAI copies wholesale;
       // leaving it there turns a caching hint into an upstream 400.
       expect(provider.lastRequest().body).not.toHaveProperty("prompt_cache");
+    } finally {
+      provider.restore();
+    }
+  });
+});
+
+describe("preparing one family never rewrites what another family sends", () => {
+  /**
+   * The candidates on a ladder share ONE caller body. An adapter that applies
+   * its family's mechanism by writing through to that shared object does not
+   * merely add a field — it decides what every LATER candidate sends. Here the
+   * Anthropic primary is prepared first and fails, and the OpenAI fallback must
+   * go out as if Anthropic had never been considered.
+   *
+   * This is not a caching assertion. It is the family-isolation invariant, and
+   * `cache_control` is only the field that made it observable: the same seam
+   * would leak anything else an adapter decided to normalise.
+   */
+  it("an anthropic attempt leaves the openai fallback's body untouched", async () => {
+    const provider = interceptProviderFetch((request) =>
+      request.url.includes("api.anthropic.example")
+        ? providerJson({ error: "overloaded" }, 503)
+        : providerJson(OPENAI_COMPLETION),
+    );
+    try {
+      const res = await harness({}, ROUTES).post(
+        "/v1/chat/completions",
+        // `auto` is the mode EVERY family accepts, so both candidates stay on
+        // the ladder and the second one is genuinely dispatched.
+        chatRequest("isolation-cached", { mode: "auto" }),
+      );
+      expect(res.status).toBe(200);
+      expect(provider.requests).toHaveLength(2);
+      expect(provider.requests[0]!.url).toContain("api.anthropic.example");
+
+      const openai = provider.requests[1]!;
+      expect(openai.url).toContain("api.openai.example");
+      // Anthropic's breakpoint is an Anthropic-only member. OpenAI has no
+      // `cache_control`; receiving one means the Anthropic adapter wrote into
+      // the object this request was built from.
+      expect(JSON.stringify(openai.body)).not.toContain("cache_control");
+      // And the CONTENT SHAPE is the caller's own: marking a breakpoint
+      // promotes a string `content` to a block array, so a leak changes the
+      // message OpenAI is asked to complete, not just its metadata.
+      expect((openai.body as Record<string, any>)["messages"]).toEqual([
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: "is claim 91 covered?" },
+      ]);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  /**
+   * The mirror image: the OpenAI adapter REMOVES `prompt_cache` from the body
+   * it sends (the member is FerroGate's own and would 400 an upstream). If that
+   * removal writes through, the directive is gone before the Anthropic
+   * candidate ever reads it, and the caller's contract silently evaporates on
+   * failover rather than leaking.
+   */
+  it("an openai attempt leaves the anthropic fallback's directive intact", async () => {
+    const provider = interceptProviderFetch((request) =>
+      request.url.includes("api.openai.example")
+        ? providerJson({ error: "overloaded" }, 503)
+        : providerJson(ANTHROPIC_MESSAGE),
+    );
+    try {
+      const res = await harness({}, ROUTES).post(
+        "/v1/chat/completions",
+        // `auto`, not `explicit`: `explicit` would take the OpenAI route OFF
+        // the ladder, so only one candidate would ever be prepared and the
+        // ordering this test exists to exercise would not happen.
+        chatRequest("failover-cached", { mode: "auto" }),
+      );
+      expect(res.status).toBe(200);
+      expect(provider.requests).toHaveLength(2);
+      const anthropic = provider.requests[1]!;
+      expect(anthropic.url).toContain("api.anthropic.example");
+      expect((anthropic.body as Record<string, any>)["messages"][0]).toEqual({
+        role: "system",
+        content: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+      });
     } finally {
       provider.restore();
     }

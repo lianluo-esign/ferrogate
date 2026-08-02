@@ -54,7 +54,7 @@
  */
 import { AdapterError } from "./types.js";
 import { asObject, asStr, getField, isArray, isObject } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
+import type { Json, JsonObject, OwnedJsonObject } from "./json.js";
 
 /** The body member a caller sets to state a caching intent. */
 export const PROMPT_CACHE_MEMBER = "prompt_cache";
@@ -125,8 +125,15 @@ function readTtl(value: Json | undefined): PromptCacheTtl | undefined {
   return ttl;
 }
 
-/** Remove the FerroGate-only member so it never reaches a provider. */
-export function stripPromptCacheDirective(body: JsonObject): void {
+/**
+ * Remove the FerroGate-only member so it never reaches a provider.
+ *
+ * Takes an {@link OwnedJsonObject} and not the caller's body: deleting the
+ * directive from a SHARED body would erase it before the next candidate on the
+ * ladder ever read it, so a failover would silently drop the caller's contract
+ * rather than honour it on the family that can.
+ */
+export function stripPromptCacheDirective(body: OwnedJsonObject): void {
   delete body[PROMPT_CACHE_MEMBER];
 }
 
@@ -138,6 +145,14 @@ const ANTHROPIC_CACHE_MEMBER = "cache_control";
 
 /**
  * Apply the directive to an Anthropic `/v1/messages` body, in place.
+ *
+ * `body` is an {@link OwnedJsonObject} — a copy no caller aliases — because
+ * this function reaches deep into `system` / `messages` / `tools` to place the
+ * breakpoint. Applied to a body whose subtrees are still the CALLER's, it would
+ * write an Anthropic-only marker into the object every other candidate on the
+ * ladder is prepared from, and an OpenAI failover would go out carrying
+ * `cache_control` it never asked for. The brand is what stops that being a
+ * choice each adapter re-makes.
  *
  * Anthropic caches by PREFIX, rendered `tools` → `system` → `messages`, so a
  * single breakpoint at the end of `system` covers the tools and the system
@@ -158,7 +173,7 @@ const ANTHROPIC_CACHE_MEMBER = "cache_control";
  * informed one.
  */
 export function applyPromptCacheToAnthropic(
-  body: JsonObject,
+  body: OwnedJsonObject,
   directive: CanonicalPromptCache,
   _providerKind: string,
 ): void {
@@ -287,7 +302,7 @@ const BEDROCK_CACHE_MEMBER = "cachePoint";
  * for exactly the pair that most needs it fixed.
  */
 export function applyPromptCacheToBedrockConverse(
-  body: JsonObject,
+  body: OwnedJsonObject,
   directive: CanonicalPromptCache,
   providerKind: string,
 ): void {
