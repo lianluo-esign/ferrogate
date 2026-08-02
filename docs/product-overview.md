@@ -45,9 +45,15 @@ work belongs in [`roadmap.md`](roadmap.md).
   with the supported list in `error.data`. NOT implemented, and refused rather
   than half-served: `subscriptions/listen`, the `io.modelcontextprotocol/tasks`
   and MCP Apps extensions, `prompts/*`, `resources/templates/list`, and the
-  client half of MRTR. Execution evidence against an external official SDK
-  remains separate from the command's implementation and must not be inferred
-  from compilation.
+  client half of MRTR. Conformance is checked against the PUBLISHED SCHEMA, not
+  a transcription of it: the official `2026-07-28` JSON Schema is vendored at
+  `apps/mcp/spec/2026-07-28/` with its upstream commit, git blob sha and SHA-256
+  recorded beside it, and real `server/discover` / `tools/list` / `tools/call` /
+  `resources/read` responses plus the `-32020`/`-32022` refusals are validated
+  against it. A hand-edited copy is caught offline by the recorded digest;
+  upstream movement by `bun apps/mcp/spec/refresh.mjs --check`. Execution
+  evidence against an external official SDK remains separate from the command's
+  implementation and must not be inferred from compilation.
 - **Hosted asset closed loop** at `/v1/assets/*`: versioned publish/pull/
   delete with tenant quota accounting, artifact-registry semantics (channels
   such as latest/stable/canary, semver resolution, platform/arch variants,
@@ -154,9 +160,10 @@ Validated end to end:
 - Native legacy MCP JSON-RPC ingress at `POST /v1/mcp`, including
   `resources/list`/`resources/read` over hosted assets. The final MCP
   2026-07-28 ingress and outbound-client slices have focused regression
-  coverage over the surface FerroGate serves; external official-SDK
-  compatibility, and the extensions/notification surfaces listed above,
-  remain open.
+  coverage over the surface FerroGate serves, with response shapes validated
+  against the vendored official schema and both eras' version negotiation
+  driven end to end; external official-SDK compatibility, and the
+  extensions/notification surfaces listed above, remain open.
 - The hosted-asset closed loop: authenticated publish/pull/delete on
   `/v1/assets/*`, channels/semver/variant resolution, signature and
   malware-scan gates, presigned large-file upload/commit/download against a

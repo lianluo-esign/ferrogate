@@ -191,6 +191,144 @@ describe("stateless server identity and capabilities", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Version negotiation, end to end
+// ---------------------------------------------------------------------------
+
+/**
+ * Where version negotiation lives, and what "negotiation" means on each era.
+ *
+ * The revision bump's whole compatibility promise is that a client on the OLD
+ * protocol and a client on the NEW one both work, and that a client on neither
+ * is told which versions ARE spoken instead of being left to guess. That
+ * promise is discharged in three different places, and until now only the unit
+ * halves were pinned (`test/protocol.test.ts` covers `negotiateProtocolVersion`
+ * and `validateIngress` in isolation; the `server/discover` case above covers
+ * the advertisement). This section drives all of it through the DEPLOYED
+ * `POST /v1/mcp` surface, because "a deployed agent still works" is a claim
+ * about the endpoint, not about a pure function.
+ *
+ *  - **Old era — counter-offer.** `initialize` (`src/dispatch.ts`, case
+ *    `"initialize"` -> `negotiateProtocolVersion` in `src/protocol.ts`) takes
+ *    the client's `params.protocolVersion` and answers with the revision the
+ *    server selected. A legacy handshake NEVER refuses; it counter-offers, and
+ *    the client reads `result.protocolVersion` to learn what it got.
+ *  - **New era — per-request assertion.** `2026-07-28` deleted the handshake,
+ *    so there is nothing to negotiate against: `validateIngress` checks the one
+ *    revision this request declares (header and `_meta` must agree) and either
+ *    serves it or refuses it. Era selection is a pure function of one request,
+ *    which is what makes the two eras unable to interfere.
+ *  - **Refusal — naming the alternatives.** An unknown revision is `-32022`
+ *    with `error.data.supported`, so the refusal carries the retry.
+ */
+describe("version negotiation across the two eras", () => {
+  beforeEach(() => {
+    seedFixture();
+  });
+
+  async function initialize(protocolVersion?: string): Promise<Record<string, unknown>> {
+    const params = protocolVersion === undefined ? {} : { protocolVersion };
+    const res = await SELF.fetch(
+      rpcRequest({ jsonrpc: "2.0", id: 1, method: "initialize", params }, { key: READ_KEY }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: Record<string, unknown> };
+    return body.result;
+  }
+
+  it("serves a client on the OLD protocol: initialize honours 2025-06-18 exactly", async () => {
+    const result = await initialize("2025-06-18");
+    expect(result["protocolVersion"]).toBe("2025-06-18");
+    expect(result["serverInfo"]).toMatchObject({ name: expect.any(String) as unknown as string });
+  });
+
+  it("serves a client on the direct predecessor: initialize honours 2025-11-25", async () => {
+    expect((await initialize("2025-11-25"))["protocolVersion"]).toBe("2025-11-25");
+  });
+
+  it("serves a client on the NEW protocol: a modern tools/call is executed", async () => {
+    const res = await SELF.fetch(
+      rpcRequest(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "srv-echo", arguments: {}, _meta: modernRequestMeta() },
+        },
+        {
+          headers: {
+            ...modernHeaders("tools/call", EXEC_KEY),
+            "mcp-name": "srv-echo",
+          },
+        },
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result?: { resultType?: string }; error?: unknown };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.resultType).toBe("complete");
+  });
+
+  /**
+   * A legacy client asking for a revision this server does not speak is
+   * counter-offered the direct predecessor rather than refused — that is what
+   * an `initialize` handshake is FOR, and refusing would evict a client the
+   * server could have served.
+   */
+  it("counter-offers 2025-11-25 to a legacy client naming an unknown revision", async () => {
+    expect((await initialize("2024-11-05"))["protocolVersion"]).toBe("2025-11-25");
+    expect((await initialize(undefined))["protocolVersion"]).toBe("2025-11-25");
+  });
+
+  /**
+   * `2026-07-28` REMOVED the handshake, so the modern revision must never be
+   * echoed by `initialize`. A client that asks for it over the legacy path is
+   * told 2025-11-25 — it has to use the modern stateless path to get 2026-07-28.
+   */
+  it("never negotiates the modern revision through the removed handshake", async () => {
+    expect((await initialize(MCP_PROTOCOL_VERSION))["protocolVersion"]).toBe("2025-11-25");
+  });
+
+  /**
+   * The refusal leg. What makes it a NEGOTIATION failure rather than a bare
+   * rejection is `error.data.supported`: the client is told every revision it
+   * could retry with, which is the only thing that lets an unknown client
+   * recover without out-of-band knowledge.
+   */
+  it("refuses an unsupported revision with -32022 naming every version it DOES speak", async () => {
+    const res = await SELF.fetch(
+      rpcRequest(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/list",
+          params: {
+            _meta: {
+              "io.modelcontextprotocol/protocolVersion": "1999-01-01",
+              "io.modelcontextprotocol/clientCapabilities": {},
+            },
+          },
+        },
+        {
+          headers: {
+            "mcp-protocol-version": "1999-01-01",
+            "mcp-method": "tools/list",
+            authorization: `Bearer ${READ_KEY}`,
+          },
+        },
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: { code: number; data?: { requested?: string; supported?: string[] } };
+    };
+    expect(body.error.code).toBe(-32022);
+    expect(body.error.data?.requested).toBe("1999-01-01");
+    // Every spoken revision, so the client can pick one — not just the newest.
+    expect(body.error.data?.supported).toEqual([MCP_PROTOCOL_VERSION, "2025-11-25", "2025-06-18"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Authorization SEPs
 // ---------------------------------------------------------------------------
 
