@@ -78,6 +78,33 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "read-only per-agent cost-burn rollup for a billing period; its operator UI belongs as a spend panel inside the existing wallets/metering cockpit rather than a standalone page — deferred, needs UI",
   },
+  // Two groups surfaced by #747, not created by it — the same mechanism that
+  // made #682 and #695 visible below. #677 routed the per-request cost
+  // attribution read and its export without describing either in
+  // `admin-api.openapi.json`, and this gate derives its group list FROM that
+  // file, so neither group has been visible since #677 landed. The console has
+  // had no cost-attribution surface that whole time; describing the contract is
+  // what makes the gap countable.
+  //
+  // Both belong on the SAME operator screen as `agent-cost-burn` above — the
+  // per-tenant spend panel beside `/app/wallets` and `/app/metering` — because
+  // they answer the next question that panel raises ("which requests made up
+  // this figure?"). A standalone read-only table would strand the chargeback
+  // drill-down away from the spend controls, which is the exact reason
+  // `agent-cost-burn` is deferred rather than built. Deferred, needs UI —
+  // tracked on the #313 chain as the #677 cost-attribution follow-up. Both
+  // entries must be deleted when that panel lands; an obsolete exclusion fails
+  // the check below.
+  "cost-records": {
+    owner: "billing/ops cockpit (#677 follow-up, #313 chain)",
+    reason:
+      "read-only per-request cost attribution drill-down; it is the detail behind the per-agent burn rollup and belongs in the same wallets/metering spend panel rather than a page of its own — deferred, needs UI",
+  },
+  "cost-record-exports": {
+    owner: "billing/ops cockpit (#677 follow-up, #313 chain)",
+    reason:
+      "download-only surface: it answers a CSV, JSONL or binary Parquet attachment rather than a renderable document, so it is a button on the cost-records panel above rather than a page — deferred, needs UI",
+  },
   // (`observed-agent-activity` used to be excluded here as "deferred, needs UI".
   // #464 shipped that UI as the Unattributed tab on `src/pages/agent-runs.tsx`,
   // so the exclusion was DELETED: the group is now covered by a real call site
