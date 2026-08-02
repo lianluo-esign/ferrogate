@@ -822,11 +822,18 @@ export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
 
 /** The two statements `D1RbacAuthorizer` issues. Exported so a test can pin them. */
 export const RBAC_PERMISSION_EXISTS_SQL = "SELECT 1 AS present FROM permissions WHERE key = ?1";
-export const RBAC_TENANT_ROLE_GRANTS_SQL =
-  "SELECT roles.permission_keys_json AS permission_keys_json " +
-  "FROM tenant_role_bindings " +
-  "JOIN roles ON roles.id = tenant_role_bindings.role_id " +
-  "WHERE tenant_role_bindings.tenant_id = ?1";
+// ONE template literal rather than the `"SELECT …" + "FROM …"` concatenation
+// this used to be, and the change is load-bearing rather than cosmetic:
+// `test/fleet-control-matrix.test.ts` derives which durable authority each
+// Worker reads by scanning SQL string literals that carry BOTH the verb and the
+// table, so a statement split across fragments is invisible to it and this
+// Worker scored as reading neither `tenant_role_bindings` nor `roles` — i.e.
+// the fleet gate could not see the gateway enforcing the control it defines.
+// The SQL is unchanged apart from whitespace.
+export const RBAC_TENANT_ROLE_GRANTS_SQL = `SELECT roles.permission_keys_json AS permission_keys_json
+     FROM tenant_role_bindings
+     JOIN roles ON roles.id = tenant_role_bindings.role_id
+    WHERE tenant_role_bindings.tenant_id = ?1`;
 
 /**
  * The subset of `D1Database` this adapter reads. A live binding satisfies it

@@ -734,6 +734,41 @@ const CONTROLS: readonly FleetControl[] = [
     refusalCode: "rate_limit_exceeded",
   },
   {
+    id: "rbac-action",
+    title: "a role that denies an operation's `rbac_action` (FC-7)",
+    // CREDENTIAL, not `spend`: `rbac_action` restricts what an authenticated
+    // caller may DO, so every Worker that resolves a tenant credential and then
+    // serves contract operations off it has to ask the same question. Scoping
+    // this to `spend` would have exempted `apps/control-plane`, which is where
+    // most rbac-guarded operations live today, and scoping it to a hand list of
+    // Workers is what FC-7 already was.
+    required: "credential",
+    // Two spellings, because the two halves fail differently. `.authorize(auth`
+    // is the CALL — the half FC-7 found missing, where a Worker parses
+    // `rbac_action` and never consults an authorizer. `"rbac_denied"` is the
+    // refusal a Worker can only produce if it owns the decision. A Worker that
+    // deleted the call but kept the string, or vice versa, still matches here
+    // and is then caught by §3.4/§3.4b (it must read all three authority
+    // tables) and by `test/fleet-rbac-action.test.ts` (it must DECIDE alike).
+    enforcement: /\.authorize\(auth|"rbac_denied"/,
+    // The Rust walk, table for table (`state_rbac.rs::
+    // tenant_has_permission_result`): the action must be DECLARED in
+    // `permissions`, the tenant's `tenant_role_bindings` are walked, and a
+    // `roles` row grants when its `permission_keys` names the action. §3.4b
+    // demands all three of every enforcer, so a Worker that skips the
+    // permission-existence step — the step that stops a typo in a role from
+    // minting an entitlement — is red rather than "still durable".
+    authorityTables: ["permissions", "roles", "tenant_role_bindings"],
+    // NO `refusalCode`. `rbac_denied` / `guardrail_rbac_denied` is chosen by
+    // `rbacDenialCode(action)` and thrown as `HttpError(403, decision.code,
+    // decision.message)` — neither the code nor the message is a literal at the
+    // throw site on ANY enforcer, so §3.5's literal scan would index nothing
+    // and `expect(byApp).toBeDefined()` would fail for a reason that has
+    // nothing to do with the fleet. The wire agreement is asserted where it can
+    // be asserted honestly — `test/fleet-rbac-action.test.ts` compares the four
+    // Workers' code + message FUNCTIONS on the same inputs.
+  },
+  {
     id: "operator-deny-rules",
     title: "the operator `[[policies]]` deny table (FC-6c)",
     required: "self",
@@ -966,22 +1001,19 @@ describe("§3.6 the shared RPM counter stays ONE namespace", () => {
       ),
     );
     for (const app of SPEND.filter((a) => !definers.includes(a))) {
-      // Live declaration of the class WITHOUT `script_name` is a private
-      // namespace by another route, so the LIVE config must not name it...
-      expect(
-        new RegExp(CLASS).test(TOML[app]?.live ?? ""),
-        `${app} declares the limiter class in its live config`,
-      ).toBe(false);
-      // ...while the deploy-time stanza (commented out because workerd refuses
-      // a cross-script DO binding under `wrangler dev --local`) must survive,
-      // pointed at the one definer. Deleting it is how the shared counter
-      // silently stops being shared at the next deploy.
-      expect(TOML[app]?.full, `${app} lost the RATE_LIMIT deploy stanza`).toContain(
-        `class_name = "${CLASS}"`,
-      );
-      expect(TOML[app]?.full, `${app} lost script_name — a private namespace at deploy`).toMatch(
+      // The borrowed stanza must be LIVE and must name the one definer's
+      // script. It was asserted against the whole file INCLUDING comments until
+      // issue #666, because the stanza was committed commented out — an
+      // assertion that could not tell a deployed binding from a comment about
+      // one, which is the defect itself. Deleting it, or dropping `script_name`
+      // from it, is how the shared counter silently stops being shared.
+      const live = TOML[app]?.live ?? "";
+      expect(live, `${app} lost the LIVE RATE_LIMIT stanza`).toContain(`class_name = "${CLASS}"`);
+      expect(live, `${app} lost script_name — a private namespace at deploy`).toMatch(
         /script_name\s*=\s*"[^"]+"/,
       );
+      // ...and it must still introduce no migration for a class it does not
+      // define; that half is the `definers.length === 1` assertion above.
     }
   });
 });
@@ -1071,11 +1103,13 @@ describe("§4 fleet-wide ratchets", () => {
       "api_keys",
       "static_api_keys",
       "api_key_directory",
-      // RBAC grant tables. FC-7: parsed by four Workers, consulted by two, and
-      // every `rbac_action` in the contract is on an `/admin/v1/` path today.
-      "roles",
-      "permissions",
-      "tenant_role_bindings",
+      // The RBAC grant tables were HERE, declared "not a control" because FC-7
+      // was open: four Workers parsed `rbac_action`, two consulted an
+      // authorizer, and the exemption was the honest way to record that. They
+      // are now the `rbac-action` control in §3, which is what makes §3.2
+      // demand the call on every credential Worker. Moving them was the point
+      // of the fix — a "declared non-control" is exactly how a shared source of
+      // truth stops being asked about.
       // Tenant hierarchy identity, not lifecycle. The CONTROL on `tenants` is
       // its `status` column and that is registered as `tenant-lifecycle`.
       "tenants",

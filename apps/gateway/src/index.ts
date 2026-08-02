@@ -5,7 +5,7 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 251
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 252
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
@@ -27,6 +27,7 @@ import {
   createMeteringUsageSink,
   meteringBindingsFromEnv,
   meteringDrain,
+  routePriceSettledCostUsd,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
 import {
@@ -62,8 +63,43 @@ import { tenantDatabase } from "./tenancy/index.js";
  *
  * With a resolver configured the sink does not drain itself — see
  * `GATEWAY_MIDDLEWARE` below.
+ *
+ * ## `settledCostUsd` and `diagnostics` — the #663 wiring
+ *
+ * Both slots used to be empty here, and the two omissions compounded into a
+ * SILENT loss: a served, billable request against a model absent from
+ * `PriceBook.withDefaultRateCard()` (11 hard-coded entries, no `("*","*")`
+ * wildcard) failed closed in `charge()`, wrote nothing anywhere, and — because
+ * no `diagnostics` were supplied — logged nothing either. It was found on the
+ * live account, not by a test.
+ *
+ * - `settledCostUsd: routePriceSettledCostUsd` carries the SERVED route's own
+ *   `[[models]].input_price_per_1m` / `output_price_per_1m` into settlement, so
+ *   an operator who priced a model on its registry row gets that model billed
+ *   at those prices instead of refused. Those numbers were already parsed and,
+ *   until now, read only by cost-based routing.
+ * - `diagnostics.onPriceNotFound` makes what is left of the refusal LOUD. It is
+ *   the last resort — no card rule and no row price — and it is exactly the
+ *   condition an operator must act on, so it goes to the Worker log with the
+ *   request id, provider and model in it.
  */
-const usage = createMeteringUsageSink({ bindings: meteringBindingsFromEnv });
+const usage = createMeteringUsageSink({
+  bindings: meteringBindingsFromEnv,
+  settledCostUsd: routePriceSettledCostUsd,
+  diagnostics: {
+    onPriceNotFound: ({ requestId, provider, providerModel, message }) => {
+      // `console.warn` is the Worker's `tracing::warn!`: it reaches
+      // `wrangler tail` and the Logpush sink. The usage itself is NOT lost —
+      // `MeteringUsageSink` persists a cost-less `billing_events` row for it —
+      // so this line names the model to price rather than announcing a
+      // dropped request.
+      console.warn(
+        `[ferrogate] billing: no price for provider '${provider}' model '${providerModel}' ` +
+          `(request ${requestId}); usage recorded with a null cost_usd. ${message}`,
+      );
+    },
+  },
+});
 
 /**
  * The durable request-log sink (#664) — one evidence row per decision.
@@ -211,7 +247,7 @@ export const GATEWAY_MIDDLEWARE = [
   // layer in: `meteringDrain` returns the same `Response` object it received,
   // so the status this emitter records is the client's.
   //
-  // `src/inference/route-module.ts` ALSO emits, so the six inference
+  // `src/inference/route-module.ts` ALSO emits, so the seven inference
   // operations pass through two emitters; `emitRequestTelemetry` de-duplicates
   // on the inbound `Request` object, so they still produce exactly one span
   // and one metric point. Mounting here is what widens the coverage from those
