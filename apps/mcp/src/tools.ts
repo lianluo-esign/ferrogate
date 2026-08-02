@@ -215,7 +215,13 @@ export async function toolsList(
   context: DispatchContext,
   id: JsonRpcId | undefined,
 ): Promise<JsonRpcResponse> {
-  const tools = [...(await ports.upstreams.listTools())];
+  // Gate upstream tools on the same entitlement decision as tools/call (#685).
+  // Without this, tools/list DISCOVERS tools that tools/call would later DENY,
+  // violating Envoy AI Gateway's "one control, two code paths" guarantee.
+  const mcpDenial = await ports.entitlements.toolExecutionDenial(context.auth, "mcp");
+  const tools = mcpDenial === undefined
+    ? [...(await ports.upstreams.listTools())]
+    : [];
   if (hasScope(context.auth, ASSET_READ_SCOPE)) tools.push(...builtinTools());
   ports.audit.record(
     auditEvent(
