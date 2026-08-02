@@ -267,6 +267,17 @@ const DECLARED = declared();
  *    session JWT (`src/session/`), which every SSO login also ends in. Wave 18
  *    mounted that surface on `src/index.ts` and documented the secret in
  *    `wrangler.toml`, which is what let this move out of {@link UNDOCUMENTED}.
+ *  - `SITE_DOMAIN_CF_API_TOKEN` — the Cloudflare API token
+ *    `GET /admin/v1/site-domains/{hostname}` reads custom-hostname certificate
+ *    state with (#738). It needs the ZONE-level "SSL and Certificates: Edit"
+ *    group, so it is a real credential and cannot be a committed `[vars]` line.
+ *
+ * Absence is SAFE for this one too, and behaviourally:
+ * `resolveSiteDomainCertificates` falls back to
+ * `UnconfiguredSiteDomainCertificates` when the token (or the zone, or the
+ * account) is missing, so the endpoint reports `certificate_status:
+ * "unconfigured"` and makes NO outbound call —
+ * `test/site-domain-certificate.test.ts` pins that.
  *
  * Absence is SAFE, and that is asserted behaviourally rather than by
  * convention: `test/console-session.test.ts` ("an unconfigured deployment")
@@ -274,7 +285,7 @@ const DECLARED = declared();
  * `503 admin_console_unconfigured` instead of signing a session with a
  * guessable key.
  */
-const SECRETS: readonly string[] = ["ADMIN_CONSOLE_JWT_SECRET"];
+const SECRETS: readonly string[] = ["ADMIN_CONSOLE_JWT_SECRET", "SITE_DOMAIN_CF_API_TOKEN"];
 
 /**
  * Vars deliberately left out of `[vars]`, each NAMED in the config's prose so
@@ -285,10 +296,27 @@ const SECRETS: readonly string[] = ["ADMIN_CONSOLE_JWT_SECRET"];
  *    a control plane that forgets everything on eviction.
  *  - `ADMIN_CONSOLE_ALLOWED_ORIGIN` — deliberately ABSENT so that with no
  *    console origin configured the CORS layer stays closed.
+ *  - `SITE_DOMAIN_CERTIFICATES` (#738) — the custom-domain certificate backend
+ *    switch. Deliberately UNSET so that absent means "this deployment does not
+ *    read certificate state", which makes NO outbound Cloudflare call. Setting
+ *    it is an explicit act, exactly like `SITE_DOMAIN_RESOLVER`.
+ *  - `SITE_DOMAIN_CF_ZONE_ID` / `SITE_DOMAIN_CF_ACCOUNT_ID` — real account
+ *    resource ids. A `[vars]` entry is committed plaintext in a tracked file and
+ *    a committed zone id is a leak, so these are named in the config's prose and
+ *    supplied at deploy time.
+ *  - `SITE_DOMAIN_CERTIFICATE_RECORDS` — the deterministic backend's table.
+ *    Absent because the deterministic backend is off by default.
  *
- * Both are documented in `wrangler.toml`, which the assertion below holds.
+ * All are documented in `wrangler.toml`, which the assertion below holds.
  */
-const DOCUMENTED_BUT_UNDECLARED = ["ADMIN_CONSOLE_ALLOWED_ORIGIN", "CONTROL_PLANE_STORE"] as const;
+const DOCUMENTED_BUT_UNDECLARED = [
+  "ADMIN_CONSOLE_ALLOWED_ORIGIN",
+  "CONTROL_PLANE_STORE",
+  "SITE_DOMAIN_CERTIFICATES",
+  "SITE_DOMAIN_CERTIFICATE_RECORDS",
+  "SITE_DOMAIN_CF_ACCOUNT_ID",
+  "SITE_DOMAIN_CF_ZONE_ID",
+] as const;
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.

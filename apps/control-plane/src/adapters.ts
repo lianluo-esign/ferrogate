@@ -58,6 +58,7 @@ import type {
   TenancyLifecycleGatePort,
 } from "./ports.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, DEFAULT_ADMIN_LIST_MAX_LIMIT } from "./responses.js";
+import { resolveSiteDomainCertificates } from "./site_domain_certificates.js";
 import {
   DEFAULT_DOH_ENDPOINT,
   DEFAULT_DOH_TIMEOUT_MS,
@@ -799,6 +800,9 @@ export function resolveDeps(
     promptLabels: resolvePromptLabels(env),
     runtime: new StoreRuntimeStatus(store),
     txtResolver: resolveTxtResolver(env),
+    // The certificate seam (#738). Its default answers `unconfigured` and makes
+    // no outbound call, so a deployment that has not opted in gains no traffic.
+    siteDomainCertificates: resolveSiteDomainCertificates(env),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does
     // not exist at all (see `middleware/cors.ts`).
     corsAllowedOrigin:

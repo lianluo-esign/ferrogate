@@ -4863,7 +4863,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Fetch one custom-domain binding by hostname. */
+        /** Fetch one custom-domain binding by hostname, with its TLS certificate state. */
         get: operations["getSiteDomain"];
         put?: never;
         post?: never;
@@ -9757,6 +9757,54 @@ export interface components {
             unavailable_reason: string | null;
             /** @description true when the feed did not answer, so absent or inactive rows are NOT evidence that nothing is running. */
             rows_may_be_incomplete: boolean;
+        };
+        /**
+         * @description Whether a request arriving on this custom domain can complete TLS and reach the gateway (#738). Deliberately an enum and not a boolean: five of these values mean 'the domain does not work yet' and each names a DIFFERENT next action.
+         *
+         *     * `unconfigured` - This deployment has no certificate backend bound, so FerroGate did not look. Distinct from not_provisioned: a statement about the deployment, not about the domain. Configure SITE_DOMAIN_CERTIFICATES, or read the Cloudflare dashboard.
+         *     * `not_provisioned` - No Cloudflare custom-hostname record exists for this hostname. The domain CANNOT serve: TLS terminates nowhere and the request never reaches the gateway. Provision it.
+         *     * `unavailable` - The certificate backend could not be reached or could not answer. The state is UNKNOWN and is deliberately not folded into any other value; retry.
+         *     * `pending_validation` - Cloudflare is waiting for its own domain-control-validation record. Requests on this hostname FAIL TLS until it is published. Give the tenant the entries in certificate.validation_records. This is NOT the same situation as active, and is the distinction a boolean would erase.
+         *     * `provisioning` - Validation passed; issuance or deployment is in flight. No operator action - wait.
+         *     * `issued_not_routing` - The certificate is live but the hostname is not routing here, typically because the tenant's CNAME does not point at the fallback origin. TLS is not the problem; DNS is.
+         *     * `active` - The certificate is issued AND the hostname routes here. Nothing to do. Note this is independent of the FerroGate DNS ownership proof: an active certificate on an unverified binding is still refused 421 by the gateway.
+         *     * `timed_out` - Cloudflare stopped retrying validation after its backoff schedule. Fix DNS, then restart validation.
+         *     * `expired` - The certificate lapsed. Re-validate.
+         *     * `blocked` - Cloudflare refused the hostname; it collides with a zone elsewhere on Cloudflare. Contact Cloudflare support.
+         *     * `inactive` - The custom-hostname record is deleted, deleting or deactivating. Re-provision.
+         *     * `unknown` - A Cloudflare status this platform does not classify. Read certificate.ssl_status and certificate.hostname_status.
+         * @enum {string}
+         */
+        AdminSiteDomainCertificateStatus: "unconfigured" | "not_provisioned" | "unavailable" | "pending_validation" | "provisioning" | "issued_not_routing" | "active" | "timed_out" | "expired" | "blocked" | "inactive" | "unknown";
+        /** @description A record the tenant must publish for Cloudflare's own domain-control validation. Separate from, and additional to, the FerroGate _ferrogate-challenge TXT record of #488. */
+        AdminSiteDomainCertificateRecord: {
+            /** @description The DNS name, or the HTTP URL for the http method. */
+            name: string;
+            /** @description txt or http. */
+            type: string;
+            /** @description The exact value to publish, or the body to serve. */
+            value: string;
+        };
+        /** @description The evidence behind certificate_status. Reported by GET /admin/v1/site-domains/{hostname} only; the list operation deliberately omits it, because N bindings would be N outbound Cloudflare calls per page. */
+        AdminSiteDomainCertificate: {
+            /** @description Which backend answered: cloudflare_for_saas, static, or unconfigured. */
+            backend: string;
+            /** @description Cloudflare's raw custom-hostname activation status, verbatim. */
+            hostname_status?: string | null;
+            /** @description Cloudflare's raw ssl.status, verbatim. */
+            ssl_status?: string | null;
+            /** @description Validation errors, or the reason a lookup was unavailable. */
+            detail?: string | null;
+            validation_records?: components["schemas"]["AdminSiteDomainCertificateRecord"][] | null;
+        };
+        /** @description GET /admin/v1/site-domains/{hostname}. Carries the certificate state ALONGSIDE the binding, never merged into it: the DNS ownership proof (#488) decides whether the gateway serves, and the certificate decides whether the request arrives at all. Either can fail while the other succeeds, and the two failures have nothing in common as instructions. */
+        AdminSiteDomainReadResponse: {
+            /** @constant */
+            object: "site_domain";
+            site_domain: components["schemas"]["AdminSiteDomain"];
+            certificate_status: components["schemas"]["AdminSiteDomainCertificateStatus"];
+            certificate: components["schemas"]["AdminSiteDomainCertificate"];
+            verification?: components["schemas"]["AdminSiteDomainVerification"];
         };
     };
     responses: {
@@ -19596,14 +19644,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Site domain binding. */
+            /** @description Site domain binding, plus the Cloudflare certificate state for the hostname. A binding can be verified and still unreachable because its certificate has not issued; certificate_status is the field that says which. */
             200: {
                 headers: {
                     "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AdminSiteDomainResponse"];
+                    "application/json": components["schemas"]["AdminSiteDomainReadResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];

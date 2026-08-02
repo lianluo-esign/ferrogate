@@ -191,6 +191,56 @@ export const siteDomainRoutes: GroupModule = crudGroup(
     },
   ],
   {
+    /**
+     * The generic {@link readHandler}, plus the CERTIFICATE (#738's second
+     * "Done when" bullet).
+     *
+     * The whole reason this is an override rather than the derived CRUD shape:
+     * a hostname whose Cloudflare certificate has not issued fails at the EDGE.
+     * The request never reaches this platform, no log line is written, and
+     * before this field the admin API had nothing that could explain it — the
+     * operator saw `verified: true` and a domain that did not work.
+     *
+     * Three orderings here are load-bearing:
+     *
+     *  1. **The row is resolved for the caller's scope FIRST.** A tenant that
+     *     cannot see the binding gets the ordinary 404 and NO certificate
+     *     lookup happens, so this route cannot be used to probe which hostnames
+     *     another tenant has provisioned — nor to make this Worker issue an
+     *     outbound Cloudflare call on an unauthenticated-for-that-row hostname.
+     *  2. **A backend failure does not fail the read.** The certificate state
+     *     is reported as `unavailable` and the binding is still returned;
+     *     answering 503 would make an operator unable to read their own
+     *     configuration during a Cloudflare incident.
+     *  3. **`certificate_status` is beside `verified`, never merged into it.**
+     *     The DNS proof decides whether the gateway serves; the certificate
+     *     decides whether the request arrives. Both can be true, either can be
+     *     false, and the two failures have nothing in common as instructions.
+     *
+     * `listSiteDomains` deliberately keeps the derived handler: N bindings
+     * would be N outbound calls per page.
+     */
+    getSiteDomain: async (c) => {
+      const deps = c.get("deps");
+      const hostname = pathParam(c, "hostname");
+      const record = await deps.store.get(SITE_DOMAINS, scopeOf(c), hostname);
+      if (record === null) {
+        throw new HttpError(404, "not_found", `site_domain ${hostname} not found`);
+      }
+      const certificate = await deps.siteDomainCertificates.certificateFor(hostname);
+      return json(c, 200, {
+        ...adminItem("site_domain", record),
+        certificate_status: certificate.status,
+        certificate: {
+          backend: certificate.backend,
+          hostname_status: certificate.hostnameStatus ?? null,
+          ssl_status: certificate.sslStatus ?? null,
+          detail: certificate.detail ?? null,
+          validation_records: certificate.validationRecords ?? null,
+        },
+      });
+    },
+
     verifySiteDomain: async (c) => {
       const deps = c.get("deps");
       const scope = scopeOf(c);

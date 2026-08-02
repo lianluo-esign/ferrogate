@@ -158,40 +158,120 @@ domain are paths inside the tenant's document tree.
 
 ---
 
-## 6. What this repository cannot prove — TLS, SNI and provisioning
+## 6. The certificate half — Cloudflare for SaaS
 
 A Worker only sees a request for `docs.acme.com` if **Cloudflare terminated TLS
-for that hostname and routed it to this Worker.** Two deploy-time mechanisms do
-that:
+for that hostname and routed it to this Worker.** Two mechanisms do that, and
+FerroGate picked one:
 
-* **Workers Custom Domains** — the hostname is on a zone in your own Cloudflare
-  account; the certificate is managed for you. Suitable when the operator owns
-  the zones.
-* **Cloudflare for SaaS custom hostnames** (`/zones/{zone}/custom_hostnames`) —
-  the hostname is on the TENANT's zone, pointed at your fallback origin by
-  CNAME, and Cloudflare issues a certificate per hostname after its own
-  validation (HTTP or TXT, separate from the ownership challenge above).
-  Suitable for a multi-tenant product, which is this one.
+| | Workers Custom Domains | **Cloudflare for SaaS custom hostnames** |
+|---|---|---|
+| where the hostname lives | a zone in **your** account | the **tenant's** zone |
+| who controls the DNS | you do | the tenant, CNAMEd at your fallback origin |
+| certificate | the zone's, managed | **one per hostname**, with its own DCV |
+| per-hostname status | none | `status` + `ssl.status` on a hostname-keyed row |
 
-**Neither is implemented in this tree, and nothing here tests them.** `workerd`
-under vitest has no TLS terminator, no zone and no certificate authority, so a
-test asserting "the certificate is active" could only assert against a stub of
-our own writing and would be evidence of nothing. The honest position is that
-#738 delivers everything downstream of the `Host` header — the ownership proof,
-the claim, the fences, the refusals and the serve path — and that the
-provisioning call and the `certificate_status` field on
-`GET /admin/v1/site-domains/{hostname}` are still open. Until they land, an
-operator provisions the hostname out of band (dashboard or API) and reads its
-certificate state there.
+**Custom hostnames, and here is why.** FerroGate is multi-tenant and a tenant
+keeps its own DNS — `acme.com` is not, and must not become, a zone in our
+account. Workers Custom Domains would require every customer to hand us their
+zone. And the part that decides it for this feature: a zone-level certificate
+publishes **no per-hostname state**, so `GET /admin/v1/site-domains/{hostname}`
+would have nothing to report. The `custom_hostnames` row is exactly the thing
+the certificate field is asking for.
 
-Two consequences worth stating for whoever picks that up:
+**What it costs.** Cloudflare for SaaS is a paid entitlement billed per active
+custom hostname. It needs a dedicated fallback-origin zone in your account, a
+DNS record on it for tenants to CNAME at, a Worker route covering that origin,
+and an API token carrying the **zone-level** `SSL and Certificates: Edit`
+permission group. An otherwise-complete *account* token cannot reach
+`/zones/.../custom_hostnames`.
 
-* The certificate state and the ownership proof are **independent**. A hostname
-  can have a live certificate and no FerroGate proof (it is refused with 421),
-  or a live proof and no certificate (the request never arrives). Surfacing them
-  as one boolean would hide exactly the case an operator is debugging.
-* A `custom_hostnames` create is an outbound call to the Cloudflare API with an
-  account-scoped token. It belongs behind `@ferrogate/cloudflare`'s client, on
-  the control plane, and it must be idempotent per hostname — the admin API is
-  retried, and a duplicate create is a 409 from Cloudflare rather than a second
-  certificate.
+### 6.1 The client
+
+`packages/cloudflare/src/custom-hostnames.ts` (`CustomHostnamesClient`) — the
+same shape as the package's D1 and R2 modules: one `CloudflareClient`, one
+envelope decoder, one error taxonomy, one retry policy. Three behaviours are
+deliberately *not* the same as `r2.ts` and each is argued in that file's header:
+
+* a `1406` duplicate is **reconciled against our own zone**, never absorbed into
+  success. An R2 bucket name is unique per account so its duplicate code proves
+  the bucket is ours; a custom hostname is unique across *all* of Cloudflare, so
+  `1406` may mean another account holds it and no certificate will ever issue;
+* `?hostname=` is a **contains** filter, so the exact-equality re-check is
+  load-bearing — without it `docs.acme.com` can be answered by a row for
+  `docs.acme.com.attacker.test`;
+* the status fold never guesses `active`.
+
+### 6.2 The states, and what an operator does about each
+
+`GET /admin/v1/site-domains/{hostname}` answers with `certificate_status` plus a
+`certificate` object carrying Cloudflare's raw `hostname_status` / `ssl_status`
+and any `validation_records`. It is an enum and not a boolean because five of
+these mean "the domain does not work yet" and each names a **different** action:
+
+| `certificate_status` | what is true | what you do |
+|---|---|---|
+| `unconfigured` | this deployment binds no certificate backend | FerroGate did not look — a fact about the deployment, not the domain |
+| `not_provisioned` | no custom-hostname row exists | provision it; the domain cannot serve |
+| `unavailable` | the backend could not answer | retry; the state is unknown and is **not** folded into anything |
+| `pending_validation` | Cloudflare awaits its DCV record | publish `certificate.validation_records`; **requests fail TLS until then** |
+| `provisioning` | issuance/deployment in flight | wait |
+| `issued_not_routing` | certificate live, hostname not routing | fix the tenant's CNAME — TLS is not the problem |
+| `active` | issued **and** routing | nothing |
+| `timed_out` | Cloudflare stopped retrying | fix DNS, restart validation |
+| `expired` | certificate lapsed | re-validate |
+| `blocked` | Cloudflare refused the hostname | it collides elsewhere on Cloudflare; support |
+| `inactive` | deleted / deleting / deactivating | re-provision |
+| `unknown` | a status this platform does not classify | read the raw pair |
+
+The `LIST` operation deliberately omits all of this: N bindings would be N
+outbound Cloudflare calls per page.
+
+### 6.3 The certificate is independent of the ownership proof
+
+They answer different questions and neither implies the other:
+
+* live certificate, no FerroGate proof → the request **arrives and is refused
+  421**;
+* live proof, no certificate → the request **never arrives** at all.
+
+So `certificate_status` sits *beside* `verified`, never merged into it, and
+nothing on the serving path reads it. A single boolean would hide exactly the
+case an operator is debugging.
+
+### 6.4 What this repository still cannot prove
+
+`workerd` under vitest has **no TLS terminator, no zone and no certificate
+authority.** So:
+
+* **no test here has ever called Cloudflare.** The client is exercised against a
+  scripted transport; the admin endpoint is exercised against a deterministic
+  backend fed Cloudflare's own result shape. Both prove the request shapes, the
+  pagination walk, the duplicate reconcile, the fold and the surfacing — and
+  **none of them is evidence that Cloudflare answers this way.** The response
+  shapes and both status enums are taken from Cloudflare's published schema.
+* **TLS termination and SNI are untested and untestable here.** No assertion in
+  this tree should be read as saying a certificate works.
+* **Provisioning is not yet driven automatically.** `ensureCustomHostname` is
+  written, typed and tested, and the admin GET reads state through the same
+  client — but no `POST /admin/v1/site-domains` handler calls it, because
+  creating a billable Cloudflare resource on a tenant-triggered admin write is
+  an operator decision that needs its own issue (rate limiting, cleanup on
+  unbind, what happens when the entitlement is absent). Until then the operator
+  provisions the hostname out of band and this endpoint reports its state.
+
+### 6.5 Turning it on
+
+```toml
+# apps/control-plane — not committed values; see wrangler.toml's own comment
+SITE_DOMAIN_CERTIFICATES  = "cloudflare_for_saas"
+SITE_DOMAIN_CF_ZONE_ID    = "<the fallback-origin zone in YOUR account>"
+SITE_DOMAIN_CF_ACCOUNT_ID = "<that zone's account>"
+```
+
+```sh
+wrangler secret put SITE_DOMAIN_CF_API_TOKEN --name ferrogate-control-plane
+```
+
+Absent, the default is `unconfigured`: no outbound call is made, so a deployment
+does not acquire Cloudflare traffic merely by upgrading.

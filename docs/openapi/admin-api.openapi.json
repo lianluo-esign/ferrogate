@@ -16449,7 +16449,7 @@
         "tags": [
           "admin-read"
         ],
-        "summary": "Fetch one custom-domain binding by hostname.",
+        "summary": "Fetch one custom-domain binding by hostname, with its TLS certificate state.",
         "parameters": [
           {
             "name": "hostname",
@@ -16462,11 +16462,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Site domain binding.",
+            "description": "Site domain binding, plus the Cloudflare certificate state for the hostname. A binding can be verified and still unreachable because its certificate has not issued; certificate_status is the field that says which.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminSiteDomainResponse"
+                  "$ref": "#/components/schemas/AdminSiteDomainReadResponse"
                 }
               }
             },
@@ -35827,6 +35827,113 @@
           "rows_may_be_incomplete": {
             "type": "boolean",
             "description": "true when the feed did not answer, so absent or inactive rows are NOT evidence that nothing is running."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainCertificateStatus": {
+        "type": "string",
+        "enum": [
+          "unconfigured",
+          "not_provisioned",
+          "unavailable",
+          "pending_validation",
+          "provisioning",
+          "issued_not_routing",
+          "active",
+          "timed_out",
+          "expired",
+          "blocked",
+          "inactive",
+          "unknown"
+        ],
+        "description": "Whether a request arriving on this custom domain can complete TLS and reach the gateway (#738). Deliberately an enum and not a boolean: five of these values mean 'the domain does not work yet' and each names a DIFFERENT next action.\n\n* `unconfigured` - This deployment has no certificate backend bound, so FerroGate did not look. Distinct from not_provisioned: a statement about the deployment, not about the domain. Configure SITE_DOMAIN_CERTIFICATES, or read the Cloudflare dashboard.\n* `not_provisioned` - No Cloudflare custom-hostname record exists for this hostname. The domain CANNOT serve: TLS terminates nowhere and the request never reaches the gateway. Provision it.\n* `unavailable` - The certificate backend could not be reached or could not answer. The state is UNKNOWN and is deliberately not folded into any other value; retry.\n* `pending_validation` - Cloudflare is waiting for its own domain-control-validation record. Requests on this hostname FAIL TLS until it is published. Give the tenant the entries in certificate.validation_records. This is NOT the same situation as active, and is the distinction a boolean would erase.\n* `provisioning` - Validation passed; issuance or deployment is in flight. No operator action - wait.\n* `issued_not_routing` - The certificate is live but the hostname is not routing here, typically because the tenant's CNAME does not point at the fallback origin. TLS is not the problem; DNS is.\n* `active` - The certificate is issued AND the hostname routes here. Nothing to do. Note this is independent of the FerroGate DNS ownership proof: an active certificate on an unverified binding is still refused 421 by the gateway.\n* `timed_out` - Cloudflare stopped retrying validation after its backoff schedule. Fix DNS, then restart validation.\n* `expired` - The certificate lapsed. Re-validate.\n* `blocked` - Cloudflare refused the hostname; it collides with a zone elsewhere on Cloudflare. Contact Cloudflare support.\n* `inactive` - The custom-hostname record is deleted, deleting or deactivating. Re-provision.\n* `unknown` - A Cloudflare status this platform does not classify. Read certificate.ssl_status and certificate.hostname_status."
+      },
+      "AdminSiteDomainCertificateRecord": {
+        "type": "object",
+        "description": "A record the tenant must publish for Cloudflare's own domain-control validation. Separate from, and additional to, the FerroGate _ferrogate-challenge TXT record of #488.",
+        "required": [
+          "name",
+          "type",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The DNS name, or the HTTP URL for the http method."
+          },
+          "type": {
+            "type": "string",
+            "description": "txt or http."
+          },
+          "value": {
+            "type": "string",
+            "description": "The exact value to publish, or the body to serve."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainCertificate": {
+        "type": "object",
+        "description": "The evidence behind certificate_status. Reported by GET /admin/v1/site-domains/{hostname} only; the list operation deliberately omits it, because N bindings would be N outbound Cloudflare calls per page.",
+        "required": [
+          "backend"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string",
+            "description": "Which backend answered: cloudflare_for_saas, static, or unconfigured."
+          },
+          "hostname_status": {
+            "type": "string",
+            "nullable": true,
+            "description": "Cloudflare's raw custom-hostname activation status, verbatim."
+          },
+          "ssl_status": {
+            "type": "string",
+            "nullable": true,
+            "description": "Cloudflare's raw ssl.status, verbatim."
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "description": "Validation errors, or the reason a lookup was unavailable."
+          },
+          "validation_records": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/AdminSiteDomainCertificateRecord"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainReadResponse": {
+        "type": "object",
+        "description": "GET /admin/v1/site-domains/{hostname}. Carries the certificate state ALONGSIDE the binding, never merged into it: the DNS ownership proof (#488) decides whether the gateway serves, and the certificate decides whether the request arrives at all. Either can fail while the other succeeds, and the two failures have nothing in common as instructions.",
+        "required": [
+          "object",
+          "site_domain",
+          "certificate_status",
+          "certificate"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "site_domain"
+          },
+          "site_domain": {
+            "$ref": "#/components/schemas/AdminSiteDomain"
+          },
+          "certificate_status": {
+            "$ref": "#/components/schemas/AdminSiteDomainCertificateStatus"
+          },
+          "certificate": {
+            "$ref": "#/components/schemas/AdminSiteDomainCertificate"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/AdminSiteDomainVerification"
           }
         },
         "additionalProperties": false

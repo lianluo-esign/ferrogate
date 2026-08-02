@@ -17,6 +17,7 @@
 import type { PromptLabelKv } from "@ferrogate/config";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { ApiOperation } from "./contract.js";
+import type { SiteDomainCertificatePort } from "./site_domain_certificates.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
 
 // ---------------------------------------------------------------------------
@@ -452,6 +453,17 @@ export interface ControlPlaneDeps {
    */
   readonly txtResolver: SiteDomainTxtResolver;
   /**
+   * The CERTIFICATE seam `GET /admin/v1/site-domains/{hostname}` reports
+   * `certificate_status` through (#738, `src/site_domain_certificates.ts`).
+   *
+   * A port for the same two reasons the resolver above is one — the lookup is
+   * outbound I/O, and the DEFAULT must be the one that claims to know nothing.
+   * It is NOT the same seam: DNS ownership decides whether the gateway serves,
+   * and a certificate decides whether the request ever reaches it. Neither
+   * implies the other and nothing here may ever gate a serving decision.
+   */
+  readonly siteDomainCertificates: SiteDomainCertificatePort;
+  /**
    * Admin-console origin allowed to drive this API from a browser
    * (Rust `config.admin.cors_allowed_origin`). `null` = no console configured,
    * and then the `OPTIONS /admin/{*rest}` preflight surface DOES NOT EXIST.
@@ -542,6 +554,31 @@ export interface ControlPlaneBindings {
    * the Workers stand-in for Rust's zone FILE, since a Worker has no filesystem.
    */
   readonly SITE_DOMAIN_TXT_ANSWERS?: string;
+  /**
+   * Which site-domain CERTIFICATE backend to build
+   * (`src/site_domain_certificates.ts`): `"cloudflare_for_saas"`, `"static"`,
+   * or — absent, the DEFAULT — unconfigured, which reports that this deployment
+   * cannot tell. A separate switch from {@link SITE_DOMAIN_RESOLVER} because
+   * they answer different questions (#738).
+   */
+  readonly SITE_DOMAIN_CERTIFICATES?: string;
+  /**
+   * The curated `hostname -> custom_hostnames row` table for the `"static"`
+   * certificate backend, in Cloudflare's own result shape.
+   */
+  readonly SITE_DOMAIN_CERTIFICATE_RECORDS?: string;
+  /**
+   * The Cloudflare zone the custom hostnames live on — the FALLBACK-ORIGIN zone
+   * in this account that every tenant CNAMEs at, never a tenant's own zone.
+   */
+  readonly SITE_DOMAIN_CF_ZONE_ID?: string;
+  /** The Cloudflare account id the zone belongs to. */
+  readonly SITE_DOMAIN_CF_ACCOUNT_ID?: string;
+  /**
+   * The Cloudflare API token, as a `wrangler secret put` binding. Never a
+   * `[vars]` entry — that file is committed plaintext.
+   */
+  readonly SITE_DOMAIN_CF_API_TOKEN?: string;
   /**
    * The control database (`[[d1_databases]] binding = "DB"` in
    * `wrangler.toml`) — the native replacement for BOTH the D1 REST client and
