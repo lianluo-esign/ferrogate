@@ -41,6 +41,62 @@ export function otlpAttribute(key: string, value: string): OtlpAttribute {
   return { key, value };
 }
 
+/**
+ * One GAUGE data point — a named measurement with its own attributes (#692).
+ *
+ * ## Why this exists next to {@link GatewayMetricsSnapshot}
+ *
+ * The snapshot is a FIXED struct: the gateway's request/status/guardrail
+ * counters, rendered by `gatewayMetricsJson`. It is the right shape for a
+ * per-request delta of a known counter set and the wrong one for a measurement
+ * whose series is data — an online-evaluation score is named by the TENANT's
+ * criterion id, so its attribute set cannot be a field on a struct.
+ *
+ * A gauge rather than a sum, because a score is a LEVEL and not a count: the
+ * collector's Analytics Engine sink stores `double1` per point and an operator
+ * reads `AVG(double1)` over a window. Declaring it monotonic (as
+ * `sumMetricJson` does) would tell any OTLP-compliant backend it may compute
+ * rates over it, which for a 0-1 quality score is meaningless.
+ */
+export interface OtlpGaugePoint {
+  name: string;
+  description?: string;
+  value: number;
+  /** Milliseconds since the epoch; rendered as the point's `timeUnixNano`. */
+  timeUnixMs?: number;
+  attributes: OtlpAttribute[];
+}
+
+/**
+ * Build an OTLP/JSON metrics request from arbitrary gauge points.
+ *
+ * The envelope is byte-identical in shape to the one
+ * {@link buildOtlpMetricsRequest} produces — same resource, same instrumentation
+ * scope, same path — so `apps/telemetry`'s existing metric ingest parses these
+ * with no change: it reads `metric.gauge.dataPoints[]` generically and turns
+ * each into one Analytics Engine point whose blobs carry the attributes.
+ */
+export function buildOtlpGaugeMetricsRequest(
+  endpoint: string,
+  serviceName: string,
+  points: readonly OtlpGaugePoint[],
+): OtlpHttpRequest {
+  const body = {
+    resourceMetrics: [
+      {
+        resource: resourceJson(serviceName),
+        scopeMetrics: [
+          {
+            scope: instrumentationScopeJson(),
+            metrics: points.map(gaugeMetricJson),
+          },
+        ],
+      },
+    ],
+  };
+  return buildOtlpRequest(endpoint, "/v1/metrics", body);
+}
+
 export interface OtlpSpanRecord {
   traceId: string;
   spanId: string;
@@ -446,6 +502,24 @@ function sumMetricJson(
       isMonotonic: true,
       dataPoints: [
         { asDouble: value, attributes: attributesJson(attributes) },
+      ],
+    },
+  };
+}
+
+const MS_TO_NS = 1_000_000;
+
+function gaugeMetricJson(point: OtlpGaugePoint): unknown {
+  return {
+    name: point.name,
+    description: point.description ?? "",
+    gauge: {
+      dataPoints: [
+        {
+          asDouble: point.value,
+          timeUnixNano: (point.timeUnixMs ?? Date.now()) * MS_TO_NS,
+          attributes: attributesJson(point.attributes),
+        },
       ],
     },
   };

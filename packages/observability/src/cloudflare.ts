@@ -25,11 +25,13 @@ import {
 } from "./config.js";
 import type { GatewayMetricsSnapshot } from "./metrics.js";
 import {
+  buildOtlpGaugeMetricsRequest,
   buildOtlpLogsRequest,
   buildOtlpMetricsRequest,
   buildOtlpTracesRequest,
 } from "./otlp.js";
 import type {
+  OtlpGaugePoint,
   OtlpHttpRequest,
   OtlpLogRecord,
   OtlpSpanRecord,
@@ -107,6 +109,29 @@ export class CloudflareBackend implements TelemetryBackend {
     }
     return this.authorize(
       buildOtlpMetricsRequest(this.collectorEndpoint_, snapshot),
+    );
+  }
+
+  /**
+   * The METRIC signal again, for measurements whose series is data rather than
+   * a field on {@link GatewayMetricsSnapshot} — an online-evaluation score is
+   * named by a tenant's own criterion id (#692).
+   *
+   * It honours the same `supports(Metric)` gate as {@link metricsRequest}, so a
+   * deployment that exported only traces does not start receiving metrics
+   * through a second door, and it returns `null` for an empty batch the way
+   * {@link tracesRequest} does — an OTLP envelope with no data points is a
+   * round trip that carries nothing.
+   */
+  gaugeMetricsRequest(
+    serviceName: string,
+    points: readonly OtlpGaugePoint[],
+  ): OtlpHttpRequest | null {
+    if (points.length === 0 || !this.supports(ObservabilitySignal.Metric)) {
+      return null;
+    }
+    return this.authorize(
+      buildOtlpGaugeMetricsRequest(this.collectorEndpoint_, serviceName, points),
     );
   }
 
