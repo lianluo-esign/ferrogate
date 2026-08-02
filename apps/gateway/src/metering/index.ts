@@ -105,6 +105,7 @@ export {
 export type { BillingEventContext } from "./event.js";
 
 export { InMemoryLedgerStore, meteredTotals, sameSettlement } from "./ledger.js";
+export type { RecordedEvent } from "./ledger.js";
 
 export {
   BILLING_OUTBOX_BATCH,
@@ -208,11 +209,18 @@ export type {
 } from "./ports.js";
 
 export {
+  MAX_PENDING_UNPRICED_EVENTS,
   OUTBOX_SWEEP_GRACE_SECONDS,
   MeteringUsageSink,
   createMeteringUsageSink,
 } from "./sink.js";
 export type { MeteringSinkOptions, UnpricedUsage } from "./sink.js";
+
+/**
+ * The model-registry pricing leg of settlement (#663) — `src/index.ts` passes
+ * it as `MeteringSinkOptions.settledCostUsd`.
+ */
+export { routePriceSettledCostUsd } from "./route-price.js";
 
 export {
   billingEventFromWire,

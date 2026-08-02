@@ -126,6 +126,7 @@ export {
   WINDOW_SECONDS,
   type WindowState,
   RequestWindow,
+  SpendLedger,
   TokenBudgetLedger,
   TokenWindow,
   WalletLedger,
@@ -144,6 +145,8 @@ export { DurableObjectRateLimiter, releaseOnce } from "./do-limiter.js";
 export { InMemoryRateLimiter, type InMemoryRateLimiterOptions } from "./memory.js";
 
 export {
+  type BudgetHoldBindings,
+  type MonthlyBudgetCharge,
   type QuotaBindings,
   type QuotaPolicySnapshot,
   type QuotaPolicySource,
@@ -153,11 +156,14 @@ export {
   type SpendBindings,
   type SpendSource,
   type WalletBalanceReading,
+  DEFAULT_BUDGET_HOLD_USD,
   NO_QUOTA_POLICIES,
   NO_SPEND_SOURCE,
+  budgetHoldUsdFromEnv,
   currentPeriodMonth,
   d1QuotaPolicySource,
   d1SpendSource,
+  monthlyBudgetCharges,
   monthlyBudgetScope,
   quotaPolicySourceFromEnv,
   quotaPolicySourceFromVars,

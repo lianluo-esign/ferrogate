@@ -1,5 +1,5 @@
 /**
- * Contract-driven route registration for the 31 gateway-owned operations.
+ * Contract-driven route registration for the 32 gateway-owned operations.
  *
  * Routes are never hand-written here: `GatewayRouter.register` takes an
  * `operation_id`, looks the operation up in the contract, and mounts it at the
@@ -8,7 +8,7 @@
  * `test/contract.test.ts` can assert the two never drift.
  *
  * Ownership (see the task split in ROUTE-MAP.md):
- *   - the 6 inference operations  → `src/inference/route-module.ts`
+ *   - the 7 inference operations  → `src/inference/route-module.ts`
  *   - the 18 `/v1/assets/**` ops  → `src/assets/handlers.ts`
  * Both are in the contract table and both are guarded by `contractAuth`; each
  * is mounted by its own `RouteModule`, listed in `GATEWAY_ROUTE_MODULES` in
@@ -69,13 +69,23 @@ export const SHARED_OPERATION_IDS = ["getHealthz", "getReadyz"] as const;
  */
 export const OBSERVABILITY_OPERATION_IDS = ["getMetrics"] as const;
 
-/** The 6 inference operations. Owned by the inference agent this wave. */
+/**
+ * The 7 inference operations. Owned by the inference agent this wave.
+ *
+ * `countMessageTokens` (issue #671) is the Anthropic-native
+ * `POST /v1/messages/count_tokens` pre-flight. It is an inference operation
+ * even though it dispatches nothing: it reads the model registry, it is gated
+ * by the same `messages.create` scope as `createMessage`, and it answers with
+ * the same estimator the `/v1/messages` reservation uses. Putting it anywhere
+ * else would separate the count from the arithmetic it must agree with.
+ */
 export const INFERENCE_OPERATION_IDS = [
   "listModels",
   "createChatCompletion",
   "createResponse",
   "createEmbedding",
   "createMessage",
+  "countMessageTokens",
   "createImage",
 ] as const;
 
@@ -112,7 +122,7 @@ export const TOOLING_OPERATION_IDS = [
   "getAgentDiscovery",
 ] as const;
 
-/** All 31 operations `apps/gateway` owns per ROUTE-MAP.md. */
+/** All 32 operations `apps/gateway` owns per ROUTE-MAP.md. */
 export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
@@ -125,7 +135,7 @@ export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
  * or listed here, so this list cannot be forgotten.
  *
  * EMPTY as of the composition-root wiring: `src/index.ts` mounts
- * `inferenceRouteModule()` + `assetRouteModule()`, so all 31 are live.
+ * `inferenceRouteModule()` + `assetRouteModule()`, so all 32 are live.
  */
 export const PENDING_MODULE_OPERATION_IDS: readonly string[] = [];
 
@@ -564,7 +574,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
   app.use("*", options.networkAccess ?? networkAccess());
 
-  // ONE table-driven guard for all 254 operations, ahead of every route.
+  // ONE table-driven guard for all 255 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
   app.use("*", contractAuth(options.deps ?? depsFromEnv));
 
@@ -638,7 +648,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   //
   // LAST, and the position is the whole correctness argument: Hono runs matched
   // handlers in REGISTRATION order, so an `app.all("*")` placed any earlier
-  // would shadow all 254 contract operations AND `/health`. It is registered
+  // would shadow all 255 contract operations AND `/health`. It is registered
   // after every `router.register`, after every caller-supplied module, and after
   // `/health` above.
   //

@@ -19,7 +19,7 @@
  * Steps 1 THROUGH 4 are all what {@link rateLimit} does, in that order. Steps 2
  * and 3 need durable spend/balance reads, which arrive through the
  * {@link SpendSource} port in `./quota.ts`: `d1SpendSource` reads
- * `usage_monthly_rollups` (the winning scope's aggregate spend for the current
+ * `usage_monthly_rollups` (each budgeted scope's aggregate spend for the current
  * calendar month) and `wallets` minus the live `wallet_reservations` holds, all
  * out of the TENANT database the `DB` binding already points at. A deployment
  * with no `DB` bound gets `NO_SPEND_SOURCE`, which reports the same values an
@@ -34,6 +34,12 @@
  * chain below, and each has an assertion that fails when the call is removed
  * (`test/ratelimit/guards.test.ts`, `test/metering/usage-ledger.test.ts`):
  *
+ *   2b. **the nested budget's concurrency guard** (#679) —
+ *       `RateLimiter.reserveMonthlyBudget`, one hold per rung of the ladder,
+ *       taken on the Durable Object that owns that rung's counter key → 429
+ *       `monthly_budget_exceeded`. Step 2 is a READ across every rung and
+ *       bounds cumulative spend; this bounds what may be in flight at once,
+ *       which a D1 read structurally cannot. Same two-gate shape as 3/3b below.
  *   3b. **wallet no-oversell** (`./wallet.ts` → `@ferrogate/storage`'s
  *       `D1WalletStore.reserveWalletCredits`) → 429 `wallet_balance_exhausted`.
  *       Step 3 is a READ and cannot bound a race; the storage guard puts the
@@ -99,13 +105,15 @@ import {
   policyRulesFromEnv,
 } from "./policy.js";
 import {
+  type BudgetHoldBindings,
   type QuotaBindings,
   type QuotaPolicySource,
   type QuotaSubject,
   type SpendBindings,
   type SpendSource,
+  budgetHoldUsdFromEnv,
   currentPeriodMonth,
-  monthlyBudgetScope,
+  monthlyBudgetCharges,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
   spendSourceFromEnv,
@@ -141,6 +149,7 @@ import {
  */
 export interface RateLimitBindings
   extends QuotaBindings,
+    BudgetHoldBindings,
     SpendBindings,
     WalletAdmissionBindings,
     TokenBudgetBindings,
@@ -398,38 +407,45 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       throw new HttpError(refusal.status, refusal.code, refusal.message(deniedBy));
     }
 
-    // 2. The monthly USD budget, measured against the scope that WON the
-    //    chain's `min` (`finalize_auth` → `AppState::monthly_budget_exceeded`).
+    // 2. The monthly USD budget — EVERY rung of the nested ladder (#679), each
+    //    against its own scope's aggregate rollup.
     //
-    //    Both of the next two blocks run BEFORE the RPM check, in Rust's order:
-    //    a request refused for being over budget must not also spend a slot
-    //    from the RPM window, or a caller that is hard-denied anyway would burn
-    //    the budget of the requests that are still allowed.
-    const budgetUsd = resolution.quota.monthlyBudgetUsd;
-    if (budgetUsd !== undefined) {
-      const scope = monthlyBudgetScope(resolution.quota, subject.chain);
-      // `null` = no attribution at all to measure spend against. Rust returns
-      // `Ok(false)` there: nothing to compare, so nothing to refuse.
-      if (scope !== null) {
-        const spent = await spend.committedSpendUsd(
-          scope.kind,
-          scope.id,
-          currentPeriodMonth(deps.nowUnixSeconds?.()),
+    //    Rust (and this port until #679) enforced one scope: the one whose
+    //    configured number won the chain's `min`. That is not a nested budget.
+    //    `project = $5,000` with `key = $100` mins to $100 at the KEY, so the
+    //    project's rollup was never read and fifty keys could each spend $100
+    //    of a project that was already at its cap. Money is per-scope: each
+    //    rung has its own aggregate, so each rung has to be checked.
+    //
+    //    All of this runs BEFORE the RPM check, in Rust's order: a request
+    //    refused for being over budget must not also spend a slot from the RPM
+    //    window, or a caller that is hard-denied anyway would burn the budget
+    //    of the requests that are still allowed.
+    const budgetCharges = monthlyBudgetCharges(resolution.quota, subject.chain, subject.apiKeyId);
+    const budgetPeriodMonth = currentPeriodMonth(deps.nowUnixSeconds?.());
+    // Read the rungs together: they are independent point lookups, and a chain
+    // with four budgets should not cost four sequential round trips on the hot
+    // path.
+    const budgetSpend = await Promise.all(
+      budgetCharges.map(async (charge) =>
+        spend.committedSpendUsd(charge.kind, charge.id, budgetPeriodMonth),
+      ),
+    );
+    for (const [index, charge] of budgetCharges.entries()) {
+      const spent = budgetSpend[index];
+      if (spent === undefined || !spent.ok) {
+        // Rust: `Err` on the rollup read is 503, NOT a 429 — a storage outage
+        // has not proven the caller is over budget.
+        throw new HttpError(
+          503,
+          "quota_resolution_unavailable",
+          `monthly budget lookup failed: ${spent === undefined ? "missing reading" : spent.detail}`,
         );
-        if (!spent.ok) {
-          // Rust: `Err` on the rollup read is 503, NOT a 429 — a storage
-          // outage has not proven the caller is over budget.
-          throw new HttpError(
-            503,
-            "quota_resolution_unavailable",
-            `monthly budget lookup failed: ${spent.detail}`,
-          );
-        }
-        // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
-        if (spent.committedSpendUsd >= budgetUsd) {
-          const refusal = RATE_LIMIT_REFUSALS.monthly_budget_exceeded;
-          throw new HttpError(refusal.status, refusal.code, refusal.message());
-        }
+      }
+      // `>=`, not `>`: Rust refuses AT the cap (`spent >= budget_usd`).
+      if (spent.committedSpendUsd >= charge.limitUsd) {
+        const refusal = RATE_LIMIT_REFUSALS.monthly_budget_exceeded;
+        throw new HttpError(refusal.status, refusal.code, refusal.message());
       }
     }
 
@@ -479,6 +495,45 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
      */
     const holds: { release(): Promise<void> }[] = [];
     try {
+      // 2b. THE BUDGET'S CONCURRENCY GUARD — one Durable-Object hold per rung.
+      //
+      //     Step 2 above is a READ, and a read cannot bound a race: requests
+      //     that arrive together all see the same `cost_usd` and all pass it.
+      //     D1 has no way to serialise them, so the in-flight half of the
+      //     budget lives on the DO instance that OWNS the rung's counter key —
+      //     one instance per scope, single-threaded, so the Nth caller sees the
+      //     N-1 holds ahead of it (`durable-object.ts::reserveMonthlyBudget`).
+      //
+      //     Both gates are kept, exactly as step 3 and step 3b are for the
+      //     wallet: step 2 bounds CUMULATIVE spend against the settled rollup,
+      //     this bounds CONCURRENT admission against what is still unsettled.
+      //     Neither substitutes for the other.
+      //
+      //     The hold is a flat configured amount, not a price — see
+      //     `DEFAULT_BUDGET_HOLD_USD`. It is released in the `finally` below.
+      const holdUsd = budgetHoldUsdFromEnv(env);
+      for (const [index, charge] of budgetCharges.entries()) {
+        const committed = budgetSpend[index];
+        // Unreachable: step 2 threw on any reading that was missing or failed.
+        if (committed === undefined || !committed.ok) continue;
+        const reserved = await limiter.reserveMonthlyBudget(
+          charge.counterKey,
+          committed.committedSpendUsd,
+          charge.limitUsd,
+          holdUsd,
+        );
+        if (reserved.outcome === "unavailable") {
+          // A counter outage has not proven the caller is over budget: 503.
+          const refusal = RATE_LIMIT_REFUSALS.governance_counter_unavailable;
+          throw new HttpError(refusal.status, refusal.code, refusal.message(reserved.detail));
+        }
+        if (reserved.outcome === "insufficient") {
+          const refusal = RATE_LIMIT_REFUSALS.monthly_budget_exceeded;
+          throw new HttpError(refusal.status, refusal.code, refusal.message());
+        }
+        if (reserved.outcome === "reserved") holds.push(reserved.reservation);
+      }
+
       // 3b. THE NO-OVERSELL GUARD — `@ferrogate/storage`'s `D1WalletStore`
       //     three-statement atomic batch, whose predicate lives INSIDE the
       //     INSERT. Step 3 above is a read and cannot bound a race; this can,

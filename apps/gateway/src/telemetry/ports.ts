@@ -13,6 +13,7 @@
  *
  * This module is the vocabulary; `./emit.ts` is the send.
  */
+import type { GenAiInvocation } from "@ferrogate/observability";
 
 /**
  * The service binding shape — `apps/telemetry`'s Worker, reachable without
@@ -65,6 +66,16 @@ export interface GatewayTelemetryBindings {
    * matching `CloudflareBackend`'s default `ALL_SIGNALS`.
    */
   readonly TELEMETRY_SIGNALS?: string | undefined;
+  /**
+   * #669 — which attribute vocabulary the spans and metrics carry:
+   * `dual` (DEFAULT, `ferrogate.*` + `gen_ai.*`), `genai` (`gen_ai.*` only,
+   * plus the semconv `{operation} {model}` span name), or `ferrogate` (exactly
+   * the pre-#669 wire). Absent, blank or unrecognised ⇒ `dual`, so an upgrade
+   * that touches no config keeps every existing dashboard working and gains the
+   * OTel half. See `@ferrogate/observability`'s `TelemetryAttributeProfile` for
+   * why the default is the WIDE one rather than the narrow one.
+   */
+  readonly TELEMETRY_ATTRIBUTE_PROFILE?: string | undefined;
   readonly [binding: string]: unknown;
 }
 
@@ -116,6 +127,23 @@ export interface RequestTelemetry {
    * than trusting one.
    */
   readonly tenantId?: string | undefined;
+  /**
+   * #669 — the OTel GenAI facts for this request, when it reached a model.
+   *
+   * ABSENT for the 25 non-inference operations, and that absence is load
+   * bearing: `gen_ai.operation.name` and `gen_ai.request.model` are REQUIRED
+   * attributes, so a `/v1/tools` span carrying them as empty strings would
+   * create a permanent empty series in every model-grouped panel downstream.
+   *
+   * This is the one place the "no free-form attribute bag" rule above is bent,
+   * and it is bent into a CLOSED shape (`GenAiInvocation` names its fields), so
+   * it is still not somewhere a caller can put a prompt or a user id.
+   *
+   * Populated by `./genai.ts` from what the inference handler observed — see
+   * that module for why the carriage needs a `WeakMap` and what a STREAMED
+   * request does (and does not) end up carrying.
+   */
+  readonly genai?: GenAiInvocation | undefined;
 }
 
 /**

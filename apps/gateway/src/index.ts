@@ -5,7 +5,7 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 254
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 255
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
@@ -27,8 +27,18 @@ import {
   createMeteringUsageSink,
   meteringBindingsFromEnv,
   meteringDrain,
+  routePriceSettledCostUsd,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
+import {
+  consumeRequestLogBatch,
+  createRequestLogSink,
+  requestLogBindingsFromEnv,
+  requestLogDatabaseFrom,
+  requestLogging,
+  sweepRequestLogs,
+} from "./requestlog/index.js";
+import type { RequestLogMessageBatch } from "./requestlog/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
 import { tenantDatabase } from "./tenancy/index.js";
@@ -53,8 +63,57 @@ import { tenantDatabase } from "./tenancy/index.js";
  *
  * With a resolver configured the sink does not drain itself — see
  * `GATEWAY_MIDDLEWARE` below.
+ *
+ * ## `settledCostUsd` and `diagnostics` — the #663 wiring
+ *
+ * Both slots used to be empty here, and the two omissions compounded into a
+ * SILENT loss: a served, billable request against a model absent from
+ * `PriceBook.withDefaultRateCard()` (11 hard-coded entries, no `("*","*")`
+ * wildcard) failed closed in `charge()`, wrote nothing anywhere, and — because
+ * no `diagnostics` were supplied — logged nothing either. It was found on the
+ * live account, not by a test.
+ *
+ * - `settledCostUsd: routePriceSettledCostUsd` carries the SERVED route's own
+ *   `[[models]].input_price_per_1m` / `output_price_per_1m` into settlement, so
+ *   an operator who priced a model on its registry row gets that model billed
+ *   at those prices instead of refused. Those numbers were already parsed and,
+ *   until now, read only by cost-based routing.
+ * - `diagnostics.onPriceNotFound` makes what is left of the refusal LOUD. It is
+ *   the last resort — no card rule and no row price — and it is exactly the
+ *   condition an operator must act on, so it goes to the Worker log with the
+ *   request id, provider and model in it.
  */
-const usage = createMeteringUsageSink({ bindings: meteringBindingsFromEnv });
+const usage = createMeteringUsageSink({
+  bindings: meteringBindingsFromEnv,
+  settledCostUsd: routePriceSettledCostUsd,
+  diagnostics: {
+    onPriceNotFound: ({ requestId, provider, providerModel, message }) => {
+      // `console.warn` is the Worker's `tracing::warn!`: it reaches
+      // `wrangler tail` and the Logpush sink. The usage itself is NOT lost —
+      // `MeteringUsageSink` persists a cost-less `billing_events` row for it —
+      // so this line names the model to price rather than announcing a
+      // dropped request.
+      console.warn(
+        `[ferrogate] billing: no price for provider '${provider}' model '${providerModel}' ` +
+          `(request ${requestId}); usage recorded with a null cost_usd. ${message}`,
+      );
+    },
+  },
+});
+
+/**
+ * The durable request-log sink (#664) — one evidence row per decision.
+ *
+ * Module scope, and a binding RESOLVER rather than bindings, for the same
+ * reason `usage` above is: the middleware is built once and Worker bindings are
+ * per request, and workerd refuses I/O started on behalf of a different
+ * request, so a captured `env` is a correctness bug that only shows up under
+ * concurrency. `requestLogBindingsFromEnv` reads `env.REQUEST_LOG` (the Queue
+ * producer) and `env.CONTROL_DB` (the CONTROL database that owns
+ * `request_logs` — NOT the tenant `DB`, whose migration has no such table) off
+ * whichever request is being served.
+ */
+const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
@@ -188,7 +247,7 @@ export const GATEWAY_MIDDLEWARE = [
   // layer in: `meteringDrain` returns the same `Response` object it received,
   // so the status this emitter records is the client's.
   //
-  // `src/inference/route-module.ts` ALSO emits, so the six inference
+  // `src/inference/route-module.ts` ALSO emits, so the seven inference
   // operations pass through two emitters; `emitRequestTelemetry` de-duplicates
   // on the inbound `Request` object, so they still produce exactly one span
   // and one metric point. Mounting here is what widens the coverage from those
@@ -197,6 +256,20 @@ export const GATEWAY_MIDDLEWARE = [
   // Inert until `TELEMETRY_TOKEN` is set (a secret, never a committed var):
   // `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a no-op.
   requestTelemetry(),
+  // #664 — the per-decision evidence row, on `ctx.waitUntil`.
+  //
+  // THIRD, and specifically AHEAD of `rateLimit()` and `guardrails()`: it
+  // wraps `await next()`, so everything below it is inside its window and the
+  // responses those two SHORT-CIRCUIT with (429 `rate_limited`, 403
+  // `guardrail_*`) are recorded. Mounting it below either would delete from the
+  // trail exactly the refusals an incident review and an audit are looking for
+  // — an evidence surface that only records the requests that succeeded is the
+  // same lie, one layer down, as the one this issue closes.
+  //
+  // Behind `meteringDrain` and `requestTelemetry` because money outranks
+  // evidence for outermost position and nothing is lost by sitting two layers
+  // in: both return the same `Response` object they received.
+  requestLogging(requestLogs),
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),
@@ -279,6 +352,44 @@ export async function gatewayScheduled(
   ctx: { waitUntil(work: Promise<unknown>): void },
 ): Promise<void> {
   await usage.sweep({ env, ctx });
+  await gatewayRequestLogRetention(env);
+}
+
+/**
+ * The request-log retention sweep (#664), on the same Cron tick.
+ *
+ * `@ferrogate/storage`'s `retention.ts` has said for two waves that its
+ * planners are ported and tested and that *nothing ever CALLED a planner*, so
+ * `request_logs` grows without bound in a deployed environment — a library
+ * package has no entry module and therefore no `[triggers] crons` to hang a
+ * schedule on. This is that call site.
+ *
+ * Never throws: `sweepRequestLogs` swallows its own failures, and a retention
+ * outage must not take the billing-outbox sweep down with it. With neither
+ * `REQUEST_LOG_RETENTION_DAYS` nor `REQUEST_LOG_RETENTION_POLICIES` set it
+ * resolves zero scopes and touches nothing, because keeping evidence is the
+ * only safe default.
+ */
+async function gatewayRequestLogRetention(env: unknown): Promise<void> {
+  const db = requestLogDatabaseFrom(env);
+  if (db === undefined) return;
+  await sweepRequestLogs(db, env, Math.floor(Date.now() / 1000));
+}
+
+/**
+ * The `[[queues.consumers]]` handler — request-log messages become D1 rows.
+ *
+ * Exposed here and re-exported through `src/worker.ts` for the same reason
+ * `gatewayScheduled` is: workerd only dispatches a queue event to a handler
+ * found on the ENTRY module's DEFAULT export, so a named export alone would be
+ * silently accepted as a service entrypoint and the queue would fill and
+ * dead-letter with nothing consuming it.
+ */
+export async function gatewayQueue(
+  batch: RequestLogMessageBatch,
+  env: unknown,
+): Promise<void> {
+  await consumeRequestLogBatch(batch, env);
 }
 
 export { createGatewayApp, GatewayRouter } from "./routes/index.js";

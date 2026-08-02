@@ -81,10 +81,34 @@ class AdminConsoleWorkflowTests(unittest.TestCase):
             ],
         )
 
-    def test_release_ci_calls_the_admin_console_workflow(self) -> None:
+    def test_admin_console_is_checked_without_being_fanned_out_from_ci(self) -> None:
+        """The console is gated by its OWN path-filtered workflow, not by `ci.yml`.
+
+        This test used to assert the opposite — that `ci.yml` contained
+        `uses: ./.github/workflows/admin-console.yml` and listed `admin-console`
+        as a needed job. That was true of the Rust release gate, which was an
+        aggregate fanning out to a dozen sub-workflows on `release: published`.
+
+        That aggregate was deleted: it called twelve `rust-*.yml` files removed
+        with the Rust tree, and branch protection required an aggregate job it
+        could never report. The replacement `ci.yml` is a single job running on
+        every push and pull request, and it deliberately fans out to nothing.
+
+        So the assertion is inverted rather than deleted. What must stay true is
+        the PROPERTY the original test was protecting — that a change to
+        `admin-console/` is checked by something — and that is now the console
+        workflow's own `push`/`pull_request` path filters, which
+        `test_triggers_on_admin_console_changes` already pins. Asserting the
+        absence here keeps the two workflows from being re-coupled by accident.
+        """
         text = CI_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("uses: ./.github/workflows/admin-console.yml", text)
-        self.assertIn("      - admin-console", text)
+        self.assertNotIn(
+            "uses: ./.github/workflows/",
+            text,
+            "ci.yml is a single job on purpose; re-introducing a fan-out revives "
+            "the aggregate-job shape whose required status could never be reported",
+        )
+        self.assertIn("name: ci", text)
 
 
 if __name__ == "__main__":

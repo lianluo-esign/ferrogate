@@ -22,6 +22,7 @@ import { type CounterWindow, assertNamespacedCounterKey } from "./keys.js";
 import type { RateLimitOutcome, RateLimiter, ReservationOutcome, TokenAdmission } from "./ports.js";
 import {
   RequestWindow,
+  SpendLedger,
   TokenBudgetLedger,
   TokenWindow,
   WalletLedger,
@@ -33,6 +34,7 @@ interface Entry {
   readonly tpm: TokenWindow;
   readonly tokenBudget: TokenBudgetLedger;
   readonly wallet: WalletLedger;
+  readonly monthlyBudget: SpendLedger;
 }
 
 export interface InMemoryRateLimiterOptions {
@@ -58,6 +60,7 @@ export class InMemoryRateLimiter implements RateLimiter {
         tpm: new TokenWindow(),
         tokenBudget: new TokenBudgetLedger(),
         wallet: new WalletLedger(),
+        monthlyBudget: new SpendLedger(),
       };
       this.#entries.set(counterKey, entry);
     }
@@ -123,6 +126,23 @@ export class InMemoryRateLimiter implements RateLimiter {
       reservation: releaseOnce(estimatedTokens, async () =>
         entry.tokenBudget.release(estimatedTokens),
       ),
+    };
+  }
+
+  async reserveMonthlyBudget(
+    counterKey: string,
+    committedUsd: number,
+    budgetUsd: number,
+    estimatedUsd: number,
+  ): Promise<ReservationOutcome> {
+    if (estimatedUsd <= 0) return { outcome: "not_applicable" };
+    const entry = this.#entry(counterKey);
+    if (!entry.monthlyBudget.tryReserve(committedUsd, budgetUsd, estimatedUsd)) {
+      return { outcome: "insufficient" };
+    }
+    return {
+      outcome: "reserved",
+      reservation: releaseOnce(estimatedUsd, async () => entry.monthlyBudget.release(estimatedUsd)),
     };
   }
 

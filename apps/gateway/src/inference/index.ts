@@ -1,9 +1,9 @@
 /**
- * `apps/gateway` inference surface — the six OpenAPI operations in the
+ * `apps/gateway` inference surface — the seven OpenAPI operations in the
  * `inference` route group of `docs/openapi/runtime-api-contract.json`:
  *
  *   listModels · createChatCompletion · createResponse · createMessage ·
- *   createEmbedding · createImage
+ *   countMessageTokens · createEmbedding · createImage
  *
  * Mount it from the app shell as a contract-driven `RouteModule`:
  *

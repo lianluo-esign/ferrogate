@@ -184,15 +184,14 @@ FG_DEV_A2A_GUARDRAILS = ""
 # ---------------------------------------------------------------------------
 
 # ===========================================================================
-# DURABLE OBJECTS — the SHARED admission counter (wave 16, finding D1)
+# DURABLE OBJECTS — the SHARED admission counter (wave 16 finding D1; #666)
 #
-# WRITTEN OUT AND COMMENTED for the same measured harness reason as the D1
-# stanzas above. UNCOMMENT AT DEPLOY TIME.
-#
-#   [[durable_objects.bindings]]
-#   name = "RATE_LIMIT"
-#   class_name = "RateLimiterDurableObject"
-#   script_name = "ferrogate-gateway"
+# LIVE. It was committed COMMENTED OUT from wave 16 until issue #666, with
+# "UNCOMMENT AT DEPLOY TIME" written above it — which made the COMMITTED tree
+# the broken configuration. A credential capped at 60 rpm was charged 60 here,
+# 60 more on `apps/gateway` and 60 more per `apps/mcp` isolate, and a deploy
+# that forgot the two lines said nothing. See the harness note below the stanza
+# for why it can now be live.
 #
 # Read as `env.RATE_LIMIT` by `src/admission/counter.ts::counterFromEnv`. NOT a
 # class this script defines: `script_name` names `apps/gateway`'s deployed
@@ -202,34 +201,45 @@ FG_DEV_A2A_GUARDRAILS = ""
 # `/v1/agent-jobs`. A `RateLimiterDurableObject` defined HERE would compile,
 # deploy and pass every test while creating a SECOND, independent namespace,
 # handing this Worker its own full RPM quota: a quieter version of the very
-# bypass this wave closes.
+# bypass wave 16 closed.
 #
-# NO `[[migrations]]` entry belongs to it, now or when uncommented. A migration
-# INTRODUCES a class; this class is introduced by `apps/gateway/wrangler.toml`
-# (`new_sqlite_classes = ["RateLimiterDurableObject"]`). Claiming to define a
-# class this script does not export is rejected at deploy. Same reason there is
-# no `src/worker.ts` re-export line. DEPLOY `ferrogate-gateway` FIRST — a
-# `script_name` binding to a script that does not exist yet fails.
+# NO `[[migrations]]` entry belongs to it. A migration INTRODUCES a class; this
+# class is introduced by `apps/gateway/wrangler.toml` (`new_sqlite_classes =
+# ["RateLimiterDurableObject"]`). Claiming to define a class this script does
+# not export is rejected at deploy. Same reason there is no `src/worker.ts`
+# re-export line. DEPLOY `ferrogate-gateway` FIRST — a `script_name` binding to
+# a script that does not exist yet FAILS THE DEPLOY, which is the point: that
+# refusal is the deploy-time assertion the old comment could never be.
+# ===========================================================================
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+script_name = "ferrogate-gateway"
+
+# ---------------------------------------------------------------------------
+# HOW THE OFFLINE HARNESS RESOLVES THE LINE ABOVE
 #
-# WHY COMMENTED — measured 2026-08-01. `vitest.config.ts` loads this file
-# through `wrangler: { configPath }`, and neither
-# `@cloudflare/vitest-pool-workers` nor `wrangler dev --local` can resolve a
-# cross-script DO binding; workerd refuses to START:
+# The measured reason this stanza was commented (2026-08-01) was real: a bare
+# `@cloudflare/vitest-pool-workers` session refuses to start with
 #
 #   binding "RATE_LIMIT" refers to a service "core:user:ferrogate-gateway",
 #   but no such service is defined.
 #
-# Committed uncommented that is 0 tests / 23 collection errors on a correct
-# tree and no "Ready on" from `wrangler dev --local`. The seam is therefore
-# DEPLOY-ONLY (`docs/rewrite/MOUNT-SEAMS.md` §1).
+# The reading that was WRONG is "workerd cannot resolve a cross-script binding
+# offline". It cannot resolve it against a script that is not in the SESSION —
+# `vitest.config.ts` now puts one there, an auxiliary worker named
+# `ferrogate-gateway` carrying the gateway's real `RateLimiterDurableObject`
+# (`apps/gateway/test/support/rate-limit-aux-worker.ts`). So the binding is
+# live, the suite is green, and `test/shared-rate-limit.test.ts` charges a
+# window as the gateway and requires THIS Worker to find it spent.
 #
-# WHILE COMMENTED, `counterFromEnv` falls back to `InMemoryRequestCounter`:
-# correct arithmetic, per-isolate blast radius. The quota-scope chain, the
-# monthly USD budget and the prepaid-wallet no-oversell hold remain enforced
-# and durable — four of five legs shared, one degraded, versus none of five
-# enforced before. `test/env-var-drift.test.ts` pins `RATE_LIMIT` as
-# read-but-undeclared so it cannot be forgotten.
-# ===========================================================================
+# `wrangler dev --local` on this app alone boots too (wrangler >=4.114 reports
+# the binding as `[not connected]` rather than refusing), so `e2e/` and the
+# boot proof are unaffected. To exercise the counter locally, put the gateway
+# in the same dev session:
+#
+#   bunx wrangler dev --local -c wrangler.toml -c ../gateway/wrangler.toml
+# ---------------------------------------------------------------------------
 
 # TODO(bindings): configure per this app's inventory before first deploy.
 # Do NOT commit real resource IDs — these are placeholders only.

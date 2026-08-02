@@ -384,6 +384,49 @@ describe("the ladder runs in Rust's order, and the order is the control", () => 
     expect(outcome.error).toMatchObject({ status: 429, code: "monthly_budget_exceeded" });
     expect(counter.charged).toHaveLength(0);
   });
+
+  it("#679 refuses when an ANCESTOR budget is spent, even though the key's is not", async () => {
+    // The nested-budget defect, on the MCP admission ladder: the project is
+    // allowed $5,000 and this key $100, so the chain's `min` is $100 at the KEY
+    // scope. Enforcing only that winner reads the key's rollup (which is empty)
+    // and admits — while the project, whose sibling keys have already spent the
+    // whole $5,000, is never looked at.
+    const budget = (scopeType: "project" | "key", scopeId: string, usd: number) => ({
+      id: `${scopeType}:${scopeId}`,
+      scopeType,
+      scopeId,
+      modelAllowlist: [],
+      monthlyBudgetUsd: usd,
+      alertThresholdPcts: [],
+      enabled: true,
+      createdAtUnix: 0,
+      updatedAtUnix: 0,
+    });
+    const counter = limiter();
+    const gate = new McpAdmissionGate({
+      limiter: counter,
+      quotas: quotas({
+        ok: true,
+        lookup: (kind) => {
+          if (kind === "project") return budget("project", "proj-1", 5_000);
+          if (kind === "key") return budget("key", "key-1", 100);
+          return undefined;
+        },
+      }),
+      spendFor: spendFor(
+        spend({
+          async committedSpendUsd(scopeKind): Promise<MonthlySpendReading> {
+            // The project is at its cap; this key has spent nothing.
+            return { ok: true, committedSpendUsd: scopeKind === "project" ? 5_000 : 0 };
+          },
+        }),
+      ),
+    });
+    const outcome = await gate.admit(IDENTITY, "req-1");
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatchObject({ status: 429, code: "monthly_budget_exceeded" });
+  });
 });
 
 describe("counter keys are scope-namespaced, which is a tenant-isolation boundary", () => {

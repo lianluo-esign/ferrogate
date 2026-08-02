@@ -368,7 +368,16 @@ describe("metering through the composed gateway — streaming", () => {
 });
 
 describe("metering through the composed gateway — fail closed", () => {
-  it("bills NOTHING for a model with no rate-card rule", async () => {
+  /**
+   * CHANGED FOR #663. The old assertions (`ledger.size === 0`, zero credits)
+   * are all still here and still correct — nothing may be BILLED for a model
+   * nothing can price. What they did not say, and what let the defect hide, is
+   * what happens to the USAGE: this test passed identically whether the sink
+   * kept a recoverable record of the request or forgot it completely, and the
+   * shipped behaviour was the second one. The `ledger.events` assertion below
+   * is the observation that distinguishes them.
+   */
+  it("bills NOTHING for a model with no rate-card rule, but records the usage", async () => {
     provider = interceptProviderFetch(() =>
       providerJson({
         id: "chatcmpl-1",
@@ -404,10 +413,18 @@ describe("metering through the composed gateway — fail closed", () => {
     expect(response.status).toBe(200);
     await scheduler.idle();
 
+    // Nothing billed — #129, unchanged.
     expect(ledger.size).toBe(0);
     expect((await ledger.totals()).credits).toBe(0n);
     expect(sink.stats.priceNotFound).toBe(1);
     expect(sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
+
+    // …and the usage is still on record, with a null cost (#663).
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.events[0]?.event.provider_model).toBe("unpriced-model-9000");
+    expect(ledger.events[0]?.event.cost_usd).toBeUndefined();
+    expect(ledger.events[0]?.event.usage.total_tokens).toBe(200);
+    expect(sink.stats.unpricedRecorded).toBe(1);
   });
 });
 

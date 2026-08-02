@@ -110,6 +110,43 @@ binding = "PROMPT_LABELS"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ---------------------------------------------------------------------------
+# R2: the tamper-evidence ANCHOR bucket (#684)
+# ---------------------------------------------------------------------------
+#
+# `src/audit/anchor.ts` publishes each audit chain's head — `(chain_key,
+# head_seq, head_hash, row_count)`, a few hundred bytes — to this bucket on
+# every cron tick. `audit_events` rows are hash-chained in `DB`, which makes an
+# edit or a mid-trail deletion detectable from an export alone; it does NOT
+# catch a TAIL deletion or a wholesale re-forge, because both leave a perfect
+# chain. Comparing the trail against a head published OUTSIDE the database is
+# what catches those, so this binding is the half of the feature that a
+# database operator cannot quietly undo.
+#
+# ABSENT IS A SUPPORTED, DEGRADED POSTURE, not a crash: with no bucket bound the
+# tick reports `audit_anchor: "unconfigured"` and the deployment keeps the chain
+# but loses truncation detection. It is a WARN rather than a boot failure
+# because refusing to serve the control plane over a missing evidence bucket
+# would take the whole admin surface down for a compliance feature.
+#
+# TWO DEPLOYMENT NOTES THIS CODE CANNOT ENFORCE, both in
+# `docs/audit-tamper-evidence.md`:
+#
+#   1. Turn on R2 OBJECT LOCK / a retention policy for this bucket. The job
+#      never overwrites an anchor it has already written, so anchors are
+#      append-only from this Worker — but a principal holding R2 credentials can
+#      still delete one. Only a bucket-level retention rule closes that, and
+#      only the account owner can set it.
+#   2. Prefer an account (or at least credentials) SEPARATE from the one that
+#      owns the D1 database. An anchor is worth exactly as much as the
+#      difficulty of forging it and the database in the same breath.
+#
+# `bucket_name` is a documented PLACEHOLDER — the deploy step substitutes the
+# account's real bucket. R2 names are lowercase alphanumerics and hyphens.
+[[r2_buckets]]
+binding = "AUDIT_ANCHORS"
+bucket_name = "replace-at-deploy-ferrogate-audit-anchors"
+
+# ---------------------------------------------------------------------------
 # ENTERPRISE IDENTITY (wave 18) — the deploy-time secrets, as PLACEHOLDERS
 # ---------------------------------------------------------------------------
 #

@@ -571,6 +571,20 @@ export interface ControlPlaneBindings {
    * why both `wrangler.toml`s say so where an operator will read it.
    */
   readonly PROMPT_LABELS?: KVNamespace;
+  /**
+   * The audit-anchor bucket (`[[r2_buckets]] binding = "AUDIT_ANCHORS"`) — the
+   * tamper-evidence half that does not live in the database (#684).
+   *
+   * `src/audit/anchor.ts` writes one small object per audit chain per new head,
+   * and never overwrites one. OPTIONAL, and absent is a supported degraded
+   * posture: the hash chain still detects an edited or mid-trail-deleted row
+   * from an export alone, but a TAIL deletion and a wholesale re-forge both
+   * leave a perfect chain and are only caught by comparing against a head
+   * published outside the database. The scheduled tick reports
+   * `audit_anchor: "unconfigured"` so the gap is visible in a tail log rather
+   * than silent.
+   */
+  readonly AUDIT_ANCHORS?: R2Bucket;
 }
 
 /** Per-request context values set by the middleware chain. */

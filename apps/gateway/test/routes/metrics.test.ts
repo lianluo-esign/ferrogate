@@ -13,7 +13,7 @@
  * > exposing them means a gateway-side `/metrics` or an Analytics Engine query
  * > binding.*
  *
- * This file is the gateway-side `/metrics`. `getMetrics` is one of the 254
+ * This file is the gateway-side `/metrics`. `getMetrics` is one of the 255
  * contract operations (`visibility: internal`, `auth.kind: bearer`,
  * `auth.scope: admin.read`), so mounting it puts it behind the SAME guard Rust
  * put it behind — `handle_metrics` opens with an auth check, and
