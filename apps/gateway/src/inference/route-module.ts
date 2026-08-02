@@ -31,6 +31,7 @@
  */
 import type { Context, Hono } from "hono";
 import { attributionDefaultsFor } from "../attribution/index.js";
+import { publishShadowEvalLeg, shadowEvalRetentionRequested } from "../evals/shadow-leg.js";
 import type { GatewayEnv } from "../ports.js";
 import {
   admitTokensPerMinute,
@@ -239,6 +240,18 @@ function publishRequestScope(c: Context<GatewayEnv>): void {
     // the gate did not touch, which is every request under a deployment that
     // configured no policy.
     attributionDefaults: attributionDefaultsFor(request),
+    // #693 — the shadow arm's eval leg, and its RETENTION GATE, in one
+    // expression. `onlineEvaluation()` runs earlier in the same chain and marks
+    // this `Request` only when its capture plan cleared opt-in, ZDR, criteria
+    // and the sample bucket; without that mark the key is absent from the
+    // scope, `handlers.ts` attaches no retainer, and the mirrored response is
+    // discarded exactly as it was before #693's quality half existed.
+    //
+    // Spelled as a conditional SPREAD rather than an `undefined`-valued key so
+    // an ungated deployment cannot satisfy an `in` check on the scope.
+    ...(shadowEvalRetentionRequested(request)
+      ? { scoreShadowLeg: (leg) => publishShadowEvalLeg(request, leg) }
+      : {}),
   });
 }
 

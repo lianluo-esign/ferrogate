@@ -120,10 +120,37 @@ export interface ShadowMirror {
    * and nobody the measurement could be reported to.
    */
   readonly observation?: ShadowMirrorObservationContext | undefined;
+  /**
+   * #693 (quality half) — hand the mirrored response body BACK, so the online
+   * evaluation sampler can score the arm no client was served.
+   *
+   * Attached by `handlers.ts::withShadowObservation` and ONLY when the sampler
+   * has already cleared this exchange for content capture
+   * (`evals/shadow-leg.ts` states the gate). Absent is the normal case and
+   * means the response is read for its token counts and discarded exactly as it
+   * always was.
+   *
+   * It is the resolver of a promise the sampler already holds, so it is
+   * IDEMPOTENT — a second call after the first is a no-op — which is what lets
+   * {@link runShadowMirror} guarantee settlement from a `finally` without
+   * having to know whether the success path already settled it.
+   */
+  readonly retain?: ((body: string | undefined) => void) | undefined;
 }
 
 /** The identity half of a shadow leg's evidence row. See {@link ShadowMirror}. */
 export interface ShadowMirrorObservationContext {
+  /**
+   * `{clientRequestId}~shadow`, computed ONCE by
+   * `handlers.ts::withShadowObservation`.
+   *
+   * DERIVED rather than random so a retried mirror overwrites its own row
+   * instead of inflating the arm's sample — and it is the id the shadow arm's
+   * eval SCORE is filed under too, so a leg's cost, latency and quality all
+   * join on one key. Carried here rather than re-derived by each consumer
+   * because two derivations of one id are two chances to disagree about it.
+   */
+  readonly legId: string;
   readonly experimentId: string;
   /** The id the CLIENT was told, which is what makes the two arms a PAIR. */
   readonly clientRequestId: string;
@@ -328,6 +355,14 @@ export function spawnShadowMirror(
  * a rejected `waitUntil` promise is a logged Worker exception on a request that
  * otherwise succeeded.
  *
+ * ALWAYS SETTLES `mirror.retain` (#693). The outer `finally` calls it with
+ * `undefined`, which is a no-op once the success path has already settled it
+ * with the body. That guarantee is load-bearing rather than tidy:
+ * `evals/middleware.ts` AWAITS the promise this resolver belongs to, from
+ * inside `ctx.waitUntil`, so a path that returned without settling would hold
+ * the isolate open until the platform killed it — on every mirrored request
+ * that took that path.
+ *
  * Exported so the budget/dispatch behaviour is directly assertable, but the
  * request path only ever reaches it through {@link spawnShadowMirror}.
  */
@@ -353,9 +388,8 @@ export async function runShadowMirror(
     if (observation === undefined) return;
     try {
       await deps.experiments.observeShadowLeg({
-        // DERIVED from the client's request id, never random: a retried mirror
-        // must overwrite its own row rather than inflate the arm's sample.
-        legId: `${observation.clientRequestId}~shadow`,
+        // Computed once, on the request path — see the field's own docs.
+        legId: observation.legId,
         clientRequestId: observation.clientRequestId,
         experimentId: observation.experimentId,
         tenantId: observation.tenantId,
@@ -435,9 +469,24 @@ export async function runShadowMirror(
     // discarded: nothing here is returned, metered, or billed.
     const text = await readBoundedProviderBody(response, deps.limits.providerResponseMaxBytes);
 
-    // #693 — the only thing now taken from that body, and it is a COUNT rather
-    // than content. The arm's evidence row carries tokens and a cost; no prompt
-    // and no completion text leaves this function, exactly as
+    // #693 (quality half) — HAND THE BODY BACK, and only on a 200.
+    //
+    // A non-200 mirror has no answer for a judge to score, and scoring error
+    // envelopes would drag the arm's mean down whenever the mirrored provider
+    // had a bad hour — turning a reliability problem into a fake quality
+    // regression. That is the SAME rule
+    // `evals/middleware.ts::evaluableResponse` applies to the served arm,
+    // applied here rather than paralleled there because this is the only place
+    // the mirror's status exists. The failure is NOT lost: the leg row below
+    // records it, so the arm's error rate is unaffected by this.
+    //
+    // `retain` is absent unless the sampler asked for it, so on all other
+    // traffic the only thing that still leaves this body is token COUNTS.
+    if (response.status === 200) mirror.retain?.(text);
+
+    // The one thing taken from that body for the leg row, and it is a COUNT
+    // rather than content. The evidence row carries tokens and a cost; no
+    // prompt and no completion text is stored, exactly as
     // `0009_online_eval.sql` refuses to store either.
     await record({ statusCode: response.status, usage: shadowUsageFrom(mirror, text) });
   } catch {
@@ -446,6 +495,11 @@ export async function runShadowMirror(
     // looks healthier than the arm it is being compared against, which is the
     // direction that promotes a bad variant.
     await record({ errorCode: "provider_dispatch_error" });
+  } finally {
+    // #693 — SETTLE, whatever happened. Idempotent: a no-op once the success
+    // path above resolved it with the body. See this function's docblock for
+    // why an unsettled promise here would hold the isolate open.
+    mirror.retain?.(undefined);
   }
 }
 

@@ -104,7 +104,12 @@ import {
   observeGenAiInvocation,
 } from "../telemetry/genai.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
-import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import type {
+  InferenceLogFacts,
+  InferenceShadowEvalLeg,
+  TokenAdmissionHandle,
+  TokenGovernor,
+} from "./identity.js";
 import { describeModel } from "./model-metadata.js";
 import type { ModelDescriptor } from "./model-metadata.js";
 import { expandPromptReference } from "./prompt-reference.js";
@@ -194,6 +199,17 @@ export interface InferenceEnv {
      * defaulted, which is the normal case.
      */
     inferenceAttributionDefaults: Readonly<Record<string, string>>;
+    /**
+     * #693 — where a spawned shadow mirror is published so the online-eval
+     * sampler can score the arm no client was served, bound to the OUTER
+     * request (see `./identity.ts`).
+     *
+     * `undefined` for every request the sampler did NOT clear for content
+     * capture, and that absence IS the retention gate: without it
+     * {@link withShadowObservation} attaches no retainer and the mirrored
+     * response is discarded exactly as it always was.
+     */
+    inferenceShadowEval: ((leg: InferenceShadowEvalLeg) => void) | undefined;
 
     /**
      * replaces `c.req.raw`.
@@ -876,6 +892,21 @@ function planUpstream(
  *    carries no tenancy at all), so there is nobody the measurement could be
  *    reported to. This is the same `null`-tenancy arm `evals/middleware.ts`
  *    refuses to build a sample on.
+ *
+ * ## The QUALITY half — retaining the mirrored response so it can be SCORED
+ *
+ * `c.get("inferenceShadowEval")` is present ONLY when the online-evaluation
+ * sampler has already cleared this exchange for content capture; see
+ * `evals/shadow-leg.ts` for the whole gate and for why it is a request FROM the
+ * sampler rather than a decision taken here. When it is present this attaches a
+ * `retain` resolver to the mirror and publishes the pending body, which is what
+ * lets the sampler derive the shadow arm's eval sample from the SERVED sample —
+ * same judge, same criteria, same prompt, by value rather than by coincidence.
+ *
+ * When it is absent nothing about the mirror is retained anywhere. That is the
+ * behaviour for a tenant that did not opt in, for a ZERO-DATA-RETENTION tenant,
+ * and for every request the sampler did not select — i.e. for almost all of
+ * them.
  */
 function withShadowObservation(
   c: InferenceContext,
@@ -887,16 +918,46 @@ function withShadowObservation(
   if (assignment === undefined || caller.scope.kind !== "tenant") {
     return mirror;
   }
-  return {
+  const clientRequestId = c.get("requestId");
+  // DERIVED from the client's request id, never random, and computed ONCE here
+  // rather than once per consumer: a retried mirror must overwrite its own leg
+  // row instead of inflating the arm's sample, and the shadow arm's SCORE is
+  // filed under this same id so it cannot collide with the served arm's score
+  // for the same request (`online_eval_scores` is keyed by request + criterion).
+  const legId = `${clientRequestId}~shadow`;
+  const observed: ShadowMirror = {
     ...mirror,
     observation: {
+      legId,
       experimentId: assignment.experimentId,
-      clientRequestId: c.get("requestId"),
+      clientRequestId,
       tenantId: caller.scope.tenantId,
       ...(caller.projectId === undefined ? {} : { projectId: caller.projectId }),
       ...(caller.apiKeyId === undefined ? {} : { apiKeyId: caller.apiKeyId }),
     },
   };
+
+  const publish = c.get("inferenceShadowEval");
+  if (publish === undefined) return observed;
+
+  let settle: ((body: string | undefined) => void) | undefined;
+  const body = new Promise<string | undefined>((resolve) => {
+    settle = resolve;
+  });
+  publish({
+    legId,
+    experimentId: assignment.experimentId,
+    logicalModel: mirror.logicalModel,
+    // The MIRROR's identity. A sample carrying the primary's provider under the
+    // shadow label would be an arm measured with the other arm's facts.
+    provider: mirror.route.provider,
+    providerModel: mirror.route.providerModel,
+    body,
+  });
+  // The executor above runs synchronously, so `settle` is assigned by the time
+  // this line is reached; the fallback keeps the expression total rather than
+  // asserting it away with `!`.
+  return { ...observed, retain: settle ?? ((): void => undefined) };
 }
 
 /**
@@ -1651,6 +1712,9 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
     c.set("inferenceLog", scope?.log ?? noInferenceLog);
     c.set("inferenceAttributionDefaults", scope?.attributionDefaults ?? NO_ATTRIBUTION_DEFAULTS);
+    // #693 — `undefined` unless the online-eval sampler asked for this request's
+    // mirror to be retained. See `InferenceRequestScope.scoreShadowLeg`.
+    c.set("inferenceShadowEval", scope?.scoreShadowLeg);
 
     // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
     // provider credential for the platform one before anything is planned.

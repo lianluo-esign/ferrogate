@@ -73,6 +73,7 @@ import {
   onlineEvalSamplingDecision,
 } from "./policy.js";
 import type { OnlineEvalSample } from "./record.js";
+import { requestShadowEvalRetention, shadowArmSampleFrom, shadowEvalLegFor } from "./shadow-leg.js";
 import type { OnlineEvalSink } from "./sink.js";
 import {
   type OnlineEvalBindings,
@@ -229,6 +230,53 @@ export function onlineEvalSampleFrom(input: {
   };
 }
 
+/**
+ * #693 — enqueue the SHADOW arm's sample beside the served arm's, when this
+ * request had a mirror.
+ *
+ * A no-op for the overwhelming majority of requests: no mirror was spawned, so
+ * `shadowEvalLegFor` answers `undefined` and this costs one `WeakMap` lookup.
+ *
+ * ## Why this awaits the mirror
+ *
+ * `spawnShadowMirror` is fire-and-forget, so the mirrored dispatch is normally
+ * still in flight when the client's response is flushed. The wait happens
+ * INSIDE the sampler's own `ctx.waitUntil` block — the same window the mirror
+ * itself lives in — so no client byte is behind it and the isolate is already
+ * being kept alive for the mirror regardless.
+ *
+ * The wait is bounded by the mirror, not by a second timer here: `shadow.ts`
+ * dispatches under `dispatchDeadline(deps.limits.dispatchTimeoutMs)` and
+ * resolves `leg.body` from a `finally`, so `leg.body` always settles. A timeout
+ * of this module's own would be a second, differently-configured deadline for
+ * one operation.
+ *
+ * ## Why the sample is derived rather than built
+ *
+ * See `./shadow-leg.ts`: the served sample IS the instrument, and copying it is
+ * what makes "same judge, same criterion" a fact about the values rather than a
+ * property two independent resolutions happen to share.
+ */
+async function enqueueShadowArmSample(
+  c: Context<GatewayEnv>,
+  sink: OnlineEvalSink,
+  served: OnlineEvalSample,
+): Promise<void> {
+  const leg = shadowEvalLegFor(c.req.raw);
+  if (leg === undefined) return;
+  const shadow = shadowArmSampleFrom(served, leg, await leg.body);
+  if (shadow === undefined) {
+    // DISTINCT from `content_not_extractable`, which is about the served
+    // response. This one says "a mirror ran and produced nothing a judge could
+    // be shown" — a shadow arm reported without a quality number, which an
+    // operator staring at `variant_arm_not_scored` needs to be able to tell
+    // apart from "no mirror ran at all".
+    sink.skip("shadow_arm_not_evaluable");
+    return;
+  }
+  await sink.enqueue(shadow, { env: c.env });
+}
+
 /** Mount the sampler. See the module docblock for the position and the rules. */
 export function onlineEvaluation(
   sink: OnlineEvalSink,
@@ -278,6 +326,15 @@ export function onlineEvaluation(
         if (plan.decision?.sampled === true) {
           plannedDecision = { samplingKey: plan.decision.samplingKey, rate: plan.decision.rate };
         }
+        // #693 — THE RETENTION GATE for the shadow arm. A mirror's response is
+        // discarded by design, so it may only be held long enough to build a
+        // sample once THIS plan has cleared opt-in, ZDR, criteria and the
+        // bucket. Asking here, inside the same branch that authorises cloning
+        // the client's own body, is what makes the shadow arm inherit every one
+        // of those refusals instead of re-deciding them: a tenant that must not
+        // be sampled is never shadow-SCORED either, and nothing about the
+        // mirror is retained for it. See `./shadow-leg.ts`.
+        requestShadowEvalRetention(c.req.raw);
         try {
           // Cloning tees the body stream; it reads nothing and awaits nothing.
           // A failure here (an already-disturbed body) costs the sample, never
@@ -389,6 +446,12 @@ export function onlineEvaluation(
             return;
           }
           await sink.enqueue(sample, { env: c.env });
+          // #693 — and the SHADOW arm of the same exchange, if this request had
+          // a mirror and the mirror answered. Strictly after the served sample:
+          // an arm that has no control to be compared against is not worth
+          // spending a judge call on, and enqueuing it first would let a queue
+          // failure on the served sample leave an orphan shadow population.
+          await enqueueShadowArmSample(c, sink, sample);
         } catch {
           // The response has already been served. Nothing here may surface.
         }

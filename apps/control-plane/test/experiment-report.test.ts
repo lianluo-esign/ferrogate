@@ -181,6 +181,18 @@ async function seedScores(options: {
   judgeModel?: string;
   criterionId?: string;
   tenant?: string;
+  /**
+   * The `request_id` these scores are filed under.
+   *
+   * The shadow arm's rows are filed under the LEG id — `{clientRequestId}~shadow`
+   * — because `online_eval_scores` is keyed by `(request_id, criterion_id)` and
+   * a shadow score filed under the client's own id would OVERWRITE the served
+   * arm's score for the same criterion. `apps/gateway/src/evals/shadow-leg.ts`
+   * derives it, and `apps/gateway/test/experiments/shadow-scored.test.ts` holds
+   * the derivation end to end; this parameter is what lets the fixtures here
+   * carry the same shape the writer really produces.
+   */
+  requestIdFor?: (index: number) => string;
 }): Promise<void> {
   const judgeModel = options.judgeModel ?? "judge-a";
   const criterionId = options.criterionId ?? "helpfulness";
@@ -196,7 +208,8 @@ async function seedScores(options: {
            VALUES (?, ?, ?, ?, 'request', 1, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          `score-${options.arm}-${judgeModel}-${criterionId}-${index}`,
+          options.requestIdFor?.(index) ??
+            `score-${options.arm}-${judgeModel}-${criterionId}-${index}`,
           criterionId,
           options.tenant ?? TENANT,
           `sk-${index}`,
@@ -396,6 +409,125 @@ describe("the quality half REFUSES rather than reporting a plausible number", ()
     expect(cell?.difference).toBeCloseTo(0.2, 6);
     expect(cell?.judge_model).toBe("judge-a");
     expect(cell?.criterion_id).toBe("helpfulness");
+  });
+});
+
+/**
+ * THE SHADOW ARM'S QUALITY NUMBER (#693, second cut).
+ *
+ * Until the gateway could score the mirrored response, a control+shadow
+ * experiment came back with `comparisons: []` and one
+ * `variant_arm_not_scored` cell — every operational number and no answer to
+ * "was the variant better", which is the only question a shadow experiment
+ * exists to ask. The rows below are the shape
+ * `apps/gateway/src/evals/shadow-leg.ts` really writes: filed under the LEG id,
+ * carrying `experiment_arm = 'shadow'`, and — this is the part that makes the
+ * comparison legitimate — carrying the SAME judge and the SAME criterion as the
+ * control arm, because the sampler derives the shadow sample from the served
+ * one rather than resolving a policy a second time.
+ */
+describe("the SHADOW arm is comparable, under exactly the same rule as the canary", () => {
+  beforeEach(async () => {
+    await seedServedArm({
+      arm: "control",
+      count: 200,
+      latencyMs: 100,
+      costUsdEach: 0,
+      prefix: "ctl",
+    });
+    await seedShadowLegs({ count: 200, latencyMs: 120, costUsdEach: 0.001 });
+  });
+
+  it("compares a scored shadow arm against the control and reaches a verdict", async () => {
+    await seedScores({ arm: "control", count: 100, mean: 0.6, spread: 0.05 });
+    await seedScores({
+      arm: "shadow",
+      count: 100,
+      mean: 0.8,
+      spread: 0.05,
+      // Filed under the leg id the gateway derives, exactly as the writer does.
+      requestIdFor: (index) => `shadow-${index}~shadow`,
+    });
+
+    // NO `?variant=`: with only a control and a shadow observed there is one
+    // variant, and the report picks it rather than refusing.
+    const body = await report("?since=0");
+    expect(body.variant_arm).toBe("shadow");
+
+    // THE ASSERTION THIS BLOCK EXISTS FOR — a real verdict where the surface
+    // could previously only answer "variant_arm_not_scored".
+    expect(body.quality.incomparable).toHaveLength(0);
+    expect(body.quality.comparisons).toHaveLength(1);
+    const cell = body.quality.comparisons[0];
+    expect(cell?.verdict).toBe("variant_better");
+    expect(cell?.variant.arm).toBe("shadow");
+    expect(cell?.difference).toBeCloseTo(0.2, 6);
+    expect(cell?.judge_model).toBe("judge-a");
+    expect(cell?.criterion_id).toBe("helpfulness");
+
+    // And the operational half is still the shadow arm's: nobody was served it
+    // and nobody was billed for it.
+    const shadowArm = body.arms.find((entry) => entry.arm === "shadow");
+    expect(shadowArm?.delivered).toBe(false);
+    expect(shadowArm?.charged_to).toBe("operator");
+  });
+
+  it("still REFUSES a shadow arm scored by a different judge", async () => {
+    await seedScores({ arm: "control", count: 100, mean: 0.6, spread: 0.05 });
+    await seedScores({
+      arm: "shadow",
+      count: 100,
+      mean: 0.8,
+      spread: 0.05,
+      judgeModel: "judge-b",
+      requestIdFor: (index) => `shadow-${index}~shadow`,
+    });
+
+    const body = await report("?since=0");
+    // The shadow path acquired no looser rule of its own. A naive report would
+    // say "shadow +0.20", which measures the difference between two JUDGES.
+    expect(body.quality.comparisons).toHaveLength(0);
+    expect(body.quality.judge_mismatch).toBe(true);
+    expect(body.quality.incomparable.map((cell) => cell.reason).sort()).toEqual([
+      "control_arm_not_scored",
+      "variant_arm_not_scored",
+    ]);
+    expect(JSON.stringify(body.quality)).not.toContain("difference");
+  });
+
+  it("still REFUSES a shadow arm scored under a different criterion", async () => {
+    await seedScores({ arm: "control", count: 100, mean: 0.6, spread: 0.05 });
+    await seedScores({
+      arm: "shadow",
+      count: 100,
+      mean: 0.8,
+      spread: 0.05,
+      criterionId: "helpfulnes",
+      requestIdFor: (index) => `shadow-${index}~shadow`,
+    });
+
+    const body = await report("?since=0");
+    expect(body.quality.comparisons).toHaveLength(0);
+    expect(body.quality.criterion_mismatch).toBe(true);
+    expect(JSON.stringify(body.quality)).not.toContain("difference");
+  });
+
+  it("still reports NO MEAN when the shadow arm is below the sample floor", async () => {
+    await seedScores({ arm: "control", count: 100, mean: 0.6, spread: 0.05 });
+    await seedScores({
+      arm: "shadow",
+      count: 2,
+      mean: 0.95,
+      spread: 0.01,
+      requestIdFor: (index) => `shadow-${index}~shadow`,
+    });
+
+    const body = await report("?since=0");
+    const cell = body.quality.comparisons[0];
+    expect(cell?.verdict).toBe("insufficient_samples");
+    expect(cell?.variant.count).toBe(2);
+    expect(cell?.variant.mean).toBeUndefined();
+    expect(cell?.difference).toBeUndefined();
   });
 });
 

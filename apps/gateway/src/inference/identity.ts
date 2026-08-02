@@ -220,6 +220,44 @@ export interface InferenceRequestScope {
    * caller's `metadata` exactly as it arrived.
    */
   readonly attributionDefaults?: Readonly<Record<string, string>> | undefined;
+  /**
+   * #693 — where this app publishes the SHADOW mirror it spawned, so the
+   * online-evaluation sampler can score the arm no client was served.
+   *
+   * It travels on the scope for exactly the reason {@link log} does: the
+   * sampler runs on the OUTER app and `inner.fetch` opens a fresh Hono context,
+   * so nothing this app sets on its own `c` is visible to it. A callback rather
+   * than an import keeps the dependency pointing outward — `src/evals/` knows
+   * about inference, and inference knows only that someone wants to be told.
+   *
+   * **ABSENT is the retention gate.** `route-module.ts` supplies it only when
+   * `evals/shadow-leg.ts::shadowEvalRetentionRequested` says the sampler has
+   * already cleared this exchange for content capture (opted in, not ZDR,
+   * criteria present, in the sample). For every other request the mirror is
+   * dispatched, read for its token counts and discarded exactly as before, with
+   * nothing retained anywhere.
+   */
+  readonly scoreShadowLeg?: ((leg: InferenceShadowEvalLeg) => void) | undefined;
+}
+
+/**
+ * The mirrored dispatch as the inference path publishes it (#693).
+ *
+ * Structurally a subset of `src/evals/shadow-leg.ts::ShadowEvalLeg` and
+ * declared separately for the reason {@link InferenceLogFacts} gives: this
+ * module must not import the evaluation slice, and the compiler still checks
+ * that the two agree at the one place they meet, `route-module.ts`.
+ */
+export interface InferenceShadowEvalLeg {
+  /** `{clientRequestId}~shadow` — the id the leg and its score are filed under. */
+  readonly legId: string;
+  readonly experimentId: string;
+  readonly logicalModel: string;
+  /** The MIRROR's provider, never the served route's. */
+  readonly provider: string;
+  readonly providerModel: string;
+  /** The mirrored body, or `undefined`. NEVER rejects; ALWAYS settles. */
+  readonly body: Promise<string | undefined>;
 }
 
 /**
