@@ -126,8 +126,10 @@ export interface SiteDomainCertificatePort {
  * `unconfigured` is deliberately its own value and not `not_provisioned`. "We
  * did not look" and "we looked and there is nothing there" send an operator to
  * different places, and a deployment that provisions its custom hostnames out
- * of band (or through Workers Custom Domains, which has no per-hostname row to
- * read) is in the first state permanently and correctly.
+ * of band (or through Workers Custom Domains, whose per-hostname certificate
+ * state lives behind a DIFFERENT API this module does not read — see
+ * `packages/cloudflare/src/custom-hostnames.ts`) is in the first state
+ * permanently and correctly.
  */
 export class UnconfiguredSiteDomainCertificates implements SiteDomainCertificatePort {
   readonly backendName = "unconfigured";
@@ -147,36 +149,24 @@ export class UnconfiguredSiteDomainCertificates implements SiteDomainCertificate
  * The real one: Cloudflare for SaaS custom hostnames on the fallback-origin
  * zone, read through `@ferrogate/cloudflare`'s `CustomHostnamesClient`.
  *
- * A lookup FAILURE is `unavailable`, never `not_provisioned`. Folding a 5xx or
- * an expired token into "no certificate exists" would tell an operator to
- * re-provision a hostname that is already live — the same fail-visible rule
- * `site_domain_txt.ts` applies to a DNS resolver that cannot answer, and for the
- * same reason.
+ * A lookup FAILURE is `unavailable`, never `not_provisioned` — see
+ * {@link readCertificate}, which is where that rule now lives for BOTH backends.
+ * Folding a 5xx or an expired token into "no certificate exists" would tell an
+ * operator to re-provision a hostname that is already live — the same
+ * fail-visible rule `site_domain_txt.ts` applies to a DNS resolver that cannot
+ * answer, and for the same reason.
  */
 export class CloudflareForSaasCertificates implements SiteDomainCertificatePort {
   readonly backendName = "cloudflare_for_saas";
 
   constructor(private readonly hostnames: CustomHostnamesClient) {}
 
-  async certificateFor(hostname: string): Promise<SiteDomainCertificate> {
-    let row: CustomHostname | null;
-    try {
-      row = await this.hostnames.findCustomHostname(hostname);
-    } catch (error) {
-      return {
-        status: "unavailable",
-        backend: this.backendName,
-        detail: error instanceof Error ? error.message : String(error),
-      };
-    }
-    if (row === null) {
-      return {
-        status: "not_provisioned",
-        backend: this.backendName,
-        detail: `no Cloudflare custom hostname exists for ${hostname} on the configured zone`,
-      };
-    }
-    return fromCustomHostname(row, this.backendName);
+  certificateFor(hostname: string): Promise<SiteDomainCertificate> {
+    return readCertificate(
+      this.backendName,
+      () => this.hostnames.findCustomHostname(hostname),
+      `no Cloudflare custom hostname exists for ${hostname} on the configured zone`,
+    );
   }
 }
 
@@ -207,24 +197,65 @@ export class StaticSiteDomainCertificates implements SiteDomainCertificatePort {
     this.#parseError = parsed.error;
   }
 
-  async certificateFor(hostname: string): Promise<SiteDomainCertificate> {
-    if (this.#rows === null) {
-      return {
-        status: "unavailable",
-        backend: this.backendName,
-        detail: `SITE_DOMAIN_CERTIFICATE_RECORDS could not be read: ${this.#parseError}`,
-      };
-    }
-    const row = this.#rows.get(hostname);
-    if (row === undefined) {
-      return {
-        status: "not_provisioned",
-        backend: this.backendName,
-        detail: `no certificate record is configured for ${hostname}`,
-      };
-    }
-    return fromCustomHostname(row, this.backendName);
+  certificateFor(hostname: string): Promise<SiteDomainCertificate> {
+    return readCertificate(
+      this.backendName,
+      async () => {
+        // A document this backend could not parse is a lookup that cannot
+        // ANSWER, not one that answered "nothing here" — so it is raised, and
+        // {@link readCertificate} applies the one rule that turns that into
+        // `unavailable`. Returning `null` here would silently reclassify an
+        // operator's typo as "your certificate does not exist".
+        if (this.#rows === null) {
+          throw new Error(`SITE_DOMAIN_CERTIFICATE_RECORDS could not be read: ${this.#parseError}`);
+        }
+        return this.#rows.get(hostname) ?? null;
+      },
+      `no certificate record is configured for ${hostname}`,
+    );
   }
+}
+
+/**
+ * The three "not-a-yes" answers, decided ONCE for every backend.
+ *
+ * This used to be written out separately in each backend, and the copies were
+ * the risk: `unavailable` vs `not_provisioned` is the distinction the module
+ * docblock argues is load-bearing ("we could not look" sends an operator to
+ * retry, "we looked and there is nothing there" sends them to provision), and
+ * two spellings of a rule that subtle is how the two answers drift apart —
+ * exactly the way that pins the states on whichever backend the tests happen to
+ * construct rather than on the one that answers in production.
+ *
+ *  - the lookup THREW → `unavailable`, carrying the failure's own message. The
+ *    state is UNKNOWN and is deliberately not folded either way.
+ *  - the lookup returned `null` → `not_provisioned`, with the backend's own
+ *    sentence about where it looked.
+ *  - a row → `@ferrogate/cloudflare`'s fold, which is the only thing that may
+ *    ever answer `active`.
+ */
+async function readCertificate(
+  backend: string,
+  lookup: () => Promise<CustomHostname | null>,
+  absentDetail: string,
+): Promise<SiteDomainCertificate> {
+  let row: CustomHostname | null;
+  try {
+    row = await lookup();
+  } catch (error) {
+    return {
+      status: "unavailable",
+      backend,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  // Deliberately OUTSIDE the try: the fold is this module's own code, and a bug
+  // in it must surface as a 500 rather than be reported to an operator as a
+  // Cloudflare outage.
+  if (row === null) {
+    return { status: "not_provisioned", backend, detail: absentDetail };
+  }
+  return fromCustomHostname(row, backend);
 }
 
 function parseRows(document: string | undefined): {

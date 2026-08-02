@@ -1,3 +1,4 @@
+import { SELF, env } from "cloudflare:test";
 /**
  * #738, the second "Done when" bullet: `GET /admin/v1/site-domains/{hostname}`
  * must surface a CERTIFICATE STATUS.
@@ -9,16 +10,34 @@
  * could say so. "It does not work" and "it does not work YET, publish this TXT
  * record" are different sentences.
  *
- * These tests drive the real Worker over `SELF.fetch` with the DETERMINISTIC
+ * Most of these drive the real Worker over `SELF.fetch` with the DETERMINISTIC
  * certificate backend, whose input is Cloudflare's own `custom_hostnames` result
  * shape and whose fold is the one `@ferrogate/cloudflare` uses for the live
- * backend. So what is proved here is the SURFACING and the STATE DISTINCTIONS.
+ * backend. So what is proved there is the SURFACING and the STATE DISTINCTIONS.
+ *
+ * The last block drives `CloudflareForSaasCertificates` — the backend that
+ * answers in PRODUCTION — directly, over a scripted HTTP transport. Every state
+ * the deterministic backend pins is pinned on a class that is not the live one,
+ * so without this block the live backend's own answers would rest on nothing.
+ *
  * What is not proved — because `workerd` under vitest has no TLS terminator, no
- * zone and no certificate authority — is that Cloudflare answers this way. See
+ * zone and no certificate authority — is that Cloudflare really answers with
+ * these payloads. What IS proved is what this code does with them. See
  * `src/site_domain_certificates.ts`.
  */
-import { SELF, env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import {
+  CloudflareClient,
+  CustomHostnamesClient,
+  EnvTokenResolver,
+  type HttpRequest,
+  type HttpResponse,
+  type HttpTransport,
+} from "@ferrogate/cloudflare";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CloudflareForSaasCertificates,
+  StaticSiteDomainCertificates,
+} from "../src/site_domain_certificates.js";
 import { BASE, arm, bearer, jsonRequest, tenantKey } from "./harness.js";
 
 const HOST = "docs.acme.test";
@@ -204,6 +223,39 @@ describe("the certificate lookup is fenced by tenancy", () => {
     expect(body.certificate_status).toBeUndefined();
     expect(body.certificate).toBeUndefined();
   });
+
+  it("the backend is never CALLED on the 404 — the row is resolved first", async () => {
+    // `src/routes/site_domain.ts` states this ordering as a security property:
+    // a tenant that cannot see the binding must not make this Worker perform a
+    // certificate lookup at all. An absent field in the body cannot hold that —
+    // a lookup whose result is then discarded produces the identical response
+    // and the identical body. Only a CALL COUNT can fail on it, so here is one.
+    //
+    // The spy is installed on the class the Worker itself constructs
+    // (`resolveSiteDomainCertificates` under `SITE_DOMAIN_CERTIFICATES=static`),
+    // and `SELF.fetch` dispatches into this isolate, so what is counted is the
+    // real route's real calls and not a stand-in's.
+    certificates({ [HOST]: row("active", "active") });
+    await bind(A, HOST);
+    const lookups = vi.spyOn(StaticSiteDomainCertificates.prototype, "certificateFor");
+
+    try {
+      const forbidden = await read(B, HOST);
+      expect(forbidden.status).toBe(404);
+      expect(lookups.mock.calls.map(([hostname]) => hostname)).toEqual([]);
+
+      // And the counter is LIVE, not a spy that was never wired up: the owner's
+      // own read of the same hostname goes through it exactly once. Without
+      // this half, deleting the lookup entirely would leave the assertion above
+      // green.
+      const owner = await read(A, HOST);
+      expect(owner.status).toBe(200);
+      expect(owner.body.certificate_status).toBe("active");
+      expect(lookups.mock.calls.map(([hostname]) => hostname)).toEqual([HOST]);
+    } finally {
+      lookups.mockRestore();
+    }
+  });
 });
 
 describe("the LIST operation is deliberately unchanged", () => {
@@ -218,5 +270,140 @@ describe("the LIST operation is deliberately unchanged", () => {
     const body = (await response.json()) as CertificateBody;
     expect(body.data?.length).toBe(1);
     expect(body.data?.[0]?.certificate_status).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The backend that answers in PRODUCTION, driven directly.
+// ---------------------------------------------------------------------------
+
+/**
+ * A `HttpTransport` that never touches a network, in the shape
+ * `packages/cloudflare`'s own `ScriptedTransport` uses: it records every
+ * request and answers (or throws) from a supplied function. Declared here
+ * rather than imported because `@ferrogate/cloudflare` exports only `./src`,
+ * and reaching into another workspace's `test/` directory across a package
+ * boundary is worse than eight lines.
+ */
+class StubTransport implements HttpTransport {
+  readonly requests: HttpRequest[] = [];
+
+  constructor(private readonly answer: (request: HttpRequest) => HttpResponse) {}
+
+  async execute(request: HttpRequest): Promise<HttpResponse> {
+    this.requests.push(request);
+    return this.answer(request);
+  }
+}
+
+/** No real sleeping: the client retries a GET, and the schedule is not on trial here. */
+const INSTANT_CLOCK = { sleep: async (): Promise<void> => undefined };
+
+/** A Cloudflare `success: true` envelope carrying `result`. */
+function envelope(result: unknown): HttpResponse {
+  return {
+    status: 200,
+    body: JSON.stringify({ success: true, errors: [], messages: [], result }),
+  };
+}
+
+/** The LIVE backend over a scripted transport — a real client, no network. */
+function liveBackend(transport: StubTransport): CloudflareForSaasCertificates {
+  return new CloudflareForSaasCertificates(
+    new CustomHostnamesClient(
+      new CloudflareClient({
+        config: { accountId: "acct_placeholder", tokenReference: "inline-placeholder-token" },
+        resolver: new EnvTokenResolver({}),
+        transport,
+        clock: INSTANT_CLOCK,
+      }),
+      "zoneplaceholder0000000000000000",
+    ),
+  );
+}
+
+describe("CloudflareForSaasCertificates — the backend that answers in production", () => {
+  it("names itself, so a reading is traceable to the backend that produced it", async () => {
+    const backend = liveBackend(new StubTransport(() => envelope([])));
+    expect(backend.backendName).toBe("cloudflare_for_saas");
+    expect((await backend.certificateFor(HOST)).backend).toBe("cloudflare_for_saas");
+  });
+
+  it("a lookup that FAILS is `unavailable`, never `not_provisioned`", async () => {
+    // The distinction this class's docblock argues is load-bearing, asserted on
+    // the class itself. `not_provisioned` tells an operator to provision a
+    // hostname that may already be live and serving; an expired token or a
+    // Cloudflare 5xx must never produce that sentence.
+    const transport = new StubTransport(() => {
+      throw new Error("connect ECONNREFUSED api.cloudflare.com");
+    });
+
+    const reading = await liveBackend(transport).certificateFor(HOST);
+    expect(reading.status).toBe("unavailable");
+    expect(reading.status).not.toBe("not_provisioned");
+    // The operator is told WHY, not merely that something went wrong.
+    expect(reading.detail ?? "").toContain("ECONNREFUSED");
+    expect(transport.requests.length).toBeGreaterThan(0);
+  });
+
+  it("a 5xx from Cloudflare is `unavailable` too, not an absent certificate", async () => {
+    const transport = new StubTransport(() => ({
+      status: 503,
+      body: JSON.stringify({ success: false, errors: [{ code: 1000, message: "boom" }] }),
+    }));
+
+    const reading = await liveBackend(transport).certificateFor(HOST);
+    expect(reading.status).toBe("unavailable");
+    expect(reading.status).not.toBe("not_provisioned");
+  });
+
+  it("a zone with NO row for the hostname is `not_provisioned`", async () => {
+    // The other side of the same distinction: Cloudflare answered, and the
+    // answer is that nothing is there. That IS actionable — provision it.
+    const transport = new StubTransport(() => envelope([]));
+
+    const reading = await liveBackend(transport).certificateFor(HOST);
+    expect(reading.status).toBe("not_provisioned");
+    expect(reading.status).not.toBe("unavailable");
+    expect(reading.detail ?? "").toContain(HOST);
+    // One GET, on the zone's custom-hostname collection, filtered by hostname.
+    expect(transport.requests.length).toBe(1);
+    expect(transport.requests[0]?.method).toBe("GET");
+    expect(transport.requests[0]?.url).toContain(
+      "/zones/zoneplaceholder0000000000000000/custom_hostnames",
+    );
+    expect(transport.requests[0]?.url).toContain(`hostname=${HOST}`);
+  });
+
+  it("a row Cloudflare returns is folded — and `active` survives the round trip", async () => {
+    const transport = new StubTransport(() =>
+      envelope([{ id: "ch-1", hostname: HOST, status: "active", ssl: { status: "active" } }]),
+    );
+
+    const reading = await liveBackend(transport).certificateFor(HOST);
+    expect(reading.status).toBe("active");
+    expect(reading.hostnameStatus).toBe("active");
+    expect(reading.sslStatus).toBe("active");
+  });
+
+  it("a PARTIAL-match row is not this hostname's certificate", async () => {
+    // Cloudflare's `?hostname=` filter is a CONTAINS match. Reporting the first
+    // row of a filtered page would attribute `docs.acme.test.attacker.test`'s
+    // certificate to `docs.acme.test` — a live `active` for a name we hold no
+    // proof over. The absence must read as `not_provisioned`, not as `active`.
+    const transport = new StubTransport(() =>
+      envelope([
+        {
+          id: "ch-9",
+          hostname: `${HOST}.attacker.test`,
+          status: "active",
+          ssl: { status: "active" },
+        },
+      ]),
+    );
+
+    const reading = await liveBackend(transport).certificateFor(HOST);
+    expect(reading.status).toBe("not_provisioned");
+    expect(reading.status).not.toBe("active");
   });
 });
