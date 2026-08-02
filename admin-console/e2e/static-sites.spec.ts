@@ -36,7 +36,12 @@ import {
   test,
 } from "./support/ui-contract";
 
-const GATEWAY_ORIGIN = "http://localhost:8080";
+// The "open site" links the console renders resolve against its OWN origin
+// since #696 (`new URL(servePath, CONTROL_PLANE_BASE_URL)`), so the expected
+// href is the Playwright web server's origin — `playwright.config.ts`
+// `baseURL`, restated here because Playwright exposes it only through the
+// fixture and these are module-level constants.
+const GATEWAY_ORIGIN = "http://127.0.0.1:4173";
 
 function isGatewayRequest(request: Request, method: string, pathname: string): boolean {
   return request.method() === method && new URL(request.url()).pathname === pathname;

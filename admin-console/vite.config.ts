@@ -37,6 +37,32 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    /**
+     * The dev server IS the origin the console talks to (#696).
+     *
+     * `src/lib/config.ts` resolves `window.location.origin`, because the
+     * control plane refuses cross-site mutations on `sec-fetch-site` and
+     * preflights only `/admin/` — a console on a second origin cannot log in,
+     * let alone write. Production gets that by serving the built console from
+     * the control-plane Worker as static assets; local dev gets it here, by
+     * proxying the four API prefixes to a `wrangler dev` on 8787.
+     *
+     * The prefixes mirror `[assets] run_worker_first` in
+     * `apps/control-plane/wrangler.toml` — the same "these paths belong to the
+     * Worker, everything else is the SPA" split, one layer up. Playwright drives
+     * this same server (`playwright.config.ts` runs `npm run dev`), and its
+     * specs intercept requests before they reach the proxy, so an unreachable
+     * target does not affect them.
+     */
+    proxy: Object.fromEntries(
+      ["/admin/v1", "/control/v1", "/v1/admin", "/scim/v2"].map((prefix) => [
+        prefix,
+        {
+          target: process.env.VITE_CONTROL_PLANE_PROXY_TARGET ?? "http://127.0.0.1:8787",
+          changeOrigin: false,
+        },
+      ]),
+    ),
   },
   test: {
     // `e2e/support/*.test.ts` are NOT browser specs: they are unit tests over the

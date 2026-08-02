@@ -39,7 +39,11 @@ interface AdminApiOptions {
   partialOverview?: boolean;
 }
 
-const ADMIN_API_PATTERN = "http://localhost:8080/admin/v1/**";
+// Origin-RELATIVE (#696): the console now calls its own origin, which is the
+// Playwright web server (127.0.0.1:4173), not the Rust-era `localhost:8080`.
+// A `**/` prefix matches whichever origin serves the page, so this pattern
+// does not have to be kept in step with `playwright.config.ts`.
+const ADMIN_API_PATTERN = "**/admin/v1/**";
 const SESSION_KEY = "ferrogate-admin-session";
 
 const projects: AdminProject[] = Array.from({ length: 52 }, (_, index) => {

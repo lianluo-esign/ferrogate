@@ -55,7 +55,8 @@ test.describe("public auth routes", () => {
   });
 
   test("login server errors are announced and focused", async ({ page }) => {
-    await page.route("http://localhost:8081/v1/admin/login", (route) =>
+    // Origin-relative since #696: the console session surface is same-origin.
+    await page.route("**/v1/admin/login", (route) =>
       route.fulfill({
         status: 401,
         contentType: "application/json",

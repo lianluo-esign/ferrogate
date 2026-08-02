@@ -34,26 +34,32 @@ import { type GroupModule, type Handler, crudGroup, json, raw } from "./resource
 import { registerSelfHostedWorkerHandler } from "./self_hosted_worker.js";
 
 /**
- * The admin console shell.
+ * The admin console SIGNPOST — not the console itself.
  *
- * PORT-TODO(P: inventory-edge-control §4) — KEPT, sharpened. This is NOT a platform
- * limit: Workers Assets and Pages both serve a built SPA perfectly well, and the
- * three anonymous routes below are already the right mount point for one. It is
- * a **product sequencing decision** — `docs/rewrite/PORT-PLAN.md` lists
- * `admin-console` as "rebuilt later (console = lowest priority)", behind the core
- * and the CLI — so the console BUNDLE does not exist yet in this rewrite and
- * there is nothing to serve.
+ * PORT-TODO(P: inventory-edge-control §4) — KEPT, narrowed by #696. The console
+ * is no longer unserved: `wrangler.toml` now carries an `[assets]` block that
+ * serves `admin-console/`'s build output from THIS Worker, so the SPA lives at
+ * `/` and its client-side routes (`/app/**`, `/login`) are answered by the
+ * asset router's single-page-application fallback. Same origin is a
+ * requirement, not a convenience — `adminCrossSiteRejection` and the `/admin/`-
+ * only CORS preflight make a cross-origin console unable to write or even log
+ * in; that file's docblock has the argument.
  *
- * What is implemented is the honest minimum, and the honesty is the point: a
- * valid HTML document that states which API it fronts and sends the reader to
- * `GET /admin/v1/status`. It deliberately ships **no script tag and no bundle
- * reference**, because a shell that loaded a non-existent bundle would answer
- * `200` with a blank page — an operator would read that as "the console is
- * broken" rather than "the console is not built yet". `test/auth.test.ts` pins
- * both halves of that approximation (a real document, and no script).
+ * What is NOT resolved is these three paths. `/admin`, `/admin/` and
+ * `/admin/dashboard` are contract operations (the contract's only `anonymous`
+ * ones) with a documented `text/html` response, so they cannot become the SPA
+ * without changing the contract, and they are inside `run_worker_first` so the
+ * asset router never sees them. They therefore stay a self-contained document —
+ * one that now points at `/`, where the console actually is.
  *
- * It closes by pointing these three routes at the built console: an
- * `[assets]` directory on this Worker, or a Pages project fronted by a route.
+ * It deliberately ships **no script tag and no bundle reference**: a shell that
+ * loaded a bundle would answer `200` with a blank page whenever the console had
+ * not been built into `public/`, and an operator reads a blank page as "the
+ * console is broken" rather than "the console is not deployed". `test/auth.test.ts`
+ * pins both halves (a real document, and no script).
+ *
+ * It closes when the contract's dashboard operations are either retired or
+ * redefined to serve the SPA.
  */
 export const ADMIN_DASHBOARD_HTML = `<!doctype html>
 <html lang="en">
@@ -66,6 +72,9 @@ export const ADMIN_DASHBOARD_HTML = `<!doctype html>
 <h1>FerroGate Control Plane</h1>
 <p>Control Plane API <code>/admin/v1</code> (legacy alias <code>/control/v1</code>).</p>
 <p>See <code>GET /admin/v1/status</code> for runtime status.</p>
+<p>The admin console is served from the site root: <a href="/">/</a>. If that
+answers 404, the console has not been built into this Worker's asset directory
+&mdash; run <code>scripts/build-admin-console.sh</code> before deploying.</p>
 </body>
 </html>
 `;

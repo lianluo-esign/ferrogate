@@ -155,22 +155,49 @@ failing threshold by #334 after those defects are fixed.
 
 ## Docker / production
 
+### The supported shape: same origin as the control plane
+
 ```bash
-docker build -t ferrogate-admin-console .
-docker run --rm -p 8081:8080 \
-  -e AUTH_BASE_URL=https://auth.ferrogate.example.com \
-  -e GATEWAY_ADMIN_BASE_URL=https://ferrogate.example.com \
-  ferrogate-admin-console
+scripts/build-admin-console.sh          # from the repo root
+cd apps/control-plane && wrangler deploy
 ```
 
-The dev-server env vars above (`VITE_AUTH_BASE_URL`/`VITE_GATEWAY_ADMIN_BASE_URL`)
-are Vite build-time values, baked into the JS bundle by `npm run build` --
-they can't be changed without a rebuild. The Docker image instead reads plain
-`AUTH_BASE_URL`/`GATEWAY_ADMIN_BASE_URL` container env vars and renders them
-into `/env-config.js` at container start (`render-env-config.sh`, installed
-as an nginx `docker-entrypoint.d/` hook), which `index.html` loads before the
-app bundle and `src/lib/config.ts` prefers over the Vite build-time value.
-This lets the same image serve dev/staging/prod with different backend URLs.
+`scripts/build-admin-console.sh` builds this app into
+`apps/control-plane/public/`, which that Worker serves as Workers Static
+Assets. There is nothing to configure: the console calls the origin it was
+served from.
+
+That is a **correctness requirement**, not a packaging choice. The control
+plane answers `403 cross_site_admin_denied` to any state-changing request
+carrying `sec-fetch-site: cross-site`, and its CORS preflight surface covers
+`/admin/` only -- so a console on a second origin cannot write, and cannot even
+log in (`OPTIONS /v1/admin/login` 404s, so the browser never sends the POST).
+`src/lib/config.ts` carries the full write-up.
+
+### The container image
+
+```bash
+docker build -t ferrogate-admin-console .
+docker run --rm -p 8081:8080 ferrogate-admin-console
+```
+
+The image serves the built SPA from nginx. To be usable it must be fronted by
+something that puts the console and the control plane on ONE origin -- an
+nginx/ingress rule proxying `/admin/v1`, `/control/v1`, `/v1/admin` and
+`/scim/v2` to the control-plane Worker -- for exactly the reasons above.
+
+`CONTROL_PLANE_BASE_URL` is available as a container env var and is rendered
+into `/env-config.js` at container start (`render-env-config.sh`, installed as
+an nginx `docker-entrypoint.d/` hook), which `index.html` loads before the app
+bundle and `src/lib/config.ts` prefers over the Vite build-time value -- the
+runtime hook exists because Vite bakes `import.meta.env.VITE_*` at build time.
+Setting it points the console at an absolute origin, which is an escape hatch
+for debugging and NOT a supported production topology: such a console can read
+and cannot write.
+
+The Rust-era pair `AUTH_BASE_URL`/`GATEWAY_ADMIN_BASE_URL` is gone with the
+services it named (`ferrogate-auth-service` and the gateway's own `/admin/v1`);
+`apps/control-plane` serves both surfaces.
 
 Kubernetes: [`deploy/kubernetes/admin-console.yaml`](../deploy/kubernetes/admin-console.yaml)
 or the optional `adminConsole.*` Helm values in

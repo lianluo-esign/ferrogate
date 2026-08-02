@@ -48,30 +48,31 @@ import {
   gatewayPut,
 } from "@/lib/gateway-client";
 
-/** Every URL `fetch` was called with during one test, resolved absolute. */
-function requestedUrls(spy: ReturnType<typeof vi.spyOn>): string[] {
-  return spy.mock.calls.map((call) => {
-    const input = call[0] as string | URL | Request;
-    const raw =
-      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    // A relative path IS the same-origin answer; resolve it the way the browser
-    // would so the assertion reads one way for both spellings.
-    return new URL(raw, window.location.href).href;
-  });
-}
-
 describe("every control-plane request the console makes is same-origin", () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  /** Absolute URLs `fetch` was called with, in order, for the current test. */
+  let requested: string[];
 
   beforeEach(() => {
-    // Not MSW: the point is the URL, not the response, and a handler would have
-    // to name an origin — which is the thing under test.
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ object: "list", data: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+    // Not MSW: the point is the URL, not the response, and an MSW handler would
+    // have to name an origin — which is the thing under test. Recording into a
+    // local array rather than reading `spy.mock.calls` keeps the subject a
+    // plain `string[]`; `fetch`'s overloaded signature does not survive
+    // `ReturnType<typeof vi.spyOn>` under `tsc -b` (the console's typecheck
+    // gate, src/lib/typecheck.gate.test.ts, fails on it).
+    requested = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const raw =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      // A relative path IS the same-origin answer; resolve it the way the
+      // browser would so the assertion reads one way for both spellings.
+      requested.push(new URL(raw, window.location.href).href);
+      return Promise.resolve(
+        new Response(JSON.stringify({ object: "list", data: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
   });
 
   it("keeps the admin-console SESSION surface (/v1/admin/*) on this origin", async () => {
@@ -85,7 +86,7 @@ describe("every control-plane request the console makes is same-origin", () => {
     await logoutAdminSession("refresh-token");
     await fetchAdminMe("access-token");
 
-    const urls = requestedUrls(fetchSpy);
+    const urls = requested;
     expect(urls).toHaveLength(5);
     for (const url of urls) {
       expect(new URL(url).origin, `${url} is cross-origin`).toBe(window.location.origin);
@@ -107,7 +108,7 @@ describe("every control-plane request the console makes is same-origin", () => {
     await gatewayPatch("key", "/admin/v1/tenant-accounts/t1", { status: "active" });
     await gatewayDelete("key", "/admin/v1/plans/p1");
 
-    const urls = requestedUrls(fetchSpy);
+    const urls = requested;
     expect(urls).toHaveLength(5);
     for (const url of urls) {
       // The four mutating verbs are exactly the ones `adminCrossSiteRejection`
@@ -121,7 +122,7 @@ describe("every control-plane request the console makes is same-origin", () => {
     // `buildUrl` composes the query through `new URL(path, base)`; a base swap
     // is exactly the kind of change that can drop it.
     await gatewayGet("key", "/admin/v1/request-logs", { query: { limit: 25, offset: 50 } });
-    const url = new URL(requestedUrls(fetchSpy)[0] as string);
+    const url = new URL(requested[0] as string);
     expect(url.pathname).toBe("/admin/v1/request-logs");
     expect(url.searchParams.get("limit")).toBe("25");
     expect(url.searchParams.get("offset")).toBe("50");
