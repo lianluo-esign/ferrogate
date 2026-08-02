@@ -586,7 +586,7 @@ impl FerroGateway {
         // per-tenant enforcement switch (default OFF).
         let agent_run_id =
             match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
-                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Proceed(id) => id.filter(|_| false), // MUTATION: asset ingress run id dropped
                 AssetActionIdOutcome::Malformed(message) => {
                     return asset_invalid_action_id(session, ctx, message).await;
                 }
@@ -978,7 +978,7 @@ impl FerroGateway {
         // optional per-tenant enforcement (default OFF).
         let agent_run_id =
             match resolve_asset_action_id(headers, &state, &auth.tenant_context(), "asset") {
-                AssetActionIdOutcome::Proceed(id) => id,
+                AssetActionIdOutcome::Proceed(id) => id.filter(|_| false), // MUTATION: asset ingress run id dropped
                 AssetActionIdOutcome::Malformed(message) => {
                     return asset_invalid_action_id(session, ctx, message).await;
                 }

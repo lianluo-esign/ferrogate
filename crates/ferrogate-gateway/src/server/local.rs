@@ -3204,7 +3204,7 @@ impl FerroGateway {
             &state,
             ctx,
             &auth,
-            agent_run_id.as_deref(),
+            None, // MUTATION: MCP ingress run id dropped
             skill_context.as_ref(),
             original_bearer,
             rpc,
