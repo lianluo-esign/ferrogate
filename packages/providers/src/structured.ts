@@ -185,7 +185,11 @@ export function applyStructuredOutputToAnthropic(
   const name = coercionToolName(structured.name);
   const tools = isArray(body["tools"]) ? [...(body["tools"] as Json[])] : [];
   for (const tool of tools) {
-    if (asStr(getField(tool, "name")) === name) {
+    // Both spellings, because `/v1/responses` reaches this with the caller's
+    // OpenAI-shaped `{"type":"function","function":{"name":…}}` tools in place.
+    const toolName =
+      asStr(getField(tool, "name")) ?? asStr(getField(getField(tool, "function"), "name"));
+    if (toolName === name) {
       throw AdapterError.invalidRequest(
         `structured output cannot be coerced: the request already defines a tool named "${name}"`,
       );
