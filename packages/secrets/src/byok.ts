@@ -435,10 +435,30 @@ export class TenantByokResolver implements SecretResolver {
         `TenantByokResolver cannot resolve a non-byok:// reference: ${describeSecretRef(reference)}`,
       );
     }
-    // THE FENCE: `this.tenantId`, never anything off `reference`.
-    const record = await this.store.lookup(this.tenantId, reference.alias);
+    return (await this.resolveBinding(reference.alias))?.value ?? null;
+  }
+
+  /**
+   * The same resolution, returning the PROVIDER alongside the value.
+   *
+   * The gateway needs both: a credential registered for `openai` must never be
+   * presented to `anthropic`, so the dispatch path has to know which provider an
+   * alias belongs to. Doing it here rather than making the caller issue a second
+   * store read keeps it to ONE lookup and — more importantly — keeps the tenant
+   * fence in ONE place. A caller that fetched the row itself to read `.provider`
+   * would be a second code path that has to remember to scope, which is exactly
+   * how a fence acquires a hole.
+   */
+  async resolveBinding(
+    alias: string,
+  ): Promise<{ readonly provider: string; readonly value: string } | null> {
+    // THE FENCE: `this.tenantId`, never anything off the reference or the request.
+    const record = await this.store.lookup(this.tenantId, alias);
     if (record === null) return null;
-    return openTenantCredential(this.keyring, record);
+    return {
+      provider: record.provider,
+      value: await openTenantCredential(this.keyring, record),
+    };
   }
 }
 

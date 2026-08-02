@@ -15,6 +15,7 @@ import {
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
+import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
 import type { ProviderCircuitNamespace } from "./circuit-do.js";
@@ -415,5 +416,17 @@ export function resolveDeps(
         ? deps.workflowHistory(env)
         : (deps.workflowHistory ?? workflowHistoryFromEnv(env as WorkflowGateBindings)),
     nowUnixSeconds: deps.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    // Per-tenant BYOK (issue #682). Env-resolved like `circuit`, and DEFAULT-ON
+    // in the sense that a deployment with CONTROL_DB and a master key bound gets
+    // it without a switch — `byokPortsFromEnv` returns `null` when either is
+    // absent, so a deployment that has not opted in is byte-for-byte unchanged.
+    // An explicit `null` turns it off even where it could be built, which is
+    // what lets a test pin the pre-#682 behaviour.
+    byok:
+      deps.byok === undefined
+        ? byokPortsFromEnv(env)
+        : typeof deps.byok === "function"
+          ? deps.byok(env)
+          : deps.byok,
   };
 }
