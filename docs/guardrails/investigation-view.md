@@ -74,8 +74,46 @@ match the `GuardrailInvestigationTimeline` schema in the OpenAPI document.
 | **ACTION** | What kind of request and how it ended | `requests[0].{route, status_code, error_code}`; `guardrail_evaluations[0].{protocol, stage}`; top-level `final_outcome` (`blocked` / `failed` / `succeeded` / `decision_only`) |
 | **COST** | Money billed (zero for a pre-provider block) | top-level `total_cost_usd`; `billing_events[]` (empty when the request was blocked before reaching the provider) |
 
-Raw prompt/response content is never stored in the evidence; guardrail findings
-carry only an HMAC fingerprint (`input_fingerprint`) and byte offsets.
+`approvals[]` is always empty on a Workers deployment: there is no approvals
+table in `sql/d1-ts/control/`. The field is present because the response schema
+requires it, not because the reader knows anything about approvals.
+
+## What the evidence stores, and what it deliberately does not (#665)
+
+Raw prompt/response content is **never** stored. A guardrail that blocks a
+prompt for carrying a secret and then keeps that secret in a table every
+`guardrails.evidence.read` holder can list has moved the leak rather than
+stopped it.
+
+Each evaluation carries a keyed, non-reversible `input_fingerprint`
+(`hmac-sha256:<hex>` over the envelope's per-segment content fingerprints), and
+each check carries its detector id, detector version, config digest and a
+`findings[]` array of:
+
+| field | what it answers |
+|---|---|
+| `category` / `severity` | which detector rule fired |
+| `confidence` | how sure the detector was (`0`–`1`, clamped) |
+| `segment_id`, `byte_start`, `byte_end` | where in the request it fired |
+| `redacted_excerpt` | the SHAPE of the match — `[category] segment:start..end ****` |
+
+`redacted_excerpt` is a **reconstruction, not a snippet**: it is built from the
+finding's structure plus a run of `*` as wide as the matched bytes, so it tells
+you "a 20-byte AWS access key at bytes 13..33 of the first user message" without
+telling you which one. `Finding.matched_text` is dropped at
+`apps/gateway/src/guardrails/evidence.ts::sanitizedFindings` and has no column,
+no document field and no wire field to land in — including when an external
+detector volunteers it, which
+`apps/gateway/test/guardrails/evidence-write.test.ts` proves by scripting a
+detector that does.
+
+Storage is `sql/d1-ts/control/0004_guardrail_evaluations.sql`
+(`guardrail_evaluations` + `guardrail_check_evaluations`) in the CONTROL
+database, written by the gateway through the same Queue and the same retention
+window as the request log (`REQUEST_LOG_RETENTION_DAYS` /
+`REQUEST_LOG_RETENTION_POLICIES`). Evidence and traffic logs age out together on
+purpose: an investigation that can only half-answer is the failure this surface
+exists to remove.
 
 ## RBAC: which key can read investigation evidence
 
