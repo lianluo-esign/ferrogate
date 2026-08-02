@@ -24,7 +24,7 @@ name: CI
 
 on:
   push:
-    branches: [main, main-ts]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
