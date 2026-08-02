@@ -18,6 +18,25 @@
  * "the refusal happens after admission has been charged" and "the refusal
  * happens before guardrail screening" — are statements about ORDER, and order
  * is exactly what a test with a hand-rolled middleware list cannot see.
+ *
+ * ## MUTATION LOG — what was broken, and what went red
+ *
+ * FerroGate's dominant defect mode is correct code with a green test that does
+ * not hold it, so each claim below was falsified against the tree before this
+ * file was believed. Every mutation was reverted; `grep MUTATION-678` is empty.
+ *
+ * | mutation (in `src/`)                                        | red |
+ * |-------------------------------------------------------------|-----|
+ * | `source.ts`: drop `AND scope_id = ?` from the tenant lookup   | `binds the tenant, and only ever looks at the tenant scope` (`policy-source.test.ts`) |
+ * | `source.ts`: cache entries keyed `"ANY"` instead of by tenant | `never answers tenant B from tenant A's entry`; `does not let tenant A's REJECT policy refuse tenant B` |
+ * | `middleware.ts`: `keyTagsOf` returns the FIRST key's tags for every later request | `defaults tenant B's request from tenant B's key` — tenant B's charge came back stamped `team: "growth"`, i.e. one tenant's spend attributed to another; and `still refuses when the key declares nothing to default FROM` |
+ * | `handlers.ts`: `attributedMetadata` returns the caller's map only | `fills a missing required tag … and bills it under that value` — the request was served and the charge's `metadata` was `{}` |
+ * | `index.ts`: `attributionTags()` unmounted                     | 9 of the 13 cases here |
+ * | `index.ts`: gate moved BEHIND `guardrails()`                   | `runs BEFORE guardrail screening` (answered `guardrail_blocked`) + the mount gate |
+ * | `index.ts`: gate moved AHEAD of `rateLimit()`                  | `runs AFTER admission` (the second, correctly tagged request was 200 instead of 429) + the mount gate |
+ *
+ * The third row is the one the issue singles out: it is a real cross-tenant
+ * attribution leak, and it is caught by value, not by status code.
  */
 import { env as poolEnv } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
