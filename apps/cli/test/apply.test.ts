@@ -16,6 +16,7 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 import { describe, expect, test } from "vitest";
+import { CliError } from "../src/errors.js";
 import { main } from "../src/index.js";
 import type {
   ApiResponse,
@@ -25,7 +26,6 @@ import type {
   RequestContext,
   RequestSpec,
 } from "../src/ports.js";
-import { CliError } from "../src/errors.js";
 import { createTestRuntime } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -181,7 +181,10 @@ function createStatefulControlPlane(seed: Partial<StatefulState> = {}): Stateful
         if (stored !== undefined) stored.status = "archived";
         const policy = state.guardrailPolicies.get(policyId);
         if (policy !== undefined) policy.active_revision = null;
-        return { status: 200, body: { object: "guardrail_policy_revision", id: key, deleted: true } };
+        return {
+          status: 200,
+          body: { object: "guardrail_policy_revision", id: key, deleted: true },
+        };
       }
     }
 
@@ -220,9 +223,7 @@ const QUOTA_ONLY = JSON.stringify({
   apiVersion: "ferrogate.io/v1alpha1",
   kind: "DesiredState",
   resources: {
-    "quota-policies": [
-      { scope_type: "tenant", scope_id: "acme", rpm_limit: 600, enabled: true },
-    ],
+    "quota-policies": [{ scope_type: "tenant", scope_id: "acme", rpm_limit: 600, enabled: true }],
   },
 });
 
@@ -278,7 +279,16 @@ describe("ferrogate apply converges the declared resources", () => {
   test("a declared field that differs on the server is replaced, in place", async () => {
     const client = createStatefulControlPlane({
       quotaPolicies: new Map([
-        ["tenant:acme", { id: "tenant:acme", scope_type: "tenant", scope_id: "acme", rpm_limit: 60, enabled: true }],
+        [
+          "tenant:acme",
+          {
+            id: "tenant:acme",
+            scope_type: "tenant",
+            scope_id: "acme",
+            rpm_limit: 60,
+            enabled: true,
+          },
+        ],
       ]),
     });
     const runtime = runtimeWith({ "/desired.json": QUOTA_ONLY }, client);
@@ -329,11 +339,15 @@ describe("ferrogate apply is idempotent", () => {
 
   test("a guardrail policy whose content changed appends the next revision and activates it", async () => {
     const client = createStatefulControlPlane();
-    expect(await main(ARGV("/desired.json"), runtimeWith({ "/desired.json": GUARDRAIL_ONLY }, client))).toBe(0);
+    expect(
+      await main(ARGV("/desired.json"), runtimeWith({ "/desired.json": GUARDRAIL_ONLY }, client)),
+    ).toBe(0);
 
     const changed = GUARDRAIL_ONLY.replace('"enforced":true', '"enforced":false');
     expect(changed).not.toBe(GUARDRAIL_ONLY);
-    expect(await main(ARGV("/desired.json"), runtimeWith({ "/desired.json": changed }, client))).toBe(0);
+    expect(
+      await main(ARGV("/desired.json"), runtimeWith({ "/desired.json": changed }, client)),
+    ).toBe(0);
 
     expect(client.state.guardrailPolicies.get("pii")?.active_revision).toBe(2);
     expect(client.state.guardrailRevisions.get("pii@2")?.enforced).toBe(false);
@@ -358,7 +372,16 @@ describe("ferrogate apply is diffable and dry-runnable", () => {
   test("an update names the old and the new value of every changed field", async () => {
     const client = createStatefulControlPlane({
       quotaPolicies: new Map([
-        ["tenant:acme", { id: "tenant:acme", scope_type: "tenant", scope_id: "acme", rpm_limit: 60, enabled: true }],
+        [
+          "tenant:acme",
+          {
+            id: "tenant:acme",
+            scope_type: "tenant",
+            scope_id: "acme",
+            rpm_limit: 60,
+            enabled: true,
+          },
+        ],
       ]),
     });
     const runtime = runtimeWith({ "/desired.json": QUOTA_ONLY }, client);
@@ -375,8 +398,26 @@ describe("ferrogate apply never deletes silently", () => {
   const seeded = () =>
     createStatefulControlPlane({
       quotaPolicies: new Map([
-        ["tenant:acme", { id: "tenant:acme", scope_type: "tenant", scope_id: "acme", rpm_limit: 600, enabled: true }],
-        ["tenant:legacy", { id: "tenant:legacy", scope_type: "tenant", scope_id: "legacy", rpm_limit: 5, enabled: true }],
+        [
+          "tenant:acme",
+          {
+            id: "tenant:acme",
+            scope_type: "tenant",
+            scope_id: "acme",
+            rpm_limit: 600,
+            enabled: true,
+          },
+        ],
+        [
+          "tenant:legacy",
+          {
+            id: "tenant:legacy",
+            scope_type: "tenant",
+            scope_id: "legacy",
+            rpm_limit: 5,
+            enabled: true,
+          },
+        ],
       ]),
     });
 

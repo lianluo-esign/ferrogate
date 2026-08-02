@@ -3,6 +3,7 @@
  * `ctl` subtree, exactly as `ferrogate-cli::command_tree::assembled_command`
  * composed them (inventory-edge-control.md §1).
  */
+import { applyCommand } from "./commands/apply.js";
 import { assetsCommand } from "./commands/assets.js";
 import { completionsCommand } from "./commands/completions.js";
 import { hashKeyCommand, reloadCommand, validateCommand } from "./commands/config-commands.js";
@@ -30,6 +31,7 @@ export const COMMANDS: readonly CommandNode[] = [
   storageCommand,
   validateCommand,
   reloadCommand,
+  applyCommand,
   hashKeyCommand,
   assetsCommand,
   plansCommand,

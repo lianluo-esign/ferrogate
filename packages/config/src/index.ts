@@ -86,5 +86,8 @@ export { x402ConfirmationWindowSecs, x402HoldTtlFloorSecs } from "./x402-hold.js
 export type { X402ReconcilerLike } from "./x402-hold.js";
 export * from "./x402-scope.js";
 
+// Declarative desired-state document + the pure GitOps diff engine (#702).
+export * from "./desired-state.js";
+
 // Signed cluster config snapshots (Ed25519).
 export * from "./signed-snapshot.js";
