@@ -95,7 +95,10 @@ interface ResolvedBundleLimits {
  */
 function resolveLimits(limits: BundleLimits | undefined): ResolvedBundleLimits {
   return {
-    maxTotalBytes: Math.min(BUNDLE_MAX_TOTAL_BYTES, limits?.maxTotalBytes ?? Number.MAX_SAFE_INTEGER),
+    maxTotalBytes: Math.min(
+      BUNDLE_MAX_TOTAL_BYTES,
+      limits?.maxTotalBytes ?? Number.MAX_SAFE_INTEGER,
+    ),
     maxFiles: Math.min(BUNDLE_MAX_FILES, limits?.maxFiles ?? Number.MAX_SAFE_INTEGER),
     maxFileBytes: Math.min(BUNDLE_MAX_FILE_BYTES, limits?.maxFileBytes ?? Number.MAX_SAFE_INTEGER),
   };
@@ -320,8 +323,13 @@ export async function expandBundle(
     const tar =
       format === "tar" ? archive : await inflateBounded(archive, "gzip", resolved.maxTotalBytes);
     if (tar === null) {
+      // Deliberately WORDED differently from the accumulator's identical-looking
+      // ceiling refusal below. Only this arm can be reached by the incremental
+      // guard inside `inflateBounded`, i.e. only this wording proves the bomb
+      // was abandoned mid-stream rather than measured after it had already been
+      // materialized — and a test can therefore pin the difference.
       return refuse(
-        `the static_site bundle expands beyond the ${resolved.maxTotalBytes}-byte decompressed ceiling`,
+        `the static_site bundle expands beyond the ${resolved.maxTotalBytes}-byte decompressed ceiling: abandoned while decompressing`,
       );
     }
     return await expandTar(tar, resolved);
@@ -403,8 +411,7 @@ class BundleAccumulator {
     if (contentType === undefined) {
       return (
         `bundle entry ${JSON.stringify(path)} is refused: its file type is not allowed inside a ` +
-        "static_site bundle (allowed: " +
-        `${STATIC_SITE_BUNDLE_FILE_CONTENT_TYPES.join(", ")})`
+        `static_site bundle (allowed: ${STATIC_SITE_BUNDLE_FILE_CONTENT_TYPES.join(", ")})`
       );
     }
     if (content.byteLength > this.limits.maxFileBytes) {
@@ -496,7 +503,8 @@ async function expandTar(tar: Uint8Array, limits: ResolvedBundleLimits): Promise
 
     if (typeflag === "x" || typeflag === "X") {
       // A pax extended header. Its `path` binds the NEXT record.
-      if (size > TAR_BLOCK * 64) return refuse("the static_site bundle has an oversized pax header");
+      if (size > TAR_BLOCK * 64)
+        return refuse("the static_site bundle has an oversized pax header");
       overridePath = paxPath(body) ?? overridePath;
       offset += advance;
       continue;

@@ -23,6 +23,7 @@
  * `handlers.ts` renders it into the gateway error envelope. That is what keeps
  * the status/code taxonomy assertable without a Worker.
  */
+import { bundlePathRejection, expandBundle, isBundlePush, normalizeBundlePath } from "./bundle.js";
 import {
   ASSET_REJECTED_CODE,
   ASSET_REJECTED_STATUS,
@@ -38,12 +39,6 @@ import {
   recordAssetEgress,
 } from "./egress.js";
 import { sha256Hex } from "./hash.js";
-import {
-  bundlePathRejection,
-  expandBundle,
-  isBundlePush,
-  normalizeBundlePath,
-} from "./bundle.js";
 import {
   type AssetObjectRef,
   CrossTenantKeyError,
@@ -2017,13 +2012,7 @@ export class AssetService {
     // #736: expand AFTER the reservation row exists and BEFORE anything can
     // resolve it — the same order as the inline path, through the same helpers.
     if (bundle) {
-      const expanded = await this.#expandBundleIntoStore(
-        caller,
-        objectRef,
-        id,
-        bytes,
-        contentType,
-      );
+      const expanded = await this.#expandBundleIntoStore(caller, objectRef, id, bytes, contentType);
       if (!expanded.ok) {
         await this.#unwindBundlePublish(caller, ref, id, finalKey);
         await this.#bestEffortDelete(stagingKey, caller.tenantId);
@@ -2466,10 +2455,7 @@ export class AssetService {
    * EXISTING `pending_scan` CAS (#378) — the same one the async-scan promotion
    * endpoint drives. Nothing else may move a bundle to `visible`.
    */
-  async #promoteExpandedBundle(
-    assetId: string,
-    target: AssetVisibility,
-  ): Promise<AssetVisibility> {
+  async #promoteExpandedBundle(assetId: string, target: AssetVisibility): Promise<AssetVisibility> {
     // A screener that deferred wants the row withheld; leaving it `pending_scan`
     // is the verdict, not a missing step.
     if (target === "pending_scan") return "pending_scan";

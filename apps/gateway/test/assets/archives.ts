@@ -41,16 +41,14 @@ export interface TarEntry {
   readonly mode?: number;
 }
 
-/** One 512-byte ustar header + its NUL-padded body blocks. */
-function tarRecord(entry: TarEntry): Uint8Array {
-  const body =
-    typeof entry.body === "string" ? ascii(entry.body) : (entry.body ?? new Uint8Array(0));
+/** The 512-byte ustar header block for `entry` declaring a body of `size`. */
+function tarHeaderBlock(entry: TarEntry, size: number): Uint8Array {
   const header = new Uint8Array(BLOCK);
   writeAscii(header, 0, entry.name, 100);
   writeOctal(header, 100, entry.mode ?? 0o644, 8);
   writeOctal(header, 108, 0, 8);
   writeOctal(header, 116, 0, 8);
-  writeOctal(header, 124, body.length, 12);
+  writeOctal(header, 124, size, 12);
   writeOctal(header, 136, 0, 12);
   // Checksum is computed with the checksum field itself read as spaces.
   header.fill(0x20, 148, 156);
@@ -61,7 +59,14 @@ function tarRecord(entry: TarEntry): Uint8Array {
   let sum = 0;
   for (const byte of header) sum += byte;
   writeAscii(header, 148, `${sum.toString(8).padStart(6, "0")}\0 `, 8);
+  return header;
+}
 
+/** One header block + its NUL-padded body blocks. */
+function tarRecord(entry: TarEntry): Uint8Array {
+  const body =
+    typeof entry.body === "string" ? ascii(entry.body) : (entry.body ?? new Uint8Array(0));
+  const header = tarHeaderBlock(entry, body.length);
   const padded = Math.ceil(body.length / BLOCK) * BLOCK;
   const out = new Uint8Array(BLOCK + padded);
   out.set(header, 0);
@@ -92,6 +97,47 @@ export function paxRecord(key: string, value: string): string {
     length = candidate.length;
   }
   throw new Error("pax record length did not converge");
+}
+
+/**
+ * A gzip of a tar holding ONE file of `size` zero bytes — a real high-ratio
+ * bomb.
+ *
+ * The plaintext is generated lazily through the stream's `pull`, so a 256 MiB
+ * bomb costs the TEST almost nothing to build. That matters: the thing under
+ * test is whether the expander abandons the decompression partway, and a bomb
+ * small enough to materialize here would not distinguish "bounded while
+ * decompressing" from "measured afterwards".
+ */
+export async function gzipZeroFileBomb(name: string, size: number): Promise<Uint8Array> {
+  const header = tarHeaderBlock({ name }, size);
+  const padded = Math.ceil(size / BLOCK) * BLOCK;
+  const chunk = new Uint8Array(64 * 1024);
+  let emittedHeader = false;
+  let written = 0;
+  let closed = false;
+  const plaintext = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!emittedHeader) {
+        emittedHeader = true;
+        controller.enqueue(header);
+        return;
+      }
+      if (written < padded) {
+        const span = Math.min(chunk.length, padded - written);
+        controller.enqueue(chunk.subarray(0, span));
+        written += span;
+        return;
+      }
+      if (!closed) {
+        closed = true;
+        controller.enqueue(new Uint8Array(2 * BLOCK));
+        controller.close();
+      }
+    },
+  });
+  const compressed = plaintext.pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(compressed).arrayBuffer());
 }
 
 /** gzip the bytes with the platform's own compressor (workerd has one). */

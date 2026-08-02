@@ -50,7 +50,11 @@ import {
   subjectFor,
 } from "../ratelimit/index.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
-import { assetAuditSinkFromEnv, assetMetadataStoreFromEnv } from "./d1.js";
+import {
+  assetAuditSinkFromEnv,
+  assetBundleIndexStoreFromEnv,
+  assetMetadataStoreFromEnv,
+} from "./d1.js";
 import {
   type AssetEgressQuota,
   NO_ASSET_EGRESS_METER,
@@ -65,6 +69,7 @@ import {
   type AssetObjectStore,
   BuiltinEicarScreener,
   InMemoryAssetAuditSink,
+  InMemoryAssetBundleIndexStore,
   InMemoryAssetMetadataStore,
   InMemoryAssetObjectStore,
   UnavailablePresigner,
@@ -79,10 +84,10 @@ import {
   assetVisibilityPromotionRequestSchema,
   channelMoveQuerySchema,
   platformQuerySchema,
-  pullQuerySchema,
   presignAbortRequestSchema,
   presignCommitRequestSchema,
   presignUploadIntentRequestSchema,
+  pullQuerySchema,
   pushQuerySchema,
   withheldQuerySchema,
 } from "./schemas.js";
@@ -647,6 +652,12 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   // the default screener keeps living in exactly one place.
   const screener = composed === inner ? scanScreener : composed;
   const metadata = assetMetadataStoreFromEnv(env);
+  // #736: the `static_site` bundle file index lives in the SAME tenant D1 as
+  // `stored_assets`, so it is bound exactly when the metadata store is. Absent
+  // ⇒ the service's in-memory index, which matches the in-memory metadata
+  // fallback beside it: the two halves of a bundle version are never split
+  // across a durable store and an isolate-local one.
+  const bundles = assetBundleIndexStoreFromEnv(env);
   const audit = assetAuditSinkFromEnv(env);
   const objectStoreEnabled = objects !== undefined || devInMemoryPortsEnabled(env);
   // #262 egress governance (finding D4). ALWAYS supplied, never conditional on
@@ -663,6 +674,7 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   return {
     ...(objects !== undefined ? { objects } : {}),
     ...(metadata !== null ? { metadata } : {}),
+    ...(bundles !== null ? { bundles } : {}),
     ...(audit !== null ? { audit } : {}),
     ...(presigner !== null ? { presigner } : {}),
     ...(screener !== null ? { screener } : {}),
@@ -730,6 +742,7 @@ export function buildAssetService(deps?: Partial<AssetServiceDeps>): AssetServic
     presigner: deps?.presigner ?? new UnavailablePresigner(),
     screener: deps?.screener ?? new BuiltinEicarScreener(),
     audit: deps?.audit ?? new InMemoryAssetAuditSink(),
+    bundles: deps?.bundles ?? new InMemoryAssetBundleIndexStore(),
     limits: deps?.limits,
     now: deps?.now,
   });

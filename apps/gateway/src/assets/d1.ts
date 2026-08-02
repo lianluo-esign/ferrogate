@@ -69,6 +69,7 @@ import { randomHex128 } from "./hash.js";
 import type {
   AssetAuditEvent,
   AssetAuditSink,
+  AssetBundleIndexStore,
   AssetMetadataStore,
   AssetQuotaAdmission,
   AssetVisibility,
@@ -76,6 +77,7 @@ import type {
   ChannelMoveOutcome,
   StoredAsset,
   StoredAssetChannel,
+  StoredBundleFile,
   VariantDeleteOutcome,
   VersionYankOutcome,
 } from "./ports.js";
@@ -542,6 +544,113 @@ export class D1AssetMetadataStore implements AssetMetadataStore {
 export function assetMetadataStoreFromEnv(env: Record<string, unknown>): AssetMetadataStore | null {
   const db = env[TENANT_DATABASE_BINDING];
   return isAssetDatabase(db) ? new D1AssetMetadataStore(db) : null;
+}
+
+// ---------------------------------------------------------------------------
+// The durable static_site bundle index — `asset_bundle_files` (#736)
+// ---------------------------------------------------------------------------
+
+const BUNDLE_FILE_COLUMNS =
+  "asset_id, tenant_id, path, storage_uri, content_type, content_hash, size_bytes, created_at_unix";
+
+/**
+ * `ON CONFLICT … DO UPDATE`, not `DO NOTHING`.
+ *
+ * The only way a row can already exist for `(asset_id, path)` is a RETRIED
+ * expansion of the same version — the version row is created before expansion
+ * and `stored_assets` immutability refuses a second, different publish under
+ * that id. So the retry's values are the authority, and `DO NOTHING` would
+ * leave the index pointing at the FIRST attempt's object keys while the version
+ * row and the reclamation pass both believe in the second attempt's.
+ */
+export const BUNDLE_FILE_UPSERT_SQL =
+  `INSERT INTO asset_bundle_files (${BUNDLE_FILE_COLUMNS}) ` +
+  "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) " +
+  "ON CONFLICT (asset_id, path) DO UPDATE SET " +
+  "storage_uri = excluded.storage_uri, content_type = excluded.content_type, " +
+  "content_hash = excluded.content_hash, size_bytes = excluded.size_bytes, " +
+  "created_at_unix = excluded.created_at_unix";
+
+export const BUNDLE_FILE_SELECT_SQL = `SELECT ${BUNDLE_FILE_COLUMNS} FROM asset_bundle_files WHERE asset_id = ?1 AND path = ?2`;
+
+export const BUNDLE_FILE_LIST_SQL = `SELECT ${BUNDLE_FILE_COLUMNS} FROM asset_bundle_files WHERE asset_id = ?1 ORDER BY path`;
+
+/**
+ * `RETURNING` on the delete, so the caller learns which OBJECTS it now owns the
+ * reclamation of. A separate select-then-delete would let a concurrent retry
+ * slip a row in between and strand its bytes with nothing referencing them.
+ */
+export const BUNDLE_FILE_DELETE_SQL = `DELETE FROM asset_bundle_files WHERE asset_id = ?1 RETURNING ${BUNDLE_FILE_COLUMNS}`;
+
+function bundleFileFromRow(row: Row): StoredBundleFile {
+  return {
+    asset_id: text(row.asset_id),
+    tenant_id: text(row.tenant_id),
+    path: text(row.path),
+    storage_uri: text(row.storage_uri),
+    content_type: text(row.content_type),
+    content_hash: text(row.content_hash),
+    size_bytes: integer(row.size_bytes),
+    created_at_unix: integer(row.created_at_unix),
+  };
+}
+
+/**
+ * The durable {@link AssetBundleIndexStore}.
+ *
+ * The whole index of one bundle is written in ONE `batch`, which D1 runs as a
+ * single transaction. That is not an optimization: it is what makes "the index
+ * is durable" a single observable event, so the CAS that follows it can be the
+ * only thing standing between a partial expansion and a `visible` version.
+ */
+export class D1AssetBundleIndexStore implements AssetBundleIndexStore {
+  constructor(private readonly db: AssetDatabase) {}
+
+  async putBundleFiles(files: readonly StoredBundleFile[]): Promise<void> {
+    if (files.length === 0) return;
+    await this.db.batch(
+      files.map((file) =>
+        this.db
+          .prepare(BUNDLE_FILE_UPSERT_SQL)
+          .bind(
+            file.asset_id,
+            file.tenant_id,
+            file.path,
+            file.storage_uri,
+            file.content_type,
+            file.content_hash,
+            file.size_bytes,
+            file.created_at_unix,
+          ),
+      ),
+    );
+  }
+
+  async getBundleFile(assetId: string, path: string): Promise<StoredBundleFile | null> {
+    const rows = rowsOf(await this.db.prepare(BUNDLE_FILE_SELECT_SQL).bind(assetId, path).all());
+    const row = rows[0];
+    return row === undefined ? null : bundleFileFromRow(row);
+  }
+
+  async listBundleFiles(assetId: string): Promise<StoredBundleFile[]> {
+    return rowsOf(await this.db.prepare(BUNDLE_FILE_LIST_SQL).bind(assetId).all()).map(
+      bundleFileFromRow,
+    );
+  }
+
+  async deleteBundleFiles(assetId: string): Promise<StoredBundleFile[]> {
+    return rowsOf(await this.db.prepare(BUNDLE_FILE_DELETE_SQL).bind(assetId).all()).map(
+      bundleFileFromRow,
+    );
+  }
+}
+
+/** `null` when `DB` is absent — same fallback rule as the metadata store. */
+export function assetBundleIndexStoreFromEnv(
+  env: Record<string, unknown>,
+): AssetBundleIndexStore | null {
+  const db = env[TENANT_DATABASE_BINDING];
+  return isAssetDatabase(db) ? new D1AssetBundleIndexStore(db) : null;
 }
 
 // ---------------------------------------------------------------------------
