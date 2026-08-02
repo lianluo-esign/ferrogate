@@ -15,7 +15,6 @@
         "@cloudflare/workers-types": "^4.20260702.1",
         "@playwright/test": "^1.50.0",
         "@types/node": "^22.10.2",
-        "hyparquet": "^1.27.1",
         "typescript": "5.5.4",
         "vitest": "^4.1.10",
         "wrangler": "^4.114.0",
@@ -64,6 +63,9 @@
         "@ferrogate/storage": "workspace:*",
         "hono": "^4.6.0",
         "zod": "^3.25.76",
+      },
+      "devDependencies": {
+        "hyparquet": "^1.27.1",
       },
     },
     "apps/gateway": {
