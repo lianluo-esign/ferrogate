@@ -20,26 +20,31 @@
  */
 import { z } from "zod";
 import { byteLen, byteMatchIndices, byteOffsetMap, byteSlice } from "./bytes.js";
-import { hmacSha256, toHex } from "./hash.js";
-import { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "./jsonschema.js";
 import {
-  DetectorError,
-  DetectorSecret,
   type ContentPatch,
   type DetectorDescriptor,
+  DetectorError,
   type DetectorHealth,
   type DetectorInput,
   type DetectorResult,
+  type DetectorSecret,
   type Finding,
   type FindingSeverity,
   type GuardrailDetector,
 } from "./contract.js";
 import {
-  guardrailProtocolSchema,
   type ContentSegment,
   type ContentSource,
   type GuardrailProtocol,
+  guardrailProtocolSchema,
 } from "./envelope.js";
+import { hmacSha256, toHex } from "./hash.js";
+import {
+  evaluateSchema,
+  isValidSchema,
+  jsonPointerExists,
+  resolveJsonPointer,
+} from "./jsonschema.js";
 
 const DETERMINISTIC_VERSION = "deterministic/1";
 const REDACTION = "[REDACTED]";
@@ -165,7 +170,12 @@ function validateJsonConstraints(c: JsonConstraints, name: string): void {
 }
 
 function validateRequestConstraints(c: RequestConstraints): void {
-  for (const values of [c.allowed_models, c.forbidden_models, c.allowed_providers, c.forbidden_providers]) {
+  for (const values of [
+    c.allowed_models,
+    c.forbidden_models,
+    c.allowed_providers,
+    c.forbidden_providers,
+  ]) {
     if (values.some((v) => v.trim().length === 0) || new Set(values).size !== values.length) {
       throw invalidConfig("request Guardrail constraints must be non-empty and unique");
     }
@@ -244,14 +254,17 @@ export function isMutableTextSegment(segment: ContentSegment): boolean {
     segment.source === "assistant" ||
     segment.source === "tool_result" ||
     segment.source === "text_attachment";
-  return mutableSource && (segment.content_type === "text" || segment.content_type === "text_attachment");
+  return (
+    mutableSource && (segment.content_type === "text" || segment.content_type === "text_attachment")
+  );
 }
 
 export function coalesceSelectedSegments(selected: ContentSegment[]): CoalescedGroup[] {
   const groups: CoalescedGroup[] = [];
   for (const segment of selected) {
     const last = groups[groups.length - 1];
-    const extend = last !== undefined && last.segments[last.segments.length - 1]?.source === segment.source;
+    const extend =
+      last !== undefined && last.segments[last.segments.length - 1]?.source === segment.source;
     const group = extend ? (last as CoalescedGroup) : { text: "", segments: [], starts: [] };
     if (!extend) {
       groups.push(group);
@@ -271,10 +284,24 @@ class TextMatchSink {
   truncated = false;
 }
 
-/** Regex byte matches over `text`, non-overlapping, mirroring `find_iter`. */
-export function regexByteMatches(source: string, text: string): Array<[number, number]> {
+/**
+ * Regex byte matches over `text`, non-overlapping, mirroring `find_iter`.
+ *
+ * `flags` exists for the injection pattern pack (#688), whose rules are natural
+ * language and therefore have to be case-insensitive — `IGNORE ALL PREVIOUS
+ * INSTRUCTIONS` is the same attack as the lowercase spelling. Case-folding the
+ * TEXT instead would have been the alternative and is wrong: `toLowerCase()` is
+ * not length-preserving in Unicode (ẞ→ss, İ→i̇), so every byte offset after the
+ * first such character would be shifted and every patch would land in the wrong
+ * place. Folding the PATTERN costs nothing and moves no offsets.
+ */
+export function regexByteMatches(
+  source: string,
+  text: string,
+  flags = "g",
+): Array<[number, number]> {
   const map = byteOffsetMap(text);
-  const re = new RegExp(source, "g");
+  const re = new RegExp(source, flags.includes("g") ? flags : `${flags}g`);
   const out: Array<[number, number]> = [];
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
@@ -308,7 +335,9 @@ export class DeterministicDetector implements GuardrailDetector {
         throw invalidConfig("local Guardrail contains an invalid regex");
       }
     }
-    for (const [, expression] of config.secret_patterns.map((p) => [p, secretExpression(p)] as const)) {
+    for (const [, expression] of config.secret_patterns.map(
+      (p) => [p, secretExpression(p)] as const,
+    )) {
       try {
         new RegExp(expression, "g");
       } catch {
@@ -367,7 +396,8 @@ export class DeterministicDetector implements GuardrailDetector {
       byte_start: range ? range[0] : null,
       byte_end: range ? range[1] : null,
       segment_id: segment ? segment.segment_id : null,
-      fingerprint: sensitiveValue !== undefined ? (this.hmacFingerprint(sensitiveValue) ?? null) : null,
+      fingerprint:
+        sensitiveValue !== undefined ? (this.hmacFingerprint(sensitiveValue) ?? null) : null,
       matched_text: null,
       attributes: {},
     };
@@ -379,7 +409,9 @@ export class DeterministicDetector implements GuardrailDetector {
     }
     if (sink.findings.length >= MAX_FINDINGS_PER_EVALUATION) {
       sink.truncated = true;
-      sink.findings.push(this.finding("detector.truncated", "critical", 1.0, segment, [0, 0], undefined));
+      sink.findings.push(
+        this.finding("detector.truncated", "critical", 1.0, segment, [0, 0], undefined),
+      );
       return;
     }
     const { category, severity, confidence, start, end } = detected;
@@ -387,7 +419,9 @@ export class DeterministicDetector implements GuardrailDetector {
     const key = `${category}\u0000${segment.segment_id}\u0000${start}\u0000${end}`;
     if (!sink.seenFindings.has(key)) {
       sink.seenFindings.add(key);
-      sink.findings.push(this.finding(category, severity, confidence, segment, [start, end], matched));
+      sink.findings.push(
+        this.finding(category, severity, confidence, segment, [start, end], matched),
+      );
     }
     if (isMutableTextSegment(segment)) {
       const intervals = sink.patchedIntervals.get(segment.segment_id) ?? [];
@@ -425,7 +459,10 @@ export class DeterministicDetector implements GuardrailDetector {
 
   async evaluate(input: DetectorInput, deadlineMs: number): Promise<DetectorResult> {
     if (Date.now() >= deadlineMs) {
-      throw DetectorError.new("timeout", "deterministic Guardrail deadline expired before execution");
+      throw DetectorError.new(
+        "timeout",
+        "deterministic Guardrail deadline expired before execution",
+      );
     }
     const selected = input.segments.filter((s) => this.config.supported_sources.includes(s.source));
     const sink = new TextMatchSink();
@@ -434,7 +471,9 @@ export class DeterministicDetector implements GuardrailDetector {
       this.config.max_input_bytes !== undefined &&
       selected.reduce((acc, s) => acc + byteLen(s.text), 0) > this.config.max_input_bytes
     ) {
-      sink.findings.push(this.finding("size.input_bytes", "high", 1.0, undefined, undefined, undefined));
+      sink.findings.push(
+        this.finding("size.input_bytes", "high", 1.0, undefined, undefined, undefined),
+      );
     }
 
     for (const group of coalesceSelectedSegments(selected)) {
@@ -451,7 +490,13 @@ export class DeterministicDetector implements GuardrailDetector {
       }
       for (const expression of this.regex) {
         for (const [start, end] of regexByteMatches(expression, group.text)) {
-          this.addGroupMatch(sink, group, { category: "regex", severity: "high", confidence: 1.0, start, end });
+          this.addGroupMatch(sink, group, {
+            category: "regex",
+            severity: "high",
+            confidence: 1.0,
+            start,
+            end,
+          });
         }
       }
       for (const [pattern, expression] of this.secrets) {
@@ -481,7 +526,13 @@ export class DeterministicDetector implements GuardrailDetector {
       }
       for (const expression of this.regex) {
         for (const [start, end] of regexByteMatches(expression, segment.text)) {
-          this.addTextMatch(sink, segment, { category: "regex", severity: "high", confidence: 1.0, start, end });
+          this.addTextMatch(sink, segment, {
+            category: "regex",
+            severity: "high",
+            confidence: 1.0,
+            start,
+            end,
+          });
         }
       }
       for (const [pattern, expression] of this.secrets) {
@@ -529,7 +580,9 @@ export class DeterministicDetector implements GuardrailDetector {
       return;
     }
     for (const failure of evaluateJsonConstraints(constraints, value)) {
-      findings.push(this.finding(`${prefix}.${failure}`, "high", 1.0, segment, undefined, undefined));
+      findings.push(
+        this.finding(`${prefix}.${failure}`, "high", 1.0, segment, undefined, undefined),
+      );
     }
   }
 
@@ -540,7 +593,8 @@ export class DeterministicDetector implements GuardrailDetector {
     findings: Finding[],
   ): void {
     const endpointDenied =
-      definition.allowed_endpoints.length > 0 && !definition.allowed_endpoints.includes(input.protocol);
+      definition.allowed_endpoints.length > 0 &&
+      !definition.allowed_endpoints.includes(input.protocol);
     this.addContextFinding(findings, endpointDenied, "request.endpoint");
 
     const model = input.model;
@@ -553,7 +607,8 @@ export class DeterministicDetector implements GuardrailDetector {
     const provider = input.provider;
     const providerDenied =
       provider !== undefined &&
-      ((definition.allowed_providers.length > 0 && !definition.allowed_providers.includes(provider)) ||
+      ((definition.allowed_providers.length > 0 &&
+        !definition.allowed_providers.includes(provider)) ||
         definition.forbidden_providers.includes(provider));
     this.addContextFinding(findings, providerDenied, "request.provider");
 
@@ -584,7 +639,9 @@ function evaluateJsonConstraints(constraints: JsonConstraints, value: unknown): 
   if (constraints.required_keys.some((pointer) => !jsonPointerExists(value, pointer))) {
     failures.push("required_key");
   }
-  if (constraints.forbidden_keys.some((pointer) => resolveJsonPointer(value, pointer) !== undefined)) {
+  if (
+    constraints.forbidden_keys.some((pointer) => resolveJsonPointer(value, pointer) !== undefined)
+  ) {
     failures.push("forbidden_key");
   }
   return failures;

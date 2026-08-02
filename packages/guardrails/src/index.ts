@@ -184,6 +184,33 @@ export type {
   PiiTokenVault,
 } from "./pii.js";
 
+// Native prompt-injection + jailbreak screening (#688) — the same hybrid shape
+// as #680: a deterministic pack as the always-on floor plus an OPTIONAL Workers
+// AI stage that may only ADD to it, screened at four hooks (prompt, retrieved
+// context, tool metadata, tool output).
+export {
+  INJECTION_AI_CATEGORY,
+  INJECTION_AI_DEFAULT_MODEL,
+  INJECTION_CATEGORIES,
+  INJECTION_REQUEST_HOOKS,
+  InjectionDetector,
+  injectionCategory,
+  injectionDetectorConfig,
+  injectionLabel,
+  isQuotedMention,
+  normalizeInjectionSpan,
+  sourceTrust,
+} from "./injection.js";
+export type {
+  InjectionAction,
+  InjectionAiStageConfig,
+  InjectionCategory,
+  InjectionDetectorConfig,
+  InjectionHostCapabilities,
+  InjectionPolicyDefinition,
+  InjectionTrust,
+} from "./injection.js";
+
 // JSON schema/pointer helpers.
 export {
   evaluateSchema,
@@ -290,6 +317,9 @@ export {
   piiAiStageSchema,
   piiEntitySchema,
   piiRedactionModeSchema,
+  injectionActionSchema,
+  injectionAiStageSchema,
+  injectionCategorySchema,
   scopeMatches,
   selectPolicyRevisions,
   selectedCheckIds,

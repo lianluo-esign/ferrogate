@@ -29,6 +29,7 @@ import {
   DetectorSecret,
   DeterministicDetector,
   type GuardrailDetector,
+  InjectionDetector,
   LlmGuardPromptInjectionDetector,
   PiiDetector,
   type PiiTokenVault,
@@ -38,6 +39,7 @@ import {
   type WorkersAiClient,
   WorkersAiLlamaGuardDetector,
   configDigest,
+  injectionDetectorConfig,
   piiDetectorConfig,
   validateDetectorDefinition,
   workersAiBindingClient,
@@ -224,6 +226,27 @@ export function buildDetector(
           requireSecret(context, definition.fingerprint_secret_ref, "pii fingerprint"),
           {
             vault: context.piiVault,
+            workersAi:
+              context.workersAiClient ??
+              (context.workersAi !== undefined
+                ? workersAiBindingClient(context.workersAi)
+                : undefined),
+          },
+          (message) => new DetectorBuildError(message),
+        ),
+      );
+    }
+    case "injection": {
+      // Same "raise, never degrade" rule as `pii`: a policy that asks for the
+      // Workers AI stage and silently runs without it still answers `pass` on a
+      // paraphrased attack, which reads as "screened and clean".
+      return InjectionDetector.new(
+        injectionDetectorConfig(
+          id,
+          definition,
+          supportedSources,
+          requireSecret(context, definition.fingerprint_secret_ref, "injection fingerprint"),
+          {
             workersAi:
               context.workersAiClient ??
               (context.workersAi !== undefined
