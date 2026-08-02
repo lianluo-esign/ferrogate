@@ -66,7 +66,7 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 275 operations", () => {
+  it("is version 1 and carries all 278 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });

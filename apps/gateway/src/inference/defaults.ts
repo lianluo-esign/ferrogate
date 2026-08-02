@@ -16,6 +16,8 @@ import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
 import { audioObjectsFromEnv } from "./audio-objects.js";
+import { resolveRetentionSeconds, responseStoreMode } from "./conversation.js";
+import { conversationStoreFromEnv } from "./conversation-store.js";
 import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
@@ -473,5 +475,20 @@ export function resolveDeps(
       typeof deps.audioObjects === "function"
         ? deps.audioObjects(env)
         : (deps.audioObjects ?? audioObjectsFromEnv(env as Record<string, unknown>)),
+    // Issue #689. Env-resolved like `audioObjects`, and fail-CLOSED in the same
+    // shape: a deployment that binds no tenant database gets
+    // `NO_CONVERSATION_STORE`, which makes `store: true` and
+    // `previous_response_id` answer 503 `response_store_disabled` rather than
+    // being accepted and forgotten. Every OTHER `/v1/responses` request on such
+    // a deployment is served exactly as it was before this slice.
+    conversations:
+      typeof deps.conversations === "function"
+        ? deps.conversations(env)
+        : (deps.conversations ?? conversationStoreFromEnv(env)),
+    responseStoreMode: deps.responseStoreMode ?? responseStoreMode(env["GATEWAY_RESPONSES_STORE"]),
+    responseRetentionSeconds:
+      deps.responseRetentionSeconds ??
+      ((tenantId: string) =>
+        resolveRetentionSeconds(env["GATEWAY_RESPONSES_RETENTION"], tenantId)),
   };
 }

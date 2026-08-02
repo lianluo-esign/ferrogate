@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 276.
+ * ANTI-DRIFT GATE for the third copy of 278.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(276);
+    expect(OPENAPI_OPERATION_COUNT).toBe(278);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -302,12 +302,18 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // request body is validated at the route by an inline Zod schema in
     // `apps/control-plane/src/routes/admin_asset.ts`, and the force-delete
     // takes query parameters rather than a body — so none of the four seeds a
-    // WIRE shape here. 262 + 4 = 266.
+    // WIRE shape here. That branch wrote 262 + 4 = 266.
+    //
+    // #689's `getResponse` / `deleteResponse` are that story once more — the
+    // Responses conversation-state shapes live beside their handler in
+    // `apps/gateway/src/inference/` — and that branch wrote 262 + 2 = 264. #743
+    // and #689 landed in PARALLEL, so neither 266 nor 264 is the merged truth.
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 276 - 10. The running sum is narrative, and #703 and #737
-    // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(266);
+    // `seeded`, i.e. 278 - 10 = 268. The running sum is narrative, and #703/#737
+    // and then #743/#689 landing in parallel is exactly why it must not be the
+    // source.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(268);
   });
 });
