@@ -252,6 +252,9 @@ export interface RequestLogSeed {
   readonly project?: string | null;
   readonly workspace?: string | null;
   readonly apiKeyId?: string | null;
+  /** `#691` — the verified delegation chain, and the principal it roots at. */
+  readonly delegationChain?: string | null;
+  readonly delegationRoot?: string | null;
   readonly startedAtUnix: number;
   readonly completedAtUnix?: number | null;
   readonly route?: string | null;
@@ -278,11 +281,11 @@ export async function seedRequestLogs(rows: readonly RequestLogSeed[]): Promise<
         .prepare(
           `INSERT INTO ${REQUEST_LOG_TABLE}
              (request_id, trace_id, agent_run_id, tenant, project, workspace, api_key_id,
-              started_at_unix, completed_at_unix,
+              delegation_chain, delegation_root, started_at_unix, completed_at_unix,
               route, provider, logical_model, provider_model, status_code, cache_status,
               latency_ms, prompt_tokens, completion_tokens, total_tokens,
               guardrail_verdict, streamed, request_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           row.requestId,
@@ -292,6 +295,8 @@ export async function seedRequestLogs(rows: readonly RequestLogSeed[]): Promise<
           row.project ?? null,
           row.workspace ?? null,
           row.apiKeyId ?? null,
+          row.delegationChain ?? null,
+          row.delegationRoot ?? null,
           row.startedAtUnix,
           row.completedAtUnix ?? null,
           row.route ?? null,

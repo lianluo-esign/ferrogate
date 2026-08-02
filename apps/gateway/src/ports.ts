@@ -11,6 +11,7 @@
  * `crates/ferrogate-gateway/src/auth.rs` (`AuthContext`, `CallerScope`,
  * `AuthError`) and `crates/ferrogate-storage/src/lifecycle_gate.rs`.
  */
+import type { VerifiedDelegationChain } from "@ferrogate/identity";
 import type { ApiOperation } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -510,6 +511,26 @@ export interface GatewayVariables {
   operation: ApiOperation | null;
   auth: AuthContext | null;
   workerIdentity: SelfHostedWorkerIdentity | null;
+  /**
+   * The scope `contractAuth` actually REQUIRED of this request (#691).
+   *
+   * `operation.auth.scope` is not a substitute: for a `method_dependent`
+   * operation (`POST /v1/mcp`) the required scope is derived from a body field
+   * and the contract row carries `null`. The delegation gate has to narrow
+   * against the scope that was really enforced, so the guard publishes it
+   * rather than every later reader re-deriving it — a second derivation is a
+   * second chance to disagree with the one that authorized the request.
+   */
+  requiredScope: string | null;
+  /**
+   * The VERIFIED delegation chain (#691), or `null` for the overwhelming
+   * majority of requests that present none.
+   *
+   * Never a chain that failed a check: `delegationChain()` refuses the request
+   * instead of setting this, so anything reading it is reading proof rather
+   * than a claim.
+   */
+  delegation: VerifiedDelegationChain | null;
 }
 
 /** The Hono generic for every gateway route and middleware. */

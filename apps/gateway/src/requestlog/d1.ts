@@ -50,16 +50,19 @@ export const REQUEST_LOG_TABLE = "request_logs";
  * a decision about array semantics that nothing here needs yet.
  */
 export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
-  request_id, trace_id, agent_run_id, tenant, project, workspace, api_key_id,
+  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
+  tenant, project, workspace, api_key_id,
   route, provider, logical_model, provider_model,
   status_code, error_code, cache_status, latency_ms,
   prompt_tokens, completion_tokens, total_tokens,
   guardrail_verdict, guardrail_policy_id, streamed,
   started_at_unix, completed_at_unix, request_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (request_id) DO UPDATE SET
   trace_id = COALESCE(excluded.trace_id, ${REQUEST_LOG_TABLE}.trace_id),
   agent_run_id = COALESCE(excluded.agent_run_id, ${REQUEST_LOG_TABLE}.agent_run_id),
+  delegation_chain = COALESCE(excluded.delegation_chain, ${REQUEST_LOG_TABLE}.delegation_chain),
+  delegation_root = COALESCE(excluded.delegation_root, ${REQUEST_LOG_TABLE}.delegation_root),
   tenant = COALESCE(excluded.tenant, ${REQUEST_LOG_TABLE}.tenant),
   project = COALESCE(excluded.project, ${REQUEST_LOG_TABLE}.project),
   workspace = COALESCE(excluded.workspace, ${REQUEST_LOG_TABLE}.workspace),
@@ -93,6 +96,8 @@ export function requestLogBindings(record: RequestLogRecord): (string | number |
     record.requestId,
     bindOptional(record.traceId),
     bindOptional(record.agentRunId),
+    bindOptional(record.delegationChain),
+    bindOptional(record.delegationRoot),
     bindOptional(record.tenantId),
     bindOptional(record.projectId),
     bindOptional(record.workspaceId),

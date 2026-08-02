@@ -9219,6 +9219,10 @@ export interface components {
             trace_id: string | null;
             /** @description The agent run this request belongs to, when one declared itself. */
             agent_run_id: string | null;
+            /** @description The VERIFIED agent delegation chain that produced this request, rendered root-first as `user:u_1>agent:planner>agent:writer` (#691). Null when the request presented no chain, which is most of them. Never a caller-declared value — a chain that failed any verification step refuses the request, so this field is evidence rather than an echo of a header. It establishes that each delegation was AUTHORISED, not that the agent behaved. */
+            delegation_chain: string | null;
+            /** @description The principal ultimately responsible: the delegator of the chain's ROOT link, as `{user|agent|service|key}:{id}` (#691). Split out of delegation_chain as its own field so a chargeback question is an equality predicate rather than a prefix scan — and so it cannot answer wrongly for a principal that is a prefix of another. Null when the request presented no chain. */
+            delegation_root: string | null;
             tenant_id: string | null;
             project_id: string | null;
             workspace_id: string | null;
@@ -20635,6 +20639,8 @@ export interface operations {
                 api_key_id?: string;
                 /** @description Narrow to one agent run, so an agent's spend can be totalled across its requests. */
                 agent_run_id?: string;
+                /** @description Narrow to the principal ultimately responsible for the spend — the root of the verified delegation chain, e.g. `user:u_1` (#691). This is what makes a delegated agent run groupable by the query finance already runs: an audit row naming a chain the cost query cannot group by would be half a feature. */
+                delegation_root?: string;
                 /** @description Narrow to one upstream provider id. */
                 provider?: string;
                 /** @description Matches EITHER spelling of the model -- the logical name the caller asked for or the provider model actually invoked -- because matching only one would silently drop half of that model's spend. */
@@ -20694,6 +20700,8 @@ export interface operations {
                 api_key_id?: string;
                 /** @description Narrow to one agent run. */
                 agent_run_id?: string;
+                /** @description Narrow to the principal ultimately responsible for the spend — the root of the verified delegation chain, e.g. `user:u_1` (#691). This is what makes a delegated agent run groupable by the query finance already runs: an audit row naming a chain the cost query cannot group by would be half a feature. */
+                delegation_root?: string;
                 /** @description Narrow to one upstream provider id. */
                 provider?: string;
                 /** @description Matches either the logical model or the provider model actually invoked. */

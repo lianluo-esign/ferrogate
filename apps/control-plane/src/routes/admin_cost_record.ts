@@ -191,7 +191,8 @@ const COST_AGGREGATE = `(
  * metered request always produces a number (possibly `0`), so the fallback fires
  * only when there is no metering row.
  */
-const COST_RECORD_COLUMNS = `rl.request_id, rl.trace_id, rl.agent_run_id, rl.tenant, rl.project,
+const COST_RECORD_COLUMNS = `rl.request_id, rl.trace_id, rl.agent_run_id,
+       rl.delegation_chain, rl.delegation_root, rl.tenant, rl.project,
        rl.workspace, rl.api_key_id, rl.route, rl.provider, rl.logical_model, rl.provider_model,
        rl.status_code, rl.error_code, rl.cache_status, rl.streamed, rl.latency_ms,
        rl.started_at_unix, rl.completed_at_unix,
@@ -219,6 +220,8 @@ interface CostRecordRow {
   readonly request_id: string;
   readonly trace_id: string | null;
   readonly agent_run_id: string | null;
+  readonly delegation_chain: string | null;
+  readonly delegation_root: string | null;
   readonly tenant: string | null;
   readonly project: string | null;
   readonly workspace: string | null;
@@ -295,6 +298,18 @@ function costRecordDocument(row: CostRecordRow): StoreRecord {
     request_id: row.request_id,
     trace_id: row.trace_id,
     agent_run_id: row.agent_run_id,
+    // #691 — the VERIFIED delegation chain and the principal ultimately
+    // responsible for the spend. Both, and not one derived from the other: an
+    // auditor's question is "who was involved" (the path) and finance's is
+    // "whose spend is this" (an equality predicate), and answering the second
+    // by prefix-matching the first would be a scan that also answers wrongly
+    // for any principal that is a prefix of another.
+    //
+    // Null for the overwhelming majority of requests, which present no chain.
+    // Null, not `""` — "nobody delegated" and "we did not look" must stay
+    // distinguishable in a chargeback export.
+    delegation_chain: row.delegation_chain,
+    delegation_root: row.delegation_root,
     tenant_id: row.tenant,
     project_id: row.project,
     workspace_id: row.workspace,
@@ -424,6 +439,16 @@ function costFilters(url: URL): Predicate[] {
 
   const agentRunId = param(url, "agent_run_id");
   if (agentRunId !== undefined) push("rl.agent_run_id = ?", agentRunId);
+
+  // #691 — group a month of spend by the principal ultimately responsible.
+  //
+  // An EQUALITY on the root column, never a `LIKE 'user:u_1>%'` over the
+  // rendered path: the prefix form cannot use `idx_request_logs_delegation_root`
+  // (so it scans an append-heavy table on the one report finance runs over a
+  // whole month), and it silently over-matches any principal whose id is a
+  // prefix of another's — `user:u_1` would collect `user:u_10`'s charges.
+  const delegationRoot = param(url, "delegation_root");
+  if (delegationRoot !== undefined) push("rl.delegation_root = ?", delegationRoot);
 
   const provider = param(url, "provider");
   if (provider !== undefined) push("rl.provider = ?", provider);
@@ -592,6 +617,12 @@ const COST_EXPORT_COLUMNS: readonly ParquetColumn[] = [
   { name: "billed_attempts", type: "int64" },
   { name: "unpriced_attempts", type: "int64" },
   { name: "tags", type: "string" },
+  // #691, APPENDED — the column order is a positional contract (a spreadsheet
+  // macro or a warehouse `COPY` indexes it by position), so new columns go on
+  // the end and never in the middle, however much they would like to sit next
+  // to `agent_run_id`.
+  { name: "delegation_chain", type: "string" },
+  { name: "delegation_root", type: "string" },
 ];
 
 const COST_EXPORT_COLUMN_NAMES = COST_EXPORT_COLUMNS.map((column) => column.name);

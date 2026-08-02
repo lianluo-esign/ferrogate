@@ -679,6 +679,46 @@ GATEWAY_GUARDRAIL_BINDINGS = "[]"
 # `sql/d1-ts/control/0003_tenant_provider_credentials.sql`.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# AGENT DELEGATION CHAIN (issue #691) — DELEGATION_SIGNING_KEY
+# ---------------------------------------------------------------------------
+# The HMAC-SHA-256 shared key a delegation link is signed and verified with. It
+# is a SECRET and is deliberately NOT declared here — set it with
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put DELEGATION_SIGNING_KEY
+#
+# or, preferably, bind it through Cloudflare Secrets Store;
+# `delegationVerifierFromEnv` (src/delegation/source.ts) reads either shape,
+# because at the point of use both are a plain string on `env`. A committed
+# value would let anyone mint a chain naming any principal as ultimately
+# responsible, which is exactly the forgery the whole slice exists to refuse.
+#
+# ONE BINDING FOR THE WHOLE FLEET, and the same key signs and verifies. Secrets
+# Store bindings resolve at DEPLOY time, so per-agent private keys would mean a
+# deploy per agent; the mint therefore signs on behalf of a delegator it has
+# already authenticated (the RFC 8693 token-exchange shape). What that buys and
+# what it does not is written out at the top of
+# `packages/identity/src/delegation/link.ts`. The consequence for deployment is
+# concrete: any Worker holding this binding can MINT as well as verify, so bind
+# it only to the gateway and to the delegation authority.
+#
+# Rejected at import if shorter than 32 bytes — a shorter shared secret is
+# recoverable offline from one captured link, and every forgery after that
+# verifies perfectly.
+#
+# Absent ⇒ delegation is simply OFF. A request carrying no
+# `x-ferrogate-delegation` header is untouched (one header read and `next()`),
+# and a request that PRESENTS one is refused 503
+# `delegation_verification_unavailable` rather than served with the header
+# ignored — otherwise deleting this binding would bypass the whole verifier.
+#
+# Revocation additionally needs the CONTROL_DB binding (declared below) and
+# migration `sql/d1-ts/control/0008_delegation_chain.sql`. With no control
+# database bound nothing can hold a revocation, so chains verify and nothing is
+# revocable; with one bound but unreadable, a delegated request is refused 503
+# rather than admitted.
+# ---------------------------------------------------------------------------
+
 # Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
 # negative D1 key resolution may be reused inside one isolate. `"0"` (the
 # default, and the value shipped here) DISABLES the cache, so a key revoked in

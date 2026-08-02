@@ -76,6 +76,7 @@
         "@ferrogate/config": "workspace:*",
         "@ferrogate/core": "workspace:*",
         "@ferrogate/guardrails": "workspace:*",
+        "@ferrogate/identity": "workspace:*",
         "@ferrogate/observability": "workspace:*",
         "@ferrogate/policy": "workspace:*",
         "@ferrogate/providers": "workspace:*",

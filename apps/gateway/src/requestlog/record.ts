@@ -45,6 +45,21 @@ export interface RequestLogRecord {
   readonly traceId?: string | undefined;
   /** `#305/#522` — the agent run this request belongs to. */
   readonly agentRunId?: string | undefined;
+  /**
+   * `#691` — the whole VERIFIED delegation chain
+   * (`user:u_1>agent:planner>agent:writer`), and its root principal split out
+   * as its own field.
+   *
+   * Both, rather than one: an auditor asks "who was involved" and wants the
+   * path, finance asks "whose spend is this" and wants an equality predicate.
+   * Answering the second by prefix-matching the first would be a scan, and
+   * would answer wrongly for any principal that is a prefix of another.
+   *
+   * Absent for an undelegated request, which is most of them — and absent, not
+   * blank: "nobody delegated" and "we did not look" must stay distinguishable.
+   */
+  readonly delegationChain?: string | undefined;
+  readonly delegationRoot?: string | undefined;
   readonly tenantId?: string | undefined;
   readonly projectId?: string | undefined;
   readonly workspaceId?: string | undefined;
@@ -124,6 +139,8 @@ export function requestLogToWire(record: RequestLogRecord): RequestLogWire {
   };
   put(wire, "trace_id", record.traceId);
   put(wire, "agent_run_id", record.agentRunId);
+  put(wire, "delegation_chain", record.delegationChain);
+  put(wire, "delegation_root", record.delegationRoot);
   put(wire, "tenant_id", record.tenantId);
   put(wire, "project_id", record.projectId);
   put(wire, "workspace_id", record.workspaceId);
@@ -191,6 +208,8 @@ export function requestLogFromWire(body: unknown): RequestLogRecord | undefined 
     streamed: wire["streamed"] === true,
     traceId: str(wire, "trace_id"),
     agentRunId: str(wire, "agent_run_id"),
+    delegationChain: str(wire, "delegation_chain"),
+    delegationRoot: str(wire, "delegation_root"),
     tenantId: str(wire, "tenant_id"),
     projectId: str(wire, "project_id"),
     workspaceId: str(wire, "workspace_id"),
