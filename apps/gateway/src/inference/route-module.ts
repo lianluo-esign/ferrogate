@@ -30,6 +30,7 @@
  * per-request rebuild would throw away the isolate's warm state.
  */
 import type { Context, Hono } from "hono";
+import { attributionDefaultsFor } from "../attribution/index.js";
 import type { GatewayEnv } from "../ports.js";
 import {
   admitTokensPerMinute,
@@ -225,6 +226,11 @@ function publishRequestScope(c: Context<GatewayEnv>): void {
     // (`readInferenceBody()` re-presents it), which is why the identity is
     // captured here rather than inside the callback.
     log: (facts) => contributeRequestLogFacts(request, facts),
+    // #678 — whatever `attributionTags()` defaulted for this request, read back
+    // off the SAME `Request` object it keyed them by. Empty for every request
+    // the gate did not touch, which is every request under a deployment that
+    // configured no policy.
+    attributionDefaults: attributionDefaultsFor(request),
   });
 }
 

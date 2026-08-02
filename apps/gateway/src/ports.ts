@@ -77,6 +77,25 @@ export interface AuthContext {
    * chain. Read by `ratelimit/middleware.ts::subjectFor`.
    */
   readonly requestLimitPerMinute?: number;
+  /**
+   * The VIRTUAL KEY'S OWN ATTRIBUTION (#678) — the `metadata` tags this
+   * credential stands for, e.g. `{ team: "growth", cost_center: "eng" }`.
+   *
+   * It has no Rust twin: the Rust `AuthContext` carried no such map, because
+   * nothing in that tree defaulted attribution. It is populated from
+   * `api_keys.attribution_tags_json` (`keys/store.ts`) and from the
+   * `attribution_tags` field of a configured key record (`adapters.ts`), and it
+   * is read in exactly one place — `attribution/middleware.ts`, when the calling
+   * tenant's policy says `default_from_key`.
+   *
+   * Absent means "this credential declares no attribution", which under that
+   * policy is a REFUSAL rather than a pass: see
+   * `attribution/policy.ts::attributionDecision`. That is the opposite of how
+   * the three limits above treat absence, and deliberately so — an absent LIMIT
+   * must not deny, while an absent ATTRIBUTION must not admit unattributable
+   * spend.
+   */
+  readonly attributionTags?: Readonly<Record<string, string>>;
 }
 
 /** Rust `AuthContext::caller_scope`. */

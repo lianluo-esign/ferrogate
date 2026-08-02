@@ -1,0 +1,46 @@
+-- ===========================================================================
+-- `api_keys.attribution_tags_json` — the virtual key's own attribution (#678)
+--
+-- The second half of #678. A tenant policy may answer a missing required tag
+-- with `default_from_key` instead of a refusal, and this column is what there
+-- is to default FROM: the `metadata` tags a virtual key stands for, e.g.
+--
+--     {"team": "growth", "cost_center": "eng-platform"}
+--
+-- ## Why the key, and not the project or the tenant
+--
+-- Because the key is the finest identity the request path already resolves, and
+-- it is the one an operator hands out per team/service/environment. Defaulting
+-- from the TENANT would attribute every request to one bucket, which is the
+-- same non-answer as no tag at all; defaulting from the key attributes it to
+-- whoever was given that credential, which is what a chargeback conversation is
+-- actually about.
+--
+-- ## Why it lives in the TENANT database
+--
+-- Same rule the whole `api_keys` row follows (`0001_init_tenant.sql`): a key's
+-- scopes, allowlists, budgets — and now its attribution — are that tenant's own
+-- data and are physically isolated. The control-database `api_key_directory`
+-- deliberately does NOT mirror this column: the directory holds only what the
+-- ROUTER needs to answer "which tenant does this credential belong to", and
+-- widening it would put one tenant's cost-centre names in a table every tenant's
+-- authentication reads.
+--
+-- ## `NOT NULL DEFAULT '{}'`, and how a bad value reads
+--
+-- `ADD COLUMN ... NOT NULL DEFAULT` is the one schema change SQLite applies
+-- without rewriting the table. Every existing row means "this key declares no
+-- attribution", and `'{}'` states exactly that.
+--
+-- `keys/store.ts::parseJsonStringMap` reads a NULL, blank, malformed or
+-- non-object value as the EMPTY map — fail-CLOSED here, unlike the allowlist
+-- columns beside it: an unreadable attribution map means the key declares
+-- nothing, and under a `default_from_key` policy that REFUSES the request
+-- rather than admitting spend nobody can attribute. Non-string values are
+-- dropped rather than coerced, so a corrupted entry can never satisfy a
+-- required tag with `"[object Object]"`.
+--
+-- No index: it is read as part of a row already located by `key_prefix`.
+-- ===========================================================================
+
+ALTER TABLE api_keys ADD COLUMN attribution_tags_json TEXT NOT NULL DEFAULT '{}';

@@ -91,6 +91,25 @@ function stringArrayJson(value: unknown): string {
   );
 }
 
+/**
+ * `attribution_tags` → the `attribution_tags_json` column (#678).
+ *
+ * Only string→string entries survive, and blanks are dropped: the reader
+ * (`apps/gateway/src/keys/store.ts::parseJsonStringMap`) applies the same rule
+ * from the other side, so a value that would not be readable is never written.
+ * A malformed document therefore projects to `{}` — "this key declares no
+ * attribution" — which under a `default_from_key` policy REFUSES rather than
+ * admits, the fail-closed direction for this control.
+ */
+function stringMapJson(value: unknown): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "{}";
+  const map: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === "string" && entry.trim() !== "") map[key] = entry;
+  }
+  return JSON.stringify(map);
+}
+
 /** SQLite has no boolean; the readers compare against 1. */
 function bit(value: boolean): number {
   return value ? 1 : 0;
@@ -155,9 +174,10 @@ export async function projectVirtualKey(
            id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4,
            enabled, scopes_json, allowed_models_json, allowed_providers_json,
            monthly_token_budget, request_limit_per_minute,
-           created_at_unix, updated_at_unix, rotated_at_unix, expires_at_unix, revoked_at_unix
+           created_at_unix, updated_at_unix, rotated_at_unix, expires_at_unix, revoked_at_unix,
+           attribution_tags_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            workspace_id = excluded.workspace_id,
            project_id = excluded.project_id,
@@ -174,7 +194,8 @@ export async function projectVirtualKey(
            updated_at_unix = excluded.updated_at_unix,
            rotated_at_unix = excluded.rotated_at_unix,
            expires_at_unix = excluded.expires_at_unix,
-           revoked_at_unix = excluded.revoked_at_unix`,
+           revoked_at_unix = excluded.revoked_at_unix,
+           attribution_tags_json = excluded.attribution_tags_json`,
       )
       .bind(
         id,
@@ -198,6 +219,12 @@ export async function projectVirtualKey(
         finite(record.rotated_at),
         expiresAt,
         revoked,
+        // #678 — the tags this key stands for. NOT mirrored into the control
+        // database's `api_key_directory`: that table holds only what the ROUTER
+        // needs to answer "which tenant owns this credential", and widening it
+        // would put one tenant's cost-centre names in a table every tenant's
+        // authentication reads.
+        stringMapJson(record.attribution_tags),
       )
       .run();
   };

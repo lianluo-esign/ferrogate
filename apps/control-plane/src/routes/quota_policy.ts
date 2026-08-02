@@ -57,6 +57,19 @@ export const quotaPolicySchema = adminRecordSchema.extend({
   rpm_limit: z.number().int().min(0).nullish(),
   monthly_token_budget: z.number().int().min(0).nullish(),
   enabled: z.boolean().optional(),
+  /**
+   * #678 — the `metadata` tag KEYS every request from this scope must carry,
+   * and what to do when one is missing. Read by the gateway at the `tenant`
+   * scope only (`apps/gateway/src/attribution/source.ts` states why).
+   *
+   * `on_missing_tags` has no default and is not inferred from
+   * `required_tags`: the issue asks for the operator's choice to be EXPLICIT,
+   * so a document that lists required tags without naming an action enforces
+   * nothing. Both the projection and the gateway reader make that same
+   * judgement, from opposite ends.
+   */
+  required_tags: z.array(z.string().trim().min(1)).optional(),
+  on_missing_tags: z.enum(["reject", "default_from_key"]).nullish(),
 });
 
 const QUOTA_POLICIES = "quota-policies";

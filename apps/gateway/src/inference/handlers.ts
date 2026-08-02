@@ -149,6 +149,13 @@ export interface InferenceEnv {
      * driven directly, exactly like {@link inferenceTokens}.
      */
     inferenceLog: (facts: InferenceLogFacts) => void;
+    /**
+     * #678 — attribution tags the OUTER gate supplied from the virtual key for
+     * required tags the caller did not state. Merged UNDER the caller's own
+     * `metadata` by {@link attributedMetadata}. Empty when nothing was
+     * defaulted, which is the normal case.
+     */
+    inferenceAttributionDefaults: Readonly<Record<string, string>>;
 
     /**
      * replaces `c.req.raw`.
@@ -299,6 +306,42 @@ function validateBody<S extends z.ZodTypeAny>(
     }
     return undefined;
   }) as unknown as MiddlewareHandler<InferenceEnv>;
+}
+
+/** Nothing was defaulted — hoisted so the common path allocates nothing. */
+const NO_ATTRIBUTION_DEFAULTS: Readonly<Record<string, string>> = Object.freeze({});
+
+/**
+ * The request's EFFECTIVE attribution tags: what the caller stated, over what
+ * the outer gate defaulted from the virtual key (#678).
+ *
+ * ## Why the merge happens here and not in the gate
+ *
+ * The gate (`src/attribution/middleware.ts`) runs before this app and reads the
+ * body from a `Request.clone()`; it deliberately does not REWRITE the body,
+ * because rewriting would mean materializing and re-presenting the caller's
+ * bytes and would put the `payload_too_large` / `invalid_json` boundary behind a
+ * re-serialization. So the gate carries only what it ADDED, and the merge lands
+ * at the exact point the metadata becomes `Usage.metadata` — i.e. at the one
+ * value that reaches `billing_events.event_json -> metadata`, which is the
+ * column #677's chargeback query filters on. A default that stopped short of
+ * this line would satisfy the gate and still leave the charge unattributed.
+ *
+ * ## The direction of the spread is load-bearing
+ *
+ * Defaults FIRST, caller SECOND: a tag the caller stated always wins. The gate
+ * only ever defaults keys the caller left unstated, so the two can collide only
+ * if the request changed between the gate's read and this one — impossible for
+ * one request, and the safe resolution either way.
+ */
+function attributedMetadata(
+  c: InferenceContext,
+  request: Record<string, unknown>,
+): RequestMetadata | undefined {
+  const stated = request["metadata"] as RequestMetadata | undefined;
+  const defaults = c.get("inferenceAttributionDefaults");
+  if (defaults === undefined || Object.keys(defaults).length === 0) return stated;
+  return { ...defaults, ...(stated ?? {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,6 +1243,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     c.set("inferenceCaller", caller);
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
     c.set("inferenceLog", scope?.log ?? noInferenceLog);
+    c.set("inferenceAttributionDefaults", scope?.attributionDefaults ?? NO_ATTRIBUTION_DEFAULTS);
 
     // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
     // provider credential for the platform one before anything is planned.
@@ -1440,7 +1484,7 @@ async function handleOpenAiInference(
   const request = c.get("inferenceBody") as Record<string, unknown>;
   const logicalModel = String(request["model"]);
   const stream = request["stream"] === true;
-  const metadata = request["metadata"] as RequestMetadata | undefined;
+  const metadata = attributedMetadata(c, request);
 
   // Rust `estimate_chat_completion_usage` — `/v1/responses` shares it, because
   // both surfaces go through `build_chat_completion_request_plan`.
@@ -1830,7 +1874,7 @@ async function handleEmbeddings(
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
   const logicalModel = String(request["model"]);
-  const metadata = request["metadata"] as RequestMetadata | undefined;
+  const metadata = attributedMetadata(c, request);
 
   // Rust `estimate_embeddings_usage` — the arm that scores a PRE-TOKENIZED
   // `input` (a flat array of token ids) at one token each is the one that
@@ -1936,7 +1980,7 @@ async function handleImages(
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
   const logicalModel = String(request["model"]);
-  const metadata = request["metadata"] as RequestMetadata | undefined;
+  const metadata = attributedMetadata(c, request);
 
   // Rust `estimate_images_usage` (issue #275): the pre-charge unit is GENERATED
   // IMAGES on the completion dimension, and `n` is clamped to

@@ -109,6 +109,32 @@ export interface ApiKeyRecord {
   readonly expires_at_unix?: number | null;
   /** Static keys only: `0` means the budget is exhausted. */
   readonly monthly_token_budget?: number | null;
+  /**
+   * #678 — the attribution tags this credential stands for, defaulted onto a
+   * request whose tenant policy says `default_from_key`. The durable twin is
+   * `api_keys.attribution_tags_json` (`keys/store.ts`).
+   */
+  readonly attribution_tags?: Readonly<Record<string, string>>;
+}
+
+/**
+ * A configured key's `attribution_tags`, keeping only string→string entries.
+ *
+ * A var is operator-authored JSON with no schema behind it, so a number or a
+ * nested object would otherwise reach `Usage.metadata` and from there
+ * `billing_events.event_json`. Dropping non-strings rather than stringifying
+ * them means a malformed entry cannot SATISFY a required tag — it stays missing
+ * and the request is refused, which is the fail-closed direction for this
+ * control.
+ */
+function attributionTagsOf(record: ApiKeyRecord): Readonly<Record<string, string>> | undefined {
+  const raw = record.attribution_tags;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const tags: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === "string" && value !== "") tags[key] = value;
+  }
+  return Object.keys(tags).length === 0 ? undefined : tags;
 }
 
 function isExpired(record: ApiKeyRecord, now: number): boolean {
@@ -128,6 +154,9 @@ function toAuthContext(record: ApiKeyRecord, scopes: readonly string[]): AuthCon
     scopes,
     platformOperator: record.platform_operator === true,
     source: "durable_native",
+    ...(attributionTagsOf(record) === undefined
+      ? {}
+      : { attributionTags: attributionTagsOf(record) }),
   };
 }
 

@@ -193,6 +193,20 @@ export interface InferenceRequestScope {
    * `createInferenceRouter` directly is unaffected.
    */
   readonly log?: ((facts: InferenceLogFacts) => void) | undefined;
+  /**
+   * #678 — the attribution tags the OUTER gate defaulted onto this request from
+   * the virtual key, for the required tags the caller did not state.
+   *
+   * It travels here for the same reason `caller` and `tokens` do: the gate runs
+   * on the outer app and `inner.fetch` opens a fresh Hono context. It carries
+   * ONLY the defaults, never the caller's own tags — those are already in the
+   * body this app parses, and a second copy of them would be a second source of
+   * truth for one fact.
+   *
+   * Absent (an inner-app unit test, or a request nothing defaulted) leaves the
+   * caller's `metadata` exactly as it arrived.
+   */
+  readonly attributionDefaults?: Readonly<Record<string, string>> | undefined;
 }
 
 /**

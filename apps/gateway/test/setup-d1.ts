@@ -38,6 +38,12 @@ import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sq
 // listed because they are `ALTER TABLE`s and tables no `apps/gateway` code path
 // reads; add one here the moment a gateway module queries it.
 import semanticCacheMigrationSql from "../../../sql/d1-ts/control/0004_semantic_cache_policies.sql?raw";
+// Issue #678, and the same rule the note above states: `src/attribution/source.ts`
+// reads `quota_policies.required_tags_json` / `on_missing_tags` on the request
+// path of every spend-producing operation. This one is an `ALTER TABLE`, so it
+// is applied through {@link applyIgnoringDuplicateColumn} rather than being
+// listed with the `CREATE … IF NOT EXISTS` migrations above.
+import attributionPolicyMigrationSql from "../../../sql/d1-ts/control/0006_attribution_tag_policy.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;
@@ -104,5 +110,26 @@ beforeAll(async () => {
         await CONTROL_DB.prepare(statement).run();
       }
     }
+    await applyIgnoringDuplicateColumn(CONTROL_DB, attributionPolicyMigrationSql);
   }
 });
+
+/**
+ * Apply an `ALTER TABLE … ADD COLUMN` migration idempotently.
+ *
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`, and this setup runs once per test
+ * FILE against storage that a given run may or may not have already migrated —
+ * so a second application must be a no-op rather than a `duplicate column name`
+ * throw that fails an entire file before its first test. Any OTHER error is
+ * re-thrown: a migration that is broken for a real reason must still be loud.
+ */
+async function applyIgnoringDuplicateColumn(db: D1Database, migration: string): Promise<void> {
+  for (const statement of sqlStatements(migration)) {
+    try {
+      await db.prepare(statement).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name/i.test(message)) throw error;
+    }
+  }
+}

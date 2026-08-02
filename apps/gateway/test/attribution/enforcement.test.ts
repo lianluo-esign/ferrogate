@@ -19,6 +19,7 @@
  * happens before guardrail screening" — are statements about ORDER, and order
  * is exactly what a test with a hand-rolled middleware list cannot see.
  */
+import { env as poolEnv } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
@@ -31,14 +32,14 @@ import {
   TrackingScheduler,
 } from "../../src/metering/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
-import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "../guardrails/fixtures.js";
-import { pricedBook } from "../metering/fixtures.js";
+import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import {
   type ProviderInterceptor,
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
+import { pricedBook } from "../metering/fixtures.js";
 
 const BASE = "https://gw.test";
 
@@ -115,7 +116,15 @@ function gateway(
       : { GATEWAY_ATTRIBUTION_POLICIES: JSON.stringify(options.policies) }),
     ...(options.quotas === undefined
       ? {}
-      : { GATEWAY_QUOTA_POLICIES: JSON.stringify(options.quotas) }),
+      : {
+          GATEWAY_QUOTA_POLICIES: JSON.stringify(options.quotas),
+          // The REAL `RateLimiterDurableObject` from `wrangler.toml`. Without
+          // it `limiterForEnv` builds a fresh `InMemoryRateLimiter` per
+          // request, whose `Map` is discarded before the next one — so an RPM
+          // limit could never be reached and the "the refusal was counted"
+          // assertion below would be vacuous rather than informative.
+          RATE_LIMIT: (poolEnv as unknown as Record<string, unknown>)["RATE_LIMIT"],
+        }),
     ...(options.guardrails === true
       ? {
           GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([secretScanPolicy()]),
@@ -139,7 +148,7 @@ function gateway(
   return {
     ledger,
     scheduler,
-    call: (key, body) =>
+    call: async (key, body) =>
       app.request(
         `${BASE}/v1/chat/completions`,
         {

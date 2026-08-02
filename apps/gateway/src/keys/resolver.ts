@@ -182,6 +182,14 @@ function toAuthContext(row: StoredApiKey): AuthContext {
     ...(row.requestLimitPerMinute === null
       ? {}
       : { requestLimitPerMinute: row.requestLimitPerMinute }),
+    // #678 — forwarded only when non-empty, so "this key declares nothing" and
+    // "this credential source has no such column" are the same value
+    // (`undefined`) at the one place that reads it. Read by
+    // `attribution/middleware.ts`; an empty map would be indistinguishable from
+    // a declared-but-blank one and mean the same thing anyway.
+    ...(Object.keys(row.attributionTags).length === 0
+      ? {}
+      : { attributionTags: row.attributionTags }),
   };
 }
 
