@@ -10,14 +10,14 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { McpDispatchHeaders, McpExecutionError, type DispatchContext } from "../src/ports.js";
+import { type DispatchContext, McpDispatchHeaders, McpExecutionError } from "../src/ports.js";
 import {
   MCP_METHOD_HEADER,
   MCP_NAME_HEADER,
   MCP_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION_HEADER,
 } from "../src/protocol.js";
-import { encodeSseEvent, HttpMcpUpstreams, validateHttpEndpoint } from "../src/transport.js";
+import { HttpMcpUpstreams, encodeSseEvent, validateHttpEndpoint } from "../src/transport.js";
 import { tenantAuth, upstreamConfig } from "./fixtures.js";
 
 interface Seen {
@@ -103,8 +103,11 @@ describe("modern Streamable HTTP upstream", () => {
       });
     });
     const upstreams = new HttpMcpUpstreams([upstreamConfig()], impl);
-    const tool = await upstreams.toolByName("srv-echo");
-    expect(tool).toBeDefined();
+    // #687: resolution answers with a RESOLUTION (resolved / ambiguous /
+    // missing), so a colliding flat name can be refused instead of guessed.
+    const resolution = await upstreams.resolveTool("srv-echo");
+    expect(resolution.kind).toBe("resolved");
+    const tool = resolution.kind === "resolved" ? resolution.tool : undefined;
 
     const result = await upstreams.callTool(
       tool!,
@@ -128,7 +131,8 @@ describe("modern Streamable HTTP upstream", () => {
       return sseResponse({ jsonrpc: "2.0", id: 3, result: { isError: true } });
     });
     const upstreams = new HttpMcpUpstreams([upstreamConfig()], impl);
-    const tool = await upstreams.toolByName("srv-echo");
+    const resolved = await upstreams.resolveTool("srv-echo");
+    const tool = resolved.kind === "resolved" ? resolved.tool : undefined;
     const result = await upstreams.callTool(tool!, {}, McpDispatchHeaders.empty(), context);
     expect(result.isError).toBe(true);
   });
@@ -160,7 +164,8 @@ describe("modern Streamable HTTP upstream", () => {
       return jsonResponse({ error: "nope" }, 401);
     });
     const upstreams = new HttpMcpUpstreams([upstreamConfig()], impl);
-    const tool = await upstreams.toolByName("srv-echo");
+    const resolved = await upstreams.resolveTool("srv-echo");
+    const tool = resolved.kind === "resolved" ? resolved.tool : undefined;
     await expect(
       upstreams.callTool(tool!, {}, McpDispatchHeaders.empty(), context),
     ).rejects.toMatchObject({ code: "mcp_upstream_unauthorized" });

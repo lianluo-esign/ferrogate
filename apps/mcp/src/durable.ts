@@ -98,12 +98,32 @@ export const MCP_IDENTITY_SCHEMA: readonly string[] = [
      auth_type             TEXT    NOT NULL,
      tools_to_execute      TEXT    NOT NULL,
      tools_to_auto_execute TEXT    NOT NULL,
+     tools_to_exclude      TEXT,
      headers               TEXT,
      oauth                 TEXT,
      signed_jwt_audience   TEXT,
      timeout_ms            INTEGER NOT NULL,
      PRIMARY KEY (tenant_id, name)
    )`,
+];
+
+/**
+ * Columns added to a table {@link MCP_IDENTITY_SCHEMA} already creates.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a NO-OP against a database that already has
+ * the table, so adding a column to the literal above reaches new databases only
+ * — and every deployed one would then fail `SELECT … tools_to_exclude` with
+ * `no such column`. SQLite has no `ADD COLUMN IF NOT EXISTS`, so the statement
+ * runs unconditionally and a `duplicate column name` error is the SUCCESS case
+ * (the column is already there). Any OTHER error is re-raised: swallowing it
+ * would leave the reader querying a column that does not exist.
+ *
+ * Additive only, and every added column is NULLABLE. That is what keeps this
+ * idempotent, race-safe between two isolates, and reversible by a rollback of
+ * the code alone.
+ */
+export const MCP_IDENTITY_ADDED_COLUMNS: readonly string[] = [
+  "ALTER TABLE mcp_servers ADD COLUMN tools_to_exclude TEXT",
 ];
 
 const migrated = new WeakSet<D1Database>();
@@ -120,6 +140,17 @@ const migrated = new WeakSet<D1Database>();
 export async function ensureMcpIdentitySchema(db: D1Database): Promise<void> {
   if (migrated.has(db)) return;
   await db.batch(MCP_IDENTITY_SCHEMA.map((sql) => db.prepare(sql)));
+  // Run OUTSIDE the batch: `db.batch` is one transaction, and the expected
+  // `duplicate column name` failure of an already-applied ALTER would roll the
+  // whole schema back.
+  for (const sql of MCP_IDENTITY_ADDED_COLUMNS) {
+    try {
+      await db.prepare(sql).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name/i.test(message)) throw error;
+    }
+  }
   migrated.add(db);
 }
 
@@ -633,6 +664,12 @@ interface ServerRow {
   auth_type: string;
   tools_to_execute: string;
   tools_to_auto_execute: string;
+  /**
+   * The #687 exclude list, as JSON. NULLABLE on purpose: this column was added
+   * after `mcp_servers` shipped, so a row written before the migration reads
+   * `null` and must decode to a server that excludes nothing.
+   */
+  tools_to_exclude?: string | null;
   headers: string | null;
   oauth: string | null;
   signed_jwt_audience: string | null;
@@ -662,6 +699,12 @@ const AUTH_TYPES: readonly McpAuthType[] = [
 export function decodeServerRow(row: ServerRow): McpServerConfig | undefined {
   if (!TRANSPORTS.includes(row.transport as McpTransport)) return undefined;
   if (!AUTH_TYPES.includes(row.auth_type as McpAuthType)) return undefined;
+  // #687: the exclude list. `null`/absent is a database that predates the
+  // column, which excludes nothing; anything that is not a JSON array OF
+  // STRINGS REFUSES the row, because silently dropping a malformed entry of a
+  // DENY list permits more than the operator wrote.
+  const excluded = decodeExcludeColumn(row.tools_to_exclude);
+  if (excluded === REFUSED) return undefined;
   const config: McpServerConfig = {
     name: row.name,
     transport: row.transport as McpTransport,
@@ -675,7 +718,28 @@ export function decodeServerRow(row: ServerRow): McpServerConfig | undefined {
   if (row.headers !== null) optional.headers = JSON.parse(row.headers) as Record<string, string>;
   if (row.oauth !== null) optional.oauth = JSON.parse(row.oauth) as McpOauthConfig;
   if (row.signed_jwt_audience !== null) optional.signedJwtAudience = row.signed_jwt_audience;
+  if (excluded !== undefined) optional.toolsToExclude = excluded;
   return { ...config, ...optional };
+}
+
+/** Sentinel distinguishing "no exclude list" from "an exclude list I refuse". */
+const REFUSED = Symbol("refused");
+
+function decodeExcludeColumn(
+  raw: string | null | undefined,
+): string[] | undefined | typeof REFUSED {
+  if (raw === null || raw === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return REFUSED;
+  }
+  if (!Array.isArray(parsed)) return REFUSED;
+  for (const entry of parsed) {
+    if (typeof entry !== "string") return REFUSED;
+  }
+  return parsed as string[];
 }
 
 /**
@@ -725,7 +789,7 @@ export async function loadServerCatalog(
   const rows = await db
     .prepare(
       `SELECT name, transport, url, auth_type, tools_to_execute, tools_to_auto_execute,
-              headers, oauth, signed_jwt_audience, timeout_ms
+              tools_to_exclude, headers, oauth, signed_jwt_audience, timeout_ms
          FROM mcp_servers WHERE tenant_id = ? ORDER BY name`,
     )
     .bind(tenantId)

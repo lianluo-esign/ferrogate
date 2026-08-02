@@ -92,6 +92,15 @@ import {
   type TenancyLifecycleGatePort,
   UnboundLifecycleGate,
 } from "./lifecycle.js";
+// `./multiplex.js` is a LEAF: it imports only the `McpTool` TYPE back out of
+// this module, which is erased, so there is no value-level cycle to reason
+// about even though the dependency reads both ways on paper.
+import {
+  type McpFanIn,
+  type McpToolResolution,
+  namespacedToolName,
+  resolveAcrossCatalog,
+} from "./multiplex.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "./oauth-flow.js";
 // `./rbac.js` imports the `AuthContext` TYPE back out of this module. The cycle
 // is safe for the same reason `./auth.js`'s is: the import is type-only, so
@@ -100,6 +109,9 @@ import { type RbacAuthorizerPort, UnboundRbacAuthorizer, rbacAuthorizerFromEnv }
 // TYPE-ONLY. `./session.js` imports `McpTool` back out of this module, also
 // type-only, so nothing is evaluated in either direction at module load.
 import type { FerroGateMcpSession } from "./session.js";
+// TYPE-ONLY, for the same reason: `./unified.ts` imports nothing from here at
+// runtime, so the namespace field below costs no module-load coupling.
+import type { FerroGateMcpUnifiedSession } from "./unified.js";
 
 // ---------------------------------------------------------------------------
 // Upstream MCP server configuration (port of `ferrogate-mcp/src/config.rs`)
@@ -137,6 +149,19 @@ export interface McpServerConfig {
   authType: McpAuthType;
   /** Deny-by-default execution allowlist. Empty ⇒ nothing is listed or callable. */
   toolsToExecute: string[];
+  /**
+   * The subtractive half of the multiplex filter pair (#687).
+   *
+   * ABSENT means "exclude nothing", which is the only backwards-compatible
+   * default and the only one a database that predates the column can express.
+   * It is NOT the fail-open direction it looks like: the INCLUDE list is still
+   * deny-by-default, so an absent exclude list leaves a server exposing exactly
+   * what it exposed before this field existed.
+   *
+   * EXCLUDE WINS over {@link toolsToExecute}. See {@link toolPermitted} for why
+   * that is forced rather than chosen.
+   */
+  toolsToExclude?: string[];
   /** Subset of {@link toolsToExecute} that may run without an approval. */
   toolsToAutoExecute: string[];
   /** Static headers merged into every dispatch (`shared_headers`). */
@@ -274,6 +299,28 @@ export interface DispatchContext {
   /** Validated original bearer (`x-ferrogate-mcp-bearer`) for `original_bearer` upstreams. */
   originalBearer?: string;
   skill?: { id: string; version: string };
+  /**
+   * #687: where the code that RESOLVED an upstream reports which one it was.
+   *
+   * Optional, so every existing construction site keeps compiling and every
+   * path that has no session simply writes nowhere. The alternative — the
+   * ingress guessing the serving upstream from the flat tool name — is exactly
+   * the defect `#677/#678`'s attribution and this PR's `resolveTool` closed.
+   */
+  upstreams?: UpstreamAttributionSink;
+}
+
+/**
+ * The upstreams that contributed to one response (#687).
+ *
+ * `note` is the upstream that SERVED something; `noteFailure` is one whose own
+ * session could not be reached on this request. The second is how a client
+ * session learns that one leg of its fan-out dropped mid-conversation while the
+ * session itself stays open.
+ */
+export interface UpstreamAttributionSink {
+  note(server: string): void;
+  noteFailure(server: string, message: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,9 +418,32 @@ export class McpExecutionError extends Error {
 export interface McpUpstreamPort {
   listServers(): readonly McpServerConfig[];
   getServer(name: string): McpServerConfig | undefined;
-  /** Namespaced, allowlisted tools visible to this caller. */
+  /**
+   * The multiplexed fan-in: the union of every reachable upstream's
+   * allowlisted tools, AND the upstreams that could not be reached (#687).
+   *
+   * Both halves are returned together on purpose. A signature that returned
+   * only the tools is what allowed a partial upstream failure to reach the
+   * client as a silently shorter list, which an agent reads as "that tool does
+   * not exist" — strictly worse than an error.
+   */
+  fanIn(): Promise<McpFanIn>;
+  /**
+   * Namespaced, allowlisted tools visible to this caller.
+   *
+   * The lossy half of {@link fanIn}, kept because most callers genuinely only
+   * want the union. Anything that reports to a client must use `fanIn`.
+   */
   listTools(): Promise<readonly McpTool[]>;
-  toolByName(name: string): Promise<McpTool | undefined>;
+  /**
+   * Resolve one namespaced tool name against the multiplexed catalogue (#687).
+   *
+   * Returns a RESOLUTION rather than a tool because "no such tool" and "two
+   * upstreams claim this name" are different answers and only the second one is
+   * fixable by the caller. `selector` is the caller's explicit
+   * `ferrogate/server`; see `./multiplex.ts` for the whole contract.
+   */
+  resolveTool(name: string, selector?: string | undefined): Promise<McpToolResolution>;
   /**
    * Execute an allowlisted upstream tool. `identity` carries the resolved
    * per-request grant; `context` carries the correlation chain so an upstream
@@ -1137,14 +1207,15 @@ export class InMemoryUpstreams implements McpUpstreamPort {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
-  async listTools(): Promise<readonly McpTool[]> {
+  async fanIn(): Promise<McpFanIn> {
     const listed: McpTool[] = [];
     for (const config of this.#servers.values()) {
       for (const tool of this.#tools.get(config.name) ?? []) {
-        // Deny-by-default: an un-allowlisted tool is never even advertised.
-        if (!toolAllowlisted(config.toolsToExecute, tool.name)) continue;
+        // Deny-by-default MINUS the exclude list (#687): an un-allowlisted or
+        // explicitly excluded tool is never even advertised.
+        if (!toolPermitted(config, tool.name)) continue;
         const entry: McpTool = {
-          name: `${config.name}-${tool.name}`,
+          name: namespacedToolName(config.name, tool.name),
           serverName: config.name,
           remoteName: tool.name,
           inputSchema: tool.input_schema,
@@ -1154,11 +1225,24 @@ export class InMemoryUpstreams implements McpUpstreamPort {
         listed.push(entry);
       }
     }
-    return listed;
+    // An in-memory server cannot be unreachable, so `degraded` is always empty
+    // here — the honest answer, not a stub.
+    return { tools: listed, degraded: [] };
   }
 
-  async toolByName(name: string): Promise<McpTool | undefined> {
-    return (await this.listTools()).find((tool) => tool.name === name);
+  async listTools(): Promise<readonly McpTool[]> {
+    return (await this.fanIn()).tools;
+  }
+
+  /**
+   * #687: resolved against the materialised catalogue, exactly as
+   * `HttpMcpUpstreams` does — the two hosts used to disagree about collisions
+   * (this one took the FIRST exact match, that one the LONGEST server prefix),
+   * which meant the dev bundle and production routed the same name to different
+   * upstreams.
+   */
+  async resolveTool(name: string, selector?: string | undefined): Promise<McpToolResolution> {
+    return resolveAcrossCatalog(await this.listTools(), name, selector);
   }
 
   async callTool(
@@ -1184,7 +1268,7 @@ export class InMemoryUpstreams implements McpUpstreamPort {
         `MCP server ${config.name} uses the stdio transport, which Workers cannot host (no process spawn); move it to a Container or an HTTP transport`,
       );
     }
-    if (!toolAllowlisted(config.toolsToExecute, tool.remoteName)) {
+    if (!toolPermitted(config, tool.remoteName)) {
       throw new McpExecutionError(
         "tool_denied",
         `MCP tool ${config.name}-${tool.remoteName} is not allowlisted for execution`,
@@ -1206,26 +1290,52 @@ export function toolAllowlisted(allowlist: readonly string[], name: string): boo
   return allowlist.includes(name);
 }
 
-/**
- * Longest-prefix resolution of a namespaced `{server}-{remote}` tool name.
- * Port of `manager::resolve_namespaced_session`: a server named `a-b` wins over
- * a server named `a` for the tool `a-b-c`.
- */
-export function resolveNamespacedTool(
-  serverNames: readonly string[],
-  name: string,
-): { serverName: string; remoteName: string } | undefined {
-  let best: { serverName: string; remoteName: string } | undefined;
-  for (const serverName of serverNames) {
-    if (!name.startsWith(`${serverName}-`)) continue;
-    const remoteName = name.slice(serverName.length + 1);
-    if (remoteName.trim().length === 0) continue;
-    if (best === undefined || serverName.length > best.serverName.length) {
-      best = { serverName, remoteName };
-    }
-  }
-  return best;
+/** The subtractive half. An absent list excludes nothing. */
+export function toolExcluded(denylist: readonly string[] | undefined, name: string): boolean {
+  return denylist?.includes(name) ?? false;
 }
+
+/**
+ * The multiplex filter pair (#687): INCLUDE ∖ EXCLUDE, by the upstream's own
+ * remote tool name.
+ *
+ * ## Why EXCLUDE wins, and why that is forced rather than preferred
+ *
+ * `toolsToExecute` is deny-by-DEFAULT. A tool that is listable or callable at
+ * all is therefore NECESSARILY on the include list. So if include won a
+ * conflict, writing a name into the exclude list could never change any
+ * outcome — the exclude list would be decorative, and an operator who added an
+ * exclusion and watched the tool stay callable would be holding a security
+ * hole, not a preference mismatch. There is exactly one order in which both
+ * lists mean something, and this is it.
+ *
+ * It is also the fail-CLOSED direction, which is the tie-break this app applies
+ * everywhere else a decode or a policy is ambiguous.
+ *
+ * ## Where it must be applied
+ *
+ * EVERY read, not only where a tool list is first discovered. `HttpMcpUpstreams`
+ * caches the discovered list per isolate and publishes it to the shared
+ * `MCP_SESSION` Durable Object, so an exclusion applied only at discovery would
+ * leave every warm session serving the excluded tool until its next reconnect.
+ * A deny rule that takes effect eventually is not a deny rule.
+ */
+export function toolPermitted(
+  config: Pick<McpServerConfig, "toolsToExecute" | "toolsToExclude">,
+  remoteName: string,
+): boolean {
+  if (toolExcluded(config.toolsToExclude, remoteName)) return false;
+  return toolAllowlisted(config.toolsToExecute, remoteName);
+}
+
+// `resolveNamespacedTool` — the longest-prefix port of
+// `manager::resolve_namespaced_session` — used to live here and is DELETED
+// (#687), not moved. It answered "which single upstream owns this flat name"
+// by looking only at the string, and with two upstreams whose namespaced names
+// collide it silently picked one and made the other's tool permanently
+// unreachable. `./multiplex.ts`'s `candidateServerNames` returns EVERY prefix
+// match, and the answer then comes from those upstreams' catalogues. Leaving
+// the old helper exported would only invite a second, divergent resolver.
 
 export class InMemoryCredentialStore implements McpCredentialStorePort {
   readonly #flows = new Map<string, StoredMcpOauthFlow>();
@@ -1419,6 +1529,23 @@ export interface McpEnv {
    * health signal, same answers.
    */
   MCP_SESSION?: DurableObjectNamespace<FerroGateMcpSession>;
+
+  /**
+   * Durable Object namespace holding the UNIFIED CLIENT session (#687,
+   * `src/unified.ts`). One instance per `(tenant, client session id)` — the
+   * other axis from {@link MCP_SESSION}, which is per `(tenant, UPSTREAM)`.
+   *
+   * It holds what one client conversation sees: which upstreams its fan-out is
+   * bound to, which of them dropped, and the bounded log of emitted frames a
+   * `Last-Event-ID` reconnect replays from.
+   *
+   * OPTIONAL. Absent, the ingress mints no session and answers exactly as it
+   * did before this slice — but it then REFUSES an `Mcp-Session-Id` or a
+   * `Last-Event-ID` rather than accepting one it cannot honour. Silently
+   * ignoring a resume cursor is the failure mode; offering no sessions is a
+   * visible degradation.
+   */
+  MCP_CLIENT_SESSION?: DurableObjectNamespace<FerroGateMcpUnifiedSession>;
 
   /**
    * DEV/TEST ONLY. When `"1"`, the dev bundle resolves upstreams through the

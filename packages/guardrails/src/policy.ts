@@ -15,6 +15,7 @@ import {
   type DetectorStage,
   MAX_DETECTOR_TIMEOUT_MS,
   detectorStageSchema,
+  findingSeveritySchema,
 } from "./contract.js";
 import { validateCustomHttpEndpoint } from "./custom_http.js";
 import {
@@ -28,6 +29,11 @@ import {
   secretPatternSchema,
 } from "./deterministic.js";
 import { ALL_CONTENT_SOURCES, type ContentSource, contentSourceSchema } from "./envelope.js";
+import {
+  INJECTION_AI_DEFAULT_MODEL,
+  INJECTION_CATEGORIES,
+  INJECTION_REQUEST_HOOKS,
+} from "./injection.js";
 import { PII_AI_DEFAULT_MODEL, PII_AI_ENTITIES, PII_ENTITIES } from "./pii.js";
 
 function invalidPolicy(message: string): DetectorError {
@@ -257,6 +263,18 @@ export const piiAiStageSchema = z
   })
   .strict();
 
+export const injectionCategorySchema = z.enum(INJECTION_CATEGORIES);
+export const injectionActionSchema = z.enum(["flag", "neutralize"]);
+
+/** The optional Workers AI classifier stage (#688), off unless a policy asks. */
+export const injectionAiStageSchema = z
+  .object({
+    model: z.string().default(INJECTION_AI_DEFAULT_MODEL),
+    timeout_ms: z.number().int().nonnegative().default(DEFAULT_TIMEOUT_MS),
+    max_input_chars: z.number().int().nonnegative().default(4_000),
+  })
+  .strict();
+
 export const detectorDefinitionSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -336,6 +354,22 @@ export const detectorDefinitionSchema = z.discriminatedUnion("kind", [
       redaction: piiRedactionModeSchema.default("mask"),
       max_input_bytes: z.number().int().nonnegative().nullable().optional(),
       ai: piiAiStageSchema.nullable().optional(),
+      fingerprint_secret_ref: z.string(),
+    })
+    .strict(),
+  // Native prompt-injection / jailbreak screening (#688). Like `pii` it has no
+  // endpoint and no credential; unlike `pii` its tuning knobs are governance
+  // decisions in both directions — `min_severity` trades a missed attack
+  // against a refused legitimate request, and both costs are the tenant's — so
+  // they live on a signed, versioned revision rather than on an env var.
+  z
+    .object({
+      kind: z.literal("injection"),
+      categories: z.array(injectionCategorySchema).default([...INJECTION_CATEGORIES]),
+      min_severity: findingSeveritySchema.default("high"),
+      action: injectionActionSchema.default("flag"),
+      max_input_bytes: z.number().int().nonnegative().nullable().optional(),
+      ai: injectionAiStageSchema.nullable().optional(),
       fingerprint_secret_ref: z.string(),
     })
     .strict(),
@@ -520,6 +554,33 @@ export function validateDetectorDefinition(def: DetectorDefinition): void {
         }
         if (ai.model.trim().length === 0 || ai.max_input_chars === 0) {
           throw invalidPolicy("pii detector AI model and input budget must be non-empty");
+        }
+      }
+      break;
+    }
+    case "injection": {
+      if (def.categories.length === 0 || new Set(def.categories).size !== def.categories.length) {
+        // An empty category list compiles, runs, finds nothing and reports a
+        // clean pass forever — a green control that screens nothing.
+        throw invalidPolicy("injection detector categories must be non-empty and unique");
+      }
+      if (def.fingerprint_secret_ref.trim().length === 0) {
+        throw invalidPolicy(
+          "injection detector requires fingerprint_secret_ref for keyed evidence",
+        );
+      }
+      if (def.max_input_bytes === 0) {
+        throw invalidPolicy("injection detector max_input_bytes must be greater than zero");
+      }
+      const ai = def.ai;
+      if (ai !== null && ai !== undefined) {
+        if (ai.timeout_ms === 0 || ai.timeout_ms > MAX_DETECTOR_TIMEOUT_MS) {
+          throw invalidPolicy(
+            "injection detector AI limits are invalid or exceed the runtime ceiling",
+          );
+        }
+        if (ai.model.trim().length === 0 || ai.max_input_chars === 0) {
+          throw invalidPolicy("injection detector AI model and input budget must be non-empty");
         }
       }
       break;
@@ -711,6 +772,40 @@ export function immutableId(revision: PolicyRevision): string {
   return `${revision.policy_id}@${revision.revision}`;
 }
 
+/**
+ * A request-stage `injection` check MUST be bound to all four hooks (#688).
+ *
+ * This is a deliberate refusal to make the dangerous configuration
+ * expressible. Screening only `user` is the intuitive setup and it defends
+ * almost nothing: the attacker does not type into the prompt box, they poison a
+ * document the retriever pulls, a tool DESCRIPTION the agent reads to choose a
+ * call, or the RESULT a tool hands back. A policy that screens the prompt alone
+ * looks green on every dashboard while the actual attack path is unwatched, and
+ * a control that reports "clean" on an unscreened surface is worse than no
+ * control — it converts an open risk into a false assurance.
+ *
+ * Tuning is therefore done with `min_severity`, `categories` and `action`,
+ * which change what is BLOCKED. Unbinding a hook changes what is SEEN, and that
+ * is not offered.
+ *
+ * Response-stage injection checks are unconstrained: the four hooks are
+ * request-shaped (a tool result re-enters as a `tool` message on the NEXT
+ * request), and a response-stage check screens assistant output for a different
+ * purpose.
+ */
+function validateInjectionHookCoverage(check: CheckBinding): void {
+  if (check.detector.kind !== "injection" || check.stage !== "request") {
+    return;
+  }
+  const bound = new Set(check.sources);
+  const missing = INJECTION_REQUEST_HOOKS.filter((hook) => !bound.has(hook));
+  if (missing.length > 0) {
+    throw invalidPolicy(
+      `injection detector must be bound to all four request hooks; missing ${missing.join(", ")}`,
+    );
+  }
+}
+
 export function validatePolicyRevision(rev: PolicyRevision): void {
   if (
     rev.policy_id.trim().length === 0 ||
@@ -738,6 +833,7 @@ export function validatePolicyRevision(rev: PolicyRevision): void {
       throw invalidPolicy("guardrail policy check sources must be non-empty and unique");
     }
     validateDetectorDefinition(check.detector);
+    validateInjectionHookCoverage(check);
     if (check.fallback_detector) {
       if (check.fallback_detector.kind !== "local") {
         throw invalidPolicy("guardrail policy fallback_detector must be local");

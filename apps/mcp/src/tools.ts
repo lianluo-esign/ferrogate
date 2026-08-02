@@ -22,23 +22,35 @@ import type { JsonValue } from "@ferrogate/core";
 
 import { resolveMcpIdentity } from "./identity/oauth.js";
 import {
+  type JsonRpcId,
+  type JsonRpcResponse,
   jsonRpcError,
   jsonRpcResult,
   mcpErrorCode,
-  type JsonRpcId,
-  type JsonRpcResponse,
 } from "./jsonrpc.js";
 import {
-  hasScope,
-  isJsonObjectValue,
-  McpDispatchHeaders,
-  McpExecutionError,
-  tenantContext,
+  EMPTY_FAN_IN,
+  MULTIPLEX_AMBIGUOUS_META,
+  MULTIPLEX_DEGRADED_META,
+  TOOL_NAMESPACE_SEPARATOR,
+  ambiguousMeta,
+  ambiguousToolMessage,
+  ambiguousToolNames,
+  degradedMeta,
+  readServerSelector,
+  toolMeta,
+} from "./multiplex.js";
+import {
   type AuditEvent,
   type DispatchContext,
+  McpDispatchHeaders,
+  McpExecutionError,
   type McpPorts,
   type McpTool,
   type ToolExecuteBackend,
+  hasScope,
+  isJsonObjectValue,
+  tenantContext,
 } from "./ports.js";
 
 /** Scope the built-in `fetch_asset` tool enforces at execution. */
@@ -80,6 +92,16 @@ export interface ToolExecutionRequest {
   arguments: JsonValue;
   route?: string;
   sessionId?: string;
+  /**
+   * #687: the upstream the caller means, when the flat `{server}-{tool}` name
+   * is claimed by more than one of them.
+   *
+   * Carried as `params._meta["ferrogate/server"]` on the JSON-RPC transport and
+   * as a top-level `server` field on `POST /v1/mcp/tool/execute`. It NARROWS —
+   * a `server` that does not advertise this tool is a refusal, never a fallback
+   * to a different upstream.
+   */
+  server?: string;
 }
 
 /** Port of `ToolExecutionResponse` (minus the buffer-budget guard). */
@@ -104,13 +126,29 @@ export interface ToolExecutionHttpError {
 // Audit helpers (port of `mcp_rpc.rs`)
 // ---------------------------------------------------------------------------
 
-/** Split a namespaced tool name into `(server, tool)` on its FIRST hyphen. */
-export function toolAuditDetails(
-  name: string,
-): { serverName: string; toolName: string } | undefined {
-  const separator = name.indexOf("-");
-  if (separator === -1) return undefined;
-  return { serverName: name.slice(0, separator), toolName: name.slice(separator + 1) };
+/** The `(server, tool)` pair an audit row is filed against. */
+export interface ToolAuditDetails {
+  serverName: string;
+  toolName: string;
+}
+
+/**
+ * Attribution for a RESOLVED tool — read off the catalogue entry, never parsed
+ * out of the flat name (#687).
+ *
+ * This replaces a first-hyphen split of `{server}-{remote}`. That split was
+ * wrong for every upstream whose own name contains a hyphen (`github-mcp`,
+ * `slack-connector`): `github-mcp-search` was filed as server `github`, tool
+ * `mcp-search` — a server that does not exist and a tool nobody called — so
+ * every `tool.execute`, `tool.guardrail`, `tool.approval` and
+ * `mcp.identity.use` row for those upstreams was misattributed, destroying the
+ * per-upstream attribution #677/#678 built.
+ *
+ * `McpTool` already carries both halves exactly as the catalogue knows them,
+ * so the correct answer was one field access away the whole time.
+ */
+export function toolAttribution(tool: McpTool): ToolAuditDetails {
+  return { serverName: tool.serverName, toolName: tool.remoteName };
 }
 
 export function toolAuditTarget(serverName: string, toolName: string): string {
@@ -219,26 +257,59 @@ export async function toolsList(
   // Without this, tools/list DISCOVERS tools that tools/call would later DENY,
   // violating Envoy AI Gateway's "one control, two code paths" guarantee.
   const mcpDenial = await ports.entitlements.toolExecutionDenial(context.auth, "mcp");
-  const tools = mcpDenial === undefined
-    ? [...(await ports.upstreams.listTools())]
-    : [];
+  const fan = mcpDenial === undefined ? await ports.upstreams.fanIn() : EMPTY_FAN_IN;
+  const tools = [...fan.tools];
   if (hasScope(context.auth, ASSET_READ_SCOPE)) tools.push(...builtinTools());
+
+  // #687: what the caller did NOT get is part of the answer. A partial upstream
+  // failure used to arrive as a silently shorter list, and an agent reading a
+  // shorter list concludes the tool does not exist and stops — a worse outcome
+  // than an error it can retry or route around.
+  // #687: tell the client session which upstreams this listing spans and which
+  // of them could not be reached. A degraded upstream is how a client session
+  // learns that one leg of its fan-out dropped MID-CONVERSATION; the session
+  // itself stays open, because one upstream falling over must not take the
+  // whole multiplexed conversation with it.
+  for (const tool of fan.tools) context.upstreams?.note(tool.serverName);
+  for (const failure of fan.degraded) {
+    context.upstreams?.noteFailure(failure.server, failure.message);
+  }
+
+  const collisions = ambiguousToolNames(tools);
+  const meta: Record<string, JsonValue> = {};
+  if (fan.degraded.length > 0) meta[MULTIPLEX_DEGRADED_META] = degradedMeta(fan.degraded);
+  if (collisions.length > 0) meta[MULTIPLEX_AMBIGUOUS_META] = ambiguousMeta(collisions);
+
   ports.audit.record(
     auditEvent(
       context,
       "tool.list",
       "mcp",
-      "success",
-      `listed ${tools.length} MCP tools through native MCP endpoint`,
+      // A listing that could not reach every upstream is not a plain success,
+      // and an operator watching the audit stream is the second reader who
+      // needs to know before an agent starts reasoning from a short catalogue.
+      fan.degraded.length > 0 ? "degraded" : "success",
+      fan.degraded.length > 0
+        ? `listed ${tools.length} MCP tools through native MCP endpoint; ` +
+            `${fan.degraded.length} upstream(s) unreachable: ` +
+            fan.degraded.map((failure) => failure.server).join(", ")
+        : `listed ${tools.length} MCP tools through native MCP endpoint`,
     ),
   );
-  return jsonRpcResult(id, {
+
+  const result: Record<string, JsonValue> = {
     tools: tools.map((tool) => ({
       name: tool.name,
       description: tool.description ?? null,
       inputSchema: tool.inputSchema,
+      // Emitted for EVERY tool: this is the selector a caller sends back on
+      // `tools/call` to name the upstream it meant, and a collision can appear
+      // the moment an operator adds a server.
+      _meta: toolMeta(tool),
     })),
-  });
+  };
+  if (Object.keys(meta).length > 0) result["_meta"] = meta;
+  return jsonRpcResult(id, result);
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +344,11 @@ export async function toolsCall(
 
   const args = object?.["arguments"] ?? {};
   const request: ToolExecutionRequest = { name, arguments: args as JsonValue, route: "/v1/mcp" };
+  // #687: the caller's explicit upstream, from `params._meta["ferrogate/server"]`
+  // — the same string `tools/list` put on that tool's own `_meta`. It is the
+  // ONLY way a flat name claimed by two upstreams stays callable on both.
+  const selector = readServerSelector(params);
+  if (selector !== undefined) request.server = selector;
 
   const result = await executeToolWithGovernance(ports, context, request, backend);
   if (!result.ok) {
@@ -293,7 +369,7 @@ export type GovernedExecution =
 /**
  * THE governed tool chokepoint.
  *
- * Owns, in order: the deny-by-default allowlist check (`toolByName`), the
+ * Owns, in order: the deny-by-default allowlist check (`resolveTool`), the
  * approval gate, the input guardrail, MCP identity resolution (fed the
  * validated original bearer), execution, the output guardrail, and the
  * `tool.execute` / guardrail / approval / identity audit rows. Callers must NOT
@@ -306,13 +382,26 @@ export async function executeToolWithGovernance(
   backend: ToolExecuteBackend,
 ): Promise<GovernedExecution> {
   const started = Date.now();
-  const details = backend === "mcp" ? toolAuditDetails(request.name) : undefined;
-  const auditTarget =
-    details === undefined
-      ? request.name
-      : request.sessionId === undefined
+
+  // #687: attribution is UNKNOWN until the catalogue has resolved the tool.
+  //
+  // These were derived by splitting `request.name` on its first hyphen, which
+  // is a guess — and a wrong one for any upstream whose own name contains a
+  // hyphen. They now start empty (so a refusal that happens BEFORE resolution
+  // is filed against the flat name the caller actually sent, which is the only
+  // thing known at that point) and are retargeted by {@link retarget} the
+  // instant the catalogue answers. `fail` reads them through the closure, so
+  // every refusal after resolution carries the true owning upstream.
+  let details: ToolAuditDetails | undefined;
+  let auditTarget = request.name;
+  const retarget = (tool: McpTool): void => {
+    if (backend !== "mcp") return;
+    details = toolAttribution(tool);
+    auditTarget =
+      request.sessionId === undefined
         ? toolAuditTarget(details.serverName, details.toolName)
         : toolSessionMcpAuditTarget(request.sessionId, details.serverName, details.toolName);
+  };
 
   const fail = (
     status: number,
@@ -333,10 +422,10 @@ export async function executeToolWithGovernance(
   };
 
   // --- allowlist -----------------------------------------------------------
-  let tool: McpTool | undefined;
+  let tool: McpTool;
   if (backend === "builtin") {
-    tool = builtinTools().find((candidate) => candidate.name === request.name);
-    if (tool === undefined) {
+    const builtin = builtinTools().find((candidate) => candidate.name === request.name);
+    if (builtin === undefined) {
       return fail(404, "tool_not_found", `built-in tool ${request.name} does not exist`);
     }
     if (!hasScope(context.auth, ASSET_READ_SCOPE)) {
@@ -346,12 +435,31 @@ export async function executeToolWithGovernance(
         `built-in tool ${request.name} requires the ${ASSET_READ_SCOPE} scope`,
       );
     }
+    tool = builtin;
   } else {
-    tool = await ports.upstreams.toolByName(request.name);
-    if (tool === undefined) {
+    // #687: the CATALOGUE resolves the name, not a split of it, and `server`
+    // narrows to the upstream the caller named before the ambiguity test — that
+    // ordering is what keeps both halves of a collision callable.
+    const resolution = await ports.upstreams.resolveTool(request.name, request.server);
+    if (resolution.kind === "ambiguous") {
+      // REFUSING is the security decision. Picking one claimant would dispatch
+      // arguments composed for upstream A to upstream B, over B's identity
+      // grant (`resolveMcpIdentity` keys on `tool.serverName`) and past B's
+      // execute allowlist — the shared session silently crossing the
+      // per-server fence it exists to preserve. Nothing has been resolved, so
+      // the row stays filed against the flat name the caller sent.
+      return fail(
+        409,
+        "mcp_tool_ambiguous",
+        ambiguousToolMessage(resolution.name, resolution.servers),
+      );
+    }
+    if (resolution.kind === "missing") {
       // Deny-by-default: an un-allowlisted or unknown tool is refused here, at
-      // the chokepoint, so the refusal is audited exactly once.
-      const known = request.name.includes("-");
+      // the chokepoint, so the refusal is audited exactly once. A `server` that
+      // names an upstream not advertising this tool lands here too, and NEVER
+      // falls back to another upstream.
+      const known = request.name.includes(TOOL_NAMESPACE_SEPARATOR);
       return fail(
         403,
         "tool_denied",
@@ -360,7 +468,15 @@ export async function executeToolWithGovernance(
           : `MCP tool ${request.name} must use serverName-toolName namespace`,
       );
     }
+    tool = resolution.tool;
   }
+  // Everything audited from here on names the upstream that actually owns the
+  // tool, whatever the flat name's hyphens suggest.
+  retarget(tool);
+  // #687: the same fact, told to the client session, so the replay log records
+  // WHICH upstream a frame came from. Reported here — after resolution — for
+  // exactly the reason the audit target is: only the catalogue knows.
+  context.upstreams?.note(tool.serverName);
 
   // --- approval gate -------------------------------------------------------
   if (!tool.autoExecute) {
