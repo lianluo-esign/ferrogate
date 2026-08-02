@@ -325,6 +325,53 @@ GATEWAY_TENANT_PLANS = "{}"
 GATEWAY_ATTRIBUTION_POLICIES = "[]"
 
 # ---------------------------------------------------------------------------
+# [vars] - data residency and zero data retention (#681)
+#
+# Read by `residencyPolicySourceFromEnv` (src/residency/source.ts) ONLY when no
+# control database is bound. The DURABLE source is `CONTROL_DB`'s
+# `quota_policies.residency_regions_json` + `require_zero_data_retention` +
+# `log_residency` (sql/d1-ts/control/0007_residency_policy.sql) - so on a
+# deployment with `CONTROL_DB` this var is never consulted, exactly like
+# `GATEWAY_ATTRIBUTION_POLICIES` above it.
+#
+# A JSON array of `{ tenant_id, residency_regions, require_zero_data_retention,
+# log_residency }`:
+#
+#   GATEWAY_RESIDENCY_POLICIES = """
+#   [{ "tenant_id": "tenant_acme",
+#      "residency_regions": ["eu-west-1", "eu-central-1"],
+#      "require_zero_data_retention": true,
+#      "log_residency": "in_region" }]
+#   """
+#
+# EMPTY, the shipped default, is the OFF posture: no tenant is governed and
+# every request routes exactly as before. A governed tenant's request is
+# REFUSED - never quietly served elsewhere - when no candidate route declares a
+# listed `region`, or when `require_zero_data_retention` is set and no route
+# ASSERTS `zero_data_retention = true` on its provider/model row.
+# ---------------------------------------------------------------------------
+GATEWAY_RESIDENCY_POLICIES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] - where THIS deployment's durable request log physically lives (#681)
+#
+# An ASSERTION by the operator, verified by `residency/middleware.ts` against a
+# tenant whose policy says `log_residency = "in_region"`. Cloudflare exposes no
+# runtime property for it - a D1 binding does not report the `location_hint` it
+# was created with - so the honest modelling is the same one ZDR uses: the
+# operator asserts, the policy verifies, and an ABSENT assertion CANNOT satisfy
+# an in-region log policy. Every such tenant's governed requests are then
+# refused `403 log_residency_unsatisfiable` rather than served while their
+# evidence row lands somewhere the policy forbids.
+#
+# EMPTY, the shipped default, is correct for every deployment no tenant has
+# asked for log residency from; set it to the region `CONTROL_DB` and the
+# `REQUEST_LOG` queue were provisioned in (e.g. "eu-west-1") before enabling
+# `log_residency = "in_region"` for anyone.
+# ---------------------------------------------------------------------------
+GATEWAY_LOG_REGION = ""
+
+# ---------------------------------------------------------------------------
 # [vars] — deny/allow policy rules and the prepaid-wallet hold
 #
 # GATEWAY_POLICY_RULES is read by `policyRulesFromEnv` (src/ratelimit/policy.ts):

@@ -81,6 +81,7 @@ import { ShadowBudgetLedger, shadowSampled } from "@ferrogate/routing";
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import { DurableObjectShadowBudgetLedger } from "@ferrogate/routing/durable-objects";
 import type { ShadowBudgetNamespace } from "@ferrogate/routing/durable-objects";
+import { type ResidencyPolicy, residencyViolations } from "../residency/policy.js";
 import { stickyKeyFor } from "./candidates.js";
 import { dispatchDeadline, readBoundedProviderBody } from "./dispatch.js";
 import type {
@@ -118,6 +119,38 @@ export interface ShadowMirror {
  * `samplePercent`% of every caller's traffic instead of a stable
  * `samplePercent`% of callers — the same reason `applyCanary` drops the canary
  * for an identity-less caller.
+ *
+ * ## THE RESIDENCY GATE (#681), AND WHY IT HAD TO BE HERE
+ *
+ * Taking the FULL list is exactly what made this the residency hole. The mirror
+ * is not a candidate, so `candidates.ts::eligibleCandidates` never sees it:
+ * before this gate, an EU-only tenant's entire prompt was dispatched to a
+ * mirror route in `us-east-1` on every sampled request, the client's response
+ * was unaffected, and nothing anywhere reported it. It is the failure the issue
+ * describes — a policy honoured on the primary and forgotten on a secondary
+ * leg — in its worst form, because it is silent by construction.
+ *
+ * ## DROPPING THE MIRROR, RATHER THAN REFUSING THE REQUEST
+ *
+ * This is the one place in this slice where the governing "refuse, never
+ * degrade" rule (#674, #690) does NOT produce a refusal, and the asymmetry is
+ * deliberate rather than an exception carved for convenience.
+ *
+ * That rule is about the guarantee the CLIENT was given. A mirror is not part
+ * of it: the client is served in region either way, and the request it made is
+ * fulfilled exactly as its policy requires. What the mirror would add is an
+ * OPERATOR-side measurement — a shadow evaluation of a second provider — whose
+ * only effect on the tenant is that its prompt leaves the region. Refusing the
+ * client's request because the OPERATOR configured an out-of-region shadow
+ * would punish the tenant for a decision it did not make and cannot see, and
+ * would turn "we measure a second provider" into an outage for every governed
+ * tenant. So the compliant action, and the one that honours the guarantee, is
+ * not to mirror.
+ *
+ * The operator-visible consequence — a shadow evaluation whose sample excludes
+ * governed tenants — is real and is stated here so it is not discovered as a
+ * surprise in a report. It is the correct trade: an incomplete measurement is
+ * an operator problem, an out-of-region prompt is a breach.
  */
 export function shadowMirrorFor(
   candidates: readonly PhysicalRoute[],
@@ -125,9 +158,16 @@ export function shadowMirrorFor(
   operation: InferenceOperation,
   logicalModel: string,
   body: Record<string, unknown>,
+  residencyPolicy: ResidencyPolicy | null,
 ): ShadowMirror | null {
   const route = candidates.find((candidate) => candidate.shadowPercent !== undefined);
   if (route === undefined) {
+    return null;
+  }
+  // BEFORE sampling, so the decision does not depend on which bucket the caller
+  // landed in: a residency-ineligible mirror is never mirrored to, for anyone,
+  // rather than "usually not".
+  if (residencyViolations(route, residencyPolicy).length > 0) {
     return null;
   }
   const stickyKey = stickyKeyFor(caller);

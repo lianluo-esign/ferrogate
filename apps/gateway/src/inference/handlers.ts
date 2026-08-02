@@ -86,6 +86,7 @@ import {
   estimateRerankUsage,
 } from "./estimate.js";
 import type { EstimatedUsage } from "./estimate.js";
+import { effectiveResidencyPolicy } from "../residency/policy.js";
 import {
   genAiOperationForRouteLabel,
   observeGenAiInvocation,
@@ -513,11 +514,28 @@ function planUpstream(
     return reject(400, "model_not_found", `unknown model ${logicalModel}`);
   }
 
+  // Issue #681 — the TENANT residency policy the outer gate resolved, combined
+  // with the per-CREDENTIAL `region_allowlist` the Rust port already carried.
+  // Both must hold, so the region lists intersect; see
+  // `residency/policy.ts::effectiveResidencyPolicy`.
+  const residencyPolicy = effectiveResidencyPolicy(
+    caller.residency ?? null,
+    caller.regionAllowlist,
+  );
+
   // `server/shadow.rs::shadow_decision` (sampling half) — chosen from the FULL
-  // list, because the very next line removes the mirror from it. `undefined`
-  // whenever no shadow is configured, the caller is not in the sampled bucket,
-  // or the caller has no sticky identity to bucket on.
-  const shadow = shadowMirrorFor(resolved, caller, operation, logicalModel, body);
+  // list, because the very next line removes the mirror from it. It is given the
+  // residency policy DIRECTLY: the mirror is not a candidate, so
+  // `eligibleCandidates` below never sees it, and before #681 that made the
+  // mirror the one leg that could put a governed prompt in an unexamined region.
+  const shadow = shadowMirrorFor(
+    resolved,
+    caller,
+    operation,
+    logicalModel,
+    body,
+    residencyPolicy,
+  );
 
   // `AppState::canary_route` — promote the canary for the sticky subset of
   // callers it selects, drop it for everyone else — and then strip the SHADOW
@@ -532,9 +550,9 @@ function planUpstream(
     stream,
     inputTokenUpperBound,
   );
-  const decision = eligibleCandidates(rolled, requirements, caller.regionAllowlist ?? []);
+  const decision = eligibleCandidates(rolled, requirements, residencyPolicy);
   if (decision.eligible.length === 0) {
-    const rejection = routingRejectionFor(logicalModel, decision.exclusions);
+    const rejection = routingRejectionFor(logicalModel, decision.exclusions, residencyPolicy);
     return reject(rejection.status, rejection.code, rejection.message);
   }
 

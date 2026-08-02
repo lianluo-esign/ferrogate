@@ -416,10 +416,18 @@ describe("the env-var drift gate itself", () => {
     // (`grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml` ⇒ 57), not
     // arrived at by adding one to the previous line.
     //
+    // #681 committed TWO: `GATEWAY_RESIDENCY_POLICIES` ("[]"), the
+    // no-control-database fallback for the residency policy, and
+    // `GATEWAY_LOG_REGION` (""), the operator's assertion about where this
+    // deployment's durable request log physically lives. 57 -> 59.
+    //
     // #737 committed `GATEWAY_SITES` ("{}"), the slug -> tenant binding table
-    // the `/sites/*` serve mode reads, so 58. Re-derived by the same grep
-    // against the merged file rather than by incrementing.
-    expect(DECLARED.vars.size).toBe(58);
+    // the `/sites/*` serve mode reads. #681 and #737 were in flight at the same
+    // time and each wrote its own increment against 57, which is exactly the
+    // collision this comment block keeps warning about: the merged figure is
+    // neither parent's. Re-derived with the same grep against the MERGED file
+    // (⇒ 60), not by adding the two increments together.
+    expect(DECLARED.vars.size).toBe(60);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -648,10 +656,11 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    // #678: 56 -> 57 (`GATEWAY_ATTRIBUTION_POLICIES`); #737: 57 -> 58
-    // (`GATEWAY_SITES`). Same re-derivation as the `DECLARED.vars.size` pin
-    // above.
-    expect(rows.length).toBe(58);
+    // #678: 56 -> 57 (`GATEWAY_ATTRIBUTION_POLICIES`). Same re-derivation as
+    // the `DECLARED.vars.size` pin above.
+    // #681: 57 -> 59 (`GATEWAY_RESIDENCY_POLICIES`, `GATEWAY_LOG_REGION`);
+    // #737: + `GATEWAY_SITES`. Counted off the merged file, not summed.
+    expect(rows.length).toBe(60);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -706,14 +715,23 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // pre-#678 posture, so the committed value enforces nothing in this suite.
     // `test/attribution/enforcement.test.ts` supplies its own policies on the
     // env it drives, so the committed blank cannot shadow them.
-    // #737: 52 -> 53. `GATEWAY_SITES` ("{}") is observable and INERT — an
-    // empty binding table means every site is private and none is anonymously
-    // readable, which is the posture the suite needs: a committed binding would
-    // publish a site `test/sites/*` never asked for, and worse, could make an
-    // anonymous read pass for a reason no test stated. Those suites pass their
-    // own bindings to `siteRouteModule` in their own isolate.
+    //
+    // #681: 52 -> 54. `GATEWAY_RESIDENCY_POLICIES` ("[]") and
+    // `GATEWAY_LOG_REGION` ("") are both observable and both INERT. An empty
+    // policy table means no tenant is governed, which is the pre-#681 posture;
+    // and `GATEWAY_LOG_REGION` is only ever CONSULTED for a tenant whose policy
+    // says `log_residency = "in_region"`, so with no such tenant the blank
+    // constrains nothing. `test/residency/enforcement.test.ts` supplies both on
+    // the env it drives, so the committed blanks cannot shadow them.
+    //
+    // #737: + `GATEWAY_SITES` ("{}"), observable and INERT for the same reason
+    // — an empty binding table means every site is private and none is
+    // anonymously readable, which is the posture the suite needs. A committed
+    // binding would publish a site `test/sites/*` never asked for and could
+    // make an anonymous read pass for a reason no test stated; those suites
+    // pass their own bindings to `siteRouteModule` in their own isolate.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(53);
+    expect(observable.length).toBe(55);
     expect(rows.length - observable.length).toBe(5);
   });
 });
