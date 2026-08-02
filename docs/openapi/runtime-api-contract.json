@@ -3186,6 +3186,17 @@
       "rbac_action": null
     },
     {
+      "path": "/sites/{*rest}",
+      "method": "get",
+      "operation_id": "serveSite",
+      "visibility": "public",
+      "auth": {
+        "kind": "anonymous",
+        "scope": null
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/admin/v1/permissions",
       "method": "get",
       "operation_id": "listPermissions",

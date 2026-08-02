@@ -6,7 +6,7 @@
  * `crates/ferrogate-auth-service/src/admin_console.rs` is 1481 lines and
  * `admin_console_test.rs` is 3780 — the biggest test file in the Rust tree.
  * NONE of it had a TypeScript counterpart: `grep -rl "admin/login" apps/` found
- * zero files, the nine routes are absent from the 271-operation contract (they
+ * zero files, the nine routes are absent from the 272-operation contract (they
  * are the auth SERVICE's surface, not the gateway runtime's), and
  * `src/index.ts`'s own docblock lists them under "Still to come on this
  * Worker". The control migration has shipped `admin_users`,

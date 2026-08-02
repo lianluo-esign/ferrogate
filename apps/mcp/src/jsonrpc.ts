@@ -54,6 +54,13 @@ export const JsonRpcErrorCode = {
   AssetTooLarge: -32004,
   /** Read shed by the gateway's aggregate buffering budget. */
   GatewayBufferBudgetExhausted: -32005,
+  /**
+   * The flat `{server}-{tool}` name is claimed by more than one multiplexed
+   * upstream (#687). Distinct from `ToolDenied` because it is not a policy
+   * refusal — the caller is entitled to the tool and only has to say which
+   * upstream it meant, and the message names every claimant.
+   */
+  McpToolAmbiguous: -32006,
 
   // --- Modern 2026-07-28 candidate protocol codes (`mcp_ingress.rs`) --------
   /** Routing/protocol header disagrees with the body. */
@@ -78,6 +85,8 @@ export function mcpErrorCode(code: string): number {
       return JsonRpcErrorCode.InvalidParams;
     case "mcp_server_unavailable":
       return JsonRpcErrorCode.McpServerUnavailable;
+    case "mcp_tool_ambiguous":
+      return JsonRpcErrorCode.McpToolAmbiguous;
     default:
       return JsonRpcErrorCode.ApplicationError;
   }

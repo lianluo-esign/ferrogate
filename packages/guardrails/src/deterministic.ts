@@ -271,10 +271,24 @@ class TextMatchSink {
   truncated = false;
 }
 
-/** Regex byte matches over `text`, non-overlapping, mirroring `find_iter`. */
-export function regexByteMatches(source: string, text: string): Array<[number, number]> {
+/**
+ * Regex byte matches over `text`, non-overlapping, mirroring `find_iter`.
+ *
+ * `flags` exists for the injection pattern pack (#688), whose rules are natural
+ * language and therefore have to be case-insensitive — `IGNORE ALL PREVIOUS
+ * INSTRUCTIONS` is the same attack as the lowercase spelling. Case-folding the
+ * TEXT instead would have been the alternative and is wrong: `toLowerCase()` is
+ * not length-preserving in Unicode (ẞ→ss, İ→i̇), so every byte offset after the
+ * first such character would be shifted and every patch would land in the wrong
+ * place. Folding the PATTERN costs nothing and moves no offsets.
+ */
+export function regexByteMatches(
+  source: string,
+  text: string,
+  flags = "g",
+): Array<[number, number]> {
   const map = byteOffsetMap(text);
-  const re = new RegExp(source, "g");
+  const re = new RegExp(source, flags.includes("g") ? flags : `${flags}g`);
   const out: Array<[number, number]> = [];
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {

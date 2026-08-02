@@ -5,15 +5,16 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 271
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 272
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
- * the 33 operations this Worker owns.
+ * the 38 operations this Worker owns.
  *
- * The inference (6 ops) and asset (18 ops) handlers arrive as `RouteModule`s
- * from their own directories and are mounted in `GATEWAY_ROUTE_MODULES` below;
- * they need no change to the router, the guard, or the contract table.
+ * The inference (12 ops), asset (18 ops) and site (1 op) handlers arrive as
+ * `RouteModule`s from their own directories and are mounted in
+ * `GATEWAY_ROUTE_MODULES` below; they need no change to the router, the guard,
+ * or the contract table.
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
@@ -42,6 +43,7 @@ import {
 } from "./requestlog/index.js";
 import type { RequestLogMessageBatch } from "./requestlog/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
+import { siteRouteModule } from "./sites/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
 import { tenantDatabase } from "./tenancy/index.js";
 
@@ -162,6 +164,13 @@ const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
   inferenceRouteModule({ models: modelsFromEnv, dispatcher: dispatcherFromEnv, usage }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
+  // The static-site serve mode (issue #737), wired to the SAME `env.ASSETS`
+  // bucket and the same tenant D1 bundle index the asset module is: it serves
+  // published `static_site` bundles through `AssetService.pullAsset`, so a site
+  // read and an asset read cannot resolve differently. With no bucket bound it
+  // degrades exactly as the asset module does — `503 asset_bucket_unavailable`
+  // — rather than serving nothing quietly.
+  siteRouteModule({ depsFromEnv: assetDepsFromEnv }),
 ];
 
 /**

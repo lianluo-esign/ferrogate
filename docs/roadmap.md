@@ -104,7 +104,8 @@ These areas are implemented in the current open-source gateway:
   supply-chain gates, presigned large-file S3 path with a private bucket,
   egress metering with download quotas and audit, 304/Range pull caching,
   retention policies and unreferenced-blob GC, static-site serve mode under
-  `/sites/*`, and agent consumption via MCP resources and the `fetch_asset`
+  `/sites/{site}/{path}` — private by default, anonymous per site and per
+  channel — and agent consumption via MCP resources and the `fetch_asset`
   tool.
 - Time-based agent schedules (cron/interval) firing `agent_run` targets into
   the dispatch lease queue, with an `/admin/v1/agent-schedules` CRUD API,

@@ -243,6 +243,9 @@
         "openapi-typescript": "7.13.0",
       },
     },
+    "tools/generated-clients": {
+      "name": "ferrogate-generated-clients",
+    },
     "tools/sdk-conformance": {
       "name": "ferrogate-sdk-conformance",
       "devDependencies": {
@@ -685,6 +688,8 @@
     "fast-uri": ["fast-uri@3.1.4", "", {}, "sha512-8JnbkQ4juDyvYs4mgFGQqg4yCYtFDtUtmp2QIQq11ZZe5CFQ5wcqm1rqDgAh/QdMySuBnPzMUiJUNZG5N/AiQw=="],
 
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
+
+    "ferrogate-generated-clients": ["ferrogate-generated-clients@workspace:tools/generated-clients"],
 
     "ferrogate-sdk-conformance": ["ferrogate-sdk-conformance@workspace:tools/sdk-conformance"],
 

@@ -43,8 +43,9 @@
   的 presigned 大文件上传/下载、带下载侧审计和带宽配额的 egress
   计量/计费、pull 路径统一的 ETag/Range/304 HTTP 缓存、版本 retention
   策略与无引用 blob GC、静态站点服务模式
-  `GET /sites/{tenant}/{site}/{path}`（index.html 解析、可选 SPA
-  fallback、每站点匿名访问 opt-in），以及通过 MCP `resources/*` 和内置
+  `GET|HEAD /sites/{site}/{path}`（issue #737：index.html 解析并 308 收敛到
+  唯一规范 URL、站点自带 404.html、可选 SPA fallback、按站点且按 channel 的
+  匿名访问 opt-in、逐响应 cache-control），以及通过 MCP `resources/*` 和内置
   `fetch_asset` 工具的 agent 消费。
 - **Agentic Lite 插件面**：用于治理 capability bundle、tool provider、event
   sink、权限声明、tool session、Admin 视图和审计事件。

@@ -87,6 +87,7 @@ import {
 import { CustomHttpDetector } from "./custom_http.js";
 import { DeterministicDetector } from "./deterministic.js";
 import { ALL_CONTENT_SOURCES, type ContentSource } from "./envelope.js";
+import { InjectionDetector, injectionDetectorConfig } from "./injection.js";
 import { PiiDetector, type PiiTokenVault, piiDetectorConfig } from "./pii.js";
 import {
   type ActionKind,
@@ -540,6 +541,24 @@ export function buildGuardrailDetector(
           requireSecret(context, definition.fingerprint_secret_ref, "pii fingerprint"),
           {
             vault: context.piiVault,
+            workersAi:
+              context.workersAiClient ??
+              (context.workersAi !== undefined
+                ? workersAiBindingClient(context.workersAi)
+                : undefined),
+          },
+          (message) => new GuardrailDetectorBuildError(message),
+        ),
+      );
+    }
+    case "injection": {
+      return InjectionDetector.new(
+        injectionDetectorConfig(
+          id,
+          definition,
+          supportedSources,
+          requireSecret(context, definition.fingerprint_secret_ref, "injection fingerprint"),
+          {
             workersAi:
               context.workersAiClient ??
               (context.workersAi !== undefined

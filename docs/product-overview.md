@@ -53,9 +53,11 @@ work belongs in [`roadmap.md`](roadmap.md).
   metering/billing with download-side audit and bandwidth quotas, unified
   ETag/Range/304 HTTP caching on pulls, version retention policies with
   unreferenced-blob GC, static-site serve mode at
-  `GET /sites/{tenant}/{site}/{path}` (index.html resolution, optional SPA
-  fallback, per-site anonymous opt-in), and agent consumption through MCP
-  `resources/*` plus the built-in `fetch_asset` tool.
+  `GET|HEAD /sites/{site}/{path}` (issue #737: `index.html` resolution with a
+  308 to one canonical URL per document, the site's own `404.html`, optional SPA
+  fallback, per-site and per-channel anonymous opt-in, per-response
+  `cache-control`), and agent consumption through MCP `resources/*` plus the
+  built-in `fetch_asset` tool.
 - **Agentic Lite plugin surface** for governed capability bundles, tool
   providers, event sinks, permission declarations, tool sessions, admin views,
   and audit events.

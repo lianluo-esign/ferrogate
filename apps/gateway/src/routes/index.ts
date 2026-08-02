@@ -1,5 +1,5 @@
 /**
- * Contract-driven route registration for the 37 gateway-owned operations.
+ * Contract-driven route registration for the 38 gateway-owned operations.
  *
  * Routes are never hand-written here: `GatewayRouter.register` takes an
  * `operation_id`, looks the operation up in the contract, and mounts it at the
@@ -10,7 +10,10 @@
  * Ownership (see the task split in ROUTE-MAP.md):
  *   - the 12 inference operations  → `src/inference/route-module.ts`
  *   - the 18 `/v1/assets/**` ops  → `src/assets/handlers.ts`
- * Both are in the contract table and both are guarded by `contractAuth`; each
+ *   - the 1 `/sites/{*rest}` op   → `src/sites/index.ts`
+ * All three are in the contract table; the first two are guarded by
+ * `contractAuth` and the third defers the same ladder into its handler (see
+ * {@link SITE_OPERATION_IDS}). Each
  * is mounted by its own `RouteModule`, listed in `GATEWAY_ROUTE_MODULES` in
  * `src/index.ts` and passed to `createGatewayApp({ modules })`. Everything else
  * is mounted here.
@@ -146,11 +149,27 @@ export const TOOLING_OPERATION_IDS = [
   "getAgentDiscovery",
 ] as const;
 
-/** All 37 operations `apps/gateway` owns per ROUTE-MAP.md. */
+/**
+ * The `site` route group — `GET /sites/{*rest}` (issue #737).
+ *
+ * Its own list rather than a 19th entry in {@link ASSET_OPERATION_IDS}, because
+ * the contract puts it in a different route GROUP (`site`, not `asset`) and
+ * because its guard is different in kind: every asset operation is
+ * bearer-guarded by the contract middleware, while this one is `anonymous`
+ * there and runs the bearer ladder inside its handler, per site. Folding it
+ * into the asset list would have hidden that distinction inside a count.
+ *
+ * Mounted by `src/sites/index.ts`, which serves it out of the same
+ * `AssetService` the asset operations use.
+ */
+export const SITE_OPERATION_IDS = ["serveSite"] as const;
+
+/** All 38 operations `apps/gateway` owns per ROUTE-MAP.md. */
 export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
   ...ASSET_OPERATION_IDS,
+  ...SITE_OPERATION_IDS,
 ];
 
 /**
@@ -159,7 +178,8 @@ export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
  * or listed here, so this list cannot be forgotten.
  *
  * EMPTY as of the composition-root wiring: `src/index.ts` mounts
- * `inferenceRouteModule()` + `assetRouteModule()`, so all 33 are live.
+ * `inferenceRouteModule()` + `assetRouteModule()` + `siteRouteModule()`, so all
+ * 38 are live.
  */
 export const PENDING_MODULE_OPERATION_IDS: readonly string[] = [];
 
@@ -607,7 +627,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
   app.use("*", options.networkAccess ?? networkAccess());
 
-  // ONE table-driven guard for all 271 operations, ahead of every route.
+  // ONE table-driven guard for all 272 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
   app.use("*", contractAuth(options.deps ?? depsFromEnv));
 
@@ -693,7 +713,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   //
   // LAST, and the position is the whole correctness argument: Hono runs matched
   // handlers in REGISTRATION order, so an `app.all("*")` placed any earlier
-  // would shadow all 271 contract operations AND `/health`. It is registered
+  // would shadow all 272 contract operations AND `/health`. It is registered
   // after every `router.register`, after every caller-supplied module, and after
   // `/health` above.
   //

@@ -49,7 +49,7 @@
  * answers 404, and 404 is exactly what a "not implemented yet" surface also
  * answers, which is how an unmounted route survives a green suite.
  *
- * `/scim/v2/*` and `/v1/admin/*` are NOT among the 271 contract operations, so
+ * `/scim/v2/*` and `/v1/admin/*` are NOT among the 272 contract operations, so
  * mounting this app does not move the control plane's anti-drift count.
  */
 import { Hono } from "hono";

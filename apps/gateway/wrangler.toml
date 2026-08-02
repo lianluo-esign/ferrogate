@@ -543,6 +543,30 @@ GATEWAY_SKILL_PACKAGES = "[]"
 GATEWAY_PROMPT_TEMPLATES = "[]"
 
 # ---------------------------------------------------------------------------
+# [vars] — the STATIC-SITE BINDINGS (issue #737)
+#
+# Read by `siteBindingsFromEnv` (src/sites/registry.ts): a JSON map of URL slug
+# → `{ tenant_id, asset_name?, channel?, anonymous?, spa?, not_found_document? }`
+# that binds `/sites/{slug}` to one tenant's published `static_site` bundle.
+#
+# It exists because `/sites/{slug}` is a GLOBAL path namespace over a per-tenant
+# asset namespace — two tenants may each own a `static_site` called `docs`, and
+# an ANONYMOUS request carries nothing that says which one it means. A slug with
+# no entry here is still fully serveable: it resolves inside the CREDENTIAL's
+# own tenant, which is the private-by-default posture and needs no config.
+#
+# `anonymous: true` on an entry is the ONLY thing that lets a site be read with
+# no credential, per site and per channel. That is why it is an operator var and
+# not a tenant-writable table: a self-service claim on a global name is a
+# land-grab and a phishing surface (`/sites/acme-login`).
+#
+# EMPTY IS THE COMMITTED POSTURE — every site private, none anonymously
+# readable — and it must stay empty here, because vitest loads THIS FILE and a
+# placeholder binding would publish a site the suite never asked for. Parsing is
+# fail-closed: malformed JSON binds NOTHING rather than binding everything.
+GATEWAY_SITES = "{}"
+
+# ---------------------------------------------------------------------------
 # [vars] — the ASSET PUBLISHER-SIGNATURE policy (wave 13; Rust
 # `screen_asset_push` stage 2)
 #

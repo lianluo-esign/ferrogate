@@ -369,6 +369,8 @@ describe("the env-var drift gate itself", () => {
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "DB",
+      // #687's unified CLIENT session, the other axis from MCP_SESSION below.
+      "MCP_CLIENT_SESSION",
       "MCP_OAUTH_FLOWS",
       "MCP_OAUTH_KV",
       "MCP_SESSION",
@@ -416,7 +418,12 @@ describe("the deploy config's unobservable lines", () => {
     // is rejected at deploy. `crossScriptClasses` is subtracted rather than the
     // list being hand-written, so a NEW local class still has to be migrated.
     const bound = localDurableObjectClasses();
-    expect(bound.sort()).toEqual(["FerroGateMcpSession", "McpOauthFlowClaim"]);
+    expect(bound.sort()).toEqual([
+      "FerroGateMcpSession",
+      // #687: one instance per (tenant, CLIENT session).
+      "FerroGateMcpUnifiedSession",
+      "McpOauthFlowClaim",
+    ]);
     for (const className of bound) {
       expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
       expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);

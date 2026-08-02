@@ -26,55 +26,67 @@
  * silently treating it as HTTP") and `test/durable-identity.test.ts` ("keeps a
  * stdio row decodable — it is refused at DISPATCH, not at config").
  *
- * NOTE — the server-side ingress is deliberately STATELESS, and that is PARITY,
- * not a gap: Rust's modern ingress (`mcp_ingress.rs`) mints no `Mcp-Session-Id`
- * and keeps no resumable `Last-Event-ID` replay log either, so neither does
- * this. A resumable server-side stream would be a NEW feature in both trees; on
- * CF its shape is a Durable Object per session (the `McpAgent` pattern), the
- * same primitive `src/oauth-flow.ts` already uses in this Worker.
+ * NOTE — the server-side ingress USED to be deliberately stateless, and this
+ * header used to record that as parity with Rust's `mcp_ingress.rs`, which
+ * mints no `Mcp-Session-Id` and keeps no `Last-Event-ID` replay log. #687 says
+ * that parity is the defect: a client fanning in to many upstreams loses the
+ * WHOLE fan-out on one SSE reconnect. The session and the replay log now live
+ * in `src/unified.ts` — a Durable Object per CLIENT session, addressed by
+ * `(tenant, session id)` — and this module keeps only the framing they use
+ * ({@link sseFrameResponse} emits a replayed run of frames ahead of a fresh
+ * one). Everything below is still the OUTBOUND client and the wire framing; the
+ * session state deliberately is not here.
  */
 import type { JsonValue } from "@ferrogate/core";
 
 import {
+  type McpToolExecutionResult,
+  type ParsedToolDef,
   callToolParams,
   parseCallResult,
   parseToolsList,
-  type McpToolExecutionResult,
-  type ParsedToolDef,
 } from "./jsonrpc.js";
 import {
-  discoverSupportsCurrentVersion,
-  encodeMcpHeaderValue,
-  httpLegacyDowngradeReason,
-  jsonRpcErrorCode,
+  type McpFanIn,
+  type McpToolResolution,
+  type McpUpstreamFailure,
+  candidateServerNames,
+  namespacedToolName,
+  resolveAcrossCatalog,
+} from "./multiplex.js";
+import {
+  type DispatchContext,
+  McpDispatchHeaders,
+  McpExecutionError,
+  type McpServerConfig,
+  type McpTool,
+  type McpUpstreamPort,
+  toolAllowlisted,
+  toolPermitted,
+} from "./ports.js";
+import {
+  FERROGATE_CLIENT_INFO,
+  MCP_LEGACY_PROTOCOL_VERSION,
   MCP_METHOD_HEADER,
   MCP_NAME_HEADER,
   MCP_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION_HEADER,
-  MCP_LEGACY_PROTOCOL_VERSION,
+  type McpNegotiatedProtocol,
+  discoverSupportsCurrentVersion,
+  encodeMcpHeaderValue,
+  httpLegacyDowngradeReason,
+  jsonRpcErrorCode,
   modernDiscoverParams,
   modernRequestParams,
   resolveLegacyProtocolVersion,
-  FERROGATE_CLIENT_INFO,
-  type McpNegotiatedProtocol,
 } from "./protocol.js";
 import {
-  McpDispatchHeaders,
-  McpExecutionError,
-  resolveNamespacedTool,
-  toolAllowlisted,
-  type DispatchContext,
-  type McpServerConfig,
-  type McpTool,
-  type McpUpstreamPort,
-} from "./ports.js";
-import {
   DEFAULT_RECONNECT_POLICY,
-  statusOf,
   type McpReconnectPolicy,
   type McpServerStatus,
   type McpSessionState,
   type McpSessionStorePort,
+  statusOf,
 } from "./session.js";
 
 /** Hard cap on any single upstream response (Rust `MAX_MCP_RESPONSE_BYTES`). */
@@ -213,10 +225,27 @@ export function sseJsonRpcResponse(
 ): Response {
   const event: SseEvent = { event: "message", data: JSON.stringify(payload) };
   if (init.eventId !== undefined) event.id = init.eventId;
-  const frame = encodeSseEvent(event);
+  return sseFrameResponse([event], init);
+}
+
+/**
+ * Frame SEVERAL messages onto one `text/event-stream` response and close.
+ *
+ * This is what a `Last-Event-ID` resume needs (#687): the frames the client
+ * missed are emitted, IN THEIR ORIGINAL ORDER and carrying their ORIGINAL `id:`
+ * cursors, ahead of the answer to the request that carried the cursor. Re-using
+ * the original ids matters — a replayed frame given a fresh id would make the
+ * client's next cursor point at a position that never existed, so a second
+ * reconnect would resume from the wrong place.
+ */
+export function sseFrameResponse(
+  events: readonly SseEvent[],
+  init: { status?: number; headers?: Record<string, string> } = {},
+): Response {
+  const body = events.map((event) => encodeSseEvent(event)).join("");
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(new TextEncoder().encode(frame));
+      controller.enqueue(new TextEncoder().encode(body));
       controller.close();
     },
   });
@@ -581,26 +610,67 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     return this.#sessions.get(name)?.config;
   }
 
-  async listTools(): Promise<readonly McpTool[]> {
-    const listed: McpTool[] = [];
+  /**
+   * The multiplexed fan-in (#687).
+   *
+   * A single unreachable upstream must not blank the whole catalogue — the Rust
+   * manager keeps the other sessions' tools listed too — but it must not vanish
+   * either. Every failure is CAUGHT and RECORDED, so the caller can be told the
+   * union is incomplete instead of reading a shorter list as "that tool does
+   * not exist".
+   */
+  async fanIn(): Promise<McpFanIn> {
+    const tools: McpTool[] = [];
+    const degraded: McpUpstreamFailure[] = [];
     for (const session of this.#sessions.values()) {
       try {
-        listed.push(...(await this.#sessionTools(session)));
-      } catch {
-        // A single unreachable upstream must not blank the whole catalog; the
-        // Rust manager keeps the other sessions' tools listed too.
+        tools.push(...(await this.#sessionTools(session)));
+      } catch (cause) {
+        degraded.push({
+          server: session.config.name,
+          code:
+            cause instanceof McpExecutionError ? cause.code : ("mcp_server_unavailable" as const),
+          message: cause instanceof Error ? cause.message : String(cause),
+        });
       }
     }
-    return listed;
+    return { tools, degraded };
   }
 
-  async toolByName(name: string): Promise<McpTool | undefined> {
-    const resolved = resolveNamespacedTool([...this.#sessions.keys()], name);
-    if (resolved === undefined) return undefined;
-    const session = this.#sessions.get(resolved.serverName);
-    if (session === undefined) return undefined;
-    const tools = await this.#sessionTools(session);
-    return tools.find((tool) => tool.name === name);
+  async listTools(): Promise<readonly McpTool[]> {
+    return (await this.fanIn()).tools;
+  }
+
+  /**
+   * Resolve a flat `{server}-{remote}` name against the CATALOGUE (#687).
+   *
+   * The prefix scan only decides which upstreams are worth interrogating (so a
+   * `tools/call` does not hand-shake the whole fleet); it deliberately keeps
+   * EVERY prefix match rather than the longest, because the longest-prefix rule
+   * is what silently shadowed one of two colliding tools.
+   *
+   * An upstream that fails to list is skipped rather than propagated: it cannot
+   * claim the name, and letting its outage turn a resolvable call into an
+   * ambiguity — or into a hard failure — would let one dead server break a tool
+   * on a healthy one. The caller still learns about it through {@link fanIn}.
+   */
+  async resolveTool(name: string, selector?: string | undefined): Promise<McpToolResolution> {
+    const candidates = candidateServerNames(this.#sessions.keys(), name).filter(
+      (candidate) => selector === undefined || candidate.serverName === selector,
+    );
+    const claimants: McpTool[] = [];
+    for (const candidate of candidates) {
+      const session = this.#sessions.get(candidate.serverName);
+      if (session === undefined) continue;
+      let tools: McpTool[];
+      try {
+        tools = await this.#sessionTools(session);
+      } catch {
+        continue;
+      }
+      claimants.push(...tools.filter((tool) => tool.name === name));
+    }
+    return resolveAcrossCatalog(claimants, name, selector);
   }
 
   async callTool(
@@ -623,7 +693,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
         `MCP server ${session.config.name} uses the stdio transport, which Workers cannot host (no process spawn)`,
       );
     }
-    if (!toolAllowlisted(session.config.toolsToExecute, tool.remoteName)) {
+    if (!toolPermitted(session.config, tool.remoteName)) {
       throw new McpExecutionError(
         "tool_denied",
         `MCP tool ${session.config.name}-${tool.remoteName} is not allowlisted for execution`,
@@ -661,14 +731,28 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     }
   }
 
+  /**
+   * The exclude half of the multiplex filter pair (#687), applied on EVERY
+   * read of a tool list.
+   *
+   * `session.tools` is a cache — the isolate's own, and (through `#negotiate`)
+   * the shared `MCP_SESSION` Durable Object's. Filtering only where the list is
+   * DISCOVERED would leave every warm session serving an excluded tool until
+   * its next reconnect, which for a deny rule is a security window rather than
+   * a staleness nuisance. So the filter runs on the way OUT, not on the way in.
+   */
+  #permitted(session: UpstreamSession, tools: readonly McpTool[]): McpTool[] {
+    return tools.filter((tool) => toolPermitted(session.config, tool.remoteName));
+  }
+
   async #sessionTools(session: UpstreamSession): Promise<McpTool[]> {
-    if (session.tools.length > 0) return session.tools;
+    if (session.tools.length > 0) return this.#permitted(session, session.tools);
     if (session.config.transport === "stdio") return [];
     const negotiation = await this.#negotiate(session);
     // `#negotiate` may have ADOPTED the shared session's tool list, which is
     // the whole point of the manager: a warm upstream costs a cold isolate one
     // DO read instead of a handshake plus a `tools/list`.
-    if (session.tools.length > 0) return session.tools;
+    if (session.tools.length > 0) return this.#permitted(session, session.tools);
     const params = negotiation.mode === "modern" ? modernRequestParams({}) : {};
     const response = await this.#post(
       session,
@@ -685,10 +769,10 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     }
     const parsed: ParsedToolDef[] = parseToolsList(response.json);
     session.tools = parsed
-      .filter((tool) => toolAllowlisted(session.config.toolsToExecute, tool.name))
+      .filter((tool) => toolPermitted(session.config, tool.name))
       .map((tool) => {
         const entry: McpTool = {
-          name: `${session.config.name}-${tool.name}`,
+          name: namespacedToolName(session.config.name, tool.name),
           serverName: session.config.name,
           remoteName: tool.name,
           inputSchema: tool.input_schema,
@@ -707,7 +791,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
         this.#now(),
       );
     }
-    return session.tools;
+    return this.#permitted(session, session.tools);
   }
 
   /**

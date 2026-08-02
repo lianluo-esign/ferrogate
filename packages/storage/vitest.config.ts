@@ -13,7 +13,19 @@ import { defineConfig } from "vitest/config";
  * would assert only that the fake was written to agree.
  *
  * `bun run test` runs both suites; see package.json.
+ *
+ * The warning below is not decoration. A gate a developer cannot reach with the
+ * obvious command in the obvious directory goes stale — #760 is the proof: the
+ * `api_keys` column pin sat red on main because `bunx vitest run` here reports
+ * a clean 302/302 while the suite that pins the schema is not collected at all.
+ * Silence after an incomplete run reads exactly like silence after a complete
+ * one, so the run now says which half it skipped.
  */
+console.warn(
+  "[@ferrogate/storage] this config EXCLUDES test/d1/** — the D1 schema pins and " +
+    "durable-backend tests were NOT run. Use `bun run test` to run both suites.",
+);
+
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],

@@ -131,6 +131,40 @@ class_name = "McpOauthFlowClaim"
 name = "MCP_SESSION"
 class_name = "FerroGateMcpSession"
 
+# ---------------------------------------------------------------------------
+# DURABLE OBJECTS — the UNIFIED CLIENT session (#687)
+#
+# Read as `env.MCP_CLIENT_SESSION`. One instance per `(tenant, client session
+# id)` via `idFromName(clientSessionKey(tenantId, sessionId))` — the OTHER axis
+# from `MCP_SESSION` above, which is one per `(tenant, UPSTREAM)`. Both are
+# needed and neither replaces the other: this one holds what ONE CLIENT
+# CONVERSATION sees across the whole fan-out (which upstreams it is bound to,
+# which of them dropped mid-conversation, and the bounded log of emitted frames
+# a `Last-Event-ID` reconnect replays from), and that is #687's "Durable Object
+# per session".
+#
+# The tenant id being half the DO NAME is the cross-tenant isolation property,
+# exactly as it is for `MCP_SESSION`: a second tenant presenting the first
+# tenant's session id addresses a DIFFERENT object, which was never opened, and
+# is refused as unknown. There is no tenant check inside the object for a later
+# author to forget.
+#
+# `class_name` resolves against the ENTRY module, so `FerroGateMcpUnifiedSession`
+# is re-exported from `src/worker.ts`. Dropping that re-export fails the Worker
+# at startup, including under `@cloudflare/vitest-pool-workers`.
+#
+# OPTIONAL to the code: without this namespace the ingress mints no session and
+# answers exactly as it did before #687 — but it then REFUSES an
+# `Mcp-Session-Id` or a `Last-Event-ID` rather than accepting one it cannot
+# honour. Offering no sessions is a visible degradation; silently ignoring a
+# resume cursor is not.
+#
+# DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`).
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "MCP_CLIENT_SESSION"
+class_name = "FerroGateMcpUnifiedSession"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["McpOauthFlowClaim"]
@@ -138,6 +172,10 @@ new_sqlite_classes = ["McpOauthFlowClaim"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["FerroGateMcpSession"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["FerroGateMcpUnifiedSession"]
 
 # ---------------------------------------------------------------------------
 # D1 — per-user MCP identity grants + the upstream server catalog

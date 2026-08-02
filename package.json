@@ -10,9 +10,11 @@
     "apps/*",
     "e2e",
     "tools/sdk-conformance",
+    "tools/generated-clients",
     "sdks/typescript"
   ],
   "scripts": {
+    "generate": "bun tools/generated-clients/generate.mjs",
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
     "test:sdk-python": "python3 -m unittest discover -s sdks/python",
