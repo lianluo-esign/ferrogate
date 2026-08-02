@@ -26,6 +26,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { Caller, InferenceDeps, PhysicalRoute } from "../../src/inference/index.js";
+import type { ResidencyPolicy } from "../../src/residency/index.js";
 import { errorBody, harness } from "./fixtures.js";
 import {
   type ProviderInterceptor,
@@ -75,6 +76,25 @@ function euCaller(): InferenceDeps["caller"] {
     scope: { kind: "tenant", tenantId: "eu-tenant" },
     apiKeyId: "key_eu",
     regionAllowlist: ["eu-west-1"],
+  });
+}
+
+/** A tenant policy: EU-only, ZDR required, log residency not constrained. */
+function zdrPolicy(): ResidencyPolicy {
+  return {
+    regionGated: true,
+    allowedRegions: ["eu-west-1"],
+    requireZeroDataRetention: true,
+    logResidency: "unconstrained",
+  };
+}
+
+/** A caller under {@link zdrPolicy}. */
+function zdrCaller(): InferenceDeps["caller"] {
+  return (): Caller => ({
+    scope: { kind: "tenant", tenantId: "eu-tenant" },
+    apiKeyId: "key_eu",
+    residency: zdrPolicy(),
   });
 }
 
@@ -232,6 +252,120 @@ describe("#681 — the shadow mirror cannot leave the tenant's region", () => {
     // An operator cannot act on "policy refused this". The refusal has to say
     // WHICH constraint failed and what would satisfy it.
     expect(body.error.message).toContain("eu-west-1");
+    expect(provider.requests).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. Zero data retention
+// ---------------------------------------------------------------------------
+
+describe("#681 — zero data retention is asserted by the route and verified here", () => {
+  it("refuses an in-region route that asserts NOTHING about retention", async () => {
+    // The route is perfectly in region. What it has never said is whether a ZDR
+    // agreement covers the account, and "nobody has said" is not "yes" — this
+    // is the assertion that stops every pre-existing GATEWAY_MODELS table from
+    // satisfying a ZDR policy the day the policy is switched on.
+    provider = interceptProviderFetch(() => providerJson(CHAT_OK));
+
+    const app = harness({ caller: zdrCaller() }, [
+      route({ provider: "eu", region: "eu-west-1" }),
+    ]);
+
+    const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+    expect(res.status).toBe(403);
+    const body = await errorBody(res);
+    expect(body.error.code).toBe("zero_data_retention_required");
+    expect(body.error.message).toContain("zero data retention");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("refuses an in-region route that asserts it DOES retain", async () => {
+    provider = interceptProviderFetch(() => providerJson(CHAT_OK));
+
+    const app = harness({ caller: zdrCaller() }, [
+      route({ provider: "eu", region: "eu-west-1", zeroDataRetention: false }),
+    ]);
+
+    const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+    expect(res.status).toBe(403);
+    expect((await errorBody(res)).error.code).toBe("zero_data_retention_required");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("serves an in-region route that ASSERTS zero data retention", async () => {
+    provider = interceptProviderFetch(() => providerJson(CHAT_OK));
+
+    const app = harness({ caller: zdrCaller() }, [
+      route({ provider: "eu", region: "eu-west-1", zeroDataRetention: true }),
+    ]);
+
+    const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+    expect(res.status).toBe(200);
+    expect(provider.requests.map((request) => providerOf(request.url))).toEqual(["eu"]);
+  });
+
+  it("cannot fail over from a ZDR route onto a non-ZDR one", async () => {
+    // The failover leg for the retention constraint, and the reason it is a
+    // separate case from the region one: a ladder that re-checked the region
+    // and not the retention assertion would look correct and still ship the
+    // retried prompt to an account that keeps it.
+    provider = interceptProviderFetch((request) =>
+      providerOf(request.url) === "eu-zdr"
+        ? new Response("{}", { status: 503, headers: { "content-type": "application/json" } })
+        : providerJson(CHAT_OK),
+    );
+
+    const app = harness({ caller: zdrCaller() }, [
+      route({ provider: "eu-zdr", region: "eu-west-1", zeroDataRetention: true, priority: 0 }),
+      route({ provider: "eu-keeps", region: "eu-west-1", zeroDataRetention: false, priority: 1 }),
+    ]);
+
+    const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+    expect(res.status).not.toBe(200);
+    expect(provider.requests.map((request) => providerOf(request.url))).toEqual(["eu-zdr"]);
+  });
+
+  it("does not mirror to a shadow route that asserts no retention agreement", async () => {
+    provider = interceptProviderFetch(() => providerJson(CHAT_OK));
+
+    const app = harness({ caller: zdrCaller() }, [
+      route({ provider: "eu", region: "eu-west-1", zeroDataRetention: true, priority: 0 }),
+      route({
+        provider: "eu-mirror",
+        region: "eu-west-1",
+        priority: 5,
+        shadowPercent: 100,
+        shadowMaxRequests: 0,
+      }),
+    ]);
+
+    const res = await app.post("/v1/chat/completions", CHAT_BODY);
+    expect(res.status).toBe(200);
+    await settle();
+
+    expect(provider.requests.map((request) => providerOf(request.url))).toEqual(["eu"]);
+  });
+
+  it("names BOTH unmet constraints when a route fails region AND retention", async () => {
+    // One operator round trip, not two. A refusal that reports only the first
+    // failing constraint sends the operator to fix the region and come back to
+    // a second refusal about retention.
+    provider = interceptProviderFetch(() => providerJson(CHAT_OK));
+
+    const app = harness({ caller: zdrCaller() }, [route({ provider: "us", region: "us-east-1" })]);
+
+    const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+    expect(res.status).toBe(403);
+    const body = await errorBody(res);
+    expect(body.error.code).toBe("residency_policy_not_satisfiable");
+    expect(body.error.message).toContain("eu-west-1");
+    expect(body.error.message).toContain("zero data retention");
     expect(provider.requests).toHaveLength(0);
   });
 });
