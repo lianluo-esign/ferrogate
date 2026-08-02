@@ -19,7 +19,7 @@ the same rule, and the same shape, as
 |---|---|
 | `POST /v1/chat/completions` | `prompt_cache` |
 | `POST /v1/responses` | `prompt_cache` |
-| `POST /v1/messages` | `prompt_cache`, or a native `cache_control` marker anywhere in the body |
+| `POST /v1/messages` | `prompt_cache`, else a native `cache_control` marker anywhere in the body |
 
 ```json
 {
@@ -39,6 +39,16 @@ a `cache_control` marker in the request is read as `{"mode": "explicit"}` (with
 its `ttl`) and carried forward. The marker's PLACEMENT is not carried — the
 OpenAI grammar the ingress translates into has nowhere to hold it — so the
 re-emitted breakpoint lands at the canonical boundary described below.
+
+`/v1/messages` reads `prompt_cache` for the same reason every other ingress
+does: it is served by the same route ladder, so a directive it did not read
+could not be refused, and the caller would get a 200 from a route that had
+quietly declined to honour it. That matters most for `off`, where a 200 means
+the prompt WAS written into a provider cache the caller asked it be kept out of.
+
+A request that carries BOTH a `prompt_cache` and native `cache_control` markers
+is governed by `prompt_cache` — the stated directive is the deliberate one.
+`{"mode": "off"}` therefore strips the markers rather than honouring them.
 
 ## The three modes
 
@@ -75,6 +85,12 @@ breakpoint is added: Anthropic allows four per request, and a caller who marked
 its own boundaries has made a better-informed decision than the default.
 
 `prompt_cache` is FerroGate's own member and never reaches a provider.
+
+Each candidate on a failover ladder is prepared against a private copy of the
+request. An Anthropic leg that is attempted and fails therefore leaves nothing
+behind: the OpenAI leg that follows sends the body the caller wrote, with no
+`cache_control` on it and no rewritten content blocks. Which routes were tried
+is not observable in what the surviving route sends.
 
 ## When FerroGate refuses
 

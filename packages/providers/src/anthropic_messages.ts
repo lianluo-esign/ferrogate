@@ -53,7 +53,15 @@ export function toChatCompletions(body: Json): Json {
   // which the OpenAI grammar cannot hold) is carried forward as the canonical
   // directive, which then re-emits per family — issue #690, and see the twin of
   // this function in `apps/gateway/src/inference/anthropic.ts`.
-  const promptCache = promptCacheFromCacheControl(object);
+  //
+  // A STATED `prompt_cache` beats an INFERRED marker. `/v1/messages` is served
+  // by the same ladder as every other ingress, so a directive this translation
+  // dropped would be one the route silently declined to honour while answering
+  // 200 — and for `mode: "off"`, a retention control, that 200 would mean the
+  // opposite of what was asked. Reading it here is what puts this ingress under
+  // #674's refuse-rather-than-degrade rule. It is passed through unvalidated
+  // because `promptCacheFromBody` is the one canonical parser.
+  const promptCache = object[PROMPT_CACHE_MEMBER] ?? promptCacheFromCacheControl(object);
   if (promptCache !== undefined) out[PROMPT_CACHE_MEMBER] = promptCache;
 
   return out;

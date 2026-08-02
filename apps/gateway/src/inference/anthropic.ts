@@ -327,13 +327,39 @@ export function toChatCompletions(body: Json): TranslationResult {
     }
   }
 
-  const promptCache = promptCacheFromCacheControl(body);
+  const promptCache = body[PROMPT_CACHE_MEMBER] ?? promptCacheFromCacheControl(body);
   if (promptCache !== undefined) {
     out[PROMPT_CACHE_MEMBER] = promptCache;
   }
 
   return { ok: true, body: out };
 }
+
+/**
+ * Why `prompt_cache` is read here and not left to the native marker alone
+ * (issue #690).
+ *
+ * `/v1/messages` reaches the SAME governed chokepoint every other ingress
+ * does, and can be backed by any family on the ladder. A directive this
+ * translation dropped was a directive the route quietly declined to honour
+ * while answering 200 — and `off` is a retention/isolation control, not a cost
+ * knob, so a 200 there means the prompt WAS written into a provider cache the
+ * caller told the gateway to keep it out of. #674's rule is that what a family
+ * cannot express is REFUSED, and a directive the route never reads cannot be
+ * refused. Carrying it forward is what puts `/v1/messages` under that rule.
+ *
+ * The member is deliberately not in {@link SCALAR_PASSTHROUGH}: it is an
+ * object, and it is FerroGate's own rather than a member of either protocol.
+ * It is passed through UNVALIDATED because `@ferrogate/providers`'
+ * `promptCacheFromBody` is the one canonical parser, and a second validation
+ * here is a second thing to drift.
+ *
+ * A STATED directive beats an INFERRED one: a caller that both left native
+ * `cache_control` markers and wrote `prompt_cache` has said two things, and the
+ * one it wrote out is the deliberate one. That ordering matters most for
+ * `{"mode":"off"}`, where reading the markers instead would cache a prompt the
+ * caller had just asked not to be cached.
+ */
 
 /**
  * A native `cache_control` marker, read as the canonical caching directive

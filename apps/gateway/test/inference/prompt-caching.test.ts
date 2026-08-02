@@ -296,6 +296,77 @@ describe("the /v1/messages ingress keeps the caller's caching intent", () => {
     }
   });
 
+  it("an explicit `prompt_cache` is read here too, and refused where it cannot be honoured", async () => {
+    // `/v1/messages` reaches the same governed chokepoint every other ingress
+    // does, so a directive it DROPS is a directive the route silently declines
+    // to honour while answering 200 — the exact shape #674 exists to forbid,
+    // and worse here because `off` is a retention control rather than a cost
+    // knob. The route is OpenAI-backed and OpenAI cannot disable its automatic
+    // caching, so the only honest answer is a refusal.
+    const provider = interceptProviderFetch(() => providerJson(OPENAI_COMPLETION));
+    try {
+      const res = await harness({}, ROUTES).post("/v1/messages", {
+        model: "gpt-4o-mini",
+        max_tokens: 256,
+        messages: [{ role: "user", content: "is claim 91 covered?" }],
+        prompt_cache: { mode: "off" },
+      });
+      expect(res.status).toBe(400);
+      expect((await errorBody(res)).error.code).toBe("model_capability_unsupported");
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("a `prompt_cache` on /v1/messages reaches the family's own mechanism", async () => {
+    // The other half of the same claim: read means READ, not merely validated.
+    const provider = interceptProviderFetch(() => providerJson(ANTHROPIC_MESSAGE));
+    try {
+      const res = await harness({}, ROUTES).post("/v1/messages", {
+        model: "claude-logical",
+        max_tokens: 256,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: "is claim 91 covered?" }],
+        prompt_cache: { mode: "explicit", ttl: "1h" },
+      });
+      expect(res.status).toBe(200);
+      const body = provider.lastRequest().body as Record<string, any>;
+      expect(body["messages"][0]).toEqual({
+        role: "system",
+        content: [
+          { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+        ],
+      });
+      // FerroGate's own member never reaches a provider.
+      expect(JSON.stringify(body)).not.toContain("prompt_cache");
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("a stated directive overrides an inferred one", async () => {
+    // A caller that both left native markers AND stated `off` has said two
+    // things; the STATEMENT is the one it made deliberately, and `off` means
+    // the markers come off rather than being honoured behind its back.
+    const provider = interceptProviderFetch(() => providerJson(ANTHROPIC_MESSAGE));
+    try {
+      const res = await harness({}, ROUTES).post("/v1/messages", {
+        model: "claude-logical",
+        max_tokens: 256,
+        system: [
+          { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+        ],
+        messages: [{ role: "user", content: "is claim 91 covered?" }],
+        prompt_cache: { mode: "off" },
+      });
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(provider.lastRequest().body)).not.toContain("cache_control");
+    } finally {
+      provider.restore();
+    }
+  });
+
   it("reports the cache hit/miss split back to the caller after a translation", async () => {
     // A `/v1/messages` request served by an OPENAI route comes back as a chat
     // completion and is translated into an Anthropic Message. #667 made the

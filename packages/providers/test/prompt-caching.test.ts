@@ -447,6 +447,23 @@ describe("the Anthropic-native ingress keeps the caller's caching intent", () =>
     expect(translated["prompt_cache"]).toEqual({ mode: "explicit", ttl: "1h" });
   });
 
+  test("an explicit prompt_cache is read here too, and beats an inferred marker", () => {
+    // Without this, `/v1/messages` would answer 200 to a directive it never
+    // read — and for `off`, a retention control, that 200 means the prompt WAS
+    // written into a provider cache the caller asked it be kept out of. The
+    // stated directive wins over the markers because it is the one the caller
+    // wrote out deliberately.
+    const translated = toChatCompletions({
+      model: "claude-logical",
+      system: [
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+      ],
+      messages: [{ role: "user", content: "is claim 91 covered?" }],
+      prompt_cache: { mode: "off" },
+    } as never) as Record<string, any>;
+    expect(translated["prompt_cache"]).toEqual({ mode: "off" });
+  });
+
   test("a request with no marker states no intent", () => {
     const translated = toChatCompletions({
       model: "claude-logical",
