@@ -415,7 +415,11 @@ describe("the env-var drift gate itself", () => {
     // cross-checked independently against the committed file
     // (`grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml` ⇒ 57), not
     // arrived at by adding one to the previous line.
-    expect(DECLARED.vars.size).toBe(57);
+    //
+    // #737 committed `GATEWAY_SITES` ("{}"), the slug -> tenant binding table
+    // the `/sites/*` serve mode reads, so 58. Re-derived by the same grep
+    // against the merged file rather than by incrementing.
+    expect(DECLARED.vars.size).toBe(58);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -644,9 +648,10 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    // #678: 56 -> 57 (`GATEWAY_ATTRIBUTION_POLICIES`). Same re-derivation as
-    // the `DECLARED.vars.size` pin above.
-    expect(rows.length).toBe(57);
+    // #678: 56 -> 57 (`GATEWAY_ATTRIBUTION_POLICIES`); #737: 57 -> 58
+    // (`GATEWAY_SITES`). Same re-derivation as the `DECLARED.vars.size` pin
+    // above.
+    expect(rows.length).toBe(58);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -701,8 +706,14 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // pre-#678 posture, so the committed value enforces nothing in this suite.
     // `test/attribution/enforcement.test.ts` supplies its own policies on the
     // env it drives, so the committed blank cannot shadow them.
+    // #737: 52 -> 53. `GATEWAY_SITES` ("{}") is observable and INERT — an
+    // empty binding table means every site is private and none is anonymously
+    // readable, which is the posture the suite needs: a committed binding would
+    // publish a site `test/sites/*` never asked for, and worse, could make an
+    // anonymous read pass for a reason no test stated. Those suites pass their
+    // own bindings to `siteRouteModule` in their own isolate.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(52);
+    expect(observable.length).toBe(53);
     expect(rows.length - observable.length).toBe(5);
   });
 });

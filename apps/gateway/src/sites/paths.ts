@@ -87,7 +87,13 @@ export const SITE_INDEX_DOCUMENT = "index.html";
  * NUL anywhere under any app's `src/`, and #736 is why — two literal NULs in a
  * test file made git classify it as BINARY, so the 684-line suite at the centre
  * of that PR produced no diff hunk and was invisible to review and to grep.
+ *
+ * Matching control characters IS the point — the same suppression, for the same
+ * reason, as `src/assets/schemas.ts`'s `addressSegment`: a decoded segment
+ * becomes an object-index key and a response header value, so a raw CR/LF must
+ * be refused rather than smuggled into either.
  */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: see above
 const ILLEGAL_DECODED = /[\u0000-\u001f\u007f\\]/;
 
 /**
@@ -136,7 +142,7 @@ export function planSitePath(rest: string, search = ""): SitePathPlan {
   for (const raw of tail) {
     const segment = decodeSegment(raw);
     if (segment === null) return { kind: "invalid", reason: "path is not valid percent-encoding" };
-    if (segment === "" ) return { kind: "invalid", reason: "path contains an empty segment" };
+    if (segment === "") return { kind: "invalid", reason: "path contains an empty segment" };
     if (segment === "." || segment === "..") {
       return { kind: "invalid", reason: "path contains a relative segment" };
     }

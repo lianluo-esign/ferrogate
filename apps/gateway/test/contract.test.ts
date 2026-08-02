@@ -31,6 +31,7 @@ import { hasScope } from "../src/ports.js";
 import {
   ASSET_OPERATION_IDS,
   GATEWAY_OWNED_OPERATION_IDS,
+  SITE_OPERATION_IDS,
   INFERENCE_OPERATION_IDS,
   OBSERVABILITY_OPERATION_IDS,
   PENDING_MODULE_OPERATION_IDS,
@@ -343,12 +344,16 @@ describe("route registration", () => {
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 34 operations ROUTE-MAP assigns to apps/gateway", () => {
+  it("owns exactly the 35 operations ROUTE-MAP assigns to apps/gateway", () => {
     // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
     // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
     // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
     // number here is re-derived by COUNTING the list, never incremented.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(34);
+    //
+    // 34 -> 35 with `serveSite` (issue #737), the `site` route group's first
+    // operation — counted off `GATEWAY_OWNED_OPERATION_IDS` after the merge,
+    // which is now four lists rather than three.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(35);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -362,14 +367,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 34 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 35 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 34 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 35 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 35th owned
@@ -402,7 +407,7 @@ describe("route registration", () => {
     // The modules are the ones the composition root uses, not a copy.
     const fromModules = GATEWAY_ROUTE_MODULES.flatMap((module) => module.operationIds);
     expect(new Set(fromModules)).toEqual(
-      new Set([...INFERENCE_OPERATION_IDS, ...ASSET_OPERATION_IDS]),
+      new Set([...INFERENCE_OPERATION_IDS, ...ASSET_OPERATION_IDS, ...SITE_OPERATION_IDS]),
     );
     // Every id a module claims is actually registered by that module.
     for (const operationId of fromModules) {

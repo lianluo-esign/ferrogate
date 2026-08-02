@@ -119,11 +119,11 @@ function bindingFrom(slug: string, raw: unknown): SiteBinding | null {
     tenantId,
     assetName: stringField(row, "asset_name") ?? slug,
     channel: stringField(row, "channel") ?? DEFAULT_SITE_CHANNEL,
-    anonymous: row["anonymous"] === true,
-    spa: row["spa"] === true,
+    anonymous: row.anonymous === true,
+    spa: row.spa === true,
     notFoundDocument:
-      typeof row["not_found_document"] === "string"
-        ? (row["not_found_document"] as string).trim()
+      typeof row.not_found_document === "string"
+        ? (row.not_found_document as string).trim()
         : DEFAULT_SITE_NOT_FOUND_DOCUMENT,
   };
 }
@@ -170,7 +170,7 @@ export function siteAccessFor(
   binding: SiteBinding | undefined,
   credentialPresented: boolean,
 ): SiteAccess {
-  if (binding !== undefined && binding.anonymous && !credentialPresented) {
+  if (binding?.anonymous && !credentialPresented) {
     return { kind: "anonymous", tenantId: binding.tenantId, binding };
   }
   return { kind: "authenticate", binding: binding ?? null };

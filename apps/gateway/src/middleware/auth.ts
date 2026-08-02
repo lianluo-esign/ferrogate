@@ -232,7 +232,11 @@ export async function authenticateBearer(
 
   // Authenticated but under-scoped is 403 — never 401.
   if (!hasScope(auth.scopes, requiredScope)) {
-    throw new HttpError(403, "scope_denied", `API key does not have required scope ${requiredScope}`);
+    throw new HttpError(
+      403,
+      "scope_denied",
+      `API key does not have required scope ${requiredScope}`,
+    );
   }
 
   // Tenancy lifecycle: a suspended/deleted TENANT — or any suspended ANCESTOR
@@ -259,7 +263,11 @@ export async function authenticateBearer(
   if (operation.rbacAction !== null) {
     const decision = await ports.rbac.authorize(auth, operation.rbacAction);
     if (decision.allowed === "unavailable") {
-      throw new HttpError(503, "rbac_unavailable", `failed to resolve role permissions: ${decision.detail}`);
+      throw new HttpError(
+        503,
+        "rbac_unavailable",
+        `failed to resolve role permissions: ${decision.detail}`,
+      );
     }
     if (!decision.allowed) {
       throw new HttpError(403, decision.code, decision.message);

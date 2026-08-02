@@ -1,3 +1,4 @@
+import { resolveEffectiveQuota } from "@ferrogate/policy";
 /**
  * `GET|HEAD /sites/{site}/{path}` — the static-site serve mode (issue #737).
  *
@@ -51,12 +52,8 @@ import type { AssetCaller } from "../assets/ports.js";
 import type { AssetService, AssetServiceDeps } from "../assets/service.js";
 import { authenticateBearer, extractApiKey } from "../middleware/auth.js";
 import { HttpError } from "../middleware/errors.js";
-import type { GatewayDeps, GatewayEnv } from "../ports.js";
-import {
-  type QuotaBindings,
-  quotaPolicySourceFromEnv,
-  resolveQuotaWindows,
-} from "../ratelimit/index.js";
+import type { GatewayBindings, GatewayDeps, GatewayEnv } from "../ports.js";
+import { type QuotaBindings, quotaPolicySourceFromEnv } from "../ratelimit/index.js";
 import { GatewayRouter, type RouteModule } from "../routes/index.js";
 import { planSitePath } from "./paths.js";
 import { SITE_VARY, siteCacheControl } from "./policy.js";
@@ -105,7 +102,7 @@ function siteNotFound(slug: string): never {
 }
 
 /** Ports for the auth ladder — a factory, because bindings are per request. */
-export type SiteDepsResolver = GatewayDeps | ((env: GatewayEnv["Bindings"]) => GatewayDeps);
+export type SiteDepsResolver = GatewayDeps | ((env: GatewayBindings) => GatewayDeps);
 
 export interface SiteRouteModuleOptions {
   /** A pre-built asset service. Wins over `deps`/`depsFromEnv`. */
@@ -137,11 +134,17 @@ async function ownerEgressQuota(
   apiKeyId: string,
 ): Promise<AssetEgressQuota> {
   if (tenantId === "") return {};
-  const resolution = await resolveQuotaWindows(
-    quotaPolicySourceFromEnv(c.env as unknown as QuotaBindings),
-    { apiKeyId, chain: { tenantId, keyId: apiKeyId }, requestLimitPerMinute: undefined },
-  );
-  return resolution.ok ? resolution.quota : {};
+  const chain = { tenantId, ...(apiKeyId === "" ? {} : { keyId: apiKeyId }) };
+  const source = quotaPolicySourceFromEnv(c.env as unknown as QuotaBindings);
+  // `resolveQuotaWindows` is deliberately NOT used: it also derives the RPM
+  // COUNTER WINDOWS, and `perKeyCounterKey` refuses an empty api-key id
+  // (`counter key "key:" is not scope-namespaced`) — correctly, because an
+  // anonymous reader has no per-key window to charge. Only the merged quota is
+  // wanted here; the egress gate derives its own counter keys from the winning
+  // SCOPE, which for an anonymous read is the tenant.
+  const snapshot = await source.policiesFor({ apiKeyId, chain, requestLimitPerMinute: undefined });
+  if (!snapshot.ok) return {};
+  return resolveEffectiveQuota(chain, snapshot.lookup, snapshot.plan);
 }
 
 /** Render an `AssetPullResult` that has already succeeded. */
@@ -173,7 +176,7 @@ export function siteRouteModule(options: SiteRouteModuleOptions = {}): RouteModu
   const portsFor = (c: Context<SiteEnv>): GatewayDeps => {
     const resolver = options.gatewayDeps ?? depsFromEnv;
     return typeof resolver === "function"
-      ? resolver(c.env as unknown as GatewayEnv["Bindings"])
+      ? resolver(c.env as unknown as GatewayBindings)
       : resolver;
   };
 
@@ -282,12 +285,11 @@ export function siteRouteModule(options: SiteRouteModuleOptions = {}): RouteModu
       const spaFallback = binding?.spa === true ? ["index.html"] : [];
       const notFoundDocument =
         binding === undefined || binding.notFoundDocument === "" ? [] : [binding.notFoundDocument];
-      const documents = binding === undefined ? ["404.html"] : [...spaFallback, ...notFoundDocument];
+      const documents =
+        binding === undefined ? ["404.html"] : [...spaFallback, ...notFoundDocument];
       const second =
-        documents.length === 0
-          ? null
-          : await service.siteFileProbe(caller, ref, documents);
-      if (second !== null && second.ok && second.body.path !== null) {
+        documents.length === 0 ? null : await service.siteFileProbe(caller, ref, documents);
+      if (second?.ok && second.body.path !== null) {
         file = second.body.path;
         fallback = true;
         // The SPA entry document IS the answer (200); a 404 document describes
