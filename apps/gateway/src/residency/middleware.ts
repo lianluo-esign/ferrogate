@@ -59,6 +59,18 @@
  *     that this gateway refused. An operator who cannot satisfy log residency
  *     needs to see the refusals; a control whose failures are invisible is the
  *     defect this repository keeps finding.
+ *  5. **Neither surface gains a `region` column, and here is why that is
+ *     enough.** `request_logs` already records the SERVED `provider` and
+ *     `route` — the configured provider NAME (`openai-eu`), not the family —
+ *     and `billing_events` records the same provider. The region is a property
+ *     of that provider row in `GATEWAY_MODELS`, so "which region served request
+ *     X" is answerable today by joining the row to the catalogue, and a
+ *     denormalised copy would be a second source of truth for one fact that can
+ *     disagree with the first after a config change. What is genuinely NOT
+ *     answerable from the row is the region a route declared AT THE TIME, if
+ *     the catalogue later changes; that is a point-in-time-evidence question,
+ *     it needs a column and an admin reader, and it is deliberately not in this
+ *     slice rather than half-done inside it.
  */
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { HttpError } from "../middleware/errors.js";
