@@ -1,5 +1,5 @@
 /**
- * The inference `RouteModule` seam — the adapter that mounts the nine inference
+ * The inference `RouteModule` seam — the adapter that mounts the twelve inference
  * operations on the contract-driven gateway router.
  *
  * `test/inference/*.test.ts` drives the standalone `createInferenceRouter`
@@ -51,17 +51,19 @@ function gateway(limits?: { inferenceBodyMaxBytes?: number }) {
 }
 
 describe("inferenceRouteModule", () => {
-  it("claims exactly the 9 contract inference operation ids", () => {
+  it("claims exactly the 12 contract inference operation ids", () => {
     expect(new Set(inferenceRouteModule().operationIds)).toEqual(new Set(INFERENCE_OPERATION_IDS));
     // 6 -> 7 with `countMessageTokens` (issue #671), 7 -> 8 with `getModel`
-    // (GET /v1/models/{model}, issue #670) and 8 -> 9 with `createRerank`
-    // (POST /v1/rerank, issue #676). #671 and #670 both wrote 7 independently,
-    // so that merge kept 7 silently; this number is COUNTED off the list rather
-    // than incremented from a parent's.
-    expect(inferenceRouteModule().operationIds).toHaveLength(9);
+    // (GET /v1/models/{model}, issue #670), 8 -> 9 with `createRerank`
+    // (POST /v1/rerank, issue #676) and 9 -> 12 with the audio surface
+    // (`createTranscription`, `createTranslation`, `createSpeech`, issue #703).
+    // #671 and #670 both wrote 7 independently, so that merge kept 7 silently;
+    // this number is COUNTED off the list rather than incremented from a
+    // parent's.
+    expect(inferenceRouteModule().operationIds).toHaveLength(12);
   });
 
-  it("registers all 9 on the contract-driven router", () => {
+  it("registers all 12 on the contract-driven router", () => {
     const { router } = gateway();
     for (const operationId of INFERENCE_OPERATION_IDS) {
       expect(router.registeredOperationIds(), operationId).toContain(operationId);

@@ -55,6 +55,9 @@ export type {
   ProviderUsage,
   RerankPlan,
   ResponsesPlan,
+  AudioBytes,
+  SpeechPlan,
+  TranscriptionPlan,
 } from "./types.js";
 
 // JSON value model + accessors.
@@ -122,6 +125,7 @@ export {
   WORKERS_AI_KIND,
   WORKERS_AI_RUN_PATH_SEGMENT,
   rerankDocumentTexts,
+  audioUploadBytes,
 } from "./workers_ai.js";
 export { ProviderAdapterRegistry } from "./registry.js";
 

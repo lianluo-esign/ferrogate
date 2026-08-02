@@ -44,6 +44,7 @@ import type {
   Usage,
   UsageSink,
 } from "./ports.js";
+import { MAX_AUDIO_UPLOAD_BYTES } from "./schemas.js";
 import { ProviderRoutingMetrics } from "./strategy.js";
 import type { RoutingMetrics } from "./strategy.js";
 import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
@@ -60,6 +61,10 @@ import type { WorkflowGateBindings } from "./workflow.js";
 export const DEFAULT_INFERENCE_LIMITS: InferenceLimits = {
   inferenceBodyMaxBytes: 1024 * 1024,
   providerResponseMaxBytes: 8 * 1024 * 1024,
+  // Issue #703. Imported rather than re-spelled: the handler enforces this cap
+  // and the test suite asserts against the constant, and a second literal here
+  // is exactly how a ceiling stops matching the thing that enforces it.
+  audioUploadMaxBytes: MAX_AUDIO_UPLOAD_BYTES,
   dispatchTimeoutMs: 120_000,
 };
 
@@ -260,7 +265,13 @@ export const fetchDispatcher: UpstreamDispatcher = {
       ...(signal !== undefined ? { signal } : {}),
     };
     if (request.method !== "GET" && request.body !== undefined) {
-      init.body = JSON.stringify(request.body);
+      // `FormData` (issue #703) is handed to `fetch` UNTOUCHED, and the
+      // `content-type` header the adapter deliberately omitted is what makes
+      // that work: `fetch` writes `multipart/form-data; boundary=...` itself,
+      // with the boundary it will actually use to serialize the parts. A
+      // hand-written header would name a boundary that does not appear in the
+      // bytes and every upstream would answer 400.
+      init.body = request.body instanceof FormData ? request.body : JSON.stringify(request.body);
     }
     return await globalThis.fetch(request.endpoint, init);
   },

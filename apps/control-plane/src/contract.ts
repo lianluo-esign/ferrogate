@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 268-operation runtime API contract, as a
+ * The control-plane slice of the 271-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -116,7 +116,7 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 268;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 271;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -418,7 +418,7 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 268). */
+/** Every operation in the document, in document order (all 271). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
 /** The operations this Worker owns, in document order (211). */
@@ -430,7 +430,7 @@ export const OPERATIONS_BY_GROUP: ReadonlyMap<string, readonly ApiOperation[]> =
 /** Every group this Worker owns at least one operation in, sorted. */
 export const CONTROL_PLANE_GROUPS: readonly string[] = [...CONTRACT.byGroup.keys()].sort();
 
-/** Lookup by `operation_id` — across ALL 268, so a mis-assignment is visible. */
+/** Lookup by `operation_id` — across ALL 271, so a mis-assignment is visible. */
 export function operationById(operationId: string): ApiOperation | undefined {
   return CONTRACT.byOperationId.get(operationId);
 }

@@ -1,5 +1,5 @@
 /**
- * Contract-driven route registration for the 34 gateway-owned operations.
+ * Contract-driven route registration for the 37 gateway-owned operations.
  *
  * Routes are never hand-written here: `GatewayRouter.register` takes an
  * `operation_id`, looks the operation up in the contract, and mounts it at the
@@ -8,7 +8,7 @@
  * `test/contract.test.ts` can assert the two never drift.
  *
  * Ownership (see the task split in ROUTE-MAP.md):
- *   - the 9 inference operations  → `src/inference/route-module.ts`
+ *   - the 12 inference operations  → `src/inference/route-module.ts`
  *   - the 18 `/v1/assets/**` ops  → `src/assets/handlers.ts`
  * Both are in the contract table and both are guarded by `contractAuth`; each
  * is mounted by its own `RouteModule`, listed in `GATEWAY_ROUTE_MODULES` in
@@ -71,7 +71,7 @@ export const SHARED_OPERATION_IDS = ["getHealthz", "getReadyz"] as const;
 export const OBSERVABILITY_OPERATION_IDS = ["getMetrics"] as const;
 
 /**
- * The 9 inference operations. Owned by the inference agent this wave.
+ * The 12 inference operations. Owned by the inference agent this wave.
  *
  * `countMessageTokens` (issue #671) is the Anthropic-native
  * `POST /v1/messages/count_tokens` pre-flight. It is an inference operation
@@ -101,6 +101,16 @@ export const INFERENCE_OPERATION_IDS = [
   // `handleRerank` in `../inference/handlers.ts` for why a seventh data-plane
   // scope would have re-minted every existing RAG key to buy nothing.
   "createRerank",
+  // The audio surface — `POST /v1/audio/{transcriptions,translations,speech}`
+  // (issue #703). Inference operations for the same reason `createRerank` is:
+  // the same registry, the same candidate ladder, the same TPM window, the same
+  // usage sink and the same drain gate. They are guarded on a NEW
+  // `audio.create` scope rather than a reuse — see `INFERENCE_SCOPES` in
+  // `../keys/scopes.ts` for why audio, unlike reranking, has no existing family
+  // whose scope would be the honest name for it.
+  "createTranscription",
+  "createTranslation",
+  "createSpeech",
 ] as const;
 
 /** The 18 `/v1/assets/**` operations. Owned by the assets agent this wave. */
@@ -136,7 +146,7 @@ export const TOOLING_OPERATION_IDS = [
   "getAgentDiscovery",
 ] as const;
 
-/** All 34 operations `apps/gateway` owns per ROUTE-MAP.md. */
+/** All 37 operations `apps/gateway` owns per ROUTE-MAP.md. */
 export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
@@ -597,7 +607,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
   app.use("*", options.networkAccess ?? networkAccess());
 
-  // ONE table-driven guard for all 268 operations, ahead of every route.
+  // ONE table-driven guard for all 271 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
   app.use("*", contractAuth(options.deps ?? depsFromEnv));
 
@@ -683,7 +693,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   //
   // LAST, and the position is the whole correctness argument: Hono runs matched
   // handlers in REGISTRATION order, so an `app.all("*")` placed any earlier
-  // would shadow all 268 contract operations AND `/health`. It is registered
+  // would shadow all 271 contract operations AND `/health`. It is registered
   // after every `router.register`, after every caller-supplied module, and after
   // `/health` above.
   //

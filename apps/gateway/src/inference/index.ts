@@ -1,10 +1,10 @@
 /**
- * `apps/gateway` inference surface — the nine OpenAPI operations in the
+ * `apps/gateway` inference surface — the twelve OpenAPI operations in the
  * `inference` route group of `docs/openapi/runtime-api-contract.json`:
  *
  *   listModels · getModel · createChatCompletion · createResponse ·
  *   createMessage · countMessageTokens · createEmbedding · createRerank ·
- *   createImage
+ *   createTranscription · createTranslation · createSpeech · createImage
  *
  * Mount it from the app shell as a contract-driven `RouteModule`:
  *
@@ -109,6 +109,8 @@ export {
   providerTransportFailureClass,
   providerTransportMessage,
   readBoundedProviderBody,
+  readBoundedProviderBytes,
+  readBoundedStream,
 } from "./dispatch.js";
 export {
   chatCompletionToMessage,

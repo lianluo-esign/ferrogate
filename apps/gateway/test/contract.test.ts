@@ -45,11 +45,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 268 operations", () => {
+  it("carries exactly 271 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 268 unique operation ids", () => {
+  it("has 271 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -67,15 +67,17 @@ describe("contract table", () => {
     // `listModels` it narrows, -> 252), then #677's two chargeback reads
     // (`listAdminCostRecords` / `exportAdminCostRecords`, -> 254), which are
     // `admin.read` like every other evidence read, and `createRerank` (issue
-    // #676, bearer-`embeddings.create`, -> 255). All seventeen additions since
+    // #676, bearer-`embeddings.create`, -> 255), and the three audio operations
+    // (issue #703, bearer-`audio.create`, -> 258). All twenty additions since
     // 238 are bearer; none is anonymous or internal.
     //
-    // 255 is COUNTED off the merged document, not summed: #677 and #676 were
+    // 258 is COUNTED off the merged document, not summed: #677 and #676 were
     // parallel and each parent wrote its own increment, which is the collision
     // this file's header warns about. `Counter(o["auth"]["kind"] for o in
-    // operations)` over the merged JSON is what produced it.
+    // operations)` over the merged JSON is what produced it, and #703 re-ran the
+    // same count rather than adding three to a number it had not verified.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 255,
+      bearer: 258,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -98,8 +100,10 @@ describe("contract table", () => {
       // `getModel` (issue #670), public for the same reason as `listModels`.
       // Both parents independently wrote 52, so git merged that clean — 53 was
       // the merged truth, and `createRerank` (issue #676) takes it to 54: a
-      // data-plane operation, publicly reachable, bearer-guarded.
-      public: 54,
+      // data-plane operation, publicly reachable, bearer-guarded. The three
+      // audio operations (issue #703) take it to 57 for the same reason — a
+      // voice client is a data-plane caller like any other.
+      public: 57,
       internal: 7,
     });
   });
@@ -124,8 +128,10 @@ describe("contract table", () => {
       // re-counted off the merged document rather than added up.
       GET: 123,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
-      // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
-      POST: 82,
+      // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
+      // #676's `/v1/rerank` and 85 with #703's three audio POSTs. Re-counted off
+      // the merged document, never summed.
+      POST: 85,
       DELETE: 27,
       PUT: 20,
       PATCH: 16,
@@ -303,16 +309,17 @@ describe("route registration", () => {
   // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
   // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
   // here: a local module list is exactly how the deployed Worker came to mount
-  // 7 of its 34 operations while this suite stayed green.
+  // 7 of its 37 operations while this suite stayed green.
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 34 operations ROUTE-MAP assigns to apps/gateway", () => {
+  it("owns exactly the 37 operations ROUTE-MAP assigns to apps/gateway", () => {
     // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
-    // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
-    // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
-    // number here is re-derived by COUNTING the list, never incremented.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(34);
+    // (issue #670), 33 -> 34 with `createRerank` (issue #676) and 34 -> 37 with
+    // the three audio operations (issue #703). Both #671 and #670 wrote 32
+    // independently, so the merge kept 32 with no conflict — the number here is
+    // re-derived by COUNTING the list, never incremented.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(37);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }

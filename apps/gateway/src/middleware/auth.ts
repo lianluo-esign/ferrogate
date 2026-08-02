@@ -1,9 +1,9 @@
 /**
- * ONE contract-driven auth middleware for all 268 operations.
+ * ONE contract-driven auth middleware for all 271 operations.
  *
  * `ROUTE-MAP.md` invariant 1: "Port these as Hono middleware driven by the
  * contract, not as hand-written per-route guards — one table-driven middleware
- * keeps all 268 in sync." This is that middleware. It matches the request
+ * keeps all 271 in sync." This is that middleware. It matches the request
  * against `contract.ts`, then enforces whatever the matched operation *declares*
  * (`auth.kind`, `auth.scope`, `rbac_action`). Adding a route to the contract
  * automatically brings its guard with it; nothing here mentions a specific path.
@@ -156,7 +156,7 @@ async function methodDependentRequiredScope(
     // in this file. For `POST /v1/mcp` the JSON-RPC-native answer to an unknown
     // `method` is error -32601 ("method not found") in a 200 envelope, and
     // `apps/mcp` — which owns the MCP dialect — may well want that. It cannot
-    // be produced HERE: this middleware guards all 268 contract operations and
+    // be produced HERE: this middleware guards all 271 contract operations and
     // knows nothing about JSON-RPC framing, and emitting a 200 from the auth
     // boundary for an unrecognised discriminator would mean an unauthenticated
     // caller could probe method names.

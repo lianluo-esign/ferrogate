@@ -105,6 +105,27 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
   // evidence row, and enforces nothing. That is the exact shape of hole this
   // table is supposed to make impossible.
   createRerank: { protocol: "rerank", dialect: "openai.chat", screensResponse: false },
+  // Issue #703. The audio surface appears here EXACTLY ONCE, and the two
+  // absences are the substantive part of the entry.
+  //
+  // `createSpeech` is bound: its request body is JSON carrying the `input` text
+  // a caller wants spoken, which is ordinary user content and the last point at
+  // which it is still a string — once synthesized it is past every text control
+  // a tenant owns. `screensResponse` is false because the response is audio
+  // bytes and no detector in this tree reads a waveform.
+  //
+  // `createTranscription` and `createTranslation` are DELIBERATELY ABSENT, and
+  // this is a claim about honesty rather than about effort. Their bodies are
+  // `multipart/form-data` wrapping opaque audio; `readJsonBodyBounded` below
+  // returns `undefined` for them, so a binding here would take the
+  // `return next()` arm on every single request. The visible effect would be an
+  // operation that LOOKS screened in this table and a `guardrail_verdict` that
+  // is never `allowed` nor `blocked` — a control an auditor would read as
+  // present and that enforces nothing. Screening speech-to-text needs a detector
+  // that reads audio (or a second pass over the transcript, which is a
+  // response-stage design this table cannot express for a `next()`-ed request);
+  // until one exists the correct entry is no entry.
+  createSpeech: { protocol: "audio_speech", dialect: "openai.chat", screensResponse: false },
   createImage: { protocol: "images", dialect: "openai.chat", screensResponse: false },
 };
 

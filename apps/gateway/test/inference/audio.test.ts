@@ -159,16 +159,26 @@ function audioBytes(size = 8): Uint8Array {
   return bytes;
 }
 
+/**
+ * `null` — not `undefined` — omits the file part. A default parameter treats an
+ * explicit `undefined` as "not supplied" and substitutes the default, so
+ * `upload(path, fields, undefined)` would quietly ATTACH a file and the
+ * no-file test would assert nothing about the case it names.
+ */
 function upload(
   path: string,
   fields: Record<string, string>,
-  file: Uint8Array | undefined = audioBytes(),
+  file: Uint8Array | null = audioBytes(),
   key = "fg_audio",
 ): Promise<Response> {
   const form = new FormData();
   for (const [name, value] of Object.entries(fields)) form.append(name, value);
-  if (file !== undefined) {
-    form.append("file", new Blob([file as BlobPart], { type: "audio/wav" }), "clip.wav");
+  if (file !== null) {
+    form.append(
+      "file",
+      new Blob([file as unknown as ArrayBuffer], { type: "audio/wav" }),
+      "clip.wav",
+    );
   }
   return SELF.fetch(`${BASE}${path}`, {
     method: "POST",
@@ -206,7 +216,7 @@ describe("the audio surface is three guarded contract operations", () => {
     for (const path of ["/v1/audio/transcriptions", "/v1/audio/translations"]) {
       const form = new FormData();
       form.append("model", "edge-whisper");
-      form.append("file", new Blob([audioBytes() as BlobPart]), "clip.wav");
+      form.append("file", new Blob([audioBytes() as unknown as ArrayBuffer]), "clip.wav");
       const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", body: form });
       expect(res.status, path).toBe(401);
       expect((await errorBody(res)).error.code).toBe("missing_api_key");
@@ -231,7 +241,7 @@ describe("the audio surface is three guarded contract operations", () => {
   });
 
   it("400s an upload with no file part", async () => {
-    const res = await upload("/v1/audio/transcriptions", { model: "edge-whisper" }, undefined);
+    const res = await upload("/v1/audio/transcriptions", { model: "edge-whisper" }, null);
     expect(res.status).toBe(400);
     expect((await errorBody(res)).error.code).toBe("invalid_request");
   });
@@ -241,66 +251,93 @@ describe("the audio surface is three guarded contract operations", () => {
 // The size ceiling — the denial-of-service this surface would otherwise be
 // ---------------------------------------------------------------------------
 
+/**
+ * These two drive the INNER router with a hand-built `Request` rather than
+ * `SELF.fetch`, and the reason is the measurement itself. `SELF.fetch` puts the
+ * body through workerd's loopback transport, which pulls from the stream to
+ * ship it — so a byte counter on the other side counts the HARNESS, not the
+ * gateway, and the assertion would be about the wrong thing. Driving
+ * `router.fetch` hands the reader the very `ReadableStream` this test built, so
+ * every byte counted is a byte the gateway asked for.
+ *
+ * The guard/route half is already covered above through `SELF.fetch`; what is
+ * unique here is the accounting.
+ */
 describe("an oversized upload is REFUSED, not buffered", () => {
+  function streamingUpload(
+    body: ReadableStream<Uint8Array>,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    return audioHarness().router.fetch(
+      new Request(`${BASE}/v1/audio/transcriptions`, {
+        method: "POST",
+        headers: { "content-type": "multipart/form-data; boundary=x", ...headers },
+        body,
+        duplex: "half",
+      } as RequestInit),
+    );
+  }
+
   it("413s on the declared Content-Length before a single body byte is read", async () => {
-    // A `ReadableStream` body that would hand over far more than the ceiling if
+    // A `ReadableStream` that would hand over far more than the ceiling if
     // anything ever pulled from it. Nothing may: the declared length alone is
-    // enough to refuse, and reading first is the denial-of-service.
+    // enough to refuse, and reading first is the denial of service.
     let pulled = 0;
+    const CHUNK = 1024 * 1024;
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
+        // FINITE, so removing the declared-length check below produces a 413
+        // from the streaming guard instead of an unterminating test. What
+        // separates the two is `pulled`, not the status.
+        if (pulled * CHUNK > MAX_AUDIO_UPLOAD_BYTES * 2) {
+          controller.close();
+          return;
+        }
         pulled += 1;
-        controller.enqueue(new Uint8Array(1024));
+        controller.enqueue(new Uint8Array(CHUNK));
       },
     });
-    const res = await SELF.fetch(`${BASE}/v1/audio/transcriptions`, {
-      method: "POST",
-      headers: {
-        authorization: "Bearer fg_audio",
-        "content-type": "multipart/form-data; boundary=x",
-        "content-length": String(MAX_AUDIO_UPLOAD_BYTES + 1),
-      },
-      body,
-      duplex: "half",
-    } as RequestInit);
+
+    const res = await streamingUpload(body, {
+      "content-length": String(MAX_AUDIO_UPLOAD_BYTES + 1),
+    });
 
     expect(res.status).toBe(413);
     expect((await errorBody(res)).error.code).toBe("payload_too_large");
-    expect(pulled).toBe(0);
+    // At most ONE, and the one is not ours: a `ReadableStream` fills its own
+    // internal queue (default high-water mark 1) as soon as it is handed to a
+    // `Request`, before any consumer exists. What this pins is that the gateway
+    // asked for NOTHING beyond that — deleting the `content-length` check makes
+    // this ~26.
+    expect(pulled).toBeLessThanOrEqual(1);
   });
 
   it("413s a chunked upload that lies about its size, without buffering it whole", async () => {
-    // No `content-length` at all — the case a hostile client actually uses. The
-    // reader has to stop ON ITS OWN, so this counts the bytes the gateway was
-    // willing to accept before refusing. `MAX_AUDIO_UPLOAD_BYTES` is the budget;
-    // anything materially past it means the whole upload was materialized.
+    // No `content-length` at all — the shape a hostile client actually uses, and
+    // the one `arrayBuffer()`/`formData()` cannot defend against because they
+    // buffer first and measure afterwards. The reader has to stop ON ITS OWN, so
+    // this counts the bytes the gateway was willing to accept before refusing.
     const chunk = new Uint8Array(1024 * 1024);
     let served = 0;
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
-        served += chunk.byteLength;
         if (served > MAX_AUDIO_UPLOAD_BYTES * 4) {
           controller.close();
           return;
         }
+        served += chunk.byteLength;
         controller.enqueue(chunk);
       },
     });
-    const res = await SELF.fetch(`${BASE}/v1/audio/transcriptions`, {
-      method: "POST",
-      headers: {
-        authorization: "Bearer fg_audio",
-        "content-type": "multipart/form-data; boundary=x",
-      },
-      body,
-      duplex: "half",
-    } as RequestInit);
+
+    const res = await streamingUpload(body, {});
 
     expect(res.status).toBe(413);
     expect((await errorBody(res)).error.code).toBe("payload_too_large");
-    // The reader stopped near the ceiling instead of draining the stream. One
-    // chunk of slack: the cap is checked after each chunk lands.
-    expect(served).toBeLessThanOrEqual(MAX_AUDIO_UPLOAD_BYTES + chunk.byteLength);
+    // The reader stopped AT the ceiling instead of draining the stream. Two
+    // chunks of slack: the cap is checked before a chunk is appended, and the
+    // stream may have one more queued behind it.
+    expect(served).toBeLessThanOrEqual(MAX_AUDIO_UPLOAD_BYTES + 2 * chunk.byteLength);
   });
 });
 
@@ -328,6 +365,25 @@ describe("transcription is served by Workers AI Whisper", () => {
     // Whisper's native run grammar: base64 audio, not a multipart part.
     expect(typeof ai.runs.at(-1)?.input["audio"]).toBe("string");
     expect(egress.calls()).toBe(0);
+  });
+
+  it("surfaces the derived duration only when the caller asks for verbose_json", async () => {
+    ai.answerWith(() => ({
+      text: "hello",
+      // Deliberately NOT in ascending order: the duration is the MAXIMUM `end`,
+      // not the last row's, so a mis-ordered answer cannot under-report the
+      // length of the recording — which is the quantity this call is billed on.
+      segments: [
+        { start: 4, end: 9.5, text: "b" },
+        { start: 0, end: 4, text: "a" },
+      ],
+    }));
+    const res = await upload("/v1/audio/transcriptions", {
+      model: "edge-whisper",
+      response_format: "verbose_json",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ text: "hello", duration: 9.5 });
   });
 
   it("passes `translate` to the binding for /v1/audio/translations, and only there", async () => {
@@ -479,7 +535,7 @@ describe("the audio surface is metered on its own units", () => {
       const h = audioHarness();
       const form = new FormData();
       form.append("model", "whisper-model");
-      form.append("file", new Blob([audioBytes(64) as BlobPart]), "clip.wav");
+      form.append("file", new Blob([audioBytes(64) as unknown as ArrayBuffer]), "clip.wav");
       const res = await h.router.request(`${BASE}/v1/audio/transcriptions`, {
         method: "POST",
         body: form,
@@ -512,7 +568,7 @@ describe("the audio surface is metered on its own units", () => {
       const h = audioHarness();
       const form = new FormData();
       form.append("model", "whisper-model");
-      form.append("file", new Blob([audioBytes(64) as BlobPart]), "clip.wav");
+      form.append("file", new Blob([audioBytes(64) as unknown as ArrayBuffer]), "clip.wav");
       const res = await h.router.request(`${BASE}/v1/audio/transcriptions`, {
         method: "POST",
         body: form,

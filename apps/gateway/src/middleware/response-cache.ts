@@ -171,6 +171,24 @@ export const CACHEABLE_OPERATION_IDS: ReadonlySet<string> = new Set([
   // `top_n` are all different keys — there is no way for one caller's ranking to
   // be served for another's question.
   "createRerank",
+  // `createSpeech` (issue #703) — and, deliberately, NOT the two audio uploads.
+  //
+  // Text-to-speech is the most repeat-prone call on this list: a UI reads the
+  // same label, the same error string and the same onboarding sentence to every
+  // user who lands on it, the answer is deterministic for a given
+  // (model, input, voice, format), and the key is a small JSON body. The stored
+  // entry is a `Uint8Array` and `respondFromCache` replays it with its stored
+  // content type, so the audio comes back byte-for-byte — a cache hit on this
+  // surface is indistinguishable from a provider answer.
+  //
+  // `createTranscription` / `createTranslation` are absent on the same
+  // cost/benefit argument run the other way. Their cache key would have to be
+  // the AUDIO — up to `MAX_AUDIO_UPLOAD_BYTES` canonicalized and hashed on every
+  // request, which is exactly the work `MAX_CACHEABLE_BODY_BYTES` exists to
+  // avoid — for a workload of one-shot uploads that essentially never repeat.
+  // Their bodies are not JSON either, so `readRequestFacts` would refuse them at
+  // the next line down; listing them would be a claim the code does not honour.
+  "createSpeech",
   "createMessage",
   "createImage",
 ]);

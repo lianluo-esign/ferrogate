@@ -70,6 +70,8 @@ const capabilitySchema = z.enum([
   "images",
   "embeddings",
   "rerank",
+  "transcription",
+  "speech",
   "tools",
   "structured_output",
 ]);

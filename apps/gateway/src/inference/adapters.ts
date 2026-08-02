@@ -249,6 +249,9 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       responses: "responses request body",
       embeddings: "embeddings request body",
       rerank: "rerank request body",
+      "audio.transcriptions": "audio transcription request body",
+      "audio.translations": "audio translation request body",
+      "audio.speech": "speech request body",
       images: "image generation request body",
       model_catalog: "model catalog request body",
     }[plan.operation];
@@ -315,6 +318,58 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
         // the whole premise of issue #676), so this family refuses rather than
         // inventing a `/rerank` path an upstream would 404.
         return rerankUnsupported(plan.route.providerKind.trim().toLowerCase());
+      // ---- the audio surface (issue #703) --------------------------------
+      //
+      // The two uploads are the only operations on this family that do NOT send
+      // JSON. OpenAI's `/v1/audio/transcriptions` is `multipart/form-data` and
+      // there is no JSON spelling of it, so the passthrough builds a real
+      // `FormData` here and `fetchDispatcher` hands it to `fetch` untouched —
+      // which is also why the JSON content-type is REMOVED rather than
+      // replaced: `fetch` derives the header from a `FormData` body, so the MIME
+      // boundary it generates is the one actually on the wire. Writing one by
+      // hand would produce a boundary that does not match the bytes and every
+      // upstream would answer 400.
+      case "audio.transcriptions":
+      case "audio.translations": {
+        const form = audioUploadForm(body, plan.providerModel);
+        if (form === null) {
+          return {
+            ok: false,
+            error: {
+              kind: "invalid_request",
+              message: 'audio request body must include a "file" part with bytes',
+            },
+          };
+        }
+        return {
+          ok: true,
+          request: {
+            ...base,
+            headers: withoutContentType(headers),
+            endpoint: endpoint(
+              plan.route.baseUrl,
+              plan.operation === "audio.translations"
+                ? "/audio/translations"
+                : "/audio/transcriptions",
+            ),
+            body: form,
+            stream: false,
+          },
+        };
+      }
+      case "audio.speech":
+        // Speech is ordinary JSON on the REQUEST side of this dialect; only the
+        // response is binary, and that is the handler's concern rather than the
+        // adapter's. Nothing to strip and no form to build.
+        return {
+          ok: true,
+          request: {
+            ...base,
+            endpoint: endpoint(plan.route.baseUrl, "/audio/speech"),
+            body,
+            stream: false,
+          },
+        };
       case "images":
         return {
           ok: true,
@@ -503,6 +558,71 @@ function rerankUnsupported(kind: string): AdapterResult {
   };
 }
 
+/** The audio refusal (issue #703), same argument as {@link rerankUnsupported}. */
+function audioUnsupported(kind: string): AdapterResult {
+  return {
+    ok: false,
+    error: { kind: "unsupported_capability", capability: "audio", providerKind: kind },
+  };
+}
+
+/**
+ * The caller's normalized upload → the `multipart/form-data` OpenAI expects
+ * (issue #703).
+ *
+ * `model` is overwritten with the PHYSICAL model, exactly as the JSON legs do:
+ * a caller must never be able to pin the upstream model through a form field
+ * any more than through a JSON one.
+ *
+ * Every other field is forwarded as a string EXCEPT `file` and `metadata`.
+ * `file` becomes the binary part; `metadata` is FerroGate's own routing/billing
+ * tag map (issue #171) and has no meaning to a provider, so forwarding it would
+ * put a tenant's internal cost-centre labels on a vendor's servers for nothing.
+ * That exclusion matches the JSON legs only by accident today — they forward
+ * `metadata` because OpenAI ignores unknown members — so it is stated here
+ * rather than left to the reader.
+ *
+ * Returns `null` when the `file` part is missing or empty, which the caller
+ * turns into `invalid_request`. Reachable only if the ingress schema were
+ * bypassed, and cheap depth against exactly that.
+ */
+function audioUploadForm(body: Record<string, unknown>, providerModel: string): FormData | null {
+  const file = body["file"] as { bytes?: unknown; filename?: unknown; contentType?: unknown } | undefined;
+  const bytes = file?.bytes;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) return null;
+
+  const form = new FormData();
+  const filename = typeof file?.filename === "string" && file.filename !== "" ? file.filename : "audio";
+  const contentType =
+    typeof file?.contentType === "string" && file.contentType !== ""
+      ? file.contentType
+      : "application/octet-stream";
+  form.append("file", new Blob([bytes as unknown as ArrayBuffer], { type: contentType }), filename);
+  form.append("model", providerModel);
+  for (const [name, value] of Object.entries(body)) {
+    if (name === "file" || name === "model" || name === "metadata") continue;
+    if (typeof value === "string") form.append(name, value);
+    else if (typeof value === "number" || typeof value === "boolean") form.append(name, String(value));
+  }
+  return form;
+}
+
+/**
+ * Drop `content-type` so `fetch` can derive it from a `FormData` body.
+ *
+ * A `Headers`-shaped copy without the key, not a copy with the key set to
+ * `undefined`: `fetch` only generates the multipart boundary when it sees NO
+ * content-type at all, and an empty one is still one.
+ */
+function withoutContentType(headers: Readonly<Record<string, string>>): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === "content-type") continue;
+    next[name] = value;
+  }
+  return next;
+}
+
 /**
  * `ferrogate-providers/src/grok.rs::GrokAdapter`.
  *
@@ -527,6 +647,14 @@ export const grokAdapter: ProviderAdapter = {
         return imagesUnsupported("grok");
       case "rerank":
         return rerankUnsupported("grok");
+      // Issue #703. A capability refusal, not an unknown kind: the failover
+      // ladder treats it as "try the next candidate", which is what a
+      // deployment mixing this family with a Whisper route under one logical
+      // model needs.
+      case "audio.transcriptions":
+      case "audio.translations":
+      case "audio.speech":
+        return audioUnsupported("grok");
       case "embeddings":
       case "model_catalog":
         return operationUnsupported("grok");
@@ -603,6 +731,14 @@ export const openRouterAdapter: ProviderAdapter = {
         return imagesUnsupported("openrouter");
       case "rerank":
         return rerankUnsupported("openrouter");
+      // Issue #703. A capability refusal, not an unknown kind: the failover
+      // ladder treats it as "try the next candidate", which is what a
+      // deployment mixing this family with a Whisper route under one logical
+      // model needs.
+      case "audio.transcriptions":
+      case "audio.translations":
+      case "audio.speech":
+        return audioUnsupported("openrouter");
       case "embeddings":
         return operationUnsupported("openrouter");
       case "chat.completions":
@@ -617,7 +753,17 @@ export const openRouterAdapter: ProviderAdapter = {
     }
 
     let body = built.request.body;
-    if (plan.operation === "chat.completions" && plan.stream && body !== undefined) {
+    // `body instanceof FormData` cannot be true on this arm — OpenRouter refuses
+    // the audio operations above, and only those produce a form (issue #703) —
+    // but the narrowing is stated rather than cast away, so a future arm that
+    // DOES pass a form here fails to compile instead of silently spreading a
+    // `FormData` into a plain object and posting `{}`.
+    if (
+      plan.operation === "chat.completions" &&
+      plan.stream &&
+      body !== undefined &&
+      !(body instanceof FormData)
+    ) {
       const { stream_options: _dropped, ...rest } = body;
       body = rest;
     }
@@ -720,6 +866,14 @@ export const azureOpenAiAdapter: ProviderAdapter = {
         return imagesUnsupported("azure-openai");
       case "rerank":
         return rerankUnsupported("azure-openai");
+      // Issue #703. A capability refusal, not an unknown kind: the failover
+      // ladder treats it as "try the next candidate", which is what a
+      // deployment mixing this family with a Whisper route under one logical
+      // model needs.
+      case "audio.transcriptions":
+      case "audio.translations":
+      case "audio.speech":
+        return audioUnsupported("azure-openai");
       case "responses":
       case "embeddings":
       case "model_catalog":
@@ -874,7 +1028,21 @@ export function packageProviderAdapter(
                 ? adapter.prepareEmbeddings(provider, base)
                 : plan.operation === "rerank"
                   ? adapter.prepareRerank(provider, base)
-                  : adapter.prepareImages(provider, base);
+                  : // Issue #703. `translate` is passed as a FLAG rather than
+                    // as two adapter methods, because for every family that has
+                    // ever shipped this surface the two operations differ by
+                    // exactly one field (Whisper's `task`, OpenAI's path
+                    // segment). Two near-identical methods would double the
+                    // surface a new family has to implement to buy nothing.
+                    plan.operation === "audio.transcriptions" ||
+                      plan.operation === "audio.translations"
+                    ? adapter.prepareTranscription(provider, {
+                        ...base,
+                        translate: plan.operation === "audio.translations",
+                      })
+                    : plan.operation === "audio.speech"
+                      ? adapter.prepareSpeech(provider, base)
+                      : adapter.prepareImages(provider, base);
         return {
           ok: true,
           request: {
@@ -909,6 +1077,21 @@ export function packageProviderAdapter(
       // the pass-through arm — reachable only if such a family somehow served a
       // rerank plan, since `prepareRerank` refuses first.
       const translated = adapter.translateRerankResponse(encoded, logicalModel, request as Json);
+      return translated === null ? undefined : translated;
+    },
+
+    translateTranscriptionResponse(body: unknown, logicalModel: string): unknown | undefined {
+      const encoded = new TextEncoder().encode(JSON.stringify(body) ?? "null");
+      const translated = adapter.translateTranscriptionResponse(encoded, logicalModel);
+      return translated === null ? undefined : translated;
+    },
+
+    translateSpeechResponse(body: Uint8Array, contentType: string) {
+      // The bytes go in RAW, not re-encoded through JSON: this is the one leg
+      // whose upstream body may legitimately not be JSON at all (an OpenAI
+      // passthrough answers `audio/mpeg` directly), and stringifying it would
+      // corrupt every byte above 0x7f before the adapter ever saw it.
+      const translated = adapter.translateSpeechResponse(body, contentType);
       return translated === null ? undefined : translated;
     },
   };
@@ -1030,7 +1213,8 @@ export const workersAiAdapter: ProviderAdapter = packageProviderAdapter(
  * registry class was never on the deployed path (see the note on
  * {@link withCloudflareAiGatewayRouting}).
  *
- * `images`, `rerank` and `model_catalog` return `null` deliberately:
+ * `images`, `rerank`, the three `audio.*` operations (issue #703) and
+ * `model_catalog` return `null` deliberately:
  * `cloudflare.ts`'s `CloudflareAiGatewaySurface` has no member for any of them,
  * and inventing a path would send a request somewhere Cloudflare does not serve.
  * They keep dialling the vendor directly, which is what they did before this
@@ -1192,6 +1376,20 @@ export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): Provid
             request: Record<string, unknown>,
           ): unknown | undefined =>
             adapter.translateRerankResponse?.(body, logicalModel, request),
+        }),
+    ...(adapter.translateTranscriptionResponse === undefined
+      ? {}
+      : {
+          translateTranscriptionResponse: (
+            body: unknown,
+            logicalModel: string,
+          ): unknown | undefined => adapter.translateTranscriptionResponse?.(body, logicalModel),
+        }),
+    ...(adapter.translateSpeechResponse === undefined
+      ? {}
+      : {
+          translateSpeechResponse: (body: Uint8Array, contentType: string) =>
+            adapter.translateSpeechResponse?.(body, contentType),
         }),
   };
 }

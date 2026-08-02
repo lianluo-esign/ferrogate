@@ -32,7 +32,7 @@
  * request and either one alone satisfies every assertion.
  *
  * So the route-module emission is now REDUNDANT: this middleware covers all 31
- * gateway operations including the 9 inference ones, with the same payload and
+ * gateway operations including the 12 inference ones, with the same payload and
  * the same id. It is kept only because `src/inference/` is a different owner and
  * deleting a caller across an ownership boundary is not this slice's call. If
  * that slice wants it gone, nothing here changes; if it wants it KEPT, it needs

@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 268.
+ * ANTI-DRIFT GATE for the third copy of 271.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(268);
+    expect(OPENAPI_OPERATION_COUNT).toBe(271);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -287,11 +287,14 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // `createRerank`, whose request/response Zod shapes live in
     // `apps/gateway/src/inference/schemas.ts` beside the handler that serves
     // them. So `seeded` is still 10 and the shortfall is 255 + 2 + 1 = 258.
+    // #703's three audio operations (`createTranscription`, `createTranslation`,
+    // `createSpeech`) are the same story a third time — their Zod shapes are in
+    // `apps/gateway/src/inference/schemas.ts` — so the shortfall is 258 + 3 = 261.
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 268 - 10. The running sum is narrative, and #677 and #676
+    // `seeded`, i.e. 271 - 10. The running sum is narrative, and #677 and #676
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(258);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(261);
   });
 });

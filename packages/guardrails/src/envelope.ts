@@ -24,6 +24,16 @@ export const guardrailProtocolSchema = z.enum([
   "embeddings",
   "rerank",
   "images",
+  // Issue #703. `audio_speech` and NOT a shared `audio` protocol: the two halves
+  // of the audio surface are not symmetric. A speech request carries the TEXT a
+  // caller wants spoken, which is ordinary user content and fully screenable; a
+  // transcription request carries opaque audio bytes, which nothing in this tree
+  // can read. One protocol covering both would extract the readable half and
+  // silently claim the other, which is what an EMPTY envelope always is — a
+  // screening that passes on nothing while producing an evidence row that says
+  // it ran. There is deliberately no `audio_transcription` member for that
+  // reason; see `GUARDRAIL_OPERATIONS` in `apps/gateway/src/guardrails/middleware.ts`.
+  "audio_speech",
   "managed_action",
   "a2a",
 ]);
@@ -118,6 +128,8 @@ function protocolName(protocol: GuardrailProtocol): string {
       return "embeddings";
     case "rerank":
       return "rerank";
+    case "audio_speech":
+      return "audio_speech";
     case "images":
       return "images";
     case "managed_action":
@@ -246,6 +258,9 @@ export function normalizeRequest(protocol: GuardrailProtocol, body: unknown): Gu
     case "rerank":
       extractRerankRequest(body, builder);
       break;
+    case "audio_speech":
+      extractAudioSpeechRequest(body, builder);
+      break;
     case "images":
       extractImagesRequest(body, builder);
       break;
@@ -270,6 +285,11 @@ export function normalizeResponse(
   if (
     protocol === "embeddings" ||
     protocol === "rerank" ||
+    // Issue #703. A speech response is AUDIO BYTES. There is no text to walk
+    // and no detector in this tree reads a waveform, so the response stage is
+    // an empty envelope by construction — stated here rather than left to a
+    // JSON parse that would have failed on the bytes anyway.
+    protocol === "audio_speech" ||
     protocol === "images" ||
     protocol === "managed_action" ||
     protocol === "a2a"
@@ -380,6 +400,30 @@ function extractRerankRequest(body: unknown, builder: EnvelopeBuilder): void {
       builder.push("user", `documents[${index}].text`, "text", wrapped);
     }
   });
+  extractMetadata(get(body, "metadata"), builder);
+}
+
+/**
+ * `POST /v1/audio/speech` (issue #703) — the text a caller asked to be spoken.
+ *
+ * This is the one genuinely screenable half of the audio surface, and it is
+ * worth screening for a reason specific to it: synthesis turns text into an
+ * artefact that leaves the text channel entirely. A secret spoken into an MP3 is
+ * past every downstream text control a tenant owns — a DLP scan of chat
+ * transcripts, a log scrubber, a redaction policy on `/v1/chat/completions` —
+ * because none of them reads audio. The last point at which the string is still
+ * a string is right here.
+ *
+ * `voice` and `response_format` are NOT pushed. They are enum-shaped provider
+ * knobs, not content, and a redaction patch landing on `voice` would rewrite a
+ * routing field rather than withhold anything — the exact class this module's
+ * header calls out as the reason patching is deliberately narrow.
+ */
+function extractAudioSpeechRequest(body: unknown, builder: EnvelopeBuilder): void {
+  const input = asString(get(body, "input"));
+  if (input !== undefined) {
+    builder.push("user", "input", "text", input);
+  }
   extractMetadata(get(body, "metadata"), builder);
 }
 

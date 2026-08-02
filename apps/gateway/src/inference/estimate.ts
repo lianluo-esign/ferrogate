@@ -400,6 +400,109 @@ export function estimateRerankUsage(body: unknown): EstimatedUsage {
 }
 
 // ---------------------------------------------------------------------------
+// audio (issue #703)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tokens reserved per SECOND of uploaded audio.
+ *
+ * The TPM window is a TOKEN window; every gate on the request path — the
+ * governor, the workflow budget, `lowest_cost` routing — is denominated in
+ * tokens, and inventing a second currency for one operation would mean audio
+ * spent nothing against any of them. So audio is converted, once, here.
+ *
+ * 3 is the conversational rate: ordinary speech runs about 150 words per minute
+ * (2.5 words/second) and this tree prices a word at roughly 1.3 tokens
+ * (`chars/4` over a ~5-character average word plus its space). It is an
+ * ESTIMATE and it is deliberately on the generous side of the truth for a dense
+ * speaker, because the reservation is a pre-charge that is settled DOWN when
+ * the provider reports the real duration — over-reserving briefly holds a
+ * caller's own window, while under-reserving lets them past the gate.
+ */
+export const TOKENS_PER_AUDIO_SECOND = 3;
+
+/**
+ * Bytes of uploaded audio assumed to hold one second, for the PRE-DISPATCH
+ * estimate only.
+ *
+ * 4000 B/s is 32 kbit/s — the floor of usable speech encoding (Opus voice runs
+ * 16–24 kbit/s, an MP3 voice memo 32–64, and 16-bit 16 kHz PCM is 32000 B/s,
+ * eight times this). Choosing the FLOOR rather than an average is the whole
+ * design: a lower assumed bitrate means a larger assumed duration, so the
+ * estimate is an upper bound for every codec a caller can realistically send.
+ * A tighter number would under-reserve on a well-compressed hour of audio,
+ * which is exactly the direction that turns the gate into a formality.
+ *
+ * The alternative — parsing container headers for the real duration — is a
+ * per-codec demuxer inside the request path for a number the provider is about
+ * to report authoritatively anyway. See {@link estimateAudioUploadUsage}.
+ */
+export const AUDIO_UPLOAD_BYTES_PER_SECOND = 4000;
+
+/**
+ * The pre-dispatch estimate for `POST /v1/audio/{transcriptions,translations}`.
+ *
+ * ## The estimate/settle gap, stated
+ *
+ * The billable quantity for transcription is SECONDS OF AUDIO, and that number
+ * is not knowable until the provider answers — the gateway holds a compressed
+ * blob, not a decoded waveform. This is the same shape of gap #676 documented
+ * for its unsettled TPM reservation, and it is closed the same way: reserve an
+ * upper bound from what IS knowable (the byte count), then settle on the
+ * provider's reported duration in {@link handleAudioUpload}. When the provider
+ * reports no duration at all the reservation is left UNSETTLED — the caller is
+ * charged the estimate for the minute rather than zero, which is the
+ * fail-closed direction and the same choice `handleRerank` makes.
+ *
+ * `prompt` is added on top because it is real text the model reads, and the
+ * completion side is 0: a transcript's length is a function of the audio, which
+ * the prompt side has already accounted for, and double-counting it would
+ * reserve the same speech twice.
+ */
+export function estimateAudioUploadUsage(body: unknown): EstimatedUsage {
+  const file = get(body, "file");
+  const bytes = get(file, "bytes");
+  const byteLength =
+    bytes instanceof Uint8Array
+      ? bytes.byteLength
+      : typeof (bytes as { byteLength?: unknown } | undefined)?.byteLength === "number"
+        ? ((bytes as { byteLength: number }).byteLength)
+        : 0;
+  const seconds = byteLength / AUDIO_UPLOAD_BYTES_PER_SECOND;
+  const hint = get(body, "prompt");
+  const promptChars = typeof hint === "string" ? charCount(hint) : 0;
+
+  const counted = Math.ceil(seconds * TOKENS_PER_AUDIO_SECOND) + charsToTokens(promptChars);
+  // A present upload always reserves at least one token, so even a one-frame
+  // clip engages the gates. Mirrors `estimateEmbeddingsUsage`'s floor.
+  return usage(byteLength > 0 ? Math.max(counted, 1) : counted, 0);
+}
+
+/**
+ * The pre-dispatch estimate for `POST /v1/audio/speech`.
+ *
+ * The billable quantity here is CHARACTERS OF INPUT, and unlike transcription
+ * it is fully knowable before dispatch — so there is no estimate/settle gap at
+ * all on this leg, and `handleSpeech` records the exact count it reserved
+ * against.
+ *
+ * The tokens reserved are `chars/4`, the same conversion every other estimator
+ * in this file uses. Deliberately NOT one token per character: the reservation
+ * is denominated in the SAME unit as a chat prompt because it is spent against
+ * the same window, and a per-character reservation would make one sentence of
+ * speech cost four times what the identical sentence costs as a chat prompt.
+ *
+ * The completion side is 0 — a TTS model generates audio, not tokens, and the
+ * bytes it emits are already implied by the input it was given.
+ */
+export function estimateSpeechUsage(body: unknown): EstimatedUsage {
+  const input = get(body, "input");
+  const chars = typeof input === "string" ? charCount(input) : 0;
+  const counted = charsToTokens(chars);
+  return usage(chars > 0 ? Math.max(counted, 1) : counted, 0);
+}
+
+// ---------------------------------------------------------------------------
 // images
 // ---------------------------------------------------------------------------
 

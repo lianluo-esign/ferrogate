@@ -224,6 +224,25 @@ async function runOnBinding(
   if (record !== undefined && Array.isArray(record["response"])) {
     return jsonResponse(record);
   }
+  // Audio (issue #703): the same treatment, one surface each, and for exactly
+  // the same reason. Without these two arms a Whisper transcript and a MeloTTS
+  // clip both fall into `openAiCompletion` below and are served as a
+  // `chat.completion` whose `content` is `""` — a 200, metered, that contains
+  // neither the transcript nor the audio the caller asked for.
+  //
+  // TTS is checked FIRST because it is the narrower claim: MeloTTS answers
+  // `{ audio }` and nothing else on this surface does, while `text` is a common
+  // enough key that ordering the loose test first would eventually capture
+  // something that is not a transcript. Both are handed back NATIVE, so the
+  // adapter's `translateSpeechResponse` / `translateTranscriptionResponse` do
+  // the shaping — the same seam the embeddings and rerank arms above use rather
+  // than a second translation living in the dispatcher.
+  if (record !== undefined && typeof record["audio"] === "string") {
+    return jsonResponse(record);
+  }
+  if (record !== undefined && typeof record["text"] === "string") {
+    return jsonResponse(record);
+  }
   return jsonResponse(openAiCompletion(record, model));
 }
 

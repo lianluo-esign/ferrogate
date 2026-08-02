@@ -1,5 +1,5 @@
 /**
- * Hono handlers for the nine inference operations owned by `apps/gateway`.
+ * Hono handlers for the twelve inference operations owned by `apps/gateway`.
  *
  * | contract operation      | method + path              | scope              | Rust handler |
  * |-------------------------|----------------------------|--------------------|--------------|
@@ -40,7 +40,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 268 operations, and duplicating a per-route
+ * table-driven middleware for all 271 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -67,10 +67,13 @@ import {
   parseProviderEndpoint,
   providerTransportMessage,
   readBoundedProviderBody,
+  readBoundedProviderBytes,
+  readBoundedStream,
 } from "./dispatch.js";
 import {
   envelopeForThrown,
   errorResponse,
+  gatewayHeaders,
   jsonResponse,
   rawUpstreamResponse,
   reject,
@@ -84,6 +87,9 @@ import {
   estimateImagesUsage,
   estimateMessagesUsage,
   estimateRerankUsage,
+  estimateAudioUploadUsage,
+  estimateSpeechUsage,
+  TOKENS_PER_AUDIO_SECOND,
 } from "./estimate.js";
 import type { EstimatedUsage } from "./estimate.js";
 import {
@@ -120,15 +126,23 @@ import type {
 import {
   anthropicCountTokensRequestSchema,
   anthropicMessagesRequestSchema,
+  audioUploadRequestSchema,
   chatCompletionRequestSchema,
   embeddingsRequestSchema,
   formatZodError,
   imagesRequestSchema,
+  MAX_AUDIO_UPLOAD_BYTES,
   rerankRequestSchema,
   responsesRequestSchema,
+  speechRequestSchema,
   validateRequestMetadata,
 } from "./schemas.js";
-import type { AnthropicTokenCount, OpenAiModelList, RequestMetadata } from "./schemas.js";
+import type {
+  AnthropicTokenCount,
+  AudioUploadFile,
+  OpenAiModelList,
+  RequestMetadata,
+} from "./schemas.js";
 import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
@@ -205,6 +219,14 @@ const ROUTE_LABELS = {
   // OpenAI or Anthropic surface to be a dialect of. `openai.rerank` would name a
   // vendor endpoint that does not exist, and dashboards key off this string.
   rerank: "rerank",
+  // Vendor-prefixed, unlike `rerank` one line up, and the asymmetry is correct:
+  // these three ARE the OpenAI dialect — `/v1/audio/transcriptions` is a real
+  // OpenAI endpoint this surface ports, where reranking has no OpenAI endpoint
+  // to be a dialect of. Dashboards key off these strings, so they name what the
+  // request actually is.
+  "audio.transcriptions": "openai.audio.transcriptions",
+  "audio.translations": "openai.audio.translations",
+  "audio.speech": "openai.audio.speech",
   images: "openai.images.generations",
   models: "openai.models",
 } as const;
@@ -283,6 +305,148 @@ function readInferenceBody(): MiddlewareHandler<InferenceEnv> {
     await next();
     return;
   };
+}
+
+/** Thrown by {@link readAudioUpload} when the ceiling is crossed mid-stream. */
+class AudioUploadTooLargeError extends Error {}
+
+/**
+ * The MULTIPART ingress for `POST /v1/audio/{transcriptions,translations}`
+ * (issue #703) — the one operation family whose body is not JSON.
+ *
+ * ## The ceiling, and why it is enforced by ABORTING rather than by measuring
+ *
+ * A Worker has a hard memory bound, so an unbounded upload is a denial of
+ * service on ourselves — not on a provider, not on a tenant, on this isolate.
+ * There are two shapes to refuse and they need two different mechanisms:
+ *
+ *  1. an honestly-declared oversized body. `Content-Length` alone decides it, so
+ *     the refusal costs ZERO bytes read. That is the cheap, common case (an SDK
+ *     uploading a two-hour recording) and it must not be answered by reading
+ *     two hours of audio first.
+ *  2. a chunked upload with NO `Content-Length`, or one that lies. This is the
+ *     hostile shape, and the only correct answer is to stop pulling from the
+ *     stream the moment the cap is crossed — which is exactly what
+ *     `readBoundedStream` does, `reader.cancel()` and all. `request.formData()`
+ *     and `request.arrayBuffer()` both buffer the WHOLE body and then let you
+ *     measure it, so neither can be used here at any cap: by the time they
+ *     return, the damage they were supposed to prevent has already happened.
+ *
+ * The cap is `limits.audioUploadMaxBytes` — a separate, much larger number than
+ * `inferenceBodyMaxBytes` for the reason stated on that field.
+ *
+ * ## Why the form is re-parsed out of the bytes we already hold
+ *
+ * `new Response(bytes, { headers }).formData()` is a pure, in-memory parse of a
+ * buffer whose size this middleware has already bounded, so the multipart
+ * decode cannot exceed the ceiling either. Going through `c.req.formData()`
+ * would have handed the parse the UNBOUNDED stream instead.
+ *
+ * ## Why it produces a plain object
+ *
+ * Everything downstream — the metadata bounds check, the model gate, the
+ * estimator, the guardrail envelope, the adapters — reads
+ * `Record<string, unknown>`. Normalizing here, once, is what lets the audio
+ * handlers be structural twins of `handleEmbeddings` instead of a parallel path
+ * that would have to re-implement each of those stages for a `FormData`.
+ */
+function readAudioUpload(): MiddlewareHandler<InferenceEnv> {
+  return async (c, next) => {
+    const requestId = c.get("requestId");
+    const max = c.get("inferenceDeps").limits.audioUploadMaxBytes;
+
+    const declared = c.req.header("content-length");
+    if (declared !== undefined) {
+      const length = Number.parseInt(declared, 10);
+      if (Number.isFinite(length) && length > max) {
+        return errorResponse(audioTooLarge(max), requestId);
+      }
+    }
+
+    const stream = c.req.raw.body;
+    let raw: Uint8Array;
+    try {
+      raw =
+        stream === null
+          ? new Uint8Array(0)
+          : await readBoundedStream(stream, max, () => new AudioUploadTooLargeError());
+    } catch (error) {
+      if (error instanceof AudioUploadTooLargeError) {
+        return errorResponse(audioTooLarge(max), requestId);
+      }
+      return errorResponse(
+        reject(400, "invalid_request", "could not read the audio upload body"),
+        requestId,
+      );
+    }
+
+    const contentType = c.req.header("content-type") ?? "";
+    let form: FormData;
+    try {
+      form = await new Response(raw as unknown as BodyInit, {
+        headers: { "content-type": contentType },
+      }).formData();
+    } catch {
+      // A distinct code from `invalid_request`, mirroring the `invalid_json`
+      // vs `invalid_request` split the JSON reader draws one function up: "your
+      // bytes are not a multipart body at all" and "your multipart body is
+      // missing a field" are different mistakes with different fixes.
+      return errorResponse(
+        reject(
+          400,
+          "invalid_multipart",
+          "request body is not a readable multipart/form-data document",
+        ),
+        requestId,
+      );
+    }
+
+    const body: Record<string, unknown> = {};
+    for (const [name, value] of form.entries()) {
+      if (typeof value === "string") {
+        body[name] = name === "temperature" ? numberOrString(value) : value;
+        continue;
+      }
+      const file = value as File;
+      body[name] = {
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        filename: file.name === "" ? "audio" : file.name,
+        contentType: file.type === "" ? "application/octet-stream" : file.type,
+      } satisfies AudioUploadFile;
+    }
+
+    const parsed = audioUploadRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return errorResponse(
+        reject(400, "invalid_request", `invalid audio request: ${formatZodError(parsed.error)}`),
+        requestId,
+      );
+    }
+    c.set("inferenceBody", body);
+
+    await next();
+    return;
+  };
+}
+
+/**
+ * A multipart field is always a string on the wire, but `temperature` is a
+ * NUMBER in the ingress schema and in every provider's grammar. Converted here
+ * rather than in the schema so the schema stays one shape for both ingresses.
+ * A non-numeric value is left as the string it was, so the schema reports the
+ * type error rather than this function silently producing `NaN`.
+ */
+function numberOrString(value: string): number | string {
+  const parsed = Number(value);
+  return value.trim() !== "" && Number.isFinite(parsed) ? parsed : value;
+}
+
+function audioTooLarge(maxBytes: number): InferenceRejection {
+  return reject(
+    413,
+    "payload_too_large",
+    `audio upload exceeds maximum size of ${maxBytes} bytes`,
+  );
 }
 
 function tooLarge(maxBytes: number): InferenceRejection {
@@ -400,6 +564,13 @@ function endpointKindFor(operation: InferenceOperation): ModelEndpointKind {
       return "embeddings";
     case "rerank":
       return "rerank";
+    case "audio.transcriptions":
+    case "audio.translations":
+      // One capability serves both: they are the same Whisper-class model with
+      // one flag flipped. See `ModelEndpointKind` in `./candidates.ts`.
+      return "transcription";
+    case "audio.speech":
+      return "speech";
     case "images":
       return "images";
     case "responses":
@@ -1048,6 +1219,16 @@ function routePricing(route: PhysicalRoute): {
     ...(route.reasoningPricePer1m !== undefined
       ? { reasoningPricePer1m: route.reasoningPricePer1m }
       : {}),
+    // #703 — the two audio rates ride along for the same reason as the other
+    // five. They are absent on every non-audio route, and `Usage` distinguishes
+    // "unpriced" from "priced at zero", so carrying them costs nothing and
+    // omitting them would leave the audio surface unsettleable on a failover.
+    ...(route.audioSecondPricePer1m !== undefined
+      ? { audioSecondPricePer1m: route.audioSecondPricePer1m }
+      : {}),
+    ...(route.audioCharacterPricePer1m !== undefined
+      ? { audioCharacterPricePer1m: route.audioCharacterPricePer1m }
+      : {}),
   };
 }
 
@@ -1423,6 +1604,31 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     body,
     validateBody(rerankRequestSchema, "invalid rerank request"),
     (c) => handleRerank(c, c.get("inferenceDeps")),
+  );
+
+  // -- POST /v1/audio/transcriptions ----------------------------------------
+  //
+  // `audioUpload` REPLACES `body` + `validateBody` rather than wrapping them:
+  // this ingress is multipart, so the JSON reader would answer `invalid_json`
+  // on a perfectly valid upload. The reader does its own Zod pass on the
+  // normalized object, which is why no `validateBody` follows it.
+  const audioUpload = readAudioUpload();
+  app.post("/v1/audio/transcriptions", audioUpload, (c) =>
+    handleAudioUpload(c, c.get("inferenceDeps"), "audio.transcriptions"),
+  );
+
+  // -- POST /v1/audio/translations ------------------------------------------
+  app.post("/v1/audio/translations", audioUpload, (c) =>
+    handleAudioUpload(c, c.get("inferenceDeps"), "audio.translations"),
+  );
+
+  // -- POST /v1/audio/speech -------------------------------------------------
+  // JSON in, BYTES out. The request half is an ordinary body read.
+  app.post(
+    "/v1/audio/speech",
+    body,
+    validateBody(speechRequestSchema, "invalid speech request"),
+    (c) => handleSpeech(c, c.get("inferenceDeps")),
   );
 
   // -- POST /v1/images/generations ------------------------------------------
@@ -2229,6 +2435,365 @@ async function handleRerank(
     requestId,
     relay,
   );
+}
+
+// ---------------------------------------------------------------------------
+// The audio surface (issue #703; no Rust ancestor)
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /v1/audio/{transcriptions,translations}` — speech to text, through the
+ * same pipeline as every other `/v1` operation.
+ *
+ * ## Why this is another copy of `handleEmbeddings`
+ *
+ * Same reason `handleRerank` is, and the issue says so outright: voice
+ * applications "route around" the gateway, so a whole workload class loses
+ * governance and cost tracking. A fix that served audio on a bespoke path would
+ * close the hole on paper and leave the controls off. Every line below is one of
+ * those controls — workflow admission, the model/tenancy/eligibility ladder in
+ * `planUpstream`, the TPM reservation, the failover ladder, `recordUsage`, and
+ * (through `routes/index.ts`) the drain gate.
+ *
+ * ## The estimate/settle gap, and how it is closed
+ *
+ * Transcription is billed on SECONDS OF AUDIO and that number does not exist
+ * until the provider answers — this handler holds a compressed blob, not a
+ * decoded waveform. So:
+ *
+ *  - BEFORE dispatch, `estimateAudioUploadUsage` reserves an upper bound derived
+ *    from the byte count at a deliberately low assumed bitrate. Over-reserving
+ *    holds the caller's own window briefly; under-reserving would let them past
+ *    the gate, so the bound leans the safe way.
+ *  - AFTER, the provider's reported duration settles both the TPM reservation
+ *    (converted at `TOKENS_PER_AUDIO_SECOND`, because the window is denominated
+ *    in tokens) and the billing row (`Usage.audioSeconds`, in seconds, because
+ *    the invoice is denominated in seconds).
+ *  - when the provider reports NO duration, `audioSeconds` is left ABSENT and
+ *    the reservation is left UNSETTLED. Both are the fail-closed direction and
+ *    both are the same call `handleRerank` and `handleImages` make: a number the
+ *    provider did not report must not be recorded as if it had been, and
+ *    settling a reservation DOWN on a number nobody measured would refund a
+ *    caller for work that happened.
+ *
+ * ## `response_format`
+ *
+ * The caller's `response_format: "text"` is honoured HERE rather than forwarded,
+ * because the Workers AI run surface has no such knob and the OpenAI
+ * passthrough's answer has to be re-shaped anyway. Everything else — `json`,
+ * `verbose_json` — is the JSON document, which is what the translated body
+ * already is.
+ */
+async function handleAudioUpload(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  operation: "audio.transcriptions" | "audio.translations",
+): Promise<Response> {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const request = c.get("inferenceBody") as Record<string, unknown>;
+  const logicalModel = String(request["model"]);
+  const metadata = attributedMetadata(c, request);
+
+  const estimated = estimateAudioUploadUsage(request);
+
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
+  const planned = planUpstream(
+    deps,
+    caller,
+    operation,
+    logicalModel,
+    metadata,
+    false,
+    request,
+    estimated,
+    workflowConstraintOf(gate),
+  );
+  if (isRejection(planned)) {
+    return errorResponse(planned, requestId);
+  }
+
+  const admitted = await admitTokens(c, estimated);
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
+  const dispatched = await dispatchCandidates(c, deps, planned);
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
+  }
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
+
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
+  const meterBase = {
+    requestId,
+    route: ROUTE_LABELS[operation],
+    logicalModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
+    stream: false,
+    status: upstreamResponse.status,
+    ...(metadata !== undefined ? { metadata } : {}),
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
+  } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
+
+  if (!upstreamResponse.ok) {
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      upstreamResponse.headers.get("content-type") ?? "application/json",
+      text,
+      requestId,
+      relay,
+    );
+  }
+
+  const parsed = safeJson(text);
+  const adapter = deps.adapters.adapterFor(servedRoute.providerKind);
+  // `undefined` means "this family already speaks the ingress dialect", which is
+  // the OpenAI passthrough's answer — its `/v1/audio/transcriptions` response IS
+  // `{ text, ... }`. Workers AI translates.
+  const translated = adapter?.translateTranscriptionResponse?.(parsed, logicalModel) ?? parsed;
+  const seconds = audioDurationOf(translated);
+
+  recordUsage(
+    c,
+    deps,
+    {
+      ...meterBase,
+      // Absent when the provider reported nothing. See the header.
+      ...(seconds !== undefined ? { audioSeconds: seconds } : {}),
+    },
+    servedRoute.providerKind,
+    // No `ProviderUsage`: this operation produces no tokens, and a fabricated
+    // zero would be metered as a real reading. Same call `handleImages` makes.
+    undefined,
+  );
+  await settleTokens(
+    c,
+    admission,
+    seconds === undefined ? undefined : Math.ceil(seconds * TOKENS_PER_AUDIO_SECOND),
+  );
+  settleWorkflowStep(c, deps, gate, true, estimated.totalTokens);
+
+  // ---- `response_format`, applied HERE and not forwarded -------------------
+  //
+  // It is an INGRESS concern on this surface: the Workers AI run surface has no
+  // such knob, and the OpenAI passthrough's body has to be re-shaped anyway.
+  // Applying it after metering is what lets `duration` be read for billing on
+  // every request while still being ABSENT from the default `json` answer, which
+  // is what OpenAI documents. Shaping first would have made the meter's input
+  // depend on what the client asked to see.
+  const format = request["response_format"];
+  if (format === "text") {
+    const transcript = (translated as { text?: unknown } | undefined)?.text;
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      "text/plain; charset=utf-8",
+      typeof transcript === "string" ? transcript : "",
+      requestId,
+      relay,
+    );
+  }
+  if (format === "verbose_json") {
+    return jsonResponse(translated, requestId, upstreamResponse.status, relay);
+  }
+  // The default. OpenAI's `json` is `{ "text": ... }` and NOTHING else — a
+  // client switching on `Object.keys` (or a strict SDK model) would break on a
+  // richer body, so the extra fields are withheld unless asked for.
+  const transcript = (translated as { text?: unknown } | undefined)?.text;
+  return jsonResponse(
+    { text: typeof transcript === "string" ? transcript : "" },
+    requestId,
+    upstreamResponse.status,
+    relay,
+  );
+}
+
+/** The billable duration, in seconds, off a translated transcription body. */
+function audioDurationOf(body: unknown): number | undefined {
+  const duration = (body as { duration?: unknown } | undefined)?.duration;
+  return typeof duration === "number" && Number.isFinite(duration) && duration > 0
+    ? duration
+    : undefined;
+}
+
+/**
+ * `POST /v1/audio/speech` — text to speech. JSON in, AUDIO BYTES out.
+ *
+ * ## The one place this handler is NOT a copy of `handleEmbeddings`
+ *
+ * The response. Every other operation on this surface answers a JSON document,
+ * and `readUpstreamBody` decodes the provider's bytes as UTF-8 to produce one.
+ * Doing that to an MP3 replaces every byte above 0x7f with U+FFFD — the caller
+ * gets a 200, the right content type, the right length in characters, and a file
+ * no audio player can open. So this leg reads BYTES
+ * ({@link readBoundedProviderBytes}, the same bounded read one decode-step
+ * lower) and relays them untouched.
+ *
+ * ## Errors are still the envelope (issue #733)
+ *
+ * The binary passthrough applies to SUCCESS only. A non-2xx upstream is decoded
+ * as text and handed to `rawUpstreamResponse`, which relays a well-formed
+ * provider error verbatim and wraps an unreadable one in the FerroGate envelope.
+ * That line is what keeps an SDK's error handling working: a caller must never
+ * have to distinguish "these bytes are audio" from "these bytes are a CDN's
+ * HTML 502" by sniffing them.
+ *
+ * ## Metering
+ *
+ * Speech is billed on CHARACTERS OF INPUT, which — unlike a transcription's
+ * duration — is fully known before dispatch. So there is no estimate/settle gap
+ * on this leg at all: the count recorded is the count reserved against, and it
+ * is recorded only on success, because a failed synthesis synthesized nothing.
+ */
+async function handleSpeech(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Promise<Response> {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const request = c.get("inferenceBody") as Record<string, unknown>;
+  const logicalModel = String(request["model"]);
+  const metadata = attributedMetadata(c, request);
+
+  const estimated = estimateSpeechUsage(request);
+
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
+  const planned = planUpstream(
+    deps,
+    caller,
+    "audio.speech",
+    logicalModel,
+    metadata,
+    false,
+    request,
+    estimated,
+    workflowConstraintOf(gate),
+  );
+  if (isRejection(planned)) {
+    return errorResponse(planned, requestId);
+  }
+
+  const admitted = await admitTokens(c, estimated);
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
+  const dispatched = await dispatchCandidates(c, deps, planned);
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
+  }
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
+
+  let bytes: Uint8Array;
+  try {
+    bytes = await readBoundedProviderBytes(upstreamResponse, deps.limits.providerResponseMaxBytes);
+  } catch (error) {
+    const detail =
+      error instanceof ProviderBodyTooLargeError
+        ? error.message
+        : `failed to read provider response body: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+    return errorResponse(
+      reject(502, "provider_dispatch_error", `provider dispatch failed: ${detail}`),
+      requestId,
+    );
+  }
+
+  const upstreamContentType =
+    upstreamResponse.headers.get("content-type") ?? "application/octet-stream";
+  const meterBase = {
+    requestId,
+    route: ROUTE_LABELS["audio.speech"],
+    logicalModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
+    stream: false,
+    status: upstreamResponse.status,
+    ...(metadata !== undefined ? { metadata } : {}),
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
+  } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
+
+  if (!upstreamResponse.ok) {
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    // Decoded as text on the ERROR path only. A provider error body is JSON or
+    // an HTML page; either way it is text, and `rawUpstreamResponse` is what
+    // decides between relaying it verbatim and wrapping it (#733).
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      upstreamContentType,
+      new TextDecoder().decode(bytes),
+      requestId,
+      relay,
+    );
+  }
+
+  const adapter = deps.adapters.adapterFor(servedRoute.providerKind);
+  const audio = adapter?.translateSpeechResponse?.(bytes, upstreamContentType);
+  const payload = audio ?? { bytes, contentType: upstreamContentType };
+
+  const characters = typeof request["input"] === "string" ? (request["input"] as string).length : 0;
+  recordUsage(
+    c,
+    deps,
+    { ...meterBase, audioCharacters: characters },
+    servedRoute.providerKind,
+    undefined,
+  );
+  // Settled at exactly what was reserved: the quantity was never in doubt.
+  await settleTokens(c, admission, estimated.totalTokens);
+  settleWorkflowStep(c, deps, gate, true, estimated.totalTokens);
+
+  return audioResponse(payload.bytes, payload.contentType, requestId, relay);
+}
+
+/**
+ * A binary 2xx, with the gateway's own headers and the pacing relay.
+ *
+ * Deliberately NOT `rawUpstreamResponse`: that function takes a `string`, and
+ * its #733 wrap-check parses the body as JSON to decide whether to envelope it.
+ * Both are correct for a text body and both are wrong for an MP3 — the decode
+ * corrupts it, and the JSON check would be asking whether a waveform happens to
+ * parse. The status is fixed at 2xx by construction here, so the wrap-check has
+ * nothing to decide anyway: it only ever applies to `status >= 400`.
+ */
+function audioResponse(
+  bytes: Uint8Array,
+  contentType: string,
+  requestId: string,
+  upstream?: UpstreamRelay,
+): Response {
+  return new Response(bytes as BodyInit, {
+    status: 200,
+    headers: {
+      "content-type": contentType,
+      ...gatewayHeaders(requestId),
+      ...relayedRateLimitHeaders(upstream),
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -10,11 +10,11 @@ auth/visibility invariants the Hono port must preserve.
 | App | Ops | Surface |
 |---|---:|---|
 | `apps/control-plane` | **211** | `/admin/v1/**` (206) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
-| `apps/gateway` | **34** | inference (9): `/v1/{chat/completions,messages,messages/count_tokens,responses,embeddings,rerank,images/generations,models,models/{model}}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions + `/.well-known/agent.json` (7) |
+| `apps/gateway` | **37** | inference (12): `/v1/{chat/completions,messages,messages/count_tokens,responses,embeddings,rerank,images/generations,audio/transcriptions,audio/translations,audio/speech,models,models/{model}}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions + `/.well-known/agent.json` (7) |
 | `apps/agent-runtime` | **15** | `/v1/agent-jobs/**` (5), `/v1/agents/**` (3), `/v1/agent-runs` (1), `/v1/self-hosted-workers/**` (6) |
 | `apps/mcp` | **6** | `/v1/mcp`, `/v1/mcp/tool/execute`, `/v1/mcp/identity/**` |
 | shared | **2** | `/healthz`, `/readyz` — implemented in **every** Worker |
-| **total** | **268** | |
+| **total** | **271** | |
 
 `apps/telemetry` owns no contract route: it is the observability sink
 (Analytics Engine / Logpush), fed by the other Workers.
@@ -64,9 +64,17 @@ auth/visibility invariants the Hono port must preserve.
 >   reason: reranking is the second half of the retrieval pipeline whose first
 >   half is embedding, so no already-provisioned RAG key has to be re-minted and
 >   no unauthenticated reranking oracle exists. `public`; `apps/gateway`.
+> - `createTranscription` / `createTranslation` / `createSpeech`
+>   (`POST /v1/audio/{transcriptions,translations,speech}`, issue #703): the
+>   audio ingress, served by Workers AI Whisper/MeloTTS and by an
+>   OpenAI-compatible passthrough. Bearer on a NEW `audio.create` scope — audio
+>   is its own family with nothing to reuse (there is no `audio.*` scope to
+>   inherit the way `createRerank` inherited `embeddings.create`), and minting
+>   one fails CLOSED for every key issued before audio existed, which is the safe
+>   direction. `public`; `apps/gateway`.
 >
 > `apps/control-plane` went 197 → 211 (197 + 3 + 3 + 6 + 2) and `apps/gateway`
-> went 31 → 34 (31 + 1 + 1 + 1).
+> went 31 → 37 (31 + 1 + 1 + 1 + 3).
 >
 > #677 and #676 were themselves parallel, and this is the merge that proves the
 > warning is not theoretical: the #676 branch was cut before #677 landed, wrote
