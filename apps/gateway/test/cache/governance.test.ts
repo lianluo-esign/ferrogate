@@ -246,6 +246,44 @@ describe("a tenant can enable the semantic cache the deployment vars leave off",
     }
   });
 
+  it("`scoped_models` narrows caching to the named models and nothing else", async () => {
+    const provider = interceptProviderFetch(() => providerJson(completion("first")));
+    try {
+      // The "scope it" lever. A non-empty list is an ALLOWLIST: only these
+      // logical models are cached for this tenant. The failure direction that
+      // matters is the widening one — a tenant who excluded a model finding it
+      // cached anyway — so the assertion is on the EXCLUDED model.
+      await setPolicy("tenant_a", { scopedModels: JSON.stringify(["some-other-model"]) });
+      const stores = freshStores();
+
+      await gateway(stores).post("fg_a", PROMPT);
+      const second = await gateway(stores).post("fg_a", PROMPT);
+      // `gpt-4o-mini` is not in the tenant's scope, so an identical body under
+      // an identical credential still dispatches.
+      expect(provider.requests).toHaveLength(2);
+      expect(second.headers.get(CACHE_STATUS_HEADER)).toBeNull();
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("CONTROL: a scope that NAMES the model leaves caching on", async () => {
+    const provider = interceptProviderFetch(() => providerJson(completion("first")));
+    try {
+      // Without this, the assertion above would also pass for a projection that
+      // treated any `scoped_models` value as "cache nothing".
+      await setPolicy("tenant_a", { scopedModels: JSON.stringify(["gpt-4o-mini"]) });
+      const stores = freshStores();
+
+      await gateway(stores).post("fg_a", PROMPT);
+      const second = await gateway(stores).post("fg_a", PROMPT);
+      expect(provider.requests).toHaveLength(1);
+      expect(second.headers.get(CACHE_STATUS_HEADER)).toBe("hit");
+    } finally {
+      provider.restore();
+    }
+  });
+
   it("the OPERATOR master switch still wins: a tenant cannot cache in a disabled deployment", async () => {
     const provider = interceptProviderFetch(() => providerJson(completion("first")));
     try {
