@@ -14584,7 +14584,7 @@
           "gateway"
         ],
         "summary": "Publish a small tenant asset inline.",
-        "description": "Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission. Special case: pushing a static_site asset_type whose body is a ZIP archive publishes a multi-file static-site bundle (unpacked into per-file objects plus a stored manifest and served under /sites/{tenant}/{site}/). Such a publish reads the x-site-public, x-site-spa-fallback, and x-site-cache-control headers for its serving policy and returns a StaticSitePublishResponse body instead of the AssetMutationResponse envelope.",
+        "description": "Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission. Special case: pushing a static_site asset_type whose body is a tar, tar.gz or ZIP archive publishes a multi-file static-site bundle (issue #736), expanded into per-file objects under the tenant-isolated key prefix plus a per-file index, with the content-type allowlist enforced on every file inside the archive. The response is the ordinary AssetMutationResponse envelope; the bundle is then servable at GET|HEAD /sites/{site}/{path} (issue #737), whose access, channel and SPA policy is operator configuration rather than a publish-time header.",
         "x-ferrogate-contract": {
           "visibility": "public",
           "auth": {
@@ -33032,7 +33032,7 @@
           },
           "serve_path": {
             "type": "string",
-            "description": "Equivalent path-based serve prefix, /sites/{tenant}/{site}/."
+            "description": "Equivalent path-based serve prefix, /sites/{site}/."
           },
           "verification_state": {
             "type": "string",
