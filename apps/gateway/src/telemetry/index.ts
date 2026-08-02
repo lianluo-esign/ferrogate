@@ -95,3 +95,9 @@ export type {
   TelemetryService,
 } from "./ports.js";
 export { requestTelemetry } from "./middleware.js";
+export {
+  genAiInvocationFor,
+  genAiOperationForRouteLabel,
+  observeGenAiInvocation,
+} from "./genai.js";
+export type { GenAiObservation } from "./genai.js";
