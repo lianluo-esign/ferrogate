@@ -45,11 +45,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 267 operations", () => {
+  it("carries exactly 268 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 267 unique operation ids", () => {
+  it("has 268 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -64,12 +64,18 @@ describe("contract table", () => {
     // 245), the six `/admin/v1/semantic-cache-policies/**` operations (issue
     // #695, `admin.read` / `admin.write` like every other admin surface, ->
     // 251), and `getModel` (issue #670, bearer-`models.read` like the
-    // `listModels` it narrows, -> 252), and finally #677's two chargeback
-    // reads (`listAdminCostRecords` / `exportAdminCostRecords`, ->
-    // 254), which are `admin.read` like every other evidence read. All sixteen
-    // additions since 238 are bearer; none is anonymous or internal.
+    // `listModels` it narrows, -> 252), then #677's two chargeback reads
+    // (`listAdminCostRecords` / `exportAdminCostRecords`, -> 254), which are
+    // `admin.read` like every other evidence read, and `createRerank` (issue
+    // #676, bearer-`embeddings.create`, -> 255). All seventeen additions since
+    // 238 are bearer; none is anonymous or internal.
+    //
+    // 255 is COUNTED off the merged document, not summed: #677 and #676 were
+    // parallel and each parent wrote its own increment, which is the collision
+    // this file's header warns about. `Counter(o["auth"]["kind"] for o in
+    // operations)` over the merged JSON is what produced it.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 254,
+      bearer: 255,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -90,9 +96,10 @@ describe("contract table", () => {
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
-      // Both parents independently wrote 52, so git merged that clean — 53 is
-      // the merged truth and neither side's number.
-      public: 53,
+      // Both parents independently wrote 52, so git merged that clean — 53 was
+      // the merged truth, and `createRerank` (issue #676) takes it to 54: a
+      // data-plane operation, publicly reachable, bearer-guarded.
+      public: 54,
       internal: 7,
     });
   });
@@ -112,11 +119,13 @@ describe("contract table", () => {
       // combined figures are 121/27/20, which is no parent's number and had to
       // be re-derived from `docs/openapi/runtime-api-contract.json`. #677 then
       // adds two more GETs (`/admin/v1/cost-records` and
-      // `/admin/v1/cost-record-exports`) for 123.
+      // `/admin/v1/cost-record-exports`) for 123, and #676 one more POST
+      // (`/v1/rerank`) for 82. Both landed in parallel, so both figures were
+      // re-counted off the merged document rather than added up.
       GET: 123,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
-      POST: 81,
+      POST: 82,
       DELETE: 27,
       PUT: 20,
       PATCH: 16,
@@ -294,15 +303,16 @@ describe("route registration", () => {
   // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
   // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
   // here: a local module list is exactly how the deployed Worker came to mount
-  // 7 of its 33 operations while this suite stayed green.
+  // 7 of its 34 operations while this suite stayed green.
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 33 operations ROUTE-MAP assigns to apps/gateway", () => {
-    // 31 -> 32 with `countMessageTokens` (issue #671) and 32 -> 33 with
-    // `getModel` (issue #670). Both parents wrote 32 independently, so the
-    // merge kept 32 with no conflict — 33 is the re-derived truth.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(33);
+  it("owns exactly the 34 operations ROUTE-MAP assigns to apps/gateway", () => {
+    // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
+    // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
+    // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
+    // number here is re-derived by COUNTING the list, never incremented.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(34);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -316,17 +326,17 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 33 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 34 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 33 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 34 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
-    // `getMetrics` is deliberately its OWN list rather than a 32nd owned
+    // `getMetrics` is deliberately its OWN list rather than a 35th owned
     // operation or a third "shared" one. ROUTE-MAP assigns the operation to
     // `apps/control-plane`; the cutover certification found that leaving it
     // ONLY there means the 47 `ferrogate_*` series a dashboard queries have no
@@ -420,7 +430,7 @@ async function envelope(response: Response): Promise<{ code: string; message: st
 }
 
 describe("the deployed Worker serves the mounted modules", () => {
-  it("mounts the 8 inference operations", async () => {
+  it("mounts the 9 inference operations", async () => {
     // GET /v1/models reaches the inference handler: an empty catalog, not a 404.
     const models = await SELF.fetch(`${BASE}/v1/models`, { headers: ROOT });
     expect(models.status).toBe(200);

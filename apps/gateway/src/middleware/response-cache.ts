@@ -163,6 +163,14 @@ export const CACHEABLE_OPERATION_IDS: ReadonlySet<string> = new Set([
   "createChatCompletion",
   "createResponse",
   "createEmbedding",
+  // `createRerank` (issue #676). It is here for the stated reason and not by
+  // family resemblance: reranking DOES pay a provider, and a RAG pipeline reranks
+  // the same (query, corpus) pair on every retry and every follow-up turn, which
+  // is the repeat-request profile this cache exists for. The key is the request
+  // body, so a different `query`, a different document set or a different
+  // `top_n` are all different keys — there is no way for one caller's ranking to
+  // be served for another's question.
+  "createRerank",
   "createMessage",
   "createImage",
 ]);

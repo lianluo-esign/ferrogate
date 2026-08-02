@@ -53,6 +53,7 @@ export type {
   ProviderHeader,
   ProviderHttpRequest,
   ProviderUsage,
+  RerankPlan,
   ResponsesPlan,
 } from "./types.js";
 
@@ -116,7 +117,12 @@ export { GeminiAdapter } from "./gemini.js";
 export { GrokAdapter } from "./grok.js";
 export { OpenRouterAdapter } from "./openrouter.js";
 export { VertexAiAdapter } from "./vertex.js";
-export { WorkersAiAdapter, WORKERS_AI_KIND, WORKERS_AI_RUN_PATH_SEGMENT } from "./workers_ai.js";
+export {
+  WorkersAiAdapter,
+  WORKERS_AI_KIND,
+  WORKERS_AI_RUN_PATH_SEGMENT,
+  rerankDocumentTexts,
+} from "./workers_ai.js";
 export { ProviderAdapterRegistry } from "./registry.js";
 
 // Anthropic Messages ⇄ OpenAI translation.

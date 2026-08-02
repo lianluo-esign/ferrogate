@@ -51,6 +51,7 @@ import type {
   ProviderHeader,
   ProviderHttpRequest,
   ProviderUsage,
+  RerankPlan,
   ResponsesPlan,
 } from "./types.js";
 import { CanonicalAiRequest } from "./canonical.js";
@@ -146,6 +147,87 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
       stream: false,
       headers: workersAiHeaders(provider.apiKey),
     };
+  }
+
+  /**
+   * Workers AI reranker models (`@cf/baai/bge-reranker-base`) take
+   * `{ query, contexts: [{ text }], top_k }` — issue #676.
+   *
+   * The mapping is deliberate on all three fields:
+   *
+   *  - `contexts`, not `documents`: this is the native run-surface grammar, the
+   *    same reason `prepareEmbeddings` emits `text` rather than `input`.
+   *  - `top_k`, not the caller's `top_n`: Cohere's ingress spelling and
+   *    Cloudflare's native spelling differ, and translating here is what keeps
+   *    every other family's future rerank leg free to use its own.
+   *  - the knob is forwarded ONLY when the caller set it. Defaulting `top_k` to
+   *    the document count would look harmless and is not: Workers AI's own
+   *    default is what an operator's model card documents, and inventing one
+   *    here would silently change the answer for a caller who asked for nothing.
+   */
+  override prepareRerank(provider: ProviderConfig, request: RerankPlan): ProviderHttpRequest {
+    validateKind(provider.kind);
+    const body = ensureObjectBody(request.body, "rerank request body");
+    const query = asStr(getField(body, "query"));
+    if (query === undefined || query.length === 0) {
+      throw AdapterError.invalidRequest('rerank request body must include a "query" string');
+    }
+    const texts = rerankDocumentTexts(body);
+    const input: JsonObject = { query, contexts: texts.map((text) => ({ text })) };
+    const topN = asU64(getField(body, "top_n"));
+    if (topN !== undefined) input["top_k"] = topN;
+    return {
+      provider: provider.name,
+      endpoint: runEndpoint(provider.baseUrl, request.providerModel),
+      body: input,
+      stream: false,
+      headers: workersAiHeaders(provider.apiKey),
+    };
+  }
+
+  /**
+   * `{ response: [{ id, score }] }` → `{ object, model, results }`.
+   *
+   * `id` is the INDEX of the context in the request, which is why the caller's
+   * body has to be in hand: `return_documents` is answered by joining those
+   * indices back against the documents the caller sent, and no reranker echoes
+   * them.
+   *
+   * The provider's ORDER is preserved rather than re-sorted by score. A
+   * cross-encoder returns its ranking, and re-sorting here would silently
+   * overwrite a provider's tie-breaking with this gateway's. `relevance_score`
+   * is on every row, so a client that wants a different order has everything it
+   * needs.
+   *
+   * An index the provider returns that is not in the caller's document list is
+   * DROPPED rather than emitted with a missing document: it can only be a
+   * provider bug or a truncated response, and passing it on would hand the
+   * client a row whose `index` addresses nothing.
+   */
+  override translateRerankResponse(body: Uint8Array, model: string, request: Json): Json | null {
+    const parsed = parseJson(body);
+    if (parsed === undefined) {
+      throw AdapterError.invalidRequest("provider rerank response must be JSON");
+    }
+    const result = unwrapCloudflareEnvelope(parsed);
+    const rows = getField(result, "response");
+    if (!Array.isArray(rows)) {
+      throw AdapterError.invalidRequest("workers ai rerank response is missing a response array");
+    }
+    const documents = isObject(request) ? rerankDocumentTexts(request) : [];
+    const returnDocuments = getField(request, "return_documents") === true;
+
+    const results: Json[] = [];
+    for (const row of rows) {
+      const index = asU64(getField(row, "id"));
+      const score = getField(row, "score");
+      if (index === undefined || typeof score !== "number") continue;
+      if (index >= documents.length) continue;
+      const entry: JsonObject = { index, relevance_score: score };
+      if (returnDocuments) entry["document"] = { text: documents[index] as string };
+      results.push(entry);
+    }
+    return { object: "list", model, results };
   }
 
   /**
@@ -328,6 +410,44 @@ function textGenerationInput(body: JsonObject, stream: boolean): JsonObject {
     if (value !== undefined) input[key] = value;
   }
   return input;
+}
+
+/**
+ * The caller's `documents` as plain text, in request order (issue #676).
+ *
+ * Both spellings the ingress schema admits are normalized here, ONCE, and this
+ * is the only place that happens: `prepareRerank` needs the texts to build
+ * `contexts`, and `translateRerankResponse` needs the same array — by the same
+ * indices — to answer `return_documents`. Two extractors would be two chances
+ * for those indices to disagree, which would attach the wrong document to a
+ * score without any test failing on the shape.
+ *
+ * Exported because it is family-independent: it reads the gateway's ingress
+ * grammar, not Cloudflare's, so the next family to grow a rerank leg reuses it
+ * rather than writing a second reading of `documents`.
+ */
+export function rerankDocumentTexts(body: Json): string[] {
+  const documents = getField(body, "documents");
+  if (!Array.isArray(documents) || documents.length === 0) {
+    throw AdapterError.invalidRequest(
+      'rerank request must include a non-empty "documents" array',
+    );
+  }
+  const texts: string[] = [];
+  for (const document of documents) {
+    if (typeof document === "string") {
+      texts.push(document);
+      continue;
+    }
+    const text = asStr(getField(document, "text"));
+    if (text === undefined) {
+      throw AdapterError.invalidRequest(
+        'rerank documents must be strings or objects with a "text" string',
+      );
+    }
+    texts.push(text);
+  }
+  return texts;
 }
 
 /**

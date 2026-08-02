@@ -69,6 +69,7 @@ const capabilitySchema = z.enum([
   "vision",
   "images",
   "embeddings",
+  "rerank",
   "tools",
   "structured_output",
 ]);
