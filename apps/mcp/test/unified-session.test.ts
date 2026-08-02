@@ -184,7 +184,10 @@ describe("FerroGateMcpUnifiedSession", () => {
     if (ok.kind !== "replay") throw new Error("unreachable");
     expect(ok.frames).toHaveLength(MAX_RETAINED_FRAMES);
     expect(ok.frames[0]?.seq).toBe(oldest);
-  });
+    // Generous, and deliberately not a smaller retention bound to make it fast:
+    // this test's whole point is overflowing the REAL bound against the REAL
+    // Durable Object, which is 261 sequential storage round trips in workerd.
+  }, 30_000);
 
   it("records an upstream that dropped mid-conversation without closing the session", async () => {
     const id = mintSessionId();

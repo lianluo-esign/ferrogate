@@ -290,31 +290,53 @@ describe("the resume cursor is meaningful across the whole fan-out", () => {
     expect(JSON.parse(replayed[2]?.data ?? "{}").id).toBe(5);
   });
 
-  it("REFUSES a cursor from a different session rather than resuming from zero", async () => {
+  it("REFUSES a cursor from a different session even when the number is in range", async () => {
     const one = await openSession();
-    const two = await openSession();
-    await send(
-      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "alpha-ping" } },
-      { session: one },
-    );
     const stolen = (
       await frames(
         await send(
-          { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "alpha-ping" } },
+          { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "alpha-ping" } },
           { session: one },
         ),
       )
     )[0]?.id as string;
 
+    // Session TWO is deliberately pushed PAST the stolen sequence, so the
+    // "cursor is ahead of what this session emitted" rule cannot be what
+    // refuses it. Only the session-identity half of the cursor can. Without
+    // that half, session two would happily replay ITS OWN later frames at a
+    // position that means something only in session one — the silent
+    // resume-from-the-wrong-point this contract exists to prevent.
+    const two = await openSession();
+    for (const id of [3, 4, 5, 6]) {
+      await send(
+        { jsonrpc: "2.0", id, method: "tools/call", params: { name: "alpha-ping" } },
+        { session: two },
+      );
+    }
+    const stolenSeq = Number.parseInt(stolen.split(":")[0] ?? "", 10);
+    const twoCursor = (
+      await frames(
+        await send(
+          { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "alpha-ping" } },
+          { session: two },
+        ),
+      )
+    )[0]?.id as string;
+    // The control that makes the paragraph above true rather than assumed.
+    expect(Number.parseInt(twoCursor.split(":")[0] ?? "", 10)).toBeGreaterThan(stolenSeq);
+
     const res = await send(
-      { jsonrpc: "2.0", id: 4, method: "ping" },
+      { jsonrpc: "2.0", id: 8, method: "ping" },
       {
         session: two,
         lastEventId: stolen,
       },
     );
     expect(res.status).toBe(400);
-    expect(await res.text()).toContain("mcp_session_not_resumable");
+    const body = await res.text();
+    expect(body).toContain("mcp_session_not_resumable");
+    expect(body).toContain("names session");
   });
 
   it("REFUSES a cursor ahead of anything the session ever emitted", async () => {
