@@ -39,11 +39,11 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { readSiemCursor } from "../src/siem/cursor.js";
-import { SIEM_EXPORT_SINKS_VAR, parseSiemSinks } from "../src/siem/config.js";
-import { type SiemExportReport, runSiemExportPass } from "../src/siem/pump.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
-import { applySchema, resetD1, seedAuditEvents, seedRequestLogs } from "./d1.js";
+import { SIEM_EXPORT_SINKS_VAR, parseSiemSinks } from "../src/siem/config.js";
+import { readSiemCursor } from "../src/siem/cursor.js";
+import { type SiemExportReport, runSiemExportPass } from "../src/siem/pump.js";
+import { applySchema, db, resetD1, seedAuditEvents, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 // ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ afterEach(async () => {
   // would make that gate report a drift this file caused.
   mutable[SIEM_EXPORT_SINKS_VAR] = "[]";
   mutable[HEC_TOKEN_VAR] = undefined;
-  await env.DB.prepare("DELETE FROM siem_export_cursors").run();
+  await db().prepare("DELETE FROM siem_export_cursors").run();
   vi.restoreAllMocks();
 });
 
@@ -216,16 +216,22 @@ describe("the tenant fence on what leaves the platform", () => {
     // The fence is not a call-site check that a future edit can forget: a sink
     // with no tenant does not PARSE, so no configuration can produce a read
     // that spans tenants.
-    expect(() => parseSiemSinks(JSON.stringify([{ id: "x", destination: { kind: "r2" } }]))).toThrow(
-      /tenant/i,
-    );
+    expect(() =>
+      parseSiemSinks(JSON.stringify([{ id: "x", destination: { kind: "r2" } }])),
+    ).toThrow(/tenant/i);
   });
 
   it("fences the audit stream the same way", async () => {
     armSink({ streams: ["audit_events"] });
     await seedAuditEvents([
       { id: "a-1", requestId: "r-1", tenant: "acme", occurredAtUnix: OLD, audit: { action: "x" } },
-      { id: "b-1", requestId: "r-2", tenant: "globex", occurredAtUnix: OLD, audit: { action: "y" } },
+      {
+        id: "b-1",
+        requestId: "r-2",
+        tenant: "globex",
+        occurredAtUnix: OLD,
+        audit: { action: "y" },
+      },
       { id: "p-1", requestId: "r-3", tenant: null, occurredAtUnix: OLD, audit: { action: "z" } },
     ]);
 
@@ -250,7 +256,7 @@ describe("at-least-once delivery across a killed pump", () => {
     const first = await runSiemExportPass(bindings(), NOW);
     expect(first.streams[0]).toMatchObject({ status: "failed", batches: 2, rows: 4 });
 
-    const afterFirst = await readSiemCursor(env.DB, "acme-splunk", "request_logs");
+    const afterFirst = await readSiemCursor(db(), "acme-splunk", "request_logs");
     expect(afterFirst?.position).toEqual({ ts: OLD + 3, id: "acme-003" });
 
     const firstTickIds = deliveredIds();
@@ -264,7 +270,14 @@ describe("at-least-once delivery across a killed pump", () => {
     // BOUNDED DUPLICATION: only the batch that was in flight when the pump died.
     const duplicated = [...new Set(all.filter((id) => all.indexOf(id) !== all.lastIndexOf(id)))];
     expect(duplicated.sort()).toEqual(["acme-004", "acme-005"]);
-    expect(firstTickIds).toEqual(["acme-000", "acme-001", "acme-002", "acme-003", "acme-004", "acme-005"]);
+    expect(firstTickIds).toEqual([
+      "acme-000",
+      "acme-001",
+      "acme-002",
+      "acme-003",
+      "acme-004",
+      "acme-005",
+    ]);
 
     // A third tick has nothing left to do — the cursor is at the end.
     deliveries = [];
@@ -283,7 +296,7 @@ describe("at-least-once delivery across a killed pump", () => {
     const failed = await runSiemExportPass(bindings(), NOW);
     expect(failed.streams[0]).toMatchObject({ status: "failed", rows: 0 });
     expect(deliveredIds()).toEqual(["acme-000", "acme-001"]);
-    expect(await readSiemCursor(env.DB, "acme-splunk", "request_logs")).toBeNull();
+    expect(await readSiemCursor(db(), "acme-splunk", "request_logs")).toBeNull();
 
     await runSiemExportPass(bindings(), NOW);
     expect(deliveredIds()).toEqual(["acme-000", "acme-001", "acme-000", "acme-001"]);
@@ -338,7 +351,7 @@ describe("the replayable cursor", () => {
     await seedRequestLogs(rows("acme", "acme", 3));
     await runSiemExportPass(bindings(), NOW);
 
-    const cursor = await readSiemCursor(env.DB, "acme-splunk", "request_logs");
+    const cursor = await readSiemCursor(db(), "acme-splunk", "request_logs");
     expect(cursor).toMatchObject({
       sinkId: "acme-splunk",
       stream: "request_logs",
@@ -358,7 +371,11 @@ describe("the customer sink credential", () => {
     const logs: string[] = [];
     for (const level of ["log", "warn", "error", "info", "debug"] as const) {
       vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
-        logs.push(args.map((arg) => (arg instanceof Error ? arg.stack ?? arg.message : String(arg))).join(" "));
+        logs.push(
+          args
+            .map((arg) => (arg instanceof Error ? (arg.stack ?? arg.message) : String(arg)))
+            .join(" "),
+        );
       });
     }
     await seedRequestLogs(rows("acme", "acme", 2));
@@ -413,7 +430,7 @@ describe("the customer sink credential", () => {
     // Nothing left the platform, and the cursor did not move — so the rows are
     // still there to deliver once the operator provisions the secret.
     expect(deliveries).toHaveLength(0);
-    expect(await readSiemCursor(env.DB, "acme-splunk", "request_logs")).toBeNull();
+    expect(await readSiemCursor(db(), "acme-splunk", "request_logs")).toBeNull();
   });
 });
 
@@ -496,7 +513,7 @@ describe("the R2 destination", () => {
     // same window lands on the SAME object. That is what keeps at-least-once
     // from becoming an ever-growing pile of near-duplicate files in the
     // customer's bucket.
-    await env.DB.prepare("DELETE FROM siem_export_cursors").run();
+    await db().prepare("DELETE FROM siem_export_cursors").run();
     await runSiemExportPass(bindings(), NOW);
     expect(await keys()).toEqual(written);
   });
