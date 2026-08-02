@@ -49,6 +49,8 @@ import type { ExperimentObserver } from "../experiments/index.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
+import type { ResponseStoreMode } from "./conversation.js";
+import type { ConversationStore } from "./conversation-store.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
 import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
@@ -828,7 +830,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 272
+ * enforcement belong to the ONE contract-driven middleware that covers all 276
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
@@ -1206,6 +1208,27 @@ export interface InferenceDeps {
    * rate were invisible by construction.
    */
   readonly experiments?: ExperimentObserver | ((env: InferenceBindings) => ExperimentObserver);
+  /**
+   * Issue #689 — the store behind `store` / `previous_response_id` and
+   * `GET`/`DELETE /v1/responses/{id}`. Absent ⇒ built per Worker `env` by
+   * `conversation-store.ts::conversationStoreFromEnv`, which answers
+   * `NO_CONVERSATION_STORE` (and therefore REFUSES both members, 503) on a
+   * deployment that binds no tenant database.
+   */
+  readonly conversations?:
+    | ConversationStore
+    | ((env: InferenceBindings) => ConversationStore);
+  /**
+   * The operator's `GATEWAY_RESPONSES_STORE` ladder. Absent ⇒ read from `env`,
+   * defaulting to `opt_in` — see `conversation.ts` for why this is not
+   * OpenAI's `default_on`.
+   */
+  readonly responseStoreMode?: ResponseStoreMode;
+  /**
+   * Per-tenant retention for conversation state, in SECONDS. Absent ⇒ read
+   * from `GATEWAY_RESPONSES_RETENTION` (hours, per tenant, with a `default`).
+   */
+  readonly responseRetentionSeconds?: (tenantId: string) => number;
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -1232,4 +1255,8 @@ export interface ResolvedInferenceDeps {
   readonly audioObjects: AudioObjectSource;
   /** Issue #693 — the shadow arm's evidence writer. */
   readonly experiments: ExperimentObserver;
+  /** Issue #689 — Responses conversation state; never `undefined`, see above. */
+  readonly conversations: ConversationStore;
+  readonly responseStoreMode: ResponseStoreMode;
+  readonly responseRetentionSeconds: (tenantId: string) => number;
 }

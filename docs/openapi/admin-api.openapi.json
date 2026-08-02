@@ -9483,6 +9483,113 @@
         }
       }
     },
+    "/v1/responses/{response_id}": {
+      "parameters": [
+        {
+          "name": "response_id",
+          "in": "path",
+          "required": true,
+          "description": "The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getResponse",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Retrieve a stored response (Responses API conversation state).",
+        "description": "Returns the response body that was served for this id, tenant-fenced. Absent, expired and another tenant's ids all answer the same 404, so the endpoint is not an existence oracle over other tenants' conversation ids.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "responses.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The stored response body, verbatim.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteResponse",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Delete a stored response (Responses API conversation state).",
+        "description": "Deletes exactly the named response, tenant-fenced. Descendants are NOT cascaded; a later `previous_response_id` whose chain crosses the deleted turn is refused with `conversation_chain_broken` rather than served as a silently shortened conversation.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "responses.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Deletion acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "object": {
+                      "type": "string"
+                    },
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "object",
+                    "deleted"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/v1/embeddings": {
       "parameters": [
         {

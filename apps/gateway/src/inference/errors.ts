@@ -395,6 +395,13 @@ export function rawUpstreamResponse(
   body: string,
   requestId: string,
   upstream?: UpstreamRelay,
+  /**
+   * Gateway-originated headers for a response whose BODY is the upstream's —
+   * `x-ferrogate-response-id` / `x-ferrogate-response-stored` (#689). Applied
+   * before `gatewayHeaders`, so they can never overwrite a correlation id, and
+   * after the relayed pacing family, which is the provider's to state.
+   */
+  extraHeaders?: Record<string, string>,
 ): Response {
   if (status >= 400 && !isJsonObjectBody(body)) {
     return errorResponse(
@@ -413,6 +420,7 @@ export function rawUpstreamResponse(
       "content-type": contentType,
       "content-length": String(new TextEncoder().encode(body).byteLength),
       ...relayedRateLimitHeaders(upstream),
+      ...(extraHeaders ?? {}),
       ...gatewayHeaders(requestId),
     },
   });

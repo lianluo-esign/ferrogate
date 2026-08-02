@@ -1,7 +1,7 @@
 /**
  * `OPTIONS /admin/{*rest}` — the CORS preflight surface.
  *
- * This is a **dynamic surface**, not one of the 272 contract operations. From
+ * This is a **dynamic surface**, not one of the 276 contract operations. From
  * `dynamic_surfaces` in `docs/openapi/runtime-api-contract.json`:
  *
  * > `OPTIONS /admin/{*rest}` — CORS preflight, exists only when an

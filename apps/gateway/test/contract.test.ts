@@ -46,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 274 operations", () => {
+  it("carries exactly 276 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 274 unique operation ids", () => {
+  it("has 276 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -85,10 +85,23 @@ describe("contract table", () => {
     // landed in parallel: bearer 258 and anonymous 7 are both COUNTED off the
     // MERGED document, which is the only side that holds both.
     //
-    // 258 -> 260 with #693's two experiment reads (`listAdminExperiments` /
-    // `getAdminExperiment`), `admin.read` like every other evidence read.
+    // TWO parallel slices then moved bearer again, and each parent wrote its
+    // own +2 against the same 258 — the exact collision this file's header
+    // warns about, and the reason 262 below is COUNTED and not summed:
+    //
+    //  - #693's two experiment reads (`listAdminExperiments` /
+    //    `getAdminExperiment`), `admin.read` like every other evidence read;
+    //  - #689's `getResponse` / `deleteResponse`, which are
+    //    bearer-`responses.create` like the `createResponse` whose state they
+    //    read and end — see the note beside their registration in
+    //    `src/inference/handlers.ts` for why the scope is a reuse and not two
+    //    new ones.
+    //
+    // Neither parent's 260 holds both. 262 comes from
+    // `Counter(o["x-ferrogate-contract"]["auth"]["kind"] for o in operations)`
+    // over the MERGED `docs/openapi/admin-api.openapi.json`.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 260,
+      bearer: 262,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -120,8 +133,10 @@ describe("contract table", () => {
       // (issue #737) takes it to 58, publicly reachable in the strongest sense
       // of the word, since an opted-in site may be read with no credential at
       // all. 58 is COUNTED off the merged document: neither parent's own number
-      // (57, 55) holds both slices.
-      public: 58,
+      // (57, 55) holds both slices. `getResponse` / `deleteResponse` (issue
+      // #689) take it to 60 — data-plane operations on data-plane state, as
+      // publicly reachable as the `createResponse` that produced it.
+      public: 60,
       internal: 7,
     });
   });
@@ -147,15 +162,19 @@ describe("contract table", () => {
       // `GET /sites/{*rest}` then takes GET to 124 — the contract's first
       // operation whose path is a CATCH-ALL, because a static site is a tree of
       // unknown depth and a fixed segment count cannot address it.
-      // 124 -> 126 with #693's `GET /admin/v1/experiments` and
-      // `GET /admin/v1/experiments/{experiment_id}`.
-      GET: 126,
+      // Then two parallel slices moved GET again: #693's
+      // `GET /admin/v1/experiments` and `GET /admin/v1/experiments/{experiment_id}`
+      // (+2), and #689's `GET /v1/responses/{response_id}` (+1, its sibling
+      // taking DELETE to 28 — one path, two methods). One parent wrote 126, the
+      // other 125; the MERGED document holds all three, and 127 is what
+      // counting it produces.
+      GET: 127,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs. Re-counted off
       // the merged document, never summed.
       POST: 85,
-      DELETE: 27,
+      DELETE: 28,
       PUT: 20,
       PATCH: 16,
     });
@@ -361,7 +380,7 @@ describe("route registration", () => {
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 38 operations ROUTE-MAP assigns to apps/gateway", () => {
+  it("owns exactly the 40 operations ROUTE-MAP assigns to apps/gateway", () => {
     // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
     // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
     // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
@@ -372,7 +391,9 @@ describe("route registration", () => {
     // route group's first operation, -> 35). 38 is neither parent's number; it
     // is COUNTED off `GATEWAY_OWNED_OPERATION_IDS` after the merge, which is now
     // four lists rather than three.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(38);
+    // 38 -> 40 with #689's `getResponse` / `deleteResponse`, COUNTED off
+    // `GATEWAY_OWNED_OPERATION_IDS` after the merge like every number above it.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(40);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -386,14 +407,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 38 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 40 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 38 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 40 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 39th owned
