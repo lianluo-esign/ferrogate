@@ -23,12 +23,12 @@
  *
  * ## Fail-closed when the binding is absent
  *
- * A `workers-ai` route on a Worker with no `[ai]` binding THROWS, which the
- * handler renders as `502 provider_dispatch_error`. It deliberately does not
- * fall back to the REST endpoint: that would need an API token nobody
- * configured, and silently egressing (and paying for) a request an operator
- * asked to keep on-platform is worse than a loud failure. This is the same
- * posture `bedrock`/`vertex` take when their credential is missing.
+ * A `workers-ai` route on a Worker with no `[ai]` binding answers a synthesized
+ * 503 naming the missing stanza ({@link unboundBindingResponse}). It
+ * deliberately does not fall back to the REST endpoint: that would need an API
+ * token nobody configured, and silently egressing (and paying for) a request an
+ * operator asked to keep on-platform is worse than a loud failure. Same posture
+ * `bedrock`/`vertex` take when their credential is missing.
  *
  * ## What is NOT here
  *
