@@ -280,6 +280,11 @@ Compliance procedures a customer runs themselves:
   [`audit-tamper-evidence.md`](docs/audit-tamper-evidence.md) — the hash chain,
   the R2 anchor, the digest format, and `scripts/verify-audit-chain.mjs` with
   the exit codes to wire into a job.
+- Getting request and audit logs into your own SIEM:
+  [`siem-export.md`](docs/siem-export.md) — the export pump, its at-least-once
+  guarantee and the two ways a row could still be missed, how to configure a
+  Splunk/Datadog/HTTPS/R2 sink without putting a credential in git, and how to
+  replay a window.
 
 The API contracts are in `docs/openapi/`. Other documents under `docs/` predate
 the TypeScript implementation and describe the earlier system; treat

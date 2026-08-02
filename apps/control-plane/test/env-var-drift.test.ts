@@ -341,6 +341,11 @@ describe("the env-var drift gate itself", () => {
       "CONTROL_PLANE_NATIVE_API_KEYS",
       "CONTROL_PLANE_SEED",
       "CONTROL_PLANE_STATIC_API_KEYS",
+      // #683: the SIEM export sinks. A `[vars]` entry rather than a secret
+      // because it holds no secret BY CONSTRUCTION — a sink's credential is an
+      // `env://` REFERENCE and `src/siem/config.ts` refuses an inline literal,
+      // which is what makes this list safe to commit.
+      "SIEM_EXPORT_SINKS",
       "TENANCY_LIFECYCLE",
       "TENANT_RBAC_ACTIONS",
     ]);
@@ -350,7 +355,15 @@ describe("the env-var drift gate itself", () => {
     // (#684). Both joined `DB` in the same release, and both are listed here
     // rather than excepted because they are normal, operator-visible bindings.
     // The order is `wrangler.toml` declaration order: d1, then kv, then r2.
-    expect([...DECLARED.bindings.keys()]).toEqual(["DB", "PROMPT_LABELS", "AUDIT_ANCHORS"]);
+    // `SIEM_EXPORTS` (#683) is the SECOND R2 bucket, and the separation is
+    // deliberate rather than incidental: `AUDIT_ANCHORS` is worth what it costs
+    // to forge, so the bulk-export path must not hold write access to it.
+    expect([...DECLARED.bindings.keys()]).toEqual([
+      "DB",
+      "PROMPT_LABELS",
+      "AUDIT_ANCHORS",
+      "SIEM_EXPORTS",
+    ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the
     // scanner shrinks the read set loudly instead of silently.
@@ -467,7 +480,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(5);
+    // SIX since #683 added `SIEM_EXPORT_SINKS`. Re-derived by counting the
+    // committed `[vars]` table, not by incrementing the old number.
+    expect(rows.length).toBe(6);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -480,7 +495,13 @@ describe("which committed [vars] values this runner can actually observe", () =>
     expect(overridden).toEqual([]);
   });
 
-  it("records that ALL five committed values reach this runner unchanged", () => {
+  it("records that ALL six committed values reach this runner unchanged", () => {
+    // NOTE (#683): `test/siem-export.test.ts` OVERRIDES `SIEM_EXPORT_SINKS` at
+    // runtime to arm a sink, and restores it to the committed `"[]"` in its
+    // `afterEach` for exactly this assertion — the pool shares one isolate per
+    // file, and a leaked override would make this gate report a drift the
+    // deploy config does not have.
+    //
     // The good case, and worth stating: unlike the gateway (5 of 49 pinned) and
     // telemetry (1 of 1 pinned), nothing here is masked — `vitest.config.ts`
     // pins only test-fixture bindings, never a declared var. So a behavioural
@@ -490,6 +511,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(5);
+    expect(observable.length).toBe(6);
   });
 });

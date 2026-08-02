@@ -3,6 +3,20 @@
  * request logs and their JSONL export, admin audit events, guardrail
  * evaluations, and investigations.
  *
+ * ## The pump reads through this module, not around it (#683)
+ *
+ * `src/siem/source.ts` — the export pump that pushes the same evidence to a
+ * customer's SIEM — imports {@link requestLogTenantFence},
+ * {@link REQUEST_LOG_COLUMNS}, {@link requestLogDocument},
+ * {@link auditTenantFence} and {@link auditEventDocument} from here rather than
+ * restating any of them. That is the same argument the JSONL export already
+ * makes one level down: a push path that could see a row the console cannot is
+ * a cross-tenant leak with a different front door, and a push path that
+ * PROJECTED a row differently would make a customer's SIEM and this API
+ * disagree about what happened. The pump differs from these handlers in exactly
+ * two ways, both stated where they occur: it walks time FORWARDS (a cursor has
+ * to), and it pages by keyset rather than by offset.
+ *
  * All `admin.read`. Two of them additionally carry an `rbac_action`
  * (`guardrails.evidence.read` on `listGuardrailEvaluations` and
  * `getGuardrailInvestigation`) — that second gate is applied by the table-driven
@@ -41,12 +55,12 @@ import {
  * `event.tenant.organization_id.as_deref() == Some(tenant_id)`, i.e. strict
  * equality, so `NULL` matches nobody.
  */
-function auditTenantFence(scope: CallerScope): { sql: string; params: string[] } {
+export function auditTenantFence(scope: CallerScope): { sql: string; params: string[] } {
   if (scope.kind === "platform_operator") return { sql: "", params: [] };
   return { sql: ` WHERE ${AUDIT_TABLE}.tenant = ?`, params: [scope.tenantId] };
 }
 
-interface AuditEventRow {
+export interface AuditEventRow {
   readonly id: string;
   readonly request_id: string;
   readonly agent_run_id: string | null;
@@ -58,7 +72,13 @@ interface AuditEventRow {
   readonly seq: number | null;
   readonly prev_hash: string | null;
   readonly row_hash: string | null;
-  readonly total: number;
+  /**
+   * `count(*) OVER()`. OPTIONAL because the SIEM pump (`src/siem/source.ts`)
+   * reuses this row shape and this projection without the window function — it
+   * pages by KEYSET, so a pre-window total would be a second full scan per
+   * batch for a number nothing reads.
+   */
+  readonly total?: number;
 }
 
 /**
@@ -79,7 +99,7 @@ interface AuditEventRow {
  * for a reader that only wants to know what happened, load-bearing for one
  * asking whether it can trust the answer.
  */
-function auditEventDocument(row: AuditEventRow): StoreRecord {
+export function auditEventDocument(row: AuditEventRow): StoreRecord {
   let audit: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(row.audit_json);
@@ -199,7 +219,7 @@ function listAuditEventsHandler(): Handler {
  * `test/request-logs-read.test.ts` proves from BOTH tenants' sides plus the
  * export.
  */
-function requestLogTenantFence(scope: CallerScope): { sql: string; params: string[] } {
+export function requestLogTenantFence(scope: CallerScope): { sql: string; params: string[] } {
   if (scope.kind === "platform_operator") return { sql: "", params: [] };
   return { sql: ` WHERE ${REQUEST_LOG_TABLE}.tenant = ?`, params: [scope.tenantId] };
 }
@@ -211,7 +231,7 @@ function requestLogTenantFence(scope: CallerScope): { sql: string; params: strin
  * answering different documents for the same row — which is exactly how a SIEM
  * pipeline and a console end up disagreeing about what happened.
  */
-const REQUEST_LOG_COLUMNS =
+export const REQUEST_LOG_COLUMNS =
   "request_id, trace_id, agent_run_id, tenant, project, workspace, api_key_id, " +
   "route, provider, logical_model, provider_model, status_code, error_code, cache_status, " +
   "latency_ms, prompt_tokens, completion_tokens, total_tokens, " +
@@ -235,7 +255,7 @@ const REQUEST_LOG_COLUMNS =
  */
 const REQUEST_LOG_ORDER = `ORDER BY started_at_unix DESC, request_id ASC`;
 
-interface RequestLogRow {
+export interface RequestLogRow {
   readonly request_id: string;
   readonly trace_id: string | null;
   readonly agent_run_id: string | null;
@@ -279,7 +299,7 @@ interface RequestLogRow {
  * discarding it would make this reader lossy the moment the writer learns
  * something new.
  */
-function requestLogDocument(row: RequestLogRow): StoreRecord {
+export function requestLogDocument(row: RequestLogRow): StoreRecord {
   let document: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(row.request_json);

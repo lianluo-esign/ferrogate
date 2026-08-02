@@ -43,6 +43,7 @@
 import { resolveAuditAnchorBucket, resolveControlDatabase, resolveDeps } from "../adapters.js";
 import { anchorAuditChains } from "../audit/anchor.js";
 import type { ControlPlaneBindings } from "../ports.js";
+import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
 import { type ScheduleTickSummary, runScheduleTick } from "./engine.js";
 
 /** What `scheduled` reports back, so a tail log says something useful. */
@@ -55,6 +56,16 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
    * log rather than silent, because that gap is invisible from every response.
    */
   readonly auditAnchor: "unconfigured" | "failed" | { written: number; skipped: number };
+  /**
+   * What the SIEM export pass did (#683): how many sinks were configured and
+   * what each (sink, stream) leg delivered, skipped or failed on.
+   *
+   * Reported on every tick rather than only when something moved, because "the
+   * pump ran and had nothing to send" and "the pump did not run" are the two
+   * states an operator most needs to tell apart — and in the DESTINATION they
+   * look identical.
+   */
+  readonly siemExport: SiemExportReport;
 }
 
 /**
@@ -80,7 +91,12 @@ export async function runScheduledTick(
     { store: deps.store, lifecycle: deps.lifecycle, nodeId: "control-plane-cron" },
     now,
   );
-  return { at: now, ...summary, auditAnchor: await anchorPass(env, now) };
+  return {
+    at: now,
+    ...summary,
+    auditAnchor: await anchorPass(env, now),
+    siemExport: await siemPass(env, now),
+  };
 }
 
 /**
@@ -118,6 +134,31 @@ async function anchorPass(
   } catch (error) {
     console.warn("control-plane: audit anchor pass failed", error);
     return "failed";
+  }
+}
+
+/**
+ * The SIEM export pass (#683), riding the same minute tick.
+ *
+ * Errors are caught here rather than thrown for the reason the anchor pass
+ * gives one paragraph up, and it applies with more force: a `scheduled` handler
+ * that throws is RETRIED by the platform, and retrying because a customer's
+ * collector answered 503 would re-dispatch every due SCHEDULE in the batch. The
+ * pump does not need the retry — its cursor is the retry, and the next tick is
+ * a minute away.
+ */
+async function siemPass(env: ControlPlaneBindings, now: number): Promise<SiemExportReport> {
+  try {
+    return await runSiemExportPass(env, now);
+  } catch (error) {
+    // Deliberately not `String(error)` into the report: `runSiemExportPass`
+    // already redacts what it reports, and an escaped exception is the one path
+    // whose text nothing has vetted.
+    console.warn(
+      "control-plane: SIEM export pass failed",
+      error instanceof Error ? error.name : "",
+    );
+    return { sinks: 0, streams: [], configError: "siem export pass failed" };
   }
 }
 
