@@ -20,11 +20,14 @@
  * `env` from `cloudflare:test` IS the object the Worker sees (the same trick
  * `test/cache/deployed.test.ts` uses for its vars), so a recording double can
  * be put on `env.AI` before the first request and the deployed composition root
- * picks it up through `dispatcherFromEnv`. A REAL `[ai]` binding cannot be
- * exercised offline — miniflare proxies it to the live Cloudflare API — so a
- * double is the only way to prove the wiring without a network round trip and
- * an account. What the double CANNOT prove is Workers AI's own wire behaviour;
- * that is stated in the PR body rather than papered over.
+ * picks it up through `dispatcherFromEnv`. The pool DOES bind the real thing —
+ * it boots from the committed `wrangler.toml`, `[ai]` and all — but a real AI
+ * binding cannot be exercised offline: calling `.run()` on it throws `Binding AI
+ * needs to be run remotely`. So a double is the only way to prove the wiring
+ * without a network round trip and an account. What the double CANNOT prove is
+ * Workers AI's own wire behaviour; that is stated in the PR body rather than
+ * papered over. The real binding is not discarded — the describe at the bottom
+ * asserts against the original it displaced.
  *
  * ## The property under test
  *
@@ -43,12 +46,11 @@ declare global {
 }
 
 /**
- * Vite inlines both files at build time — the only way a workerd test with no
- * filesystem can read a config at all, and the same mechanism
- * `test/env-var-drift.test.ts` uses. See the "derived deploy config" describe at
- * the bottom for why the second file exists.
+ * Vite inlines the committed config at build time — the only way a workerd test
+ * with no filesystem can read it at all, and the same mechanism
+ * `test/env-var-drift.test.ts` uses.
  */
-const TOML = import.meta.glob("../../wrangler{,.vitest}.toml", {
+const TOML = import.meta.glob("../../wrangler.toml", {
   query: "?raw",
   import: "default",
   eager: true,
@@ -63,7 +65,6 @@ function toml(suffix: string): string {
 }
 
 const COMMITTED_WRANGLER_TOML = toml("/wrangler.toml");
-const POOL_WRANGLER_TOML = toml("/wrangler.vitest.toml");
 
 const BASE = "https://gw.test";
 
@@ -322,18 +323,26 @@ describe("workers-ai is reachable on the deployed data plane", () => {
 });
 
 /**
- * THE DERIVED DEPLOY CONFIG — the one place this slice weakens a guarantee, so
- * it is fenced here rather than left implicit.
+ * THE DEPLOY-TIME GATE ON THE `[ai]` STANZA — the #666 shape, applied here.
  *
- * `wrangler.toml` declares `[ai] binding = "AI"` because the deployed Worker
- * reads it. `@cloudflare/vitest-pool-workers` cannot load that stanza offline
- * (see `vitest.config.ts`), so the POOL is pointed at a generated copy with the
- * stanza removed. That substitution is safe only for as long as it removes
- * exactly the `[ai]` stanza and nothing else — otherwise every other config gate
- * in this suite would be asserting against the committed file while the Worker
- * under test booted from a different one.
+ * `[ai]` cannot be *exercised* offline, and the first cut of this slice
+ * concluded from that it cannot be *loaded* offline either: the pool was pointed
+ * at a generated copy of `wrangler.toml` with the stanza stripped, and the
+ * stanza itself carried `remote = false` to keep local runs off the network.
+ * That second part broke `wrangler dev --local` outright — wrangler's
+ * `warnOrError` throws "AI bindings do not support local development" on
+ * `remote = false` before the Worker starts — so the gateway never reached
+ * "Ready on" and both `scripts/wave25-boot-proof.sh` and the Playwright
+ * webServer went with it.
+ *
+ * The correction is #666's: the binding stays COMMITTED and LIVE, the offline
+ * runner is made to tolerate it (no `remote` key ⇒ a warning, not a refusal),
+ * and the thing that catches its removal is an assertion that fails, not a
+ * comment. Both halves are asserted below, and neither can pass vacuously:
+ * `env.AI` in this isolate exists ONLY because the pool booted from the
+ * committed file that declares it.
  */
-describe("the pool's derived wrangler config differs from the committed one only in [ai]", () => {
+describe("the committed [ai] stanza is the one the pool actually loaded", () => {
   const stanza = (toml: string, header: string): string[] => {
     const out: string[] = [];
     let inside = false;
@@ -349,32 +358,32 @@ describe("the pool's derived wrangler config differs from the committed one only
     return out.filter((line) => line.length > 0 && !line.startsWith("#"));
   };
 
-  it("the committed config declares the binding and the derived one does not", () => {
-    expect(stanza(COMMITTED_WRANGLER_TOML, "[ai]")).toContain('binding = "AI"');
-    expect(stanza(POOL_WRANGLER_TOML, "[ai]")).toEqual([]);
-    expect(/^\[ai\]/m.test(POOL_WRANGLER_TOML)).toBe(false);
+  it("declares [ai] binding = \"AI\" in the file wrangler deploys", () => {
+    expect(/^\[ai\]/m.test(COMMITTED_WRANGLER_TOML)).toBe(true);
+    expect(stanza(COMMITTED_WRANGLER_TOML, "[ai]")).toEqual(['binding = "AI"']);
   });
 
-  it("removes NOTHING else — every other line survives verbatim", () => {
-    // Reconstruct what the committed file looks like with only `[ai]` dropped
-    // and compare to the generated file's body. Any other divergence — a
-    // dropped binding, a rewritten var, a stale regeneration — fails here.
-    const withoutAi: string[] = [];
-    let inAi = false;
-    for (const line of COMMITTED_WRANGLER_TOML.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (trimmed === "[ai]") {
-        inAi = true;
-        continue;
-      }
-      if (inAi && trimmed.startsWith("[")) inAi = false;
-      if (!inAi) withoutAi.push(line);
-    }
-    // The generated file prepends a three-line "DO NOT EDIT" banner.
-    const generated = POOL_WRANGLER_TOML.split(/\r?\n/);
-    const banner = generated.slice(0, 3);
-    expect(banner.every((line) => line.startsWith("#"))).toBe(true);
-    expect(banner.join("\n")).toContain("GENERATED by vitest.config.ts");
-    expect(generated.slice(3)).toEqual(withoutAi);
+  it("carries no `remote` key, because either value breaks a runner", () => {
+    // `remote = false` → `wrangler dev --local` refuses to boot (the #673
+    // regression). `remote = true` → wrangler and the pool open a proxy session
+    // against the live Cloudflare API and demand a CLOUDFLARE_API_TOKEN this
+    // repo's offline gates neither have nor should need. Absent is the only
+    // value under which the committed config is loadable by every runner, and
+    // no test that merely boots workerd can notice it changing — hence this.
+    expect(stanza(COMMITTED_WRANGLER_TOML, "[ai]").some((l) => l.startsWith("remote"))).toBe(false);
+  });
+
+  it("gave this pool a real env.AI, so the stanza above is not just text", () => {
+    // The link between the committed file and the running Worker. If the pool
+    // is ever pointed back at a derived config with `[ai]` stripped, or the
+    // stanza is deleted, `env.AI` disappears and this fails — which is what
+    // makes the two assertions above a gate rather than a description.
+    //
+    // `beforeAll` installed the recording double over this binding, so the
+    // real one is read from the saved original.
+    const bound = ORIGINAL["AI"] as { run?: unknown } | undefined;
+    expect(bound).toBeDefined();
+    expect(bound).not.toBe(ai);
+    expect(typeof bound?.run).toBe("function");
   });
 });

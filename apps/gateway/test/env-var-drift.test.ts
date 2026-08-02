@@ -324,12 +324,15 @@ const DOCUMENTED_BUT_UNDECLARED = [
  * Llama-Guard detector while `wrangler.toml` carried only a PORT-TODO, and it
  * pinned that as a deliberate state because "declaring it costs the offline,
  * docker-free property this project's testing strategy is built on" — the
- * `@cloudflare/vitest-pool-workers` remote-proxy failure. That measurement was
- * correct and still reproduces; the CONCLUSION drawn from it no longer holds,
- * because the cost is avoidable. `vitest.config.ts` now points the pool at a
- * derived config with the `[ai]` stanza stripped, so the suite stays offline
- * AND the deployed Worker gets the binding. `[ai] binding = "AI"` is committed
- * and `AI` is therefore DECLARED, which is what the assertions below now say.
+ * `@cloudflare/vitest-pool-workers` remote-proxy failure. The CONCLUSION drawn
+ * from it no longer holds, because the cost is avoidable — and the measurement
+ * itself was over-read. What a runner refuses is `remote = false` on an AI
+ * binding, not the binding; declared with no `remote` key and the pool's
+ * `remoteBindings: false`, `[ai]` loads offline in both the pool and
+ * `wrangler dev --local` and nothing proxies anywhere. So the suite stays
+ * offline AND the deployed Worker gets the binding. `[ai] binding = "AI"` is
+ * committed and `AI` is therefore DECLARED, which is what the assertions below
+ * now say.
  *
  * This is not a test being routed around: the old claim was that the AI code
  * path is dead in production, and issue #673 is the work that made it live.

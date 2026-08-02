@@ -62,10 +62,15 @@ beforeAll(() => {
     ORIGINAL[name] = mutable[name];
     mutable[name] = value;
   }
-  // Belt and braces: the pool's derived config has no `[ai]` stanza, so nothing
-  // should have bound this. Stating it makes the premise of the file explicit
-  // rather than assumed.
-  expect(mutable["AI"]).toBeUndefined();
+  // The premise of the file, made explicit rather than assumed: this isolate
+  // stands in for a deploy whose `wrangler.toml` carries NO `[ai]` stanza. The
+  // pool loads the committed config, which does carry one, so the binding is
+  // removed here — before the first request of the isolate, since
+  // `envScopedDeps` memoizes the dispatcher on the FIRST request and never
+  // re-reads `env.AI` (see the file docblock).
+  expect(mutable["AI"]).toBeDefined();
+  ORIGINAL["AI"] = mutable["AI"];
+  delete mutable["AI"];
 });
 
 afterAll(() => {
