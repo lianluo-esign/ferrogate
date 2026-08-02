@@ -223,7 +223,7 @@ export interface ListPage {
  * Deliberately generic over a collection name rather than one method per
  * resource: the 203 operations are overwhelmingly CRUD over ~60 named
  * collections, and a per-resource method-per-operation interface would be the
- * hand-written-197-handlers problem moved down a layer.
+ * hand-written-203-handlers problem moved down a layer.
  *
  * Every method takes the caller's {@link CallerScope} so tenant isolation is a
  * property of the store, not of each handler — the Rust tree's repeat defect

@@ -2,7 +2,7 @@
  * Shared external-wire-boundary schemas and the OpenAPI contract surface.
  *
  * These are the cross-cutting envelopes every FerroGate surface agrees on. The
- * per-operation request/response shapes of the committed 252-operation contract
+ * per-operation request/response shapes of the committed 258-operation contract
  * (`docs/openapi/runtime-api-contract.json`) are ported incrementally by the
  * request-path cluster ports and registered in {@link wireSchemas}.
  */

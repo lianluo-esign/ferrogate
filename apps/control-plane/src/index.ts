@@ -85,7 +85,7 @@ app.use("*", contractAuth());
  * admin-console session, OIDC + SCIM, and SAML — and that
  * `docs/rewrite/MODULE-OWNERSHIP.md` found precisely because they are not in
  * `docs/openapi/runtime-api-contract.json`. None of their paths is one of the
- * 197, so mounting them cannot move the anti-drift operation count; they mount
+ * 203, so mounting them cannot move the anti-drift operation count; they mount
  * OUTSIDE `registerRoutes` exactly as `/healthz` and `/version` do.
  *
  * The ORDER is load-bearing:

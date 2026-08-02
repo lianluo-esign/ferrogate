@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 252-operation runtime API contract, as a
+ * The control-plane slice of the 258-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -13,7 +13,7 @@
  *     one source of truth, no generated copy that can drift;
  *  2. validate it eagerly at module load (throw, mirroring the Rust panic);
  *  3. expose lookup by `(method, path)`, by `operation_id`, and by contract
- *     `group`, restricted to the 197 operations `ROUTE-MAP.md` assigns to
+ *     `group`, restricted to the 203 operations `ROUTE-MAP.md` assigns to
  *     `apps/control-plane`.
  *
  * `matchit`'s radix tree is re-implemented as a specificity-ranked segment
@@ -410,10 +410,10 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 252). */
+/** Every operation in the document, in document order (all 258). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
-/** The operations this Worker owns, in document order (197). */
+/** The operations this Worker owns, in document order (203). */
 export const CONTROL_PLANE_OPERATIONS: readonly ApiOperation[] = CONTRACT.owned;
 
 /** Owned operations, keyed by contract `group` (`rbac`, `billing`, `wallets`, …). */
@@ -422,7 +422,7 @@ export const OPERATIONS_BY_GROUP: ReadonlyMap<string, readonly ApiOperation[]> =
 /** Every group this Worker owns at least one operation in, sorted. */
 export const CONTROL_PLANE_GROUPS: readonly string[] = [...CONTRACT.byGroup.keys()].sort();
 
-/** Lookup by `operation_id` — across ALL 252, so a mis-assignment is visible. */
+/** Lookup by `operation_id` — across ALL 258, so a mis-assignment is visible. */
 export function operationById(operationId: string): ApiOperation | undefined {
   return CONTRACT.byOperationId.get(operationId);
 }

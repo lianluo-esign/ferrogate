@@ -260,7 +260,7 @@ beforeEach(() => {
 
 describe("the DEPLOYED Worker serves every mounted operation", () => {
   it("answers no contract operation with the app's own 'no route' 404", async () => {
-    // The full 197. Every request goes through `export default` in workerd with
+    // The full 203. Every request goes through `export default` in workerd with
     // a credential that clears the guard, so anything that comes back as
     // `no route for …` is a route that is not mounted.
     const unreachable: string[] = [];
