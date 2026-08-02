@@ -20,6 +20,7 @@ import controlInitSql from "../../../../sql/d1-ts/control/0001_init_control.sql?
 import ssoNonceSql from "../../../../sql/d1-ts/control/0002_sso_flow_nonce.sql?raw";
 import requestLogColumnsSql from "../../../../sql/d1-ts/control/0003_request_log_columns.sql?raw";
 import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_evaluations.sql?raw";
+import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_chain.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 
@@ -82,6 +83,17 @@ export async function applyControlMigrations(): Promise<void> {
   // idempotent and needs no guard (#665).
   for (const statement of sqlStatements(guardrailEvidenceSql)) {
     await db.prepare(statement).run();
+  }
+
+  // `0008` (#691) is MIXED: `CREATE TABLE IF NOT EXISTS` is idempotent but its
+  // two `ALTER TABLE … ADD COLUMN`s are not, so it gets the same
+  // column-presence guard `0003` gets, for the same reason — the pool persists
+  // this database under `.wrangler/state`, and a blind re-apply fails the
+  // second `vitest run` with "duplicate column name".
+  if (!names.has("delegation_chain")) {
+    for (const statement of sqlStatements(delegationChainSql)) {
+      await db.prepare(statement).run();
+    }
   }
   applied = true;
 }

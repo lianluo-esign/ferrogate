@@ -8,5 +8,5 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run && vitest run --config test/ratelimit/harness/vitest.config.ts && vitest run --config test/tenancy/harness/vitest.config.ts"
   },
-  "dependencies": { "hono": "^4.6.0", "zod": "^3.25.76", "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "@ferrogate/config": "workspace:*", "@ferrogate/policy": "workspace:*", "@ferrogate/guardrails": "workspace:*", "@ferrogate/secrets": "workspace:*", "@ferrogate/providers": "workspace:*", "@ferrogate/routing": "workspace:*", "@ferrogate/storage": "workspace:*", "@ferrogate/billing": "workspace:*", "@ferrogate/observability": "workspace:*" }
+  "dependencies": { "hono": "^4.6.0", "zod": "^3.25.76", "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "@ferrogate/config": "workspace:*", "@ferrogate/policy": "workspace:*", "@ferrogate/guardrails": "workspace:*", "@ferrogate/secrets": "workspace:*", "@ferrogate/providers": "workspace:*", "@ferrogate/routing": "workspace:*", "@ferrogate/storage": "workspace:*", "@ferrogate/billing": "workspace:*", "@ferrogate/observability": "workspace:*", "@ferrogate/identity": "workspace:*" }
 }
