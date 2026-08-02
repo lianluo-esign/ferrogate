@@ -596,7 +596,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 265
+ * enforcement belong to the ONE contract-driven middleware that covers all 267
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`

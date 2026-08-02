@@ -63,7 +63,7 @@ const HONO_ROUTES: readonly HonoRoute[] = (
 const HONO_KEYS = new Set(HONO_ROUTES.map((route) => `${route.method} ${route.path}`));
 
 /**
- * The routes `src/index.ts` mounts that are not among the 209 operations this
+ * The routes `src/index.ts` mounts that are not among the 211 operations this
  * app OWNS. They are named here so the "nothing extra is mounted" assertion
  * below is exact rather than a tolerance.
  *
@@ -107,7 +107,7 @@ function contractKey(operationId: string): string {
   return `${operation.method} ${operation.honoPath}`;
 }
 
-describe("the app src/index.ts exports has all 209 operations in its ROUTING TABLE", () => {
+describe("the app src/index.ts exports has all 211 operations in its ROUTING TABLE", () => {
   it("mounts every contract operation this app owns — naming any that fell off", () => {
     // THE gate. `HONO_KEYS` comes from Hono, not from the contract, so this is
     // a comparison between two independent things.
@@ -121,7 +121,7 @@ describe("the app src/index.ts exports has all 209 operations in its ROUTING TAB
     ).toEqual([]);
   });
 
-  it("mounts NOTHING beyond the 209 + the shared probes + /health + /version", () => {
+  it("mounts NOTHING beyond the 211 + the shared probes + /health + /version", () => {
     const expected = new Set<string>([
       ...CONTROL_PLANE_OPERATIONS.map((operation) => `${operation.method} ${operation.honoPath}`),
       ...NON_CONTRACT_ROUTES,
@@ -167,7 +167,7 @@ describe("the mount record the composition root returned", () => {
     expect(unrecorded).toEqual([]);
   });
 
-  it("exports the PRODUCTION module list, covering exactly the 31 owned groups", () => {
+  it("exports the PRODUCTION module list, covering exactly the 34 owned groups", () => {
     expect(CONTROL_PLANE_ROUTE_MODULES).toHaveLength(CONTROL_PLANE_GROUPS.length);
     expect(CONTROL_PLANE_ROUTE_MODULES.map((module) => module.group).sort()).toEqual([
       ...CONTROL_PLANE_GROUPS,
@@ -296,6 +296,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["admin_agent_workflow", "listAdminAgentWorkflows", "GET", "/admin/v1/agent-workflows", 200],
   ["admin_api_key", "listAdminApiKeys", "GET", "/admin/v1/api-keys", 200],
   ["admin_config_ops", "validateAdminConfig", "POST", "/admin/v1/config/validate", 200],
+  ["admin_cost_record", "listAdminCostRecords", "GET", "/admin/v1/cost-records", 200],
   ["admin_gateway_config", "listAdminGatewayConfigs", "GET", "/admin/v1/gateway-configs", 200],
   ["admin_managed_worker", "listAdminManagedWorkers", "GET", "/admin/v1/managed-workers", 200],
   ["admin_mcp_server", "listAdminMcpServers", "GET", "/admin/v1/mcp-servers", 200],
@@ -345,7 +346,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 32 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 34 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });

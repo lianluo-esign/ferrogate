@@ -33,6 +33,7 @@ import { adminAgentUpstreamRoutes } from "./admin_agent_upstream.js";
 import { adminAgentWorkflowRoutes } from "./admin_agent_workflow.js";
 import { adminApiKeyRoutes } from "./admin_api_key.js";
 import { adminConfigOpsRoutes } from "./admin_config_ops.js";
+import { adminCostRecordRoutes } from "./admin_cost_record.js";
 import { adminGatewayConfigRoutes } from "./admin_gateway_config.js";
 import { adminManagedWorkerRoutes } from "./admin_managed_worker.js";
 import { adminMcpServerRoutes } from "./admin_mcp_server.js";
@@ -70,6 +71,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   adminAgentWorkflowRoutes,
   adminApiKeyRoutes,
   adminConfigOpsRoutes,
+  adminCostRecordRoutes,
   adminGatewayConfigRoutes,
   adminManagedWorkerRoutes,
   adminMcpServerRoutes,
@@ -222,7 +224,7 @@ export function registeredRoutes(): readonly RegisteredRoute[] {
 export function registerRoutes(app: Hono<ControlPlaneEnv>): readonly RegisteredRoute[] {
   // The two SHARED probes (`/healthz`, `/readyz`), which belong to no group and
   // are therefore NOT contract operations of this app — they are not appended to
-  // `mounted`, so the 209-operation count `test/wiring.test.ts` pins does not
+  // `mounted`, so the 211-operation count `test/wiring.test.ts` pins does not
   // move. They are mounted HERE, from the one function `src/index.ts` already
   // calls, because `src/index.ts` is a composition root this slice may not edit
   // and its two inline probe handlers answered a document that had drifted from
