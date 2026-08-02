@@ -200,6 +200,31 @@ describe("InMemoryRateLimiter — the RateLimiter port over the same arithmetic"
       allowed: false,
       counterKey: "tenant:t1",
       limit: 2,
+      // #726 — the denial reports what is LEFT, which the 429's
+      // `x-ratelimit-remaining-requests` renders. Zero for RPM by construction:
+      // `RequestWindow` refuses at `used >= limit`, so a refused caller has
+      // nothing in hand. (TPM is the case where this is NOT zero — see
+      // `remainingInWindow` and the TPM assertion in
+      // `test/inference/wiring.test.ts`.)
+      remaining: 0,
+      retryAfterSeconds: 60,
+    });
+  });
+
+  test("a TPM denial reports the headroom that is still there (#726)", async () => {
+    // The assertion a constant `0` cannot satisfy. `TokenWindow` refuses on
+    // `used + tokens > limit`, so a caller denied a 60-token request against a
+    // 100-token window with 50 already charged still has 50 tokens for a
+    // smaller one — and telling it `0` would stop it sending those.
+    const t = { now: 1000 };
+    const limiter = at(t);
+    const window = { counterKey: "tenant:t1", limit: 100 };
+    expect((await limiter.consumeTokens(window, 50)).allowed).toBe(true);
+    expect(await limiter.consumeTokens(window, 60)).toEqual({
+      allowed: false,
+      counterKey: "tenant:t1",
+      limit: 100,
+      remaining: 50,
       retryAfterSeconds: 60,
     });
   });

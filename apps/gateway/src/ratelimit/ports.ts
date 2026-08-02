@@ -68,6 +68,12 @@ export type RateLimitOutcome =
       /** The window that denied. Never logged to the client; used for metrics. */
       readonly counterKey: string;
       readonly limit: number;
+      /**
+       * What is left of that window (#726) — `x-ratelimit-remaining-requests`.
+       * Always `0` for RPM (which refuses at the cap), carried anyway so the
+       * two dimensions render through one code path in `./headers.ts`.
+       */
+      readonly remaining: number;
       /** Whole seconds until that window rolls. See {@link RateLimitOptions}. */
       readonly retryAfterSeconds: number;
     }
@@ -90,6 +96,12 @@ export type TokenAdmission =
       readonly allowed: false;
       readonly counterKey: string;
       readonly limit: number;
+      /**
+       * Tokens still available in the window (#726). NOT necessarily zero: TPM
+       * refuses on `used + estimate > limit`, so a denied caller can have real
+       * headroom for a smaller request. See `window.ts::remainingInWindow`.
+       */
+      readonly remaining: number;
       readonly retryAfterSeconds: number;
     }
   | { readonly allowed: "unavailable"; readonly detail: string };
@@ -222,13 +234,20 @@ export async function withReservation<T>(
  * message. Sourced from `auth.rs::require_request_budget`,
  * `auth.rs::finalize_auth` and `server/chat.rs`.
  *
- * Rust attaches NO `Retry-After` header to any of them — `write_json_error`
- * writes `content-type`, `content-length`, `x-request-id`, `x-trace-id`,
+ * Rust attached NO `Retry-After` header to any of them — `write_json_error`
+ * wrote `content-type`, `content-length`, `x-request-id`, `x-trace-id`,
  * `x-ferrogate-runtime` and the CORS headers, and nothing else; the only
- * `Retry-After` in the Rust tree is READ from an upstream response
- * (`control-plane-client/src/transport.rs`), never written. So the header is
- * off by default here too, and {@link RateLimitOptions.retryAfterHeader} is an
- * explicit opt-in rather than a silent addition.
+ * `Retry-After` in the Rust tree was READ from an upstream response
+ * (`control-plane-client/src/transport.rs`), never written.
+ *
+ * **THAT PARITY IS DELIBERATELY BROKEN AS OF #726.** The 429s now carry
+ * `retry-after` and the `x-ratelimit-*` triple derived from the window that
+ * refused (`./headers.ts`), because the parity had a client-visible cost: both
+ * official SDKs read `retry-after` to time their backoff and fall back to a
+ * blind exponential schedule without it, so a throttled caller retried on its
+ * own schedule against a limit it could not see. The 403s and 503s below still
+ * carry nothing, and that is not an oversight — see
+ * {@link RateLimitOptions.retryAfterHeader}.
  */
 export const RATE_LIMIT_REFUSALS = {
   /** `require_request_budget` — the RPM denial. `{request_id}` is interpolated. */
@@ -286,9 +305,28 @@ export const RATE_LIMIT_REFUSALS = {
 /** Tunables for {@link rateLimit}. */
 export interface RateLimitOptions {
   /**
-   * Emit `Retry-After: <seconds>` on a 429. **Rust emits no such header**;
-   * default `false` keeps byte-parity with the Rust responses. Turn it on only
-   * as a deliberate, documented improvement.
+   * Emit `retry-after` + the `x-ratelimit-*` triple on a 429.
+   *
+   * **DEFAULT FLIPPED TO ON BY #726.** It reads `!== false`, so only an
+   * explicit `retryAfterHeader: false` restores the Rust byte-parity — the
+   * escape hatch stays for an operator who needs the old wire exactly, but a
+   * deployment that configures nothing now tells its callers how to back off.
+   *
+   * The previous default was `false`, and worse than that: when it WAS true the
+   * value was stashed on the thrown `HttpError` as `retryAfterSeconds` "for a
+   * wrapper that wants to emit it", and no such wrapper existed. The header was
+   * therefore unreachable from any configuration.
+   *
+   * Scope, stated precisely so this is not read as "every refusal gets a
+   * Retry-After": it governs the two THROTTLES (429 `rate_limit_exceeded`, 429
+   * `tpm_limit_exceeded`), the refusals that own a window and can therefore
+   * name an honest deadline. It does NOT cover
+   *  - 403 `quota_scope_disabled` — waiting cannot fix a disabled policy;
+   *  - 503 `governance_counter_unavailable` / `quota_resolution_unavailable` —
+   *    the backend is down, so no window was read and there is no number to
+   *    derive. A constant here would be exactly the hard-coded `Retry-After`
+   *    that synchronises every client in the fleet onto one instant, which is
+   *    worse than none.
    */
   readonly retryAfterHeader?: boolean;
   /**

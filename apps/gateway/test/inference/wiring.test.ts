@@ -252,6 +252,36 @@ describe("the mounted module enforces the resolved TPM window", () => {
     }
   });
 
+  it("counts `retry-after` down from where the window actually is (#726)", async () => {
+    // THE ASSERTION A CONSTANT CANNOT PASS. A `retry-after` hard-coded to the
+    // window length is worse than none: it is wrong for every caller except one
+    // that arrived at the instant the window opened, and it wakes the whole
+    // fleet together. So the clock is driven explicitly and the value is pinned
+    // to an exact mid-window number rather than a range.
+    //
+    // The window opens at t=1000 (first request). At t=1025, 25 of the 60
+    // seconds are gone and the honest answer is 35 — not 60, and not 0.
+    const clock = { now: 1000 };
+    const provider = interceptProviderFetch(() => okChatCompletion());
+    try {
+      const call = gateway(TPM_ENV, [
+        rateLimit({ limiter: new InMemoryRateLimiter({ clock: () => clock.now }) }),
+      ]);
+      const post = () =>
+        call(CHAT, { method: "POST", headers: bearer("fg_other_tenant"), body: CHAT_BODY });
+
+      expect((await post()).status).toBe(200);
+      clock.now = 1025;
+      const denied = await post();
+
+      expect(denied.status).toBe(429);
+      expect(denied.headers.get("retry-after")).toBe("35");
+      expect(denied.headers.get("x-ratelimit-reset-tokens")).toBe("35s");
+    } finally {
+      provider.restore();
+    }
+  });
+
   it("does not charge TPM for a request the model gate already refused", async () => {
     // Rust checks TPM inside the provider-attempt loop, i.e. AFTER route
     // resolution. An unknown model must not burn a minute's worth of tokens.

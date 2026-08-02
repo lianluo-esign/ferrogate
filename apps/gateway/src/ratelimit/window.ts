@@ -79,6 +79,25 @@ export function secondsUntilWindowReset(state: WindowState, now: number): number
 }
 
 /**
+ * What is LEFT of the window against a given limit (#726) — the number
+ * `x-ratelimit-remaining-*` reports.
+ *
+ * Read AFTER a refused `tryConsume`, which is the only place it is used:
+ * `tryConsume` returns `false` without charging, so `used` is still the
+ * settled figure and this is the caller's true headroom.
+ *
+ * It is NOT always zero on a denial, and that asymmetry is exactly why this
+ * has to be computed rather than hard-coded. {@link RequestWindow} refuses on
+ * `used >= limit`, so RPM headroom really is 0. {@link TokenWindow} refuses on
+ * `used + tokens > limit`, so a caller denied a 516-token request against a
+ * 600-token window still has 84 tokens for a smaller one — and telling it
+ * `0` would stop it sending the requests that would still be served.
+ */
+export function remainingInWindow(state: WindowState, limit: number): number {
+  return saturatingSub(limit, state.used);
+}
+
+/**
  * Requests-per-minute window. Rust `ApiKeyRequestWindow`.
  *
  * `limit == 0` rejects every request (`count >= 0` is immediately true), which

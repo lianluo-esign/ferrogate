@@ -72,10 +72,13 @@ const OPENAI_THROTTLE_HEADERS: Record<string, string> = {
 };
 
 function throttled(): Response {
-  return new Response(JSON.stringify({ error: { message: "slow down", type: "rate_limit_error" } }), {
-    status: 429,
-    headers: OPENAI_THROTTLE_HEADERS,
-  });
+  return new Response(
+    JSON.stringify({ error: { message: "slow down", type: "rate_limit_error" } }),
+    {
+      status: 429,
+      headers: OPENAI_THROTTLE_HEADERS,
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +178,7 @@ describe("a provider 429 reaches the client with its pacing headers intact", () 
       expect(res.headers.get("anthropic-ratelimit-requests-limit")).toBe("1000");
       expect(res.headers.get("anthropic-ratelimit-requests-remaining")).toBe("998");
       expect(res.headers.get("anthropic-ratelimit-tokens-remaining")).toBe("39500");
-      expect(res.headers.get("anthropic-ratelimit-requests-reset")).toBe(
-        "2026-08-02T12:00:00Z",
-      );
+      expect(res.headers.get("anthropic-ratelimit-requests-reset")).toBe("2026-08-02T12:00:00Z");
     } finally {
       provider.restore();
     }
@@ -348,10 +349,7 @@ describe("a failover suppresses the upstream numbers instead of misreporting the
       const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
       expect(attempts).toBe(2);
-      expect(provider.requests.map((request) => providerOf(request.url))).toEqual([
-        "solo",
-        "solo",
-      ]);
+      expect(provider.requests.map((request) => providerOf(request.url))).toEqual(["solo", "solo"]);
       expect(res.headers.get("retry-after")).toBe("7");
       expect(res.headers.get("x-ferrogate-ratelimit-relay")).toBeNull();
     } finally {
