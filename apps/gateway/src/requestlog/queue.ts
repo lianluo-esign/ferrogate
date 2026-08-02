@@ -1,3 +1,4 @@
+import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
 /**
  * The CONSUMER half of the request-log queue — `export default { queue }` on
  * `src/worker.ts`.
@@ -32,7 +33,11 @@
  * none of it does. On failure the batch is retried whole — with the upsert, the
  * messages that had already landed are simply re-applied.
  */
-import { type RequestLogDatabase, writeRequestLogs } from "./d1.js";
+import {
+  type GuardrailEvidenceEnvelope,
+  guardrailEvidenceFromWire,
+} from "../guardrails/evidence-wire.js";
+import { REQUEST_LOG_UPSERT_SQL, type RequestLogDatabase, requestLogBindings } from "./d1.js";
 import { requestLogFromWire } from "./record.js";
 import { requestLogDatabaseFrom } from "./sink.js";
 
@@ -67,8 +72,19 @@ export async function consumeRequestLogBatch(
   databaseOf: (env: unknown) => RequestLogDatabase | undefined = requestLogDatabaseFrom,
 ): Promise<RequestLogConsumeResult> {
   const records = [];
+  const evidence: GuardrailEvidenceEnvelope[] = [];
   let malformed = 0;
   for (const message of batch.messages) {
+    // GUARDRAIL EVIDENCE IS TRIED FIRST, and the order is load-bearing (#665).
+    // `requestLogFromWire` is permissive — it fills defaults for every field it
+    // cannot find — so handing it a guardrail message would not fail, it would
+    // succeed and write a plausible, wrong `request_logs` row. Discriminating
+    // on `object` BEFORE decoding is what stops that.
+    const envelope = guardrailEvidenceFromWire(message.body);
+    if (envelope !== undefined) {
+      evidence.push(envelope);
+      continue;
+    }
     const record = requestLogFromWire(message.body);
     if (record === undefined) {
       malformed += 1;
@@ -80,7 +96,7 @@ export async function consumeRequestLogBatch(
     records.push(record);
   }
 
-  if (records.length === 0) {
+  if (records.length === 0 && evidence.length === 0) {
     return { written: 0, malformed, retried: false };
   }
 
@@ -93,9 +109,20 @@ export async function consumeRequestLogBatch(
     return { written: 0, malformed, retried: true };
   }
 
+  // ONE batch for BOTH kinds, because a mixed delivery must land or not land as
+  // a unit: writing the request log and then failing on the evidence would give
+  // an auditor a decision with no screening record attached, which reads as "no
+  // guardrail ran". D1 applies a batch in order and both upserts are
+  // idempotent, so a `retryAll()` re-applies the whole delivery safely.
+  const requestLogStatement = db.prepare(REQUEST_LOG_UPSERT_SQL);
+  const statements = [
+    ...records.map((record) => requestLogStatement.bind(...requestLogBindings(record))),
+    ...guardrailEvidenceStatements(db, evidence),
+  ];
+
   try {
-    await writeRequestLogs(db, records);
-    return { written: records.length, malformed, retried: false };
+    await db.batch(statements);
+    return { written: records.length + evidence.length, malformed, retried: false };
   } catch {
     batch.retryAll?.();
     return { written: 0, malformed, retried: true };

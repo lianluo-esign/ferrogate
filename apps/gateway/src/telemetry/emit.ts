@@ -313,7 +313,7 @@ export function spanFor(
  * `genAiInvocations` carries at most ONE entry — this is a per-request
  * snapshot, not an accumulator — and is empty for every request that reached no
  * model. The `ferrogate.*` counters are unaffected by the profile: they are the
- * request/status series the gateway has always published for all 31 operations,
+ * request/status series the gateway has always published for all 33 operations,
  * not the AI-specific half #669 is about, and suppressing them for a deployment
  * that opted into `genai` would take out its HTTP error-rate panel too.
  */
@@ -357,7 +357,7 @@ async function send(service: TelemetryService | undefined, built: OtlpHttpReques
  *
  * The `WeakSet` keyed on the inbound `Request` makes a second call for the same
  * request a no-op. That is not defensive coding: this is mounted today inside
- * `inference/route-module.ts` (the seven inference operations), and the
+ * `inference/route-module.ts` (the eight inference operations), and the
  * integrate step is expected to ALSO mount it app-wide in `GATEWAY_MIDDLEWARE`
  * so the other 25 operations are covered — see the WIRING block in
  * `./index.ts`. Without the guard that second mount would double every

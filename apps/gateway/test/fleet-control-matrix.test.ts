@@ -1139,6 +1139,38 @@ describe("§4 fleet-wide ratchets", () => {
       // JSONL export. If a second Worker ever grows a `request_logs` READ, that
       // fence becomes a fleet property and this entry must move into CONTROLS.
       "request_logs",
+      // #665 — guardrail screening evidence, newly SHARED on exactly the same
+      // terms as `request_logs` above (written by
+      // `apps/gateway/src/guardrails/`, read by
+      // `apps/control-plane/src/routes/admin_request_log.ts`) and classified
+      // the same way: they record what SCREENING DECIDED, and nothing consults
+      // them before deciding anything. The control here is the guardrail
+      // POLICY, which is a different pair of tables
+      // (`guardrail_policy_revisions` / `guardrail_policy_bindings`) and is
+      // registered in §3.
+      //
+      // Answering this ratchet's question explicitly — "does a change to these
+      // apply to both Workers?" — yes, and the schema enforces it rather than a
+      // registry entry: both Workers name the columns of
+      // `sql/d1-ts/control/0004_guardrail_evaluations.sql`, both suites apply
+      // the deployed migration rather than a fixture, and a column rename
+      // breaks `apps/gateway/test/guardrails/evidence-write.test.ts` and
+      // `apps/control-plane/test/guardrail-evidence-read.test.ts` together.
+      //
+      // The tenant FENCE on these tables is not shared — only the control plane
+      // serves the read, and `guardrail-evidence-read.test.ts` proves it from
+      // both tenants' sides and from the investigation view. If a second Worker
+      // ever grows a guardrail-evidence READ, that fence becomes a fleet
+      // property and these entries move into CONTROLS.
+      "guardrail_evaluations",
+      "guardrail_check_evaluations",
+      // Settled metering events. Already written by the gateway; newly READ by
+      // the control plane because `getGuardrailInvestigation` answers the COST
+      // leg of who/why/target/action/cost (#665). A ledger of what was billed,
+      // not a control — the control on spend is the admission ladder, which is
+      // registered as `admission`, and this table is only ever reached for a
+      // request the caller has already been fenced onto.
+      "billing_events",
       // Money the admission ladder reads; the CONTROL is the ladder, which is
       // registered as `admission`.
       "wallets",

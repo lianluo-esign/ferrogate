@@ -15,7 +15,13 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import type { StoreRecord } from "../src/ports.js";
-import { AUDIT_TABLE, REQUEST_LOG_TABLE, RESOURCE_TABLE } from "../src/store/d1.js";
+import {
+  AUDIT_TABLE,
+  GUARDRAIL_CHECK_TABLE,
+  GUARDRAIL_EVALUATION_TABLE,
+  REQUEST_LOG_TABLE,
+  RESOURCE_TABLE,
+} from "../src/store/d1.js";
 
 interface D1TestBindings {
   readonly DB: D1Database;
@@ -52,7 +58,167 @@ export async function resetD1(): Promise<void> {
     db().prepare(`DELETE FROM ${RESOURCE_TABLE}`),
     db().prepare(`DELETE FROM ${AUDIT_TABLE}`),
     db().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
+    // Children first: `guardrail_check_evaluations` has a foreign key onto the
+    // evaluation, so deleting the parents first would fail on a database with
+    // enforcement on. D1 runs a batch in order, so the order here is the
+    // guarantee.
+    db().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`),
+    db().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`),
   ]);
+}
+
+/**
+ * One `guardrail_evaluations` row plus its child checks, in the shape the
+ * gateway's writer produces (#665).
+ *
+ * The same cross-Worker-seam fixture argument {@link RequestLogSeed} makes
+ * applies here: `apps/gateway` owns the writer and cannot be driven from this
+ * suite, so what these fixtures hold is that the READER returns what the tables
+ * hold and fences it by tenant. The end-to-end "a real blocked request produces
+ * this row, and its excerpt carries no secret" proof lives in
+ * `apps/gateway/test/guardrails/evidence-write.test.ts`.
+ */
+export interface GuardrailCheckSeed {
+  readonly id: string;
+  readonly checkId: string;
+  readonly detectorId: string;
+  readonly detectorVersion: string;
+  readonly configDigest: string;
+  readonly verdict: string;
+  readonly action: string;
+  readonly enforcementStatus: string;
+  readonly errorKind?: string | null;
+  readonly document?: Record<string, unknown>;
+}
+
+export interface GuardrailEvaluationSeed {
+  readonly id: string;
+  readonly requestId: string;
+  readonly traceId?: string | null;
+  readonly agentRunId?: string | null;
+  readonly subjectId?: string | null;
+  readonly tenant?: string | null;
+  readonly scopeType?: string;
+  readonly scopeId?: string | null;
+  readonly target?: string;
+  readonly protocol?: string;
+  readonly stage?: string;
+  readonly mode?: string;
+  readonly policyId?: string;
+  readonly policyRevision?: number;
+  readonly verdict?: string;
+  readonly action?: string;
+  readonly enforcementStatus?: string;
+  readonly latencyMs?: number;
+  readonly findingCount?: number;
+  readonly inputFingerprint?: string;
+  readonly actionFingerprint?: string | null;
+  readonly occurredAtUnix: number;
+  readonly document?: Record<string, unknown>;
+  readonly checks?: readonly GuardrailCheckSeed[];
+}
+
+/** Seed the two evidence tables with raw SQL — see {@link GuardrailEvaluationSeed}. */
+export async function seedGuardrailEvaluations(
+  rows: readonly GuardrailEvaluationSeed[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  const statements = [];
+  for (const row of rows) {
+    statements.push(
+      db()
+        .prepare(
+          `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE}
+             (id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id,
+              target, protocol, stage, mode, policy_id, policy_revision, verdict, action,
+              enforcement_status, latency_ms, finding_count, input_fingerprint,
+              action_fingerprint, occurred_at_unix, evaluation_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.id,
+          row.requestId,
+          row.traceId ?? null,
+          row.agentRunId ?? null,
+          row.subjectId ?? null,
+          row.tenant ?? null,
+          row.scopeType ?? "organization",
+          row.scopeId ?? null,
+          row.target ?? "unspecified",
+          row.protocol ?? "chat_completions",
+          row.stage ?? "request",
+          row.mode ?? "enforce",
+          row.policyId ?? "policy",
+          row.policyRevision ?? 1,
+          row.verdict ?? "fail",
+          row.action ?? "block",
+          row.enforcementStatus ?? "enforced",
+          row.latencyMs ?? 0,
+          row.findingCount ?? 0,
+          row.inputFingerprint ?? "hmac-sha256:unavailable",
+          row.actionFingerprint ?? null,
+          row.occurredAtUnix,
+          JSON.stringify(row.document ?? {}),
+        ),
+    );
+    for (const check of row.checks ?? []) {
+      statements.push(
+        db()
+          .prepare(
+            `INSERT INTO ${GUARDRAIL_CHECK_TABLE}
+               (id, evaluation_id, check_id, detector_id, detector_version, config_digest,
+                verdict, action, enforcement_status, error_kind, check_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            check.id,
+            row.id,
+            check.checkId,
+            check.detectorId,
+            check.detectorVersion,
+            check.configDigest,
+            check.verdict,
+            check.action,
+            check.enforcementStatus,
+            check.errorKind ?? null,
+            JSON.stringify(check.document ?? {}),
+          ),
+      );
+    }
+  }
+  await db().batch(statements);
+}
+
+/** One `audit_events` row, for the investigation join. */
+export interface AuditEventSeed {
+  readonly id: string;
+  readonly requestId: string;
+  readonly agentRunId?: string | null;
+  readonly tenant?: string | null;
+  readonly occurredAtUnix: number;
+  readonly audit?: Record<string, unknown>;
+}
+
+export async function seedAuditEvents(rows: readonly AuditEventSeed[]): Promise<void> {
+  if (rows.length === 0) return;
+  await db().batch(
+    rows.map((row) =>
+      db()
+        .prepare(
+          `INSERT INTO ${AUDIT_TABLE}
+             (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.id,
+          row.requestId,
+          row.agentRunId ?? null,
+          row.tenant ?? null,
+          row.occurredAtUnix,
+          JSON.stringify(row.audit ?? {}),
+        ),
+    ),
+  );
 }
 
 /**

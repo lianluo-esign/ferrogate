@@ -5,18 +5,18 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 264
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 265
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
- * the 31 operations this Worker owns.
+ * the 33 operations this Worker owns.
  *
  * The inference (6 ops) and asset (18 ops) handlers arrive as `RouteModule`s
  * from their own directories and are mounted in `GATEWAY_ROUTE_MODULES` below;
  * they need no change to the router, the guard, or the contract table.
  */
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
-import { guardrailDepsFromEnv, guardrails } from "./guardrails/index.js";
+import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
   dispatcherFromEnv,
@@ -118,7 +118,7 @@ const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
  * the deployed data plane serves. `test/contract.test.ts` imports this exact
- * array (never a bespoke copy) and asserts all 31 gateway-owned operation ids
+ * array (never a bespoke copy) and asserts all 33 gateway-owned operation ids
  * are registered, so a module dropped from this list fails the suite.
  *
  * The inference module is wired to the REAL data plane here:
@@ -190,7 +190,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * including paid provider calls — on requests that were never admitted.
  *
  * `createGatewayApp` mounts these after the auth guard and before every route,
- * so all 31 gateway operations are covered (see `CreateGatewayAppOptions`).
+ * so all 33 gateway operations are covered (see `CreateGatewayAppOptions`).
  *
  * ## The two PRE-AUTH ingress steps are NOT in this array — by construction
  *
@@ -253,11 +253,11 @@ export const GATEWAY_MIDDLEWARE = [
   // layer in: `meteringDrain` returns the same `Response` object it received,
   // so the status this emitter records is the client's.
   //
-  // `src/inference/route-module.ts` ALSO emits, so the seven inference
+  // `src/inference/route-module.ts` ALSO emits, so the eight inference
   // operations pass through two emitters; `emitRequestTelemetry` de-duplicates
   // on the inbound `Request` object, so they still produce exactly one span
   // and one metric point. Mounting here is what widens the coverage from those
-  // six to all 31 gateway operations.
+  // six to all 33 gateway operations.
   //
   // Inert until `TELEMETRY_TOKEN` is set (a secret, never a committed var):
   // `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a no-op.
@@ -379,7 +379,14 @@ export async function gatewayScheduled(
 async function gatewayRequestLogRetention(env: unknown): Promise<void> {
   const db = requestLogDatabaseFrom(env);
   if (db === undefined) return;
-  await sweepRequestLogs(db, env, Math.floor(Date.now() / 1000));
+  const nowUnix = Math.floor(Date.now() / 1000);
+  await sweepRequestLogs(db, env, nowUnix);
+  // Guardrail screening evidence (#665) is swept on the SAME tick, with the
+  // SAME policy, against the same database. Deliberately not a separate
+  // retention window: a request log whose screening evidence has been deleted
+  // (or the reverse) makes the investigation view able to half-answer, which is
+  // the failure #665 exists to fix. See `guardrails/evidence-retention.ts`.
+  await sweepGuardrailEvidence(db, env, nowUnix);
 }
 
 /**
@@ -391,10 +398,7 @@ async function gatewayRequestLogRetention(env: unknown): Promise<void> {
  * silently accepted as a service entrypoint and the queue would fill and
  * dead-letter with nothing consuming it.
  */
-export async function gatewayQueue(
-  batch: RequestLogMessageBatch,
-  env: unknown,
-): Promise<void> {
+export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown): Promise<void> {
   await consumeRequestLogBatch(batch, env);
 }
 

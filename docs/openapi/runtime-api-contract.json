@@ -47,6 +47,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/models/{model}",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/chat/completions",
       "group": "inference"
     },
@@ -2171,6 +2175,17 @@
       "path": "/v1/models",
       "method": "get",
       "operation_id": "listModels",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "models.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/models/{model}",
+      "method": "get",
+      "operation_id": "getModel",
       "visibility": "public",
       "auth": {
         "kind": "bearer",

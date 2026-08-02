@@ -41,6 +41,10 @@ describe("guardrail operation bindings match the contract", () => {
     // missing is a hole.
     //
     //  - `listModels` carries no model content at all.
+    //  - `getModel` (issue #670) is the single-model CATALOGUE read: no request
+    //    body, no model-generated text, nothing for a guardrail to screen. It
+    //    is spelled out rather than matched by a `*Model*` prefix so a fourth
+    //    unscreened operation still has to be argued for here.
     //  - `countMessageTokens` (issue #671) carries model content but NEVER
     //    reaches a provider: it answers `{input_tokens}` from the local
     //    estimator and dispatches nothing. This entry was added deliberately
@@ -56,7 +60,7 @@ describe("guardrail operation bindings match the contract", () => {
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened.sort()).toEqual(["countMessageTokens", "listModels"]);
+    expect(unscreened.sort()).toEqual(["countMessageTokens", "getModel", "listModels"]);
   });
 
   test("only chat/responses/messages screen the RESPONSE stage", () => {

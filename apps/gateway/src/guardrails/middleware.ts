@@ -60,6 +60,7 @@ import type {
   GuardrailAuditSink,
   GuardrailEngineDeps,
   GuardrailEvaluationContext,
+  GuardrailEvidenceSink,
   GuardrailMatch,
   GuardrailTenant,
 } from "./ports.js";
@@ -179,6 +180,66 @@ function recordGuardrailVerdict(
   });
 }
 
+/**
+ * Schedule the durable evidence write, OFF the hot path (#665).
+ *
+ * The engine's `evidence.append` is synchronous and buffers; this is where the
+ * buffer actually reaches D1 or the Queue. It is called from a `finally`, so
+ * every exit of the middleware — a 403 block, a pass-through, a thrown error —
+ * lands its evidence, and it is called again when a screened SSE body finishes,
+ * because a stream's evidence is decided long after the middleware returned.
+ *
+ * Returns a NO-OP for a sink with no `flush` (the in-memory sink), so the
+ * offline/local path is unchanged.
+ *
+ * `ctx.waitUntil` keeps the invocation alive until the write lands. Hono throws
+ * from `executionCtx` when there is none (a plain `app.fetch(request, env)` in
+ * a unit test); the write is already in flight by then and settles on its own,
+ * so that case is caught and ignored rather than turned into a request failure.
+ * A guardrail that returned 500 because its evidence queue was busy would have
+ * turned a compliance feature into an outage.
+ */
+function evidenceFlusher(c: Context, evidence: GuardrailEvidenceSink, env: unknown): () => void {
+  if (typeof evidence.flush !== "function") return () => {};
+  const flush = evidence.flush.bind(evidence);
+  return () => {
+    const work = flush({ env });
+    try {
+      c.executionCtx.waitUntil(work);
+    } catch {
+      // No ExecutionContext on this invocation — see the docblock.
+    }
+  };
+}
+
+/**
+ * Re-run `flush` when a screened SSE body ends.
+ *
+ * `stream.ts` evaluates once per frame, so the row that records what a stream
+ * actually decided is appended AFTER the middleware's own `finally` has already
+ * run. Without this the last (and only interesting) evidence for every streamed
+ * request would sit in the buffer until some later request happened to flush
+ * it — or be lost with the isolate.
+ *
+ * An identity `transform` with a `flush` hook is the cheapest way to observe
+ * end-of-stream: it copies no bytes and adds no buffering, and `flush` fires on
+ * normal completion. A cancelled stream (the client hung up) does not reach it,
+ * which is correct — the invocation is being torn down and `waitUntil` on a
+ * dead context would throw.
+ */
+function flushWhenStreamEnds(body: ReadableStream, onEnd: () => void): ReadableStream {
+  return body.pipeThrough(
+    new TransformStream({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+      },
+      flush() {
+        onEnd();
+      },
+    }),
+  );
+}
+
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
@@ -261,166 +322,208 @@ export function guardrails(
 
     const env = (c.env ?? {}) as Record<string, unknown>;
     const [options, engine] = await resolve(env);
+    // Buffered evidence reaches D1/the Queue here, never on the hot path.
+    // `finally` so a 403 block, a pass-through and a thrown error all land it.
+    const flushEvidence = evidenceFlusher(c, options.evidence, env);
     const requestId = (c.get("requestId") as string | undefined) ?? "";
-    const tenant = tenantFrom(c);
+    try {
+      const tenant = tenantFrom(c);
 
-    const body = await readJsonBodyBounded(
-      c.req.raw,
-      options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES,
-    );
-    if (body === undefined) {
-      // Not JSON, or over the cap: the downstream reader owns the 400/413. A
-      // guardrail cannot screen what it cannot parse, and inventing a verdict
-      // here would shadow the correct error code.
-      return next();
-    }
+      const body = await readJsonBodyBounded(
+        c.req.raw,
+        options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES,
+      );
+      if (body === undefined) {
+        // Not JSON, or over the cap: the downstream reader owns the 400/413. A
+        // guardrail cannot screen what it cannot parse, and inventing a verdict
+        // here would shadow the correct error code.
+        return next();
+      }
 
-    const model = typeof body.model === "string" ? body.model : undefined;
-    const provider = model !== undefined ? options.providerForModel?.(model, env) : undefined;
-    const streaming = body.stream === true;
+      const model = typeof body.model === "string" ? body.model : undefined;
+      const provider = model !== undefined ? options.providerForModel?.(model, env) : undefined;
+      const streaming = body.stream === true;
 
-    const screenedBody =
-      operationId === "createMessage" && options.translateAnthropicRequest !== undefined
-        ? (options.translateAnthropicRequest(body) ?? body)
-        : body;
+      const screenedBody =
+        operationId === "createMessage" && options.translateAnthropicRequest !== undefined
+          ? (options.translateAnthropicRequest(body) ?? body)
+          : body;
 
-    const context: GuardrailEvaluationContext = {
-      requestId,
-      tenant,
-      ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
-      ...(model !== undefined ? { model } : {}),
-      ...(provider !== undefined ? { provider } : {}),
-      streaming,
-      envelope: normalizeRequest(binding.protocol, screenedBody),
-    };
+      const context: GuardrailEvaluationContext = {
+        requestId,
+        tenant,
+        ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(provider !== undefined ? { provider } : {}),
+        streaming,
+        envelope: normalizeRequest(binding.protocol, screenedBody),
+      };
 
-    // ---- INPUT screening -------------------------------------------------
-    const requestMatch = await engine.matchGuardrail("request", context);
-    if (requestMatch !== null) {
-      await auditBlock(options.audit, context, requestMatch, "request");
-      recordGuardrailVerdict(c, "blocked", requestMatch);
-      // Any match — deny OR redact — refuses. See the module doc.
-      return guardrailBlockedResponse(requestMatch, requestId);
-    }
-    // Screening RAN and passed. The request log distinguishes this from
-    // `not_screened` (#664): the early `return next()` paths above — an
-    // operation no policy binds, a body that could not be parsed — leave the
-    // verdict unset, and recording those as "allowed" would tell an auditor a
-    // control ran when none did.
-    recordGuardrailVerdict(c, "allowed");
+      // ---- INPUT screening -------------------------------------------------
+      const requestMatch = await engine.matchGuardrail("request", context);
+      if (requestMatch !== null) {
+        await auditBlock(options.audit, context, requestMatch, "request");
+        recordGuardrailVerdict(c, "blocked", requestMatch);
+        // Any match — deny OR redact — refuses. See the module doc.
+        return guardrailBlockedResponse(requestMatch, requestId);
+      }
+      // Screening RAN and passed. The request log distinguishes this from
+      // `not_screened` (#664): the early `return next()` paths above — an
+      // operation no policy binds, a body that could not be parsed — leave the
+      // verdict unset, and recording those as "allowed" would tell an auditor a
+      // control ran when none did.
+      recordGuardrailVerdict(c, "allowed");
 
-    // A `reject_streaming` policy denies a streaming request before dispatch;
-    // `matchGuardrail` above already produced that verdict, so by here the plan
-    // only distinguishes enforcement from shadow.
-    const plan = engine.streamingGuardrailPlan(context);
+      // A `reject_streaming` policy denies a streaming request before dispatch;
+      // `matchGuardrail` above already produced that verdict, so by here the plan
+      // only distinguishes enforcement from shadow.
+      const plan = engine.streamingGuardrailPlan(context);
 
-    await next();
+      await next();
 
-    // ---- OUTPUT screening ------------------------------------------------
-    const response = c.res;
-    if (!binding.screensResponse || response === undefined || response.body === null) {
-      return;
-    }
-    if (response.status >= 400) {
-      // A provider/gateway error body is not model content; the Rust screened
-      // the response only on the success path.
-      return;
-    }
+      // The inference route REPLACES the request id
+      // (`inference/handlers.ts:1190`), and from here on the client's id is the
+      // join key: it is what `x-request-id` carries and what `request_logs`
+      // records. The request-stage evidence already buffered is re-keyed onto
+      // it, and the response-stage evidence below is built with it. Without
+      // this, `GET /admin/v1/investigations?request_id=<the id the client was
+      // told>` would find the request log and NOT the screening that produced
+      // it — i.e. would report that a screened request was never screened.
+      // See `GuardrailEvidenceSink.recorrelate`.
+      //
+      // It is read off the RESPONSE HEADER, not off `c.get("requestId")`,
+      // because the inference router runs in a SEPARATE Hono app
+      // (`route-module.ts` delegates with `inner.fetch(c.req.raw, …)`) and its
+      // `c.set(...)` is invisible out here — the same isolation
+      // `requestlog/facts.ts` exists to bridge. The header is what the client
+      // was actually told, which is the definition of the join key.
+      const settledRequestId =
+        c.res?.headers.get("x-request-id") ??
+        (c.get("requestId") as string | undefined) ??
+        requestId;
+      options.evidence.recorrelate?.(requestId, settledRequestId);
+      const settledContext: GuardrailEvaluationContext = {
+        ...context,
+        requestId: settledRequestId,
+      };
 
-    const contentType = response.headers.get("content-type") ?? "";
-    const isSse = contentType.includes("text/event-stream");
-
-    if (isSse) {
-      if (plan === "none") {
+      // ---- OUTPUT screening ------------------------------------------------
+      const response = c.res;
+      if (!binding.screensResponse || response === undefined || response.body === null) {
         return;
       }
-      if (plan === "shadow_after_complete") {
-        // Pass through untouched; the engine records `not_enforced` evidence.
-        //
-        // PORT-TODO(L: inventory-request-path §streaming shadow): a DELIBERATE
-        // approximation, and the difference is observable in evidence only.
-        // The Rust captured the whole streamed body and evaluated it ONCE at
-        // completion. Reproducing that literally would mean buffering an SSE
-        // response in a Worker — unbounded memory on a 128 MiB isolate, and the
-        // first-token latency this whole port exists to preserve — so
-        // `shadow_after_complete` here reuses the INCREMENTAL screener with
-        // enforcement suppressed by `effectiveShadow`.
-        //
-        // What is identical: the bytes the client receives (untouched, in the
-        // same order, at the same time) and the enforcement decision (none —
-        // shadow never blocks). What differs: the evidence row is decided from
-        // the frame that first matched rather than from the assembled document,
-        // so a finding that only exists ACROSS a frame boundary is not seen.
-        // Evidence is UPSERTED by evaluation id (`evidence.ts`), so a shadow
-        // stream still produces exactly ONE row per policy, not one per frame.
+      if (response.status >= 400) {
+        // A provider/gateway error body is not model content; the Rust screened
+        // the response only on the success path.
+        return;
+      }
+
+      const contentType = response.headers.get("content-type") ?? "";
+      const isSse = contentType.includes("text/event-stream");
+
+      if (isSse) {
+        if (plan === "none") {
+          return;
+        }
+        if (plan === "shadow_after_complete") {
+          // Pass through untouched; the engine records `not_enforced` evidence.
+          //
+          // PORT-TODO(L: inventory-request-path §streaming shadow): a DELIBERATE
+          // approximation, and the difference is observable in evidence only.
+          // The Rust captured the whole streamed body and evaluated it ONCE at
+          // completion. Reproducing that literally would mean buffering an SSE
+          // response in a Worker — unbounded memory on a 128 MiB isolate, and the
+          // first-token latency this whole port exists to preserve — so
+          // `shadow_after_complete` here reuses the INCREMENTAL screener with
+          // enforcement suppressed by `effectiveShadow`.
+          //
+          // What is identical: the bytes the client receives (untouched, in the
+          // same order, at the same time) and the enforcement decision (none —
+          // shadow never blocks). What differs: the evidence row is decided from
+          // the frame that first matched rather than from the assembled document,
+          // so a finding that only exists ACROSS a frame boundary is not seen.
+          // Evidence is UPSERTED by evaluation id (`evidence.ts`), so a shadow
+          // stream still produces exactly ONE row per policy, not one per frame.
+          c.res = new Response(
+            // A stream's evidence is appended per FRAME, long after this
+            // middleware's own `finally` has run — so the flush is re-armed on
+            // end-of-body. See {@link flushWhenStreamEnds}.
+            flushWhenStreamEnds(
+              screenSseBody(response.body, {
+                engine,
+                context: { ...settledContext, streaming: true },
+                dialect: binding.dialect,
+                protocol: binding.protocol,
+                requestId: settledRequestId,
+              }),
+              flushEvidence,
+            ),
+            response,
+          );
+          return;
+        }
         c.res = new Response(
-          screenSseBody(response.body, {
-            engine,
-            context: { ...context, streaming: true },
-            dialect: binding.dialect,
-            protocol: binding.protocol,
-            requestId,
-          }),
+          flushWhenStreamEnds(
+            screenSseBody(response.body, {
+              engine,
+              context: { ...settledContext, streaming: true },
+              dialect: binding.dialect,
+              protocol: binding.protocol,
+              requestId: settledRequestId,
+              onOutcome: (outcome) => {
+                if (outcome.kind === "blocked") {
+                  void auditBlock(options.audit, context, outcome.match, "response.stream");
+                  // Mid-stream block. The request log is written when the body
+                  // settles (`requestlog/middleware.ts`), so this lands in time.
+                  recordGuardrailVerdict(c, "blocked", outcome.match);
+                }
+              },
+            }),
+            flushEvidence,
+          ),
           response,
         );
         return;
       }
-      c.res = new Response(
-        screenSseBody(response.body, {
-          engine,
-          context: { ...context, streaming: true },
-          dialect: binding.dialect,
-          protocol: binding.protocol,
-          requestId,
-          onOutcome: (outcome) => {
-            if (outcome.kind === "blocked") {
-              void auditBlock(options.audit, context, outcome.match, "response.stream");
-              // Mid-stream block. The request log is written when the body
-              // settles (`requestlog/middleware.ts`), so this lands in time.
-              recordGuardrailVerdict(c, "blocked", outcome.match);
-            }
-          },
-        }),
-        response,
-      );
-      return;
-    }
 
-    // Non-streaming response.
-    const raw = await readBytesBounded(
-      response,
-      options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
-    );
-    if (raw === undefined) {
-      await engine.recordStreamCaptureOverflow({ ...context, streaming: false });
-      return;
+      // Non-streaming response.
+      const raw = await readBytesBounded(
+        response,
+        options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+      );
+      if (raw === undefined) {
+        await engine.recordStreamCaptureOverflow({ ...settledContext, streaming: false });
+        return;
+      }
+      const responseContext: GuardrailEvaluationContext = {
+        ...settledContext,
+        streaming: false,
+        envelope: normalizeResponse(binding.protocol, raw, false),
+      };
+      const responseMatch = await engine.matchGuardrail("response", responseContext);
+      if (responseMatch === null) {
+        c.res = new Response(raw, response);
+        return;
+      }
+      if (responseMatch.effect === "deny") {
+        await auditBlock(options.audit, responseContext, responseMatch, "response");
+        recordGuardrailVerdict(c, "blocked", responseMatch);
+        c.res = guardrailBlockedResponse(responseMatch, settledRequestId);
+        return;
+      }
+      const redacted = redactText(responseMatch, new TextDecoder().decode(raw));
+      await options.audit?.record({
+        requestId: settledRequestId,
+        tenant,
+        action: "guardrail.redact",
+        target: evidenceTarget(responseMatch),
+        outcome: "redacted",
+        message: `guardrail ${responseMatch.ruleName} redacted response at ${evidenceLocation(responseMatch)}`,
+      });
+      c.res = new Response(redacted, response);
+    } finally {
+      flushEvidence();
     }
-    const responseContext: GuardrailEvaluationContext = {
-      ...context,
-      streaming: false,
-      envelope: normalizeResponse(binding.protocol, raw, false),
-    };
-    const responseMatch = await engine.matchGuardrail("response", responseContext);
-    if (responseMatch === null) {
-      c.res = new Response(raw, response);
-      return;
-    }
-    if (responseMatch.effect === "deny") {
-      await auditBlock(options.audit, responseContext, responseMatch, "response");
-      recordGuardrailVerdict(c, "blocked", responseMatch);
-      c.res = guardrailBlockedResponse(responseMatch, requestId);
-      return;
-    }
-    const redacted = redactText(responseMatch, new TextDecoder().decode(raw));
-    await options.audit?.record({
-      requestId,
-      tenant,
-      action: "guardrail.redact",
-      target: evidenceTarget(responseMatch),
-      outcome: "redacted",
-      message: `guardrail ${responseMatch.ruleName} redacted response at ${evidenceLocation(responseMatch)}`,
-    });
-    c.res = new Response(redacted, response);
   };
 }
 

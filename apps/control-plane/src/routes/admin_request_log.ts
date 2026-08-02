@@ -8,9 +8,15 @@
  * `getGuardrailInvestigation`) — that second gate is applied by the table-driven
  * auth middleware from the contract, so it is not repeated here.
  */
+import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { adminListPaginated, parseListQuery } from "../responses.js";
-import { AUDIT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
+import {
+  AUDIT_TABLE,
+  GUARDRAIL_CHECK_TABLE,
+  GUARDRAIL_EVALUATION_TABLE,
+  REQUEST_LOG_TABLE,
+} from "../store/d1.js";
 import {
   type GroupModule,
   type Handler,
@@ -385,12 +391,7 @@ function listRequestLogsHandler(): Handler {
     return json(
       c,
       200,
-      adminListPaginated(
-        page.rows.map(requestLogDocument),
-        page.total,
-        query.offset,
-        query.limit,
-      ),
+      adminListPaginated(page.rows.map(requestLogDocument), page.total, query.offset, query.limit),
     );
   };
 }
@@ -436,9 +437,7 @@ function exportRequestLogsHandler(): Handler {
     const records =
       db === null
         ? (await deps.store.list("request-log-exports", scope, query)).items
-        : (await requestLogPage(db, scope, query.limit, query.offset)).rows.map(
-            requestLogDocument,
-          );
+        : (await requestLogPage(db, scope, query.limit, query.offset)).rows.map(requestLogDocument);
 
     const body = records.map((record) => JSON.stringify(record)).join("\n");
     return raw(
@@ -456,22 +455,580 @@ function exportRequestLogsHandler(): Handler {
   };
 }
 
+// ---------------------------------------------------------------------------
+// `guardrail_evaluations` / `guardrail_check_evaluations` — screening evidence
+// (#665)
+// ---------------------------------------------------------------------------
+
 /**
- * PORT-TODO(P: inventory-edge-control §9.3 evidence) — KEPT, narrowed twice:
- * the `audit-events` leg is CLOSED (see {@link listAuditEventsHandler}) and so
- * are `request-logs` / `request-log-exports` (#664, see
- * {@link listRequestLogsHandler}). The remaining two still read document
- * collections that nothing in the tree writes, so each answers an empty
- * `AdminList` on every deployment:
+ * The tenant fence for `guardrail_evaluations`.
  *
- *   - `guardrail-evaluations` / `investigations` — one step worse than the
- *     request-log case was: `guardrail_evaluations` /
- *     `guardrail_check_evaluations` **do not exist in `sql/d1-ts/` at all**
- *     (readiness §2.4), so guardrail evidence is in-memory-only fleet-wide.
- *     Closing this needs a migration first — `wrangler.toml`'s
- *     `migrations_dir` and `vitest.config.ts` read the same directory, so the
- *     shape of the fix is the one #664 used: land the migration, the writer and
- *     the reader together, never the reader alone.
+ * Third statement of the same predicate, and stated separately for the reason
+ * {@link requestLogTenantFence} gives: the three tables' `tenant` columns are
+ * independent facts, and folding them into one helper would make a later
+ * divergence in any of them look like a typo rather than a decision.
+ *
+ * STRICT equality, so a `NULL` tenant matches nobody. An evaluation with no
+ * tenant screened a platform-operator (or anonymous) call; handing those to a
+ * tenant would tell it which models the operator calls and what its own
+ * detectors flag. `test/guardrail-evidence-read.test.ts` proves this from BOTH
+ * tenants' sides and from the investigation view, whose leak would be worse
+ * still: the investigation joins identity, route and cost.
+ */
+function guardrailTenantFence(
+  scope: CallerScope,
+  alias = GUARDRAIL_EVALUATION_TABLE,
+): { sql: string; params: string[] } {
+  if (scope.kind === "platform_operator") return { sql: "", params: [] };
+  return { sql: `${alias}.tenant = ?`, params: [scope.tenantId] };
+}
+
+const GUARDRAIL_EVALUATION_COLUMNS =
+  "id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id, " +
+  "target, protocol, stage, mode, policy_id, policy_revision, verdict, action, " +
+  "enforcement_status, latency_ms, finding_count, input_fingerprint, action_fingerprint, " +
+  "occurred_at_unix, evaluation_json";
+
+/**
+ * `ORDER BY occurred_at_unix DESC, id ASC` — newest first, like the request log
+ * and unlike the audit trail, because guardrail evidence is read backwards from
+ * an incident ("what did screening just refuse") rather than forwards as a
+ * history. `idx_guardrail_evaluations_tenant_time` is declared DESC for it.
+ *
+ * `id` is the tiebreaker and it is load-bearing rather than tidy: one request
+ * produces one evaluation PER policy@revision PER stage, all stamped with the
+ * same whole second, so an unstable sort inside that second lets a page
+ * boundary re-serve one row and skip another.
+ */
+const GUARDRAIL_EVALUATION_ORDER = "ORDER BY occurred_at_unix DESC, id ASC";
+
+interface GuardrailEvaluationRow {
+  readonly id: string;
+  readonly request_id: string;
+  readonly trace_id: string | null;
+  readonly agent_run_id: string | null;
+  readonly subject_id: string | null;
+  readonly tenant: string | null;
+  readonly scope_type: string;
+  readonly scope_id: string | null;
+  readonly target: string;
+  readonly protocol: string;
+  readonly stage: string;
+  readonly mode: string;
+  readonly policy_id: string;
+  readonly policy_revision: number;
+  readonly verdict: string;
+  readonly action: string;
+  readonly enforcement_status: string;
+  readonly latency_ms: number;
+  readonly finding_count: number;
+  readonly input_fingerprint: string;
+  readonly action_fingerprint: string | null;
+  readonly occurred_at_unix: number;
+  readonly evaluation_json: string;
+  readonly total?: number;
+}
+
+interface GuardrailCheckRow {
+  readonly id: string;
+  readonly evaluation_id: string;
+  readonly check_id: string;
+  readonly detector_id: string;
+  readonly detector_version: string;
+  readonly config_digest: string;
+  readonly verdict: string;
+  readonly action: string;
+  readonly enforcement_status: string;
+  readonly error_kind: string | null;
+  readonly check_json: string;
+}
+
+/** A stored JSON document, or `{}` when it does not parse. */
+function documentOf(raw: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    // A row whose document does not parse is still evidence THAT screening
+    // happened, and every fact an auditor asks for first is in the columns.
+    return {};
+  }
+}
+
+/** Project one child row onto the wire. */
+function guardrailCheckDocument(row: GuardrailCheckRow): StoreRecord {
+  return {
+    ...documentOf(row.check_json),
+    id: row.id,
+    evaluation_id: row.evaluation_id,
+    check_id: row.check_id,
+    detector_id: row.detector_id,
+    detector_version: row.detector_version,
+    config_digest: row.config_digest,
+    verdict: row.verdict,
+    action: row.action,
+    enforcement_status: row.enforcement_status,
+    error_kind: row.error_kind,
+  };
+}
+
+/**
+ * Project one evaluation, with its checks attached.
+ *
+ * The COLUMNS win over the document for the reason {@link requestLogDocument}
+ * gives: `evaluation_json` is assembled on the data plane out of
+ * detector-influenced material (a category name comes from a detector's own
+ * response), and a document that could rename its own `tenant_id` would be a
+ * document that could put itself in another tenant's investigation. The fence
+ * is a predicate on the COLUMN, so the wire field has to be the column too.
+ */
+function guardrailEvaluationDocument(
+  row: GuardrailEvaluationRow,
+  checks: readonly StoreRecord[],
+): StoreRecord {
+  return {
+    ...documentOf(row.evaluation_json),
+    object: "guardrail_evaluation",
+    id: row.id,
+    request_id: row.request_id,
+    trace_id: row.trace_id,
+    agent_run_id: row.agent_run_id,
+    subject_id: row.subject_id,
+    tenant_id: row.tenant,
+    scope_type: row.scope_type,
+    scope_id: row.scope_id,
+    target: row.target,
+    protocol: row.protocol,
+    stage: row.stage,
+    mode: row.mode,
+    policy_id: row.policy_id,
+    policy_revision: row.policy_revision,
+    verdict: row.verdict,
+    action: row.action,
+    enforcement_status: row.enforcement_status,
+    latency_ms: row.latency_ms,
+    finding_count: row.finding_count,
+    input_fingerprint: row.input_fingerprint,
+    action_fingerprint: row.action_fingerprint,
+    occurred_at_unix: row.occurred_at_unix,
+    checks,
+  };
+}
+
+/** `?` placeholders for an `IN` list. */
+function placeholders(count: number): string {
+  return new Array(count).fill("?").join(", ");
+}
+
+/**
+ * The child rows for a page of evaluations, in ONE query.
+ *
+ * One query rather than one per evaluation because a D1 round trip inside a
+ * loop over a 100-row page is 100 round trips, and because a partial failure
+ * halfway through would publish some decisions with their detectors and some
+ * without — which reads as "no detector fired" rather than as an error.
+ */
+async function guardrailChecksFor(
+  db: D1Database,
+  evaluationIds: readonly string[],
+): Promise<Map<string, StoreRecord[]>> {
+  const byEvaluation = new Map<string, StoreRecord[]>();
+  if (evaluationIds.length === 0) return byEvaluation;
+  const rows = await db
+    .prepare(
+      `SELECT id, evaluation_id, check_id, detector_id, detector_version, config_digest,
+              verdict, action, enforcement_status, error_kind, check_json
+         FROM ${GUARDRAIL_CHECK_TABLE}
+        WHERE evaluation_id IN (${placeholders(evaluationIds.length)})
+        ORDER BY evaluation_id ASC, check_id ASC`,
+    )
+    .bind(...evaluationIds)
+    .all<GuardrailCheckRow>();
+  for (const row of rows.results) {
+    const bucket = byEvaluation.get(row.evaluation_id);
+    if (bucket === undefined) byEvaluation.set(row.evaluation_id, [guardrailCheckDocument(row)]);
+    else bucket.push(guardrailCheckDocument(row));
+  }
+  return byEvaluation;
+}
+
+/** One fenced, ordered page of `guardrail_evaluations`, checks attached. */
+async function guardrailEvaluationPage(
+  db: D1Database,
+  scope: CallerScope,
+  limit: number,
+  offset: number,
+): Promise<{ records: StoreRecord[]; total: number }> {
+  const fence = guardrailTenantFence(scope);
+  const rows = await db
+    .prepare(
+      `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}, count(*) OVER() AS total
+         FROM ${GUARDRAIL_EVALUATION_TABLE}${fence.sql === "" ? "" : ` WHERE ${fence.sql}`}
+        ${GUARDRAIL_EVALUATION_ORDER}
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(...fence.params, limit, offset)
+    .all<GuardrailEvaluationRow>();
+  const checks = await guardrailChecksFor(
+    db,
+    rows.results.map((row) => row.id),
+  );
+  return {
+    records: rows.results.map((row) => guardrailEvaluationDocument(row, checks.get(row.id) ?? [])),
+    // `count(*) OVER()` is on every row and absent when there are none — the
+    // same reading the two sibling readers take.
+    total: rows.results[0]?.total ?? 0,
+  };
+}
+
+/**
+ * `GET /admin/v1/guardrail-evaluations` — every screening decision, newest
+ * first.
+ *
+ * ## Why this is not the generic list handler
+ *
+ * It used to be, and that was the defect (#665). The generic handler paged the
+ * `guardrail-evaluations` DOCUMENT collection in `control_plane_resources`,
+ * which has no writer, so an authenticated, RBAC-gated compliance API answered
+ * "no guardrail ever evaluated anything" on every deployment while the gateway
+ * screened traffic. The other half of the defect was that the evidence TABLES
+ * did not exist, so the fix is the one #664 used: the migration, the writer
+ * (`apps/gateway/src/guardrails/`) and this reader in one change, never the
+ * reader alone.
+ */
+function listGuardrailEvaluationsHandler(): Handler {
+  return async (c) => {
+    const deps = depsOf(c);
+    const scope = scopeOf(c);
+    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const db = deps.controlDatabase;
+
+    if (db === null) {
+      // No control database means no evidence tables AND no gateway writing
+      // them. The document collection is the only guardrail-evidence surface
+      // such a deployment has.
+      const page = await deps.store.list("guardrail-evaluations", scope, query);
+      return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
+    }
+
+    const page = await guardrailEvaluationPage(db, scope, query.limit, query.offset);
+    return json(c, 200, adminListPaginated(page.records, page.total, query.offset, query.limit));
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The investigation view
+// ---------------------------------------------------------------------------
+
+/** The three selectors `docs/guardrails/investigation-view.md` documents. */
+const INVESTIGATION_SELECTORS = ["request_id", "trace_id", "agent_run_id"] as const;
+type InvestigationSelector = (typeof INVESTIGATION_SELECTORS)[number];
+
+/**
+ * How many correlated requests one investigation may join.
+ *
+ * A `trace_id` or an `agent_run_id` legitimately spans many requests (an agent
+ * run is a whole conversation), and the response is materialized in memory
+ * before it is written. Bounded rather than unbounded because an investigation
+ * that dies at 2 GB has investigated nothing; the bound is stated here rather
+ * than left implicit so a truncated timeline is a decision with a number
+ * attached.
+ */
+const INVESTIGATION_MAX_REQUESTS = 50;
+
+/** Rows a table contributes to the timeline, as documents. */
+interface TimelineLeg {
+  readonly records: StoreRecord[];
+}
+
+/**
+ * `GET /admin/v1/investigations` — who / why / target / action / cost for ONE
+ * request, joined across every evidence table in the control database.
+ *
+ * ## The order of operations is the fence
+ *
+ * The selector is resolved FIRST, against the two tenant-fenced evidence tables
+ * (`guardrail_evaluations` and `request_logs`). If neither yields a row the
+ * answer is 404 — and that is what makes the un-fenced legs safe: `billing_events`
+ * has no tenant column at all (its rows are keyed by `request_id`), so it is
+ * only ever read for request ids the caller has ALREADY been shown to own. A
+ * reader that queried billing first and fenced afterwards would leak the
+ * existence and the cost of another tenant's request through a 200/404
+ * difference.
+ *
+ * ## What is joined, and what is honestly empty
+ *
+ * Joined for real, all from the CONTROL database: `requests` (`request_logs`,
+ * #664), `guardrail_evaluations` + their checks (#665), `audit_events`,
+ * `agent_runs` / `agent_events`, `billing_events` and the cost summed from
+ * them.
+ *
+ * `approvals` is `[]` and stays `[]`: there is no approvals table in
+ * `sql/d1-ts/control/`, and fabricating an empty array is the honest answer
+ * ("this deployment records no approvals") where inventing rows would not be.
+ * The field is in the response because the documented schema requires it and a
+ * client that switched on its presence would break on a version skew, not
+ * because this reader knows something about approvals.
+ */
+function getGuardrailInvestigationHandler(): Handler {
+  return async (c) => {
+    const deps = depsOf(c);
+    const scope = scopeOf(c);
+    const url = new URL(c.req.url);
+
+    const selected = INVESTIGATION_SELECTORS.map((name): [InvestigationSelector, string | null] => [
+      name,
+      url.searchParams.get(name),
+    ]).filter((entry): entry is [InvestigationSelector, string] => {
+      const value = entry[1];
+      return value !== null && value.trim() !== "";
+    });
+    if (selected.length !== 1) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `exactly one of ${INVESTIGATION_SELECTORS.join(", ")} is required`,
+      );
+    }
+    const [column, value] = selected[0] as [InvestigationSelector, string];
+    const selector = `${column}=${value}`;
+
+    const db = deps.controlDatabase;
+    if (db === null) {
+      // Nothing writes the evidence tables in a memory-store deployment, so
+      // there is nothing to investigate and saying so is the truthful answer.
+      throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
+    }
+
+    // ---- 1. The two FENCED evidence tables resolve the selector ------------
+    const evaluationFence = guardrailTenantFence(scope);
+    const evaluationRows = await db
+      .prepare(
+        `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
+           FROM ${GUARDRAIL_EVALUATION_TABLE}
+          WHERE ${column} = ?${evaluationFence.sql === "" ? "" : ` AND ${evaluationFence.sql}`}
+          ${GUARDRAIL_EVALUATION_ORDER}
+          LIMIT ?`,
+      )
+      .bind(value, ...evaluationFence.params, INVESTIGATION_MAX_REQUESTS)
+      .all<GuardrailEvaluationRow>();
+
+    const requestFence = requestLogTenantFence(scope);
+    const requestRows = await db
+      .prepare(
+        `SELECT ${REQUEST_LOG_COLUMNS}
+           FROM ${REQUEST_LOG_TABLE}
+          WHERE ${column} = ?${
+            requestFence.sql === "" ? "" : ` AND ${requestFence.sql.replace(/^ WHERE /, "")}`
+          }
+          ${REQUEST_LOG_ORDER}
+          LIMIT ?`,
+      )
+      .bind(value, ...requestFence.params, INVESTIGATION_MAX_REQUESTS)
+      .all<RequestLogRow>();
+
+    if (evaluationRows.results.length === 0 && requestRows.results.length === 0) {
+      throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
+    }
+
+    const requestIds = [
+      ...new Set([
+        ...evaluationRows.results.map((row) => row.request_id),
+        ...requestRows.results.map((row) => row.request_id),
+      ]),
+    ].slice(0, INVESTIGATION_MAX_REQUESTS);
+
+    // ---- 2. Everything else hangs off the ids the fence already cleared ----
+    const checks = await guardrailChecksFor(
+      db,
+      evaluationRows.results.map((row) => row.id),
+    );
+    const audit = await investigationLeg(
+      db,
+      `SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+              chain_key, seq, prev_hash, row_hash
+         FROM ${AUDIT_TABLE}
+        WHERE request_id IN (${placeholders(requestIds.length)})
+        ORDER BY occurred_at_unix ASC, id ASC`,
+      requestIds,
+      (row) => auditEventDocument(row as AuditEventRow),
+    );
+    const agentRuns = await investigationLeg(
+      db,
+      `SELECT id, request_id, tenant, started_at_unix, completed_at_unix, run_json
+         FROM agent_runs
+        WHERE request_id IN (${placeholders(requestIds.length)})
+        ORDER BY started_at_unix ASC, id ASC`,
+      requestIds,
+      (row) => correlatedDocument(row as Record<string, unknown>, "run_json", "agent_run"),
+    );
+    const agentEvents = await investigationLeg(
+      db,
+      `SELECT id, run_id, request_id, tenant, occurred_at_unix, event_json
+         FROM agent_run_events
+        WHERE request_id IN (${placeholders(requestIds.length)})
+        ORDER BY occurred_at_unix ASC, id ASC`,
+      requestIds,
+      (row) => correlatedDocument(row as Record<string, unknown>, "event_json", "agent_run_event"),
+    );
+    const billing = await investigationLeg(
+      db,
+      `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
+         FROM billing_events
+        WHERE request_id IN (${placeholders(requestIds.length)})
+        ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
+      requestIds,
+      (row) =>
+        correlatedDocument(
+          row as Record<string, unknown>,
+          "event_json",
+          "billing_event",
+          "billing_event_id",
+        ),
+    );
+
+    const totalCostUsd = billing.records.reduce((sum, record) => {
+      const cost = record["cost_usd"];
+      return typeof cost === "number" && Number.isFinite(cost) ? sum + cost : sum;
+    }, 0);
+
+    const evaluations = evaluationRows.results.map((row) =>
+      guardrailEvaluationDocument(row, checks.get(row.id) ?? []),
+    );
+    const requests = requestRows.results.map(requestLogDocument);
+
+    return json(c, 200, {
+      object: "guardrail_investigation",
+      selector,
+      identity: investigationIdentity(evaluationRows.results, requestRows.results),
+      agent_runs: agentRuns.records,
+      agent_events: agentEvents.records,
+      requests,
+      guardrail_evaluations: evaluations,
+      audit_events: audit.records,
+      // See the docblock: there is no approvals table in this schema.
+      approvals: [],
+      billing_events: billing.records,
+      total_cost_usd: totalCostUsd,
+      final_outcome: finalOutcome(evaluationRows.results, requestRows.results),
+    });
+  };
+}
+
+/** Run one `WHERE request_id IN (...)` leg and project its rows. */
+async function investigationLeg(
+  db: D1Database,
+  sql: string,
+  requestIds: readonly string[],
+  project: (row: unknown) => StoreRecord,
+): Promise<TimelineLeg> {
+  if (requestIds.length === 0) return { records: [] };
+  const rows = await db
+    .prepare(sql)
+    .bind(...requestIds)
+    .all<Record<string, unknown>>();
+  return { records: rows.results.map(project) };
+}
+
+/**
+ * A correlated row published as its stored document plus its columns.
+ *
+ * Same precedence rule as everywhere else in this module — the columns are
+ * applied last, so a document cannot rename the `request_id` that is the
+ * investigation's join key.
+ *
+ * `idColumn` exists because `billing_events` spells its primary key
+ * `billing_event_id`, not `id`. Publishing it under BOTH names rather than
+ * renaming it: `id` is what makes every element of the timeline addressable in
+ * the same way, and the original column is what a reader cross-checking against
+ * the table needs.
+ */
+function correlatedDocument(
+  row: Record<string, unknown>,
+  documentColumn: string,
+  object: string,
+  idColumn = "id",
+): StoreRecord {
+  const { [documentColumn]: raw, ...columns } = row;
+  return {
+    ...documentOf(typeof raw === "string" ? raw : "{}"),
+    ...columns,
+    id: String(columns[idColumn] ?? ""),
+    object,
+  };
+}
+
+/**
+ * WHO — the calling identity, taken from the evidence rather than from the
+ * query.
+ *
+ * The guardrail row is preferred because it carries the resolved SCOPE
+ * (`scope_type`/`scope_id`) and the acting credential (`subject_id`); the
+ * request log is the fallback for a request that reached no guardrail policy.
+ * `null` when neither knows, which is the honest answer for an anonymous call —
+ * an identity block full of nulls would read as a redaction rather than as an
+ * absence.
+ */
+function investigationIdentity(
+  evaluations: readonly GuardrailEvaluationRow[],
+  requests: readonly RequestLogRow[],
+): Record<string, unknown> | null {
+  const evaluation = evaluations[0];
+  if (evaluation !== undefined) {
+    return {
+      organization_id: evaluation.tenant,
+      api_key_id: evaluation.subject_id,
+      scope_type: evaluation.scope_type,
+      scope_id: evaluation.scope_id,
+    };
+  }
+  const request = requests[0];
+  if (request === undefined) return null;
+  return {
+    organization_id: request.tenant,
+    project_id: request.project,
+    workspace_id: request.workspace,
+    api_key_id: request.api_key_id,
+  };
+}
+
+/**
+ * `final_outcome` — `blocked` / `failed` / `succeeded` / `decision_only`.
+ *
+ * A guardrail BLOCK wins over the HTTP status, and deliberately: a request the
+ * gateway refused at 403 and a request the provider failed at 403 are the same
+ * status and different incidents, and the evidence knows which happened.
+ * `decision_only` is the case with evidence but no request log — screening ran
+ * on a path (MCP, an agent tool call) that writes no inference row.
+ */
+function finalOutcome(
+  evaluations: readonly GuardrailEvaluationRow[],
+  requests: readonly RequestLogRow[],
+): string {
+  if (evaluations.some((row) => row.action === "block" && row.enforcement_status === "enforced")) {
+    return "blocked";
+  }
+  const request = requests[0];
+  if (request === undefined) return "decision_only";
+  const status = request.status_code ?? 0;
+  if (status >= 400) return "failed";
+  return status > 0 ? "succeeded" : "decision_only";
+}
+
+/**
+ * PORT-TODO(P: inventory-edge-control §9.3 evidence) — CLOSED. Every leg of
+ * this group now reads a table with a writer: `audit-events` (see
+ * {@link listAuditEventsHandler}), `request-logs` / `request-log-exports`
+ * (#664, {@link listRequestLogsHandler}) and — with this change —
+ * `guardrail-evaluations` / `investigations` (#665,
+ * {@link listGuardrailEvaluationsHandler} and
+ * {@link getGuardrailInvestigationHandler}) over
+ * `sql/d1-ts/control/0004_guardrail_evaluations.sql`.
+ *
+ * The two `readOnlyCollection` declarations below are KEPT even though every
+ * operation in them now has an override: they are what `crudGroup` matches the
+ * contract's operation ids against, and deleting them would make the build
+ * throw rather than silently drop a route.
  *
  * Note that the request-log gauge heals with this change:
  * `adapters.ts::StoreRuntimeStatus.metrics()` publishes
@@ -495,5 +1052,7 @@ export const adminRequestLogRoutes: GroupModule = crudGroup(
     listAdminAuditEvents: listAuditEventsHandler(),
     listAdminRequestLogs: listRequestLogsHandler(),
     exportAdminRequestLogsJsonl: exportRequestLogsHandler(),
+    listGuardrailEvaluations: listGuardrailEvaluationsHandler(),
+    getGuardrailInvestigation: getGuardrailInvestigationHandler(),
   },
 );

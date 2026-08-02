@@ -18,7 +18,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  *   use    → cors preflight    OPTIONS /admin/* — only when configured
  *   use    → contractAuth      405 → CSRF → anonymous → bearer+scope
  *                              → lifecycle → rbac_action
- *   route  → 197 handlers      registered from the contract
+ *   route  → 203 handlers      registered from the contract
  *   error  → uniform envelope  { error: { message, type, code, request_id } }
  * ```
  *
@@ -85,7 +85,7 @@ app.use("*", contractAuth());
  * admin-console session, OIDC + SCIM, and SAML — and that
  * `docs/rewrite/MODULE-OWNERSHIP.md` found precisely because they are not in
  * `docs/openapi/runtime-api-contract.json`. None of their paths is one of the
- * 197, so mounting them cannot move the anti-drift operation count; they mount
+ * 203, so mounting them cannot move the anti-drift operation count; they mount
  * OUTSIDE `registerRoutes` exactly as `/healthz` and `/version` do.
  *
  * The ORDER is load-bearing:
