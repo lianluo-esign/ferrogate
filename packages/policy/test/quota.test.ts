@@ -348,3 +348,266 @@ describe("resolveEffectiveQuota", () => {
     expect(q.rpmLimit).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #679 — the nested budget lattice
+// ---------------------------------------------------------------------------
+
+/**
+ * `org → project → workspace → key`, where **org is `tenant`**: the schema's
+ * `scope_type` enum is `('tenant','project','workspace','key')` and `tenant` IS
+ * the organization (Rust called the column `organization_id`). No new scope kind
+ * is introduced by #679 — the lattice already exists, what was missing is that
+ * only ONE level of it was ever enforceable.
+ *
+ * ## Why a single `min` is not a nested budget
+ *
+ * `monthlyBudgetUsd` is the tightest CONFIGURED NUMBER across the chain, and
+ * `monthlyBudgetScope` names the one scope it came from. The gateway then
+ * measures that one scope's aggregate spend and admits. So with
+ * `project = $5,000` and `key = $100`, the min is `$100` at the KEY scope, and
+ * the only rollup consulted is that key's: fifty keys under the project each
+ * spend $100 and the project's $5,000 cap is never once evaluated.
+ *
+ * A nested budget cannot be collapsed to one number, because each level is
+ * measured against a DIFFERENT aggregate. So the merge now also reports the
+ * whole ladder — {@link EffectiveQuota.monthlyBudgets} — one entry per scope
+ * that configures a budget, each clamped by its ancestors, broadest first. The
+ * caller enforces EVERY entry against that entry's own scope, and the tightest
+ * one that actually binds is the one that refuses.
+ */
+describe("resolveEffectiveQuota — nested monthly budgets (#679)", () => {
+  const FULL_CHAIN = { tenantId: "t1", projectId: "p1", workspaceId: "w1", keyId: "k1" };
+
+  function budgetPolicy(
+    scopeType: QuotaScopeKind,
+    scopeId: string,
+    monthlyBudgetUsd: number,
+  ): StoredQuotaPolicy {
+    return policy(scopeType, scopeId, [], undefined, undefined, monthlyBudgetUsd, true);
+  }
+
+  /** `[kind, id, limitUsd, source]` per rung, in the order the merge reports them. */
+  function ladder(
+    quota: ReturnType<typeof resolveEffectiveQuota>,
+  ): [QuotaScopeKind, string, number, string][] {
+    return (quota.monthlyBudgets ?? []).map((constraint) => [
+      constraint.scope.kind,
+      constraint.scope.id,
+      constraint.limitUsd,
+      constraint.source,
+    ]);
+  }
+
+  interface LatticeCase {
+    readonly name: string;
+    /** `[scope kind, monthly budget usd]`, all on the FULL chain's ids. */
+    readonly budgets: [QuotaScopeKind, number][];
+    readonly expected: [QuotaScopeKind, string, number, string][];
+  }
+
+  const SCOPE_IDS: Record<QuotaScopeKind, string> = {
+    tenant: "t1",
+    project: "p1",
+    workspace: "w1",
+    key: "k1",
+  };
+
+  const cases: LatticeCase[] = [
+    { name: "no budget anywhere ⇒ no rung to enforce", budgets: [], expected: [] },
+    {
+      name: "one rung: an org budget stands alone",
+      budgets: [["tenant", 5_000]],
+      expected: [["tenant", "t1", 5_000, "policy"]],
+    },
+    {
+      name: "THE ISSUE: a project budget survives a smaller key budget",
+      // "this project gets $5k/month, split however its keys like" — the key's
+      // own $100 cap must not erase the project's $5,000 aggregate cap.
+      budgets: [
+        ["project", 5_000],
+        ["key", 100],
+      ],
+      expected: [
+        ["project", "p1", 5_000, "policy"],
+        ["key", "k1", 100, "policy"],
+      ],
+    },
+    {
+      name: "an inner scope CANNOT grant itself more than its parent allows",
+      budgets: [
+        ["tenant", 1_000],
+        ["key", 9_999],
+      ],
+      // The key rung is clamped to the org ceiling: a $9,999 key policy under a
+      // $1,000 org is worth $1,000, measured against the key's own spend.
+      expected: [
+        ["tenant", "t1", 1_000, "policy"],
+        ["key", "k1", 1_000, "policy"],
+      ],
+    },
+    {
+      name: "the full ladder, tightening at every rung",
+      budgets: [
+        ["tenant", 5_000],
+        ["project", 3_000],
+        ["workspace", 1_000],
+        ["key", 250],
+      ],
+      expected: [
+        ["tenant", "t1", 5_000, "policy"],
+        ["project", "p1", 3_000, "policy"],
+        ["workspace", "w1", 1_000, "policy"],
+        ["key", "k1", 250, "policy"],
+      ],
+    },
+    {
+      name: "the full ladder INVERTED — every widening rung clamps to the org",
+      budgets: [
+        ["tenant", 100],
+        ["project", 200],
+        ["workspace", 300],
+        ["key", 400],
+      ],
+      expected: [
+        ["tenant", "t1", 100, "policy"],
+        ["project", "p1", 100, "policy"],
+        ["workspace", "w1", 100, "policy"],
+        ["key", "k1", 100, "policy"],
+      ],
+    },
+    {
+      name: "a widening MIDDLE rung cannot re-open room a narrower key kept shut",
+      budgets: [
+        ["tenant", 1_000],
+        ["project", 9_999],
+        ["key", 50],
+      ],
+      expected: [
+        ["tenant", "t1", 1_000, "policy"],
+        ["project", "p1", 1_000, "policy"],
+        ["key", "k1", 50, "policy"],
+      ],
+    },
+    {
+      name: "levels with no policy are simply absent from the ladder",
+      budgets: [
+        ["project", 300],
+        ["key", 100],
+      ],
+      expected: [
+        ["project", "p1", 300, "policy"],
+        ["key", "k1", 100, "policy"],
+      ],
+    },
+    {
+      name: "a ZERO budget is a real rung (spend nothing), not an absent one",
+      budgets: [
+        ["tenant", 100],
+        ["key", 0],
+      ],
+      expected: [
+        ["tenant", "t1", 100, "policy"],
+        ["key", "k1", 0, "policy"],
+      ],
+    },
+    {
+      name: "a zero ORG budget clamps every rung beneath it to zero",
+      budgets: [
+        ["tenant", 0],
+        ["workspace", 500],
+      ],
+      expected: [
+        ["tenant", "t1", 0, "policy"],
+        ["workspace", "w1", 0, "policy"],
+      ],
+    },
+  ];
+
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      const quota = resolveEffectiveQuota(
+        FULL_CHAIN,
+        lookupFrom(
+          testCase.budgets.map(([kind, usd]) => budgetPolicy(kind, SCOPE_IDS[kind], usd)),
+        ),
+      );
+      expect(ladder(quota)).toEqual(testCase.expected);
+    });
+  }
+
+  test("the ladder is ordered broadest-first, which is the order it must be enforced in", () => {
+    const quota = resolveEffectiveQuota(
+      FULL_CHAIN,
+      lookupFrom([
+        budgetPolicy("key", "k1", 250),
+        budgetPolicy("tenant", "t1", 5_000),
+        budgetPolicy("workspace", "w1", 1_000),
+        budgetPolicy("project", "p1", 3_000),
+      ]),
+    );
+    // Note the lookup order above is deliberately shuffled: the ladder's order
+    // comes from the CHAIN, never from the order rows happen to be read in.
+    expect((quota.monthlyBudgets ?? []).map((c) => c.scope.kind)).toEqual([
+      "tenant",
+      "project",
+      "workspace",
+      "key",
+    ]);
+  });
+
+  test("a rung governs a scope that is absent from the request chain never appears", () => {
+    const quota = resolveEffectiveQuota(
+      { tenantId: "t1", keyId: "k1" },
+      lookupFrom([budgetPolicy("tenant", "t1", 100), budgetPolicy("workspace", "w1", 1)]),
+    );
+    expect(ladder(quota)).toEqual([["tenant", "t1", 100, "policy"]]);
+  });
+
+  test("the plan FLOOR is a tenant-scoped rung when no policy configures a budget", () => {
+    const quota = resolveEffectiveQuota({ tenantId: "t1", keyId: "k1" }, lookupFrom([]), samplePlan());
+    expect(ladder(quota)).toEqual([["tenant", "t1", 250, "plan"]]);
+  });
+
+  test("the plan floor stays a FLOOR: any explicit policy budget replaces it", () => {
+    // Deliberate, pre-existing semantics (`quota.rs`: a field takes the plan
+    // default only when no policy set it). Pinned here so a future change to it
+    // is a decision, not a drift: a key policy today REPLACES the plan's
+    // tenant-wide default rather than nesting under it.
+    const quota = resolveEffectiveQuota(
+      { tenantId: "t1", keyId: "k1" },
+      lookupFrom([budgetPolicy("key", "k1", 10)]),
+      samplePlan(),
+    );
+    expect(ladder(quota)).toEqual([["key", "k1", 10, "policy"]]);
+  });
+
+  test("a disabled scope denies outright and publishes no ladder to enforce", () => {
+    const quota = resolveEffectiveQuota(
+      FULL_CHAIN,
+      lookupFrom([
+        budgetPolicy("tenant", "t1", 5_000),
+        policy("project", "p1", [], undefined, undefined, 100, false),
+      ]),
+    );
+    expect(isDenied(quota)).toBe(true);
+    expect(quota.monthlyBudgets ?? []).toEqual([]);
+  });
+
+  test("the single-number fields keep their exact previous meaning", () => {
+    // BACK-COMPAT. `monthlyBudgetUsd` is still the tightest configured number
+    // and `monthlyBudgetScope` still the scope it came from — with a widening
+    // key that is the TENANT, not the key, and `monthlyBudgetScope()` in the
+    // gateway still measures the tenant's aggregate. The ladder is additive.
+    const quota = resolveEffectiveQuota(
+      { tenantId: "t1", keyId: "k1" },
+      lookupFrom([budgetPolicy("tenant", "t1", 10), budgetPolicy("key", "k1", 50)]),
+    );
+    expect(quota.monthlyBudgetUsd).toBe(10);
+    expect(quota.monthlyBudgetScope?.equals(new QuotaScopeSelector("tenant", "t1"))).toBe(true);
+    expect(ladder(quota)).toEqual([
+      ["tenant", "t1", 10, "policy"],
+      ["key", "k1", 10, "policy"],
+    ]);
+  });
+});
