@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 272.
+ * ANTI-DRIFT GATE for the third copy of 276.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(275);
+    expect(OPENAPI_OPERATION_COUNT).toBe(276);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -295,18 +295,19 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
     // merged truth: it is 258 + 3 + 1 = 262.
     //
-    // #743's three asset-fleet operations (`listFleetAssets`,
-    // `listQuarantinedAssets`, `reviewQuarantinedAsset`) are the same story
-    // again: their response shapes are declared in
-    // `docs/openapi/admin-api.openapi.json` and their one request body is
-    // validated at the route by an inline Zod schema in
-    // `apps/control-plane/src/routes/admin_asset.ts`, so none of the three
-    // seeds a WIRE shape here. 262 + 3 = 265.
+    // #743's four asset-fleet operations (`listFleetAssets`,
+    // `listQuarantinedAssets`, `reviewQuarantinedAsset`,
+    // `forceDeleteAssetVersion`) are the same story again: their response
+    // shapes are declared in `docs/openapi/admin-api.openapi.json`, their one
+    // request body is validated at the route by an inline Zod schema in
+    // `apps/control-plane/src/routes/admin_asset.ts`, and the force-delete
+    // takes query parameters rather than a body — so none of the four seeds a
+    // WIRE shape here. 262 + 4 = 266.
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 275 - 10. The running sum is narrative, and #703 and #737
+    // `seeded`, i.e. 276 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(265);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(266);
   });
 });

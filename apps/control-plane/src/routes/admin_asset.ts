@@ -1,10 +1,11 @@
 /**
- * Contract group `admin_asset` (3 operations) — the asset FLEET surface (#743).
+ * Contract group `admin_asset` (4 operations) — the asset FLEET surface (#743).
  *
  * ```
- *   GET   /admin/v1/assets                        fleet inventory
- *   GET   /admin/v1/assets/quarantine             the review queue
- *   POST  /admin/v1/assets/quarantine/{asset_id}  release / reject, with a reason
+ *   GET    /admin/v1/assets                        fleet inventory
+ *   GET    /admin/v1/assets/quarantine             the review queue
+ *   POST   /admin/v1/assets/quarantine/{asset_id}  release / reject, with a reason
+ *   DELETE /admin/v1/assets/{asset_id}             force-delete, with a reason
  * ```
  *
  * Once #736 gave a static site a versioned multi-file bundle, #737 served it at
@@ -15,7 +16,7 @@
  * excluded from every read path by `AssetService.#resolveArtifact`, with nobody
  * able to look at it and nobody able to release it.
  *
- * Five decisions are the substance of this module. Each is a security property,
+ * Six decisions are the substance of this module. Each is a security property,
  * not a style choice.
  *
  * ## 0. Reading is one authority; DECIDING is another
@@ -95,22 +96,33 @@
  * a second path that reads around the withholding, and nothing here can serve a
  * withheld artifact.
  *
+ * ## 5. A takedown is a DIFFERENT verb from a review, and says which it was
+ *
+ * `reject` moves `visibility` and destroys nothing; the force-delete
+ * ({@link forceDeleteHandler}) destroys the row, the `asset_bundle_files` index
+ * (#736) and the R2 objects, and releases the tenant's storage quota. Because a
+ * `static_site` reaches the internet through a CHANNEL (#737's `/sites/{slug}`
+ * binding, #738's custom domains), "a channel points at this version" is what
+ * LIVE means — so deleting an unreferenced version and taking a live site down
+ * are two different acts and the response says which one happened
+ * (`detached_channels`, and a `409` that names the channels unless
+ * `?force=true` was sent).
+ *
+ * It fails closed on the bucket: with no `ASSETS` binding it answers 503 and
+ * writes nothing, because a metadata-only delete would report a takedown while
+ * the bytes stayed in the bucket. The binding is narrowed to DELETE at the
+ * composition root (`ports.ts::AssetObjectReclaimer`) so decision 2 survives
+ * the new capability — this Worker can reclaim an object and still cannot fetch
+ * one.
+ *
  * ## What this slice does NOT do, stated so it is not mistaken for parity
  *
- * The issue's third bullet also asks for per-tenant quota read/adjust and a
- * force-delete of a specific version.
- *
- *  - **Quota is already shipped.** `asset_storage_quota_bytes`,
- *    `monthly_egress_bytes_budget` and `download_rpm_limit` are per-scope
- *    columns written by `PUT /admin/v1/quota-policies/tenant/{tenant_id}` and
- *    projected by `src/store/quota_registry.ts`. A second asset-shaped quota
- *    endpoint would be a second source of truth for the same three numbers.
- *  - **Force-delete is deferred, deliberately.** Deleting a version means
- *    deleting the R2 objects AND the `asset_bundle_files` index that names them
- *    (#736), and that reclamation lives in `apps/gateway`'s `AssetService`.
- *    A metadata-only delete from this Worker would answer `deleted: true` and
- *    leave the bytes in the bucket — a takedown that did not take anything
- *    down, which is a worse answer than not offering the verb.
+ * The issue's third bullet also asks for per-tenant quota read/adjust.
+ * **Quota is already shipped.** `asset_storage_quota_bytes`,
+ * `monthly_egress_bytes_budget` and `download_rpm_limit` are per-scope columns
+ * written by `PUT /admin/v1/quota-policies/tenant/{tenant_id}` and projected by
+ * `src/store/quota_registry.ts`. A second asset-shaped quota endpoint would be
+ * a second source of truth for the same three numbers.
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
@@ -122,10 +134,13 @@ import {
   type AssetVisibility,
   WITHHELD_VISIBILITIES,
   applyAssetReview,
+  assetVersionReferences,
+  deleteAssetVersion,
   fleetTenantIds,
   readAssetForReview,
   readFleetAssets,
   reviewTargetVisibility,
+  wouldStrandChannel,
 } from "../store/asset_fleet.js";
 import {
   type GroupModule,
@@ -150,6 +165,20 @@ export const ASSET_FLEET_SCOPE = "admin.assets.fleet";
 
 /** Store collection the review decisions live in. */
 export const ASSET_REVIEW_COLLECTION = "asset-reviews";
+
+/**
+ * Store collection the force-delete records live in.
+ *
+ * SEPARATE from the reviews, because the row it describes no longer exists.
+ * A review record can be checked against the version it moved; a deletion
+ * record is the ONLY remaining evidence that the version was ever there, so it
+ * carries the digest and the size as well as the reason — enough to answer
+ * "what exactly did we take down" without the row.
+ */
+export const ASSET_DELETION_COLLECTION = "asset-deletions";
+
+/** Upper bound on a decision's `reason`, shared by both write verbs. */
+export const REASON_MAX_LENGTH = 2_000;
 
 /** Response `object` for an inventory row and for a queue row. */
 const FLEET_OBJECT = "fleet_asset";
@@ -177,7 +206,7 @@ export const assetReviewSchema = z.object({
    * names. "Who" is on the audit row; without "why" a release is a fact with no
    * justification, which is the half that makes a trail reviewable.
    */
-  reason: z.string().trim().min(1).max(2_000),
+  reason: z.string().trim().min(1).max(REASON_MAX_LENGTH),
 });
 
 /**
@@ -293,6 +322,19 @@ const REVIEW_VERB: FleetWriteVerb = {
   action: "reviewing a withheld asset version",
   imperative: "release or reject",
   missingTenantCode: "invalid_request_body",
+};
+
+/**
+ * The force-delete verb.
+ *
+ * `invalid_request` rather than `invalid_request_body` because this verb takes
+ * its arguments in the QUERY STRING: a DELETE with a body is unreachable from
+ * several HTTP clients, and an operator verb has to be callable from `curl`.
+ */
+const DELETE_VERB: FleetWriteVerb = {
+  action: "force-deleting an asset version",
+  imperative: "delete",
+  missingTenantCode: "invalid_request",
 };
 
 /** `?visibility=` → the validated set, or the 400. */
@@ -445,6 +487,194 @@ const reviewHandler: Handler = async (c) => {
   return json(c, 200, adminItem("asset_review", applied ?? { ...stored, applied: true }));
 };
 
+/** A trimmed query parameter, or `null` when absent or blank. */
+function queryParam(url: URL, name: string): string | null {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * `?force=` — strictly `true` or `false`, never "anything that is not the
+ * string true".
+ *
+ * A typo (`?force=yes`, `?force=1`) silently meaning `false` would be the wrong
+ * direction of surprise on the OTHER verb — an operator who believed they had
+ * asked for a takedown and got a 409 they did not read — and a typo silently
+ * meaning `true` would destroy a live site. So neither: an unparseable value is
+ * a 400 that names the two it accepts.
+ */
+function forceParam(url: URL): boolean {
+  const raw = queryParam(url, "force");
+  if (raw === null || raw === "false") return false;
+  if (raw === "true") return true;
+  throw new HttpError(
+    400,
+    "invalid_request",
+    `force must be true or false (got ${JSON.stringify(raw)})`,
+  );
+}
+
+/**
+ * `DELETE /admin/v1/assets/{asset_id}` — the operator FORCE-DELETE.
+ *
+ * ## Why this is a different verb from `reject`, and not a bigger one
+ *
+ * `reject` moves `visibility` and touches nothing else: the artifact stops
+ * being servable and every byte survives, which is what a moderation decision
+ * should be. This verb is the takedown — the row, the `asset_bundle_files`
+ * index (#736) and the R2 objects all go, the tenant's storage quota is
+ * actually released, and nothing about it is reversible. An operator has to ask
+ * for it by name.
+ *
+ * ## The two operations an operator might be performing, told apart
+ *
+ * A `static_site` bundle reaches the public internet through a CHANNEL:
+ * `/sites/{slug}` binds a slug to one channel (#737) and a verified custom
+ * domain resolves to a site (#738). So "is a channel pointing at this version"
+ * is exactly "is this live", and it is the difference between two operations
+ * that must not wear the same name:
+ *
+ * | situation | answer |
+ * |---|---|
+ * | no channel points at the version (or another live variant survives) | RETIRING an unreferenced version — deleted, `detached_channels: []` |
+ * | a channel points at it and this row is its last resolvable variant | a LIVE takedown — refused `409 asset_version_referenced` NAMING the channels, unless `?force=true` |
+ * | the same, with `?force=true` | deleted, and the stranded channels are deleted WITH it and named in `detached_channels` |
+ *
+ * The channels are removed rather than left dangling because
+ * `apps/gateway`'s invariant is that a channel never points at an absent
+ * version (`ASSET_VARIANT_DELETE_SQL` enforces the same thing from the tenant
+ * side by refusing). A stranded channel would resolve to a 404 that looks like
+ * a bug; a channel that is gone is a site that is gone, which is what the
+ * operator asked for and what the response reports back to them.
+ *
+ * ## Fail closed on the bucket
+ *
+ * With no `ASSETS` binding this answers `503` and writes NOTHING — checked
+ * before the first write, not after. The alternative is a metadata-only delete
+ * that reports `deleted` while the bytes stay in the bucket: a takedown that
+ * took nothing down, still charged to the platform, and a lie in an
+ * abuse-response trail.
+ */
+const forceDeleteHandler: Handler = async (c) => {
+  const deps = depsOf(c);
+  const scope = scopeOf(c);
+  const auth = c.get("auth") as AuthContext;
+  const assetId = pathParam(c, "asset_id");
+  const url = new URL(c.req.url);
+
+  // (1) THE FENCE — the same one the review uses, and for a stronger reason: a
+  // force-delete is strictly more powerful than a release.
+  const { tenantId } = authorizeFleetWrite(scope, auth, queryParam(url, "tenant_id"), DELETE_VERB);
+
+  const reason = queryParam(url, "reason");
+  if (reason === null || reason.length > REASON_MAX_LENGTH) {
+    // WHY, before anything is destroyed. Same rule as the review: without it a
+    // deletion is a fact with no justification, and this one cannot be undone
+    // by reading the row back.
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `reason is required and must be 1..${REASON_MAX_LENGTH} characters: a force-delete is not reversible and the trail is all that survives it`,
+    );
+  }
+  const force = forceParam(url);
+
+  // (2) FAIL CLOSED ON THE BUCKET, before any write. See the header.
+  const objects = deps.assetObjects;
+  if (objects === null) {
+    throw new HttpError(
+      503,
+      "asset_bucket_not_configured",
+      "this deployment binds no ASSETS bucket, so the objects behind a version cannot be reclaimed; a metadata-only delete would report a takedown that did not happen",
+    );
+  }
+
+  const resolved = await readAssetForReview(deps.tenantDatabases, tenantId, assetId);
+  if (resolved === null) {
+    throw new HttpError(404, "not_found", `asset ${assetId} not found for tenant ${tenantId}`);
+  }
+  const row = resolved.row;
+
+  // (3) WHAT IS SERVING IT — read and reported before it is acted on.
+  const references = await assetVersionReferences(resolved.db, tenantId, row);
+  const strands = wouldStrandChannel(references);
+  if (strands && !force) {
+    throw new HttpError(
+      409,
+      "asset_version_referenced",
+      `${row.asset_type}/${row.name}/${row.version} is served by channel(s) ${references.channels.join(", ")} and this is its last resolvable variant; deleting it takes that site down. Re-send with ?force=true to do it deliberately`,
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  // (4) RECORD FIRST, exactly as the review does — the audit row lands on the
+  // OWNING tenant's chain, so the tenant can see what was deleted and by whom
+  // even though it could never have deleted it itself.
+  const record: StoreRecord = {
+    id: `adl_${crypto.randomUUID()}`,
+    tenant_id: tenantId,
+    asset_id: assetId,
+    asset_type: row.asset_type,
+    name: row.name,
+    version: row.version,
+    variant: row.variant,
+    from_visibility: row.visibility,
+    content_hash: row.content_hash,
+    size_bytes: row.size_bytes,
+    reason,
+    force,
+    served_by_channels: references.channels,
+    detached_channels: [],
+    objects_deleted: 0,
+    applied: false,
+    actor_scope: scope.kind,
+    actor_key_id: auth.subject,
+    decided_at_unix: now,
+  };
+  const stored = await deps.store.create(ASSET_DELETION_COLLECTION, scope, record);
+
+  // (5) APPLY — the version row first, guarded on the exact state read.
+  const outcome = await deleteAssetVersion(resolved.db, tenantId, row, {
+    detachChannels: strands,
+  });
+  if (outcome.kind === "conflict") {
+    await deps.store.merge(ASSET_DELETION_COLLECTION, scope, String(stored.id), {
+      applied: false,
+      outcome: "conflict",
+    });
+    throw new HttpError(
+      409,
+      "asset_delete_conflict",
+      `asset ${assetId} changed while it was being deleted; re-read it and decide again`,
+    );
+  }
+
+  // (6) The METADATA delete has committed, so the artifact already resolves
+  // nowhere. Record that BEFORE reclaiming the bytes: if the bucket call fails,
+  // the trail must not still say `applied: false` about a version that is gone.
+  await deps.store.merge(ASSET_DELETION_COLLECTION, scope, String(stored.id), {
+    applied: true,
+    outcome: "applied",
+    detached_channels: outcome.detachedChannels,
+  });
+  await objects.delete(outcome.objectKeys);
+  const reclaimed = await deps.store.merge(ASSET_DELETION_COLLECTION, scope, String(stored.id), {
+    objects_deleted: outcome.objectKeys.length,
+  });
+  return json(
+    c,
+    200,
+    adminItem("asset_deletion", {
+      ...(reclaimed ?? stored),
+      // Stated on the wire, not inferred from a 200 — the same reason the
+      // generic admin DELETE carries `deleted: true`.
+      deleted: true,
+    }),
+  );
+};
+
 export const adminAssetRoutes: GroupModule = crudGroup("admin_asset", [], {
   listFleetAssets: fleetListHandler({ object: FLEET_OBJECT, allowed: ASSET_VISIBILITIES }),
   listQuarantinedAssets: fleetListHandler({
@@ -452,4 +682,5 @@ export const adminAssetRoutes: GroupModule = crudGroup("admin_asset", [], {
     allowed: WITHHELD_VISIBILITIES,
   }),
   reviewQuarantinedAsset: reviewHandler,
+  forceDeleteAssetVersion: forceDeleteHandler,
 });

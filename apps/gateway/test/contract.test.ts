@@ -46,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 275 operations", () => {
+  it("carries exactly 276 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 275 unique operation ids", () => {
+  it("has 276 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -85,10 +85,11 @@ describe("contract table", () => {
     // landed in parallel: bearer 258 and anonymous 7 are both COUNTED off the
     // MERGED document, which is the only side that holds both.
     //
-    // 258 -> 261 with #743's three asset-fleet operations, all bearer: an
-    // operator inventory of what tenants are hosting has no anonymous reading.
+    // 258 -> 262 with #743's four asset-fleet operations, all bearer: an
+    // operator inventory of what tenants are hosting has no anonymous reading,
+    // and neither has its force-delete.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 261,
+      bearer: 262,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -104,11 +105,11 @@ describe("contract table", () => {
       // all admin for the same reason. BOTH sets landed, so that leg is
       // 196 + 3 + 6 = 205 and not either parent's number; #677's two
       // chargeback reads then take it to 207, admin because a per-request cost
-      // record is the most identity-dense report in the product. #743's three
-      // asset-fleet operations then take it to 210 — admin because a fleet
-      // inventory and a quarantine verdict are operator surfaces, never
-      // caller-facing ones.
-      admin: 210,
+      // record is the most identity-dense report in the product. #743's four
+      // asset-fleet operations then take it to 211 — admin because a fleet
+      // inventory, a quarantine verdict and an operator takedown are operator
+      // surfaces, never caller-facing ones. COUNTED off the merged document.
+      admin: 211,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -148,7 +149,8 @@ describe("contract table", () => {
       // operation whose path is a CATCH-ALL, because a static site is a tree of
       // unknown depth and a fixed segment count cannot address it. #743 then
       // takes GET to 126 (`/admin/v1/assets` and
-      // `/admin/v1/assets/quarantine`).
+      // `/admin/v1/assets/quarantine`) and DELETE to 28
+      // (`DELETE /admin/v1/assets/{asset_id}`, the operator force-delete).
       GET: 126,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
@@ -156,7 +158,7 @@ describe("contract table", () => {
       // #743's `POST /admin/v1/assets/quarantine/{asset_id}`. Re-counted off
       // the merged document, never summed.
       POST: 86,
-      DELETE: 27,
+      DELETE: 28,
       PUT: 20,
       PATCH: 16,
     });

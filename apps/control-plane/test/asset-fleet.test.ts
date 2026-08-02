@@ -1,8 +1,9 @@
 /**
- * The ASSET FLEET admin surface (#743): inventory, quarantine queue, review.
+ * The ASSET FLEET admin surface (#743): inventory, quarantine queue, review,
+ * force-delete.
  *
- * Three properties are under test and only one of them is "the endpoint
- * answers". The other two are the reasons the endpoint is dangerous:
+ * Five properties are under test and only one of them is "the endpoint
+ * answers". The others are the reasons the endpoint is dangerous:
  *
  *  1. **The cross-tenant fence.** A surface that lists assets across tenants is
  *     the single most dangerous read in this repo, so seeing another tenant's
@@ -20,6 +21,18 @@
  *     decision writes a durable, hash-chained `audit_events` row naming the
  *     actor, and the decision record it points at carries the reason. A release
  *     with no reason is a 400 and the row does not move.
+ *  4. **Reading is one authority, DECIDING is another.** A tenant may SEE that
+ *     its own version is withheld and may NOT move it: releasing its own
+ *     quarantined asset would be the reviewed party overturning the #366
+ *     screener's verdict on its own content, and force-deleting is strictly
+ *     more powerful again. Both refusals are asserted on the ROW as well as on
+ *     the status code — a 403 whose state changed anyway is the worse bug.
+ *  5. **A takedown takes the bytes down.** The force-delete's assertions read
+ *     the real R2 bucket back, so a metadata-only delete — which would answer
+ *     `deleted: true` over bytes that are still there — fails them. The
+ *     response also has to say WHICH operation happened: retiring an
+ *     unreferenced version and taking down a version a channel is serving are
+ *     different acts, and the second needs `?force=true` asked for by name.
  *
  * The tenant databases are REAL (`TENANT_DB_A` / `TENANT_DB_B`, the real
  * `sql/d1-ts/tenant/` migration) because `stored_assets` lives in the tenant
@@ -27,7 +40,7 @@
  * against a single shared database is vacuous — it would pass against a router
  * that ignored its argument.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, auditRows, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, tenantKey } from "./harness.js";
@@ -101,6 +114,88 @@ async function seedAssets(handle: D1Database, rows: readonly AssetSeed[]): Promi
   );
 }
 
+/**
+ * The REAL asset bucket binding, the one `wrangler.toml` declares.
+ *
+ * The force-delete's whole claim is that the bytes go, so the assertions below
+ * put real objects in this bucket and read it back afterwards. Asserting only
+ * on the D1 rows would pass against exactly the metadata-only delete the verb
+ * was deferred to avoid.
+ */
+function assetBucket(): R2Bucket {
+  return (env as unknown as { ASSETS: R2Bucket }).ASSETS;
+}
+
+/** Put an object at `key`, so a later delete has something real to remove. */
+async function putObject(key: string, body = "artifact-bytes"): Promise<void> {
+  await assetBucket().put(key, body);
+}
+
+/** Does the bucket still hold `key`? */
+async function objectExists(key: string): Promise<boolean> {
+  return (await assetBucket().head(key)) !== null;
+}
+
+/** Seed one `asset_bundle_files` row (#736) — a bundle's per-file object. */
+async function seedBundleFile(
+  handle: D1Database,
+  assetId: string,
+  tenantId: string,
+  path: string,
+  storageUri: string,
+): Promise<void> {
+  await handle
+    .prepare(
+      `INSERT INTO asset_bundle_files
+         (asset_id, tenant_id, path, storage_uri, content_type, content_hash, size_bytes, created_at_unix)
+       VALUES (?, ?, ?, ?, 'text/html', 'sha256:beef', 12, 100)`,
+    )
+    .bind(assetId, tenantId, path, storageUri)
+    .run();
+}
+
+/** Seed one `asset_channels` row — the pointer `/sites/{slug}` resolves through. */
+async function seedChannel(
+  handle: D1Database,
+  tenantId: string,
+  channel: string,
+  options: { readonly assetType?: string; readonly name: string; readonly version: string },
+): Promise<void> {
+  const assetType = options.assetType ?? "static_site";
+  await handle
+    .prepare(
+      `INSERT INTO asset_channels (id, tenant_id, asset_type, name, channel, version, updated_at_unix)
+       VALUES (?, ?, ?, ?, ?, ?, 100)`,
+    )
+    .bind(
+      `${tenantId}:${assetType}:${options.name}:${channel}`,
+      tenantId,
+      assetType,
+      options.name,
+      channel,
+      options.version,
+    )
+    .run();
+}
+
+/** Channel names still pointing at one logical version. */
+async function channelsFor(handle: D1Database, name: string): Promise<string[]> {
+  const rows = await handle
+    .prepare("SELECT channel FROM asset_channels WHERE name = ? ORDER BY channel")
+    .bind(name)
+    .all<{ channel: string }>();
+  return (rows.results ?? []).map((row) => row.channel);
+}
+
+/** How many `asset_bundle_files` rows one version still owns. */
+async function bundleFileCount(handle: D1Database, assetId: string): Promise<number> {
+  const row = await handle
+    .prepare("SELECT COUNT(*) AS n FROM asset_bundle_files WHERE asset_id = ?")
+    .bind(assetId)
+    .first<{ n: number }>();
+  return row === null ? 0 : row.n;
+}
+
 /** The `visibility` a row currently holds, straight out of the table. */
 async function visibilityOf(handle: D1Database, id: string): Promise<string | null> {
   const row = await handle
@@ -130,8 +225,19 @@ beforeEach(async () => {
   await resetTenantD1();
   await registerTenantDatabases();
   await Promise.all(
-    [tenantDbA(), tenantDbB()].map((handle) => handle.prepare("DELETE FROM stored_assets").run()),
+    [tenantDbA(), tenantDbB()].flatMap((handle) => [
+      handle.prepare("DELETE FROM stored_assets").run(),
+      handle.prepare("DELETE FROM asset_bundle_files").run(),
+      handle.prepare("DELETE FROM asset_channels").run(),
+    ]),
   );
+  // The pool persists R2 under `.wrangler/state` exactly as it persists D1, so
+  // a leftover object from a previous run would make a "the bytes are gone"
+  // assertion pass for the wrong reason (or fail for one).
+  const listed = await assetBucket().list();
+  if (listed.objects.length > 0) {
+    await assetBucket().delete(listed.objects.map((object) => object.key));
+  }
   arm({
     store: "d1",
     staticKeys: [
@@ -498,5 +604,281 @@ describe("POST /admin/v1/assets/quarantine/{asset_id} — the review decision", 
     );
     expect(response.status).toBe(403);
     expect(await visibilityOf(tenantDbA(), "asset_held")).toBe("pending_scan");
+  });
+});
+
+/**
+ * `DELETE /admin/v1/assets/{asset_id}` — the operator FORCE-DELETE (#743's
+ * third "Done when" bullet).
+ *
+ * Three properties, and only the first is "the endpoint answers":
+ *
+ *  1. **It is operator-only, like the review and for a stronger reason.** A
+ *     force-delete is strictly more powerful than a release, so a tenant-scoped
+ *     credential is refused and NOTHING is deleted — asserted on the row and on
+ *     the bucket, because a refusal whose bytes went anyway is the worse bug.
+ *  2. **The bytes actually go.** Every deletion assertion reads the REAL R2
+ *     bucket back. A metadata-only delete — the exact failure this verb was
+ *     deferred to avoid — passes a row-only test and fails these.
+ *  3. **It says which operation the operator just performed.** Deleting an
+ *     unreferenced version and taking down a version a channel is serving are
+ *     different acts: the second is refused unless `force=true` is asked for by
+ *     name, and when it does happen the response NAMES the channels that went
+ *     dark.
+ */
+describe("DELETE /admin/v1/assets/{asset_id} — the operator force-delete", () => {
+  const ARCHIVE = `assets/${TENANT_A}/asset_site.tar`;
+  const PAGE = `assets/${TENANT_A}/asset_site/index.html`;
+
+  beforeEach(async () => {
+    await seedAssets(tenantDbA(), [
+      { id: "asset_site", tenantId: TENANT_A, name: "docs", version: "1.0.0" },
+    ]);
+    await seedBundleFile(tenantDbA(), "asset_site", TENANT_A, "index.html", PAGE);
+    await putObject(ARCHIVE);
+    await putObject(PAGE);
+  });
+
+  function deleteRequest(
+    secret: string,
+    id: string,
+    query: Record<string, string>,
+  ): [string, RequestInit] {
+    const search = new URLSearchParams(query).toString();
+    return [
+      `${BASE}/admin/v1/assets/${id}?${search}`,
+      { method: "DELETE", headers: bearer(secret) },
+    ];
+  }
+
+  /** Everything a refusal must leave exactly as it found it. */
+  async function nothingWasDeleted(): Promise<void> {
+    expect(await visibilityOf(tenantDbA(), "asset_site")).toBe("visible");
+    expect(await bundleFileCount(tenantDbA(), "asset_site")).toBe(1);
+    expect(await objectExists(ARCHIVE), "the archive object survived").toBe(true);
+    expect(await objectExists(PAGE), "the bundle file object survived").toBe(true);
+    // A destroyed artifact with no decision record is unattributable; a
+    // decision record with no destroyed artifact is a lie. Neither, here.
+    expect((await auditRows()).filter((row) => row.audit.collection === "asset-deletions")).toEqual(
+      [],
+    );
+  }
+
+  it("REFUSES a tenant credential — its own asset included — and deletes nothing", async () => {
+    // The escalation, in its more dangerous form: a release can be re-reviewed,
+    // a force-delete cannot be undone.
+    const response = await SELF.fetch(
+      ...deleteRequest(TENANT_A_KEY, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "it is my asset and I want it gone",
+      }),
+    );
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("asset_fleet_write_operator_only");
+    await nothingWasDeleted();
+  });
+
+  it("refuses a platform operator without the distinct fleet grant", async () => {
+    const response = await SELF.fetch(
+      ...deleteRequest(WILDCARD_OPERATOR, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "the wildcard is not this grant",
+      }),
+    );
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "asset_fleet_scope_required",
+    );
+    await nothingWasDeleted();
+  });
+
+  it("REFUSES a delete with no reason, and deletes nothing", async () => {
+    const response = await SELF.fetch(
+      ...deleteRequest(FLEET_OPERATOR, "asset_site", { tenant_id: TENANT_A }),
+    );
+    expect(response.status).toBe(400);
+    await nothingWasDeleted();
+  });
+
+  it("RETIRES an unreferenced version: row, bundle index and objects all go", async () => {
+    const response = await SELF.fetch(
+      ...deleteRequest(FLEET_OPERATOR, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "takedown: phishing kit reported by the registrar",
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      object: string;
+      asset_deletion: Record<string, unknown>;
+    };
+    expect(body.object).toBe("asset_deletion");
+    expect(body.asset_deletion).toMatchObject({
+      asset_id: "asset_site",
+      tenant_id: TENANT_A,
+      name: "docs",
+      version: "1.0.0",
+      deleted: true,
+      applied: true,
+      force: false,
+      // Nothing was serving it, so nothing went dark — the operator is told
+      // which of the two operations this was.
+      served_by_channels: [],
+      detached_channels: [],
+      // The archive plus the one bundle file.
+      objects_deleted: 2,
+      reason: "takedown: phishing kit reported by the registrar",
+      actor_scope: "platform_operator",
+      actor_key_id: "static_fleet_operator",
+    });
+    // The row is gone…
+    expect(await visibilityOf(tenantDbA(), "asset_site")).toBeNull();
+    // …the per-file index with it (#736)…
+    expect(await bundleFileCount(tenantDbA(), "asset_site")).toBe(0);
+    // …and so are the BYTES. This is the assertion a metadata-only delete
+    // fails, and it is the reason the verb needs the bucket binding at all.
+    expect(await objectExists(ARCHIVE), "the archive object is gone").toBe(false);
+    expect(await objectExists(PAGE), "the bundle file object is gone").toBe(false);
+
+    // Attributable, on the OWNING tenant's chain — the tenant can see what was
+    // deleted and by whom even though it could never have deleted it itself.
+    const chained = (await auditRows()).filter(
+      (row) =>
+        row.audit.collection === "asset-deletions" &&
+        row.audit.resource_id === body.asset_deletion.id,
+    );
+    expect(chained.length).toBeGreaterThan(0);
+    expect(chained[0]?.tenant).toBe(TENANT_A);
+  });
+
+  it("REFUSES to take down a version a channel is serving, and NAMES the channel", async () => {
+    await seedChannel(tenantDbA(), TENANT_A, "latest", { name: "docs", version: "1.0.0" });
+    const response = await SELF.fetch(
+      ...deleteRequest(FLEET_OPERATOR, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "abuse report",
+      }),
+    );
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("asset_version_referenced");
+    // Deleting bytes out from under a live channel is a DIFFERENT operation
+    // from retiring an unreferenced version, so the refusal says what would go
+    // dark rather than just refusing.
+    expect(body.error.message).toContain("latest");
+    await nothingWasDeleted();
+    expect(await channelsFor(tenantDbA(), "docs")).toEqual(["latest"]);
+  });
+
+  it("takes the live version down with force=true, and REPORTS the channels that went dark", async () => {
+    await seedChannel(tenantDbA(), TENANT_A, "latest", { name: "docs", version: "1.0.0" });
+    await seedChannel(tenantDbA(), TENANT_A, "stable", { name: "docs", version: "1.0.0" });
+    const response = await SELF.fetch(
+      ...deleteRequest(FLEET_OPERATOR, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "court-ordered takedown of the published site",
+        force: "true",
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { asset_deletion: Record<string, unknown> };
+    expect(body.asset_deletion).toMatchObject({
+      force: true,
+      served_by_channels: ["latest", "stable"],
+      // THE field that says a live site was taken down, not that an unused
+      // version was retired.
+      detached_channels: ["latest", "stable"],
+      deleted: true,
+    });
+    // The channels are gone WITH the version: `apps/gateway`'s invariant is
+    // that a channel never points at an absent version, and a dangling channel
+    // would 404 in a way that looks like a bug rather than like a takedown.
+    expect(await channelsFor(tenantDbA(), "docs")).toEqual([]);
+    expect(await visibilityOf(tenantDbA(), "asset_site")).toBeNull();
+    expect(await objectExists(ARCHIVE)).toBe(false);
+  });
+
+  it("does not need force when another live variant keeps the channel resolving", async () => {
+    await seedAssets(tenantDbA(), [
+      {
+        id: "asset_site_arm",
+        tenantId: TENANT_A,
+        name: "docs",
+        version: "1.0.0",
+        variant: "arm64",
+      },
+    ]);
+    await seedChannel(tenantDbA(), TENANT_A, "latest", { name: "docs", version: "1.0.0" });
+    const response = await SELF.fetch(
+      ...deleteRequest(FLEET_OPERATOR, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "the x86 build was the malicious one",
+      }),
+    );
+    // Same predicate `apps/gateway`'s own delete puts inside its statement: a
+    // channel that still resolves was never stranded, so this is a retirement
+    // and not a takedown.
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { asset_deletion: Record<string, unknown> };
+    expect(body.asset_deletion).toMatchObject({
+      served_by_channels: ["latest"],
+      detached_channels: [],
+    });
+    expect(await channelsFor(tenantDbA(), "docs")).toEqual(["latest"]);
+    expect(await visibilityOf(tenantDbA(), "asset_site")).toBeNull();
+    expect(await visibilityOf(tenantDbA(), "asset_site_arm")).toBe("visible");
+  });
+
+  it("refuses ?force= that is neither true nor false rather than reading it as false", async () => {
+    const response = await SELF.fetch(
+      ...deleteRequest(FLEET_OPERATOR, "asset_site", {
+        tenant_id: TENANT_A,
+        reason: "typo in the flag",
+        force: "yes",
+      }),
+    );
+    expect(response.status).toBe(400);
+    await nothingWasDeleted();
+  });
+
+  it("cannot be aimed at another tenant's asset by a tenant credential", async () => {
+    await seedAssets(tenantDbB(), [{ id: "asset_b_live", tenantId: TENANT_B }]);
+    const response = await SELF.fetch(
+      ...deleteRequest(TENANT_A_KEY, "asset_b_live", {
+        tenant_id: TENANT_B,
+        reason: "not mine to delete",
+      }),
+    );
+    expect(response.status).toBe(403);
+    expect(await visibilityOf(tenantDbB(), "asset_b_live")).toBe("visible");
+  });
+
+  it("answers 503 and DELETES nothing when the deployment binds no ASSETS bucket", async () => {
+    // A deployment that never bound the bucket must not get a metadata-only
+    // delete that reports a takedown while the bytes stay where they are. The
+    // binding is removed for exactly this request and restored afterwards.
+    const bindings = env as unknown as { ASSETS?: R2Bucket };
+    const bucket = bindings.ASSETS;
+    bindings.ASSETS = undefined;
+    try {
+      const response = await SELF.fetch(
+        ...deleteRequest(FLEET_OPERATOR, "asset_site", {
+          tenant_id: TENANT_A,
+          reason: "no bucket on this deployment",
+        }),
+      );
+      expect(response.status).toBe(503);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+        "asset_bucket_not_configured",
+      );
+      expect(await visibilityOf(tenantDbA(), "asset_site")).toBe("visible");
+      expect(await bundleFileCount(tenantDbA(), "asset_site")).toBe(1);
+      expect(
+        (await auditRows()).filter((row) => row.audit.collection === "asset-deletions"),
+      ).toEqual([]);
+    } finally {
+      bindings.ASSETS = bucket;
+    }
   });
 });

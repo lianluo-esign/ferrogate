@@ -1197,6 +1197,14 @@ export const GROUPS: readonly GroupDescriptor[] = [
         "Release or reject one withheld asset version, with a reason",
         "reviewQuarantinedAsset",
       ),
+      withPositionalQuerySegments(
+        mutatingWithConfirmation(
+          "delete",
+          "Force-delete one asset version — row, bundle index and stored objects (irreversible)",
+          "forceDeleteAssetVersion",
+        ),
+        2,
+      ),
     ],
     build: (verb, input) => {
       switch (verb) {
@@ -1209,6 +1217,33 @@ export const GROUPS: readonly GroupDescriptor[] = [
             ["quarantine", firstSegment(input, "asset")],
             requireBody(input, verb),
           );
+        case "delete": {
+          // `<asset_id> <tenant_id> <reason> [force]`. The tenant and the reason
+          // are POSITIONAL rather than optional flags because the API refuses
+          // the call without either, and a verb that can only fail without an
+          // argument should not let you type it without one. `force` is the
+          // exception: it means "take a live site down", so it is opt-in and
+          // spelled out.
+          const [assetId, tenantId, reason, force] = input.segments;
+          if (assetId === undefined || tenantId === undefined || reason === undefined) {
+            throw CliError.usage("verb 'delete' requires <asset_id> <tenant_id> <reason> [force]");
+          }
+          if (force !== undefined && force !== "force") {
+            throw CliError.usage(
+              `verb 'delete' takes 'force' as its optional fourth argument (got ${JSON.stringify(force)})`,
+            );
+          }
+          const spec = ASSET_FLEET.mutate("DELETE", [assetId], undefined);
+          return {
+            ...spec,
+            query: [
+              ...spec.query,
+              ["tenant_id", tenantId] as const,
+              ["reason", reason] as const,
+              ...(force === "force" ? [["force", "true"] as const] : []),
+            ],
+          };
+        }
         default:
           throw CliError.usage(`verb '${verb}' is not an asset-fleet verb`);
       }

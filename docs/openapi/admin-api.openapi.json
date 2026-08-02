@@ -19711,6 +19711,117 @@
           "rbac_action": null
         }
       }
+    },
+    "/admin/v1/assets/{asset_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "asset_id",
+          "in": "path",
+          "required": true,
+          "description": "stored_assets.id of the exact version row to destroy.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "forceDeleteAssetVersion",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Force-delete one asset version: the row, its bundle-file index and its stored objects.",
+        "description": "OPERATOR ONLY and irreversible. A tenant-scoped credential — including the owning tenant's own `admin.write` key — is refused `403 asset_fleet_write_operator_only` and NOTHING is deleted; a platform operator must additionally hold the DISTINCT `admin.assets.fleet` scope, held exactly. This is a different verb from a quarantine `reject`, which only moves `visibility` and keeps every byte: here the `stored_assets` row, the `asset_bundle_files` index and the R2 objects all go, and the tenant's storage quota is actually released.\n\nWHICH OPERATION YOU JUST PERFORMED IS REPORTED BACK. A static site reaches the internet through a CHANNEL (`/sites/{slug}` binds a slug to a channel; a verified custom domain resolves to a site), so a channel pointing at the version is what 'live' means. With no channel pointing at it — or with another non-yanked variant of the same version surviving — this RETIRES an unreferenced version and answers `detached_channels: []`. When this row is the last resolvable variant of a channel-referenced version, the request is refused `409 asset_version_referenced` NAMING those channels, unless `force=true` is sent; with it, the stranded channels are deleted along with the version and listed in `detached_channels`, because a channel pointing at an absent version is a 404 that looks like a bug.\n\nA `reason` is required, the decision record is written (and hash-chained into audit_events on the OWNING tenant's chain) BEFORE anything is destroyed, and the applying delete is a compare-and-set on the exact state that was read — a version that changed under the operator is `409 asset_delete_conflict`. On a deployment that binds no ASSETS bucket the operation answers `503 asset_bucket_not_configured` and writes nothing, rather than performing a metadata-only delete that would report a takedown while the bytes stayed in the bucket.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "description": "Tenant that owns the version. Required: the only admitted caller is a platform operator, which owns no tenant to default it from, and a write names the database it acts on rather than searching every tenant for the id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": true,
+            "description": "WHY. Required and non-empty (max 2000 characters). A force-delete cannot be undone by reading the row back, so the decision record is the only thing that survives it.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "description": "Delete even when this row is the last resolvable variant of a channel-referenced version, removing those channels too. Strictly `true` or `false`; any other value is a 400 rather than a silent `false`.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Version deleted; the record states what was taken down with it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAssetDeletionResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -37150,6 +37261,143 @@
           },
           "asset_review": {
             "$ref": "#/components/schemas/AdminAssetReview"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAssetDeletion": {
+        "type": "object",
+        "description": "The durable force-delete record. It is written BEFORE anything is destroyed and hash-chained into audit_events on the owning tenant's chain, and once the version is gone it is the ONLY remaining evidence of what was taken down — which is why it carries the digest and the size as well as the reason.",
+        "required": [
+          "id",
+          "tenant_id",
+          "asset_id",
+          "asset_type",
+          "name",
+          "version",
+          "reason",
+          "force",
+          "served_by_channels",
+          "detached_channels",
+          "objects_deleted",
+          "applied",
+          "actor_scope",
+          "decided_at_unix",
+          "deleted"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "asset_id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string"
+          },
+          "from_visibility": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "The state the version was in when it was deleted. The applying DELETE is a compare-and-set on exactly this value plus updated_at_unix."
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Digest of the bytes that were destroyed. It identifies an artifact an investigator already holds; it is not a locator."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Whether the caller asked for a live takedown. False means the version was unreferenced (or another live variant survived) and nothing went dark."
+          },
+          "served_by_channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Channels that pointed at this logical version when it was deleted. Non-empty with force=false means another variant kept them resolving."
+          },
+          "detached_channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Channels this delete REMOVED because the version they pointed at is gone. Empty unless the delete stranded them — this is the field that says a live site was taken down."
+          },
+          "objects_deleted": {
+            "type": "integer",
+            "description": "Stored objects reclaimed from the bucket: the archive plus every bundle file."
+          },
+          "applied": {
+            "type": "boolean",
+            "description": "False until the guarded DELETE has committed, so 'recorded' never silently reads as 'done'."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "conflict"
+            ]
+          },
+          "deleted": {
+            "type": "boolean",
+            "const": true
+          },
+          "actor_scope": {
+            "type": "string",
+            "enum": [
+              "platform_operator",
+              "tenant"
+            ]
+          },
+          "actor_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The credential that decided, when it carries an id."
+          },
+          "decided_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AdminAssetDeletionResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "asset_deletion"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "asset_deletion"
+          },
+          "asset_deletion": {
+            "$ref": "#/components/schemas/AdminAssetDeletion"
           }
         },
         "additionalProperties": false

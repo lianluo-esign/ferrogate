@@ -2864,6 +2864,17 @@
       "rbac_action": null
     },
     {
+      "path": "/admin/v1/assets/{asset_id}",
+      "method": "delete",
+      "operation_id": "forceDeleteAssetVersion",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/admin/v1/plans",
       "method": "get",
       "operation_id": "listPlans",

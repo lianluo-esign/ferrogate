@@ -173,12 +173,14 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
   // WRONG here rather than merely thin, which is why this is a deferral with a
   // named shape instead of a registry entry:
   //
-  //  1. **It is not CRUD.** There is no create, no update and no delete — the
-  //     only write is a decision (`release` | `reject`) that carries a MANDATORY
-  //     free-text reason and is refused without one. The generic form renders
-  //     editable fields and a Save button; that is the wrong affordance for an
-  //     irreversible moderation verdict, and a Save that silently 400s on a
-  //     missing reason is worse than no button.
+  //  1. **It is not CRUD.** There is no create and no update; the two writes are
+  //     a decision (`release` | `reject`) and an irreversible force-delete, and
+  //     BOTH carry a MANDATORY free-text reason and are refused without one. The
+  //     generic form renders editable fields and a Save button; that is the
+  //     wrong affordance for a moderation verdict, and the generic row DELETE —
+  //     one click, no reason, no `force` — is the wrong affordance for a verb
+  //     that destroys bytes and can take a live site down. A Save that silently
+  //     400s on a missing reason is worse than no button.
   //  2. **The cross-tenant read is gated on a scope the console session may not
   //     hold.** `admin.assets.fleet` must be held EXACTLY (the admin wildcard
   //     does not grant it), so the page has a first-class "you are not
@@ -204,7 +206,7 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
   assets: {
     owner: "hosting abuse-response console surface (#743 follow-up, #313 chain)",
     reason:
-      "asset fleet inventory plus a quarantine review queue whose only write is a reasoned release/reject decision, not a CRUD leg; it also needs a distinct-scope ('admin.assets.fleet' held exactly) unauthorized state and a list that must never link to bytes, so a generic CRUD resource would render the wrong affordances. Belongs as a two-pane abuse-response screen beside the site-domains hosting surfaces — deferred, needs UI",
+      "asset fleet inventory plus a quarantine review queue whose writes are a reasoned release/reject decision and an irreversible force-delete that must state whether it is taking a live channel down, not CRUD legs; it also needs a distinct-scope ('admin.assets.fleet' held exactly) unauthorized state and a list that must never link to bytes, so a generic CRUD resource would render the wrong affordances. Belongs as a two-pane abuse-response screen beside the site-domains hosting surfaces — deferred, needs UI",
   },
 };
 

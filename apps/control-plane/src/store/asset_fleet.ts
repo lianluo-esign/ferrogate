@@ -424,3 +424,158 @@ export async function readAssetForReview(
     .first<StoredAssetRow>();
   return row === null ? null : { db, row: fleetAssetRow(row, "quarantined_asset") };
 }
+
+// ---------------------------------------------------------------------------
+// The force-delete  (#743, done-when bullet 3)
+// ---------------------------------------------------------------------------
+
+/** `asset_channels` — the mutable pointers a delete can strand (#367). */
+export const ASSET_CHANNEL_TABLE = "asset_channels";
+/** `asset_bundle_files` — the per-file object index a bundle owns (#736). */
+export const ASSET_BUNDLE_FILE_TABLE = "asset_bundle_files";
+
+/**
+ * What still points at a version, and whether deleting THIS row would strand it.
+ *
+ * The two fields answer two different operator questions and collapsing them
+ * would lose the one that matters. `channels` is "what is serving these bytes
+ * right now" — a `static_site` bundle reaches the public internet through a
+ * CHANNEL (`/sites/{slug}` binds a slug to a channel, #737, and a verified
+ * custom domain resolves to a site, #738), so a non-empty list means a live
+ * surface is involved. `siblingSurvives` is whether another non-yanked variant
+ * of the same logical version remains after the delete, in which case those
+ * channels keep resolving and nothing goes dark.
+ *
+ * The pair is exactly the predicate `apps/gateway`'s `ASSET_VARIANT_DELETE_SQL`
+ * puts INSIDE its DELETE ("another live variant survives OR no channel points
+ * here"), computed here as two reads because this surface has to REPORT what it
+ * found before it acts: an operator must be told which channels a force-delete
+ * is about to take down, and a guard hidden inside a statement can only refuse,
+ * never explain.
+ */
+export interface AssetVersionReferences {
+  /** Channel names pointing at this logical version, sorted. */
+  readonly channels: readonly string[];
+  /** Another non-yanked variant of the same version survives this delete. */
+  readonly siblingSurvives: boolean;
+}
+
+/** Read {@link AssetVersionReferences} for one row. */
+export async function assetVersionReferences(
+  db: D1Database,
+  tenantId: string,
+  row: FleetAssetRow,
+): Promise<AssetVersionReferences> {
+  const channels = await db
+    .prepare(
+      `SELECT channel FROM ${ASSET_CHANNEL_TABLE}
+        WHERE tenant_id = ? AND asset_type = ? AND name = ? AND version = ?
+        ORDER BY channel ASC`,
+    )
+    .bind(tenantId, row.asset_type, row.name, row.version)
+    .all<{ channel: string }>();
+  const sibling = await db
+    .prepare(
+      `SELECT id FROM ${STORED_ASSET_TABLE}
+        WHERE tenant_id = ? AND asset_type = ? AND name = ? AND version = ?
+          AND id <> ? AND yanked = 0
+        LIMIT 1`,
+    )
+    .bind(tenantId, row.asset_type, row.name, row.version, row.id)
+    .first<{ id: string }>();
+  return {
+    channels: (channels.results ?? []).map((entry) => entry.channel),
+    siblingSurvives: sibling !== null,
+  };
+}
+
+/** Deleting this row would leave at least one channel pointing at nothing. */
+export function wouldStrandChannel(references: AssetVersionReferences): boolean {
+  return references.channels.length > 0 && !references.siblingSurvives;
+}
+
+export type AssetVersionDeletion =
+  | {
+      readonly kind: "deleted";
+      /** R2 keys this delete orphaned: the archive plus every bundle file. */
+      readonly objectKeys: readonly string[];
+      /** Channel rows this delete REMOVED, sorted. Empty unless it stranded. */
+      readonly detachedChannels: readonly string[];
+    }
+  /** The row moved between the read and the delete — same shape as a review. */
+  | { readonly kind: "conflict" };
+
+/**
+ * Delete ONE asset version row, its bundle-file index, and (when asked) the
+ * channels it would otherwise strand.
+ *
+ * ## The order, and what a crash in the middle leaves
+ *
+ * `stored_assets` goes FIRST, alone, guarded on the exact state that was read.
+ * Everything else follows. D1 is SQLite and a Worker cannot hold a transaction
+ * across an `await`, so the ORDER is the contract, exactly as it is for the
+ * review:
+ *
+ * | order | a crash in between leaves |
+ * |---|---|
+ * | version row, then the rest (this one) | an artifact that resolves nowhere, plus reclaimable leftovers — the takedown TOOK EFFECT |
+ * | the rest, then the version row | a live version whose files were deleted underneath it: a 500 on the serve path instead of a clean 404 |
+ *
+ * The object keys are RETURNED rather than deleted here: the bucket handle is
+ * the caller's ({@link ../ports.js#AssetObjectReclaimer}, a delete-only port)
+ * and the bytes must not go before the rows that name them commit. An orphaned
+ * R2 object is reclaimable; bytes deleted under a live row are not.
+ *
+ * ## The guard
+ *
+ * `AND visibility = ? AND updated_at_unix = ?` is a compare-and-set on the
+ * state the operator was shown — the same discipline as
+ * {@link applyAssetReview}, and for the same reason: a screener verdict or a
+ * second operator that landed between the read and this write must make the
+ * delete FAIL rather than silently destroy something nobody looked at.
+ */
+export async function deleteAssetVersion(
+  db: D1Database,
+  tenantId: string,
+  row: FleetAssetRow,
+  options: { readonly detachChannels: boolean },
+): Promise<AssetVersionDeletion> {
+  const deleted = await db
+    .prepare(
+      `DELETE FROM ${STORED_ASSET_TABLE}
+        WHERE id = ? AND tenant_id = ? AND visibility = ? AND updated_at_unix = ?
+        RETURNING storage_uri`,
+    )
+    .bind(row.id, tenantId, row.visibility, row.updated_at_unix)
+    .all<{ storage_uri: string | null }>();
+  const removed = deleted.results ?? [];
+  if (removed.length !== 1) return { kind: "conflict" };
+
+  const files = await db
+    .prepare(
+      `DELETE FROM ${ASSET_BUNDLE_FILE_TABLE}
+        WHERE asset_id = ? AND tenant_id = ?
+        RETURNING storage_uri`,
+    )
+    .bind(row.id, tenantId)
+    .all<{ storage_uri: string | null }>();
+
+  let detached: readonly string[] = [];
+  if (options.detachChannels) {
+    const channels = await db
+      .prepare(
+        `DELETE FROM ${ASSET_CHANNEL_TABLE}
+          WHERE tenant_id = ? AND asset_type = ? AND name = ? AND version = ?
+          RETURNING channel`,
+      )
+      .bind(tenantId, row.asset_type, row.name, row.version)
+      .all<{ channel: string }>();
+    detached = (channels.results ?? []).map((entry) => entry.channel).sort();
+  }
+
+  const objectKeys = [
+    ...removed.map((entry) => entry.storage_uri),
+    ...(files.results ?? []).map((entry) => entry.storage_uri),
+  ].filter((key): key is string => typeof key === "string" && key !== "");
+  return { kind: "deleted", objectKeys, detachedChannels: detached };
+}

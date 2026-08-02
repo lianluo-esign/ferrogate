@@ -63,7 +63,7 @@ const HONO_ROUTES: readonly HonoRoute[] = (
 const HONO_KEYS = new Set(HONO_ROUTES.map((route) => `${route.method} ${route.path}`));
 
 /**
- * The routes `src/index.ts` mounts that are not among the 214 operations this
+ * The routes `src/index.ts` mounts that are not among the 215 operations this
  * app OWNS. They are named here so the "nothing extra is mounted" assertion
  * below is exact rather than a tolerance.
  *
@@ -107,7 +107,7 @@ function contractKey(operationId: string): string {
   return `${operation.method} ${operation.honoPath}`;
 }
 
-describe("the app src/index.ts exports has all 214 operations in its ROUTING TABLE", () => {
+describe("the app src/index.ts exports has all 215 operations in its ROUTING TABLE", () => {
   it("mounts every contract operation this app owns — naming any that fell off", () => {
     // THE gate. `HONO_KEYS` comes from Hono, not from the contract, so this is
     // a comparison between two independent things.
@@ -121,7 +121,7 @@ describe("the app src/index.ts exports has all 214 operations in its ROUTING TAB
     ).toEqual([]);
   });
 
-  it("mounts NOTHING beyond the 214 + the shared probes + /health + /version", () => {
+  it("mounts NOTHING beyond the 215 + the shared probes + /health + /version", () => {
     const expected = new Set<string>([
       ...CONTROL_PLANE_OPERATIONS.map((operation) => `${operation.method} ${operation.honoPath}`),
       ...NON_CONTRACT_ROUTES,
