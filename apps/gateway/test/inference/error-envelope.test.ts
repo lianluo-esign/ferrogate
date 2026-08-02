@@ -111,9 +111,7 @@ describe("an unhandled throw inside the inference router answers the envelope", 
     // The whole reason `classifyError`'s unknown arm hard-codes its message.
     // An `Error` raised deep in a provider port routinely carries the
     // credential, the upstream URL or the binding name that failed.
-    const call = gateway(
-      exploding(`connect ${PROVIDER_URL} with ${SECRET} via ${BINDING} failed`),
-    );
+    const call = gateway(exploding(`connect ${PROVIDER_URL} with ${SECRET} via ${BINDING} failed`));
     const res = await call("/v1/chat/completions", {
       method: "POST",
       headers: AUTHED,
@@ -179,6 +177,34 @@ describe("an unhandled throw inside the inference router answers the envelope", 
     expect(res.status).toBe(500);
     expect(res.headers.get("content-type")).toContain("application/json");
     expect((await errorBody(res)).error.code).toBe("internal_error");
+  });
+
+  it("covers a throw raised by a CROSS-CUTTING middleware, above every route", async () => {
+    // The upper of the two `envelopeBoundary` mounts, and the only thing that
+    // covers it. A middleware in `GATEWAY_MIDDLEWARE` runs BELOW the outer
+    // mount and ABOVE the inner one, so a literal thrown there is outside the
+    // inner boundary's window entirely — with only the low mount this is a
+    // `text/plain` 500 again. (A middleware throwing an `Error` would have
+    // reached `app.onError`; a literal is what Hono's `compose` rethrows.)
+    const { app } = createGatewayApp({
+      modules: [inferenceRouteModule({ models: new InMemoryModelResolver(ALL_ROUTES) })],
+      middleware: [
+        async () => {
+          throw `admission port unavailable: ${SECRET}`;
+        },
+      ],
+    });
+    const res = await app.request(
+      `${BASE}/v1/chat/completions`,
+      { method: "POST", headers: AUTHED, body: JSON.stringify(CHAT) },
+      ENV,
+    );
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const raw = await res.text();
+    expect(raw).not.toContain(SECRET);
+    expect((JSON.parse(raw) as { error: { code: string } }).error.code).toBe("internal_error");
   });
 });
 
@@ -252,7 +278,9 @@ describe("an upstream error body that is not JSON is wrapped, not relayed", () =
     // this file green and that one red.
     const provider = interceptProviderFetch(() =>
       providerJson(
-        { error: { message: "Unrecognized argument", type: "invalid_request_error", param: "foo" } },
+        {
+          error: { message: "Unrecognized argument", type: "invalid_request_error", param: "foo" },
+        },
         400,
       ),
     );
@@ -319,6 +347,8 @@ describe("every Hono app the gateway builds registers an error handler", () => {
   it("keeps the inner router's model resolver injectable, so this file is honest", () => {
     // Guards the fixture itself: if `models` stopped being a factory seam the
     // cases above would stop reaching the code they claim to reach.
-    expect(() => createInferenceRouter({ models: new InMemoryModelResolver(ALL_ROUTES) })).not.toThrow();
+    expect(() =>
+      createInferenceRouter({ models: new InMemoryModelResolver(ALL_ROUTES) }),
+    ).not.toThrow();
   });
 });

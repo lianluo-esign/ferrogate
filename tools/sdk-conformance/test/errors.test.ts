@@ -9,12 +9,17 @@
  *
  *  - ORIGINATED by the gateway (`errorResponse`, `apps/gateway/src/inference/
  *    errors.ts`): a provider transport failure ⇒ 502 `provider_dispatch_error`,
- *    an operator drain ⇒ 503 `node_draining`;
+ *    an operator drain ⇒ 503 `node_draining`, an upstream error body nobody can
+ *    parse ⇒ the upstream's status with `provider_invalid_error_body` (#733);
  *  - RELAYED from the provider verbatim (`rawUpstreamResponse`, same file): the
  *    provider's own status, `content-type` and error object reach the caller,
- *    so a provider 500 arrives with the PROVIDER's taxonomy, not FerroGate's;
- *  - UNHANDLED, where the Worker fails before Hono's `onError` can render
- *    anything and the client gets a 500 with no envelope at all.
+ *    so a provider 500 arrives with the PROVIDER's taxonomy, not FerroGate's.
+ *    Conditional since #733 — the relay applies to a body that decodes to a
+ *    JSON object, which is the only kind a client can read;
+ *  - UNHANDLED, which is now ALSO the envelope (#733). It used not to be: an
+ *    inner `Hono` app with no `onError` answered Hono's default `text/plain`
+ *    500, so the one status a caller most needs to classify was the one status
+ *    with no `code`, `type` or `request_id`.
  *
  * Every case below asserts on the exception the SDK CONSTRUCTED, never on a raw
  * status code. That distinction is the whole file: the SDKs classify by status
@@ -359,11 +364,18 @@ describe("openai SDK — error taxonomy", () => {
     }
   });
 
-  it("502 — a NON-JSON provider error body degrades `code`/`type` to null, not to a throw", async () => {
+  it("502 — a NON-JSON provider error body is WRAPPED in the FerroGate envelope", async () => {
     // The case that decides "a client that cannot parse our 502 body is not
     // compatible": a 502 from a CDN or a load balancer in front of the provider
-    // is an HTML page, and the gateway relays it verbatim with its
-    // `content-type`. The SDK must still classify it.
+    // is an HTML page.
+    //
+    // FLIPPED BY #733. This case used to assert the divergence it found —
+    // verbatim relay, so `error.error` / `error.code` / `error.type` were all
+    // `undefined` and `error.message` was a chunk of markup. The report's own
+    // argument ("FerroGate ALREADY wraps a provider TRANSPORT failure in its
+    // own envelope; an unparseable provider ERROR body is the same class of
+    // event from the caller's side") is what closed it, so the four members are
+    // now present here exactly as they are on the transport-failure case above.
     const upstream = interceptUpstream(
       () =>
         new Response(
@@ -374,36 +386,37 @@ describe("openai SDK — error taxonomy", () => {
     try {
       const error = await captured(() => openaiClient().chat.completions.create(REQUEST));
 
-      // It DOES: a typed `APIError`, correct status, no `SyntaxError` and no
-      // hang. That is the compatibility claim, and it holds.
+      // The UPSTREAM's status is preserved, not collapsed to a fixed 502: a 429
+      // is paced, a 503 is retried and a 500 is not, and flattening them would
+      // delete the only distinction the caller had left.
       expect(error.status).toBe(502);
       expect(error.constructor.name).toBe("InternalServerError");
-      // What is LOST: with no JSON body there is nothing to decode, so the two
-      // members application code switches on are absent and the message is the
-      // raw markup. FerroGate could wrap an unparseable upstream error in its
-      // own envelope (it already does that for a transport failure); it chooses
-      // verbatim relay instead. Asserted as it IS — reported, not fixed.
-      expect(error.error).toBeUndefined();
-      expect(error.code).toBeUndefined();
-      expect(error.type).toBeUndefined();
-      expect(error.message).toContain("<html>");
-      // The correlation id survives even when the body does not, because
-      // `rawUpstreamResponse` adds `gatewayHeaders` to the relayed response.
+      // Typed, not a parse failure — the members application code switches on.
+      expect(error.code).toBe("provider_invalid_error_body");
+      expect(error.type).toBe("ferrogate_error");
+      expect((error.error as { request_id: string }).request_id).toEqual(expect.any(String));
+      // MEANINGFUL rather than `internal_error`: it names the event and carries
+      // the upstream status and media type, which is what a caller can act on.
+      expect(error.message).toContain("502");
+      expect(error.message).toContain("text/html");
+      // And the upstream's bytes do NOT reach the client. An error page from a
+      // load balancer is where a backend leaks its own internals, and none of
+      // it is FerroGate's to forward.
+      expect(error.message).not.toContain("<html>");
       expect(error.headers?.get("x-request-id")).toEqual(expect.any(String));
     } finally {
       upstream.restore();
     }
   });
 
-  it("500 — an UNHANDLED failure answers with no envelope at all", async () => {
+  it("500 — an UNHANDLED failure answers the envelope like everything else", async () => {
     // FerroGate's contract declares `internal_error` (500) — `STATUS_BY_CODE`,
-    // apps/gateway/src/middleware/errors.ts:110 — but no client input on the
-    // SDK surface can produce it: every classified refusal on the inference
-    // path carries its own status, and the three `HttpError(500,
-    // "internal_error")` sites are contract/middleware misconfiguration guards
-    // (`middleware/auth.ts:128,248`, `tenancy/middleware.ts:160`) that a
-    // request cannot reach. The 500 a caller CAN cause is the unclassified one:
-    // a body deep enough to exhaust the stack while it is parsed and validated.
+    // apps/gateway/src/middleware/errors.ts:110. No CLASSIFIED refusal on the
+    // SDK surface produces it (every one carries its own status, and the three
+    // `HttpError(500, "internal_error")` sites in `middleware/auth.ts` and
+    // `tenancy/middleware.ts` are misconfiguration guards a request cannot
+    // reach), so the 500 a caller can actually cause is the unclassified one: a
+    // body deep enough to exhaust the stack while it is walked.
     //
     // Depth is escalated rather than pinned because the exact threshold is a
     // workerd/V8 implementation detail; if NONE of these overflow any more the
@@ -427,18 +440,25 @@ describe("openai SDK — error taxonomy", () => {
 
     // Still typed — the SDK does not blow up on it.
     expect((error as APIError).constructor.name).toBe("InternalServerError");
-    // DIVERGENCE, reported not fixed: this response is `text/plain` with the
-    // body `Internal Server Error`. Hono's `onError` (which would have written
-    // the envelope) never runs, so a caller gets NO `code`, NO `type` and NO
-    // `request_id` in the body — the one FerroGate status whose body is not the
-    // documented envelope. On Cloudflare the body is the edge's own error page
-    // instead of workerd's string; equally not the envelope.
-    expect((error as APIError).error).toBeUndefined();
-    expect((error as APIError).code).toBeUndefined();
-    // The correlation headers DO survive, because they are attached by the
-    // `requestId` middleware before the handler runs. They are the only thing
-    // a caller can quote in a bug report for this class of failure.
+    // FLIPPED BY #733. This used to be `text/plain` with the body
+    // `Internal Server Error`: `inferenceRouteModule` delegates into an INNER
+    // `Hono` that registered no `onError`, so Hono's DEFAULT handler answered
+    // and the OUTER `gatewayErrorHandler` never saw a throw at all. `err.code`
+    // was `undefined` on the one status where a caller most needs to tell
+    // "retry me" from "I am broken".
+    expect((error as APIError).code).toBe("internal_error");
+    expect((error as APIError).type).toBe("ferrogate_error");
+    // The message is a CONSTANT, and deliberately so: the thrown value on this
+    // path routinely carries a provider credential, an upstream URL or a stack
+    // trace, and none of it is the caller's.
+    expect((error as APIError).message).toContain("internal server error");
+    // The correlation id is in the body AND in the header, and they agree. It
+    // is the only thing a caller can quote in a bug report for this class of
+    // failure, so the two diverging would be as bad as it being absent.
     expect((error as APIError).headers?.get("x-request-id")).toEqual(expect.any(String));
+    expect((error as APIError).requestID).toEqual(
+      ((error as APIError).error as { request_id: string }).request_id,
+    );
   });
 
   it("keeps the envelope shape identical across every status", async () => {

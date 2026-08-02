@@ -68,7 +68,13 @@ import {
   providerTransportMessage,
   readBoundedProviderBody,
 } from "./dispatch.js";
-import { errorResponse, jsonResponse, rawUpstreamResponse, reject } from "./errors.js";
+import {
+  envelopeForThrown,
+  errorResponse,
+  jsonResponse,
+  rawUpstreamResponse,
+  reject,
+} from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import {
   countMessagesInputTokens,
@@ -1236,6 +1242,37 @@ function isStreamingUpstream(response: Response): boolean {
 export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceEnv> {
   const depsFor = envScopedDeps(deps);
   const app = new Hono<InferenceEnv>();
+
+  // THE ENVELOPE GUARANTEE (issue #733).
+  //
+  // This app is not mounted with `app.route()`; `route-module.ts` DELEGATES
+  // into it with `inner.fetch(c.req.raw, …)`, which starts a fresh Hono
+  // dispatch with its own error handling. Without this line Hono's DEFAULT
+  // handler answered — `console.error(err)` plus
+  // `new Response('Internal Server Error', { status: 500 })` — so an unhandled
+  // throw left here as a `text/plain` 500 with no `code`, no `type` and no
+  // `request_id`, and the OUTER app's `gatewayErrorHandler` never saw a throw
+  // at all: it had already been turned into an ordinary Response. That is the
+  // single status on which a caller most needs to tell "retry me" from "I am
+  // broken", and it was the one status whose body was not the envelope.
+  //
+  // The request id is the INNER one (`fg-<16 hex>`, minted by the middleware
+  // below), because that is the id this surface puts in `x-request-id` and
+  // therefore the only id a caller can quote. When the throw happened BEFORE
+  // that middleware could set it — a port that fails while it is being
+  // RESOLVED, which is what a `models` factory does when its config is broken —
+  // the inbound header is honoured and a UUID is the last resort, so a 500 is
+  // never answered with a null correlation id.
+  //
+  // This does NOT make `middleware/errors.ts`'s `envelopeBoundary` redundant:
+  // Hono only routes an `Error` here (`compose` rethrows anything else), so a
+  // thrown literal still leaves this app and is caught one layer out.
+  app.onError((error, c) =>
+    envelopeForThrown(
+      error,
+      c.get("requestId") ?? c.req.header("x-request-id") ?? crypto.randomUUID(),
+    ),
+  );
 
   // Ports, request identity and caller, once per request (Rust middleware
   // step 1). The ports come first because the body reader below reads the

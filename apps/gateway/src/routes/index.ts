@@ -23,6 +23,7 @@ import { type ApiOperation, type HttpMethod, operationById } from "../contract.j
 import { type DepsResolver, contractAuth } from "../middleware/auth.js";
 import {
   HttpError,
+  envelopeBoundary,
   gatewayErrorHandler,
   gatewayNotFoundHandler,
   requestId,
@@ -580,6 +581,15 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // outermost costs nothing and still observes the client's final status.
   app.use("*", requestMetrics());
 
+  // THE OUTER ENVELOPE BOUNDARY (issue #733) — the last line for a value Hono
+  // itself will not route to `app.onError`, which is anything that is not an
+  // `Error` (`compose` rethrows those). Below `requestMetrics` so a refusal it
+  // renders is still counted, and above everything else so a throw raised BY
+  // the network gate, the auth guard or any cross-cutting middleware is still
+  // answered with the documented body. See `middleware/errors.ts` for why one
+  // mount is not enough.
+  app.use("*", envelopeBoundary);
+
   // PRE-AUTH network gate (Rust `check_network_access`, issue #166). Mounted
   // HERE — after the request id is minted so a refusal still carries one, and
   // BEFORE `contractAuth` — because the Rust reason for its existence is that a
@@ -620,6 +630,18 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // skip guardrails) — but before dispatch, because not dispatching is the
   // point. Inert until `GATEWAY_CACHE_ENABLED=true`.
   app.use("*", options.responseCache ?? responseCache());
+
+  // THE INNER ENVELOPE BOUNDARY (issue #733) — the same middleware, mounted
+  // again as the LAST thing before the routes.
+  //
+  // This one exists for the request log, not for the client: `requestLogging()`
+  // writes its #664 row after `await next()`, so a throw from a route handler
+  // that unwound all the way to `app.onError` produced a 500 the client saw and
+  // a durable trail that recorded nothing. Converting the throw HERE means
+  // every middleware above — the request log, the metering drain, the telemetry
+  // emitter and the status counters — observes an ordinary `Response` and does
+  // its job.
+  app.use("*", envelopeBoundary);
 
   const router = new GatewayRouter(app);
 
