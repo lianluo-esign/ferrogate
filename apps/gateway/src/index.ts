@@ -5,7 +5,7 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 251
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 257
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts

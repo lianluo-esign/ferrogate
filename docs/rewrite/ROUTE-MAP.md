@@ -9,25 +9,25 @@ auth/visibility invariants the Hono port must preserve.
 
 | App | Ops | Surface |
 |---|---:|---|
-| `apps/control-plane` | **197** | `/admin/v1/**` (192) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
+| `apps/control-plane` | **203** | `/admin/v1/**` (198) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
 | `apps/gateway` | **31** | inference `/v1/{chat/completions,messages,responses,embeddings,images/generations,models}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions, `/.well-known/agent.json` |
 | `apps/agent-runtime` | **15** | `/v1/agent-jobs/**` (5), `/v1/agents/**` (3), `/v1/agent-runs` (1), `/v1/self-hosted-workers/**` (6) |
 | `apps/mcp` | **6** | `/v1/mcp`, `/v1/mcp/tool/execute`, `/v1/mcp/identity/**` |
 | shared | **2** | `/healthz`, `/readyz` — implemented in **every** Worker |
-| **total** | **251** | |
+| **total** | **257** | |
 
 `apps/telemetry` owns no contract route: it is the observability sink
 (Analytics Engine / Logpush), fed by the other Workers.
 
 ## Invariants the port MUST preserve
 
-**Auth kinds** (251): `bearer` 238 · `internal` 6 · `anonymous` 6 · `method_dependent` 1.
-**Visibility**: `admin` 193 · `public` 51 · `internal` 7.
-**Methods**: GET 116 · POST 78 · DELETE 24 · PUT 17 · PATCH 16.
+**Auth kinds** (257): `bearer` 244 · `internal` 6 · `anonymous` 6 · `method_dependent` 1.
+**Visibility**: `admin` 199 · `public` 51 · `internal` 7.
+**Methods**: GET 118 · POST 80 · DELETE 25 · PUT 18 · PATCH 16.
 
 1. **Every operation carries `visibility`, `auth.kind`, `auth.scope`, and
    `rbac_action`.** Port these as Hono middleware driven by the contract, not as
-   hand-written per-route guards — one table-driven middleware keeps all 251 in sync.
+   hand-written per-route guards — one table-driven middleware keeps all 257 in sync.
 2. **`auth.kind: "internal"`** — the 6 `/v1/self-hosted-workers/*` operations
    (`artifacts`, `checkpoints`, `events`, `heartbeat`, `runs/ack`, `runs/poll`)
    are worker-plane callbacks. They must NOT be reachable with a normal tenant

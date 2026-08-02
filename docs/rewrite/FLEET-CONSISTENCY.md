@@ -129,7 +129,7 @@ document holds it.
 | 15 | Operator deny rules (`[[policies]]`) | **V** | — | — | — | — | ⚠️ **FC-6c** | MECH §3 `operator-deny-rules` (single-Worker pin) |
 | 16 | Metering / usage rollup WRITE | **D** | — | — | — | n/a | ✅ (single writer by design) | INSPECTION (`usage_monthly_rollups` declared a non-control in §4.3) |
 | 17 | Monthly-spend rollup READ | **D** | — | **D** | **D** | n/a | ✅ | MECH §3.4b — `usage_monthly_rollups` is an authority of `admission`, so every spend Worker must read it |
-| 18 | Response cache | **V** | n/a | n/a | n/a | n/a | ✅ single-Worker | LEDGER |
+| 18 | Response cache | **D** (+ V floor) | **D** (write half) | n/a | n/a | n/a | ✅ single-Worker *(#695, 2026-08-02)* | LEDGER |
 | 19 | Pre-auth network gate (IP allowlist, unauth flood) | **V** | — | — | — | — | ✅ single-Worker | LEDGER |
 | 20 | Secrets resolution (`@ferrogate/secrets`) | ✔ | ✔ | ✔ | — | — | ✅ (see §6.4) | INSPECTION — and §6.4 records it as an unresolved question, not a verdict |
 | 21 | Self-hosted-worker transport identity | **D** | **D** (write half) | n/a | **D** | n/a | ✅ | INSPECTION (declared a non-control in §4.3) |
@@ -575,7 +575,42 @@ was skipped both times a bypass shipped.
   unauthenticated flood limit). The gateway is the only public ingress; the
   other four are reached through it or through an operator credential.
 * **FC-6b — response cache.** Nothing else in the fleet serves a cacheable
-  body.
+  body. `apps/mcp` and `apps/agent-runtime` dispatch TOOLS and A2A calls, not
+  inference; an agent run that spends on a provider reaches one **through** this
+  gateway, which is the same fact FC-6e relies on for the metering write.
+
+  **Updated 2026-08-02 (issue #695).** The row's Worker set is unchanged and the
+  reason above still holds. What changed is its SOURCE-OF-TRUTH class, from
+  **V** to **D + V**, and that is worth recording here because §1.1 names
+  var-only as the shape of both shipped bypasses. `[cache]` was entirely
+  deploy-time: a tenant could not enable semantic caching, tune the similarity
+  threshold, scope it to a model set, observe a hit rate or invalidate it.
+  `semantic_cache_policies` on the CONTROL database is now the per-tenant
+  overlay, written by `/admin/v1/semantic-cache-policies/**` and read on the
+  request path by `apps/gateway/src/cache/governance.ts`; the vars remain the
+  OPERATOR floor, and `GATEWAY_CACHE_ENABLED=false` is a master switch a tenant
+  row cannot override upward.
+
+  Three properties are gated rather than asserted in prose, because they are the
+  ones a later refactor would quietly break:
+
+    - the effective governed values are inside the CACHE KEY
+      (`CacheKeyInput.governanceFingerprint`), so a threshold change or a purge
+      makes the entries admitted under the old rules unreachable instead of
+      re-matching them — the same guarantee the guardrail-policy fingerprint
+      (#233) gives, extended to the cache's own rules now that they are mutable
+      without a deploy;
+    - an UNREADABLE governance row is `x-ferrogate-cache: bypass`, never a
+      silent fall-back to the vars, because every fall-back is in the widening
+      direction;
+    - the fingerprint deliberately does NOT carry the scope id, so it cannot
+      mask a regression in the tenancy fields of the key itself.
+
+  The gate is `apps/gateway/test/fleet-consistency.test.ts` ("the response
+  cache's governance is DURABLE now, and still gateway-only"), which asserts
+  both halves: the durable reader exists on the gateway, and it exists ONLY
+  there. The day `apps/mcp` or `apps/agent-runtime` dispatches to a provider
+  directly, that assertion is what forces the reader to move with it.
 * **FC-6c — operator deny rules (`[[policies]]`) — with a caveat, and the caveat
   is an OPEN QUESTION, not a finding.** Rust evaluated
   `policy_engine.evaluate(request, model, provider)` from `chat.rs` only, so a
@@ -1042,7 +1077,7 @@ ungated cell that nobody has written down is indistinguishable from a gated one:
 | 10 | Tenant fencing | INSPECTION | every Worker fences, but the fence is a SQL predicate rather than an authority, so §3's classifier cannot see it. **This is the most valuable conversion left** — a fence that weakens on one Worker is a cross-tenant read |
 | 13 | MCP server catalog | INSPECTION | one reader today; the day a second Worker resolves it, §4.3 will demand it be registered |
 | 16 | Metering WRITE | INSPECTION | declared a non-control in §4.3 (single writer by design) |
-| 18, 19 | Response cache, pre-auth network gate | LEDGER | pinned single-Worker in FC-6a/FC-6b |
+| 18, 19 | Response cache, pre-auth network gate | LEDGER | pinned single-Worker in FC-6a/FC-6b. Row 18 became **D + V** in #695; its ledger assertion now pins the DURABLE reader as gateway-only too, so a second reader is RED |
 | 20 | Secrets resolution | INSPECTION | §6.4 records it as an unresolved question, not a verdict — gating it would pin an answer nobody has established |
 | 21 | Self-hosted-worker transport identity | INSPECTION | declared a non-control in §4.3 |
 | 22 | Session / OAuth state | INSPECTION | genuinely distinct concerns on the two Workers |

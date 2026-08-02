@@ -45,18 +45,18 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 251 operations", () => {
+  it("carries exactly 257 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 251 unique operation ids", () => {
+  it("has 257 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
   it("reproduces the documented auth-kind census", () => {
-    // ROUTE-MAP.md: bearer 238 · internal 6 · anonymous 6 · method_dependent 1.
+    // ROUTE-MAP.md: bearer 244 · internal 6 · anonymous 6 · method_dependent 1.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 238,
+      bearer: 244,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -65,7 +65,7 @@ describe("contract table", () => {
 
   it("reproduces the documented visibility census", () => {
     expect(census(OPERATIONS.map<Visibility>((operation) => operation.visibility))).toEqual({
-      admin: 193,
+      admin: 199,
       public: 51,
       internal: 7,
     });
@@ -73,10 +73,10 @@ describe("contract table", () => {
 
   it("reproduces the documented method census", () => {
     expect(census(OPERATIONS.map<HttpMethod>((operation) => operation.method))).toEqual({
-      GET: 116,
-      POST: 78,
-      DELETE: 24,
-      PUT: 17,
+      GET: 118,
+      POST: 80,
+      DELETE: 25,
+      PUT: 18,
       PATCH: 16,
     });
   });

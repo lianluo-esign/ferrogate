@@ -63,7 +63,7 @@ const HONO_ROUTES: readonly HonoRoute[] = (
 const HONO_KEYS = new Set(HONO_ROUTES.map((route) => `${route.method} ${route.path}`));
 
 /**
- * The routes `src/index.ts` mounts that are not among the 197 operations this
+ * The routes `src/index.ts` mounts that are not among the 203 operations this
  * app OWNS. They are named here so the "nothing extra is mounted" assertion
  * below is exact rather than a tolerance.
  *
@@ -107,7 +107,7 @@ function contractKey(operationId: string): string {
   return `${operation.method} ${operation.honoPath}`;
 }
 
-describe("the app src/index.ts exports has all 197 operations in its ROUTING TABLE", () => {
+describe("the app src/index.ts exports has all 203 operations in its ROUTING TABLE", () => {
   it("mounts every contract operation this app owns — naming any that fell off", () => {
     // THE gate. `HONO_KEYS` comes from Hono, not from the contract, so this is
     // a comparison between two independent things.
@@ -121,7 +121,7 @@ describe("the app src/index.ts exports has all 197 operations in its ROUTING TAB
     ).toEqual([]);
   });
 
-  it("mounts NOTHING beyond the 197 + the shared probes + /health + /version", () => {
+  it("mounts NOTHING beyond the 203 + the shared probes + /health + /version", () => {
     const expected = new Set<string>([
       ...CONTROL_PLANE_OPERATIONS.map((operation) => `${operation.method} ${operation.honoPath}`),
       ...NON_CONTRACT_ROUTES,
@@ -316,6 +316,13 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["quota_policy", "listQuotaPolicies", "GET", "/admin/v1/quota-policies", 200],
   ["rbac", "listPermissions", "GET", "/admin/v1/permissions", 200],
   ["self_hosted_worker", "listAdminSelfHostedWorkers", "GET", "/admin/v1/self-hosted-workers", 200],
+  [
+    "semantic_cache_policy",
+    "listSemanticCachePolicies",
+    "GET",
+    "/admin/v1/semantic-cache-policies",
+    200,
+  ],
   ["site_domain", "listSiteDomains", "GET", "/admin/v1/site-domains", 200],
   ["skill", "listAdminSkillPackages", "GET", "/admin/v1/skill-packages", 200],
   ["tenant_hierarchy", "listAdminTenants", "GET", "/admin/v1/tenants", 200],
@@ -324,7 +331,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 31 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 32 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });

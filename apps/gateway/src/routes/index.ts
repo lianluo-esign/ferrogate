@@ -564,7 +564,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
   app.use("*", options.networkAccess ?? networkAccess());
 
-  // ONE table-driven guard for all 251 operations, ahead of every route.
+  // ONE table-driven guard for all 257 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
   app.use("*", contractAuth(options.deps ?? depsFromEnv));
 
@@ -638,7 +638,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   //
   // LAST, and the position is the whole correctness argument: Hono runs matched
   // handlers in REGISTRATION order, so an `app.all("*")` placed any earlier
-  // would shadow all 251 contract operations AND `/health`. It is registered
+  // would shadow all 257 contract operations AND `/health`. It is registered
   // after every `router.register`, after every caller-supplied module, and after
   // `/health` above.
   //

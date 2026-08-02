@@ -32,7 +32,7 @@
  * ## CSRF is applied here explicitly, because `contractAuth` cannot
  *
  * `contractAuth` runs `adminCrossSiteRejection` only after it has MATCHED a
- * contract operation; a path that is not one of the 197 is waved straight
+ * contract operation; a path that is not one of the 203 is waved straight
  * through. `/v1/admin/login` is a state-changing browser endpoint that mints a
  * credential, so it must carry the same guard, and {@link consoleCsrf} below is
  * that guard — the same function `middleware/auth.ts` exports, not a second
@@ -813,7 +813,7 @@ export const ADMIN_CONSOLE_SESSION_ROUTES: readonly AdminConsoleSessionRoute[] =
 
 /**
  * CSRF for this surface. The SAME `adminCrossSiteRejection` `contractAuth`
- * applies to the 197 — imported, not re-implemented, so a change to the rule
+ * applies to the 203 — imported, not re-implemented, so a change to the rule
  * cannot apply to one surface and not the other.
  */
 async function consoleCsrf(c: Ctx, next: () => Promise<void>): Promise<void> {
