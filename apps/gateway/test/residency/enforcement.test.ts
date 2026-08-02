@@ -26,6 +26,24 @@
  *    policy is resolved and then never reaches the routing decision. That is
  *    the exact two-hop dead seam #681 exists to close, so it has its own case:
  *    "the policy reaches the ROUTING decision, not just the middleware".
+ *
+ * ## MUTATION LOG — what was broken, and what went red
+ *
+ * FerroGate's dominant defect mode is correct code with a green test that does
+ * not hold it, so every claim here was falsified against the tree before this
+ * file was believed. All mutations were reverted; `grep MUTATION-681` is empty.
+ *
+ * | mutation (in `src/`)                                                       | red |
+ * |----------------------------------------------------------------------------|-----|
+ * | `candidates.ts`: `residencyViolations(...)` → the empty list, i.e. the residency leg deleted from route eligibility | 9 cases across this file and `test/inference/residency.test.ts`, INCLUDING the failover one — "refuses rather than falling over onto an out-of-region route" came back `expected 200 not to be 200`, i.e. the ladder walked onto `us` and served it |
+ * | `shadow.ts`: the `residencyViolations` guard in `shadowMirrorFor` disabled  | `does not mirror an EU tenant's prompt to an out-of-region shadow route` (`['us-mirror','eu']`) and the ZDR mirror case (`['eu-mirror','eu']`) |
+ * | `route-module.ts`: `callerFromAuth(auth, residencyPolicyFor(request))` → `callerFromAuth(auth)` — the policy resolved and then dropped on the floor | 3 cases here, all `expected 200 to be 403`. THE DEAD-SEAM GATE: the middleware still runs, the lookup still happens, and the routing decision never sees it |
+ * | `middleware.ts`: `logPlacementSatisfied` returns `true` unconditionally     | `refuses when the deployment declares no log region at all`; `refuses when the declared log region is OUTSIDE the tenant's list` |
+ * | `source.ts`: an unparseable var entry read as `{ ok: true, policy: null }` instead of a refusal | `answers 503 for a policy row this gateway cannot parse`; `refuses a policy that pins the log in region without naming a region`; `keeps an UNPARSEABLE entry as a refusal for that tenant` |
+ *
+ * The first row is the one the issue asks for by name: an ineligible region is
+ * NOT reachable through failover, and the proof is that deleting the gate makes
+ * it reachable and the assertion notices.
  */
 import { afterEach, describe, expect, it } from "vitest";
 
