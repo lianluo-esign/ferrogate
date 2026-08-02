@@ -8,6 +8,7 @@
  * would). Nothing about a detector is stubbed to a convenient verdict.
  */
 import {
+  type ContentSource,
   DetectorError,
   type GuardrailDetector,
   PROBE_SECRET,
@@ -53,6 +54,13 @@ export interface PolicyOverrides {
   readonly detector?: PolicyRevision["checks"][number]["detector"];
   readonly deadlineMs?: number;
   readonly scope?: Partial<typeof OPEN_SCOPE>;
+  /**
+   * The content sources this check selects. Defaults to the six a chat body
+   * carries. Overridden by #703's transcript-egress policy, which screens
+   * `text_attachment` — the trust class a transcription's answer belongs to,
+   * since whoever supplied the audio chose every word of it.
+   */
+  readonly sources?: readonly ContentSource[];
 }
 
 /** A one-check policy over the deterministic secret scanner. */
@@ -68,7 +76,14 @@ export function secretScanPolicy(overrides: PolicyOverrides = {}): PolicyRevisio
         id: "deterministic",
         enabled: true,
         stage: overrides.stage ?? "request",
-        sources: ["system", "developer", "user", "assistant", "tool_arguments", "tool_result"],
+        sources: overrides.sources ?? [
+          "system",
+          "developer",
+          "user",
+          "assistant",
+          "tool_arguments",
+          "tool_result",
+        ],
         detector: overrides.detector ?? {
           kind: "local",
           keywords: ["FERROGATE-GUARDRAIL-PROBE"],

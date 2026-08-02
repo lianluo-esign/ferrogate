@@ -13,6 +13,7 @@
  *     the integrate step's line), so the test below is written as the exact
  *     probe the integrator should flip from `todo` to live once the line lands.
  */
+import { normalizeRequest, normalizeResponse } from "@ferrogate/guardrails";
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, describe, expect, test } from "vitest";
 import { operationById } from "../../src/contract.js";
@@ -57,53 +58,101 @@ describe("guardrail operation bindings match the contract", () => {
     //    content was screened on its way to a model it never travelled to.
     //    If `count_tokens` ever gains a dispatching leg, it belongs here on the
     //    same day. See `inference/handlers.ts::handleCountMessageTokens`.
-    //  - `createTranscription` / `createTranslation` (issue #703) are the FIRST
-    //    entries on this list that both carry content AND dispatch it, so this
-    //    assertion is being widened a second time and the widening is the
-    //    substantive part of the change rather than a bookkeeping edit.
-    //
-    //    The content they carry is a `multipart/form-data` body wrapping opaque
-    //    audio. Nothing in this tree reads a waveform: every detector
-    //    `@ferrogate/guardrails` ships takes text, and the middleware's own
-    //    reader (`readJsonBodyBounded`) returns `undefined` for a non-JSON body
-    //    and hands the request straight to `next()`. So a binding for these two
-    //    would not screen less well — it would screen NOTHING, on every single
-    //    request, while appearing in `GUARDRAIL_OPERATIONS` as a control that an
-    //    auditor reading this table would count as present. An entry that is
-    //    always a no-op is worse than an absence, because an absence is
-    //    visible here and a no-op is not.
-    //
-    //    The half of the audio surface that CAN be screened is bound:
-    //    `createSpeech` carries the text a caller wants spoken, in JSON, and is
-    //    screened at the last point at which that string is still a string.
-    //
-    //    What closes this properly is a detector that reads audio, or a
-    //    response-stage pass over the transcript — which this table cannot
-    //    express for a request the middleware has already `next()`-ed. Either
-    //    one is a real change and belongs in its own issue, not in a table
-    //    entry that pretends the work is done.
+    //  - the two audio uploads (issue #703) were briefly on this list, on the
+    //    argument that a `multipart/form-data` body wrapping opaque audio has
+    //    nothing a detector can read. That argument is still true, and it is
+    //    still the reason `screensRequest` is `false` for them below — but it
+    //    only covers the INPUT. A transcription's ANSWER is text, chosen by
+    //    whoever supplied the recording, handed to a caller who will usually put
+    //    it in the next prompt. So they are bound after all, at the response
+    //    stage, and the list is back to the three operations that carry no
+    //    dispatched model content at all.
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened.sort()).toEqual([
-      "countMessageTokens",
-      "createTranscription",
-      "createTranslation",
-      "getModel",
-      "listModels",
-    ]);
+    expect(unscreened.sort()).toEqual(["countMessageTokens", "getModel", "listModels"]);
   });
 
-  test("only chat/responses/messages screen the RESPONSE stage", () => {
+  test("the RESPONSE stage runs for chat/responses/messages and the two transcripts", () => {
     // `normalize_response` returns an empty envelope for
-    // embeddings/rerank/images (none has model-generated text — a rerank answer
-    // is a list of indices and floats), so screening them would be a no-op that
-    // still costs an evidence row.
+    // embeddings/rerank/images/speech (none has screenable text output — a
+    // rerank answer is a list of indices and floats, a speech answer is an
+    // MP3), so screening them would be a no-op that still costs an evidence
+    // row. The two audio uploads are here because their answer IS text, and
+    // `normalize (audio_transcription)` in `packages/guardrails/test/
+    // envelope.test.ts` pins that it walks to a non-empty envelope.
     const screened = Object.entries(GUARDRAIL_OPERATIONS)
       .filter(([, binding]) => binding.screensResponse)
       .map(([id]) => id)
       .sort();
-    expect(screened).toEqual(["createChatCompletion", "createMessage", "createResponse"]);
+    expect(screened).toEqual([
+      "createChatCompletion",
+      "createMessage",
+      "createResponse",
+      "createTranscription",
+      "createTranslation",
+    ]);
+  });
+
+  test("the two audio uploads are the ONLY operations that skip the request stage", () => {
+    // `screensRequest: false` is a real hole in input control and it must never
+    // become the easy way to make a binding compile. The only justification this
+    // table accepts is "the request body is not text a detector can read", which
+    // is true of exactly one ingress here: `multipart/form-data` wrapping audio.
+    // Anything else appearing in this list is an operation whose prompt stopped
+    // being screened, which is the defect the whole file exists to catch.
+    const unscreenedInput = Object.entries(GUARDRAIL_OPERATIONS)
+      .filter(([, binding]) => !binding.screensRequest)
+      .map(([id]) => id)
+      .sort();
+    expect(unscreenedInput).toEqual(["createTranscription", "createTranslation"]);
+  });
+
+  test("no binding is a NO-OP: every stage a binding claims can produce content", () => {
+    // The anti-vacuity gate, and the reason it is structural rather than an
+    // end-to-end case per operation. A binding whose protocol normalizes to an
+    // EMPTY envelope screens nothing, passes every check, still writes an
+    // evidence row and still reports a `guardrail_verdict` — a control that
+    // reads as present and enforces nothing. That failure is silent, so it is
+    // pinned here against a representative body for each stage a binding claims.
+    const REQUEST_BODY: Record<string, unknown> = {
+      model: "m",
+      // chat / responses / messages
+      messages: [{ role: "user", content: "hello" }],
+      // responses
+      input: "hello",
+      // embeddings
+      // (`input` above doubles for it)
+      // rerank
+      query: "hello",
+      documents: ["a document"],
+      // images
+      prompt: "a picture of a cat",
+    };
+    const RESPONSE_BODY = new TextEncoder().encode(
+      JSON.stringify({
+        // chat
+        choices: [{ message: { role: "assistant", content: "an answer" } }],
+        // responses
+        output: [{ content: [{ type: "output_text", text: "an answer" }] }],
+        // audio_transcription
+        text: "an answer",
+      }),
+    );
+    for (const [id, binding] of Object.entries(GUARDRAIL_OPERATIONS)) {
+      if (binding.screensRequest) {
+        expect(
+          normalizeRequest(binding.protocol, REQUEST_BODY).segments.length,
+          `${id} claims request screening over an empty envelope`,
+        ).toBeGreaterThan(0);
+      }
+      if (binding.screensResponse) {
+        expect(
+          normalizeResponse(binding.protocol, RESPONSE_BODY, false).segments.length,
+          `${id} claims response screening over an empty envelope`,
+        ).toBeGreaterThan(0);
+      }
+    }
   });
 
   test("every POST guardrail operation is bearer-authenticated", () => {

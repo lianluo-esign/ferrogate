@@ -34,6 +34,20 @@ export const guardrailProtocolSchema = z.enum([
   // it ran. There is deliberately no `audio_transcription` member for that
   // reason; see `GUARDRAIL_OPERATIONS` in `apps/gateway/src/guardrails/middleware.ts`.
   "audio_speech",
+  // Issue #703, the OTHER half — and it is a RESPONSE-stage protocol, which is
+  // what makes it a different member rather than a second spelling of
+  // `audio_speech`.
+  //
+  // A transcription REQUEST is opaque audio and stays unscreenable; that has not
+  // changed and `normalizeRequest` below extracts nothing for this protocol on
+  // purpose. What IS screenable is the answer. A transcript is text, and it is
+  // ATTACKER-CONTROLLED text: anyone who can hand the tenant an audio file
+  // chooses every word of it, and it flows straight back to a caller who will
+  // usually put it in the next prompt. That is the same trust boundary a
+  // retrieved document crosses, so the segments are `text_attachment` and never
+  // `assistant` — the transcript is not something a model of ours composed, it
+  // is content that arrived from outside and was merely re-encoded.
+  "audio_transcription",
   "managed_action",
   "a2a",
 ]);
@@ -130,6 +144,8 @@ function protocolName(protocol: GuardrailProtocol): string {
       return "rerank";
     case "audio_speech":
       return "audio_speech";
+    case "audio_transcription":
+      return "audio_transcription";
     case "images":
       return "images";
     case "managed_action":
@@ -264,6 +280,14 @@ export function normalizeRequest(protocol: GuardrailProtocol, body: unknown): Gu
     case "images":
       extractImagesRequest(body, builder);
       break;
+    // A transcription request is `multipart/form-data` wrapping opaque audio.
+    // Extracting the `model`/`language`/`prompt` fields beside it would produce
+    // a "screened" request whose envelope contains none of the content the
+    // request actually carries — the empty-envelope lie, one field short. The
+    // gateway therefore never evaluates the request stage for this protocol
+    // (`OperationBinding.screensRequest`) and this arm is the seam that makes
+    // that structural rather than a convention.
+    case "audio_transcription":
     case "managed_action":
     case "a2a":
       break;
@@ -296,6 +320,19 @@ export function normalizeResponse(
   ) {
     return builder.finish();
   }
+  // Issue #703. Handled ahead of the generic arms and returned from directly,
+  // because BOTH of the generic behaviours below are wrong for a transcript:
+  // the JSON walk would find no chat/responses shape, and the `response.raw`
+  // fallback would then label the whole document `assistant` — asserting that a
+  // model of ours composed text that in fact arrived from whoever supplied the
+  // audio. Provenance is the discriminator every injection rule scores on
+  // (`injection.ts::sourceTrust`), so getting it wrong here would silently
+  // downgrade an attack in a retrieved recording to the trust level of our own
+  // completion.
+  if (protocol === "audio_transcription") {
+    extractAudioTranscriptionResponse(body, builder);
+    return builder.finish();
+  }
   if (streaming) {
     extractSse(protocol, body, builder);
   } else {
@@ -317,6 +354,67 @@ export function normalizeResponse(
     builder.push("assistant", "response.raw", "text", new TextDecoder().decode(body));
   }
   return builder.finish();
+}
+
+/**
+ * The transcript, out of whatever shape the caller's `response_format` asked
+ * for (issue #703).
+ *
+ * `handleAudioUpload` answers three different bodies off one upstream result,
+ * and an attacker picks which one by setting a form field — so all three have to
+ * reach the screener or the control is bypassable by a one-word change to the
+ * request:
+ *
+ *  - `json` (the default) ⇒ `{"text": ...}`;
+ *  - `verbose_json` ⇒ the same plus `segments[].text`, each of which is walked
+ *    on its own, because a phrase split across a segment boundary is still a
+ *    phrase and because a redaction patch has to name the exact field it edits;
+ *  - `text` (and `srt`/`vtt`) ⇒ the bare transcript, no JSON around it.
+ *
+ * The last case is why the fallback is keyed on "did this parse as a JSON
+ * OBJECT", not on "did the walk find anything". A bare transcript that happens
+ * to be a JSON scalar (`42`, `"yes"`, `null` — all things a one-word recording
+ * produces) parses fine and would otherwise be dropped on the floor as an
+ * unrecognized document. Conversely a document that IS an object but carries no
+ * text is left EMPTY rather than being fed to the detectors as raw JSON: an
+ * envelope whose only content is `{"text":""}`'s punctuation would be a
+ * screening that ran on scaffolding, which is the empty-envelope lie wearing a
+ * segment.
+ */
+function extractAudioTranscriptionResponse(body: Uint8Array, builder: EnvelopeBuilder): void {
+  if (body.length === 0) {
+    return;
+  }
+  const decoded = new TextDecoder().decode(body);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    parsed = undefined;
+  }
+  const document = asObject(parsed);
+  if (document === undefined) {
+    builder.push("text_attachment", "response.raw", "text_attachment", decoded);
+    return;
+  }
+  const text = asString(document["text"]);
+  if (text !== undefined) {
+    builder.push("text_attachment", "response.text", "text_attachment", text);
+  }
+  const segments = asArray(document["segments"]);
+  if (segments !== undefined) {
+    segments.forEach((segment, index) => {
+      const segmentText = asString(get(segment, "text"));
+      if (segmentText !== undefined) {
+        builder.push(
+          "text_attachment",
+          `response.segments[${index}].text`,
+          "text_attachment",
+          segmentText,
+        );
+      }
+    });
+  }
 }
 
 function extractChatRequest(body: unknown, builder: EnvelopeBuilder): void {
