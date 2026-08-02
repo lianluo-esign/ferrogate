@@ -9,6 +9,7 @@
 import type { Context } from "hono";
 
 import { type WalletHold, releaseAll } from "./admission/index.js";
+import type { ApiOperation } from "./contract.js";
 import { type DrainBindings, drainRefusal, resolveDrain } from "./drain.js";
 import { lifecycleRefusal } from "./lifecycle.js";
 import {
@@ -98,6 +99,36 @@ export interface SpendDeclaration {
  * cannot cover at all: an isolate that dies mid-request.
  */
 const inFlightHolds = new WeakMap<Request, WalletHold[]>();
+
+/**
+ * The CONTRACT OPERATION this request matched, per in-flight request.
+ *
+ * `src/routes/index.ts::McpRouter.register` mounts every handler at the
+ * contract's own path and method, so it — and only it — knows which
+ * {@link ApiOperation} a request resolved to. It records that here before the
+ * handler runs, and {@link authenticateRequest} reads it back to enforce
+ * whatever the operation DECLARES: today that is `rbac_action`
+ * (`docs/rewrite/FLEET-CONSISTENCY.md` FC-7), tomorrow whatever else the
+ * contract grows.
+ *
+ * A `WeakMap` on the `Request`, exactly like {@link inFlightHolds} above, for
+ * the same reason: it makes the association impossible to forget at a call
+ * site. The alternative — passing the operation as a sixth argument from each
+ * of the five authenticated surfaces — is a declaration a new surface can get
+ * wrong, and "the guard was not applied on the new endpoint" is the defect
+ * class this whole file is defending against.
+ */
+const operationOfRequest = new WeakMap<Request, ApiOperation>();
+
+/** Record the matched contract operation. Called by the router, once, per request. */
+export function recordOperation(request: Request, operation: ApiOperation): void {
+  operationOfRequest.set(request, operation);
+}
+
+/** The matched contract operation, or `undefined` for an unrouted request. */
+export function matchedOperation(request: Request): ApiOperation | undefined {
+  return operationOfRequest.get(request);
+}
 
 /** Release and forget every admission hold this request took. Never throws. */
 export async function releaseAdmissionHolds(request: Request): Promise<void> {
@@ -204,6 +235,66 @@ export async function authenticateRequest(
       status: lifecycle.status,
       body: errorEnvelope(lifecycle.code, lifecycle.message, requestId),
     };
+  }
+
+  // THE RBAC HALF (FC-7), and it runs HERE — after the tenancy lifecycle,
+  // before admission — because that is where `apps/gateway/src/middleware/
+  // auth.ts` and `apps/control-plane/src/middleware/auth.ts` run it, and the
+  // position is part of the control: an authorization refusal must not first
+  // charge the caller's RPM window, or a client looping on a denied action
+  // would deny service to its own permitted ones.
+  //
+  // Deleting this block re-opens the defect `docs/rewrite/FLEET-CONSISTENCY.md`
+  // records as FC-7: this Worker PARSES `rbac_action` off the shared contract
+  // (`src/contract.ts`) and never reads it, so a role an operator uses to
+  // withhold an action is enforced on two of the four credential Workers and
+  // silently ignored on this one — "call the other endpoint", the same shape as
+  // both fleet defects this project has already shipped.
+  //
+  // The operation is the one the ROUTER matched, so the guard covers whatever
+  // the contract declares rather than a path named here. No MCP operation
+  // carries an `rbac_action` today; that is exactly why the wiring — not a
+  // route-specific check — is the fix.
+  const operation = matchedOperation(request);
+  if (operation === undefined) {
+    // Fail CLOSED. Every authenticated MCP surface is a contract operation
+    // mounted through `McpRouter.register`, which records it; reaching this
+    // line means an authenticated surface was mounted some other way and its
+    // declared guards are therefore unknown. Reading "no operation" as "no
+    // rbac_action" would make forgetting the mount indistinguishable from an
+    // unguarded operation, which is the defect, not the diagnosis.
+    return {
+      ok: false,
+      status: 500,
+      body: errorEnvelope(
+        "internal_error",
+        "no contract operation was matched for this request; refusing to authorize",
+        requestId,
+      ),
+    };
+  }
+  if (operation.rbacAction !== null) {
+    const decision = await ports.rbac.authorize(authenticated, operation.rbacAction);
+    if (decision.allowed === "unavailable") {
+      // An outage is never a decision — the same 503 and the same sentence
+      // `apps/gateway` and `apps/control-plane` answer with.
+      return {
+        ok: false,
+        status: 503,
+        body: errorEnvelope(
+          "rbac_unavailable",
+          `failed to resolve role permissions: ${decision.detail}`,
+          requestId,
+        ),
+      };
+    }
+    if (!decision.allowed) {
+      return {
+        ok: false,
+        status: 403,
+        body: errorEnvelope(decision.code, decision.message, requestId),
+      };
+    }
   }
 
   // THE ADMISSION HALF. Deleting this block re-opens the bypass recorded as
