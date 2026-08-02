@@ -18,7 +18,12 @@
  * — which accumulates `message_start` / `content_block_delta` / `message_delta`
  * into a `Message` and throws on an inconsistent sequence — would say so.
  */
-import { APIError, AuthenticationError, PermissionDeniedError } from "@anthropic-ai/sdk";
+import {
+  APIError,
+  AuthenticationError,
+  InternalServerError,
+  PermissionDeniedError,
+} from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
 import {
   DONE_FRAME,
@@ -63,7 +68,10 @@ const CHUNK_BASE = {
 };
 
 const OPENAI_STREAM = [
-  dataFrame({ ...CHUNK_BASE, choices: [{ index: 0, delta: { role: "assistant", content: "Fer" } }] }),
+  dataFrame({
+    ...CHUNK_BASE,
+    choices: [{ index: 0, delta: { role: "assistant", content: "Fer" } }],
+  }),
   dataFrame({ ...CHUNK_BASE, choices: [{ index: 0, delta: { content: "ro" } }] }),
   dataFrame({ ...CHUNK_BASE, choices: [{ index: 0, delta: { content: "Gate" } }] }),
   dataFrame({
@@ -388,11 +396,16 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
       }),
     );
 
-    // Anthropic's native envelope is `{"type":"error","error":{"type":
-    // "authentication_error","message":"..."}}`, and its `APIError` reads the
-    // TOP-LEVEL `message`. FerroGate's envelope has no top-level `message`, so
-    // `makeMessage` falls back to `JSON.stringify(body)` and the exception text
-    // an operator sees in a log is the whole JSON document.
+    // `APIError.makeMessage` reads the TOP-LEVEL `message` of the body, and
+    // FerroGate's envelope has none, so the exception text is the whole JSON
+    // document.
+    //
+    // NOT a divergence, and the correction matters: Anthropic's OWN envelope is
+    // `{"type":"error","error":{"type":"authentication_error","message":"..."}}`
+    // — also no top-level `message` — so the SDK stringifies against
+    // `api.anthropic.com` in exactly the same way. The control case
+    // ("a RELAYED Anthropic-native error body reads the same way") proves it
+    // below. What IS divergent here is `type` and `requestID`.
     expect(error.message).toContain('"code":"invalid_api_key"');
     expect(error.message).toContain("ferrogate_error");
 
@@ -408,6 +421,75 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     expect((error.error as { error?: { request_id?: string } })?.error?.request_id).toEqual(
       expect.any(String),
     );
+  });
+
+  it("502 — an unreachable provider is a typed InternalServerError", async () => {
+    // The Anthropic ingress reaches the same `dispatchUpstream` as the OpenAI
+    // one, so the question this answers is only about the CLIENT: does
+    // `@anthropic-ai/sdk` classify FerroGate's 502 envelope, or choke on it?
+    const upstream = interceptUpstream(() => {
+      throw new TypeError("Network connection lost.");
+    });
+    try {
+      const error = await captured(() =>
+        anthropicClient().messages.create({
+          model: "claude-3-5-sonnet-20241022",
+          max_tokens: 16,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
+
+      expect(error).toBeInstanceOf(InternalServerError);
+      expect(error.status).toBe(502);
+      // The body decoded — `err.error` is the parsed envelope, not raw text.
+      const body = error.error as { error?: { code?: string; request_id?: string } };
+      expect(body.error?.code).toBe("provider_dispatch_error");
+      expect(body.error?.request_id).toEqual(expect.any(String));
+      // `err.type` is `body.error.type`, so it carries FerroGate's constant —
+      // the same divergence the 401 case pins, now shown to hold on a 5xx too.
+      expect(error.type).toBe("ferrogate_error");
+      // And the same missing correlation id: `request-id` is never emitted.
+      expect(error.requestID).toBeNull();
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  it("500 — a relayed Anthropic-native error keeps the provider's own taxonomy", async () => {
+    // The control case for the message-degradation note above. A provider 500
+    // is relayed VERBATIM, so what the SDK decodes here is a genuine Anthropic
+    // error body — the exact bytes `api.anthropic.com` would have sent.
+    const upstream = interceptUpstream(() =>
+      upstreamJson(
+        { type: "error", error: { type: "api_error", message: "Internal server error" } },
+        500,
+      ),
+    );
+    try {
+      const error = await captured(() =>
+        anthropicClient().messages.create({
+          model: "claude-3-5-sonnet-20241022",
+          max_tokens: 16,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
+
+      expect(error).toBeInstanceOf(InternalServerError);
+      expect(error.status).toBe(500);
+      // The provider's taxonomy survives the hop: `err.type` is Anthropic's
+      // own `api_error`, which is what an Anthropic-native caller switches on.
+      expect(error.type).toBe("api_error");
+      expect((error.error as { error?: { message?: string } }).error?.message).toBe(
+        "Internal server error",
+      );
+      // ... and `err.message` is STILL the stringified body, with a body that
+      // never went near FerroGate's envelope. That is the proof that the
+      // degradation is the SDK's own behaviour and not something the gateway
+      // does to Anthropic callers.
+      expect(error.message).toContain('{"type":"error"');
+    } finally {
+      upstream.restore();
+    }
   });
 
   it("answers messages.countTokens() in the SDK's own shape", async () => {

@@ -133,6 +133,17 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "../../apps/gateway/wrangler.toml" },
+      // LOAD-BEARING since #673 put an `[ai]` stanza in the committed deploy
+      // config: an AI binding is classified remote-only, so the default
+      // (`true`) makes this pool open a proxy session against the live
+      // Cloudflare API and every file here dies before collection with
+      // "it's necessary to set a CLOUDFLARE_API_TOKEN environment variable"
+      // (measured 2026-08-02, wrangler 4.116). `false` keeps the suite
+      // hermetic — `env.AI` still exists and throws
+      // "Binding AI needs to be run remotely" if anything ever calls it.
+      // `apps/gateway/vitest.config.ts` carries the identical line for the
+      // identical reason; the two must stay in step.
+      remoteBindings: false,
       miniflare: {
         bindings: {
           GATEWAY_NATIVE_API_KEYS: JSON.stringify(NATIVE_API_KEYS),
