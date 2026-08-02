@@ -1118,7 +1118,9 @@ export class AssetService {
     caller: AssetCaller,
     ref: AssetName & { readonly reference: string },
     requestedPlatform: string | undefined,
-  ): Promise<AssetResult<{ selected: StoredAsset; headers: Record<string, string> }>> {
+  ): Promise<
+    AssetResult<{ selected: StoredAsset; version: string; headers: Record<string, string> }>
+  > {
     const all = await this.#assetVersions(caller.tenantId, ref);
     // #366: withhold pending/quarantined rows from RESOLUTION entirely, so an
     // unproven asset is absent from exact/channel/range resolution and can
@@ -1171,7 +1173,7 @@ export class AssetService {
         `299 ferrogate "asset ${ref.assetType}/${ref.name}/${resolved.version} is yanked"`;
       headers["x-ferrogate-asset-yanked"] = "true";
     }
-    return { ok: true, status: 200, body: { selected, headers } };
+    return { ok: true, status: 200, body: { selected, version: resolved.version, headers } };
   }
 
   /**
@@ -1224,8 +1226,7 @@ export class AssetService {
       input.platform ?? input.headers.get("x-ferrogate-platform") ?? undefined;
     const resolution = await this.#resolveArtifact(caller, ref, requestedPlatform);
     if (!resolution.ok) return resolution;
-    const { selected } = resolution.body;
-    const resolved = { version: resolution.body.headers["x-ferrogate-asset-version"] ?? "" };
+    const { selected, version } = resolution.body;
 
     const extra: Record<string, string> = { ...resolution.body.headers };
 
@@ -1306,7 +1307,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version: resolved.version },
+          { assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -1326,7 +1327,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version: resolved.version },
+          { assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
