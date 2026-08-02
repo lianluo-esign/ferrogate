@@ -57,6 +57,27 @@ if (controlMigrations.length === 0 || tenantMigrations.length === 0) {
 }
 
 export default defineConfig({
+  /**
+   * Vitest's 5s default is too tight for THIS suite specifically.
+   *
+   * `test/wiring.test.ts` proves its invariants by sweeping the WHOLE contract
+   * surface — several tests issue ~197 real `fetch`es through `export default`
+   * in workerd, one per contract operation, because a sampled subset would let
+   * exactly the un-swept operation be the one that drifted. That is inherently
+   * O(operations), and on a 2-core GitHub runner three of those sweeps hit the
+   * 5s wall while passing comfortably on a developer machine — a green local
+   * suite and a red CI, which is the worst signal a gate can give.
+   *
+   * Raised rather than sampled, and raised per-suite rather than globally: the
+   * other workspaces keep the tight default, so a genuine hang there still
+   * surfaces fast. 60s is far above the observed CI cost of a sweep (~5-8s) and
+   * far below "hung", so a real deadlock still fails rather than stalling the
+   * job to its 45-minute limit.
+   */
+  test: {
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
+  },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.toml" },
