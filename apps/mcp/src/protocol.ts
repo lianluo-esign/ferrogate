@@ -5,22 +5,35 @@
  * Clean-room port of `crates/ferrogate-mcp/src/protocol.rs` plus the dual-era
  * ingress classifier in `crates/ferrogate-gateway/src/server/mcp_ingress.rs`.
  *
- * Protocol truth is pinned to official modelcontextprotocol commit
- * `71e306956a4959c9655e5036be215d41986596e6` rather than the obsolete
- * `2026-07-28-RC` tag — a candidate contract under validation, not a
- * final-conformance claim. Legacy requests remain `initialize`-based; modern
- * requests carry every piece of identity/capability metadata on the request
- * being validated. Nothing here caches client metadata: era selection is a
- * pure function of one request.
+ * Protocol truth is the FINAL `2026-07-28` revision (published 2026-07-28,
+ * superseding the release candidate this file previously tracked). Legacy
+ * requests remain `initialize`-based; modern requests carry every piece of
+ * identity/capability metadata on the request being validated. Nothing here
+ * caches client metadata: era selection is a pure function of one request.
+ *
+ * ## Dual era, and why it is not negotiable
+ *
+ * Serving the final revision must not evict a deployed agent. Three revisions
+ * are spoken ({@link SUPPORTED_MCP_PROTOCOL_VERSIONS}); a request naming any
+ * other is refused with `-32022` and a `data.supported` list naming all three,
+ * so a client learns what to retry with instead of guessing. Which era a
+ * request is in is decided by the request itself, so the two eras cannot
+ * interfere: an `initialize` body is legacy no matter what metadata it carries,
+ * and modern `_meta` is modern no matter what header accompanies it.
+ *
+ * A protocol revision is NOT a way to relax a security property. The modern
+ * path runs the same fail-closed routing-header verification, the same
+ * per-tenant upstream population, and the same session/cursor ownership fences
+ * (#687, #764) as the legacy path.
  */
 import type { JsonValue } from "@ferrogate/core";
 
 import { JsonRpcErrorCode, type McpIngressRequest } from "./jsonrpc.js";
 
 /**
- * Modern MCP candidate revision accepted by FerroGate's stateless ingress. Adds
+ * The final modern MCP revision accepted by FerroGate's stateless ingress. Adds
  * the `Mcp-Method` / `Mcp-Name` Streamable-HTTP routing headers; it is never
- * negotiated through `initialize`.
+ * negotiated through `initialize`, which this revision removed.
  */
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
 /**
@@ -67,11 +80,29 @@ export const AGENT_RUN_ID_HEADER = "x-ferrogate-agent-run-id";
 const PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion";
 const CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO_META = "io.modelcontextprotocol/clientInfo";
+/**
+ * `_meta` key carrying the SERVER's `Implementation` on every modern result.
+ *
+ * Changelog major change 2: "servers SHOULD identify themselves in each
+ * result's `_meta`". Statelessness is what makes this load-bearing rather than
+ * decorative — `initialize` is gone, so there is no other moment at which a
+ * client can learn which implementation answered, and a fleet behind a
+ * round-robin balancer may answer two consecutive calls from two builds.
+ */
+export const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
 const BASE64_SENTINEL_PREFIX = "=?base64?";
 const BASE64_SENTINEL_SUFFIX = "?=";
 
-/** Client identity stamped into modern `_meta` on outbound requests. */
+/** Client identity stamped into modern `_meta` on OUTBOUND requests (FerroGate as client). */
 export const FERROGATE_CLIENT_INFO = { name: "ferrogate", version: "1.0.0" } as const;
+/**
+ * Server identity stamped into modern `_meta` on INBOUND results (FerroGate as
+ * server). Deliberately a separate constant from {@link FERROGATE_CLIENT_INFO}
+ * even though the two currently agree: they describe opposite directions, and a
+ * future gateway build that fronts a differently-versioned client must be able
+ * to move one without moving the other.
+ */
+export const FERROGATE_SERVER_INFO = { name: "ferrogate", version: "1.0.0" } as const;
 
 /** Private-cache hint on candidate cacheable modern results (`mcp_rpc.rs`). */
 export const PRIVATE_CACHE_TTL_MS = 5_000;
@@ -481,7 +512,29 @@ export function validateIngress(headers: Headers, rpc: McpIngressRequest): Ingre
   };
 }
 
-/** Methods the modern candidate revision actually implements here. */
+/**
+ * Methods this server implements on the final `2026-07-28` revision.
+ *
+ * The list is SHORTER than the specification's, on purpose. Everything absent
+ * is answered `-32601` rather than half-served, which is the conformant way to
+ * not implement an optional surface — a client discovers the gap from the
+ * refusal and from what {@link SUPPORTED_MCP_PROTOCOL_VERSIONS} and the
+ * `server/discover` capabilities do NOT claim:
+ *
+ *  - `subscriptions/listen` (major change 4) — the long-lived change-notification
+ *    stream. Nothing here advertises `listChanged` or `resourceSubscriptions`.
+ *  - `prompts/list` / `prompts/get` / `resources/templates/list` — never served
+ *    on any revision; no prompts capability is advertised.
+ *  - the `io.modelcontextprotocol/tasks` extension (major change 6) and MCP
+ *    Apps — advertised as absent by the EMPTY `extensions` map.
+ *  - `ping` / `logging/setLevel` (major change 5) — removed by this revision, so
+ *    modern requests for them are refused here while the legacy dispatcher
+ *    still answers `ping` for a `2025-11-25` client.
+ *
+ * The client half of MRTR (SEP-2322) is likewise unimplemented; see
+ * `ensureNotInputRequired` in `./jsonrpc.ts` for the refusal that keeps an
+ * interim result from being mistaken for tool output.
+ */
 export function isSupportedModernMethod(method: string): boolean {
   return (
     method === "server/discover" ||
@@ -605,17 +658,51 @@ export function declaredAgentRunId(
 }
 
 /**
+ * Methods whose results are a `CacheableResult` and therefore MUST carry
+ * `ttlMs` + `cacheScope` (changelog minor change 5, SEP-2549).
+ *
+ * The spec names five: `tools/list`, `prompts/list`, `resources/list`,
+ * `resources/read`, `resources/templates/list`. Only the three FerroGate
+ * actually serves are listed — stamping a cache hint onto a method this server
+ * answers `-32601` for would be advertising a shape nobody can observe. The two
+ * absent entries are tracked with the rest of the unimplemented surface in the
+ * conformance note on {@link isSupportedModernMethod}.
+ */
+const CACHEABLE_RESULT_METHODS = new Set(["tools/list", "resources/list", "resources/read"]);
+
+/**
  * Modern results require an explicit result discriminator. Legacy responses
  * retain their historical shape, so the ingress calls this only after a request
  * has been validated as modern. Mutates in place, exactly as
  * `McpJsonRpcResponse::complete_modern_result` does.
+ *
+ * `resultType` is only DEFAULTED, never overwritten: a handler that has already
+ * decided its own discriminator owns it.
  */
 export function completeModernResult(result: Record<string, JsonValue>, method: string): void {
   if (!("resultType" in result)) result["resultType"] = "complete";
-  if (method === "tools/list" || method === "resources/list" || method === "resources/read") {
+  if (CACHEABLE_RESULT_METHODS.has(method)) {
     if (!("ttlMs" in result)) result["ttlMs"] = PRIVATE_CACHE_TTL_MS;
     if (!("cacheScope" in result)) result["cacheScope"] = "private";
   }
+  stampServerInfo(result);
+}
+
+/**
+ * Add `io.modelcontextprotocol/serverInfo` to a modern result's `_meta`.
+ *
+ * MERGES rather than assigns, and that is the whole subtlety: `_meta` on a
+ * `tools/list` result already carries the multiplex ambiguity report
+ * (`ferrogate/ambiguousTools`, #687), which is how a client learns that a bare
+ * tool name is claimed by two upstreams. Replacing `_meta` here would delete
+ * that report and turn a REFUSED ambiguous call into an unexplained one. An
+ * existing `serverInfo` is left alone for the same reason `resultType` is.
+ */
+function stampServerInfo(result: Record<string, JsonValue>): void {
+  const existing = result["_meta"];
+  const meta = isJsonObject(existing) ? existing : {};
+  if (SERVER_INFO_META in meta) return;
+  result["_meta"] = { ...meta, [SERVER_INFO_META]: { ...FERROGATE_SERVER_INFO } };
 }
 
 /** Narrowing helper: a JSON object (not null, not an array). */

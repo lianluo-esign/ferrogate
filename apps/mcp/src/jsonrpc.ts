@@ -333,6 +333,41 @@ export interface McpToolExecutionResult {
   isError: boolean;
 }
 
+/**
+ * The Multi Round-Trip Requests interim discriminator (SEP-2322, final
+ * `2026-07-28`). A server that needs more information — what `roots/list`,
+ * `sampling/createMessage` and `elicitation/create` used to ask for over a
+ * held-open stream — answers `resultType: "input_required"` carrying
+ * `inputRequests`, and expects the client to RETRY the original request with
+ * `inputResponses`.
+ */
+export const INPUT_REQUIRED_RESULT_TYPE = "input_required";
+
+/**
+ * Refuse an MRTR interim result.
+ *
+ * FerroGate implements no client half of MRTR: it has nothing to put in
+ * `inputResponses` and no retry loop to put it in. The ONLY safe reading of an
+ * `input_required` envelope is therefore "this upstream cannot be served",
+ * because the alternative is silently handing an agent a protocol control
+ * message shaped like tool output — an `inputRequests` array where the model
+ * expected `content`. That is a prompt-injection-adjacent failure, not a
+ * cosmetic one.
+ *
+ * Deliberately keyed on the discriminator being EXACTLY `"input_required"`, not
+ * on it being absent-or-complete: changelog major change 8 requires a client to
+ * treat a result from an earlier-protocol server that OMITS `resultType` as
+ * `"complete"`, and that is the dual-era fallback for every `2025-06-18` and
+ * `2025-11-25` upstream FerroGate still talks to.
+ */
+function ensureNotInputRequired(result: unknown, method: string): void {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) return;
+  if ((result as Record<string, unknown>)["resultType"] !== INPUT_REQUIRED_RESULT_TYPE) return;
+  throw new Error(
+    `MCP ${method} returned an ${INPUT_REQUIRED_RESULT_TYPE} multi-round-trip result; FerroGate does not implement the client half of MRTR (SEP-2322) and will not present an interim result as output`,
+  );
+}
+
 /** Raise on a JSON-RPC error member. Port of `ensure_no_jsonrpc_error`. */
 export function ensureNoJsonRpcError(response: unknown): void {
   if (typeof response === "object" && response !== null && "error" in response) {
@@ -351,6 +386,7 @@ export function parseToolsList(response: unknown): ParsedToolDef[] {
       ? (response as Record<string, unknown>)["result"]
       : undefined;
   if (raw === undefined) throw new Error("MCP tools/list response missing result");
+  ensureNotInputRequired(raw, "tools/list");
   const parsed = listToolsResultSchema.safeParse(raw);
   if (!parsed.success)
     throw new Error(`invalid MCP tools/list result: ${formatIssues(parsed.error)}`);
@@ -371,6 +407,7 @@ export function parseCallResult(response: unknown): McpToolExecutionResult {
     typeof response === "object" && response !== null
       ? ((response as Record<string, unknown>)["result"] ?? null)
       : null;
+  ensureNotInputRequired(raw, "tools/call");
   const parsed = callToolResultSchema.safeParse(raw ?? {});
   if (!parsed.success) {
     throw new Error(`invalid MCP tools/call result: ${formatIssues(parsed.error)}`);
