@@ -706,7 +706,7 @@ export class PiiDetector implements GuardrailDetector {
       );
       return;
     }
-    const key = `${match.category} ${segment.segment_id} ${match.start} ${match.end}`;
+    const key = `${match.category}\0${segment.segment_id}\0${match.start}\0${match.end}`;
     if (!sink.seen.has(key)) {
       sink.seen.add(key);
       sink.findings.push(
@@ -849,7 +849,7 @@ export class PiiDetector implements GuardrailDetector {
         continue;
       }
       for (const start of verbatimSpans(text, span.text)) {
-        const key = `${span.type} ${start}`;
+        const key = `${span.type}\0${start}`;
         if (seen.has(key)) {
           continue;
         }
