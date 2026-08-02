@@ -216,6 +216,15 @@ export function usageWriteFor(
     promptTokens: charge.event.usage.prompt_tokens,
     completionTokens: charge.event.usage.completion_tokens,
     totalTokens: charge.event.usage.total_tokens,
+    // #667. Subsets of the two counts above, so `totalTokens` is unchanged and
+    // no existing budget read shifts — these accumulate purely so the report
+    // API can EXPLAIN a bill (which portion was a cache read, which was
+    // reasoning) instead of only stating it. Read off the priced entry's usage,
+    // not the raw event, so the rollup agrees with the ledger row that produced
+    // `costUsd` even after `reconcileSplit` repaired a one-sided report.
+    cachedInputTokens: charge.entry.usage.cached_input_tokens ?? 0,
+    cacheWriteTokens: charge.entry.usage.cache_write_tokens ?? 0,
+    reasoningTokens: charge.entry.usage.reasoning_tokens ?? 0,
     costUsd: charge.entry.cost.total_cost,
     // A non-2xx still metered: it consumed prompt tokens upstream. `isError`
     // only splits the counter, it never suppresses the charge.

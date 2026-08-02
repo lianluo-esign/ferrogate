@@ -47,6 +47,11 @@ interface AuditEventRow {
   readonly tenant: string | null;
   readonly occurred_at_unix: number;
   readonly audit_json: string;
+  /** The tamper-evidence columns (#684); NULL on rows written by an unchained writer. */
+  readonly chain_key: string | null;
+  readonly seq: number | null;
+  readonly prev_hash: string | null;
+  readonly row_hash: string | null;
   readonly total: number;
 }
 
@@ -57,6 +62,16 @@ interface AuditEventRow {
  * operator-influenced data (it embeds a `collection` and a `resource_id` that
  * came from a request body), and a document that could rename its own `id` or
  * `request_id` would let a mutation forge its own correlation.
+ *
+ * ## Why the raw `audit_json` string is published TOO (#684)
+ *
+ * The tamper-evidence chain commits to the stored BYTES of `audit_json`, so a
+ * customer recomputing a row's digest needs those bytes. The spread fields
+ * cannot supply them: re-serializing a parsed object reorders keys and changes
+ * whitespace, so a verifier working from them would fail an intact row. The
+ * string is therefore carried verbatim alongside its parsed fields — redundant
+ * for a reader that only wants to know what happened, load-bearing for one
+ * asking whether it can trust the answer.
  */
 function auditEventDocument(row: AuditEventRow): StoreRecord {
   let audit: Record<string, unknown>;
@@ -77,6 +92,11 @@ function auditEventDocument(row: AuditEventRow): StoreRecord {
     agent_run_id: row.agent_run_id,
     tenant_id: row.tenant,
     occurred_at_unix: row.occurred_at_unix,
+    audit_json: row.audit_json,
+    chain_key: row.chain_key,
+    seq: row.seq,
+    prev_hash: row.prev_hash,
+    row_hash: row.row_hash,
   };
 }
 
@@ -131,6 +151,7 @@ function listAuditEventsHandler(): Handler {
     const rows = await db
       .prepare(
         `SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+                chain_key, seq, prev_hash, row_hash,
                 count(*) OVER() AS total
            FROM ${AUDIT_TABLE}${fence.sql}
           ORDER BY occurred_at_unix ASC, id ASC

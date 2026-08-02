@@ -119,6 +119,20 @@ export interface StoredUsageMonthlyRollup {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Cache-read prompt tokens accumulated in this period — a SUBSET of
+   * {@link promptTokens} (issue #667), so it never shifts a budget read.
+   *
+   * Required rather than optional: the column is `NOT NULL DEFAULT 0` and every
+   * read goes through {@link ../d1/usage-d1.js D1UsageLedger}, so an
+   * `undefined` here could only mean the reader forgot the column — which is
+   * exactly the silence this field exists to end.
+   */
+  cachedInputTokens: number;
+  /** Cache-write prompt tokens — a SUBSET of {@link promptTokens} (#667). */
+  cacheWriteTokens: number;
+  /** Reasoning/thinking tokens — a SUBSET of {@link completionTokens} (#667). */
+  reasoningTokens: number;
   costUsd: number;
   requestCount: number;
   errorCount: number;

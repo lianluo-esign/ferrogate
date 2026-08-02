@@ -344,7 +344,13 @@ describe("the env-var drift gate itself", () => {
       "TENANCY_LIFECYCLE",
       "TENANT_RBAC_ACTIONS",
     ]);
-    expect([...DECLARED.bindings.keys()]).toEqual(["DB"]);
+    // `PROMPT_LABELS` is the KV namespace the prompt deployment labels (#694)
+    // write their edge pointer into; `apps/gateway` binds the same name and
+    // reads it. `AUDIT_ANCHORS` is the R2 bucket the audit-anchor pass writes
+    // (#684). Both joined `DB` in the same release, and both are listed here
+    // rather than excepted because they are normal, operator-visible bindings.
+    // The order is `wrangler.toml` declaration order: d1, then kv, then r2.
+    expect([...DECLARED.bindings.keys()]).toEqual(["DB", "PROMPT_LABELS", "AUDIT_ANCHORS"]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the
     // scanner shrinks the read set loudly instead of silently.

@@ -32,7 +32,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 252 operations, and duplicating a per-route
+ * table-driven middleware for all 255 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -75,6 +75,7 @@ import {
 } from "../telemetry/genai.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
 import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { expandPromptReference } from "./prompt-reference.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -944,10 +945,25 @@ function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstr
 function routePricing(route: PhysicalRoute): {
   inputPricePer1m?: number;
   outputPricePer1m?: number;
+  cachedInputPricePer1m?: number;
+  cacheWritePricePer1m?: number;
+  reasoningPricePer1m?: number;
 } {
   return {
     ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
     ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
+    // #667 — the cached/reasoning rates travel with the other two, for the same
+    // reason: a failover means the route that ANSWERED is not the route that
+    // was planned, and the two can be priced differently.
+    ...(route.cachedInputPricePer1m !== undefined
+      ? { cachedInputPricePer1m: route.cachedInputPricePer1m }
+      : {}),
+    ...(route.cacheWritePricePer1m !== undefined
+      ? { cacheWritePricePer1m: route.cacheWritePricePer1m }
+      : {}),
+    ...(route.reasoningPricePer1m !== undefined
+      ? { reasoningPricePer1m: route.reasoningPricePer1m }
+      : {}),
   };
 }
 
@@ -1008,7 +1024,15 @@ function observeInvocation(
 function recordUsage(
   c: InferenceContext,
   deps: ResolvedInferenceDeps,
-  base: Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">,
+  base: Omit<
+    Usage,
+    | "promptTokens"
+    | "completionTokens"
+    | "totalTokens"
+    | "cachedInputTokens"
+    | "cacheWriteTokens"
+    | "reasoningTokens"
+  >,
   providerKind: string,
   usage: ProviderUsage | undefined,
 ): void {
@@ -1032,6 +1056,19 @@ function recordUsage(
         ? { completionTokens: usage.completionTokens }
         : {}),
       ...(usage?.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+      // #667. Absent stays absent all the way to the billing event, where the
+      // wire schema defaults it to 0 — so "the provider reported no cached
+      // tokens" and "this response predates the counter" settle identically,
+      // and neither can be mistaken for an observed zero mid-stream.
+      ...(usage?.cachedInputTokens !== undefined
+        ? { cachedInputTokens: usage.cachedInputTokens }
+        : {}),
+      ...(usage?.cacheWriteTokens !== undefined
+        ? { cacheWriteTokens: usage.cacheWriteTokens }
+        : {}),
+      ...(usage?.reasoningTokens !== undefined
+        ? { reasoningTokens: usage.reasoningTokens }
+        : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
@@ -1162,6 +1199,15 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   });
 
   const body = readInferenceBody();
+  // Prompt-by-reference (#694). Between the body read and Zod, because the
+  // expansion is what PRODUCES the `model` and `messages` Zod is about to
+  // require — after validation it would always be too late. Mounted only on the
+  // two OpenAI-dialect operations: `prompt_templates.target` is
+  // `chat_completions | responses`, so those are the two bodies a rendered
+  // template is shaped for. Anthropic `/v1/messages`, embeddings and images
+  // pass it through untouched and refuse the unknown member on their own
+  // schema, which is the honest answer for a body the renderer cannot produce.
+  const promptReference = expandPromptReference();
 
   // -- GET /v1/models --------------------------------------------------------
   app.get("/v1/models", (c) => handleModels(c, c.get("inferenceDeps")));
@@ -1170,6 +1216,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/chat/completions",
     body,
+    promptReference,
     validateBody(chatCompletionRequestSchema, "invalid chat completion request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "chat.completions"),
   );
@@ -1178,6 +1225,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/responses",
     body,
+    promptReference,
     validateBody(responsesRequestSchema, "invalid responses request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "responses"),
   );

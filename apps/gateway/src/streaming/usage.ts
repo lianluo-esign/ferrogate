@@ -36,12 +36,27 @@ export type UsageProviderKind =
 
 /**
  * Normalized token counts — the TS twin of `ferrogate_providers::ProviderUsage`
- * (`prompt_tokens` / `completion_tokens` / `total_tokens`, each `Option<u64>`).
+ * (`prompt_tokens` / `completion_tokens` / `total_tokens`, each `Option<u64>`),
+ * extended with the cached/reasoning counters (issue #667).
+ *
+ * The subset invariant and the per-family conversion that establishes it are
+ * documented once, on `../inference/usage.ts::ProviderUsage`. This module is the
+ * PARSED-FRAME twin of that scraper (see the module doc there for why two
+ * exist), and the two must agree field for field — a request that billed
+ * differently depending on which ingress it arrived through would be worse than
+ * either answer alone. `test/metering/cached-reasoning-tokens.test.ts` asserts
+ * the agreement directly rather than trusting the comment.
  */
 export interface NormalizedUsage {
   readonly promptTokens?: number | undefined;
   readonly completionTokens?: number | undefined;
   readonly totalTokens?: number | undefined;
+  /** Prompt tokens served from a prompt cache — a SUBSET of `promptTokens`. */
+  readonly cachedInputTokens?: number | undefined;
+  /** Prompt tokens written INTO a prompt cache — a SUBSET of `promptTokens`. */
+  readonly cacheWriteTokens?: number | undefined;
+  /** Reasoning/thinking tokens — a SUBSET of `completionTokens`. */
+  readonly reasoningTokens?: number | undefined;
 }
 
 /** True when no field of the usage record is populated. */
@@ -95,17 +110,71 @@ function finish(usage: NormalizedUsage): NormalizedUsage | undefined {
   return isUsageEmpty(usage) ? undefined : usage;
 }
 
-/** `ferrogate-providers/src/openai.rs::extract_usage`. */
+/**
+ * Drop `undefined`-valued cached/reasoning keys so an absent counter stays
+ * ABSENT — the property {@link mergeUsage} relies on to keep a later frame from
+ * erasing an earlier frame's reading.
+ */
+function withCounters(
+  base: NormalizedUsage,
+  counters: {
+    cachedInputTokens?: number | undefined;
+    cacheWriteTokens?: number | undefined;
+    reasoningTokens?: number | undefined;
+  },
+): NormalizedUsage {
+  return {
+    ...base,
+    ...(counters.cachedInputTokens !== undefined
+      ? { cachedInputTokens: counters.cachedInputTokens }
+      : {}),
+    ...(counters.cacheWriteTokens !== undefined
+      ? { cacheWriteTokens: counters.cacheWriteTokens }
+      : {}),
+    ...(counters.reasoningTokens !== undefined
+      ? { reasoningTokens: counters.reasoningTokens }
+      : {}),
+  };
+}
+
+/**
+ * `ferrogate-providers/src/openai.rs::extract_usage`, plus the cached/reasoning
+ * details (#667).
+ *
+ * Both detail spellings are read — `prompt_tokens_details` /
+ * `completion_tokens_details` (Chat Completions) and `input_tokens_details` /
+ * `output_tokens_details` (Responses) — because `/v1/responses` streams are
+ * normalized to the OpenAI shape before metering sees them and are read with
+ * this extractor. Both counts are already subsets of the headline counts in
+ * OpenAI's accounting, so nothing is added in.
+ */
 function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
   const usage = nonNull(get(payload, "usage"));
   if (usage === undefined) {
     return undefined;
   }
-  return finish({
-    promptTokens: getUint(usage, "prompt_tokens"),
-    completionTokens: getUint(usage, "completion_tokens"),
-    totalTokens: getUint(usage, "total_tokens"),
-  });
+  const promptDetails =
+    nonNull(get(usage, "prompt_tokens_details")) ?? nonNull(get(usage, "input_tokens_details"));
+  const completionDetails =
+    nonNull(get(usage, "completion_tokens_details")) ??
+    nonNull(get(usage, "output_tokens_details"));
+  return finish(
+    withCounters(
+      {
+        promptTokens: getUint(usage, "prompt_tokens"),
+        completionTokens: getUint(usage, "completion_tokens"),
+        totalTokens: getUint(usage, "total_tokens"),
+      },
+      {
+        cachedInputTokens:
+          promptDetails === undefined ? undefined : getUint(promptDetails, "cached_tokens"),
+        reasoningTokens:
+          completionDetails === undefined
+            ? undefined
+            : getUint(completionDetails, "reasoning_tokens"),
+      },
+    ),
+  );
 }
 
 /**
@@ -116,24 +185,30 @@ function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
  * `message_delta` reports the final `usage.output_tokens` at the tail of the
  * stream. `total_tokens` is only synthesized when both halves are known.
  *
- * PORT_TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
- * GAP.** Anthropic's newer `cache_creation_input_tokens` /
- * `cache_read_input_tokens` counters are not read here.
+ * ## The parity boundary that stood here is CLOSED (issue #667)
  *
- * Re-verified for this pass against `crates/ferrogate-providers/src/anthropic.rs`
- * `extract_usage` (line 131): it reads `input_tokens` and `output_tokens` and
- * nothing else, and `grep -rn "cache_creation_input_tokens" crates/` returns
- * zero hits across the whole Rust tree. So this port is byte-faithful and there
- * is no missing work behind this marker.
+ * It read: "Anthropic's newer `cache_creation_input_tokens` /
+ * `cache_read_input_tokens` counters are not read here", correctly noted that
+ * the Rust tree read neither (`crates/ferrogate-providers/src/anthropic.rs`
+ * `extract_usage` reads `input_tokens` and `output_tokens` and nothing else),
+ * and just as correctly refused to smuggle a fix in as a port — because summing
+ * the two counters into `promptTokens` would be *a different wrong answer*: they
+ * bill at different rates from ordinary input tokens (Anthropic prices a cache
+ * read at 0.1x and a 5-minute cache write at 1.25x), so folding them in without
+ * a split would over-bill the read side roughly tenfold.
  *
- * It is kept because the omission is CONSEQUENTIAL and invisible: a tenant using
- * Anthropic prompt caching is billed on `input_tokens` alone, which excludes the
- * cache-write and cache-read tokens Anthropic charges for separately — an
- * under-count in the Rust tree that this port inherits exactly. Fixing it is a
- * metering/pricing change (the two counters bill at different rates from
- * ordinary input tokens, so summing them into `promptTokens` would be a
- * different wrong answer), it must land in `@ferrogate/providers` beside the
- * rate card, and it must not be smuggled in as a port.
+ * That objection is what the fix is BUILT ON rather than around. The counters
+ * are summed into `promptTokens` — which is what makes the 25 000 previously
+ * invisible tokens billable at all — AND carried separately, so
+ * `@ferrogate/billing`'s `estimateCost` can subtract them back out and price
+ * each at its own rate. The rate card gained the three rates in the same change
+ * (`ModelPrice.cached_input_price_per_1m` and siblings), so this is no longer a
+ * capture that outruns its pricing.
+ *
+ * `output_tokens` is left alone: Anthropic counts extended-thinking tokens
+ * inside it and publishes no separate counter, so `reasoningTokens` stays absent
+ * rather than invented — which prices thinking at the output rate, which is
+ * correct.
  */
 function extractAnthropicUsage(payload: unknown): NormalizedUsage | undefined {
   const usage =
@@ -141,26 +216,56 @@ function extractAnthropicUsage(payload: unknown): NormalizedUsage | undefined {
   if (usage === undefined) {
     return undefined;
   }
-  const promptTokens = getUint(usage, "input_tokens");
+  const freshInput = getUint(usage, "input_tokens");
+  const cachedInputTokens = getUint(usage, "cache_read_input_tokens");
+  const cacheWriteTokens = getUint(usage, "cache_creation_input_tokens");
   const completionTokens = getUint(usage, "output_tokens");
+  // Only widen a REPORTED `input_tokens`. A frame carrying cache counters and no
+  // `input_tokens` must not manufacture a prompt count, or `mergeUsage` would
+  // let it overwrite the real one.
+  const promptTokens =
+    freshInput === undefined
+      ? undefined
+      : freshInput + (cachedInputTokens ?? 0) + (cacheWriteTokens ?? 0);
   const totalTokens =
     promptTokens !== undefined && completionTokens !== undefined
       ? promptTokens + completionTokens
       : undefined;
-  return finish({ promptTokens, completionTokens, totalTokens });
+  return finish(
+    withCounters(
+      { promptTokens, completionTokens, totalTokens },
+      { cachedInputTokens, cacheWriteTokens },
+    ),
+  );
 }
 
-/** `ferrogate-providers/src/gemini.rs::extract_usage`. */
+/**
+ * `ferrogate-providers/src/gemini.rs::extract_usage`, plus the cached-content
+ * and thoughts counters (#667).
+ *
+ * `candidatesTokenCount` EXCLUDES `thoughtsTokenCount` while `totalTokenCount`
+ * INCLUDES it, so thoughts are added into the completion count: that both makes
+ * reasoning tokens billable and restores `prompt + completion == total`.
+ * `cachedContentTokenCount` is already inside `promptTokenCount` and needs no
+ * addition.
+ */
 function extractGeminiUsage(payload: unknown): NormalizedUsage | undefined {
   const usage = nonNull(get(payload, "usageMetadata"));
   if (usage === undefined) {
     return undefined;
   }
-  return finish({
-    promptTokens: getUint(usage, "promptTokenCount"),
-    completionTokens: getUint(usage, "candidatesTokenCount"),
-    totalTokens: getUint(usage, "totalTokenCount"),
-  });
+  const visible = getUint(usage, "candidatesTokenCount");
+  const reasoningTokens = getUint(usage, "thoughtsTokenCount");
+  return finish(
+    withCounters(
+      {
+        promptTokens: getUint(usage, "promptTokenCount"),
+        completionTokens: visible === undefined ? undefined : visible + (reasoningTokens ?? 0),
+        totalTokens: getUint(usage, "totalTokenCount"),
+      },
+      { cachedInputTokens: getUint(usage, "cachedContentTokenCount"), reasoningTokens },
+    ),
+  );
 }
 
 /**
@@ -184,7 +289,19 @@ export function mergeUsage(
       ? promptTokens + completionTokens
       : undefined;
   const totalTokens = next.totalTokens ?? derivedTotal ?? base.totalTokens;
-  return { promptTokens, completionTokens, totalTokens };
+  // Same prefer-new-fall-back-to-old rule for the #667 counters, and it is
+  // load-bearing on the Anthropic stream: the cache counters arrive ONCE, on
+  // `message_start`, while the terminal `message_delta` reports only
+  // `output_tokens`. Letting the newer frame's absence win would drop the whole
+  // request's cache discount on the very last frame.
+  return withCounters(
+    { promptTokens, completionTokens, totalTokens },
+    {
+      cachedInputTokens: next.cachedInputTokens ?? base.cachedInputTokens,
+      cacheWriteTokens: next.cacheWriteTokens ?? base.cacheWriteTokens,
+      reasoningTokens: next.reasoningTokens ?? base.reasoningTokens,
+    },
+  );
 }
 
 /**

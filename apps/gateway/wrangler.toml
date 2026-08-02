@@ -709,6 +709,31 @@ bucket_name = "replace-at-deploy-ferrogate-assets"
 preview_bucket_name = "replace-at-deploy-ferrogate-assets-preview"
 
 # ---------------------------------------------------------------------------
+# KV — prompt deployment labels, `label -> revision` (#694)
+# ---------------------------------------------------------------------------
+#
+# READ-ONLY here. `apps/control-plane` owns the writes
+# (`PUT /admin/v1/prompt-templates/{id}/labels/{label}`); this Worker only
+# resolves the pointer, on the request path, for a caller that referenced a
+# prompt by label — `src/prompts/labels.ts`, reached from
+# `src/routes/prompts.ts` and from the inference `prompt` reference expander.
+#
+# The key derivation is `promptLabelPointerKey` in `@ferrogate/config`, shared
+# with the writer so a rename cannot silently turn every lookup into a miss. The
+# caller's SCOPE is part of the key, which is what stops one tenant's
+# `production` from ever resolving to another tenant's revision.
+#
+# An ABSENT binding is not a silent degradation: `readPromptLabelPointer` throws
+# `unavailable` and the request is refused, because "no label storage" must
+# never collapse into "render the default prompt".
+#
+# `id` is a DOCUMENTED PLACEHOLDER; it must be substituted with the SAME
+# namespace `apps/control-plane` writes to.
+[[kv_namespaces]]
+binding = "PROMPT_LABELS"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
 # D1 — the tenant database holding the durable `api_keys` table
 #
 # Read as `env.DB` by `d1ApiKeyResolverFromEnv` (src/keys/resolver.ts), which

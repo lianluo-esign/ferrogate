@@ -161,6 +161,12 @@ describe("metering through the composed gateway — non-streaming", () => {
       prompt_tokens: 11,
       completion_tokens: 4,
       total_tokens: 15,
+      // #667 — this fixture's provider reports no cached or reasoning
+      // tokens, and the equality stays EXACT so a change that started
+      // inventing cached tokens on an uncached request would fail here.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
     });
     expect(charge?.entry.logical_model).toBe("gpt-4o-mini");
     expect(charge?.entry.provider_model).toBe("gpt-4o-mini-2024-07-18");
@@ -241,6 +247,12 @@ describe("metering through the composed gateway — streaming", () => {
       prompt_tokens: 11,
       completion_tokens: 40,
       total_tokens: 51,
+      // #667 — this fixture's provider reports no cached or reasoning
+      // tokens, and the equality stays EXACT so a change that started
+      // inventing cached tokens on an uncached request would fail here.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
     });
     // 11 * 0.15/1e6 + 40 * 0.6/1e6 = 2.565e-5 USD ⇒ 26 credits (25.65, rounded).
     expect(h.ledger.charges[0]?.credits).toBe(26n);
@@ -321,6 +333,12 @@ describe("metering through the composed gateway — streaming", () => {
       prompt_tokens: 11,
       completion_tokens: 2,
       total_tokens: 13,
+      // #667 — this fixture's provider reports no cached or reasoning
+      // tokens, and the equality stays EXACT so a change that started
+      // inventing cached tokens on an uncached request would fail here.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
     });
     // 11 * 0.15/1e6 + 2 * 0.6/1e6 = 2.85e-6 USD ⇒ 3 credits.
     expect(charge?.credits).toBe(3n);

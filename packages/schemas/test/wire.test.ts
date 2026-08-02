@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 252.
+ * ANTI-DRIFT GATE for the third copy of 255.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(252);
+    expect(OPENAPI_OPERATION_COUNT).toBe(255);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -274,8 +274,9 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
   test("the baseline is far short of the contract, and says so in numbers", () => {
     const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
     expect(seeded).toBe(10);
-    // 241 -> 242: `countMessageTokens` (issue #671) added a 252nd contract
-    // operation and no wire schema, so the shortfall grew by exactly one.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(242);
+    // 241 -> 245: `countMessageTokens` (#671) added one contract operation and
+    // the prompt-deployment-label operations (#694) added three more, none of
+    // them with a wire schema, so the shortfall grew by exactly four.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(245);
   });
 });

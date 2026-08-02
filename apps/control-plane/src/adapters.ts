@@ -4,7 +4,7 @@
  * The STORE is now the real one: {@link resolveStore} builds
  * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
  * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
- * it — the 197 handlers still talk only to `ControlPlaneStore`, which is what
+ * it — the 200 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
  * CREDENTIALS, RBAC and the TENANCY LIFECYCLE GATE are now durable too, on the
@@ -734,6 +734,37 @@ export function resolveControlDatabase(env: ControlPlaneBindings): D1Database | 
   return env.DB ?? null;
 }
 
+/**
+ * The prompt-label KV namespace, or `null` when this deployment binds none.
+ *
+ * No fallback, and deliberately no in-memory stand-in: the pointer's ONLY
+ * consumer is a different Worker, so an isolate-local map would make every
+ * label look like it moved while `apps/gateway` saw nothing. `null` reaches
+ * `routes/prompt.ts`, which refuses with a 503 that names the missing binding.
+ */
+export function resolvePromptLabels(env: ControlPlaneBindings): KVNamespace | null {
+  return env.PROMPT_LABELS ?? null;
+}
+
+/**
+ * The audit-anchor bucket (#684), or `null` when the deployment binds none.
+ *
+ * Deliberately NOT gated on `CONTROL_PLANE_STORE`, unlike its siblings above:
+ * the anchor is evidence ABOUT the control database, and the reason to keep it
+ * in a separate store is precisely that a database operator should not be able
+ * to remove it. Coupling it to the store switch would mean a deployment could
+ * turn off the audit chain's anchor by changing a var about something else.
+ *
+ * `null` is a supported DEGRADED posture: the chain still detects an edited or
+ * mid-trail-deleted row, but a tail deletion or a full re-forge goes unseen.
+ * `runScheduledTick` reports that as `audit_anchor: "unconfigured"` rather than
+ * failing the tick, because a control plane that refused to run without an
+ * evidence bucket would be down for a compliance feature.
+ */
+export function resolveAuditAnchorBucket(env: ControlPlaneBindings): R2Bucket | null {
+  return env.AUDIT_ANCHORS ?? null;
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -748,6 +779,7 @@ export function resolveDeps(
     store,
     tenantDatabases: resolveTenantDatabases(env),
     controlDatabase: resolveControlDatabase(env),
+    promptLabels: resolvePromptLabels(env),
     runtime: new StoreRuntimeStatus(store),
     txtResolver: resolveTxtResolver(env),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does

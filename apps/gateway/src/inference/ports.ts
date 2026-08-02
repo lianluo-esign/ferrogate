@@ -167,6 +167,20 @@ export interface PhysicalRoute {
   /** `ModelRoute.output_price_per_1m` — USD per 1,000,000 COMPLETION tokens. */
   readonly outputPricePer1m?: number | undefined;
   /**
+   * `ModelRoute.cached_input_price_per_1m` — USD per 1M CACHE-READ prompt
+   * tokens (issue #667).
+   *
+   * Unlike the two rates above, these three are read ONLY by settlement
+   * (`metering/route-price.ts`), never by routing: a cache-read discount is a
+   * property of a request that has already happened, and the router chooses
+   * before it knows whether the prompt will hit the cache.
+   */
+  readonly cachedInputPricePer1m?: number | undefined;
+  /** `ModelRoute.cache_write_price_per_1m` — USD per 1M CACHE-WRITE prompt tokens. */
+  readonly cacheWritePricePer1m?: number | undefined;
+  /** `ModelRoute.reasoning_price_per_1m` — USD per 1M reasoning tokens. */
+  readonly reasoningPricePer1m?: number | undefined;
+  /**
    * `ModelRegistryEntry.routing_strategy` — the order the ladder walks the
    * eligible candidates in (`strategy.ts`).
    *
@@ -439,6 +453,21 @@ export interface Usage {
   readonly promptTokens?: number | undefined;
   readonly completionTokens?: number | undefined;
   readonly totalTokens?: number | undefined;
+  /**
+   * Prompt tokens served from a prompt cache — a SUBSET of {@link promptTokens}
+   * (issue #667).
+   *
+   * The subset normalization and each vendor's conversion onto it are documented
+   * on `./usage.ts::ProviderUsage`. What matters HERE is that `promptTokens`
+   * remains the WHOLE billable input on every family, so a consumer that ignores
+   * this field still bills a correct total — it simply bills the cached portion
+   * at the fresh rate instead of the cached one.
+   */
+  readonly cachedInputTokens?: number | undefined;
+  /** Prompt tokens written INTO a prompt cache — a SUBSET of {@link promptTokens}. */
+  readonly cacheWriteTokens?: number | undefined;
+  /** Reasoning/thinking tokens — a SUBSET of {@link completionTokens}. */
+  readonly reasoningTokens?: number | undefined;
   /** `/v1/images/generations` settles on the image count, not tokens (issue #275). */
   readonly imageCount?: number | undefined;
   /** Caller-supplied request tags (issue #171), already bounds-checked. */
@@ -488,6 +517,24 @@ export interface Usage {
   readonly inputPricePer1m?: number | undefined;
   /** See {@link Usage.inputPricePer1m} — USD per 1M completion tokens. */
   readonly outputPricePer1m?: number | undefined;
+  /**
+   * `[[models]].cached_input_price_per_1m` — USD per 1M CACHE-READ prompt
+   * tokens (issue #667). Absent ⇒ cache reads settle at
+   * {@link Usage.inputPricePer1m}.
+   *
+   * The fallback direction is deliberate and is the same one the rate card
+   * takes: a row that states no cached rate has NOT stated a discount, and
+   * inventing one would shrink an invoice by a number no operator chose. The
+   * cost of the conservative choice is that a cache-heavy Anthropic call on a
+   * row-priced model bills its cache reads at the fresh rate until the operator
+   * states the discount — visible, and correctable in config, which is exactly
+   * what an invisible discount would not be.
+   */
+  readonly cachedInputPricePer1m?: number | undefined;
+  /** `[[models]].cache_write_price_per_1m` — USD per 1M CACHE-WRITE prompt tokens. */
+  readonly cacheWritePricePer1m?: number | undefined;
+  /** `[[models]].reasoning_price_per_1m` — USD per 1M reasoning tokens. */
+  readonly reasoningPricePer1m?: number | undefined;
 }
 
 /**
@@ -536,7 +583,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 252
+ * enforcement belong to the ONE contract-driven middleware that covers all 255
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
