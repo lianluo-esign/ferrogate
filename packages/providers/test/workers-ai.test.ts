@@ -137,6 +137,83 @@ describe("WorkersAiAdapter — responses", () => {
   });
 });
 
+describe("WorkersAiAdapter — structured outputs (issue #674's ninth row)", () => {
+  test("re-emits the schema UNWRAPPED, not OpenAI's `{name, schema, strict}` object", () => {
+    const schema = { type: "object", properties: { city: { type: "string" } } };
+    const prepared = adapter.prepareChatCompletions(provider(), {
+      logicalModel: "m",
+      providerModel: "@cf/x",
+      stream: false,
+      body: {
+        messages: [],
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "place", strict: true, schema },
+        },
+      },
+    });
+    // Passing the caller's object through verbatim — which is what the
+    // OpenAI family does — would hand Workers AI a schema whose top level is
+    // `{name, schema, strict}`, constraining nothing the caller asked for.
+    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual({
+      type: "json_schema",
+      json_schema: schema,
+    });
+  });
+
+  test("carries the requirement across the Responses surface too (`text.format`)", () => {
+    const schema = { type: "object" };
+    const prepared = adapter.prepareResponses(provider(), {
+      logicalModel: "m",
+      providerModel: "@cf/x",
+      stream: false,
+      body: { input: "hi", text: { format: { type: "json_schema", name: "s", schema } } },
+    });
+    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual({
+      type: "json_schema",
+      json_schema: schema,
+    });
+  });
+
+  test("honours schema-less json_object, which Workers AI does support", () => {
+    const prepared = adapter.prepareChatCompletions(provider(), {
+      logicalModel: "m",
+      providerModel: "@cf/x",
+      stream: false,
+      body: { messages: [], response_format: { type: "json_object" } },
+    });
+    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual({
+      type: "json_object",
+    });
+  });
+
+  test("REFUSES a response_format it cannot model rather than dropping it", () => {
+    // The exact defect issue #674 closed, one family later: dropping it would
+    // return prose to a caller who asked for a contract, and the failover ladder
+    // would never learn the route was unusable for this request.
+    expect(() =>
+      adapter.prepareChatCompletions(provider(), {
+        logicalModel: "m",
+        providerModel: "@cf/x",
+        stream: false,
+        body: { messages: [], response_format: { type: "some_future_mode" } },
+      }),
+    ).toThrow(/does not support structured output/);
+  });
+
+  test("leaves the body alone when no requirement was expressed", () => {
+    const prepared = adapter.prepareChatCompletions(provider(), {
+      logicalModel: "m",
+      providerModel: "@cf/x",
+      stream: false,
+      body: { messages: [], response_format: { type: "text" } },
+    });
+    // `{"type":"text"}` is an explicit "give me prose" — the absence of a
+    // requirement, not a requirement to refuse.
+    expect("response_format" in (prepared.body as Record<string, unknown>)).toBe(false);
+  });
+});
+
 describe("WorkersAiAdapter — embeddings", () => {
   test("sends `{ text }`, not OpenAI's `{ input }`", () => {
     const prepared = adapter.prepareEmbeddings(provider(), {

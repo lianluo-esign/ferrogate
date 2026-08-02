@@ -58,6 +58,8 @@ import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
 import type { Json, JsonObject } from "./json.js";
 import { embeddingsTextInputs, openaiEmbeddingsResponse } from "./gemini.js";
 import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
+import { structuredOutputFromChatBody, structuredOutputFromResponsesBody } from "./structured.js";
+import type { CanonicalStructuredOutput } from "./structured.js";
 
 /** The canonical `kind` string for this family. */
 export const WORKERS_AI_KIND = "workers-ai";
@@ -80,10 +82,12 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
   ): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ensureObjectBody(request.body, "chat completion request body");
+    const input = textGenerationInput(body, request.stream);
+    applyStructuredOutput(input, structuredOutputFromChatBody(body), provider.kind);
     return {
       provider: provider.name,
       endpoint: runEndpoint(provider.baseUrl, request.providerModel),
-      body: textGenerationInput(body, request.stream),
+      body: input,
       stream: request.stream,
       headers: workersAiHeaders(provider.apiKey),
     };
@@ -110,10 +114,14 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
       request.body,
     ).intoChatBodyWithSystemMessage();
     const body = ensureObjectBody(canonical, "responses request body");
+    const input = textGenerationInput(body, request.stream);
+    // Read off the ORIGINAL Responses body: the requirement lives in
+    // `text.format` there, and `intoChatBodyWithSystemMessage` does not move it.
+    applyStructuredOutput(input, structuredOutputFromResponsesBody(request.body), provider.kind);
     return {
       provider: provider.name,
       endpoint: runEndpoint(provider.baseUrl, request.providerModel),
-      body: textGenerationInput(body, request.stream),
+      body: input,
       stream: request.stream,
       headers: workersAiHeaders(provider.apiKey),
     };
@@ -320,6 +328,42 @@ function textGenerationInput(body: JsonObject, stream: boolean): JsonObject {
     if (value !== undefined) input[key] = value;
   }
   return input;
+}
+
+/**
+ * The Workers AI dialect of the structured-output requirement — the ninth row
+ * of the table in `./structured.ts` (issue #674).
+ *
+ * Workers AI has JSON Mode on its text-generation models and does take
+ * `response_format` — but NOT OpenAI's spelling of it: the schema goes directly
+ * under `json_schema`, where OpenAI nests `{ name, schema, strict }`. Copying
+ * the caller's object through (which is what the OpenAI family does, and what
+ * `textGenerationInput` would otherwise have to do) would hand Workers AI a
+ * schema whose top level is `{name, schema, strict}` — a shape that constrains
+ * nothing the caller asked for. So the canonical requirement is RE-EMITTED.
+ *
+ * `unmodeled` is REFUSED, not dropped. That is the rule `./structured.ts`
+ * exists for: a request asking for a contract this family cannot express must
+ * make the route unusable for THIS request, so the reliability ladder moves on,
+ * rather than returning prose to a caller who asked for a schema.
+ */
+function applyStructuredOutput(
+  input: JsonObject,
+  structured: CanonicalStructuredOutput | undefined,
+  providerKind: string,
+): void {
+  if (structured === undefined) return;
+  if (structured.kind === "unmodeled") {
+    throw AdapterError.unsupportedCapability(
+      `structured output (response_format type ${structured.type})`,
+      providerKind,
+    );
+  }
+  if (structured.kind === "json_object") {
+    input["response_format"] = { type: "json_object" };
+    return;
+  }
+  input["response_format"] = { type: "json_schema", json_schema: structured.schema };
 }
 
 /**
