@@ -1,5 +1,19 @@
 /**
- * Cached / cache-write / reasoning token accounting, end to end (issue #667).
+ * Cached / cache-write / reasoning token accounting — the UNIT half (issue #667).
+ *
+ * ## Scope, stated up front
+ *
+ * Every case here exercises one function on values this file supplies: the
+ * capture normalizers on a literal provider payload, and
+ * `billingEventFromUsage` / `charge()` / `routePriceSettledCostUsd` on a `Usage`
+ * that `usageFor()` below assembles. That helper duplicates the spread
+ * `src/inference/handlers.ts::recordUsage` performs, so nothing in this file can
+ * hold — and nothing in it claims — that the gateway ever performs that join.
+ *
+ * The MOUNT is proved next door, in `./cached-reasoning-mount.test.ts`: a real
+ * request through `SELF.fetch` into the deployed Worker, asserted against the
+ * `billing_events` / `billing_ledger` / `usage_aggregate_rollups` rows D1 really
+ * stores, with no hand-built `Usage` anywhere.
  *
  * ## What was broken
  *
@@ -270,6 +284,21 @@ describe("streaming capture", () => {
 // The metering event.
 // ---------------------------------------------------------------------------
 
+/**
+ * A `Usage` assembled BY THIS TEST from a captured `ProviderUsage`.
+ *
+ * It is a stand-in for the spread `src/inference/handlers.ts::recordUsage`
+ * performs, not a witness to it — so nothing built with it can hold a claim
+ * about whether the gateway really performs that join. That claim belongs to
+ * `./cached-reasoning-mount.test.ts`, which never builds a `Usage`: it drives
+ * `SELF.fetch` into the deployed Worker and reads the row D1 really stores.
+ * Deleting the `#667` block of `recordUsage` turns that file red and leaves
+ * everything below green, which is exactly the division of labour intended.
+ *
+ * What the tests below DO hold is the pure half — that `billingEventFromUsage`,
+ * `charge()` and `routePriceSettledCostUsd` behave correctly on a `Usage` that
+ * carries the three counters, whatever produced it.
+ */
 function usageFor(provider: string, model: string, observed: ProviderUsage | undefined): Usage {
   return {
     requestId: "req_667",
@@ -297,7 +326,7 @@ function usageFor(provider: string, model: string, observed: ProviderUsage | und
   };
 }
 
-describe("the metering event carries the new counters", () => {
+describe("billingEventFromUsage copies the new counters off a Usage that carries them", () => {
   it("copies all three onto BillingEvent.usage", () => {
     const event = billingEventFromUsage(
       usageFor("anthropic", "claude-sonnet-4", usageFromResponseBody("anthropic", ANTHROPIC_BODY)),
