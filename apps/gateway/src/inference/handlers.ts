@@ -1,3 +1,4 @@
+import type { WorkflowProviderConstraint } from "@ferrogate/policy";
 /**
  * Hono handlers for the fourteen inference operations owned by `apps/gateway`.
  *
@@ -48,6 +49,10 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import type { z } from "zod";
+import { effectiveResidencyPolicy } from "../residency/policy.js";
+import { genAiOperationForRouteLabel, observeGenAiInvocation } from "../telemetry/genai.js";
+import { parseAudioObjectReference } from "./audio-objects.js";
+import { byokScopedModels } from "./byok.js";
 import {
   applyCanary,
   eligibleCandidates,
@@ -56,8 +61,9 @@ import {
   servableCandidates,
 } from "./candidates.js";
 import type { ModelEndpointKind } from "./candidates.js";
-import { parseAudioObjectReference } from "./audio-objects.js";
-import { byokScopedModels } from "./byok.js";
+import { publishPendingTurn } from "./conversation-commit.js";
+import { isDurableConversationStore, turnItems } from "./conversation-store.js";
+import type { ChainFailure, StoredResponseTurn } from "./conversation-store.js";
 import {
   CONVERSATION_CHAIN_BROKEN,
   CONVERSATION_CHAIN_TOO_LONG,
@@ -79,13 +85,7 @@ import {
   upstreamConversationBody,
 } from "./conversation.js";
 import type { ConversationOwner } from "./conversation.js";
-import { isDurableConversationStore, turnItems } from "./conversation-store.js";
-import type { ChainFailure, StoredResponseTurn } from "./conversation-store.js";
-import { responsesOutputTap } from "./conversation-capture.js";
-import type { CapturedResponseOutput } from "./conversation-capture.js";
 import { resolveCandidates, resolveDeps } from "./defaults.js";
-import { dispatchWithFailover } from "./reliability.js";
-import type { AttemptCandidate } from "./reliability.js";
 import {
   ProviderBodyTooLargeError,
   ProviderEndpointError,
@@ -107,32 +107,21 @@ import {
 } from "./errors.js";
 import type { InferenceRejection, UpstreamRelay } from "./errors.js";
 import {
+  TOKENS_PER_AUDIO_SECOND,
   countMessagesInputTokens,
+  estimateAudioUploadUsage,
   estimateChatCompletionUsage,
   estimateEmbeddingsUsage,
   estimateImagesUsage,
   estimateMessagesUsage,
   estimateRerankUsage,
-  estimateAudioUploadUsage,
   estimateSpeechUsage,
-  TOKENS_PER_AUDIO_SECOND,
 } from "./estimate.js";
 import type { EstimatedUsage } from "./estimate.js";
-import { effectiveResidencyPolicy } from "../residency/policy.js";
-import {
-  genAiOperationForRouteLabel,
-  observeGenAiInvocation,
-} from "../telemetry/genai.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
 import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
 import { describeModel } from "./model-metadata.js";
 import type { ModelDescriptor } from "./model-metadata.js";
-import { expandPromptReference } from "./prompt-reference.js";
-import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
-import type { ShadowMirror } from "./shadow.js";
-import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
-import type { WorkflowGateOutcome } from "./workflow.js";
-import type { WorkflowProviderConstraint } from "@ferrogate/policy";
 import {
   adapterErrorMessage,
   callerCanUseModel,
@@ -150,7 +139,11 @@ import type {
   UpstreamRequest,
   Usage,
 } from "./ports.js";
+import { expandPromptReference } from "./prompt-reference.js";
+import { dispatchWithFailover } from "./reliability.js";
+import type { AttemptCandidate } from "./reliability.js";
 import {
+  MAX_AUDIO_UPLOAD_BYTES,
   anthropicCountTokensRequestSchema,
   anthropicMessagesRequestSchema,
   audioReferenceRequestSchema,
@@ -159,7 +152,6 @@ import {
   embeddingsRequestSchema,
   formatZodError,
   imagesRequestSchema,
-  MAX_AUDIO_UPLOAD_BYTES,
   rerankRequestSchema,
   responsesRequestSchema,
   speechRequestSchema,
@@ -171,9 +163,13 @@ import type {
   OpenAiModelList,
   RequestMetadata,
 } from "./schemas.js";
+import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
+import type { ShadowMirror } from "./shadow.js";
 import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
+import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
+import type { WorkflowGateOutcome } from "./workflow.js";
 
 /** Hono variable map: the request id and caller resolved once per request. */
 export interface InferenceEnv {
@@ -308,15 +304,10 @@ function readInferenceBody(): MiddlewareHandler<InferenceEnv> {
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw),
-      );
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      return errorResponse(
-        reject(400, "invalid_json", `invalid JSON body: ${detail}`),
-        requestId,
-      );
+      return errorResponse(reject(400, "invalid_json", `invalid JSON body: ${detail}`), requestId);
     }
 
     c.set("inferenceBody", parsed);
@@ -493,19 +484,11 @@ function numberOrString(value: string): number | string {
 }
 
 function audioTooLarge(maxBytes: number): InferenceRejection {
-  return reject(
-    413,
-    "payload_too_large",
-    `audio upload exceeds maximum size of ${maxBytes} bytes`,
-  );
+  return reject(413, "payload_too_large", `audio upload exceeds maximum size of ${maxBytes} bytes`);
 }
 
 function tooLarge(maxBytes: number): InferenceRejection {
-  return reject(
-    413,
-    "payload_too_large",
-    `request body exceeds maximum size of ${maxBytes} bytes`,
-  );
+  return reject(413, "payload_too_large", `request body exceeds maximum size of ${maxBytes} bytes`);
 }
 
 function withJsonContentType(headers: Headers): Headers {
@@ -671,11 +654,7 @@ function planUpstream(
   // `AuthContext::can_use_model` — 403, and deliberately BEFORE resolution so a
   // denied key cannot probe which model names exist.
   if (!callerCanUseModel(caller, logicalModel)) {
-    return reject(
-      403,
-      "model_not_allowed",
-      `API key is not allowed to use model ${logicalModel}`,
-    );
+    return reject(403, "model_not_allowed", `API key is not allowed to use model ${logicalModel}`);
   }
 
   // Re-checked against the tree, not against the audit: F10 and F11 have SINCE
@@ -749,14 +728,7 @@ function planUpstream(
   // residency policy DIRECTLY: the mirror is not a candidate, so
   // `eligibleCandidates` below never sees it, and before #681 that made the
   // mirror the one leg that could put a governed prompt in an unexamined region.
-  const shadow = shadowMirrorFor(
-    resolved,
-    caller,
-    operation,
-    logicalModel,
-    body,
-    residencyPolicy,
-  );
+  const shadow = shadowMirrorFor(resolved, caller, operation, logicalModel, body, residencyPolicy);
 
   // `AppState::canary_route` — promote the canary for the sticky subset of
   // callers it selects, drop it for everyone else — and then strip the SHADOW
@@ -783,11 +755,7 @@ function planUpstream(
   // cannot be served by `anthropic-us` even when both are healthy and eligible.
   // `403 workflow_provider_not_allowed` when nothing survives, which is the
   // thirteenth refusal and the only one that cannot be decided before routing.
-  const narrowed = narrowByWorkflowProviders(
-    workflowConstraint,
-    logicalModel,
-    decision.eligible,
-  );
+  const narrowed = narrowByWorkflowProviders(workflowConstraint, logicalModel, decision.eligible);
   if (!narrowed.ok) return narrowed.rejection;
 
   // `candidate_model_routes`'s `match model.routing_strategy` — applied to the
@@ -1399,9 +1367,7 @@ function recordUsage(
       ...(usage?.cacheWriteTokens !== undefined
         ? { cacheWriteTokens: usage.cacheWriteTokens }
         : {}),
-      ...(usage?.reasoningTokens !== undefined
-        ? { reasoningTokens: usage.reasoningTokens }
-        : {}),
+      ...(usage?.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
@@ -1471,13 +1437,15 @@ function streamResponse(
   onUsage: (usage: ProviderUsage | undefined) => void,
   upstream?: UpstreamRelay,
   /**
-   * #689 — the conversation headers this stream carries, and (when the turn is
-   * being persisted) the capture that assembles the assistant output off the
-   * client-visible frames.
+   * #689 — the conversation headers this stream carries.
+   *
+   * The CAPTURE that assembles the assistant output used to hang here too, and
+   * that was the bypass: a tap at this depth reads the frames the guardrail
+   * response stage has not screened yet. It now lives on the final stream, in
+   * `conversation-commit.ts`, which is one layer OUT.
    */
   conversation?: {
     readonly headers: Record<string, string>;
-    readonly capture?: (captured: CapturedResponseOutput) => void;
   },
 ): Response {
   const contentType = upstreamResponse.headers.get("content-type") ?? "text/event-stream";
@@ -1501,20 +1469,11 @@ function streamResponse(
   // client is actually served — that ordering is the fix for the metering
   // bypass documented at `chat.rs:1012`.
   const tapped = normalized.pipeThrough(sseUsageTap(usageDialect, onUsage));
-  // The conversation capture sits AFTER the usage tap for the same reason the
-  // usage tap sits after the normalizer: it must read the dialect the CLIENT is
-  // actually served, because that is the transcript being stored. Reading the
-  // upstream's native frames here would store an assistant turn in a shape the
-  // caller never saw and the next turn cannot replay.
-  const captured =
-    conversation?.capture === undefined
-      ? tapped
-      : tapped.pipeThrough(responsesOutputTap(conversation.capture));
 
   // A normalized stream is always `text/event-stream`, whatever the upstream
   // labelled itself (the Rust writer hard-codes it on the normalized branches).
   const outgoingContentType = normalizer === null ? contentType : "text/event-stream";
-  return new Response(captured, {
+  return new Response(tapped, {
     status: upstreamResponse.status,
     headers: streamingHeaders(outgoingContentType, requestId, upstream, conversation?.headers),
   });
@@ -1683,12 +1642,8 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   //     every key in the field able to start a conversation and unable to read
   //     or end one, which is a silent half-feature — the failure mode this
   //     issue exists to close, arrived at from the auth side.
-  app.get("/v1/responses/:response_id", (c) =>
-    handleGetResponse(c, c.get("inferenceDeps")),
-  );
-  app.delete("/v1/responses/:response_id", (c) =>
-    handleDeleteResponse(c, c.get("inferenceDeps")),
-  );
+  app.get("/v1/responses/:response_id", (c) => handleGetResponse(c, c.get("inferenceDeps")));
+  app.delete("/v1/responses/:response_id", (c) => handleDeleteResponse(c, c.get("inferenceDeps")));
 
   // -- POST /v1/messages -----------------------------------------------------
   app.post(
@@ -1718,11 +1673,8 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   );
 
   // -- POST /v1/rerank -------------------------------------------------------
-  app.post(
-    "/v1/rerank",
-    body,
-    validateBody(rerankRequestSchema, "invalid rerank request"),
-    (c) => handleRerank(c, c.get("inferenceDeps")),
+  app.post("/v1/rerank", body, validateBody(rerankRequestSchema, "invalid rerank request"), (c) =>
+    handleRerank(c, c.get("inferenceDeps")),
   );
 
   // -- POST /v1/audio/transcriptions ----------------------------------------
@@ -1814,10 +1766,7 @@ function envScopedDeps(deps: InferenceDeps): (env: unknown) => ResolvedInference
  *     scoped to one model still listed the whole catalog, so the allowlist was
  *     enforced on the call and not on the discovery of what to call.
  */
-function discoverableModels(
-  deps: ResolvedInferenceDeps,
-  caller: Caller,
-): readonly PhysicalRoute[] {
+function discoverableModels(deps: ResolvedInferenceDeps, caller: Caller): readonly PhysicalRoute[] {
   return deps.models
     .catalog()
     .filter((route) => route.enabled)
@@ -1826,10 +1775,7 @@ function discoverableModels(
 }
 
 /** `describeModel` over the model's full candidate ladder — see `model-metadata.ts`. */
-function describeCatalogEntry(
-  deps: ResolvedInferenceDeps,
-  entry: PhysicalRoute,
-): ModelDescriptor {
+function describeCatalogEntry(deps: ResolvedInferenceDeps, entry: PhysicalRoute): ModelDescriptor {
   return describeModel(entry, resolveCandidates(deps.models, entry.logicalModel));
 }
 
@@ -1837,9 +1783,7 @@ function handleModels(c: InferenceContext, deps: ResolvedInferenceDeps): Respons
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
 
-  const data = discoverableModels(deps, caller).map((entry) =>
-    describeCatalogEntry(deps, entry),
-  );
+  const data = discoverableModels(deps, caller).map((entry) => describeCatalogEntry(deps, entry));
 
   const listing: OpenAiModelList = { object: "list", data };
   return jsonResponse(listing, requestId);
@@ -1871,14 +1815,9 @@ function handleModel(c: InferenceContext, deps: ResolvedInferenceDeps): Response
   const caller = c.get("inferenceCaller");
   const requested = c.req.param("model");
 
-  const entry = discoverableModels(deps, caller).find(
-    (route) => route.logicalModel === requested,
-  );
+  const entry = discoverableModels(deps, caller).find((route) => route.logicalModel === requested);
   if (entry === undefined) {
-    return errorResponse(
-      reject(404, "model_not_found", `unknown model ${requested}`),
-      requestId,
-    );
+    return errorResponse(reject(404, "model_not_found", `unknown model ${requested}`), requestId);
   }
   return jsonResponse(describeCatalogEntry(deps, entry), requestId);
 }
@@ -1974,8 +1913,10 @@ async function handleOpenAiInference(
   observeInvocation(c.get("inferenceOriginRequest"), meterBase, servedRoute.providerKind);
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
-    const dialect: StreamDialect =
-      operation === "responses" ? "openai.responses" : "openai.chat";
+    const dialect: StreamDialect = operation === "responses" ? "openai.responses" : "openai.chat";
+    if (conversation !== undefined && conversation.store) {
+      publishTurn(c, deps, conversation, logicalModel);
+    }
     return streamResponse(
       deps,
       upstreamResponse,
@@ -1989,20 +1930,15 @@ async function handleOpenAiInference(
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
       relay,
-      // #689 — a streamed turn is captured off the CLIENT-VISIBLE frames and
-      // persisted when the stream ends. The id was minted before dispatch and
-      // is already on the response headers, so the caller can send it as the
-      // next `previous_response_id` before the first token has even arrived.
-      conversation !== undefined && conversation.store
-        ? {
-            headers: conversationResponseHeaders(conversation.responseId, true),
-            capture: (captured) => {
-              persistStreamedTurn(c, deps, conversation, logicalModel, captured);
-            },
-          }
-        : conversation !== undefined
-          ? { headers: conversationResponseHeaders(conversation.responseId, false) }
-          : undefined,
+      // #689 — the id was minted before dispatch and rides the headers, so the
+      // caller can send it as the next `previous_response_id` before the first
+      // token has even arrived. The turn itself is captured and written one
+      // layer out, off the frames the guardrail response stage has finished
+      // with (`conversation-commit.ts`), which is why `stored` starts `false`
+      // here: only the commit knows, and only after the last frame.
+      conversation === undefined
+        ? undefined
+        : { headers: conversationResponseHeaders(conversation.responseId, false) },
     );
   }
 
@@ -2031,11 +1967,10 @@ async function handleOpenAiInference(
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   if (conversation !== undefined) {
-    // #689 — rewrite `id` to the gateway's own and persist. AWAITED, never
-    // `waitUntil`: the id is in the response the caller is about to read, and a
-    // caller that continues immediately must not race the row that makes the
-    // continuation resolvable.
-    const finished = await finishBufferedTurn(deps, conversation, parsed, text, logicalModel);
+    // #689 — rewrite `id` to the gateway's own and ANNOUNCE the turn. The write
+    // itself happens in `conversation-commit.ts`, above the guardrail response
+    // stage, over the bytes the caller actually receives.
+    const finished = finishBufferedTurn(c, deps, conversation, parsed, text, logicalModel);
     return rawUpstreamResponse(
       upstreamResponse.status,
       upstreamResponse.headers.get("content-type") ?? "application/json",
@@ -2223,10 +2158,7 @@ async function prepareConversation(
 }
 
 /** The two gateway headers a `/v1/responses` answer carries (#689). */
-function conversationResponseHeaders(
-  responseId: string,
-  stored: boolean,
-): Record<string, string> {
+function conversationResponseHeaders(responseId: string, stored: boolean): Record<string, string> {
   return {
     [RESPONSE_ID_HEADER]: responseId,
     [RESPONSE_STORED_HEADER]: stored ? "true" : "false",
@@ -2234,22 +2166,28 @@ function conversationResponseHeaders(
 }
 
 /**
- * Rewrite the served body's `id` to the gateway's, persist the turn, and return
+ * Rewrite the served body's `id` to the gateway's, ANNOUNCE the turn, and return
  * the bytes to send.
  *
- * NEVER throws. A storage failure after a successful, billed provider call is
- * reported through the `x-ferrogate-response-stored: false` header and a Worker
- * log — see `conversation.ts::RESPONSE_STORED_HEADER` for why destroying the
- * completion would be the worse answer. The next turn's `previous_response_id`
- * then refuses loudly, which is the contract this issue asks for.
+ * It no longer writes. The write is `conversation-commit.ts`'s, one layer out,
+ * because the bytes visible HERE are the ones the guardrail response stage has
+ * not seen yet — see that module's header for the whole argument. What stays
+ * here is everything that is policy: which id the body carries, which members
+ * are echoed, and whether this turn is a candidate for storage at all.
+ *
+ * The `x-ferrogate-response-stored` header therefore starts `false` and is
+ * settled by the commit. That direction is deliberate: with the commit
+ * unmounted the header says `false` and nothing is stored, which is consistent,
+ * whereas an optimistic `true` would be a lie the caller acts on.
  */
-async function finishBufferedTurn(
+function finishBufferedTurn(
+  c: InferenceContext,
   deps: ResolvedInferenceDeps,
   plan: ConversationPlan,
   parsed: unknown,
   original: string,
   logicalModel: string,
-): Promise<{ body: string; headers: Record<string, string> }> {
+): { body: string; headers: Record<string, string> } {
   const body =
     typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
       ? { ...(parsed as Record<string, unknown>) }
@@ -2275,12 +2213,54 @@ async function finishBufferedTurn(
   body["store"] = plan.store;
   const serialized = JSON.stringify(body);
 
-  if (!plan.store) {
-    return { body: serialized, headers: conversationResponseHeaders(plan.responseId, false) };
+  if (plan.store) {
+    publishTurn(c, deps, plan, logicalModel);
   }
+  return { body: serialized, headers: conversationResponseHeaders(plan.responseId, false) };
+}
 
-  const stored = await persistTurn(deps, plan, logicalModel, body, serialized.length);
-  return { body: serialized, headers: conversationResponseHeaders(plan.responseId, stored) };
+/**
+ * Hand `conversation-commit.ts` the two ways this turn can be written.
+ *
+ * Keyed by the OUTER inbound `Request` — the object `route-module.ts` passed to
+ * `inner.fetch` and the one the committing middleware sees as `c.req.raw`. It is
+ * read off the context rather than from `c.req.raw` here because the body reader
+ * has already re-presented the latter by the time a handler runs.
+ *
+ * Both closures capture the resolved store, the plan and the logical model, so
+ * every policy decision (the id, the fence, the retention horizon, the size
+ * bound) stays in this module and the middleware owns only the timing.
+ */
+function publishTurn(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+  plan: ConversationPlan,
+  logicalModel: string,
+): void {
+  publishPendingTurn(c.get("inferenceOriginRequest"), {
+    responseId: plan.responseId,
+    commitBuffered: (body, approximateBytes) =>
+      persistTurn(deps, plan, logicalModel, body, approximateBytes),
+    commitStreamed: (captured) => {
+      // The synthesized body carries the same members the buffered path stores,
+      // so `GET /v1/responses/{id}` answers identically for a streamed turn.
+      const response: Record<string, unknown> = {
+        id: plan.responseId,
+        object: "response",
+        status: "completed",
+        model: logicalModel,
+        output: [...captured.output],
+        store: true,
+        ...(plan.previousResponseId === null
+          ? {}
+          : { previous_response_id: plan.previousResponseId }),
+        ...(captured.upstreamResponseId === undefined
+          ? {}
+          : { [UPSTREAM_RESPONSE_ID_MEMBER]: captured.upstreamResponseId }),
+      };
+      return persistTurn(deps, plan, logicalModel, response, JSON.stringify(response).length);
+    },
+  });
 }
 
 /**
@@ -2324,51 +2304,6 @@ async function persistTurn(
     );
     return false;
   }
-}
-
-/**
- * Persist a STREAMED turn once the stream has finished.
- *
- * Runs on `ctx.waitUntil` when there is one — the response body has already
- * been delivered by the time this fires, so there is nothing left to await it —
- * and degrades to a detached promise otherwise, exactly as the token-settlement
- * path does. The synthesized body carries the same members the buffered path
- * stores, so `GET /v1/responses/{id}` answers identically for a streamed turn.
- */
-function persistStreamedTurn(
-  c: InferenceContext,
-  deps: ResolvedInferenceDeps,
-  plan: ConversationPlan,
-  logicalModel: string,
-  captured: { readonly output: readonly unknown[]; readonly upstreamResponseId: string | undefined },
-): void {
-  const response: Record<string, unknown> = {
-    id: plan.responseId,
-    object: "response",
-    status: "completed",
-    model: logicalModel,
-    output: [...captured.output],
-    store: true,
-    ...(plan.previousResponseId === null
-      ? {}
-      : { previous_response_id: plan.previousResponseId }),
-    ...(captured.upstreamResponseId === undefined
-      ? {}
-      : { [UPSTREAM_RESPONSE_ID_MEMBER]: captured.upstreamResponseId }),
-  };
-  const work = persistTurn(deps, plan, logicalModel, response, JSON.stringify(response).length);
-  // `executionCtxOf` and not `c.executionCtx`: the raw accessor THROWS on a
-  // context built without one (every `app.request(...)` in a test), and a throw
-  // inside a stream's `flush` is an unhandled rejection with no request left to
-  // attach it to.
-  const executionCtx = executionCtxOf(c);
-  if (executionCtx !== undefined) {
-    executionCtx.waitUntil(work);
-    return;
-  }
-  // No `waitUntil` (unit tests): the write is already in flight and
-  // `persistTurn` never rejects, so nothing is lost and nothing can escape.
-  void work;
 }
 
 /**
@@ -2442,10 +2377,7 @@ function notStoredRejection(responseId: string): InferenceRejection {
  * out — so `/v1/messages` inherits every adapter family and the SAME governed
  * chokepoint, which is exactly why the Rust tree did it this way (issue #272).
  */
-async function handleMessages(
-  c: InferenceContext,
-  deps: ResolvedInferenceDeps,
-): Promise<Response> {
+async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps): Promise<Response> {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
@@ -2633,10 +2565,7 @@ async function handleMessages(
  *    can be retired; a count consumes no capacity and produces no spend, so
  *    refusing it would turn a decided "stop spending" into "stop answering".
  */
-function handleCountMessageTokens(
-  c: InferenceContext,
-  deps: ResolvedInferenceDeps,
-): Response {
+function handleCountMessageTokens(c: InferenceContext, deps: ResolvedInferenceDeps): Response {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
@@ -2684,11 +2613,7 @@ function countTokensModelGate(
 ): InferenceRejection | null {
   // BEFORE resolution, so a denied key cannot probe which model names exist.
   if (!callerCanUseModel(caller, logicalModel)) {
-    return reject(
-      403,
-      "model_not_allowed",
-      `API key is not allowed to use model ${logicalModel}`,
-    );
+    return reject(403, "model_not_allowed", `API key is not allowed to use model ${logicalModel}`);
   }
 
   const resolved = resolveCandidates(deps.models, logicalModel);
@@ -2867,10 +2792,7 @@ async function handleEmbeddings(
  * `undefined`), so the caller is charged the estimate for the minute rather than
  * zero.
  */
-async function handleRerank(
-  c: InferenceContext,
-  deps: ResolvedInferenceDeps,
-): Promise<Response> {
+async function handleRerank(c: InferenceContext, deps: ResolvedInferenceDeps): Promise<Response> {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
@@ -3283,10 +3205,7 @@ async function resolveAudioReference(
  * on this leg at all: the count recorded is the count reserved against, and it
  * is recorded only on success, because a failed synthesis synthesized nothing.
  */
-async function handleSpeech(
-  c: InferenceContext,
-  deps: ResolvedInferenceDeps,
-): Promise<Response> {
+async function handleSpeech(c: InferenceContext, deps: ResolvedInferenceDeps): Promise<Response> {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
@@ -3424,10 +3343,7 @@ function audioResponse(
 // POST /v1/images/generations — `images.rs::handle_images`
 // ---------------------------------------------------------------------------
 
-async function handleImages(
-  c: InferenceContext,
-  deps: ResolvedInferenceDeps,
-): Promise<Response> {
+async function handleImages(c: InferenceContext, deps: ResolvedInferenceDeps): Promise<Response> {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
@@ -3492,7 +3408,7 @@ async function handleImages(
   // `MAX_ESTIMATED_IMAGE_COUNT`, so a hostile `n` cannot force an unbounded
   // pre-charge).
   const imageCount = Array.isArray((parsed as { data?: unknown } | undefined)?.data)
-    ? ((parsed as { data: unknown[] }).data.length)
+    ? (parsed as { data: unknown[] }).data.length
     : undefined;
 
   recordUsage(

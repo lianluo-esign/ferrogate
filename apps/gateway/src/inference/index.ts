@@ -80,6 +80,11 @@ export type {
 } from "./conversation-store.js";
 export { assistantMessageItem, responsesOutputTap } from "./conversation-capture.js";
 export type { CapturedResponseOutput } from "./conversation-capture.js";
+// #689 — the middleware that writes the turn ABOVE the guardrail response
+// stage. `src/index.ts` mounts it; see `conversation-commit.ts` for why the
+// write cannot live in the inference router.
+export { pendingTurnFor, publishPendingTurn, responseStateCommit } from "./conversation-commit.js";
+export type { PendingConversationTurn } from "./conversation-commit.js";
 export * from "./workflow.js";
 export * from "./errors.js";
 export * from "./usage.js";

@@ -19,13 +19,13 @@
 import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
 import { delegationChain } from "./delegation/index.js";
-import { residency } from "./residency/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
   dispatcherFromEnv,
   inferenceRouteModule,
   modelsFromEnv,
+  responseStateCommit,
   sweepResponseConversations,
 } from "./inference/index.js";
 import {
@@ -44,6 +44,7 @@ import {
   sweepRequestLogs,
 } from "./requestlog/index.js";
 import type { RequestLogMessageBatch } from "./requestlog/index.js";
+import { residency } from "./residency/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 import { siteRouteModule } from "./sites/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
@@ -355,6 +356,24 @@ export const GATEWAY_MIDDLEWARE = [
   // `GATEWAY_RESIDENCY_POLICIES` var): with no policy for the calling tenant it
   // is one cached lookup and `next()`.
   residency(),
+  // #689 — the `/v1/responses` conversation-state WRITE.
+  //
+  // IMMEDIATELY ABOVE `guardrails()`, and the position is the entire security
+  // argument rather than a preference. This middleware does its work on the way
+  // OUT, so sitting one layer further out than the screener is what makes the
+  // bytes it files the bytes the client receives: redacted where the policy
+  // redacted, and ABSENT where the policy refused. Mounted below `guardrails()`
+  // it would see the pre-screening body and `GET /v1/responses/{id}` would hand
+  // back content the operator's policy had already rejected — which is exactly
+  // the defect the first shape of #689 shipped, with every guardrail test green.
+  //
+  // Nothing between it and the screener may rewrite a response body; today
+  // nothing between here and `guardrails()` touches one at all.
+  //
+  // Inert for every request that is not a STORING `/v1/responses` call: one
+  // `WeakMap` lookup after `next()` and nothing else. See
+  // `src/inference/conversation-commit.ts`.
+  responseStateCommit(),
   // Provider-scoped policies need the model→provider join, and `/v1/messages`
   // must be screened over the same document `inference/handlers.ts` dispatches.
   // `guardrailDepsFromEnv` is ASYNC whenever `CONTROL_DB` is bound: the durable

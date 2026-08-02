@@ -18,6 +18,7 @@ import { SELF, env } from "cloudflare:test";
 import { beforeAll, describe, expect, test } from "vitest";
 import { operationById } from "../../src/contract.js";
 import { GUARDRAIL_OPERATIONS } from "../../src/guardrails/index.js";
+import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
 import { INFERENCE_OPERATION_IDS } from "../../src/routes/index.js";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "./fixtures.js";
 
@@ -70,16 +71,38 @@ describe("guardrail operation bindings match the contract", () => {
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    //  - `getResponse` / `deleteResponse` (issue #689) join the list, and the
-    //    reason is not "no content" — `getResponse` returns a stored prompt and
-    //    completion. It is that the content was ALREADY screened, on the
-    //    `createResponse` that produced it, and already delivered to this same
-    //    credential once. Re-screening would spend detector budget (including
-    //    paid provider calls) to re-decide a decision that has been made, and
-    //    could refuse a caller their own previously-served answer because a
-    //    policy changed afterwards — a retroactive block that protects nothing,
-    //    since the caller already has the text. `deleteResponse` carries no
-    //    content in either direction.
+    //  - `getResponse` / `deleteResponse` (issue #689), and this entry is on
+    //    its second attempt. It first read "the content was already screened …
+    //    and already delivered to this same credential once", which was FALSE
+    //    for the exactly two cases an exception here has to survive: a REDACTED
+    //    response was delivered redacted and stored un-redacted, and a DENIED
+    //    response was never delivered at all. That sentence describes a
+    //    pass-through response and it was applied to a set containing neither.
+    //
+    //    What makes the exception true is a change to the WRITE, not to this
+    //    list: `responseStateCommit()` is mounted ABOVE `guardrails()`, so a
+    //    stored turn is byte-for-byte the turn the response stage passed to the
+    //    client (`src/inference/conversation-commit.ts`). Member by member,
+    //    which is the check the first attempt skipped:
+    //
+    //      * `getResponse` returns a stored turn — a real prompt and completion,
+    //        so "no content" is NOT the reason. Redacted content is stored
+    //        redacted. Denied content is not stored at all, so there is no row
+    //        for it to return. Every byte this operation can serve is therefore a
+    //        byte the response stage approved and this credential already holds.
+    //        Re-screening it would spend detector budget (including paid
+    //        provider calls) to re-decide a decision already made, and could
+    //        refuse a caller their own previously-served answer because a policy
+    //        changed afterwards — a retroactive block that protects nothing,
+    //        since the caller already has the text.
+    //      * `deleteResponse` carries no content in EITHER direction: no request
+    //        body, and a `{id, object, deleted}` envelope back. There is nothing
+    //        for a detector to read, at either stage.
+    //
+    //    The mount order the first bullet depends on is asserted in this file,
+    //    immediately below, so the exception cannot outlive its justification.
+    //    The BEHAVIOUR is measured end to end in
+    //    `test/inference/responses-guardrail-bypass.test.ts`.
     expect(unscreened.sort()).toEqual([
       "countMessageTokens",
       "deleteResponse",
@@ -87,6 +110,31 @@ describe("guardrail operation bindings match the contract", () => {
       "getResponse",
       "listModels",
     ]);
+  });
+
+  test("the #689 conversation WRITE is mounted above the response stage", () => {
+    // The load-bearing half of the `getResponse` exception above, and the one
+    // fact that cannot be read off `GUARDRAIL_OPERATIONS`: WHERE the turn is
+    // written relative to the screener.
+    //
+    // Hono is an onion, so a middleware registered EARLIER wraps the ones after
+    // it and its post-`next()` work runs LAST. `responseStateCommit()` therefore
+    // has to sit at a SMALLER index than `guardrails()` to see the screened
+    // body. At a larger index it would file the pre-screening bytes and
+    // `getResponse` would hand back content the operator's policy redacted or
+    // refused — which is precisely the shape #689 first shipped, with this file
+    // green because it asserted the exception and not the reason for it.
+    //
+    // Reordering is the one defect no behavioural test can see (a correctly
+    // ordered and a merely present mount both serve the happy path identically),
+    // so it is asserted structurally, by runtime handler name, exactly as
+    // `test/metering/wiring.test.ts` pins the billing drain.
+    const names = GATEWAY_MIDDLEWARE.map((handler) => handler.name);
+    expect(names).toContain("responseStateCommitMiddleware");
+    expect(names).toContain("guardrailsMiddleware");
+    expect(names.indexOf("responseStateCommitMiddleware")).toBeLessThan(
+      names.indexOf("guardrailsMiddleware"),
+    );
   });
 
   test("the RESPONSE stage runs for chat/responses/messages and the two transcripts", () => {
