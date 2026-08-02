@@ -353,6 +353,12 @@ export function contractAuth(deps: DepsResolver): MiddlewareHandler<GatewayEnv> 
       );
     }
 
+    // Published for the DELEGATION gate (#691), which has to narrow against the
+    // scope that was actually enforced — including the `method_dependent` case,
+    // where the contract row carries `null` and the real scope came out of a
+    // body field two lines above.
+    c.set("requiredScope", requiredScope);
+
     // The ladder itself lives in `authenticateBearer` so the `/sites/*` handler
     // can run this exact code rather than a second copy — see its docstring.
     c.set("auth", await authenticateBearer(ports, c.req.raw.headers, requiredScope, operation));

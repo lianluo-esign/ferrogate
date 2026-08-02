@@ -59,6 +59,17 @@ export interface RequestLogFacts {
   readonly guardrailVerdict?: GuardrailVerdict | undefined;
   readonly guardrailPolicyId?: string | undefined;
   readonly agentRunId?: string | undefined;
+  /**
+   * #691 — the VERIFIED delegation chain, rendered
+   * (`user:u_1>agent:planner>agent:writer`), and its root principal.
+   *
+   * Contributed by `src/delegation/middleware.ts` and only ever for a chain
+   * that verified: a chain that failed any check refuses the request, so there
+   * is no path by which an unverified claim reaches the audit row. That is the
+   * property that makes the column evidence rather than an echo of a header.
+   */
+  readonly delegationChain?: string | undefined;
+  readonly delegationRoot?: string | undefined;
 }
 
 const FACTS = new WeakMap<Request, RequestLogFacts>();

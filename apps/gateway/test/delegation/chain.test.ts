@@ -185,6 +185,26 @@ function nowUnix(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/**
+ * THIS request's audit row, found by the `x-request-id` the client was handed.
+ *
+ * By id rather than "the only row in the table" on purpose: `requestLogging()`
+ * writes on `ctx.waitUntil`, and `app.request()` supplies no execution context,
+ * so a previous case's row can still be settling when the next `beforeEach`
+ * truncates. Asserting on a COUNT would make this suite flaky in a way that
+ * says nothing about delegation; asserting on the id says exactly what is
+ * meant — the row for the request that was just made.
+ */
+async function loggedRow(response: Response): Promise<Record<string, unknown>> {
+  const requestId = response.headers.get("x-request-id");
+  const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
+  const row = rows.find((candidate) => candidate["request_id"] === requestId);
+  if (row === undefined) {
+    throw new Error(`no request_logs row for ${String(requestId)} (${rows.length} rows present)`);
+  }
+  return row;
+}
+
 async function errorCode(response: Response): Promise<string | undefined> {
   const body = (await response.json()) as { error?: { code?: string } };
   return body.error?.code;
@@ -249,9 +269,7 @@ describe("#691 — the audit row names the chain, not the last credential", () =
     const response = await gateway().call("fg_writer", honest.header);
     expect(response.status).toBe(200);
 
-    const rows = await storedRequestLogs();
-    expect(rows).toHaveLength(1);
-    const row = rows[0] as unknown as Record<string, unknown>;
+    const row = await loggedRow(response);
     // The defect, stated as an assertion: before this change the row named
     // `key_writer` and nothing else, so an incident could not be attributed
     // past the credential.
@@ -269,7 +287,7 @@ describe("#691 — the audit row names the chain, not the last credential", () =
     const response = await gateway().call("fg_writer");
     expect(response.status).toBe(200);
 
-    const row = (await storedRequestLogs())[0] as unknown as Record<string, unknown>;
+    const row = await loggedRow(response);
     expect(row["delegation_chain"]).toBeNull();
     expect(row["delegation_root"]).toBeNull();
   });
