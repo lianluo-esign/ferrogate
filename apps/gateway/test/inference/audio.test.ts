@@ -268,13 +268,15 @@ describe("an oversized upload is REFUSED, not buffered", () => {
     body: ReadableStream<Uint8Array>,
     headers: Record<string, string>,
   ): Promise<Response> {
-    return audioHarness().router.fetch(
-      new Request(`${BASE}/v1/audio/transcriptions`, {
-        method: "POST",
-        headers: { "content-type": "multipart/form-data; boundary=x", ...headers },
-        body,
-        duplex: "half",
-      } as RequestInit),
+    return Promise.resolve(
+      audioHarness().router.fetch(
+        new Request(`${BASE}/v1/audio/transcriptions`, {
+          method: "POST",
+          headers: { "content-type": "multipart/form-data; boundary=x", ...headers },
+          body,
+          duplex: "half",
+        } as RequestInit),
+      ),
     );
   }
 

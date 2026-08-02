@@ -57,10 +57,41 @@ describe("guardrail operation bindings match the contract", () => {
     //    content was screened on its way to a model it never travelled to.
     //    If `count_tokens` ever gains a dispatching leg, it belongs here on the
     //    same day. See `inference/handlers.ts::handleCountMessageTokens`.
+    //  - `createTranscription` / `createTranslation` (issue #703) are the FIRST
+    //    entries on this list that both carry content AND dispatch it, so this
+    //    assertion is being widened a second time and the widening is the
+    //    substantive part of the change rather than a bookkeeping edit.
+    //
+    //    The content they carry is a `multipart/form-data` body wrapping opaque
+    //    audio. Nothing in this tree reads a waveform: every detector
+    //    `@ferrogate/guardrails` ships takes text, and the middleware's own
+    //    reader (`readJsonBodyBounded`) returns `undefined` for a non-JSON body
+    //    and hands the request straight to `next()`. So a binding for these two
+    //    would not screen less well — it would screen NOTHING, on every single
+    //    request, while appearing in `GUARDRAIL_OPERATIONS` as a control that an
+    //    auditor reading this table would count as present. An entry that is
+    //    always a no-op is worse than an absence, because an absence is
+    //    visible here and a no-op is not.
+    //
+    //    The half of the audio surface that CAN be screened is bound:
+    //    `createSpeech` carries the text a caller wants spoken, in JSON, and is
+    //    screened at the last point at which that string is still a string.
+    //
+    //    What closes this properly is a detector that reads audio, or a
+    //    response-stage pass over the transcript — which this table cannot
+    //    express for a request the middleware has already `next()`-ed. Either
+    //    one is a real change and belongs in its own issue, not in a table
+    //    entry that pretends the work is done.
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened.sort()).toEqual(["countMessageTokens", "getModel", "listModels"]);
+    expect(unscreened.sort()).toEqual([
+      "countMessageTokens",
+      "createTranscription",
+      "createTranslation",
+      "getModel",
+      "listModels",
+    ]);
   });
 
   test("only chat/responses/messages screen the RESPONSE stage", () => {
