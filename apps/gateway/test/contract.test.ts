@@ -45,30 +45,29 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 264 operations", () => {
+  it("carries exactly 265 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 264 unique operation ids", () => {
+  it("has 265 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
   it("reproduces the documented auth-kind census", () => {
-    // ROUTE-MAP.md: bearer 251 · internal 6 · anonymous 6 · method_dependent 1.
+    // ROUTE-MAP.md: bearer 252 · internal 6 · anonymous 6 · method_dependent 1.
     // bearer went 238 -> 239 with `countMessageTokens` (issue #671), which is
     // bearer-`messages.create` like the `createMessage` it pre-flights, then
     // 239 -> 242 with the three prompt-deployment-label operations (issue
     // #694), which are bearer-guarded like the rest of the prompt registry.
-    // From that shared 242 the two parents of this merge diverged: `main`
-    // reached 245 with the three `/admin/v1/provider-credentials*` BYOK-alias
-    // operations (issue #682), and this branch reached 248 with the six
-    // `/admin/v1/semantic-cache-policies/**` operations (issue #695), which are
-    // `admin.read` / `admin.write` like every other admin surface. Both sets
-    // landed, so the merged figure is 242 + 3 + 6 = 251 — neither parent's
-    // number. All twelve additions since 238 are bearer; none is anonymous or
-    // internal.
+    // From that shared 242 three independent slices landed: the three
+    // `/admin/v1/provider-credentials*` BYOK-alias operations (issue #682, ->
+    // 245), the six `/admin/v1/semantic-cache-policies/**` operations (issue
+    // #695, `admin.read` / `admin.write` like every other admin surface, ->
+    // 251), and `getModel` (issue #670, bearer-`models.read` like the
+    // `listModels` it narrows, -> 252). All fourteen additions since 238 are
+    // bearer; none is anonymous or internal.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 251,
+      bearer: 252,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -85,8 +84,11 @@ describe("contract table", () => {
       // 196 + 3 + 6 = 205 and not either parent's number.
       admin: 205,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
-      // operation, publicly reachable, bearer-guarded.
-      public: 52,
+      // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
+      // `getModel` (issue #670), public for the same reason as `listModels`.
+      // Both parents independently wrote 52, so git merged that clean — 53 is
+      // the merged truth and neither side's number.
+      public: 53,
       internal: 7,
     });
   });
@@ -95,18 +97,17 @@ describe("contract table", () => {
     expect(census(OPERATIONS.map<HttpMethod>((operation) => operation.method))).toEqual({
       // GET/PUT/DELETE each +1 with the prompt-deployment-label operations
       // (issue #694: list/read, upsert, delete of a label pointer), moving
-      // GET/DELETE/PUT from 116/24/17 to 117/25/18. Then both parents moved the
-      // same three counters again, independently: `main` with #682's
-      // GET /provider-credentials plus PUT and DELETE
-      // /provider-credentials/{alias}, and this branch with the six #695
-      // semantic-cache-policy operations (GET +2 / POST +2 / PUT +1 /
-      // DELETE +1, whose POSTs are `create` and `invalidate`). Because both
-      // parents had independently written GET 118 / DELETE 26 / PUT 19 for
-      // their own increment, git merged those three lines with NO conflict —
-      // the true combined figures are 120/27/20, which is neither parent's
-      // number and had to be re-derived from
-      // `docs/openapi/runtime-api-contract.json`.
-      GET: 120,
+      // GET/DELETE/PUT from 116/24/17 to 117/25/18. Then THREE slices moved the
+      // same counters again, each written against that same 117/25/18 base:
+      // #682's GET /provider-credentials plus PUT and DELETE
+      // /provider-credentials/{alias}; the six #695 semantic-cache-policy
+      // operations (GET +2 / POST +2 / PUT +1 / DELETE +1, whose POSTs are
+      // `create` and `invalidate`); and #670's GET /v1/models/{model}. Because
+      // parents had independently written the same intermediate figures for
+      // their own increment, git merged those lines with NO conflict — the true
+      // combined figures are 121/27/20, which is no parent's number and had to
+      // be re-derived from `docs/openapi/runtime-api-contract.json`.
+      GET: 121,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
       POST: 81,
@@ -287,13 +288,15 @@ describe("route registration", () => {
   // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
   // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
   // here: a local module list is exactly how the deployed Worker came to mount
-  // 7 of its 32 operations while this suite stayed green.
+  // 7 of its 33 operations while this suite stayed green.
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 32 operations ROUTE-MAP assigns to apps/gateway", () => {
-    // 31 -> 32 with `countMessageTokens` (issue #671).
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(32);
+  it("owns exactly the 33 operations ROUTE-MAP assigns to apps/gateway", () => {
+    // 31 -> 32 with `countMessageTokens` (issue #671) and 32 -> 33 with
+    // `getModel` (issue #670). Both parents wrote 32 independently, so the
+    // merge kept 32 with no conflict — 33 is the re-derived truth.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(33);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -307,14 +310,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 32 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 33 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 32 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 33 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 32nd owned
@@ -411,11 +414,19 @@ async function envelope(response: Response): Promise<{ code: string; message: st
 }
 
 describe("the deployed Worker serves the mounted modules", () => {
-  it("mounts the 7 inference operations", async () => {
+  it("mounts the 8 inference operations", async () => {
     // GET /v1/models reaches the inference handler: an empty catalog, not a 404.
     const models = await SELF.fetch(`${BASE}/v1/models`, { headers: ROOT });
     expect(models.status).toBe(200);
     expect(await models.json()).toEqual({ object: "list", data: [] });
+
+    // GET /v1/models/{model} reaches the same handler: the deployed catalog is
+    // empty, so the answer is the INFERENCE module's own `model_not_found`
+    // envelope — distinct from `gatewayNotFoundHandler`'s `not_found`, which is
+    // what an unmounted contract path would produce.
+    const model = await SELF.fetch(`${BASE}/v1/models/anything`, { headers: ROOT });
+    expect(model.status).toBe(404);
+    expect((await envelope(model)).code).toBe("model_not_found");
 
     // Every POST reaches the inner body-reader + Zod chain: an empty object is
     // the module's own `400 invalid_request`, which only that chain produces.

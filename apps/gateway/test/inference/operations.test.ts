@@ -27,11 +27,24 @@ describe("GET /v1/models", () => {
       "image-model",
       "acme-private",
     ]);
+    // CHANGED DELIBERATELY (issue #670). This assertion used to be the exact
+    // four-key OpenAI object, which is now the PREFIX of the answer: the
+    // listing additionally carries `capabilities`, `context_window`,
+    // `modalities` and `pricing` so a client can discover what a model does and
+    // what it costs (`src/inference/model-metadata.ts`). The four original keys
+    // are asserted unchanged, byte for byte; the metadata for THESE fixtures is
+    // the capability-neutral/unpriced case, which
+    // `test/inference/model-discovery.test.ts` covers in full alongside the
+    // declared ones.
     expect(body.data[0]).toEqual({
       id: "gpt-4o-mini",
       object: "model",
       created: 0,
       owned_by: "openai-main",
+      capabilities: [],
+      context_window: null,
+      modalities: { input: ["text"], output: ["text"] },
+      pricing: { currency: "USD", unit: "per_1m_tokens", input: null, output: null },
     });
   });
 

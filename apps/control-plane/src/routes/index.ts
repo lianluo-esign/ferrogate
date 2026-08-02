@@ -1,7 +1,7 @@
 /**
  * The route registry: contract operations → Hono routes.
  *
- * Registration is a LOOP over `CONTROL_PLANE_OPERATIONS`, not 197 `app.get(...)`
+ * Registration is a LOOP over `CONTROL_PLANE_OPERATIONS`, not 203 `app.get(...)`
  * calls. The loop is the anti-drift gate `ROUTE-MAP.md` asks for, enforced three
  * ways at module load — before a single request is served:
  *
