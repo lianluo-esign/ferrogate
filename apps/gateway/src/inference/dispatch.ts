@@ -187,6 +187,26 @@ export async function readBoundedProviderBody(
   response: Response,
   maxBytes: number,
 ): Promise<string> {
+  return new TextDecoder().decode(await readBoundedProviderBytes(response, maxBytes));
+}
+
+/**
+ * The same read, stopping at BYTES (issue #703).
+ *
+ * `/v1/audio/speech` answers with an MP3, and decoding those bytes as UTF-8 to
+ * satisfy a `string` return type would corrupt every byte above 0x7f — the
+ * caller would receive a file no audio player can open, from a 200. So the
+ * bounded read is the primitive and {@link readBoundedProviderBody} is the
+ * text-decoding wrapper, rather than the other way round.
+ *
+ * Same two guards, in the same order and with the same semantics: the declared
+ * length is refused without reading a byte, and the accumulating check bounds a
+ * chunked or `Content-Length`-lying upstream at strictly `maxBytes`.
+ */
+export async function readBoundedProviderBytes(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
   const declared = response.headers.get("content-length");
   if (declared !== null) {
     const length = Number(declared);
@@ -197,10 +217,31 @@ export async function readBoundedProviderBody(
 
   const body = response.body;
   if (body === null) {
-    return "";
+    return new Uint8Array(0);
   }
+  return await readBoundedStream(body, maxBytes, () => new ProviderBodyTooLargeError(maxBytes));
+}
 
-  const reader = body.getReader();
+/**
+ * Drain `stream` into one buffer, ABORTING the moment the cap would be passed.
+ *
+ * Extracted from `readBoundedProviderBody` because the audio surface needs the
+ * identical guarantee on the INBOUND side (issue #703): a `multipart/form-data`
+ * upload with no `Content-Length` is the hostile shape, and the only way to
+ * refuse it without a denial-of-service on ourselves is to stop pulling from
+ * the stream rather than to buffer it and measure afterwards. `arrayBuffer()`
+ * measures afterwards, which is why it cannot be used here.
+ *
+ * `reader.cancel()` is what actually stops the sender: it signals the peer that
+ * no more body is wanted, so the refusal costs at most one chunk past the cap
+ * instead of the whole upload.
+ */
+export async function readBoundedStream(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  overflow: () => Error,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
@@ -214,7 +255,7 @@ export async function readBoundedProviderBody(
       }
       if (total + value.byteLength > maxBytes) {
         await reader.cancel();
-        throw new ProviderBodyTooLargeError(maxBytes);
+        throw overflow();
       }
       chunks.push(value);
       total += value.byteLength;
@@ -229,5 +270,5 @@ export async function readBoundedProviderBody(
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(joined);
+  return joined;
 }

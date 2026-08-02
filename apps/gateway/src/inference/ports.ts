@@ -46,6 +46,7 @@
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import type { ResidencyPolicy } from "../residency/policy.js";
+import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
@@ -69,6 +70,12 @@ export type ModelCapability =
   | "images"
   | "embeddings"
   | "rerank"
+  // Issue #703. TWO members, not one `audio`: speech-to-text and text-to-speech
+  // are opposite directions on different model architectures, and a single
+  // capability would let the eligibility gate route `POST /v1/audio/speech` at
+  // Whisper — which would answer a transcript where the caller asked for sound.
+  | "transcription"
+  | "speech"
   | "tools"
   | "structured_output";
 
@@ -266,6 +273,36 @@ export interface PhysicalRoute {
   /** `ModelRoute.reasoning_price_per_1m` — USD per 1M reasoning tokens. */
   readonly reasoningPricePer1m?: number | undefined;
   /**
+   * `ModelRoute.audio_second_price_per_1m` — USD per 1,000,000 SECONDS of
+   * transcribed audio (issue #703).
+   *
+   * ## Why "per 1M" of a unit nobody quotes in millions
+   *
+   * Because the alternative is worse. This file already carries five rates, all
+   * per 1M, and `metering/route-price.ts` divides every one of them by the same
+   * `PER_1M` constant. A sixth rate quoted per-minute or per-1k would put two
+   * denominators in one settlement function, and a settlement function with two
+   * denominators is one typo away from a bill that is off by 60x or by 1000x.
+   * One convention, mechanically. An operator converts once, in config:
+   * Whisper's $0.006/minute is `100`.
+   *
+   * Read ONLY by settlement, never by routing — a duration is a property of a
+   * request that has already happened, and the router chooses before it knows
+   * how long the recording is.
+   */
+  readonly audioSecondPricePer1m?: number | undefined;
+  /**
+   * `ModelRoute.audio_character_price_per_1m` — USD per 1,000,000 CHARACTERS of
+   * synthesized text (issue #703). This is the unit every TTS vendor already
+   * quotes: OpenAI's `tts-1` is $15 per 1M characters, so the config value is
+   * `15`.
+   *
+   * Unlike {@link audioSecondPricePer1m} this quantity IS known before dispatch
+   * (it is the length of `input`), which is why speech has no estimate/settle
+   * gap at all. See `estimate.ts::estimateSpeechUsage`.
+   */
+  readonly audioCharacterPricePer1m?: number | undefined;
+  /**
    * `ModelRegistryEntry.routing_strategy` — the order the ladder walks the
    * eligible candidates in (`strategy.ts`).
    *
@@ -423,6 +460,14 @@ export type InferenceOperation =
   | "responses"
   | "embeddings"
   | "rerank"
+  // Issue #703. `audio.transcriptions` and `audio.translations` are SEPARATE
+  // members even though one capability serves both, because the adapter has to
+  // know which one it is preparing: the difference is a `task` flag on the wire
+  // (Workers AI) or a different path segment (OpenAI). Collapsing them would
+  // push that decision into a re-read of the request body inside every family.
+  | "audio.transcriptions"
+  | "audio.translations"
+  | "audio.speech"
   | "images"
   | "model_catalog";
 
@@ -450,7 +495,23 @@ export interface UpstreamRequest {
   readonly method: "GET" | "POST";
   /** Header values are secrets; never log this map. */
   readonly headers: Readonly<Record<string, string>>;
-  readonly body?: Record<string, unknown> | undefined;
+  /**
+   * The upstream body.
+   *
+   * `FormData` (issue #703) is the one non-JSON member, and it is here rather
+   * than behind a second field because every consumer that matters already
+   * branches on this one value: `fetchDispatcher` serializes it, and
+   * `workersAiDispatcher` reads `body.model` off it to decide whether the AI
+   * binding can short-circuit the call. A parallel `formBody` would mean both
+   * of those grew a second thing to check, and the one that forgot would
+   * silently send an empty body.
+   *
+   * It exists because OpenAI's `/v1/audio/transcriptions` is a multipart
+   * endpoint: passthrough to it is not expressible as JSON at all. Workers AI's
+   * own audio surface is JSON (`{ audio: "<base64>" }`), so the binding leg
+   * never produces one.
+   */
+  readonly body?: Record<string, unknown> | FormData | undefined;
   readonly stream: boolean;
 }
 
@@ -514,6 +575,37 @@ export interface ProviderAdapter {
     logicalModel: string,
     request: Record<string, unknown>,
   ): unknown | undefined;
+  /**
+   * `translate_transcription_response` (issue #703) — same `undefined`
+   * convention: "this family already speaks the ingress dialect, relay it".
+   *
+   * The OpenAI-compatible family answers `undefined` because its
+   * `/v1/audio/transcriptions` response IS `{ text, ... }` already; Workers AI
+   * translates because Whisper answers `{ text, word_count, segments }`.
+   */
+  translateTranscriptionResponse?(body: unknown, logicalModel: string): unknown | undefined;
+  /**
+   * The SPEECH leg, and the one adapter method on this interface that returns
+   * BYTES rather than a JSON document (issue #703).
+   *
+   * It exists because the two families disagree about the transport, not just
+   * the shape: OpenAI answers `POST /v1/audio/speech` with raw `audio/mpeg`,
+   * while Workers AI's run surface answers `{ audio: "<base64>" }`. Without a
+   * translation leg the base64 STRING would be handed to the caller as if it
+   * were an MP3 — a 200 that every audio player rejects, which is the silent,
+   * metered failure `runOnBinding`'s reranker arm exists to prevent one surface
+   * over.
+   *
+   * `undefined` means "the upstream body is already audio; relay it
+   * byte-for-byte".
+   */
+  translateSpeechResponse?(body: Uint8Array, contentType: string): AudioPayload | undefined;
+}
+
+/** Decoded audio plus the media type to serve it under (issue #703). */
+export interface AudioPayload {
+  readonly bytes: Uint8Array;
+  readonly contentType: string;
 }
 
 /** Resolves the adapter for a provider kind (`ferrogate_providers::registry`). */
@@ -579,6 +671,40 @@ export interface Usage {
   readonly reasoningTokens?: number | undefined;
   /** `/v1/images/generations` settles on the image count, not tokens (issue #275). */
   readonly imageCount?: number | undefined;
+  /**
+   * Seconds of source audio for `/v1/audio/{transcriptions,translations}`
+   * (issue #703) — the unit those two operations are billed on.
+   *
+   * ## Why a counter here and not a second accounting shape
+   *
+   * `imageCount` is the precedent, and the rule it encodes is the important
+   * part: an operation whose billable quantity is not tokens records THAT
+   * quantity on this same `Usage` row, travels the same sink, and settles
+   * through the same `settledCostUsd` seam #663 built. The alternative — a
+   * parallel audio ledger — would mean `billing_events`, `billing_ledger` and
+   * #677's chargeback export each grew a second shape to join, and a tenant's
+   * invoice would be assembled from two places that could disagree.
+   *
+   * ABSENT, never zero, when the provider reported no duration. The two mean
+   * completely different things to settlement — "unmeasured" must fall through
+   * to the rate card, while "zero seconds" would settle authoritatively at $0 —
+   * and `routePriceSettledCostUsd` reads exactly that distinction.
+   *
+   * Fractional on purpose: Whisper reports segment boundaries to the
+   * centisecond, and rounding a 12.5-second clip up to 13 at capture time would
+   * bake a 4% over-bill into the one number the invoice is derived from. Rounding
+   * is a PRICING decision and belongs wherever an operator states one.
+   */
+  readonly audioSeconds?: number | undefined;
+  /**
+   * Characters of synthesized text for `/v1/audio/speech` (issue #703) — the
+   * unit every TTS vendor bills on.
+   *
+   * Unlike {@link audioSeconds} this is always knowable (it is the length of the
+   * caller's `input`), so it is recorded on every successful synthesis and there
+   * is no unmeasured case to distinguish.
+   */
+  readonly audioCharacters?: number | undefined;
   /** Caller-supplied request tags (issue #171), already bounds-checked. */
   readonly metadata?: Readonly<Record<string, string>> | undefined;
   readonly tenantId?: string | undefined;
@@ -644,6 +770,15 @@ export interface Usage {
   readonly cacheWritePricePer1m?: number | undefined;
   /** `[[models]].reasoning_price_per_1m` — USD per 1M reasoning tokens. */
   readonly reasoningPricePer1m?: number | undefined;
+  /**
+   * `[[models]].audio_second_price_per_1m` — USD per 1M seconds of transcribed
+   * audio (issue #703). Travels with the other five for the same reason: the
+   * route that ANSWERED is not necessarily the route that was planned, and the
+   * two can be priced differently.
+   */
+  readonly audioSecondPricePer1m?: number | undefined;
+  /** `[[models]].audio_character_price_per_1m` — USD per 1M synthesized characters. */
+  readonly audioCharacterPricePer1m?: number | undefined;
 }
 
 /**
@@ -692,7 +827,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 268
+ * enforcement belong to the ONE contract-driven middleware that covers all 272
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
@@ -928,6 +1063,37 @@ export interface InferenceLimits {
   readonly inferenceBodyMaxBytes: number;
   /** `limits.provider_response_body_max_bytes` for the buffered path. */
   readonly providerResponseMaxBytes: number;
+  /**
+   * The audio-upload ceiling (issue #703), in bytes — a SEPARATE limit from
+   * {@link inferenceBodyMaxBytes} and deliberately much larger.
+   *
+   * It has to be its own number in both directions. Raising the ordinary body
+   * cap to 25 MiB so audio fits would let a hostile caller post a 25 MiB JSON
+   * prompt to `/v1/chat/completions`, which is a memory-amplification bug on
+   * every other operation. Leaving audio on the 1 MiB cap would refuse a
+   * fifteen-second voice memo, i.e. the surface would not work.
+   *
+   * Default `MAX_AUDIO_UPLOAD_BYTES` (`inference/handlers.ts`), which is
+   * OpenAI's own documented 25 MiB. Enforcing a ceiling at all — and enforcing
+   * it by ABORTING the read rather than by measuring a fully buffered body — is
+   * the point: a Worker has a hard memory bound, so an unbounded upload is a
+   * denial of service on ourselves.
+   */
+  readonly audioUploadMaxBytes: number;
+  /**
+   * The BY-REFERENCE audio ceiling (issue #703), in bytes — the cap on an
+   * object resolved from `file_ref` rather than streamed in the request.
+   *
+   * A separate number from {@link audioUploadMaxBytes} because the two bound
+   * different risks: that one bounds a stream whose length cannot be trusted
+   * until it has been read, this one bounds how much of the isolate one
+   * already-measured object may occupy. R2 reports the exact size before a byte
+   * is allocated, so this cap is enforced with no read at all.
+   *
+   * Default `MAX_AUDIO_REFERENCE_BYTES` (40 MiB); see that constant for the
+   * memory arithmetic and for what is still bounded.
+   */
+  readonly audioReferenceMaxBytes: number;
   /** Provider dispatch timeout in milliseconds. */
   readonly dispatchTimeoutMs: number;
 }
@@ -1021,6 +1187,13 @@ export interface InferenceDeps {
    * which is what lets a test assert the pre-#682 behaviour is untouched.
    */
   readonly byok?: ByokPorts | ByokPortsFactory | null;
+  /**
+   * The R2-backed source for `file_ref` audio uploads (issue #703). Absent ⇒
+   * built per Worker `env` by `audioObjectsFromEnv`, which answers
+   * `NO_AUDIO_OBJECTS` (503, fail closed) on a deployment that binds no bucket
+   * or no tenant database.
+   */
+  readonly audioObjects?: AudioObjectSource | ((env: InferenceBindings) => AudioObjectSource);
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -1043,4 +1216,6 @@ export interface ResolvedInferenceDeps {
   readonly nowUnixSeconds: () => number;
   /** `null` = BYOK is not enabled on this deployment. */
   readonly byok: ByokPorts | null;
+  /** Issue #703 — resolves a `file_ref` to a stored recording's bytes. */
+  readonly audioObjects: AudioObjectSource;
 }

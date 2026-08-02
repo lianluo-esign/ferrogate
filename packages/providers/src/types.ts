@@ -130,6 +130,48 @@ export interface RerankPlan {
   body: Json;
 }
 
+/**
+ * Plan for `POST /v1/audio/{transcriptions,translations}` (issue #703); never
+ * streams.
+ *
+ * `translate` is the ONE difference between the two operations, and it is a
+ * flag rather than two plan types because that is what it is on every wire that
+ * has ever carried this surface: Workers AI spells it `task: "translate"`,
+ * OpenAI spells it as a different path segment. Two plans would force a family
+ * to implement two near-identical methods to express one boolean.
+ *
+ * `body.file` carries `{ bytes, filename, contentType }` — the decoded upload,
+ * normalized by the gateway's ingress reader so nothing downstream has to know
+ * the request arrived as multipart.
+ */
+export interface TranscriptionPlan {
+  logicalModel: string;
+  providerModel: string;
+  body: Json;
+  /** `/v1/audio/translations` (always into English) rather than transcription. */
+  translate: boolean;
+}
+
+/** Plan for `POST /v1/audio/speech` (issue #703); never streams. */
+export interface SpeechPlan {
+  logicalModel: string;
+  providerModel: string;
+  body: Json;
+}
+
+/**
+ * Decoded audio plus the media type to serve it under (issue #703).
+ *
+ * The one value in this module that is not `Json`, and deliberately so: an MP3
+ * has no JSON representation, and forcing one (base64 in a wrapper) is exactly
+ * the mistake this type exists to stop — a caller would receive a string where
+ * every audio player expects bytes.
+ */
+export interface AudioBytes {
+  bytes: Uint8Array;
+  contentType: string;
+}
+
 // ---------------------------------------------------------------------------
 // Prepared HTTP requests + responses
 // ---------------------------------------------------------------------------
@@ -326,6 +368,26 @@ export interface ProviderAdapter {
   prepareEmbeddings(provider: ProviderConfig, request: EmbeddingsPlan): ProviderHttpRequest;
   prepareImages(provider: ProviderConfig, request: ImagesPlan): ProviderHttpRequest;
   prepareRerank(provider: ProviderConfig, request: RerankPlan): ProviderHttpRequest;
+  prepareTranscription(
+    provider: ProviderConfig,
+    request: TranscriptionPlan,
+  ): ProviderHttpRequest;
+  prepareSpeech(provider: ProviderConfig, request: SpeechPlan): ProviderHttpRequest;
+  /**
+   * Provider transcription dialect → the OpenAI `{ text, duration, segments }`
+   * shape. `null` means "pass the upstream body through" (issue #703).
+   */
+  translateTranscriptionResponse(body: Uint8Array, model: string): Json | null;
+  /**
+   * Provider speech answer → the AUDIO BYTES to relay, and the media type to
+   * serve them under.
+   *
+   * The only adapter method that returns bytes. It exists because the families
+   * disagree on the TRANSPORT and not merely the shape: OpenAI answers raw
+   * `audio/mpeg`, Workers AI answers `{ audio: "<base64>" }`. `null` means "the
+   * upstream body already IS the audio", which is the OpenAI-compatible arm.
+   */
+  translateSpeechResponse(body: Uint8Array, contentType: string): AudioBytes | null;
   translateEmbeddingsResponse(body: Uint8Array, model: string): Json | null;
   /**
    * Provider rerank dialect → the gateway's canonical `{ object, model, results }`.
@@ -399,11 +461,31 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
     throw AdapterError.unsupportedCapability("reranking", this.kind());
   }
 
+  /** The audio refusals (issue #703), same argument as `prepareRerank`. */
+  prepareTranscription(
+    _provider: ProviderConfig,
+    _request: TranscriptionPlan,
+  ): ProviderHttpRequest {
+    throw AdapterError.unsupportedCapability("audio transcription", this.kind());
+  }
+
+  prepareSpeech(_provider: ProviderConfig, _request: SpeechPlan): ProviderHttpRequest {
+    throw AdapterError.unsupportedCapability("speech synthesis", this.kind());
+  }
+
   translateEmbeddingsResponse(_body: Uint8Array, _model: string): Json | null {
     return null;
   }
 
   translateRerankResponse(_body: Uint8Array, _model: string, _request: Json): Json | null {
+    return null;
+  }
+
+  translateTranscriptionResponse(_body: Uint8Array, _model: string): Json | null {
+    return null;
+  }
+
+  translateSpeechResponse(_body: Uint8Array, _contentType: string): AudioBytes | null {
     return null;
   }
 

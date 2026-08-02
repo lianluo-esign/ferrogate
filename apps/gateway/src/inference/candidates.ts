@@ -48,6 +48,13 @@ export type ModelEndpointKind =
   | "messages"
   | "embeddings"
   | "rerank"
+  // Issue #703. `transcription` covers BOTH `/v1/audio/transcriptions` and
+  // `/v1/audio/translations`: they are the same Whisper-class model doing the
+  // same work with one flag flipped, so a deployment that had to declare two
+  // capabilities for one model would be declaring an operator-visible
+  // distinction the models themselves do not make.
+  | "transcription"
+  | "speech"
   | "images";
 
 /** `ModelRouteRequirements`. */
@@ -144,6 +151,17 @@ export function routeRequirements(
       // declares NO capabilities stays neutral, so a legacy row is still
       // servable. See deviation 1 on `routeExclusionReasons` below.
       require("rerank");
+      break;
+    case "transcription":
+      // Issue #703. Requiring `transcription` — and not merely "some model" —
+      // is what stops an audio upload being served by a chat model, which would
+      // answer prose about the request where the caller asked for a transcript.
+      // Subject to the same documented widening as every other capability leg:
+      // a route that declares NO capabilities stays neutral.
+      require("transcription");
+      break;
+    case "speech":
+      require("speech");
       break;
     case "images":
       require("images");

@@ -46,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 269 operations", () => {
+  it("carries exactly 272 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 269 unique operation ids", () => {
+  it("has 272 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -68,20 +68,24 @@ describe("contract table", () => {
     // `listModels` it narrows, -> 252), then #677's two chargeback reads
     // (`listAdminCostRecords` / `exportAdminCostRecords`, -> 254), which are
     // `admin.read` like every other evidence read, and `createRerank` (issue
-    // #676, bearer-`embeddings.create`, -> 255). All seventeen additions since
+    // #676, bearer-`embeddings.create`, -> 255), and the three audio operations
+    // (issue #703, bearer-`audio.create`, -> 258). All twenty additions since
     // 238 are bearer; none is anonymous or internal.
     //
-    // 255 is COUNTED off the merged document, not summed: #677 and #676 were
+    // 258 is COUNTED off the merged document, not summed: #677 and #676 were
     // parallel and each parent wrote its own increment, which is the collision
     // this file's header warns about. `Counter(o["auth"]["kind"] for o in
-    // operations)` over the merged JSON is what produced it.
+    // operations)` over the merged JSON is what produced it, and #703 re-ran the
+    // same count rather than adding three to a number it had not verified.
     //
     // `anonymous` moves 6 -> 7 with `serveSite` (issue #737) — the FIRST
     // addition since the cutover that is not bearer, and a deliberate one. See
     // the "may skip auth" case below for why the site serve route cannot be
-    // declared `bearer` and what enforces its credential instead.
+    // declared `bearer` and what enforces its credential instead. #703 and #737
+    // landed in parallel: bearer 258 and anonymous 7 are both COUNTED off the
+    // MERGED document, which is the only side that holds both.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 255,
+      bearer: 258,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -104,11 +108,14 @@ describe("contract table", () => {
       // `getModel` (issue #670), public for the same reason as `listModels`.
       // Both parents independently wrote 52, so git merged that clean — 53 was
       // the merged truth, and `createRerank` (issue #676) takes it to 54: a
-      // data-plane operation, publicly reachable, bearer-guarded. `serveSite`
-      // (issue #737) takes it to 55 — publicly reachable in the strongest
-      // sense of the word, since an opted-in site may be read with no
-      // credential at all.
-      public: 55,
+      // data-plane operation, publicly reachable, bearer-guarded. The three
+      // audio operations (issue #703) take it to 57 for the same reason — a
+      // voice client is a data-plane caller like any other — and `serveSite`
+      // (issue #737) takes it to 58, publicly reachable in the strongest sense
+      // of the word, since an opted-in site may be read with no credential at
+      // all. 58 is COUNTED off the merged document: neither parent's own number
+      // (57, 55) holds both slices.
+      public: 58,
       internal: 7,
     });
   });
@@ -136,8 +143,10 @@ describe("contract table", () => {
       // unknown depth and a fixed segment count cannot address it.
       GET: 124,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
-      // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
-      POST: 82,
+      // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
+      // #676's `/v1/rerank` and 85 with #703's three audio POSTs. Re-counted off
+      // the merged document, never summed.
+      POST: 85,
       DELETE: 27,
       PUT: 20,
       PATCH: 16,
@@ -340,20 +349,22 @@ describe("route registration", () => {
   // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
   // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
   // here: a local module list is exactly how the deployed Worker came to mount
-  // 7 of its 34 operations while this suite stayed green.
+  // 7 of its 38 operations while this suite stayed green.
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 35 operations ROUTE-MAP assigns to apps/gateway", () => {
+  it("owns exactly the 38 operations ROUTE-MAP assigns to apps/gateway", () => {
     // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
     // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
     // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
     // number here is re-derived by COUNTING the list, never incremented.
     //
-    // 34 -> 35 with `serveSite` (issue #737), the `site` route group's first
-    // operation — counted off `GATEWAY_OWNED_OPERATION_IDS` after the merge,
-    // which is now four lists rather than three.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(35);
+    // From that shared 34 two slices landed in PARALLEL: the three audio
+    // operations (issue #703, -> 37) and `serveSite` (issue #737, the `site`
+    // route group's first operation, -> 35). 38 is neither parent's number; it
+    // is COUNTED off `GATEWAY_OWNED_OPERATION_IDS` after the merge, which is now
+    // four lists rather than three.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(38);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -367,17 +378,17 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 35 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 38 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 35 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 38 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
-    // `getMetrics` is deliberately its OWN list rather than a 35th owned
+    // `getMetrics` is deliberately its OWN list rather than a 39th owned
     // operation or a third "shared" one. ROUTE-MAP assigns the operation to
     // `apps/control-plane`; the cutover certification found that leaving it
     // ONLY there means the 47 `ferrogate_*` series a dashboard queries have no

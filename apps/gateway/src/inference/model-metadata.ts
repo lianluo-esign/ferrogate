@@ -66,6 +66,8 @@ const CAPABILITY_ORDER: readonly ModelCapability[] = [
   "images",
   "embeddings",
   "rerank",
+  "transcription",
+  "speech",
   "tools",
   "structured_output",
 ];
@@ -86,8 +88,15 @@ const CAPABILITY_ORDER: readonly ModelCapability[] = [
  * EMPTY was the other candidate, and is rejected on this file's own rule: an
  * empty output array says "produces nothing", which is a different claim from
  * "produces something this vocabulary cannot name".
+ *
+ * `audio` (issue #703) is the one member of this union that is a medium in the
+ * ordinary sense, and it is the reason the union is DIRECTIONAL rather than a
+ * flat capability list: a Whisper route takes `audio` in and gives `text` out,
+ * a text-to-speech route does exactly the reverse. A client picking a model for
+ * a voice pipeline reads both arrays and gets an unambiguous answer, which is
+ * the routing decision this field exists to serve.
  */
-export type ModelModality = "text" | "image" | "embedding" | "score";
+export type ModelModality = "text" | "image" | "embedding" | "score" | "audio";
 
 /** Input/output modality support for one logical model. */
 export interface ModelModalities {
@@ -152,6 +161,13 @@ export function modalitiesFor(capabilities: readonly ModelCapability[]): ModelMo
   if (declared.has("vision")) {
     input.push("image");
   }
+  // Issue #703. A transcription model consumes audio; `text` stays on the input
+  // list beside it because the OpenAI-compatible upload also carries an optional
+  // `prompt` hint the model reads. A speech model consumes only text, so it adds
+  // nothing here — its audio is on the OUTPUT side below.
+  if (declared.has("transcription")) {
+    input.push("audio");
+  }
 
   const output: ModelModality[] = [];
   // Anything chat-shaped emits text; so does an undeclared legacy row.
@@ -173,6 +189,16 @@ export function modalitiesFor(capabilities: readonly ModelCapability[]): ModelMo
   }
   if (declared.has("rerank")) {
     output.push("score");
+  }
+  // A transcription model emits text. Guarded against the chat-shaped arm
+  // above rather than folded into it: a route may legitimately declare BOTH
+  // (an omni model that chats and transcribes), and pushing `text` twice would
+  // put a duplicate on the wire for exactly that configuration.
+  if (declared.has("transcription") && !output.includes("text")) {
+    output.push("text");
+  }
+  if (declared.has("speech")) {
+    output.push("audio");
   }
   return { input, output };
 }

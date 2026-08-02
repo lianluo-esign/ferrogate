@@ -1,10 +1,10 @@
 /**
- * `apps/gateway` inference surface — the nine OpenAPI operations in the
+ * `apps/gateway` inference surface — the twelve OpenAPI operations in the
  * `inference` route group of `docs/openapi/runtime-api-contract.json`:
  *
  *   listModels · getModel · createChatCompletion · createResponse ·
  *   createMessage · countMessageTokens · createEmbedding · createRerank ·
- *   createImage
+ *   createTranscription · createTranslation · createSpeech · createImage
  *
  * Mount it from the app shell as a contract-driven `RouteModule`:
  *
@@ -54,6 +54,13 @@ export {
 } from "./circuit-do.js";
 export type { ProviderCircuitNamespace } from "./circuit-do.js";
 export * from "./schemas.js";
+export {
+  audioObjectsFromEnv,
+  NO_AUDIO_OBJECTS,
+  parseAudioObjectReference,
+  storedAssetAudioObjects,
+} from "./audio-objects.js";
+export type { AudioObjectReference, AudioObjectSource } from "./audio-objects.js";
 export * from "./workflow.js";
 export * from "./errors.js";
 export * from "./usage.js";
@@ -113,6 +120,8 @@ export {
   providerTransportFailureClass,
   providerTransportMessage,
   readBoundedProviderBody,
+  readBoundedProviderBytes,
+  readBoundedStream,
 } from "./dispatch.js";
 export {
   chatCompletionToMessage,

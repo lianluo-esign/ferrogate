@@ -104,6 +104,213 @@ describe("charge()", () => {
   });
 });
 
+/**
+ * The audio rails, and the check that was NOT protecting them (issue #703).
+ *
+ * `charge()`'s >5% divergence warning is the one mechanism that catches a
+ * mispriced settled cost, and it is armed only when `book.priceFor(...)` finds a
+ * rule. Before this, no rate card in the tree named an audio model, so the two
+ * audio price rails had never met an invoice and a transcription settled at ten
+ * times its true cost would have been recorded in silence.
+ *
+ * Adding a card entry alone would have been WORSE than the gap: an audio event
+ * carries no tokens, so a token-only estimate values it at $0 and
+ * `costDiverges(settled > 0, 0)` fires on every correctly-priced row — a warning
+ * that is always on is a warning nobody reads. So the quantity travels with the
+ * event and the card prices it, and only then is the check armed.
+ */
+function audioEvent(request_id: string, quantities: Partial<BillingEvent>): BillingEvent {
+  return {
+    ...parseBillingEvent({
+      request_id,
+      provider_attempt_id: `${request_id}:provider-attempt:0`,
+      provider_attempt_index: 0,
+      tenant: { organization_id: "org" },
+      logical_model: "edge-whisper",
+      provider: "cf-ai",
+      provider_model: "@cf/openai/whisper-large-v3-turbo",
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      usage_source: "provider_usage",
+      status_code: 200,
+      occurred_at_unix: 1_800_000_000,
+      metadata: {},
+    }),
+    ...quantities,
+  };
+}
+
+describe("the audio rails meet an invoice (#703)", () => {
+  it("prices a transcription off the card when no settled cost is supplied", () => {
+    // The `price_not_found` failure this replaces was not hypothetical: it is
+    // what the gateway logged for every Workers AI transcription.
+    const entry = charge(
+      PriceBook.withDefaultRateCard(),
+      audioEvent("req-audio-1", { audio_seconds: 600 }),
+    );
+    expect(entry.cost_source).toBe(CostSource.BillingPriceBook);
+    expect(entry.cost.total_cost).toBeGreaterThan(0);
+    // Billed on the INPUT side: the recording that was decoded is the input.
+    expect(entry.cost.input_cost).toBeCloseTo(entry.cost.total_cost, 12);
+    expect(entry.cost.output_cost).toBeCloseTo(0, 12);
+  });
+
+  it("does NOT warn when the settled audio cost agrees with the card", () => {
+    // The half that makes the check usable. A detector that fires on every
+    // correct row is the same as no detector, and it is the failure mode adding
+    // a token-only card entry would have produced.
+    const book = PriceBook.withDefaultRateCard();
+    const seconds = 600;
+    const priced = charge(book, audioEvent("req-audio-2", { audio_seconds: seconds }));
+    let warned = 0;
+    charge(
+      book,
+      audioEvent("req-audio-3", {
+        audio_seconds: seconds,
+        cost_usd: priced.cost.total_cost,
+      }),
+      () => (warned += 1),
+    );
+    expect(warned).toBe(0);
+  });
+
+  it("WARNS on a mispriced audio row — the whole point of the entry", () => {
+    const book = PriceBook.withDefaultRateCard();
+    const seconds = 600;
+    const priced = charge(book, audioEvent("req-audio-4", { audio_seconds: seconds }));
+    let seen: { gateway_settled_cost_usd: number; price_book_estimate_usd: number } | undefined;
+    charge(
+      book,
+      audioEvent("req-audio-5", {
+        audio_seconds: seconds,
+        // Ten times the true cost — the shape of a rate typo'd by one decimal.
+        cost_usd: priced.cost.total_cost * 10,
+      }),
+      (info) => (seen = info),
+    );
+    expect(seen).toBeDefined();
+    expect(seen?.price_book_estimate_usd).toBeCloseTo(priced.cost.total_cost, 12);
+    expect(seen?.gateway_settled_cost_usd).toBeCloseTo(priced.cost.total_cost * 10, 12);
+  });
+
+  it("prices SPEECH on characters, on the same seam", () => {
+    const entry = charge(PriceBook.withDefaultRateCard(), {
+      ...audioEvent("req-audio-6", { audio_characters: 100_000 }),
+      provider_model: "@cf/myshell-ai/melotts",
+      logical_model: "edge-tts",
+    });
+    expect(entry.cost.total_cost).toBeGreaterThan(0);
+    expect(entry.cost.input_cost).toBeCloseTo(entry.cost.total_cost, 12);
+  });
+
+  it("still refuses a row whose model is absent from the card entirely", () => {
+    // Fail CLOSED, unchanged. An unpriced model with no settled cost is
+    // `price_not_found`, never a free transcription.
+    //
+    // This case reaches the PRE-EXISTING no-entry refusal in `charge()` — the
+    // one that predates #703 — because `book()` names only `openai/gpt-5.5`.
+    // It says nothing about the new audio guard; the case below is the one
+    // that holds that. Asserting the CODE rather than just `BillingError`
+    // keeps the two distinguishable: they are different sentences from the
+    // same class, and only the code tells you which refusal fired.
+    try {
+      charge(book(), {
+        ...audioEvent("req-audio-7", { audio_seconds: 600 }),
+        provider: "some-vendor",
+        provider_model: "some-asr",
+      });
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BillingError);
+      expect((error as BillingError).code).toBe("price_not_found");
+      expect((error as BillingError).message).toContain("no rate-card price for provider");
+    }
+  });
+
+  it("refuses a row the card MATCHES but states no rate for the row's unit", () => {
+    // THE case for `audioQuantityUnpriced`, and the one the shape above cannot
+    // reach. `book()` prices `openai/gpt-5.5` — tokens only, no
+    // `audio_second_price_per_1m` — so `book.priceFor(...)` HITS and the
+    // no-entry refusal is passed over. What is left is a matched card that
+    // cannot value the unit this row is measured in.
+    //
+    // Without the guard the token arithmetic answers $0 for a 600-second
+    // recording and the row is written as a free transcription — the
+    // free-inference bug (#129) one unit over. Disarming
+    // `audioQuantityUnpriced` (returning false whenever audio is present) turns
+    // this case RED and nothing else in the package with it, which is what
+    // makes it the guard's only hold.
+    try {
+      charge(book(), {
+        ...audioEvent("req-audio-7b", { audio_seconds: 600 }),
+        provider: "openai",
+        provider_model: "gpt-5.5",
+      });
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BillingError);
+      expect((error as BillingError).code).toBe("price_not_found");
+      // ...and it is the UNIT refusal, not the no-entry one it is easy to
+      // mistake it for. The card entry exists; it just cannot price seconds.
+      expect((error as BillingError).message).toContain("states no audio rate for this row");
+    }
+  });
+
+  it("refuses a MATCHED card that prices seconds but not the characters it is handed", () => {
+    // The character half of the same guard, and it is not a copy: a card may
+    // state one audio rate and not the other, and a synthesis row measured in
+    // characters must not be valued at $0 by a transcription rate.
+    const secondsOnly = PriceBook.new([
+      priceEntry("openai", "gpt-5.5", {
+        ...modelPriceUsd(5.0, 15.0),
+        audio_second_price_per_1m: 6_000.0,
+      }),
+    ]);
+    try {
+      charge(secondsOnly, {
+        ...audioEvent("req-audio-7c", { audio_characters: 100_000 }),
+        provider: "openai",
+        provider_model: "gpt-5.5",
+      });
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BillingError);
+      expect((error as BillingError).code).toBe("price_not_found");
+      expect((error as BillingError).message).toContain("states no audio rate for this row");
+    }
+    // ...and the SAME card prices a seconds row, so the refusal above is about
+    // the unit and not about the card being rejected wholesale.
+    const priced = charge(secondsOnly, {
+      ...audioEvent("req-audio-7d", { audio_seconds: 600 }),
+      provider: "openai",
+      provider_model: "gpt-5.5",
+    });
+    expect(priced.cost_source).toBe(CostSource.BillingPriceBook);
+    expect(priced.cost.total_cost).toBeGreaterThan(0);
+  });
+
+  it("carries the audio quantities across the wire form", () => {
+    // The rail is only real if the quantity survives serialization: the metering
+    // event is JSON on a Queue before it is ever charged.
+    const parsed = parseBillingEvent({
+      request_id: "req-audio-8",
+      provider_attempt_id: "req-audio-8:provider-attempt:0",
+      provider_attempt_index: 0,
+      tenant: { organization_id: "org" },
+      logical_model: "edge-whisper",
+      provider: "cf-ai",
+      provider_model: "@cf/openai/whisper-large-v3-turbo",
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      usage_source: "provider_usage",
+      status_code: 200,
+      metadata: {},
+      audio_seconds: 12.5,
+      audio_characters: 42,
+    });
+    expect(parsed.audio_seconds).toBe(12.5);
+    expect(parsed.audio_characters).toBe(42);
+  });
+});
+
 describe("ledgerEntryId idempotency (#213)", () => {
   it("ignores mutable trace/request context for a provider-attempt event", () => {
     const original = event("req-original", "openai", "gpt-5.5");

@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 268.
+ * ANTI-DRIFT GATE for the third copy of 272.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(269);
+    expect(OPENAPI_OPERATION_COUNT).toBe(272);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -185,7 +185,7 @@ describe("wireSchemas registry", () => {
 
 /**
  * The registration MECHANISM, which is this package's half of inventory
- * §1.3/§1.4. The 244 remaining per-operation bodies are owned by the surfaces
+ * §1.3/§1.4. The 262 remaining per-operation bodies are owned by the surfaces
  * that serve them (`apps/gateway`, `apps/control-plane`, `apps/mcp`) — defining
  * them here would invert the dependency and guarantee drift. What this package
  * owes is a registry that cannot silently swap a route's validator, and that is
@@ -287,14 +287,18 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // `createRerank`, whose request/response Zod shapes live in
     // `apps/gateway/src/inference/schemas.ts` beside the handler that serves
     // them. So `seeded` is still 10 and the shortfall is 255 + 2 + 1 = 258.
-    //
-    // #737's `serveSite` carries no wire schema either: its response is BYTES
-    // out of an R2 object, not a Zod shape, so the shortfall is 258 + 1 = 259.
+    // #703's three audio operations (`createTranscription`, `createTranslation`,
+    // `createSpeech`) are the same story a third time — their Zod shapes are in
+    // `apps/gateway/src/inference/schemas.ts` — and #737's `serveSite` carries
+    // no wire schema either: its response is BYTES out of an R2 object, not a
+    // Zod shape. #703 and #737 landed in PARALLEL, so neither branch's own
+    // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
+    // merged truth: it is 258 + 3 + 1 = 262.
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 269 - 10. The running sum is narrative, and #677 and #676
+    // `seeded`, i.e. 272 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(259);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(262);
   });
 });

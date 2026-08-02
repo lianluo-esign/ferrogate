@@ -19001,6 +19001,353 @@
           "rbac_action": null
         }
       }
+    },
+    "/v1/audio/transcriptions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "createTranscription",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Transcribe audio in its source language, served by Workers AI Whisper or a provider passthrough.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "audio.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The transcript, plus the duration the call is metered on when the provider reported one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioTranscription"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to transcribe, uploaded inline. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read. Mutually exclusive with `file_ref`."
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "json",
+                      "text",
+                      "verbose_json"
+                    ]
+                  },
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "file_ref": {
+                    "type": "string",
+                    "description": "A recording already published to the deployment's object store, addressed as \"{asset_type}/{name}/{version}\" - the same coordinate POST /v1/assets/presign/upload/{asset_type}/{name}/{version} registers. The bytes are read from R2 by reference and never traverse this request, so the by-reference ceiling is a separate, larger limit enforced against the size the object store recorded. Resolves inside the CALLING tenant's own namespace only. Mutually exclusive with `file`."
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "file"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "file_ref"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/translations": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "createTranslation",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Translate audio into English, served by Workers AI Whisper or a provider passthrough.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "audio.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The English transcript, plus the duration the call is metered on when the provider reported one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioTranscription"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to transcribe, uploaded inline. Refused with 413 above the deployment's audio upload ceiling, BEFORE the body is read. Mutually exclusive with `file_ref`."
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "json",
+                      "text",
+                      "verbose_json"
+                    ]
+                  },
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "file_ref": {
+                    "type": "string",
+                    "description": "A recording already published to the deployment's object store, addressed as \"{asset_type}/{name}/{version}\" - the same coordinate POST /v1/assets/presign/upload/{asset_type}/{name}/{version} registers. The bytes are read from R2 by reference and never traverse this request, so the by-reference ceiling is a separate, larger limit enforced against the size the object store recorded. Resolves inside the CALLING tenant's own namespace only. Mutually exclusive with `file`."
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "file"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "file_ref"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/speech": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "createSpeech",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Synthesize speech from text. The 2xx body is AUDIO BYTES, relayed byte-for-byte; an error is always the FerroGate envelope.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "audio.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The synthesized audio, passed through untouched. Metered on the CHARACTER count of `input`.",
+            "content": {
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AudioSpeechRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -35829,6 +36176,90 @@
             "description": "true when the feed did not answer, so absent or inactive rows are NOT evidence that nothing is running."
           }
         },
+        "additionalProperties": false
+      },
+      "AudioTranscription": {
+        "type": "object",
+        "description": "The OpenAI-compatible transcription. `text` is always present; `duration` and `segments` only when the provider reported them.",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "number",
+            "description": "Length of the source audio in seconds - the unit this call is metered on."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "number"
+                },
+                "end": {
+                  "type": "number"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": true
+      },
+      "AudioSpeechRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The text to synthesize. Its CHARACTER count is the billable unit."
+          },
+          "voice": {
+            "type": "string"
+          },
+          "response_format": {
+            "type": "string",
+            "enum": [
+              "mp3",
+              "opus",
+              "aac",
+              "flac",
+              "wav",
+              "pcm"
+            ]
+          },
+          "speed": {
+            "type": "number",
+            "minimum": 0.25,
+            "maximum": 4
+          },
+          "language": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "model",
+          "input"
+        ],
         "additionalProperties": false
       }
     }

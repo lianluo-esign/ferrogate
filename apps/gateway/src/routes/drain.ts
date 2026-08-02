@@ -90,6 +90,15 @@ export const DRAIN_GUARDED_OPERATION_IDS: readonly string[] = [
   // than on the census: it dispatches to a provider and it costs money, which is
   // exactly the work a drained node is being told to stop taking.
   "createRerank",
+  // The audio surface (issue #703), on the same rule and with the same absence
+  // of a Rust site. It is the strongest case on this list, not the weakest: a
+  // transcription is the largest single unit of work the gateway accepts — up to
+  // `MAX_AUDIO_UPLOAD_BYTES` of body and a provider call whose latency scales
+  // with the length of the recording — so a drained node that kept accepting
+  // them would keep working long after it was told to stop.
+  "createTranscription",
+  "createTranslation",
+  "createSpeech",
   "createImage",
 ];
 

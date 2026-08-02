@@ -178,10 +178,15 @@ export const DEV_API_KEY_MIN_LENGTH = DEV_API_KEY_PREFIX.length + 24;
 /**
  * The ONLY scopes a development key may hold.
  *
- * The six data-plane inference scopes, spelled out. It is not `["*"]` and it is
- * not the empty set — an empty native scope set already means "data-plane
+ * The seven data-plane inference scopes, spelled out. It is not `["*"]` and it
+ * is not the empty set — an empty native scope set already means "data-plane
  * scopes, never `admin.*`" (`hasScope`), but naming them makes the grant
  * auditable and keeps a dev key off every non-inference operation too.
+ *
+ * `audio.create` (issue #703) is on the list because a developer wiring the
+ * audio surface end to end needs to reach it; leaving it off would make the one
+ * credential this file exists to provide useless for the newest surface, which
+ * is precisely how a hand-edited `GATEWAY_NATIVE_API_KEYS` gets committed.
  */
 export const DEV_API_KEY_SCOPES: readonly string[] = [
   "models.read",
@@ -190,6 +195,7 @@ export const DEV_API_KEY_SCOPES: readonly string[] = [
   "messages.create",
   "embeddings.create",
   "images.generate",
+  "audio.create",
 ];
 
 /**

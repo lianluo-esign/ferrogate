@@ -63,6 +63,26 @@ const PER_1M = 1_000_000;
  * it against, instead of tripping a spurious warning on every such response.
  */
 export function routePriceSettledCostUsd(usage: Usage): number | undefined {
+  // The AUDIO arm (issue #703), checked FIRST and returning outright.
+  //
+  // It is first because the token arm below opens by refusing a usage row with
+  // no observed tokens, and an audio row has none by construction: transcription
+  // settles on seconds and speech on characters. Reaching that refusal would
+  // send every audio call to the rate card — which has no `("*","*")` wildcard
+  // and no audio entry — so `charge()` would throw `price_not_found` and the
+  // sink would fail closed. A live, successful, correctly-priced call would land
+  // in `billing_ledger`, `billing_events` and `billing_report_outbox` at zero.
+  // That is precisely the #663 defect, and this arm is what stops audio
+  // reproducing it.
+  //
+  // It is not a second accounting shape: the same `Usage` row, the same
+  // `settledCostUsd` seam, the same `charge()` treatment of an authoritative
+  // cost. Only the multiplicand differs, because the unit does.
+  const audio = audioSettledCostUsd(usage);
+  if (audio !== undefined) {
+    return audio;
+  }
+
   if (
     usage.promptTokens === undefined &&
     usage.completionTokens === undefined &&
@@ -118,6 +138,43 @@ export function routePriceSettledCostUsd(usage: Usage): number | undefined {
       reasoning * reasoningRate) /
     PER_1M
   );
+}
+
+/**
+ * The audio surface's settled cost, or `undefined` when this row is not an
+ * audio row (issue #703).
+ *
+ * The three refusals mirror the token arm's, one unit over:
+ *
+ *  1. **No observed quantity.** A transcription whose provider reported no
+ *     duration has `audioSeconds` ABSENT — not zero — and this returns
+ *     `undefined` so the rate card decides, exactly as an unmeasured token row
+ *     does. Reading an absent duration as `0` would settle a real, billable call
+ *     authoritatively at $0, which is the free-inference bug #129 named.
+ *  2. **A quantity the route does not price.** A row that states no audio rate
+ *     cannot settle an audio call; deferring is the honest answer.
+ *  3. **A non-finite or negative rate**, via {@link priceOrUndefined} — a
+ *     negative settled cost is a credit conjured from a config typo.
+ *
+ * Both quantities are priced on the INPUT side of the estimate. That is not a
+ * convenience: `charge()` splits an authoritative cost into input/output
+ * components, and for both audio operations the billable quantity IS the input
+ * (the recording that was decoded, the text that was synthesized). Attributing
+ * it to output would put the number in the column an operator reads as "what the
+ * model produced".
+ */
+function audioSettledCostUsd(usage: Usage): number | undefined {
+  const seconds = usage.audioSeconds;
+  if (typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0) {
+    const rate = priceOrUndefined(usage.audioSecondPricePer1m);
+    return rate === undefined ? undefined : (seconds * rate) / PER_1M;
+  }
+  const characters = usage.audioCharacters;
+  if (typeof characters === "number" && Number.isFinite(characters) && characters > 0) {
+    const rate = priceOrUndefined(usage.audioCharacterPricePer1m);
+    return rate === undefined ? undefined : (characters * rate) / PER_1M;
+  }
+  return undefined;
 }
 
 /** (3) A price is usable only if it is a finite, non-negative number. */
