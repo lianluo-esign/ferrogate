@@ -13,7 +13,8 @@
  */
 import { describe, expect, it } from "vitest";
 
-import type { PhysicalRoute } from "../../src/inference/index.js";
+import { defaultAdapterRegistry } from "../../src/inference/index.js";
+import type { GatewayProviderFamily, PhysicalRoute } from "../../src/inference/index.js";
 import { ANTHROPIC_ROUTE, OPENAI_ROUTE, errorBody, harness } from "./fixtures.js";
 import { interceptProviderFetch, providerJson } from "./provider-mock.js";
 
@@ -63,10 +64,27 @@ const ISOLATION_OPENAI: PhysicalRoute = {
   priority: 1,
 };
 
+/**
+ * Azure is the ninth family and the one that does NOT delegate to the
+ * OpenAI-compatible adapter — it builds its own body, because the model is a
+ * deployment in the path rather than a member. That difference is how it came
+ * to skip the caching adjudication entirely.
+ */
+const AZURE_ROUTE: PhysicalRoute = {
+  logicalModel: "azure-cached",
+  provider: "azure-eastus",
+  providerModel: "gpt-4o-mini",
+  providerKind: "azure-openai",
+  baseUrl: "https://example.openai.azure.example/?api-version=2024-02-15-preview",
+  apiKey: "provider-secret",
+  enabled: true,
+};
+
 const ROUTES = [
   ANTHROPIC_ROUTE,
   OPENAI_ROUTE,
   GEMINI_ROUTE,
+  AZURE_ROUTE,
   FAILOVER_OPENAI,
   FAILOVER_ANTHROPIC,
   ISOLATION_ANTHROPIC,
@@ -129,6 +147,36 @@ describe("the directive reaches the selected family's mechanism", () => {
       // The volatile turn stays OUTSIDE the cached prefix, or the cache would
       // be rewritten on every request and never read.
       expect(JSON.stringify(body["messages"][1])).not.toContain("cache_control");
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("an azure route adjudicates the directive like any other automatic family", async () => {
+    // Azure builds its upstream body BY HAND — the model is a deployment in
+    // the path, so it cannot delegate to the OpenAI-compatible adapter the way
+    // grok and openrouter do. That is exactly how it came to skip adjudication:
+    // `{"mode":"off"}` answered 200 and `prompt_cache` reached the upstream
+    // verbatim, which is both a broken retention promise and a live 400 (Azure
+    // rejects unknown members).
+    const provider = interceptProviderFetch(() => providerJson(OPENAI_COMPLETION));
+    try {
+      const app = harness({}, ROUTES);
+      const refused = await app.post(
+        "/v1/chat/completions",
+        chatRequest("azure-cached", { mode: "off" }),
+      );
+      expect(refused.status).toBe(400);
+      expect((await errorBody(refused)).error.code).toBe("model_capability_unsupported");
+      expect(provider.requests).toHaveLength(0);
+
+      const served = await app.post(
+        "/v1/chat/completions",
+        chatRequest("azure-cached", { mode: "auto" }),
+      );
+      expect(served.status).toBe(200);
+      expect(provider.lastRequest().url).toContain("openai.azure.example");
+      expect(provider.lastRequest().body).not.toHaveProperty("prompt_cache");
     } finally {
       provider.restore();
     }

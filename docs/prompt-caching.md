@@ -34,11 +34,22 @@ the same rule, and the same shape, as
 with `mode: "explicit"` — a lifetime on a mode that promises nothing would read
 as a guarantee the gateway never made, so it is rejected as `invalid_request`.
 
-An Anthropic-native caller on `/v1/messages` does not have to change anything:
-a `cache_control` marker in the request is read as `{"mode": "explicit"}` (with
+An Anthropic-native caller on `/v1/messages` needs no new field: a
+`cache_control` marker in the request is read as `{"mode": "explicit"}` (with
 its `ttl`) and carried forward. The marker's PLACEMENT is not carried — the
 OpenAI grammar the ingress translates into has nowhere to hold it — so the
 re-emitted breakpoint lands at the canonical boundary described below.
+
+> **Breaking change.** Because that marker is now read as an `explicit`
+> contract, a `/v1/messages` request carrying `cache_control` against a logical
+> model whose only routes are OpenAI-compatible, Gemini, Vertex, Azure or
+> Workers AI now returns **400 `model_capability_unsupported`** where it
+> previously returned 200. Nothing regressed: those routes never honoured the
+> marker, they discarded it and billed at the uncached rate. The 400 is the
+> refusal that was always owed. To keep the previous behaviour on such a model,
+> send `"prompt_cache": {"mode": "auto"}` — a stated directive overrides the
+> inferred one, and `auto` is refused by nobody. Anthropic and Bedrock routes
+> are unaffected.
 
 `/v1/messages` reads `prompt_cache` for the same reason every other ingress
 does: it is served by the same route ladder, so a directive it did not read
@@ -69,7 +80,8 @@ a control.
 |---|---|
 | Anthropic | `cache_control: {"type":"ephemeral"}` (plus `"ttl":"1h"` when asked) on the last block of the static prefix |
 | Bedrock (Converse) | a `{"cachePoint":{"type":"default"}}` block appended to the same boundary |
-| OpenAI-compatible (`openai`, `deepseek`, `vllm`, `grok`, `openrouter`, `azure-openai`, …) | nothing — the family caches long prefixes automatically |
+| OpenAI-compatible (`openai`, `deepseek`, `vllm`, `grok`, `openrouter`, …) | nothing — the family caches long prefixes automatically |
+| Azure OpenAI | nothing — same automatic caching, adjudicated by its own adapter (it addresses a deployment in the path, so it cannot delegate to the plain OpenAI one) |
 | Gemini / Vertex | nothing — implicit caching |
 | Workers AI | nothing — no prompt cache exists |
 
@@ -80,11 +92,21 @@ cache prefix `tools` → `system` → `messages`, so one marker at the system
 boundary covers the tools too and leaves the volatile turn — the caller's actual
 question — outside the cached span.
 
+A body that offers none of those — no system, no tools, and a last message with
+no content to mark — has nowhere to hold a breakpoint. `explicit` is then
+rejected as `invalid_request` rather than served with nothing emitted, because
+emitting nothing would bill the caller at the uncached rate for a request it
+believed it had pinned. `auto` promised nothing, so it is served.
+
 A caller that placed its own `cache_control` markers keeps them, and no second
 breakpoint is added: Anthropic allows four per request, and a caller who marked
 its own boundaries has made a better-informed decision than the default.
 
-`prompt_cache` is FerroGate's own member and never reaches a provider.
+`prompt_cache` is FerroGate's own member and never reaches a provider. Every
+registered family is checked against that claim by
+`apps/gateway/test/inference/prompt-cache-family-sweep.test.ts`, which
+enumerates the deployed adapter registry rather than a written list — an adapter
+added without adjudicating the directive fails the build.
 
 Each candidate on a failover ladder is prepared against a private copy of the
 request. An Anthropic leg that is attempted and fails therefore leaves nothing
@@ -96,10 +118,11 @@ is not observable in what the surviving route sends.
 
 | Directive | Refused by | Why |
 |---|---|---|
-| `explicit` | OpenAI-compatible, Gemini, Vertex | the family picks its own prefix and lifetime; a promised breakpoint would be a promise nobody kept |
+| `explicit` | OpenAI-compatible, Azure OpenAI, Gemini, Vertex | the family picks its own prefix and lifetime; a promised breakpoint would be a promise nobody kept |
 | `explicit` | Workers AI | there is no prompt cache at all |
 | `explicit` with `ttl: "1h"` | Bedrock | Converse's `cachePoint` has no selectable lifetime; serving it as ~5m would be a silent degrade |
-| `off` | OpenAI-compatible, Gemini, Vertex | their prompt caching cannot be disabled per request, so answering 200 would do the opposite of what was asked |
+| `off` | OpenAI-compatible, Azure OpenAI, Gemini, Vertex | their prompt caching cannot be disabled per request, so answering 200 would do the opposite of what was asked |
+| `explicit` with no placeable boundary | Anthropic, Bedrock | a body with no system, no tools and no markable message content has nowhere to hold a breakpoint; emitting none and answering 200 would bill the caller at the uncached rate for a request it believed it had pinned |
 
 A refusal removes the route from the candidate ladder for THAT request. If
 another eligible route can honour the directive, the request is served by it and

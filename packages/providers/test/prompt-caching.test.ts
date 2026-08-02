@@ -370,6 +370,57 @@ describe("no family may silently ignore the directive", () => {
   });
 });
 
+// --- the contract has nowhere to land --------------------------------------
+
+describe("an `explicit` contract with nowhere to place a breakpoint is refused", () => {
+  /**
+   * No `system`, no `tools`, and a last message with no markable content. The
+   * placement chain runs out, and the pre-#690 shape of these functions
+   * swallowed that: 200, no breakpoint, and a caller billed at the uncached
+   * rate for a request it believed it had pinned. `explicit` is a CONTRACT, so
+   * the only honest answers are "emitted" and "refused".
+   */
+  const degenerate = (promptCache: unknown) => ({
+    model: "logical",
+    // An EMPTY content array, not an empty string: a string is promoted to a
+    // one-element text block and does carry a marker, so it is the empty array
+    // that actually runs the placement chain out.
+    messages: [{ role: "user", content: [] }],
+    prompt_cache: promptCache,
+  });
+
+  test("anthropic refuses rather than emitting nothing", () => {
+    expect(() =>
+      new AnthropicAdapter().prepareChatCompletions(
+        anthropicProvider,
+        chatPlan(degenerate({ mode: "explicit", ttl: "5m" })),
+      ),
+    ).toThrowError(/cannot be honoured/i);
+  });
+
+  test("bedrock refuses on the same body", () => {
+    // The twin path. Fixing one and leaving the other is how the third instance
+    // of a defect class survives.
+    expect(() =>
+      new BedrockAdapter().prepareChatCompletions(
+        bedrockProvider,
+        chatPlan(degenerate({ mode: "explicit", ttl: "5m" })),
+      ),
+    ).toThrowError(/cannot be honoured/i);
+  });
+
+  test("`auto` on the same body is still served", () => {
+    // `auto` promised nothing, so there is nothing to break. Refusing it here
+    // would take a route off the ladder for a hint the caller cannot act on.
+    expect(() =>
+      new AnthropicAdapter().prepareChatCompletions(
+        anthropicProvider,
+        chatPlan(degenerate({ mode: "auto" })),
+      ),
+    ).not.toThrow();
+  });
+});
+
 // --- family isolation ------------------------------------------------------
 
 describe("preparing one family never rewrites the caller's body", () => {

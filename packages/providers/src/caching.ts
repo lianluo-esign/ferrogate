@@ -195,7 +195,30 @@ export function applyPromptCacheToAnthropic(
   // boundary is the same one; only the spelling differs.
   if (markLastAnthropicSystemMessage(body, marker)) return;
   if (markLastAnthropicTool(body, marker)) return;
-  markLastAnthropicMessageBlock(body, marker);
+  if (markLastAnthropicMessageBlock(body, marker)) return;
+  assertBreakpointWasPlaceable(directive);
+}
+
+/**
+ * Nowhere to put the breakpoint: no `system`, no `tools`, and a last message
+ * that is empty or has no markable block.
+ *
+ * `explicit` is a CONTRACT, and returning 200 having emitted nothing is the
+ * silent degrade #674 forbids — the caller would be billed at the uncached rate
+ * for a request it believed it had pinned. It is `invalid_request` rather than
+ * `unsupported_capability` because the obstacle is the BODY, not the family:
+ * walking to the next candidate would fail identically, so taking the route off
+ * the ladder would spend the whole ladder to reach the same answer with a
+ * message that names the wrong cause.
+ *
+ * `auto` is a hint that promised nothing, so it is satisfied vacuously here for
+ * the same reason it is satisfied vacuously on a family with no cache at all.
+ */
+function assertBreakpointWasPlaceable(directive: CanonicalPromptCache): void {
+  if (directive.kind !== "explicit") return;
+  throw AdapterError.invalidRequest(
+    `\`${PROMPT_CACHE_MEMBER}.mode: "explicit"\` cannot be honoured: the request has no system prompt, no tools and no message content to place a cache breakpoint on`,
+  );
 }
 
 /** `system` as a string is promoted to a one-element block array to carry it. */
@@ -239,11 +262,14 @@ function markLastAnthropicTool(body: JsonObject, marker: JsonObject): boolean {
   return true;
 }
 
-function markLastAnthropicMessageBlock(body: JsonObject, marker: JsonObject): void {
+function markLastAnthropicMessageBlock(body: JsonObject, marker: JsonObject): boolean {
   const messages = body["messages"];
-  if (!isArray(messages) || messages.length === 0) return;
+  if (!isArray(messages) || messages.length === 0) return false;
   const last = messages[messages.length - 1];
-  if (isObject(last)) markLastContentBlock(last, marker);
+  // The return value is LOAD-BEARING: a degenerate last message (empty string
+  // content, empty block array) leaves the breakpoint unplaced, and swallowing
+  // that turned an `explicit` contract into a silent no-op.
+  return isObject(last) ? markLastContentBlock(last, marker) : false;
 }
 
 /** Mark a message's final content block, promoting a string body to a block. */
@@ -321,10 +347,17 @@ export function applyPromptCacheToBedrockConverse(
   const point: JsonObject = { [BEDROCK_CACHE_MEMBER]: { type: "default" } };
   if (appendBedrockCachePoint(body["system"], point)) return;
   if (appendBedrockCachePoint(getField(body["toolConfig"], "tools"), point)) return;
-  const messages = body["messages"];
-  if (!isArray(messages) || messages.length === 0) return;
+  if (appendBedrockLastMessageCachePoint(body["messages"], point)) return;
+  // Same contract, same refusal as the Anthropic path: a Converse body with no
+  // system, no tools and a degenerate last message has nowhere to hold a
+  // checkpoint, and answering 200 having emitted none is the silent degrade.
+  assertBreakpointWasPlaceable(directive);
+}
+
+function appendBedrockLastMessageCachePoint(messages: Json | undefined, point: JsonObject): boolean {
+  if (!isArray(messages) || messages.length === 0) return false;
   const last = messages[messages.length - 1];
-  if (isObject(last)) appendBedrockCachePoint(last["content"], point);
+  return isObject(last) ? appendBedrockCachePoint(last["content"], point) : false;
 }
 
 function appendBedrockCachePoint(target: Json | undefined, point: JsonObject): boolean {
