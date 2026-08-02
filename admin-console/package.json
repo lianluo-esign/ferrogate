@@ -15,7 +15,7 @@
     "test:e2e": "npm run typecheck:e2e && playwright test",
     "test:e2e:install": "playwright install --with-deps chromium",
     "typecheck:e2e": "tsc -p tsconfig.e2e.json --noEmit",
-    "generate:api": "openapi-typescript ../docs/openapi/admin-api.openapi.json -o src/lib/api-types.generated.ts && node scripts/stamp-generated-api-header.mjs"
+    "generate:api": "node ../tools/generated-clients/generate.mjs --only admin-console"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",
