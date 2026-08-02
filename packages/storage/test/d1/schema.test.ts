@@ -67,6 +67,15 @@ const CONTROL_ONLY = [
   "agent_run_events",
   "request_logs",
   "audit_events",
+  // Created AFTER `0001_init_control.sql`. A later migration is exactly when a
+  // table gets filed under the wrong role — the author is editing one directory
+  // and the split is enforced by nothing but which directory the file sits in —
+  // so every `CREATE TABLE` a control migration adds belongs on this list.
+  "tenant_provider_credentials", // 0003
+  "guardrail_evaluations", // 0004
+  "guardrail_check_evaluations", // 0004
+  "semantic_cache_policies", // 0004
+  "siem_export_cursors", // 0005
 ] as const;
 
 /** Families that must live ONLY in a tenant database. */
@@ -90,6 +99,10 @@ const TENANT_ONLY = [
   "agent_schedule_fires",
   "observed_agent_presence",
   "agent_cost_burn",
+  // Created AFTER `0001_init_tenant.sql`; see the note on CONTROL_ONLY. A
+  // bundle's file index holds one tenant's paths and R2 keys, so landing it in
+  // the control database would be the cross-tenant leak the split prevents.
+  "asset_bundle_files", // 0004 (#736)
 ] as const;
 
 describe("control / tenant split", () => {
@@ -244,6 +257,27 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
     ]) {
       expect(columns, `quota_policies.${column}`).toContain(column);
     }
+  });
+
+  test("usage_aggregate_rollups", async () => {
+    // The other half of `0002_cached_reasoning_tokens.sql` (#667): it appended
+    // the same trio to BOTH rollup tables, but only the monthly one was pinned.
+    // An unpinned table that a migration already touched is the next stale pin
+    // waiting to happen, so the aggregate rollup is now held to the same
+    // order-sensitive rule — see the comment on `usage_monthly_rollups`.
+    expect(await columnNames(env.TENANT_DB_A, "usage_aggregate_rollups")).toEqual([
+      "id",
+      "tenant_context_id",
+      "logical_model",
+      "provider",
+      "prompt_tokens",
+      "completion_tokens",
+      "total_tokens",
+      "updated_at_unix",
+      "cached_input_tokens",
+      "cache_write_tokens",
+      "reasoning_tokens",
+    ]);
   });
 
   test("usage_monthly_rollups", async () => {
