@@ -198,6 +198,62 @@ export const gatewayErrorHandler: ErrorHandler<GatewayEnv> = (error, c) => {
   return writeJsonError(c, status, code, message, headers ?? {});
 };
 
+/**
+ * The envelope BOUNDARY — a `try`/`catch` around `next()` (issue #733).
+ *
+ * ## Why `app.onError` is not enough, measured
+ *
+ * Hono's `compose` only routes an `Error` to the error handler:
+ *
+ * ```js
+ * catch (err) {
+ *   if (err instanceof Error && onError) { res = await onError(err, context) }
+ *   else { throw err }        //  <-- everything else leaves the app
+ * }
+ * ```
+ *
+ * So a thrown STRING (or object, or `null`) — which is what a hand-written
+ * port's `throw "unreachable"` and several third-party libraries produce —
+ * propagates straight out of `app.fetch` and the client gets workerd's own
+ * `text/plain` 500. `gatewayErrorHandler` is registered and simply never runs.
+ * `test/inference/error-envelope.test.ts` pins this with a literal throw; it
+ * was RED with the handler in place, which is the whole reason this middleware
+ * exists rather than a better `onError`.
+ *
+ * A `catch` here is not the "wrap everything and stringify" this issue warns
+ * against: nothing about the caught value is copied onto the wire.
+ * `classifyError` keeps an `HttpError`/`FerrogateError`/`GatewayError`'s own
+ * status, code and message — so a refusal that already had a taxonomy keeps it
+ * — and gives everything else the constant `500 internal_error /
+ * "internal server error"`.
+ *
+ * ## Why it is mounted TWICE
+ *
+ * Position is the difference between one failure and two. Mounted only at the
+ * top, a throw below `requestLogging()` unwinds past that middleware's
+ * `await next()` and no `request_logs` row is ever written — the outage the
+ * client saw would leave no durable evidence at all (#664). Mounted only at the
+ * bottom, a throw raised BY one of the cross-cutting middlewares (or by the
+ * auth guard) is outside its window again.
+ *
+ * So `createGatewayApp` mounts it immediately below `requestMetrics` and again
+ * immediately above the routes. The inner mount converts a handler's throw into
+ * a `Response` that every middleware above it — the request log, the metering
+ * drain, the telemetry emitter, the status counters — observes normally; the
+ * outer mount is the last line for everything else. The two are idempotent: the
+ * inner one has already produced a `Response`, so the outer one catches nothing
+ * on that path.
+ */
+export const envelopeBoundary: MiddlewareHandler<GatewayEnv> =
+  async function envelopeBoundaryMiddleware(c, next) {
+    try {
+      await next();
+    } catch (error) {
+      const { status, code, message } = classifyError(error);
+      c.res = writeJsonError(c, status, code, message);
+    }
+  };
+
 /** Hono `notFound` — an undocumented path, in the same envelope. */
 export const gatewayNotFoundHandler: NotFoundHandler<GatewayEnv> = (c) =>
   writeJsonError(c, 404, "not_found", `no route for ${c.req.method} ${c.req.path}`);

@@ -19,6 +19,7 @@
  * is written in exactly that order and must not be reshuffled.
  */
 import type { Context } from "hono";
+import { classifyError } from "../middleware/errors.js";
 
 /** `ErrorObject::kind` — the single constant `type` discriminator. */
 export const FERROGATE_ERROR_TYPE = "ferrogate_error" as const;
@@ -304,20 +305,90 @@ export function jsonResponse(
 }
 
 /**
- * Relay an upstream provider body through untouched.
+ * The code an unparseable upstream ERROR body is answered with (issue #733).
+ *
+ * Deliberately NOT `internal_error`: nothing about this failure is internal,
+ * and a code that is always `internal_error` tells a caller no more than the
+ * status line already did. It names the one thing that happened — the provider
+ * refused, and the refusal did not arrive in a shape anybody can read — which
+ * is the difference between "retry the provider" and "FerroGate is broken".
+ */
+export const PROVIDER_INVALID_ERROR_BODY = "provider_invalid_error_body" as const;
+
+/** True when `text` decodes to a JSON OBJECT, i.e. something a client can read. */
+function isJsonObjectBody(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `content-type` as it may appear inside an error MESSAGE.
+ *
+ * A header value is attacker-adjacent (it is chosen by whatever answered the
+ * upstream request, which on a bad day is a captive portal), so only the media
+ * type survives, only from a conservative charset, and only to 64 characters.
+ * The envelope must never become a channel for an upstream's bytes.
+ */
+function safeMediaType(contentType: string): string {
+  const media = (contentType.split(";")[0] ?? "").trim().toLowerCase();
+  const cleaned = media.replaceAll(/[^a-z0-9!#$&^_.+-/]/g, "");
+  return cleaned.length === 0 ? "unknown" : cleaned.slice(0, 64);
+}
+
+/**
+ * Relay an upstream provider body through — verbatim when it is usable, in the
+ * FerroGate envelope when it is not.
  *
  * The Rust `write_raw_response` path echoes the provider's status and
  * `Content-Type` so a provider-side 429/400 reaches the caller with the
  * provider's own error object rather than being reshaped into the FerroGate
- * envelope (`inventory-request-path` §1.6 — only *transport* failures become
- * `provider_dispatch_error`).
+ * envelope (`inventory-request-path` §1.6 — only *transport* failures became
+ * `provider_dispatch_error`). That relay is still the default and it is worth
+ * keeping: the provider's `type`/`param`/`code` are the caller's best
+ * diagnostic, and reshaping them would break every client that switches on
+ * them (`tools/sdk-conformance/test/errors.test.ts` pins exactly that).
+ *
+ * ## The exception, and why it is an exception (issue #733)
+ *
+ * When a CDN or a load balancer in front of the provider answers an error with
+ * an HTML page, the verbatim relay puts markup on the wire under a 5xx: the
+ * SDK's `err.error`, `err.code` and `err.type` are all `undefined` and
+ * `err.message` is a chunk of `<html>`. From the caller's side that is the SAME
+ * CLASS OF EVENT as a transport failure — the provider did not answer usefully
+ * — and FerroGate already wraps a transport failure in its own envelope
+ * (`502 provider_dispatch_error`). The asymmetry was the defect.
+ *
+ * Three decisions, all deliberate:
+ *
+ *  - the wrap is keyed on the BODY being unreadable (not JSON, or JSON that is
+ *    not an object), never on the media type. A provider that mislabels a JSON
+ *    error `text/plain` still gets relayed, and a provider that labels an HTML
+ *    page `application/json` still gets wrapped;
+ *  - the UPSTREAM STATUS is preserved rather than collapsed to 502. A 429 is
+ *    paced, a 503 is retried and a 500 is not; flattening them would delete the
+ *    only distinction the caller still had;
+ *  - the upstream bytes are DROPPED, not truncated into the message. An error
+ *    page is where a backend leaks its own internals (server banners, internal
+ *    hostnames, occasionally a key echoed back), and none of that is FerroGate's
+ *    to forward. What survives is the status and the media type, sanitized.
+ *
+ * Success bodies are untouched at any content type: `/v1/embeddings` and
+ * `/v1/images` pass 2xx bytes through byte-for-byte and this rule must not
+ * reach them.
+ *
+ * ## Headers, which are a separate axis (issue #726)
  *
  * "Untouched" used to stop at the body: the response was rebuilt with
  * `gatewayHeaders` and NOTHING else, so a provider 429 carrying `retry-after`
- * and the `x-ratelimit-*` family reached the caller with none of it (#726).
- * `upstream` is how those come back — filtered to the two documented pacing
- * families, never a blanket copy.
- */
+ * and the `x-ratelimit-*` family reached the caller with none of it. `upstream`
+ * is how those come back — filtered to the two documented pacing families,
+ * never a blanket copy. It is orthogonal to the wrap above: a body we WRAP still
+ * relays the pacing headers, because the caller's need to back off does not
+ * depend on whether the provider's error body was readable. */
 export function rawUpstreamResponse(
   status: number,
   contentType: string,
@@ -325,6 +396,17 @@ export function rawUpstreamResponse(
   requestId: string,
   upstream?: UpstreamRelay,
 ): Response {
+  if (status >= 400 && !isJsonObjectBody(body)) {
+    return errorResponse(
+      reject(
+        status,
+        PROVIDER_INVALID_ERROR_BODY,
+        `provider answered ${status} with an unreadable error body ` +
+          `(content-type ${safeMediaType(contentType)})`,
+      ),
+      requestId,
+    );
+  }
   return new Response(body, {
     status,
     headers: {
@@ -334,6 +416,26 @@ export function rawUpstreamResponse(
       ...gatewayHeaders(requestId),
     },
   });
+}
+
+/**
+ * Render ANY thrown value as the envelope (issue #733).
+ *
+ * The classification is `middleware/errors.ts::classifyError`, reused rather
+ * than re-derived: an `HttpError`/`FerrogateError`/`GatewayError` keeps its own
+ * status, code and message, and anything else becomes
+ * `500 internal_error / "internal server error"`.
+ *
+ * That last arm is the security boundary, and the reason this function exists
+ * instead of a `catch` that stringifies. An `Error` raised deep in a provider
+ * port routinely carries the credential it was using, the upstream URL it was
+ * calling or the binding name that was missing, and its `stack` names every
+ * source file in the request path. None of it is the caller's, so the message
+ * on the unknown arm is a CONSTANT — `classifyError` never copies `error`.
+ */
+export function envelopeForThrown(error: unknown, requestId: string): Response {
+  const { status, code, message } = classifyError(error);
+  return errorResponse(reject(status, code, message), requestId);
 }
 
 /** Hono-flavoured wrapper so handlers can `return errorFor(c, ...)`. */
