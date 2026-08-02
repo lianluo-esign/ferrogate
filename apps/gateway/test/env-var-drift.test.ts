@@ -268,6 +268,11 @@ const SECRETS = [
   "ASSET_S3_ACCESS_KEY_ID",
   "ASSET_S3_SECRET_ACCESS_KEY",
   "ASSET_S3_SESSION_TOKEN",
+  // Issue #682: the fleet-wide AES-256 key that seals every tenant's own
+  // provider credential. ONE binding for the whole fleet — the per-tenant part
+  // is row data in control D1, which is what keeps onboarding and rotation off
+  // the deploy path. A committed value would decrypt every tenant's key.
+  "FERROGATE_BYOK_MASTER_KEY",
   "GATEWAY_DEV_API_KEY",
   "GATEWAY_TENANT_DB_API_TOKEN",
   "GUARDRAIL_EVIDENCE_HMAC_KEY",
