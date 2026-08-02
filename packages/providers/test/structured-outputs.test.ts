@@ -291,29 +291,80 @@ describe("a family that cannot honour the requirement refuses instead of degradi
     expect(config["responseSchema"]).toBeUndefined();
   });
 
-  test("gemini refuses a $ref/$defs schema its responseSchema subset cannot express", () => {
-    const refSchema = {
-      type: "object",
-      properties: { line: { $ref: "#/$defs/line" } },
-      $defs: { line: { type: "string" } },
+  test("gemini refuses schema keywords its responseSchema subset cannot express", () => {
+    const refuse = (schema: Record<string, unknown>): AdapterError => {
+      try {
+        new GeminiAdapter().prepareChatCompletions(
+          geminiProvider,
+          chatPlan(
+            chatBody({
+              response_format: {
+                type: "json_schema",
+                json_schema: { name: "invoice", schema },
+              },
+            }),
+          ),
+        );
+      } catch (error) {
+        return error as AdapterError;
+      }
+      throw new Error("expected a refusal, got a request");
     };
-    expect.assertions(2);
-    try {
-      new GeminiAdapter().prepareChatCompletions(
-        geminiProvider,
-        chatPlan(
-          chatBody({
-            response_format: {
-              type: "json_schema",
-              json_schema: { name: "invoice", schema: refSchema },
+
+    // A `$ref` NESTED under `properties` still has to be found: dropping it
+    // would leave `{}` — a schema that accepts anything — in its place.
+    const nested = refuse({ type: "object", properties: { line: { $ref: "#/$defs/line" } } });
+    expect(nested.kind).toBe("UnsupportedCapability");
+    expect(nested.message).toMatch(/\$ref/);
+
+    const defs = refuse({ type: "object", $defs: { line: { type: "string" } } });
+    expect(defs.message).toMatch(/\$defs/);
+
+    // `oneOf` is the sharpest case: erasing it inverts the contract from
+    // "exactly one of these" to "anything".
+    const oneOf = refuse({ oneOf: [{ type: "string" }, { type: "number" }] });
+    expect(oneOf.kind).toBe("UnsupportedCapability");
+    expect(oneOf.message).toMatch(/oneOf/);
+  });
+
+  test("gemini keeps the shape but drops only value-level keywords Gemini rejects", () => {
+    const prepared = new GeminiAdapter().prepareChatCompletions(
+      geminiProvider,
+      chatPlan(
+        chatBody({
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "invoice",
+              schema: {
+                $schema: "https://json-schema.org/draft/2020-12/schema",
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  total: { type: "number", exclusiveMinimum: 0 },
+                  lines: { type: "array", items: { type: "string", maxLength: 40 } },
+                },
+                required: ["total"],
+              },
             },
-          }),
-        ),
-      );
-    } catch (error) {
-      expect((error as AdapterError).kind).toBe("UnsupportedCapability");
-      expect((error as AdapterError).message).toMatch(/\$ref/);
-    }
+          },
+        }),
+      ),
+    );
+    const schema = (prepared.body as Record<string, any>)["generationConfig"]["responseSchema"];
+    // Shape survives intact...
+    expect(schema).toEqual({
+      type: "object",
+      properties: {
+        total: { type: "number" },
+        lines: { type: "array", items: { type: "string", maxLength: 40 } },
+      },
+      required: ["total"],
+    });
+    // ...and the dropped members are only the ones Gemini's Schema has no field
+    // for; `maxLength` (which it does have) is still there, above.
+    expect(JSON.stringify(schema)).not.toContain("$schema");
+    expect(JSON.stringify(schema)).not.toContain("additionalProperties");
   });
 
   test("a response_format shape the gateway does not model is refused, not dropped", () => {
