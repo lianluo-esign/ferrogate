@@ -40,16 +40,6 @@
  * traversal that the pre-decode check never saw.
  */
 
-/** Everything after `/sites/`, split and validated. */
-export interface SiteRequestTarget {
-  /** First path segment: the site. */
-  readonly slug: string;
-  /** Bundle-relative path, no leading or trailing `/`. `""` for the site root. */
-  readonly path: string;
-  /** Whether the request URL ended in `/` (a DIRECTORY URL). */
-  readonly directory: boolean;
-}
-
 export type SitePathPlan =
   /** `400` — the path is not a legal bundle path. */
   | { readonly kind: "invalid"; readonly reason: string }
