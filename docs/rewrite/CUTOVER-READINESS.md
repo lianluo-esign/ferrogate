@@ -1,4 +1,614 @@
-# CUTOVER READINESS — the decision document
+# CUTOVER READINESS — THE FINAL DECISION
+
+**Wave 25 · 2026-08-02 · branch `main-ts` · worktree `/home/dev/ferrogate-ts`**
+
+This document supersedes every previous version. Waves 15–24 are preserved
+verbatim in **Appendix F** (which itself contains the older Appendices G and H)
+and are **history, not evidence**. Every number in §2 was measured by this agent,
+in this worktree, this wave. Nothing is inherited — including the boot proof,
+which cert-4 explicitly declined to re-run and which is therefore run here.
+
+The question, unchanged since wave 15:
+
+> May we delete `crates/**`, `workers/**` and `Cargo.*`, and merge `main-ts`
+> into `main`?
+
+**This decision has been deferred five times.** Each deferral named a specific,
+falsifiable reason. This document's job is to check whether those reasons are
+spent, and to say so plainly in whichever direction the evidence points.
+
+---
+
+## 0. (a) THE VERDICT
+
+| Decision | Verdict |
+|---|---|
+| **Merge `main-ts` → `main`** | **GO** |
+| **Delete `crates/**` + `workers/**` + `Cargo.*`** | **GO** |
+| **The compound decision as asked (delete AND merge)** | **GO** |
+
+**Surviving CLASS A blockers: ZERO.** §1 is the audit that establishes it, not
+an assertion of it.
+
+### 0.1 The reasoning, in five lines
+
+1. The rule I was given is that **CLASS A blocks and only CLASS A blocks**, and
+   the operative sub-rule since wave 23 is narrower still: what blocks the
+   *deletion* is not the size of CLASS A but the **overlap between CLASS A and
+   the Rust's role as a specification**.
+2. That overlap was five clusters, S1–S5. Wave 24 cleared S3 and S4 (transcribed)
+   and S5 (built). The owner has **dropped S1 and S2** — one of the three exits
+   the wave-23 criterion itself offered, taken deliberately.
+3. S1 was nevertheless transcribed anyway, at algorithm fidelity
+   (`SPEC-TRANSCRIPTS.md` PART D, 863 lines, §§D0–D14). So the overlap is not
+   merely discharged by decision; for four of the five clusters it is discharged
+   by **record**.
+4. **The overlap is now empty.** 80 CLASS A findings survive as product backlog;
+   I re-derived the disposition of each class and **not one requires `crates/**`
+   to exist** in order to be specified, argued about or fixed (§1.2).
+5. What is still uncertain is uncertain because this system has only ever been
+   run offline. **Keeping a Rust tree that cannot be deployed to Cloudflare
+   Workers at all closes none of it** (§4).
+
+### 0.2 What this GO is not
+
+* It is **not** a claim that the TypeScript is complete. Eighty CLASS A findings
+  are open. They are **product backlog**, ranked in §6 — and the distinction
+  between "open work" and "a reason to keep a second implementation" is the
+  entire content of this decision.
+* It is **not** a claim that the drop was costless. S1 and S2 were real, finished
+  Rust behaviour. The owner traded them away deliberately; §3.3 records what it
+  bought and what it cost so nobody later reads it as an accident.
+* It is **not** a claim that the deployment is safe. It is not yet deployed. §4
+  names four ways this fleet can fail **silently in production against a fully
+  green tree**, and `CLOUD-VERIFICATION.md` is the only instrument that closes
+  them.
+* It is **not** a licence to skip the tag. §5.
+
+### 0.3 Why I am not hedging
+
+The honest failure mode available to me here is to invent a sixth deferral —
+there is always one more thing that could be checked, and "hold" always reads as
+the careful answer. It is not the careful answer here. The wave-23 criterion was
+written specifically so that it could be *met*, it names its own exits, and all
+five clusters have now taken one. Restating a met criterion as unmet would be a
+process failure wearing the costume of rigour. **The reasons are spent. GO.**
+
+---
+
+## 1. (b) THE SURVIVING CLASS A LIST — it is EMPTY, and here is the work
+
+**Surviving CLASS A blockers: 0.**
+
+A CLASS A finding **blocks the deletion** if and only if its only complete
+specification is Rust source about to be deleted. That is the wave-23 rule and I
+am applying it unchanged, not loosening it.
+
+### 1.1 The arithmetic, reconciled against cert-4
+
+| Movement | Δ | Status on this tree |
+|---|---:|---|
+| Wave-23 baseline | **83** | 77 contract ops + 6 cross-cutting |
+| S1 + S2 owner-dropped | **−3** | `executeFunction`, `listTools`, `executeTool` — verified mounted as `registerDropped` → `501 capability_not_offered` (§1.3) |
+| A3 / R1 built (S5) | **−1** | `apps/mcp/src/entitlements.ts`, seam `MCP-P15` — mutation-proven by wave 24 and re-proven by cert-4 |
+| `client_action_time` surfaced | **+1** | cert-4 §1.4 found a CLASS A item that was on `MISSING-TRIAGE.md`'s A-list and absent from wave 23's — **confirmed by me**: 0 hits in `apps/gateway/src`, 3 in `apps/cli/src` |
+| **CERT-4 / wave-25 total** | **80** | 74 contract operations + 6 cross-cutting |
+
+The count went **up** by one after the drop was priced in, and I am reporting it
+that way rather than netting it into a smaller-sounding number.
+
+### 1.2 The blocking test, applied to all 80
+
+The 74 contract operations are not spec-bound as a class, for a structural
+reason that is worth stating once: **`crates/**` was never the specification for
+the contract surface.** Two artefacts in `docs/` were, and the Rust was a second
+implementation of them. Both survive the delete and both are parsed here rather
+than assumed:
+
+| Instrument | Measured this wave | What it fixes |
+|---|---|---|
+| `docs/openapi/runtime-api-contract.json` | **251 operations** | path · method · `operation_id` · visibility · `auth.kind` · `auth.scope` · `rbac_action`. Imported directly by all four Workers' `contract.ts`, so it cannot rot silently |
+| `docs/openapi/admin-api.openapi.json` | OpenAPI **3.1.0**, **170 paths**, **371 component schemas** | field-level request/response bodies, parameters, headers, error responses. `ClientTimeTokenHeader` confirmed present |
+| `docs/rewrite/SPEC-TRANSCRIPTS.md` | **2,203 lines** — PART A (S3), PART B (S4), PART C (the honest ledger), **PART D (S1, §§D0–D14)** | the algorithms the Rust held and no doc did |
+| `docs/rewrite/DROPPED-CAPABILITIES.md` | 354 → 383 lines | S1 and S2 as a decision record: what the Rust did, why it was dropped, what a re-implementer needs |
+
+The 6 cross-cutting items were checked one at a time, and each was re-verified
+against **this** tree by me rather than read out of cert-4:
+
+| # | Item | Measured here | Spec-bound? |
+|---|---|---|---|
+| A4 / R2 | `monthly_token_budget = 0` kill switch reaches 1 spend Worker of 3 | files able to emit `token_budget_exceeded`: **gateway 7 · control-plane 2 · mcp 0 · agent-runtime 0** | **NO** — the Rust rule is three lines, quoted verbatim in Appendix F §2.4 and restated as `V-R2` in `CLOUD-VERIFICATION.md` §7 |
+| A5 / L1 | Cloudflare AI Gateway routing unreachable | `cloudflare_ai_gateway` appears **0 times** in `apps/gateway/src` | **NO** — `packages/providers/src/cloudflare.ts` is the complete, tested port; the gap is three edits at a composition root |
+| A7 / R5 | guardrail evidence durable nowhere | `new InMemoryGuardrailEvidenceSink()` at `apps/gateway/src/guardrails/config.ts:184`, unconditional; **0** files in `sql/d1-ts/` mention a guardrail-evaluation table | **NO** — the record shape *is* the TypeScript `GuardrailEvidenceSink` interface; the gap is a D1 table |
+| A8 | no CORS on the `/v1/**` data plane | the only `cors` hit under `apps/gateway/src` is prose in `inference/errors.ts` | **NO** — `apps/control-plane/src/middleware/cors.ts` is a working port of the same Rust function |
+| A9 / D1 | half-bound deploy fails OPEN on 2 Workers, CLOSED on 1 | `FG_DEV_IN_MEMORY_PORTS = "1"` still committed at `apps/mcp/wrangler.toml:37` and `apps/agent-runtime/wrangler.toml:64` | **NO** — a TypeScript configuration asymmetry. No Rust is involved at all |
+| A10 / A11 | two `/metrics` bodies; `apps/mcp` keeps no durable audit trail | `InMemoryAuditSink` at `apps/mcp/src/ports.ts:944`, constructed at `:1471` | **NO** — the series names are in the TypeScript that emits them; `audit_events` is already in the D1 schema and already written by the gateway |
+
+Plus the 19 tail items, each of which is **a literal string**
+(`invalid_upload_intent`, `409 agent_job_not_cancellable`,
+`422 image_generation_unsupported`, …). An error code is fully specified by
+writing it down, and they are written down in Appendix F §2.2.
+
+Plus `client_action_time`, whose wire format is in `admin-api.openapi.json`
+(`ClientTimeTokenHeader`) and whose refusal ladder is in `MISSING-TRIAGE.md` §A4.
+It carries **no interop constraint of the SigV4 kind** — the token is
+server-minted and server-verified and the CLI echoes it without parsing — so a
+fresh implementation may choose its own bytes.
+
+**Result: 80 of 80 recoverable. The spec-bound subset is empty. Nothing blocks.**
+
+### 1.3 The drop is on the wire, not just in a document
+
+I checked this rather than trusting it, because "dropped" and "unfinished" are
+indistinguishable in a route table and that ambiguity is the whole reason
+`DROPPED-CAPABILITIES.md` exists:
+
+```
+apps/gateway/src/routes/index.ts:173  DROPPED_CAPABILITY_CODE = "capability_not_offered"
+apps/gateway/src/routes/index.ts:214  DROPPED_CAPABILITIES: readonly DroppedCapability[]
+apps/gateway/src/routes/index.ts:333  registerDropped(operationId: string): this
+apps/gateway/src/routes/index.ts:436  router.registerDropped("listTools");
+apps/gateway/src/routes/index.ts:439  router.registerDropped("executeTool");
+apps/gateway/src/routes/index.ts:449  router.registerDropped("executeFunction");
+```
+
+All three are mounted **behind the full `contractAuth` ladder** — an anonymous
+caller still gets `401`, an under-scoped one `403` — and gated by
+`apps/gateway/test/routes/dropped-capabilities.test.ts`, which hard-codes the
+dropped set rather than importing it, so the gate does not follow an edit to the
+code it gates.
+
+### 1.4 One correction to cert-4, in cert-4's own direction
+
+Cert-4 §2.4 named exactly one omission — that `ANY_FUNCTION_SLUG` (the wildcard
+slug `"*"`, `function_egress.rs:21`) was missing from the S1 transcription — and
+ranked closing it as the #2 action before deletion.
+
+**It was already closed, in a document cert-4 did not check.**
+`SPEC-TRANSCRIPTS.md` PART D §D3 carries it at lines 1507 and 1562, *including*
+the subtlety that the wildcard is compared un-trimmed while a literal slug is
+compared trimmed. Cert-4 read `DROPPED-CAPABILITIES.md` only.
+
+I added it to `DROPPED-CAPABILITIES.md` §2.1 anyway — the two documents are read
+by different people for different reasons and neither should require the other —
+and the addition records the three properties a re-implementer would otherwise
+get wrong (un-trimmed comparison; the wildcard widens the *slug* axis only, never
+tenant or host; deny-by-default is unchanged and `NoRuleForTenant` stays
+distinguishable from `TargetNotAllowed`).
+
+**This is the only item on cert-4's pre-deletion list, and it is now closed
+twice. Nothing remains that is cheaper before the delete than after it.**
+
+### 1.5 One finding I re-proved rather than inherited — and it is real
+
+`C1`, the operator's tenant-suspension WRITE leg, has been carried forward
+unchanged since wave 23 by two certifications without either re-proving it. I
+proved it, because a carried-forward security claim is exactly the kind that
+turns out to have been fixed or to have gotten worse:
+
+```
+mutate   apps/control-plane/src/store/quota_registry.ts
+         «text(record.status, "active"),»  →  «/*MUTW25_C1*/ "active",»
+off-disk grep: marker present · ORIGINAL TEXT GONE · sha256 changed
+run      apps/control-plane   →  37 files, 693 passed, 0 failed
+run      apps/mcp/test/fleet-tenancy-suspension.test.ts (the FC-2 fleet gate)
+                              →  1 file, 12 passed, 0 failed
+restore  sha256 752bb8d0cdc3e6dc2ca80e5b4b13d13f01db5a187163f0ae0aedbf4c91e2dd50
+         IDENTICAL
+```
+
+Every tenant is projected `'active'` regardless of what the operator wrote, and
+**693 control-plane tests and the 12-case fleet-suspension gate all stay green.**
+The control plane's lifecycle gate reads the *document*; the fleet gate writes
+the *column* with its own hand-written `UPDATE`. Nothing joins the two.
+
+**This does not block the cutover** — it is a TypeScript defect with no Rust
+component, ~25 lines to close, and `crates/**` contributes nothing to closing it.
+It is #2 in §6 and it is the sharpest open item in this repository.
+
+---
+
+## 2. Evidence produced this wave, first-hand
+
+Every row was run by me in `/home/dev/ferrogate-ts` on 2026-08-02. No row is
+inherited.
+
+| Gate | Result |
+|---|---|
+| `bun install` | clean, no changes — 262 installs / 338 packages |
+| `bun run typecheck` | **exit 0**, 22 projects, zero diagnostics |
+| `bun run test`, per workspace, serially (21 workspaces) | **exit 0 in all 21** · **385 files · 7,051 passed · 0 failed · 9 todo** |
+| Seam pass — parse | CLAIMED **201** · PARSED **201** (+1 retired) · resolvable gate **199** · no gate BY DESIGN **2** · **no gate and no reason 0** |
+| **Seam pass — FULL, every row** | **201 run · 196 RED · 0 GREEN-unproven · 5 NOT-MUTABLE by category · 0 restore failures** (§2.1) |
+| Boot — five Workers, `bunx wrangler dev --local`, distinct ports | **5/5 "Ready on"** · `/healthz` **200 ×5** · `/readyz` **200 ×5** (§2.2) |
+| `bunx playwright test --config e2e/playwright.config.ts` | **22 passed**, exit 0, 4.5 s |
+| Mutation — C1, the suspension write leg | **GREEN under a landed mutation** — an unheld invariant, confirmed (§1.5) |
+| `grep -rn MUTW25 apps packages e2e sql` after every pass | **0 hits** |
+
+Baseline was ~7,031. The tree is at **7,051 passed + 9 todo**; the +20 is
+`apps/gateway/test/routes/dropped-capabilities.test.ts`, the gate on the owner's
+drop.
+
+Per-workspace totals, for the record:
+
+```
+billing 91 · cloudflare 146 · config 751 · core 31 · guardrails 439 · identity 136
+observability 67 · payments 54 · policy 113 · providers 102 · routing 33
+schemas 56 · secrets 79 · sso 110 · storage 554
+agent-runtime 541 · cli 344 · control-plane 693 · gateway 2116 · mcp 463 · telemetry 132
+```
+
+### 2.1 The full seam pass — 201 of 201, and how the 20 unlocatable rows were closed
+
+This is the last full pass before the Rust is deleted and the inventory requires
+one here, so the number that matters is not "196 RED" but **"201 rows accounted
+for, 0 of them silently skipped."**
+
+The generic driver (`scripts/wave25-seam-pass.py`) produced:
+
+```
+201 run · 174 RED · 4 GREEN-UNPROVEN · 3 SKIP-BY-CATEGORY · 20 SEAM-NOT-UNIQUE · 0 restore failures
+```
+
+**Twenty unlocatable rows in a summary look exactly like twenty passing ones**,
+and four GREENs against a driver-chosen mutation may be unproven mounts or may be
+mutations that changed bytes without changing behaviour. Both were resolved
+rather than reported:
+
+| Stage | Rows | Result |
+|---|---:|---|
+| generic driver | 201 | 174 RED |
+| `scripts/wave25-seam-residue.py` — 20 hand-written, behaviour-changing edits, each naming in the script the behaviour it removes | 22 | **19 RED**, 2 NOT-MUTABLE by category (`MCP-T10`, `AR-T10` — the deliberately *commented* cross-script `RATE_LIMIT` stanza; commenting a comment is a byte change and not a behaviour change), 1 mis-scoped |
+| hand pass for the last three | 3 | `CP-C13`, `CP-T3`, `MCP-T8` — **all 3 RED** |
+| **union** | **201** | **196 RED · 5 NOT-MUTABLE by category · 0 GREEN-unproven** |
+
+The five that are NOT-MUTABLE **by category** are not unproven rows —
+`CP-C13b` (`NONE`, a knowingly narrower sub-seam), `AR-C9` and `AR-T11`
+(`NOT-MUTABLE`), and the two commented `RATE_LIMIT` stanzas. This distinction is
+why `MOUNT-SEAMS.md` carries a Channel column at all.
+
+**The one mis-scope, named because it is instructive.** The inherited residue
+script's `CP-C13` edit leaves the `/version` route *registered* and only changes
+the document it answers. That is not `CP-C13`; it is `CP-C13b`, the narrower
+sub-seam the inventory already records as knowingly unproven — so its GREEN was
+**correct and expected**, not a finding. Re-running `CP-C13` against its actual
+seam (`MUT-1`, the registration removed outright) is **RED**. Wave 23 hit the
+same thing from the other direction and recorded it; this is the second
+independent confirmation of a tombstone row, which is the best evidence such a
+row can get.
+
+The two `[[d1_databases]]` rows (`CP-T3`, `MCP-T8`) had the same shape of
+problem: the correct mutation is `MUT-4`, *the whole stanza removed*, and
+commenting a single line of a toml table leaves a partially-valid stanza that
+changes nothing. Removed properly, both are RED — the control plane declaring no
+D1 at all, and `apps/mcp` losing the `DB` binding its durable auth and approvals
+resolve through.
+
+Every mutation was **grepped back off disk with the ORIGINAL TEXT REQUIRED
+ABSENT** before its suite ran — marker-present alone is not enough, because a
+concurrent write has clobbered a mutation in this repo before and a sound gate
+then looks vacuous. Every file was restored and re-verified **byte-identical by
+sha256**.
+
+**196 of 201, up from wave 23's 195 of 200. Zero unproven mounts.**
+
+### 2.2 Real boot — five Workers under workerd, bodies read
+
+`bunx wrangler dev --local` on ports 8841–8845, against the **committed**
+`wrangler.toml` of each app. All five reached "Ready on".
+
+`/healthz` — **200 on all five**, one shape, `version` on every one:
+
+```
+gateway        {"status":"ok","service":"ferrogate-gateway","version":"0.0.0","runtime":"workers"}
+control-plane  {"status":"ok","service":"ferrogate-control-plane","version":"0.0.0","runtime":"workers"}
+mcp            {"status":"ok","service":"ferrogate-mcp","version":"0.0.0","runtime":"workers"}
+agent-runtime  {"status":"ok","service":"ferrogate-agent-runtime","version":"0.0.0","runtime":"workers"}
+telemetry      {"status":"ok","service":"ferrogate-telemetry","version":"0.0.0","runtime":"workers"}
+
+distinct shapes: 1 -> IDENTICAL     every document carries `version`: True
+```
+
+`/readyz` — **200 on all five**, and this is where the known item lives:
+
+```
+gateway        {status, service, runtime, cluster{enabled, active_revision, stale,
+                last_sync_error, ready, readiness_reason, draining,
+                accepting_new_requests}}                      ← NO `version`
+control-plane  {status, service, version, runtime, dependencies}
+mcp            {status, service, version, runtime, protocol, readiness_reason,
+                draining, accepting_new_requests, dependencies}
+agent-runtime  {status, service, version, runtime, ready, readiness_reason,
+                draining, accepting_new_requests, dependencies}
+telemetry      {status, service, version, runtime, sink}
+```
+
+**The known item is confirmed exactly as wave 24 re-attributed it: the gateway's
+`/readyz` omits `version`, and `/healthz` carries it on all five.** The earlier
+attribution of this gap to `/healthz` was wrong and stays corrected. The
+gateway's own `readiness.ts:94` docblock names the divergence, so the code and
+the certification agree rather than merely coinciding.
+
+The gateway's `/readyz` is an **async durable read** of the `runtime-state/drain`
+document (FC-1, third leg). It answered 200 with `draining:false` and a resolved
+`active_revision` — a hang, a 500 or an unhandled rejection there would be
+invisible to vitest, which never runs wrangler's own bundle.
+
+**No new defect was found by the boot proof.** Waves 20 and 22 each found one, so
+this is a result rather than an absence of one: the composition roots are stable.
+
+---
+
+## 3. (c) WHAT IS PERMANENTLY LOST BY DELETION, AND WHAT WAS TRANSCRIBED TO BUY IT BACK
+
+Stated as a ledger, because "nothing is lost" would be false.
+
+### 3.1 Lost — and bought back in full
+
+| Cluster | What the Rust uniquely held | What survives the delete |
+|---|---|---|
+| **S3** — the 25 config-backed control-plane operations | the *transaction shape*: persist → clone config → apply snapshot → `validate()` → hot-reload → roll back on error → re-read and answer `409 …_reload_rejected`; the three rollback holes; validator ordering | `SPEC-TRANSCRIPTS.md` PART A §§A1–A6, as an **algorithm**, with the HTTP contract (§A4), read-side scoping (§A5) and wire projections (§A6) |
+| **S4** — `admin_provider` (3) + `admin_model` (1) | the **#535 field-level redaction**, which exists in exactly one Rust function and whose omission is a credential-disclosure regression; the `None`-not-`Some([])` wildcard invariant | PART B §§B1–B5, including the redaction (§B3) and the wildcard invariant, spot-verified against `rbac.rs:1276-1349` |
+| **S5** — the plan/RBAC tool-entitlement ladder | the plan-OR-role admission shape | **built**, not transcribed: `apps/mcp/src/entitlements.ts`, seam `MCP-P15`, mutation-proven 5 RED / 8 |
+| **S1** — the function-egress broker | deny-by-default per-tenant allowlist; the HS256 claim set; TTL bounds; constant-time compare; the seven-member error set; the wildcard slug | **PART D, §§D0–D14 — 863 lines**, the deepest transcript in the file, *despite* S1 having been dropped. Also summarised as a decision record in `DROPPED-CAPABILITIES.md` §2 |
+
+For S1 in particular the transcript goes past what the exit criterion required:
+§D10 records the fail-open/fail-closed posture line by line, §D11 the invariants
+held by control flow rather than a named check, §D12 where the Rust is
+**unfinished** (so nobody transcribes a defect as a specification), and §D13 the
+controls that **do not exist**, so nobody assumes them.
+
+### 3.2 Lost — and bought back only as a brief
+
+| Cluster | Recorded at | Honest assessment |
+|---|---|---|
+| **S2** — `listTools` / `executeTool` | `DROPPED-CAPABILITIES.md` §3.1 | **Pointer fidelity, not algorithm fidelity.** It names `handle_tools` (`local.rs:2890`), the five-step ladder including the `tool.list` audit event, `tools_for` (`extensions.rs:214`), the `tool_visible` filter axes (tenant · api-key · route), the sibling readers and the execution path (`local.rs:2935` → `:3573`). It does **not** transcribe `tool_visible`'s predicate line by line. |
+
+This is a deliberate asymmetry and I am flagging it rather than smoothing it:
+**S2 is the one cluster whose record is a brief rather than a transcript.** It is
+acceptable *because* S2 was dropped as a product position — the exit criterion
+offers "built OR dropped OR transcribed", and S2 took the second exit, not the
+third. If S2 is ever revisited, `DROPPED-CAPABILITIES.md` §3.3 is right that the
+**hook model must be designed fresh** (Rust's `RequestHook` enum has one variant,
+`Noop`, and `EventSink` one, `audit_log` — copying it would import an unfinished
+design), and the catalogue half should be re-derived from the tag (§5) rather
+than from the brief.
+
+### 3.3 Lost outright — the capabilities themselves
+
+Not a documentation gap; a product decision, recorded so it is never mistaken for
+an accident:
+
+* **`POST /v1/functions/execute`** — a broker for a tenant's Supabase Edge
+  Function or Cloudflare Worker, with deny-by-default egress and a 60-second
+  scoped token. **It was never platform-blocked**: it needs only `fetch()` and
+  WebCrypto HMAC, and the "out-of-process sandbox, blocked on Containers"
+  justification that sat in the TypeScript for eighteen waves was **false about
+  the reference**. Anyone reopening this should know the constraint was never
+  technical.
+* **`GET /v1/tools` + `POST /v1/tools/execute`** — the extension tool catalogue
+  and its execution path.
+
+All three now answer `501 capability_not_offered` with a body naming the decision
+and its date, behind the full auth ladder.
+
+### 3.4 Not lost, because it was never there
+
+`packages/cloudflare`'s account-management surface, the `ferrogate-auth-service`
+RBAC route arms, `createAgentRun`'s synchronous turn loop, MCP `resources/read` —
+all CLASS B: **the Rust never finished them**, and porting any of them would
+import a defect. `SPEC-TRANSCRIPTS.md` PART C §C1 is the ledger of exactly which
+Rust must *not* be transcribed as specification. Building that list was as
+valuable as building the transcripts.
+
+---
+
+## 4. (d) WHAT REMAINS UNVERIFIABLE UNTIL THE SINGLE AUTHORISED LIVE DEPLOY
+
+**None of this is closed by keeping `crates/**`. All of it is closed only by the
+one authorised run.** It is stated inside the final decision rather than beside
+it, because it is the real residual risk of this cutover — and it is a *deploy*
+risk, not a *deletion* risk.
+
+### 4.1 The four that can fail silently in production against a green tree
+
+1. **The shared RPM counter (B10). Money. No mechanical backstop of any kind.**
+   `apps/mcp` and `apps/agent-runtime` carry the cross-script `RATE_LIMIT` stanza
+   **commented out**, because workerd cannot resolve a `script_name` binding
+   offline — uncommenting takes both suites to **0 collected tests**. Left
+   commented at deploy, a credential capped at 60 rpm is charged 60 on the
+   gateway **plus 60×N mcp isolates plus 60×M agent-runtime isolates**. Nothing
+   errors. This has now survived seven waves in that state, and it is the single
+   item on this list with no local gate of any kind.
+2. **The half-bound `agent-runtime` (B1 + B4 → A9). Security AND money.** Fully
+   unbound is loud. Bind `DB`, forget `CONTROL_DB`, leave the committed
+   `FG_DEV_IN_MEMORY_PORTS = "1"`, and `resolveDeps` **succeeds** — serving
+   traffic with tenant suspension, the operator drain, guardrail screening and
+   agent-upstream withdrawal **all four silently inoperative**.
+   **Deploy rule: bind `CONTROL_DB` and `DB` together or bind neither.**
+3. **Three control-database uuids that must be equal (B11).** The drain's
+   fleet-wideness is a function of three `database_id` values matching. Point two
+   Workers at different control databases and each drains independently, with
+   `GET /admin/v1/drain` reporting `draining: true` and every local test green.
+   No stanza, no placeholder, nothing to typecheck.
+4. **The mTLS posture (B6).** At `FG_REQUIRE_PRODUCTION_MTLS = "0"` every
+   transport channel is admitted — transport-downgrade acceptance, **not** an
+   authentication bypass. The remediation is not a var flip: `"1"` admits
+   `verified_mutual_tls` only, which `request.cf.tlsClientAuth` supplies
+   **exclusively on a zone with Cloudflare mTLS configured**. Flip it on a zone
+   without mTLS and every self-hosted-worker callback is refused. **Confirm the
+   zone first.**
+
+### 4.2 The rest of the blocker table
+
+**B2** (R2 bucket declared but non-existent) and **B5** (Analytics Engine) fail
+the **deploy**; **B9** (two control migrations) fails the **callback**; **B3**
+(no KV rights) leaves stored-credential encryption unexercised and must be
+*reported* rather than assumed; **B7** (`ADMIN_CONSOLE_JWT_SECRET`) fails
+**closed and loud** — `503 admin_console_unconfigured`; **B8** (per-tenant
+`env://` IdP secrets) fails login closed but indistinguishably from an IdP
+outage, so check it explicitly during the run.
+
+Two verification rows are **expected to record a gap rather than a pass**:
+`V-R2` (partial — gateway only) and `V-B10` (fails unless both stanzas were
+uncommented at deploy). `V-R1` flipped to expected-**PASS** in wave 24.
+
+### 4.3 Axis-level gaps that change no verdict
+
+SSE framing byte-for-byte against the Rust streamers; **AEAD interoperability
+against a real Rust self-hosted-worker binary** (no `cargo`, by hard rule — and
+this window genuinely does close on deletion, though the tag reopens it, §5);
+`sigv4` / Vertex signing against live AWS/GCP; per-operation FIELD parity for ~60
+control-plane collections; Cron dispatch (workerd never fires a scheduled event
+under vitest or `wrangler dev`).
+
+### 4.4 The two insurance artefacts hold, and would still bite after the delete
+
+Both were *irreversible-if-missed*. Wave 24 captured them and cert-4 re-derived
+both from published algorithm text rather than from the code under test — the FNV
+golden table **165/165**, anchored on the canonical FNV-1a-64 reference vectors
+first; the two SigV4 signatures reproduced exactly from AWS's algorithm. Both
+were re-proved to bite by mutation (`FNV_PRIME` → 3 RED / 5; the SigV4 canonical
+blank line → 6 RED / 27 plus 2 RED / 23, where the same mutation previously left
+`packages/providers` **75/75 green**).
+
+Their independence from `crates/**` is the load-bearing property: the only
+occurrence of `crates` in the FNV golden file is a **provenance comment**.
+Nothing at runtime reads the Rust. **They will still catch a divergence after the
+delete.**
+
+---
+
+## 5. (e) IRREVERSIBILITY — the tag recovers the bytes
+
+**`legacy-rs` recovers everything this deletion removes.** Verified, not assumed:
+
+```
+$ git rev-parse legacy-rs                → 90e47fe0…  (annotated tag object)
+$ git rev-list -1 legacy-rs              → 9ea3cc185a0ab11d08348ca9c42293bd196b0a97
+$ git log -1 legacy-rs                   → 2026-07-31 01:13:46 +0800  "remove AGENTS.md"
+$ git ls-tree -r legacy-rs | grep -c '\.rs$'        → 872   (812 under crates/)
+$ git ls-remote --tags origin | grep legacy-rs      → present on ORIGIN
+$ git diff --stat legacy-rs HEAD -- crates workers Cargo.toml Cargo.lock
+                                                    → (empty)
+```
+
+**The last line is the one that matters.** The Rust tree at `legacy-rs` is
+**byte-identical** to the Rust tree at `HEAD` — the rewrite never touched
+`crates/**`, `workers/**` or `Cargo.*`. So the tag is not an approximate
+snapshot; it is exactly the bytes about to be deleted, and it is on the remote,
+not only in this clone.
+
+**Therefore: what deletion costs is a working-tree diff source, not the code.**
+The distinction is precise and worth stating in both directions:
+
+* **Recoverable, cheaply, forever** — reading a Rust function, quoting a line
+  number, re-deriving an algorithm, settling a dispute about what the reference
+  did. `git show legacy-rs:crates/ferrogate-runtime/src/function_egress.rs`.
+* **Genuinely harder afterwards** — anything that wants both trees *in the working
+  directory at once*: `grep -r` across Rust and TypeScript in one pass; an
+  editor's cross-language jump; a side-by-side diff of a handler against its
+  port. That friction is real, and it is why five waves of transcription happened
+  before this decision rather than after it.
+* **Not restored by the tag at all** — `cargo` was never available in this
+  environment. The AEAD-interop-against-a-real-Rust-binary gap (§4.3) needs a
+  machine with a Rust toolchain plus the tag, and was never closeable here.
+
+**Confirm the tag, then delete.** It already exists and is already pushed, so
+this is a check rather than a step.
+
+---
+
+## 6. Ranked actions, now that the gate is open
+
+1. **Merge, then delete.** `crates/**`, `workers/**`, `Cargo.*`. Confirm
+   `git ls-remote --tags origin | grep legacy-rs` first (§5).
+2. **Close C1** (§1.5) — the suspension WRITE leg. Security-adjacent, ~25 lines,
+   and FC-2 currently arrives through a door nobody is watching. **This is the
+   sharpest open item in the repository.**
+3. **Add the column property** to `fleet-control-matrix.test.ts`: *every column of
+   a shared control table that any Worker PARSES must have at least one Worker
+   that CONSUMES it in a decision.* R1 and R2 were both found by hand; this is
+   the gate that finds the third.
+4. **Close A4 / R2** — two SQL columns and one branch on each of two Workers.
+5. **Close A5 / L1** — three edits, the third being the one that matters: assert
+   the PREPARED ENDPOINT is the AI Gateway host.
+6. **Close `client_action_time`** (§1.1) or delete the CLI's signing half. What is
+   wrong today is the *asymmetry*; either direction fixes it.
+7. **Run `CLOUD-VERIFICATION.md` once, carefully**, treating §4.1 as the thing the
+   run is FOR.
+8. The 19 tail items, the 55 A6 write halves, R5 (guardrail evidence), R4 (mcp
+   audit), CORS on `/v1/**`.
+
+### 6.1 One defect class worth naming rather than fixing a fourth time
+
+Three times now this project has been bitten by **text that is inert to the
+compiler and corrupting to the evidence instrument**: raw NUL bytes (wave ~12),
+newlines in FILE NAMES (wave 23), and `/*` inside a `//` line comment (wave 25,
+which ate an `export interface` out of a scanner's view and turned a vacuity
+guard red). Each was caught by a guard built *after* the previous one. The class
+is "the evidence instrument parses source with a regex"; the fix belongs at the
+class level, not the instance level.
+
+---
+
+## 7. Scope statement
+
+Run in `/home/dev/ferrogate-ts` on `main-ts`, 2026-08-02.
+
+**No `cargo`. No Rust compiled, imported, linked, wasm'd or subprocessed.**
+`crates/**` was **READ ONLY**, once, to verify `ANY_FUNCTION_SLUG`'s semantics
+against the transcription (§1.4) — the last moment that check can be made.
+**No `wrangler deploy`, no live Cloudflare resource, no real upstream LLM call.**
+**Nothing deleted. No merge to `main`.** The owner executes the cutover.
+
+Files written by this agent: `docs/rewrite/CUTOVER-READINESS.md` (this file),
+`docs/rewrite/CLOUD-VERIFICATION.md` (§8 added, §6 checklist corrected),
+`docs/rewrite/DROPPED-CAPABILITIES.md` (§2.1 wildcard), and three wave-25 gate
+scripts under `scripts/`. **No source file and no test file was created or
+modified.** No test was weakened, skipped or deleted.
+
+Every mutation — 201 seam rows plus C1 — was read back **OFF DISK with the
+ORIGINAL TEXT REQUIRED ABSENT**, then reverted and verified **byte-identical by
+sha256**. `grep -rn MUTW25 apps packages e2e sql` returns nothing.
+
+---
+
+## 8. The verdict, in one paragraph
+
+`crates/**` was never the specification for the contract surface — the
+251-operation contract and the 3.1.0 OpenAPI document were, and they live in
+`docs/`. What the Rust uniquely held was five clusters. Two were transcribed as
+algorithms, one was built, one was dropped *and transcribed anyway at the deepest
+fidelity in the file*, and one was dropped and recorded as a brief. The two
+artefacts that expire on deletion are captured and independently re-derived.
+Eighty CLASS A findings survive as product backlog and **not one of them needs
+the Rust to exist in order to be specified, argued about, or fixed** — which is
+the test, and the only test, that this decision was ever supposed to apply. The
+tree typechecks clean, is green on 7,051 tests, holds **196 of 201** mount seams
+under landed mutation with **zero** unproven mounts, boots all five Workers under
+real workerd, and passes 22 E2E specs. What is left uncertain is uncertain
+because this system has only ever been run offline, and keeping a Rust tree that
+cannot be deployed to Cloudflare Workers at all closes none of it. The bytes are
+recoverable from `legacy-rs`, byte-for-byte, on the remote. **Merge, and delete.
+GO.**
+
+---
+---
+
+# APPENDIX F — the wave-23 / wave-24 document, preserved verbatim
+
+Everything below this line is the previous decision document, unedited. It
+reached **NO-GO on the deletion**, on a five-cluster spec-bound subset, and it is
+preserved because its reasoning is what made this wave's GO checkable rather than
+asserted: it named the exit criterion, and §0.3 of it is the criterion that has
+now been met. Its own Appendices G and H (waves 19–22 and 15–18) are nested
+inside it.
+
+**Read it as history. Where it disagrees with the document above, the document
+above is current.**
+
+## (archived) CUTOVER READINESS — the wave-23 / wave-24 decision document
 
 **Wave 23 · 2026-08-01 · branch `main-ts` · worktree `/home/dev/ferrogate-ts`**
 

@@ -14,8 +14,8 @@
  *
  * Remove either `router.register(...)` line in `src/routes/index.ts` and the
  * deployed cases go red (the contract anti-drift test in `test/contract.test.ts`
- * goes red too); swap the handler for `registerNotImplemented` and they go red
- * with a 501.
+ * goes red too); swap the handler for `registerDropped` and they go red with a
+ * 501.
  */
 import { SELF, env } from "cloudflare:test";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

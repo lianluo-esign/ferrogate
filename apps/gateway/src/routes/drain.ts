@@ -60,10 +60,15 @@ export const NODE_DRAINING_MESSAGE =
  *
  * `createChatCompletion` and `createResponse` share `plan_ai_ingress`;
  * `createEmbedding`, `createImage` and `createMessage` each carry the check in
- * their own handler. Rust's sixth site, `governed_decision.rs:502`, has no
- * mounted TS counterpart yet (`executeTool` is the gateway's documented 501),
- * so it is named here rather than silently dropped: when that handler lands it
- * belongs in this list.
+ * their own handler. Rust's sixth site, `governed_decision.rs:502`, sits behind
+ * `executeTool`, which this deployment does not offer at all: it is a DROPPED
+ * capability (owner decision 2026-08-02, cluster S2 —
+ * `docs/rewrite/DROPPED-CAPABILITIES.md`) answering
+ * `501 capability_not_offered`. It is named here rather than silently omitted
+ * so the count against Rust stays legible, and it is deliberately NOT in the
+ * list below: draining an operation this deployment refuses outright would
+ * replace a decided refusal with a temporary one. If the drop is ever revisited
+ * it belongs in this list on the same day the handler lands.
  */
 export const DRAIN_GUARDED_OPERATION_IDS: readonly string[] = [
   "createChatCompletion",

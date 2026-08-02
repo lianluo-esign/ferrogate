@@ -1,5 +1,12 @@
 # Cloud verification — the ONE authorised live deploy
 
+> **WAVE 25 — THIS IS ABOUT TO BE EXECUTED FOR REAL.** `CUTOVER-READINESS.md`
+> returned **GO** on 2026-08-02, so this document stops being a contingency and
+> becomes the runbook. §6 was re-derived against §0's blocker table in that
+> light and **four ordering/completeness defects were found and fixed**, listed
+> in §8. Read §8 before §6 if you have run through this document before — the
+> step numbers have changed.
+
 **Status: PLAN ONLY. Nothing in this document has been executed.** *(Wave 22: still true. This wave ran the full regression sweep, the seam pass, five `wrangler dev --local` boots and the E2E suite — all offline. No `wrangler deploy`, no live Cloudflare resource, no upstream LLM call. Wave 19 added **B10**; wave 22 added **B11** and the `runtime-state/drain` row in §2(d).)* No
 `wrangler deploy` has been run, no Cloudflare resource has been created or
 mutated, and no upstream LLM has been called. Everything proven so far is
@@ -216,31 +223,81 @@ Fill in the placeholders — **do not commit these edits**:
 6. gateway: `database_id` ×3, `bucket_name` ×2, queue name.
 7. control-plane: `database_id`.
 8. mcp: `database_id`, KV `id`, and `FG_DEV_IN_MEMORY_PORTS = "0"` (B1).
-9. agent-runtime: `FG_DEV_IN_MEMORY_PORTS = "0"` (B1),
-   `FG_REQUIRE_PRODUCTION_MTLS = "1"` (**B6**) and, if in scope, the two
-   D1 stanzas (B4). Leave `CONTAINER_GOVERNED_EGRESS_HOSTS = ""` as committed
-   unless the run needs container egress: empty means SEALED (#471), and
+9. agent-runtime: `FG_DEV_IN_MEMORY_PORTS = "0"` (B1) and, if in scope,
+   **both** D1 stanzas (B4 — `CONTROL_DB` and `DB` together or neither; see
+   §7.2, the half-bound posture is the silent one). Leave
+   `CONTAINER_GOVERNED_EGRESS_HOSTS = ""` as committed unless the run needs
+   container egress: empty means SEALED (#471), and
    `test/governance-mount.test.ts` (wave 14) proves `resolveDeps` really reads
    the var rather than defaulting permissively.
-10. telemetry: real `dataset` name.
+10. agent-runtime, **mTLS — a decision, not a flip.** `FG_REQUIRE_PRODUCTION_MTLS`
+    goes to `"1"` **only if the zone has Cloudflare mTLS configured** (§7.1).
+    On a zone without it, `"1"` refuses **every** self-hosted-worker callback.
+    Confirm the zone first; if it is not configured, leave `"0"` and record in
+    the result that the run covered a transport-downgrade-accepting posture.
+11. telemetry: real `dataset` name.
+12. **B11 — check the three control-database uuids MATCH before deploying.**
+    `apps/gateway`'s `BILLING_DB` and `CONTROL_DB`, `apps/control-plane`'s `DB`,
+    `apps/mcp`'s `DB`, and (if bound, step 9) `apps/agent-runtime`'s
+    `CONTROL_DB` must all be the SAME uuid. Nothing typechecks this and every
+    local test stays green if they diverge; the drain and the tenant-lifecycle
+    authority then apply per-Worker instead of fleet-wide. Diff the values by
+    eye now — this is the cheapest 30 seconds in the whole run.
 
 Schema:
 
-11. `cd apps/control-plane && bunx wrangler d1 migrations apply DB --remote`
-12. `cd apps/gateway && bunx wrangler d1 migrations apply DB --remote`
+13. `cd apps/control-plane && bunx wrangler d1 migrations apply DB --remote`
+    (applies **both** control migrations, `0001_init_control.sql` and
+    `0002_sso_flow_nonce.sql` — see **B9**).
+14. `cd apps/gateway && bunx wrangler d1 migrations apply DB --remote`
     (tenant schema → tenant database only).
+    `apps/mcp` has **no** `migrations_dir` by design; its `DB` is the control
+    database and step 13 already covered it.
 
-Secrets (§4), at minimum `TELEMETRY_TOKEN` and one provider key.
+Secrets (§4) — the required set, by Worker:
+
+15. **control-plane: `ADMIN_CONSOLE_JWT_SECRET` (B7). REQUIRED, not optional.**
+    `bunx wrangler secret put ADMIN_CONSOLE_JWT_SECRET --name ferrogate-control-plane`.
+    Unset, the entire `/v1/admin/*` surface and both SSO callbacks answer
+    `503 admin_console_unconfigured` — fail-closed and loud, but the console is
+    unusable and V8 cannot be run.
+16. **control-plane: one secret per tenant IdP** named by
+    `sso_provider_configs.oidc_client_secret_ref` (**B8**) — only if an OIDC
+    login is in scope. An unresolvable `env://` reference fails the login closed
+    and looks exactly like an IdP outage, so verify it explicitly.
+17. **gateway: `TELEMETRY_TOKEN`** — required if V7 is to mean anything
+    (`telemetryFromEnv` returns `NO_TELEMETRY` when unset and every emit is a
+    no-op).
+18. **gateway: one provider credential**, named by
+    `GATEWAY_PROVIDERS[].api_key_var` (e.g. `OPENAI_API_KEY`) — required for V5,
+    the only request that calls an upstream LLM.
+19. mcp: `FERROGATE_MCP_IDENTITY_KEY` — only if the stored-credential path is in
+    scope, and only meaningful if **B3** (KV) was resolved by enabling KV.
 
 Deploy, in this order: `telemetry` → `control-plane` → `gateway` → `mcp` →
-`agent-runtime`.
+`agent-runtime`. (§1 explains why it is not arbitrary: `TELEMETRY_COLLECTOR` and
+`RATE_LIMIT` are both resolved **by name at deploy time**.)
+
+20. **AFTER `ferrogate-gateway` is deployed and BEFORE `ferrogate-mcp` and
+    `ferrogate-agent-runtime`: uncomment the cross-script `RATE_LIMIT` stanza in
+    BOTH** `apps/mcp/wrangler.toml` (~:225) and `apps/agent-runtime/wrangler.toml`
+    (~:170) — see **B10**. This step has **no mechanical backstop of any kind**:
+    it cannot be gated locally (uncommenting takes each app's suite to 0
+    collected tests, because workerd cannot resolve a `script_name` binding
+    offline), it does not fail the deploy, and it does not error at runtime.
+    Skipped, the fleet-wide RPM ceiling is silently multiplied by the isolate
+    count. **Do NOT "fix" this by defining a local `RateLimiterDurableObject` in
+    either Worker** — that deploys cleanly, passes everything, and hands each
+    Worker its own private counter and a second full RPM allowance.
+    Confirm with **V-B10**.
 
 Verify with real requests — the smallest set that actually proves the wiring:
 
 | # | Request | Expected | What it proves |
 |---|---------|----------|----------------|
-| V1 | `GET /healthz` on all five | 200 + `{"status":"ok","service":…,"version":…,"runtime":"workers"}` — **all five, identical shape** (measured wave 21 under `wrangler dev --local`; the older note that agent-runtime answers `{"ok":true}` is stale, wave 20 closed it) | The Worker boots in production, which `--local` only approximates |
-| V2 | `GET /readyz` on the gateway | 200 | Config revision loaded and not draining |
+| V1 | `GET /healthz` on all five | 200 + exactly `{"status":"ok","service":…,"version":…,"runtime":"workers"}` — **all five, one shape, four keys, `version` on every one.** Re-measured under `wrangler dev --local` in wave 25: `distinct shapes: 1`. (The old note that agent-runtime answers `{"ok":true}` is stale — wave 20 closed it) | The Worker boots in production, which `--local` only approximates |
+| V2 | `GET /readyz` on the gateway | 200. **Expect `{status, service, runtime, cluster{…}}` with NO `version`** — the gateway is the one Worker of five whose readiness document omits it (the other four carry it). This is a KNOWN open CLASS A tail item, recorded at `apps/gateway/src/routes/readiness.ts:94`; **do not report it as a live-run finding.** Anything else about the shape IS a finding | Config revision loaded, not draining, and the durable `runtime-state/drain` read completes (it is async since FC-1) |
+| **V-DROP** | `POST /v1/functions/execute`, `GET /v1/tools`, `POST /v1/tools/execute` — each (a) with no credential and (b) with a valid, correctly-scoped operator credential | (a) **`401`** (b) **`501 capability_not_offered`**, with a body naming the decision and its date | **Wave 25.** These three are **dropped by owner decision** (`DROPPED-CAPABILITIES.md`), not unfinished. The row exists so an operator does not file the 501 as a defect — and so the (a) leg confirms the refusal sits **behind** the auth ladder rather than in front of it, which is what distinguishes a decided capability from a hole in the router. Gated offline by `apps/gateway/test/routes/dropped-capabilities.test.ts` |
 | V3 | `GET /v1/models` with **no** credential | `401 missing_api_key` | The contract guard is live ahead of every route |
 | V4 | `GET /v1/models` with a provisioned key | 200 + the configured registry | D1 key authentication against the REAL control database |
 | V5 | `POST /v1/chat/completions` with a real provider key | 200 | The one request that costs money — the whole dispatch path, and the only step that calls an upstream LLM |
@@ -325,3 +382,68 @@ bind neither.** Binding exactly one is the only configuration in this table that
 degrades silently in the security direction, and V-FC1 / V-FC2 / V-FC3 are the
 rows that catch it — run all three, and treat a pass on the gateway and mcp with
 a serve on agent-runtime as a FAILED verification, not a partial one.
+
+---
+
+## 8. WAVE 25 — what changed in this document, and why
+
+`CUTOVER-READINESS.md` returned **GO**, so this file was re-read as a runbook
+somebody is about to follow rather than as a plan somebody might follow. Four
+things in §6 were wrong or missing **relative to this document's own §0 blocker
+table** — every one of them a case where the blocker was correctly described in
+§0 and then silently dropped out of the ordered steps. A blocker that is
+documented but not on the checklist is a blocker that will be skipped.
+
+| # | Defect in the old §6 | Fix |
+|---|---|---|
+| 1 | **B10 was not a step at all.** The old §6 said "Deploy, in this order: …" and stopped. Uncommenting the two cross-script `RATE_LIMIT` stanzas appeared only in §0's B10 row and in §1's prose — and it is the one item in the whole run with **no mechanical backstop of any kind**, that does not fail the deploy and does not error at runtime | now **step 20**, positioned explicitly *after* the gateway deploy and *before* mcp/agent-runtime, with the "do not define a local DO instead" warning inline rather than a section away |
+| 2 | **`ADMIN_CONSOLE_JWT_SECRET` was not named as required.** The old §6 said "Secrets (§4), at minimum `TELEMETRY_TOKEN` and one provider key" — omitting the one secret on the control plane that is **REQUIRED** (B7). Following §6 literally produced a control plane where V8 and every SSO leg answer `503 admin_console_unconfigured` | the secrets block is now steps **15–19**, one row per secret, per Worker, with the consequence of omission on each |
+| 3 | **B11 had no step.** "All three spend Workers must resolve the SAME control-database uuid" appeared in §0's B11 row and in §5's `runtime-state/drain` row, but there was no point in the ordered flow at which a human compares the values — and divergence is invisible to every local test and to the deploy itself | now **step 12**, placed after the placeholders are filled and before the migrations, which is the only window where the values are all in front of you |
+| 4 | **B6's remediation was stated flatly as `= "1"`.** §7.1 had already re-scoped it to *"correct only where the ZONE has Cloudflare mTLS configured"*, and flipping it on a zone without mTLS **refuses every self-hosted-worker callback** — i.e. the old step 9 could take a working deployment down | now **step 10**, stated as a decision with an explicit "if the zone is not configured, leave `0` and record it" branch |
+
+Also added:
+
+* **`V-DROP`** — the three owner-dropped operations (`executeFunction`,
+  `listTools`, `executeTool`) now have a verification row, so their
+  `501 capability_not_offered` is confirmed *as the decision it is* and is not
+  filed as a live-run finding. Its (a) leg — no credential ⇒ `401` — is the part
+  that matters: it confirms the refusal sits **behind** the auth ladder, which is
+  what distinguishes a decided capability from a hole in the router.
+* **V1 / V2 re-measured**, not re-asserted. Wave 25 booted all five Workers under
+  `wrangler dev --local` and read the bodies: `/healthz` is **one four-key shape
+  across all five with `version` on every one**, and the gateway's `/readyz` is
+  the **only** one of the five that omits `version`. V2 now says so, so that a
+  known CLASS A tail item is not rediscovered as a live-run defect — while
+  anything *else* about that shape remains a finding.
+
+### 8.1 What did NOT change, and should not
+
+The deploy **order** in §1, the placeholder tables in §2, the migration commands
+in §3, the secret semantics in §4 ("absent = inert, never absent = insecure"),
+the declared-but-unreadable table in §5, and the expected-FAIL rows in §7 were
+all re-read and are accurate. In particular:
+
+* **`V-R2` and `V-B10` are still expected to FAIL**, and they must still be run.
+  A verification plan that omits a known-failing check is worse than one that
+  admits it: an operator who runs §6 and sees every row pass will reasonably
+  conclude the fleet controls are whole, and two of them are not.
+* **`V-R1` is expected to PASS** since wave 24, and it is now the only
+  account-side evidence that the entitlement ladder reads the *deployed* control
+  database rather than a placeholder `database_id`.
+* **§7.2's deploy rule stands unchanged and is the most important sentence in
+  this file:** on `apps/agent-runtime`, **bind `CONTROL_DB` and `DB` together or
+  bind neither.** Binding exactly one is the only configuration here that
+  degrades silently in the security direction. Treat a pass on gateway and mcp
+  with a *serve* on agent-runtime in V-FC1/V-FC2/V-FC3 as a **FAILED**
+  verification, not a partial one.
+
+### 8.2 One thing this run cannot tell you
+
+`CUTOVER-READINESS.md` §1.5 records **C1**: the control plane's tenant-suspension
+WRITE leg is held by no test — neutralising it leaves 693/693 control-plane specs
+and the 12-case FC-2 fleet gate green. **`V-FC2` will not catch it either**, for
+the same reason the offline gates do not: the gate writes the `tenants.status`
+column with its own `UPDATE` rather than going through the projection that is
+broken. So if V-FC2 passes, that is evidence about the *read* path only. Closing
+C1 is ~25 lines and is ranked #2 in `CUTOVER-READINESS.md` §6; doing it before
+the run would make V-FC2 mean what it appears to mean.

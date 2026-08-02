@@ -74,14 +74,25 @@ describe("bearer authentication", () => {
     const res = await SELF.fetch(`${BASE}/v1/tools`, {
       headers: { "x-api-key": "fg_tenant_tools" },
     });
-    // 501 == the guard passed and the (not-yet-ported) handler answered.
+    // 501 == the guard passed and the mounted handler answered. `listTools` is
+    // a DROPPED capability (owner decision 2026-08-02, cluster S2) — see
+    // `test/routes/dropped-capabilities.test.ts` and
+    // `docs/rewrite/DROPPED-CAPABILITIES.md`. What matters here is only that the
+    // credential got through the guard to it.
     expect(res.status).toBe(501);
   });
 
   it("lets a correctly scoped key through to its handler", async () => {
     const res = await SELF.fetch(`${BASE}/v1/tools`, { headers: bearer("fg_tenant_tools") });
     expect(res.status).toBe(501);
-    expect((await envelope(res)).error.code).toBe("not_implemented");
+    // `capability_not_offered`, not the old `not_implemented`: the refusal is a
+    // recorded product decision rather than an unfinished port, and the code is
+    // the half of the envelope a client switches on. The drop itself is pinned
+    // in `test/routes/dropped-capabilities.test.ts`; this assertion keeps the
+    // AUTH ladder's terminal rung honest about which handler answered.
+    const { code } = (await envelope(res)).error;
+    expect(code).toBe("capability_not_offered");
+    expect(code).not.toBe("not_implemented");
   });
 });
 

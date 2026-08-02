@@ -130,6 +130,143 @@ export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
 export const PENDING_MODULE_OPERATION_IDS: readonly string[] = [];
 
 // ---------------------------------------------------------------------------
+// Dropped capabilities — a DECISION, recorded where it is served
+// ---------------------------------------------------------------------------
+
+/**
+ * The HTTP status a dropped capability answers with.
+ *
+ * **The contract does not prescribe one.** `docs/openapi/runtime-api-contract.json`
+ * carries no response-status vocabulary at all — an operation is
+ * `{path, method, operation_id, visibility, auth, rbac_action}` and nothing
+ * more — so there was no contract rule to satisfy here and no status to change
+ * to. 501 stays for three independent reasons:
+ *
+ *  1. **It is the house precedent.** The only 501 the Rust gateway ever
+ *     originates is `crates/ferrogate-gateway/src/server/local.rs:11835`
+ *     `self_hosted_worker_production_mtls_not_implemented` — "this build does
+ *     not do this", which is exactly the shape of the answer here.
+ *  2. **It is the only status whose meaning fits.** RFC 9110 §15.6.2 is "the
+ *     server does not support the functionality required to fulfil the
+ *     request", and is the one non-2xx defined as cacheable by default, i.e.
+ *     *permanent unless stated otherwise*. That is a dropped capability.
+ *  3. **Every alternative lies about something.** `404` would deny a route that
+ *     exists, is contract-matched and is auth-guarded. `403` would blame the
+ *     caller's credential for a decision about the deployment. `503` would
+ *     promise the capability comes back when something recovers.
+ *
+ * What was wrong before this decision was never the status. It was the BODY:
+ * `501 not_implemented` + a `PORT-TODO(...)` note reads as a promise, and after
+ * 2026-08-02 there is nothing being promised. See {@link DROPPED_CAPABILITIES}.
+ */
+export const DROPPED_CAPABILITY_STATUS = 501;
+
+/**
+ * The machine-readable code a dropped capability answers with.
+ *
+ * Deliberately NOT `not_implemented`. A client switching on `not_implemented`
+ * is being told to retry after the next release; a client switching on
+ * `capability_not_offered` is being told to stop asking, or to choose a
+ * deployment that offers it. That distinction is the entire product decision,
+ * and the code is the only part of the envelope a machine reads.
+ */
+export const DROPPED_CAPABILITY_CODE = "capability_not_offered";
+
+/** The date the owner made the call. Carried on the wire so it can be audited. */
+export const DROPPED_CAPABILITY_DECIDED_ON = "2026-08-02";
+
+/** Where the reasoning is written down, cited in every refusal. */
+export const DROPPED_CAPABILITY_DOC = "docs/rewrite/DROPPED-CAPABILITIES.md";
+
+/** One capability this deployment has decided not to offer. */
+export interface DroppedCapability {
+  /** Contract operation id. Must be a real one — `register` verifies it. */
+  readonly operationId: string;
+  /** The `CUTOVER-READINESS.md` §3 spec-bound cluster this belonged to. */
+  readonly cluster: "S1" | "S2";
+  /** One clause, present tense: what this deployment does not do. */
+  readonly what: string;
+}
+
+/**
+ * THE DROPPED SET — the owner's decision of 2026-08-02, recorded in code.
+ *
+ * `docs/rewrite/CUTOVER-READINESS.md` §0.3 offered three exits per spec-bound
+ * cluster — **build**, **transcribe**, or **drop** — and §0.5.6 left exactly two
+ * clusters open. The owner took the third exit on both:
+ *
+ *   * **S1 · `executeFunction`** — the brokered edge-function egress path.
+ *   * **S2 · `listTools` / `executeTool`** — the native tool catalogue and the
+ *     governed dispatch into it.
+ *
+ * These three operations answered 501 before the decision and answer 501 after
+ * it, which is precisely the hazard: *a 501 nobody decided and a 501 somebody
+ * chose look identical in the code*. They are distinguishable to an operator,
+ * an auditor and a future maintainer only if the difference is written into the
+ * response and into the tree, so it is written into both — here, in the body
+ * {@link droppedCapabilityMessage} builds, and in {@link DROPPED_CAPABILITY_DOC}.
+ *
+ * Adding an entry here is not a code change, it is a PRODUCT change, and
+ * `test/routes/dropped-capabilities.test.ts` treats it as one: that gate
+ * hard-codes this list rather than importing it, so growing or shrinking the
+ * set is RED until the gate and the document are updated too.
+ */
+export const DROPPED_CAPABILITIES: readonly DroppedCapability[] = [
+  {
+    operationId: "executeFunction",
+    cluster: "S1",
+    what: "this gateway does not broker calls out to tenant edge functions",
+  },
+  {
+    operationId: "listTools",
+    cluster: "S2",
+    what: "this gateway does not publish a native tool catalogue",
+  },
+  {
+    operationId: "executeTool",
+    cluster: "S2",
+    what: "this gateway does not execute catalogue tools on a caller's behalf",
+  },
+];
+
+/** Operation ids in {@link DROPPED_CAPABILITIES}, in decision order. */
+export const DROPPED_OPERATION_IDS: readonly string[] = DROPPED_CAPABILITIES.map(
+  (capability) => capability.operationId,
+);
+
+/** Look up a dropped capability, or fail loudly — an unknown id is a wiring bug. */
+export function droppedCapability(operationId: string): DroppedCapability {
+  const capability = DROPPED_CAPABILITIES.find((entry) => entry.operationId === operationId);
+  if (capability === undefined) {
+    throw new Error(`operation_id ${operationId} is not a declared dropped capability`);
+  }
+  return capability;
+}
+
+/**
+ * The refusal an operator reads at 3am.
+ *
+ * Four things, in the order someone triaging needs them: WHAT was refused and
+ * that it is a property of this deployment rather than of their request; WHY —
+ * a decision, with a date, attributable to the owner; that it is NOT an outage
+ * and NOT work in flight, so nobody waits for it to come back; and WHERE the
+ * full reasoning lives, which survives the deletion of the Rust tree.
+ *
+ * It deliberately contains no "yet", no "not implemented" and no TODO marker.
+ * `test/routes/dropped-capabilities.test.ts` asserts their absence, because
+ * promise language is how a decision silently turns back into a backlog item.
+ */
+export function droppedCapabilityMessage(capability: DroppedCapability): string {
+  return [
+    `${capability.operationId} is not offered by this deployment: ${capability.what}.`,
+    `The capability was dropped by owner decision on ${DROPPED_CAPABILITY_DECIDED_ON}`,
+    `(cutover cluster ${capability.cluster}) — a deliberate product position, not an outage`,
+    "and not a build under way. The decision, the behaviour it dropped and what a future",
+    `implementer would need are recorded in ${DROPPED_CAPABILITY_DOC}.`,
+  ].join(" ");
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -177,10 +314,30 @@ export class GatewayRouter {
     return this;
   }
 
-  /** Mount a not-yet-ported operation as an explicit 501. */
-  registerNotImplemented(operationId: string, note: string): this {
+  /**
+   * Mount an operation this deployment has DECIDED not to offer.
+   *
+   * The mount is real: the operation is matched at the contract's own path and
+   * method and runs the full `contractAuth` ladder, so an anonymous caller
+   * still gets `401 missing_api_key` and an under-scoped one `403 scope_denied`
+   * — the refusal below is only ever reached by a caller who was entitled to
+   * the operation. Leaving it UNMOUNTED instead would answer `404 not_found`,
+   * which claims the endpoint does not exist; it does, and this deployment
+   * declines to serve it. See {@link DROPPED_CAPABILITIES}.
+   *
+   * Takes no note argument, unlike the `registerNotImplemented` it replaced: a
+   * per-call-site string is how the old three refusals drifted into three
+   * different PORT-TODO paragraphs. The wording is derived from the decision
+   * table so all of them say the same thing and can only change together.
+   */
+  registerDropped(operationId: string): this {
+    const capability = droppedCapability(operationId);
     return this.register(operationId, () => {
-      throw new HttpError(501, "not_implemented", note);
+      throw new HttpError(
+        DROPPED_CAPABILITY_STATUS,
+        DROPPED_CAPABILITY_CODE,
+        droppedCapabilityMessage(capability),
+      );
     });
   }
 }
@@ -220,92 +377,76 @@ function readyzHandler(c: Context<GatewayEnv>): Promise<Response> {
 }
 
 /**
- * The tooling operations. FOUR are ported; THREE still answer 501.
+ * The tooling operations. FOUR are served; THREE are DROPPED.
  *
- * ## The split, and how it was decided
+ * ## The four that are served
  *
- * The three that are ported all turned out to be pure projections of OPERATOR
- * CONFIG with no I/O — `handle_agent_skills` reads `state.config.skill_packages`
- * and `handle_prompt_template_render` reads `state.config.prompt_templates`.
- * Their old 501 notes claimed a dependency on "the read model in
+ * They all turned out to be pure projections of OPERATOR CONFIG with no I/O —
+ * `handle_agent_skills` reads `state.config.skill_packages` and
+ * `handle_prompt_template_render` reads `state.config.prompt_templates`. Their
+ * old 501 notes claimed a dependency on "the read model in
  * `apps/control-plane`" that does not exist in the Rust path at all; re-reading
  * the Rust rather than trusting the note is what closed them. They now live in
  * `./skills.ts` and `./prompts.ts`, on `GATEWAY_SKILL_PACKAGES` /
  * `GATEWAY_PROMPT_TEMPLATES`, exactly as `./agent-discovery.ts` reads
  * `GATEWAY_AGENT_UPSTREAMS`.
  *
- * ## Why the remaining three are still 501 and not a payload
+ * ## The three that are dropped — a DECISION, taken on 2026-08-02
  *
- * Each is a projection of, or a dispatch into, a SUBSYSTEM THAT DOES NOT EXIST
- * IN THIS TREE — see the note on each. Answering an empty list, or an invented
- * tool result, would be a fake that papers over the gap: a client cannot tell
- * "this gateway has no tools registered" from "this gateway cannot register
- * tools", and the second is the truth today. 501 says the second.
+ * `listTools`, `executeTool` (cluster S2) and `executeFunction` (cluster S1)
+ * are **not offered by this deployment**. `docs/rewrite/CUTOVER-READINESS.md`
+ * §0.3 gave each spec-bound cluster three exits — build, transcribe, or drop —
+ * and the owner took the third for both of these. It was a legitimate exit and
+ * it is now a settled product position, not a backlog item.
+ *
+ * They answered 501 BEFORE that decision too, as unported stubs carrying
+ * `PORT-TODO(...)` notes, and that is exactly why the difference has to be
+ * visible on the wire: a 501 nobody decided and a 501 somebody chose are
+ * indistinguishable in a route table. Since the decision they answer
+ * `501 capability_not_offered` with a body that names the decision and its date
+ * — see {@link DROPPED_CAPABILITIES} for the reasoning, the status choice and
+ * the wording, and `docs/rewrite/DROPPED-CAPABILITIES.md` for what the Rust did,
+ * why it was dropped, and what a future implementer would need if it is ever
+ * revisited.
+ *
+ * Answering an empty list or an invented tool result instead would be strictly
+ * worse than refusing: a client cannot tell "this gateway has no tools
+ * registered" from "this gateway does not do tools", and the second is the
+ * truth. The refusal says the second, out loud.
  *
  * What IS real about them is everything the router owns. They are matched at
  * the contract's own path, guarded by `contractAuth`, and scope-checked, so an
  * anonymous caller gets `401 missing_api_key` and an under-scoped one
- * `403 scope_denied` — the 501 is only ever reached by a caller who was
- * entitled to the operation. `test/auth.test.ts` pins exactly that ladder
- * (401 / 403 / 501 on `/v1/tools`), which is the test that keeps this
- * approximation honest: it fails if a stub ever starts answering before the
- * guard, and it is what will have to be updated when a real handler lands.
+ * `403 scope_denied` — the refusal is only ever reached by a caller who was
+ * entitled to the operation. `test/auth.test.ts` pins that ladder
+ * (401 / 403 / 501 on `/v1/tools`) and
+ * `test/routes/dropped-capabilities.test.ts` pins the drop itself, so a silent
+ * re-enable, a re-route to a real handler, or a slide back into promise
+ * language is RED.
  *
- * NONE of the three is a platform limit. Every one is a missing upstream:
- * Cloudflare can host all of them.
+ * NONE of the three was dropped because of a platform limit — Cloudflare can
+ * host all three, and `executeFunction` in particular needs only `fetch()` and
+ * WebCrypto HMAC. They were dropped because the owner decided this product does
+ * not offer them.
  */
 function registerToolingRoutes(router: GatewayRouter): void {
-  router.registerNotImplemented(
-    "listTools",
-    // Rust `local.rs::handle_tools` → `state_tools.rs::tools_for`, which is
-    // `extension_registry.tools_for(tenant, api_key_id, route)` PLUS the
-    // registered MCP servers' tools. Neither source exists in the TS tree: the
-    // plugin/extension registry (`ferrogate-runtime`) has no package yet, and
-    // the MCP server registry lives in `apps/mcp`. Listing only one of the two
-    // would understate what a tenant may call, which is worse than 501.
-    "PORT-TODO(P: inventory-request-path §tool catalog): scoped projection of the " +
-      "extension registry + registered MCP servers. Blocked on both registries " +
-      "existing; not a platform limit.",
-  );
-  router.registerNotImplemented(
-    "executeTool",
-    // Rust `handle_tool_execute_with_backend(ToolExecuteBackend::Extension)`:
-    // approval record → governed chokepoint → extension dispatch. The governed
-    // decision path and the approval store are unported.
-    "PORT-TODO(P: inventory-request-path §tool execution): governed native + MCP " +
-      "tool dispatch (approval record, chokepoint allowlist, backend call). " +
-      "Blocked on the extension registry and the governed-decision port.",
-  );
-  router.registerNotImplemented(
-    "executeFunction",
-    // CORRECTION (cert2-dataplane): the paragraph that used to sit here — "the
-    // Rust ran user functions in an out-of-process sandbox … belongs to
-    // apps/agent-runtime (containers/@cloudflare/sandbox)" — is FACTUALLY WRONG
-    // ABOUT THE RUST, and it is the reason this operation was filed as a
-    // platform-blocked item for eighteen waves. Read
-    // `crates/ferrogate-gateway/src/server/local.rs:3219 handle_function_execute`:
-    // there is no sandbox and no container anywhere in it. It is a BROKER. It
-    // reads a `FunctionInvocationRequest`, clears the fail-closed per-tenant
-    // `FunctionEgressAllowlist` of `{project_base_url, function_slug}` targets
-    // (`crates/ferrogate-runtime/src/function_egress.rs`, 197 lines, 0 `todo!()`),
-    // mints a short-lived signed function token
-    // (`function_token.rs`, 200 lines) and `POST`s to a Supabase Edge Function
-    // (`supabase_edge_function.rs`) or — since #435 — to a Cloudflare Worker
-    // (`local.rs:3417 handle_function_execute_cloudflare`,
-    // `function_egress_cloudflare.rs`). Refusals: `503 function_egress_disabled`
-    // when no signing secret is configured, `413 payload_too_large`,
-    // `405 method_not_allowed`, plus the allowlist denials.
-    //
-    // Every primitive it needs exists on Workers today: `fetch()`, WebCrypto
-    // HMAC, and a config table. There is NO paid-plan prerequisite and no
-    // Containers dependency. This is a CLASS A regression, not a platform limit.
-    "PORT-TODO(P: `server/local.rs::handle_function_execute` + " +
-      "`ferrogate-runtime::{function_egress,function_token,supabase_edge_function}`): " +
-      "the brokered edge-function egress path (#117/#120/#435) — fail-closed per-tenant " +
-      "target allowlist, signed short-lived function token, HTTP dispatch to a Supabase " +
-      "Edge Function or a Cloudflare Worker. NOT sandboxed execution and NOT blocked on " +
-      "Containers; fetch() + WebCrypto are sufficient.",
-  );
+  // S2 · Rust `local.rs:2890 handle_tools` → `extensions.rs:214 tools_for`,
+  // i.e. `extension_registry.tools_for(tenant, api_key_id, route)` PLUS the
+  // registered MCP servers' tools.
+  router.registerDropped("listTools");
+  // S2 · Rust `local.rs:3573 handle_tool_execute_with_backend(Extension)`:
+  // approval record → governed chokepoint → extension dispatch.
+  router.registerDropped("executeTool");
+  // S1 · Rust `local.rs:3219 handle_function_execute` — a BROKER, not a
+  // sandbox: fail-closed per-tenant `FunctionEgressAllowlist`, a short-lived
+  // signed function token, and a `POST` to a Supabase Edge Function or a
+  // Cloudflare Worker. `docs/rewrite/DROPPED-CAPABILITIES.md` §S1 carries the
+  // full description, because the `crates/` tree is being deleted and these
+  // citations stop resolving. (Written without a `crates` glob on purpose: the
+  // `/` + `*` + `*` sequence opens a block comment to the naive stripper
+  // `test/fleet-control-matrix.test.ts` runs over this file, which then eats
+  // the next `export` — its §1 vacuity guard catches exactly that.)
+  router.registerDropped("executeFunction");
   // Skill packages are the `[[skill_packages]]` OPERATOR CONFIG TABLE, not
   // control-plane rows — `handle_agent_skills` reads `state.config`. Ported in
   // `./skills.ts`; see the header there for why the old note was wrong.

@@ -9,8 +9,7 @@
  * `GATEWAY_PROMPT_TEMPLATES` (the operator's message text with the caller's
  * variable substituted into it). Remove the `router.register(
  * "renderPromptTemplate", …)` line in `src/routes/index.ts` and every case in
- * the MOUNT block fails; put the old `registerNotImplemented` back and they
- * fail with 501.
+ * the MOUNT block fails; swap it for `registerDropped` and they fail with 501.
  *
  * The model-ladder cases are equally load-bearing: this endpoint hands back a
  * request body naming a model, so an ungated render is a model-enumeration

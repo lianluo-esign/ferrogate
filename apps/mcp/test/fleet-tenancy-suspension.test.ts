@@ -346,7 +346,13 @@ async function fleet(): Promise<Record<string, Wire>> {
  * refusals after the suspension prove nothing at all.
  */
 const ADMITTED: Record<string, Wire> = {
-  gateway: { status: 501, code: "not_implemented" },
+  // `GET /v1/tools` is a DROPPED capability on the gateway (owner decision
+  // 2026-08-02, cluster S2 — `docs/rewrite/DROPPED-CAPABILITIES.md`), so its
+  // admitted-caller answer is the explicit refusal, not the old unported-stub
+  // `not_implemented`. The status is unchanged and so is what this file uses it
+  // for: proof that the ONE `api_keys` row got all the way past the gateway's
+  // tenancy gate to a handler.
+  gateway: { status: 501, code: "capability_not_offered" },
   mcp: { status: 200, code: undefined },
   "agent-runtime": { status: 404, code: "agent_not_found" },
 };

@@ -25,8 +25,11 @@ here now.
   released this project from parity with an unfinished system. Building S3 and
   S4, or explicitly dropping them, are both legitimate; **losing the ability to
   decide** is what is not.
-* It does **not** cover S1, S2 or S5. S1/S2 are a separate product decision;
-  S5 is tracked separately.
+* It does **not** cover S2 or S5. S5 is tracked separately; S2 was dropped by
+  the owner in wave 25 and no transcript was requested for it.
+* **PART D (wave 25) covers S1**, which the owner has **dropped**. That part is
+  insurance on a dropped capability, not a case for building it — see its
+  preamble.
 
 ## Reading conventions
 
@@ -1332,3 +1335,869 @@ contains no test evidence, because it asserts nothing about the running tree —
 it transcribes a specification out of source that is about to be deleted. The
 verifiable claims here are the `crates/…:line` citations, and every one of them
 can be checked against the working tree until the moment `crates/**` is removed.
+
+---
+
+# PART D — S1 · the function egress broker (`POST /v1/functions/execute`)
+
+**Wave 25 · 2026-08-02 · appended after the owner dropped S1 and S2.**
+
+**Read this preamble before the specification.**
+
+The owner has **dropped S1**. `POST /v1/functions/execute` answers `501` in
+TypeScript and stays that way. That decision was one of the three exits
+`CUTOVER-READINESS.md` §3 offered per cluster (build / drop / transcribe) and it
+is made. **Nothing below reverses it, re-litigates it, or asks for it to be
+built.** No code and no test was written for this part.
+
+What is transcribed here is a **security definition**, and it is transcribed for
+one reason: `CUTOVER-READINESS.md:455` records that nothing in `docs/`
+reproduces S1's egress-allowlist semantics or its token claim set, and once
+`crates/**` is deleted that definition is gone. An egress allowlist and a token
+claim set are the specific kind of artefact that looks correct when rebuilt from
+memory and is subtly permissive. If FerroGate ever offers gateway-brokered
+function execution again — under any name — the implementer should be able to
+read what the original actually enforced instead of inventing it fresh.
+
+**Rust that is lost:**
+`crates/ferrogate-runtime/src/function_egress.rs` (197 lines),
+`crates/ferrogate-runtime/src/function_token.rs` (200),
+`crates/ferrogate-runtime/src/supabase_edge_function.rs` (262),
+`crates/ferrogate-runtime/src/cloudflare_worker_target.rs` (307),
+`crates/ferrogate-gateway/src/function_egress.rs` (363),
+`crates/ferrogate-gateway/src/function_egress_cloudflare.rs` (222), and the
+`handle_function_execute` / `handle_function_execute_cloudflare` region of
+`crates/ferrogate-gateway/src/server/local.rs:3219-3571`. Zero `todo!()` in any
+of them — this is finished work, not a stub.
+
+## D0. What already survives the delete, and what it does not say
+
+Two files outside `crates/**` survive and must be read alongside this part:
+
+1. **`docs/design/function-egress-broker.md`** (170 lines) — the design
+   rationale, the trust-domain decision (both self-hosted and cloud-managed
+   workers are gateway-brokered, no special case, §4), the `FG_FN_*` env table
+   (§5a), TOK-6 single-project enforcement, TOK-7 malformed-allowlist handling,
+   and the deny/audit status-code summary. It is genuinely good and it stays.
+2. **`docs/openapi/runtime-api-contract.json:2173-2182`** — the operation
+   record: `path` `/v1/functions/execute`, `method` `post`, `operation_id`
+   `executeFunction`, `visibility` `public`, `auth.kind` `bearer`, `auth.scope`
+   `functions.execute`, `rbac_action` **`null`**. This file is loaded by
+   `include_str!` at `crates/ferrogate-gateway/src/server/api_contract.rs:15-17`,
+   i.e. the contract really was the source of truth, not documentation about it.
+
+**What neither file states, and what is therefore lost without this part:**
+
+* the allowlist **matching algorithm** — whether a rule matches by exact host,
+  by suffix, by prefix, with or without port and scheme;
+* the difference between "this tenant has no rule" and "this tenant has rules
+  but not this one", which is observable to the caller;
+* the **exact claim set** of the minted JWT: field names, field order, what is
+  in `aud`, what is *absent* (there is no `sub`, no `jti`, no `nbf`);
+* the TTL ceiling and default, and the clamping rule;
+* what `verify()` checks and — more importantly — what it does **not** check;
+* redirect policy, DNS policy, private-range policy, response-size policy;
+* the fail-open/fail-closed posture of each individual check;
+* several invariants the Rust holds through **control flow and type shape only**
+  (§D11) — the kind that vanish silently in a reimplementation because there is
+  no named check to notice missing.
+
+## D1. Surface
+
+`POST /v1/functions/execute`, resolved to `RouteGroup::Tool` by the contract
+router (`docs/openapi/runtime-api-contract.json:82-84`) and dispatched at
+`crates/ferrogate-gateway/src/server/route_groups.rs:335-339`.
+
+Gates that run **before** the handler, in order:
+
+| Order | Gate | Where | Effect |
+|---|---|---|---|
+| 1 | Source-IP allowlist / unauthenticated flood limiter | `crates/ferrogate-gateway/src/server/handlers.rs:68-92` | `403 ip_denied` / `429 unauthenticated_rate_limited` |
+| 2 | `/control/v1` → `/admin/v1` alias folding (no effect on this path) | `handlers.rs:59-61` | — |
+| 3 | Pre-request hooks | `handlers.rs:125-135` | handler-supplied status |
+| 4 | **Documented-method check** | `handlers.rs:139-149` | any method other than `POST` ⇒ `405 method_not_allowed`, message `"{method} is not documented for /v1/functions/execute"` |
+
+Because of gate 4, the handler's own `POST`-only check at
+`crates/ferrogate-gateway/src/server/local.rs:3226-3235` (`405
+method_not_allowed`, message `"function execute endpoint requires POST"`) is
+**unreachable through the server**. It is defense in depth for a caller that
+enters the handler directly. An implementer MAY collapse the two, but MUST keep
+one of them.
+
+**There is no RBAC check** (`rbac_action: null`) and **no rate limit, no quota
+check and no billing/metering call** anywhere in `local.rs:3219-3571`. See §D13.
+
+## D2. Configuration — the enable ladder, and its two mutually exclusive branches
+
+All configuration is **process environment**, read **once** per process through
+`OnceLock` (`crates/ferrogate-gateway/src/function_egress.rs:177-182`,
+`crates/ferrogate-gateway/src/function_egress_cloudflare.rs:180-186`). There is
+no hot reload and no per-tenant database-backed allowlist: **changing the
+allowlist requires restarting the gateway.** An implementer who moves this to a
+durable store is making a real change, not a translation.
+
+Branch selection happens at `local.rs:3241-3247`: the Cloudflare branch is
+tested first, and if it is configured the Supabase branch is never reached.
+Symmetrically, `FunctionEgressGatewayConfig::from_env` returns `None` unless the
+discriminant resolves to `Supabase`
+(`crates/ferrogate-gateway/src/function_egress.rs:88-100`). **Exactly one branch
+is live per process.**
+
+`FG_FN_TARGET_KIND` parsing (`function_egress_cloudflare.rs:58-71`):
+
+| Value | Result |
+|---|---|
+| absent, `""`, or `"supabase"` (after `trim`) | `Some(Supabase)` |
+| `"cloudflare_worker"` | `Some(CloudflareWorker)` |
+| anything else | `None` + `tracing::warn!` ⇒ **both branches disabled** |
+
+MUST: an unrecognised discriminant disables **both** branches. It MUST NOT fall
+back to the default.
+
+**Supabase branch enables only if ALL hold** (`function_egress.rs:102-147`):
+
+1. `FG_FN_TARGET_KIND` resolves to `Supabase` (`:88-94`).
+2. `FG_FN_JWT_SECRET` is set and not whitespace-only (`:107`).
+3. `FG_FN_APIKEY` is set and not whitespace-only (`:111`). The comment at
+   `:108-110` states the reason: enabling without an apikey would surface as a
+   misleading per-call denial instead of a clear `503`.
+4. `FunctionTokenMinter::new` succeeds (`:112`) — i.e. issuer and secret are
+   non-blank.
+5. `FG_FN_ALLOWLIST`, if present, parses as a JSON array of rules (`:113-125`).
+   **Malformed JSON ⇒ warn and stay disabled** (TOK-7). Absent ⇒ an empty
+   ruleset, which is legal and denies everything.
+6. The ruleset is **single-project**: all rules' `base_url` normalise to one
+   value (`:134-141`, predicate at `:163-174`). An empty ruleset is trivially
+   single-project. Two or more distinct normalised base URLs ⇒ warn and stay
+   disabled (TOK-6).
+
+**Cloudflare branch enables only if ALL hold**
+(`function_egress_cloudflare.rs:105-175`):
+
+1. `FG_FN_TARGET_KIND` == `cloudflare_worker` (`:111-115`).
+2. `FG_FN_JWT_SECRET` set and non-blank (`:116`).
+3. `FG_FN_CF_WORKER` set, non-blank, and valid JSON for
+   `{"base_url","invoke_path","auth_key_ref"}` (`:117-127`).
+4. That target passes the same fail-closed `validate()` the runtime applies per
+   call (`:131-138`) — https-only, single clean segment, non-empty key ref.
+5. Minter constructs (`:139`).
+6. `FG_FN_ALLOWLIST`, if present, parses (`:140-153`).
+7. **Single-worker rule**: every allowlist rule's normalised `base_url` equals
+   the configured Worker's normalised `base_url` (`:158-169`).
+
+`FG_FN_APIKEY` is Supabase-only; the Worker request never emits an `apikey`
+header (`cloudflare_worker_target.rs:191-196` builds only `authorization` and
+`content-type`).
+
+MUST: every one of these failures is **fail-closed** — the branch stays `None`
+and the route answers `503 function_egress_disabled` (`local.rs:3250-3259`). No
+partial enablement exists.
+
+## D3. The egress allowlist — how it is expressed and how it matches
+
+### D3.1 Shape
+
+`crates/ferrogate-runtime/src/function_egress.rs:24-38`:
+
+```
+FunctionEgressRule { tenant: String, base_url: String, function_slugs: Vec<String> }
+FunctionEgressAllowlist { rules: Vec<FunctionEgressRule> }
+```
+
+`ANY_FUNCTION_SLUG = "*"` (`:21`). Serialised as a JSON array in
+`FG_FN_ALLOWLIST`; field names on the wire are exactly `tenant`, `base_url`,
+`function_slugs`.
+
+### D3.2 Normalisation
+
+`normalize_base_url` (`function_egress.rs:80-82`): `trim()` surrounding
+whitespace, then strip **all** trailing `/` characters
+(`trim_end_matches('/')` — `https://h///` and `https://h` normalise equal).
+That is the **only** normalisation. There is:
+
+* **no** lowercasing — `https://Example.com` and `https://example.com` are
+  DIFFERENT allowlist entries;
+* **no** URL parsing, punycode/IDNA folding, percent-decoding, default-port
+  elision (`https://h:443` ≠ `https://h`), or userinfo stripping;
+* **no** normalisation of the scheme beyond the `https://` prefix test in §D4.
+
+The gateway re-exports the same function for the Cloudflare branch
+(`crates/ferrogate-gateway/src/function_egress.rs:153-155`) so config-time and
+request-time comparison cannot drift apart.
+
+Slug/path comparison uses `trim()` on both sides and nothing else
+(`function_egress.rs:132`, `:146`).
+
+### D3.3 The matching algorithm (the part that must not be re-invented)
+
+`FunctionEgressAllowlist::authorize_validated`,
+`crates/ferrogate-runtime/src/function_egress.rs:125-160`. Stated exactly:
+
+```
+requested_base = normalize_base_url(target.base_url)
+requested_slug = target.function_slug.trim()
+tenant_has_rule = false
+for rule in rules (in declaration order):
+    if rule.tenant != tenant                      -> continue      # EXACT, case-sensitive, untrimmed
+    tenant_has_rule = true
+    if normalize_base_url(rule.base_url) != requested_base -> continue   # EXACT string equality
+    if any slug in rule.function_slugs where slug == "*" OR slug.trim() == requested_slug:
+        return ALLOW
+if !tenant_has_rule: return DENY NoRuleForTenant(tenant)
+return DENY TargetNotAllowed { tenant, base_url: requested_base, function_slug: requested_slug }
+```
+
+MUST, and each of these is a place a fresh design goes wrong:
+
+* **Base-URL match is EXACT string equality after normalisation. It is NOT a
+  suffix, prefix, domain, or wildcard match.** `https://a.example.com` does not
+  match a rule for `https://example.com`. There is no `*.example.com` syntax —
+  the only wildcard anywhere in this system is the slug `"*"`, and it never
+  applies to the base URL.
+* **Scheme and port are matched implicitly, by being part of the compared
+  string.** There is no separate scheme or port check in the allowlist. A rule
+  for `https://h` therefore does not authorise `https://h:8443`, and vice versa.
+* **Tenant match is exact and case-sensitive**, with no trimming of either side
+  (`:136`). A rule whose `tenant` has a stray space never matches anything.
+* **The slug wildcard `"*"` is compared UNTRIMMED, while the literal comparison
+  is trimmed** (`:143-146`: `slug == ANY_FUNCTION_SLUG || slug.trim() ==
+  requested_slug`). A rule entry written as `" * "` therefore does **not** take
+  the wildcard branch; it falls through to the literal branch and matches only a
+  request whose slug is exactly `*`. That is a silent, total narrowing of an
+  entry the operator meant as "any function here" — from every slug to one.
+  Reproduce the asymmetry, or normalise both sides deliberately; do not
+  accidentally trim only one.
+* Relatedly, **`*` is a legal requested slug.** `validate()` (§D4) rejects
+  whitespace, `/`, `?`, `#` and `..` but not `*`, so a caller may request the
+  literal slug `*` and the composed URL becomes `{base}/functions/v1/*`. Against
+  a genuine `"*"` wildcard rule that request is allowed.
+* **A `"*"` entry authorises any slug at that ONE base URL only.** It is not a
+  global wildcard.
+* An **empty allowlist denies everything**, and `is_empty()` is exposed
+  (`:89-91`) purely so callers can assert that.
+* Rules are additive: the first rule that matches allows. There is **no deny
+  rule and no precedence order** — an implementer adding "deny" entries is
+  extending the model, not reproducing it.
+
+### D3.4 The two denial reasons are observable, and that is an oracle
+
+`FunctionEgressDenied` (`function_egress.rs:42-55`) distinguishes
+`NoRuleForTenant(tenant)` from `TargetNotAllowed { tenant, base_url,
+function_slug }`, and their `Display` strings are
+`"no function egress rule for tenant {tenant}"` and `"tenant {tenant} may not
+invoke {function_slug} at {base_url}"` (`:62-72`). The handler puts
+`error.to_string()` straight into the client-visible `403` body
+(`local.rs:3358-3365`, `:3519-3526`).
+
+**Consequence an implementer should decide about deliberately:** an
+authenticated caller can distinguish "my tenant is not configured for function
+egress at all" from "my tenant is configured but not for this target", and the
+second message **echoes back the resolved tenant id and the requested base
+URL**. That is a deliberate operator-debuggability trade in the Rust, not an
+oversight — but it is a trade, and the Rust never wrote it down.
+
+### D3.5 Target validation runs BEFORE allowlist matching
+
+`authorize` (`:96-105`) calls `target.validate()` first and returns
+`InvalidTarget(_)` before any rule is consulted; `authorize_cloudflare_worker`
+(`:111-120`) does the same with `InvalidWorkerTarget(_)`. So a malformed target
+is rejected identically whether or not the tenant has rules. The runtime test
+`invalid_target_is_rejected_before_allowlist_match`
+(`crates/ferrogate-runtime/src/function_egress_test.rs:119`) pins this ordering.
+
+### D3.6 One allowlist, two target types
+
+`authorize_cloudflare_worker` matches the Worker's **`invoke_path` in the slot a
+Supabase `function_slug` would occupy** (`:119`). One allowlist governs both
+platforms. An implementer supporting a second target platform MUST reuse the
+same rule table rather than introduce a parallel one — that was the #416 design
+decision.
+
+## D4. Target validation — scheme, host, path, and what happens to the awkward cases
+
+Supabase: `SupabaseEdgeFunctionTarget::validate`,
+`crates/ferrogate-runtime/src/supabase_edge_function.rs:171-195`.
+Cloudflare: `CloudflareWorkerTarget::validate`,
+`crates/ferrogate-runtime/src/cloudflare_worker_target.rs:114-140`. The two are
+character-for-character the same ladder with different error names.
+
+```
+base = base_url.trim()
+if base.is_empty()                 -> EmptyBaseUrl
+if !base.starts_with("https://")   -> InsecureBaseUrl(base)
+seg = function_slug.trim()   (Supabase)  /  invoke_path.trim()  (Cloudflare)
+if seg.is_empty() || seg.contains('/') || seg.contains('?') || seg.contains('#')
+   || seg.contains("..") || seg.contains(char::is_whitespace)
+                                   -> InvalidSlug(seg) / InvalidInvokePath(seg)
+if auth_key_ref.trim().is_empty()  -> EmptyAuthKeyRef
+ok
+```
+
+Answering the questions directly:
+
+* **Scheme.** Enforced **twice**, both fail-closed. Once here as a literal
+  `starts_with("https://")` prefix test on the trimmed string — note this is a
+  *string* test, not a parsed-URL test, and it is **case-sensitive**, so
+  `HTTPS://h` is rejected. Once again at execution time after real URL parsing:
+  `crates/ferrogate-gateway/src/function_egress.rs:233-237` parses the URL and
+  `bail!`s unless `url.scheme() == "https"`. Tests
+  `rejects_unsupported_scheme` and `rejects_plaintext_http_scheme`
+  (`crates/ferrogate-gateway/src/function_egress_test.rs:218`, `:230`) pin the
+  second one.
+* **Port.** Never inspected. It is simply part of the base-URL string and is
+  therefore pinned by the exact allowlist match (§D3.3). There is no port
+  allowlist and no "443 only" rule.
+* **Path.** The caller supplies exactly **one path segment** and cannot supply
+  more. `/`, `?`, `#`, `..` and any whitespace are all rejected, so there is no
+  traversal, no nesting, and **no way to attach a query string**. The final URL
+  is composed, not passed through: `{base}/functions/v1/{slug}`
+  (`supabase_edge_function.rs:198-204`) or `{base}/{invoke_path}`
+  (`cloudflare_worker_target.rs:143-149`), each with the base's trailing slashes
+  stripped and the segment trimmed.
+* **Redirects.** **Never followed.** `Policy::none()` on the shared client
+  (`crates/ferrogate-gateway/src/function_egress.rs:341-346`) with a nine-line
+  comment at `:335-340` giving the reason: the https + allowlist check runs once
+  on the initial URL, so following a `3xx` to an attacker-chosen `Location` —
+  their example is a tenant-authored edge function returning
+  `302 http://169.254.169.254/…` — would bypass the allowlist, exfiltrate the
+  internal response, and forward the `apikey` header. **The upstream must reach
+  its result in one hop.** A `3xx` is returned to the caller as-is: `status_code`
+  = 302 with whatever body the upstream sent. Pinned by
+  `does_not_follow_redirect_to_internal_metadata_endpoint`
+  (`function_egress_test.rs:103`).
+* **Private ranges — hostnames.** A custom `reqwest` DNS resolver,
+  `FunctionEgressDnsResolver`
+  (`crates/ferrogate-gateway/src/function_egress.rs:300-329`), resolves the host
+  and then **drops every address** for which
+  `ferrogate_guardrails::is_disallowed_detector_ip` is true. If the filtered set
+  is empty it returns `PermissionDenied` ("function egress DNS resolved only
+  disallowed (internal) addresses"). The comment at `:295-299` states the threat
+  it closes: the allowlist constrains only the *hostname*, so without this a
+  DNS-rebound allowlisted host still reaches an internal service. The
+  classification, `crates/ferrogate-guardrails/src/net.rs:53-87`, rejects:
+  IPv4 private, loopback, link-local (**including `169.254.169.254`**),
+  unspecified, multicast, broadcast, documentation, CGNAT `100.64.0.0/10`,
+  `192.0.0.0/16`, benchmarking `198.18.0.0/15`, and everything `>= 240.0.0.0`;
+  IPv6 loopback, unspecified, multicast, ULA `fc00::/7`, link-local `fe80::/10`,
+  site-local `fec0::/10`, documentation `2001:db8::/32`, and **any IPv4-mapped
+  address recursively re-checked as IPv4** (`net.rs:77-79`).
+* **IP literals — `OPEN`, and the sharpest thing in this part.** The DNS guard
+  is a *resolver*; a base URL whose host is already an IP literal
+  (`https://169.254.169.254`, `https://10.0.0.5`) does not go through name
+  resolution and is therefore **not** filtered by it. Nothing in
+  `validate()` (`supabase_edge_function.rs:171-195`) or in the allowlist
+  (`function_egress.rs:125-160`) rejects an IP-literal host either. The only
+  thing standing between that and an internal call is that an **operator** must
+  have put the literal in `FG_FN_ALLOWLIST` — the caller cannot introduce it,
+  because the wire target must match an allowlist entry exactly. So this is not
+  a caller-reachable hole in the Rust; it is a **missing config-time check**. A
+  reimplementation SHOULD reject IP-literal hosts at config-parse time, and MUST
+  NOT assume the DNS guard covers them. Flagged as `OPEN` because the Rust never
+  decided it either way.
+* **Compression.** Disabled on the client — `.no_gzip().no_brotli().no_zstd()
+  .no_deflate()` (`function_egress.rs:341-346`) — so the response-size cap in
+  §D7 cannot be defeated by a decompression bomb.
+* **TLS.** `rustls` with the `ring` provider installed on first use
+  (`function_egress.rs:334`), default (i.e. verifying) certificate policy.
+  **`#[cfg(test)]` swaps in `danger_accept_invalid_certs(true)` and drops the DNS
+  guard** (`:347-352`, and the module comment at `:34-40`) because the test
+  upstream is loopback with a self-signed cert. That is a **test-build-only**
+  divergence. Do not port it, and do not read the tests as evidence that the
+  production client accepts invalid certificates.
+
+## D5. The token claim set
+
+`crates/ferrogate-runtime/src/function_token.rs`. This is the artefact
+`CUTOVER-READINESS.md:455` specifically named as unrecoverable.
+
+### D5.1 Algorithm and encoding
+
+* **HS256 only.** The header is the fixed byte string
+  `{"alg":"HS256","typ":"JWT"}` (`:75`) — serialised as a constant, never
+  re-derived, so there is no `alg` negotiation and no `none` acceptance path.
+* Encoding is **base64url without padding** throughout (`URL_SAFE_NO_PAD`,
+  `:15`).
+* Signing input is `b64url(header_json) + "." + b64url(claims_json)` (`:146-150`);
+  the token is `signing_input + "." + b64url(hmac_sha256(secret, signing_input))`
+  (`:152`).
+* The MAC key is the raw UTF-8 bytes of the secret string (`:109`), fed to
+  `Hmac<Sha256>` with no derivation, stretching or length requirement
+  (`:156-157`).
+
+### D5.2 The claims — exactly six, in this order
+
+`FunctionTokenClaims`, `crates/ferrogate-runtime/src/function_token.rs:29-43`.
+Because `serde_json` emits struct fields in declaration order, the claims JSON
+is byte-for-byte:
+
+```
+{"iss":…,"aud":…,"tenant":…,"capability":…,"iat":…,"exp":…}
+```
+
+| Claim | Type | Value the broker sets | Citation |
+|---|---|---|---|
+| `iss` | string | `"ferrogate"` — the constant `FUNCTION_TOKEN_ISSUER`, shared by both branches | `crates/ferrogate-gateway/src/function_egress.rs:47`, `:112`; `function_egress_cloudflare.rs:42`, `:139` |
+| `aud` | string | the **trimmed function slug** (Supabase) or the **trimmed invoke path** (Cloudflare) — NOT a URL, NOT the base URL, NOT an origin | `function_egress.rs:198-208`; `cloudflare_worker_target.rs:274-283` |
+| `tenant` | string | the tenant key derived from the **authenticated identity** (§D11 item 1), never the wire `tenant` field | `local.rs:3312-3319` → `function_egress.rs:193-208` |
+| `capability` | string | the constant `"function"` for **both** branches | `crates/ferrogate-gateway/src/function_egress.rs:44`; `crates/ferrogate-runtime/src/cloudflare_worker_target.rs:39` |
+| `iat` | u64 unix seconds | wall clock at request time | `local.rs:3331-3334` |
+| `exp` | u64 unix seconds | `iat.saturating_add(ttl)` | `function_token.rs:142` |
+
+**There is no `sub`, no `jti`, no `nbf`, no `scope`, no key id, and no `kid` in
+the header.** That is not an omission in this transcript — those claims do not
+exist. The consequences (no replay defense, no per-token revocation, no key
+rotation identifier) are recorded in §D13.
+
+### D5.3 Lifetime
+
+* `MAX_FUNCTION_TOKEN_TTL_SECS = 300` (`function_token.rs:24`).
+* `DEFAULT_FUNCTION_TOKEN_TTL_SECS = 60` (`:26`).
+* `mint` rejects `ttl_secs == 0` with `ZeroTtl` (`:132-134`) and otherwise
+  **silently clamps**: `ttl = ttl_secs.min(300)` (`:135`). A caller asking for an
+  hour gets five minutes and no error. Pinned by `ttl_is_clamped_to_max`
+  (`crates/ferrogate-runtime/src/function_token_test.rs:33`).
+* **Both broker branches always pass the 60 s default** and expose no way to
+  change it: `function_egress.rs:206`, `function_egress_cloudflare.rs:211`. The
+  300 s ceiling is therefore currently unreachable through the route.
+
+### D5.4 Who can mint
+
+Only the gateway process, and only through a `FunctionTokenMinter` constructed
+at config load from `FG_FN_JWT_SECRET`
+(`crates/ferrogate-gateway/src/function_egress.rs:112`,
+`function_egress_cloudflare.rs:139`). `FunctionTokenMinter::new` rejects a blank
+issuer (`EmptyField("iss")`) and a blank secret (`EmptySigningSecret`)
+(`function_token.rs:101-106`). `mint` rejects blank `tenant`, blank slug
+(reported as `EmptyField("aud")`), and blank `capability` (`:123-131`).
+
+The secret **never leaves the gateway**: it is stored as `Vec<u8>` in a struct
+whose hand-written `Debug` prints `signing_secret: "<redacted>"`
+(`function_token.rs:84-92`, pinned by `minter_debug_redacts_secret`,
+`function_token_test.rs:127`). It is never persisted to the control-plane
+database — the module doc at
+`crates/ferrogate-gateway/src/function_egress.rs:50-54` states this as a
+deliberate property of sourcing it from the environment.
+
+**One secret per process.** That is the whole reason for the TOK-6
+single-project and single-worker rules in §D2: with one shared signing secret
+and one shared apikey, an allowlist spanning two projects would hand every
+project a token at most one of them can verify.
+
+### D5.5 What `verify()` checks — and what it does NOT
+
+`FunctionTokenMinter::verify`, `function_token.rs:164-195`:
+
+1. Split on `.`; require **exactly** three parts — a fourth part is
+   `MalformedToken` (`:169-175`).
+2. Recompute the MAC over `header.claims` and compare against the decoded
+   signature **in constant time**, after a length check
+   (`subtle::ConstantTimeEq`, `:182`) ⇒ `BadSignature`.
+3. **Only then** decode and deserialise the claims (`:186-190`) ⇒
+   `MalformedToken` on failure. Signature-before-parse is the correct ordering
+   and MUST be preserved.
+4. Reject if `now_unix >= claims.exp` ⇒ `Expired` (`:191-193`). Note `>=`, not
+   `>`: a token expiring exactly now is invalid. **There is no clock-skew
+   leeway** — zero seconds.
+
+**`verify()` does NOT check `iss`, `aud`, `tenant`, `capability`, or `iat`.** It
+returns the claims and leaves every semantic check to the caller. An implementer
+who ports `verify` as a complete validator will have built a token that
+authorises **any** function for **any** tenant as long as the signature and
+expiry hold. The header is not re-parsed or checked either, so `alg` confusion is
+prevented only by the fact that verification recomputes HS256 unconditionally —
+which is the right construction, but is a property of *not* reading the header,
+not of validating it.
+
+Note also that the JWT header is **not** covered by any check beyond being part
+of the signed input, and that no `alg` value is ever read from a presented
+token.
+
+### D5.6 Trust boundary implied by the claim set
+
+Because `aud` is a bare slug and the signing secret is shared across every
+allowlisted target of one project/worker, a token minted for slug `X` is
+cryptographically valid at **any** endpoint that knows the same secret and
+verifies the same way. The isolation between functions therefore rests on the
+**receiving function** re-checking `aud`, `iss` and `tenant` — which
+`docs/design/function-egress-broker.md:148-149` states as an expectation of the
+edge function, and which the gateway cannot enforce. An implementer choosing a
+different claim shape (e.g. `aud` = full invocation URL) is *strengthening* this,
+and should know that is what they are doing.
+
+## D6. The governed HTTP request that is built
+
+No caller-supplied header ever reaches the upstream (§D11 item 3). The header
+set is constructed from nothing but the credential and a constant:
+
+**Supabase** (`crates/ferrogate-runtime/src/supabase_edge_function.rs:235-257`),
+keys lower-cased in a `BTreeMap` so ordering is deterministic:
+
+| Header | Value |
+|---|---|
+| `authorization` | `Bearer {minted JWT}` |
+| `apikey` | `FG_FN_APIKEY` verbatim |
+| `content-type` | `application/json` |
+
+**Cloudflare Worker**
+(`crates/ferrogate-runtime/src/cloudflare_worker_target.rs:182-203`): the same
+minus `apikey` — Workers have no such concept and the header is deliberately
+never emitted (`:285-287`).
+
+Build-time ladder, both branches:
+
+1. `target.validate()` again (`supabase_edge_function.rs:239`,
+   `cloudflare_worker_target.rs:186`) — the third fail-closed application of §D4.
+2. Method normalisation: `trim().to_ascii_uppercase()`, then membership in
+   `ALLOWED_METHODS = ["POST", "GET"]`
+   (`supabase_edge_function.rs:166`, `:218-227`;
+   `cloudflare_worker_target.rs:108`, `:163-172`). Anything else ⇒
+   `UnsupportedMethod`. **`POST` and `GET` only** — no `PUT`, `DELETE`, `PATCH`,
+   `HEAD`, `OPTIONS`.
+3. Credential usability: Supabase requires **both** bearer and apikey non-blank
+   (`FunctionCredential::is_usable`, `supabase_edge_function.rs:124-126`, checked
+   at `:241-243` ⇒ `EmptyResolvedKey`); Cloudflare requires only the bearer
+   (`cloudflare_worker_target.rs:188-190` ⇒ `EmptyResolvedBearer`).
+4. URL composed as in §D4.
+5. `body` = `body_json` verbatim.
+
+Two properties worth stating because they are easy to lose:
+
+* **`body_json` is an opaque string and is never validated as JSON**, despite
+  `content-type: application/json` being sent unconditionally
+  (`supabase_edge_function.rs:250`). The field is `String`, not a parsed value
+  (`:55`, `crates/ferrogate-runtime/src/function_egress.rs:175`).
+* **The body is sent even for `GET`**, and `content-type` is set even when the
+  body is empty. There is no branch on method after normalisation.
+
+Both credential-carrying structs have hand-written `Debug` impls that never
+print secrets: `EdgeFunctionHttpRequest` prints header **names** only plus
+`body_len` (`supabase_edge_function.rs:69-79`), and `FunctionCredential` prints
+`"<redacted>"` plus lengths (`:94-103`). MUST reproduce, or the credential leaks
+into any structured log that formats the value.
+
+## D7. Execution
+
+`execute_edge_function_request`,
+`crates/ferrogate-gateway/src/function_egress.rs:225-282`.
+
+1. Parse method and URL; `bail!` on either being invalid (`:231-234`).
+2. **Re-assert https** on the parsed URL (`:235-237`).
+3. Build the `HeaderMap`, rejecting invalid names or values (`:284-293`).
+4. Send on the shared singleton client (§D4) with a per-call `timeout`.
+5. **Response size cap, two layers:** if `Content-Length` is present and exceeds
+   the cap, fail immediately (`:250-255`); then read the body chunk by chunk and
+   fail the moment the accumulated length **would** exceed the cap (`:256-270`),
+   so a chunked or `Content-Length`-lying upstream can never force unbounded
+   buffering. The error text is
+   `edge_function_response_body_too_large: exceeds {n} bytes`. Both layers are
+   pinned — `rejects_oversized_response_body` (`function_egress_test.rs:145`)
+   and `rejects_oversized_chunked_response_without_content_length` (`:170`).
+6. Excerpt the body: `String::from_utf8_lossy` then `.chars().take(2048)`
+   (`:272-275`). **`BODY_EXCERPT_MAX_BYTES = 2048` is applied as a CHARACTER
+   count, not a byte count** (`:42`) — the name is wrong and the excerpt can
+   reach ~8 KiB of UTF-8. Reproduce the behaviour or fix it deliberately;
+   do not assume the constant name.
+
+Numbers:
+
+| Quantity | Value | Citation |
+|---|---|---|
+| Request-body cap (inbound, from the caller) | `limits.tool_body_max_bytes`, default **64 KiB** | `local.rs:3262`, `:3425`; `crates/ferrogate-config/src/config/types.rs:2532`, `:2559-2562` |
+| Response-body cap (from the upstream) | **256 KiB** | `local.rs:83`, used at `:3373`, `:3534` |
+| Body excerpt returned to the caller | **2048 chars** | `crates/ferrogate-gateway/src/function_egress.rs:42`, `:272-275` |
+| Per-call upstream timeout | **30 000 ms** | `supabase_edge_function.rs:25`; `cloudflare_worker_target.rs:34` |
+
+The timeout is a constant on both paths — `SupabaseEdgeFunctionInvocation` is
+built with `DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS`
+(`crates/ferrogate-gateway/src/function_egress.rs:215`) and the Worker path with
+`DEFAULT_WORKER_INVOCATION_TIMEOUT_MILLIS`
+(`cloudflare_worker_target.rs:292`). Neither is caller-settable, although the
+`timeout_millis` field exists on both invocation structs.
+
+**Response shape on success** — `FunctionInvocationOutcome`,
+`crates/ferrogate-runtime/src/function_egress.rs:183-189`, serialised at
+`local.rs:3409` / `:3570` with HTTP **200 regardless of the upstream status**:
+
+```
+{ "function_slug": "<slug or invoke_path>", "status_code": <u16 upstream status>, "body_excerpt": "<≤2048 chars>" }
+```
+
+Note the field is named `function_slug` on **both** branches; the Cloudflare
+branch puts the invoke path in it (`local.rs:3530-3532`). And note that a
+`4xx`/`5xx` from the upstream is a **200 from the gateway** with the status in
+the body — only a transport/policy failure produces `502`.
+
+## D8. HTTP contract
+
+| Status | `code` | Trigger | Citation |
+|---|---|---|---|
+| `405` | `method_not_allowed` | any method but POST (contract layer, message `"{m} is not documented for …"`) | `handlers.rs:139-149` |
+| `405` | `method_not_allowed` | any method but POST (handler layer, unreachable via the server) | `local.rs:3226-3235` |
+| `503` | `function_egress_disabled` | neither branch configured | `local.rs:3250-3259` |
+| `413` | `payload_too_large` | request body over `tool_body_max_bytes`; **connection is closed** (`write_json_error_and_close`) | `local.rs:3266-3278`, `:3429-3441` |
+| `400` | `invalid_json` | body does not deserialise; message embeds the serde error | `local.rs:3283-3292`, `:3446-3455` |
+| `401` | `missing_api_key` | no `Authorization: Bearer` / `x-api-key` | `crates/ferrogate-gateway/src/auth.rs:1223-1229` |
+| `403` | `scope_denied` | key lacks `functions.execute` | `auth.rs:1243-1249` |
+| `403` | `no_tenant` | authenticated identity resolves to an empty tenant key | `local.rs:3320-3329`, `:3483-3492` |
+| `403` | `function_denied` | allowlist denial, target validation failure, token-mint failure, or request-build failure — **all four collapse to one code**, message = the underlying `Display` | `local.rs:3358-3365`, `:3519-3526` |
+| `502` | `function_upstream_error` | transport failure, non-https URL at execute time, timeout, or oversized response | `local.rs:3387-3394`, `:3548-3555` |
+| `200` | — | outcome envelope, **whatever the upstream status was** | `local.rs:3409`, `:3570` |
+
+The collapse of four distinct broker failures into `function_denied` is
+deliberate — `FunctionBrokerError` (`crates/ferrogate-gateway/src/function_egress.rs:63-77`)
+and `WorkerBrokerError` (`cloudflare_worker_target.rs:228-244`) both `Display`
+to their inner error and the handler does not discriminate. The *message* still
+distinguishes them (§D3.4).
+
+**Authorisation.** Scope `functions.execute`, checked by
+`scope_set_allows` (`crates/ferrogate-gateway/src/auth.rs:304-312`):
+
+```
+scopes.contains("functions.execute") -> allow
+scopes.contains(WILDCARD_SCOPE)      -> allow
+scopes.is_empty() && !scope.starts_with("admin.")  -> allow
+otherwise -> deny
+```
+
+MUST be stated explicitly because it is the single most permissive line in this
+whole part: **a key with an EMPTY scope set is granted function egress**, since
+`is_privileged_scope` is `scope.starts_with("admin.")`
+(`auth.rs:132-134`) and `functions.execute` does not start with `admin.`. Only
+`admin.*` scopes are protected from the empty-set default. An implementer who
+treats an empty scope set as "no permissions" is *tightening* the model — which
+is probably right, and is a change.
+
+## D9. Audit
+
+Every post-authentication broker decision is written to the control-plane audit
+store via `state.record_admin_audit_event(admin_audit_event_draft_for_target(…))`
+with action `"function.execute"`:
+
+| Outcome | Result string | Detail | Citation |
+|---|---|---|---|
+| broker refused | `denied` | the `Display` of the broker error | `local.rs:3350-3357`, `:3511-3518` |
+| transport failed | `upstream_error` | the anyhow error text | `local.rs:3379-3386`, `:3540-3547` |
+| executed | `executed` | `"edge function {slug} returned status {n}"` / `"cloudflare worker {path} returned status {n}"` | `local.rs:3398-3408`, `:3559-3569` |
+
+Audit target string: `supabase_edge_function:{slug}` (`local.rs:3337-3340`) or
+`cloudflare_worker:{invoke_path}` (`local.rs:3501`).
+
+Two properties:
+
+* The target is computed from the **caller-supplied, not-yet-authorised** slug —
+  deliberately, so a denial records what was attempted. It is attacker-influenced
+  text bounded only by the 64 KiB request-body cap, so the audit sink MUST treat
+  it as untrusted.
+* **Nothing before authentication is audited here**: `405`, `503`, `413`,
+  `400 invalid_json`, `401`, `403 scope_denied` and `403 no_tenant` produce **no
+  audit event**. An authenticated caller probing the allowlist leaves a trail; an
+  unauthenticated one does not (beyond generic request logging).
+
+## D10. Fail-open / fail-closed posture, each with the line it was read from
+
+Every decision in S1 is **fail-closed**. Stated individually so a
+reimplementation can be checked line by line:
+
+| # | Check | Posture | Citation |
+|---|---|---|---|
+| 1 | Broker unconfigured | **CLOSED** — `503`, no call | `crates/ferrogate-gateway/src/function_egress.rs:107-111`; `local.rs:3250-3259` |
+| 2 | `FG_FN_TARGET_KIND` unrecognised | **CLOSED** — both branches disabled | `function_egress_cloudflare.rs:62-69` |
+| 3 | `FG_FN_ALLOWLIST` malformed JSON | **CLOSED** — disabled, not "deny everything, stay up" | `crates/ferrogate-gateway/src/function_egress.rs:113-125`; `function_egress_cloudflare.rs:140-153` |
+| 4 | `FG_FN_ALLOWLIST` absent | **CLOSED** — empty ruleset, every call denied | `crates/ferrogate-gateway/src/function_egress.rs:124`; `crates/ferrogate-runtime/src/function_egress.rs:152-159` |
+| 5 | Allowlist spans >1 project / ≠ declared worker | **CLOSED** — disabled | `crates/ferrogate-gateway/src/function_egress.rs:134-141`; `function_egress_cloudflare.rs:158-169` |
+| 6 | `FG_FN_CF_WORKER` invalid target | **CLOSED** — disabled at startup | `function_egress_cloudflare.rs:131-138` |
+| 7 | Tenant absent from allowlist | **CLOSED** — `NoRuleForTenant` | `crates/ferrogate-runtime/src/function_egress.rs:152-154` |
+| 8 | Tenant present, target not listed | **CLOSED** — `TargetNotAllowed` | `crates/ferrogate-runtime/src/function_egress.rs:155-159` |
+| 9 | Target invalid (scheme/slug/key-ref) | **CLOSED**, and checked *before* rule matching | `crates/ferrogate-runtime/src/function_egress.rs:101-104`, `:116-119` |
+| 10 | Method not POST/GET | **CLOSED** | `supabase_edge_function.rs:218-227`; `cloudflare_worker_target.rs:163-172` |
+| 11 | Credential blank | **CLOSED** | `supabase_edge_function.rs:241-243`; `cloudflare_worker_target.rs:188-190` |
+| 12 | Token mint failure | **CLOSED** — `403`, no call | `crates/ferrogate-gateway/src/function_egress.rs:199-208` |
+| 13 | Non-https at execute time | **CLOSED** — `bail!` before any socket | `crates/ferrogate-gateway/src/function_egress.rs:235-237` |
+| 14 | Redirect | **CLOSED** — never followed; the `3xx` is surfaced | `crates/ferrogate-gateway/src/function_egress.rs:335-346` |
+| 15 | DNS resolves only to internal addresses | **CLOSED** — `PermissionDenied`, no connection | `crates/ferrogate-gateway/src/function_egress.rs:316-325` |
+| 16 | DNS resolution itself fails | **CLOSED** — error, no connection | `crates/ferrogate-gateway/src/function_egress.rs:309-315` |
+| 17 | Response exceeds 256 KiB | **CLOSED** — `502`, body discarded | `crates/ferrogate-gateway/src/function_egress.rs:250-270` |
+| 18 | Identity has no tenant scope | **CLOSED** — `403 no_tenant` | `local.rs:3320-3329` |
+| 19 | Token expiry | **CLOSED** — `>=`, zero skew | `function_token.rs:191-193` |
+| 20 | Signature comparison | **CLOSED**, constant-time | `function_token.rs:182` |
+
+The two places posture is **not** determined by a check, and an implementer
+should decide them explicitly:
+
+* **IP-literal hosts** — §D4. Not open to the caller, but not closed at config
+  time either. `OPEN`.
+* **Empty scope set** — `auth.rs:311`. This is the one genuinely **permissive**
+  default in the path: absence of declared scopes is read as "unrestricted for
+  everything non-admin", including function egress.
+
+## D11. Invariants the Rust enforces through control flow or type shape, not a named check
+
+These survive only if someone writes them down, because there is no function to
+grep for.
+
+1. **The wire `tenant` field is never trusted.** `FunctionInvocationRequest`
+   *has* a `tenant` field (`crates/ferrogate-runtime/src/function_egress.rs:170`,
+   documented at `:163-166` as "advisory only"), and the handler simply never
+   reads it: it computes `tenant_key` from `auth.tenant_context()` and passes
+   *that* to `prepare_brokered_invocation` (`local.rs:3312-3319` → `:3341-3347`).
+   The protection is that the wire field is dead code. Delete the derivation and
+   pass `request.tenant` and every test still describes the same shapes — while
+   any caller can now assume any tenant's allowlist.
+2. **Tenant identity is a fixed precedence chain, and mismatching it silently
+   denies everything.** `organization_id` → `project_id` → `team_id` →
+   `user_id` → `api_key_id`, first non-`None` wins, empty ⇒ `403 no_tenant`
+   (`local.rs:3312-3319`, `:3476-3482`; `TenantContext` built at
+   `auth.rs:151-160`). The allowlist's `tenant` field must contain **whatever
+   this chain selects**. An operator who writes a project id in a rule for a key
+   that also carries an organization id gets `NoRuleForTenant` forever, with no
+   diagnostic pointing at the precedence. This is the most likely
+   misconfiguration in the whole feature and nothing in the Rust warns about it.
+3. **No caller-supplied header can reach the upstream — because there is nowhere
+   to put one.** Neither `FunctionInvocationRequest`
+   (`crates/ferrogate-runtime/src/function_egress.rs:167-176`) nor
+   `WorkerInvocationRequest` (`cloudflare_worker_target.rs:211-220`) has a
+   headers field, and the built header map is constructed fresh from three
+   constants plus the credential (`supabase_edge_function.rs:244-250`). Adding a
+   pass-through `headers` map — an obvious convenience — would let a caller
+   override `authorization`, or set `x-forwarded-for`, or inject a second
+   `apikey`.
+4. **The caller cannot influence the URL beyond one path segment.** The URL is
+   *composed* (`{base}/functions/v1/{slug}`), never taken from the request, and
+   the segment cannot contain `/ ? # ..` or whitespace (§D4). There is therefore
+   no query-string channel and no path-traversal channel — enforced by string
+   composition plus a character blacklist, not by a URL builder.
+5. **The Cloudflare branch's request URL still comes from the WIRE target, not
+   from `FG_FN_CF_WORKER`.** `prepare_cloudflare_invocation`
+   (`function_egress_cloudflare.rs:193-218`) overwrites **only**
+   `governed.target.auth_key_ref` from the config (`:203-204`) and then passes
+   the caller's `base_url` and `invoke_path` into the governed pipeline. What
+   confines the call to the declared Worker is the *combination* of the
+   config-time single-worker rule (`:158-169`) and the per-call allowlist match.
+   An implementer who drops the config-time rule, believing the config target
+   pins the URL, opens the caller's `base_url` to anything the allowlist happens
+   to contain.
+6. **The wire `auth_key_ref` is never authoritative** — it is replaced with the
+   operator-declared one before the pipeline runs
+   (`function_egress_cloudflare.rs:199-204`), so a future credential
+   dereference can never be steered by the caller. Today the field is validated
+   non-empty and otherwise unused (§D12), which means this substitution is
+   currently *inert* and is very easy to "simplify" away — precisely when
+   `auth_key_ref` becomes live is when it starts mattering.
+7. **Function egress is unreachable when authentication is switched off.** Under
+   `[auth] disabled = true` the synthesised `AuthContext` sets every tenant
+   field to `None` (`auth.rs:1194-1220`), so the precedence chain yields the
+   empty string and the handler answers `403 no_tenant`. An open gateway
+   therefore cannot broker functions at all. That is a genuinely good property
+   and it is an accident of two unrelated pieces of code agreeing — the tenancy
+   fields being `None` and the emptiness check at `local.rs:3320`.
+8. **Exactly one broker branch can ever be live**, enforced from both ends: the
+   Cloudflare config is consulted first and returns early (`local.rs:3241-3247`),
+   *and* the Supabase config refuses to load unless the discriminant says
+   Supabase (`crates/ferrogate-gateway/src/function_egress.rs:88-94`). Either
+   guard alone would leave a window where both are configured.
+9. **The body is read and parsed BEFORE authentication.** `local.rs:3261-3293`
+   (read + deserialise) runs ahead of `:3296` (`authenticate`); same ordering in
+   the Cloudflare branch (`:3424-3456` before `:3459`). An unauthenticated caller
+   can therefore get a `400 invalid_json` — a parser-shaped response — without
+   presenting a credential, and can make the gateway buffer up to
+   `tool_body_max_bytes`. The pre-auth flood limiter (§D1 gate 1) is the only
+   thing bounding it. A reimplementation SHOULD authenticate first; this is
+   recorded as observed behaviour, not as a requirement to reproduce.
+10. **The `OnceLock` config makes the allowlist immutable for the process
+    lifetime** (`crates/ferrogate-gateway/src/function_egress.rs:177-182`). No
+    admin route, no config reload, and no database write can change it. Any
+    reimplementation that makes the allowlist dynamic acquires a whole class of
+    concerns — cache invalidation, read-your-writes on revocation — that the Rust
+    simply does not have.
+
+## D12. `OPEN` — where the Rust is unfinished
+
+Do **not** transcribe these as settled specification.
+
+1. **`auth_key_ref` is reserved and never dereferenced.** Both targets validate
+   it non-empty and then ignore it; the credential comes from process-wide env
+   (`crates/ferrogate-runtime/src/supabase_edge_function.rs:36-45`;
+   `cloudflare_worker_target.rs:51-59`;
+   `docs/design/function-egress-broker.md:82-92`). The whole per-tenant secret
+   store it points at **does not exist**. A future implementation gets to design
+   secret resolution freely — and on Cloudflare, Secrets Store binding is
+   deploy-time, which is a materially different constraint from the Rust's
+   runtime env read.
+2. **Single-project / single-worker is a limitation, not a design.** TOK-6 and
+   its Worker mirror exist to refuse a configuration the credential model cannot
+   serve (`crates/ferrogate-gateway/src/function_egress.rs:126-141`;
+   `function_egress_cloudflare.rs:154-169`). With per-target credentials the
+   rule should disappear, not be ported.
+3. **`capability` is a constant.** Both branches always mint `"function"`
+   (`crates/ferrogate-gateway/src/function_egress.rs:44`;
+   `cloudflare_worker_target.rs:39`) even though the claim, the parameter and
+   `FunctionTokenClaims.capability` are all shaped for a variable. The
+   capability model was never built.
+4. **The 300 s TTL ceiling is unreachable.** Both branches hard-code the 60 s
+   default with no override
+   (`crates/ferrogate-gateway/src/function_egress.rs:206`;
+   `function_egress_cloudflare.rs:211`). Whether TTL should be
+   caller-, tenant- or target-scoped is undecided.
+5. **`timeout_millis` is a field nobody sets.** Present on both invocation
+   structs, always filled from the 30 s constant. Per-target timeouts are
+   unbuilt.
+6. **The design doc's own step 3 was never realised as written.**
+   `docs/design/function-egress-broker.md:62-65` says the route "reuses the
+   external-action authorizer governance logic
+   (`GatewayExternalActionAuthorizer`) so policy/tenant checks are identical to
+   other governed actions." It does not: `handle_function_execute`
+   (`local.rs:3219-3410`) calls the allowlist directly and never touches the
+   external-action authorizer. Governance here is the allowlist plus the auth
+   scope — nothing more. **The design doc that survives the delete is wrong on
+   this point**, which is exactly why it needed this transcript.
+7. **IP-literal hosts** — §D4. Undecided.
+8. **`docs/design/function-egress-broker.md:152-153` lists per-tenant and
+   per-function rate limiting, request timeouts, idempotency keys, and
+   credential/signing-key rotation under "defense in depth".** Of those, only the
+   request timeout exists. See §D13.
+
+## D13. Controls that do NOT exist — record these so nobody assumes them
+
+An implementer reading only the design doc would reasonably assume several of
+these were present. None of them are anywhere in `local.rs:3219-3571` or the
+five runtime/gateway modules.
+
+* **No rate limit and no quota check on this route.** Not per tenant, not per
+  function, not per key. The only limiter that touches it is the pre-auth
+  source-IP flood limiter, which stops applying once a caller is authenticated.
+* **No billing or metering.** No usage record is written; the design doc's
+  step (6) "record audit + billing" is realised as audit only (§D9).
+* **No RBAC.** `rbac_action: null` in the contract
+  (`docs/openapi/runtime-api-contract.json:2181`).
+* **No idempotency key**, so a retried call re-invokes the function.
+* **No replay defense on the token** — no `jti`, no nonce, no one-time
+  redemption. Within its 60 s window a captured token is fully reusable by
+  anyone who has it.
+* **No revocation.** Nothing can invalidate an outstanding token before `exp`.
+* **No key rotation identifier** — no `kid` in the header, so two valid signing
+  secrets cannot coexist during a rotation.
+* **No clock-skew tolerance** (`function_token.rs:191`), which makes minting and
+  verification across hosts sensitive to clock drift in the strict direction.
+* **No response header inspection or forwarding** — only status and a body
+  excerpt cross back (`crates/ferrogate-runtime/src/function_egress.rs:183-189`).
+* **No streaming.** The response is fully buffered up to the cap; there is no
+  SSE or chunked pass-through.
+* **No per-target concurrency limit or circuit breaker.**
+
+## D14. Scope statement
+
+Written in `/home/dev/ferrogate-ts` on `main-ts`, wave 25. **No `cargo` was run;
+no Rust was compiled, imported, linked or executed.** `crates/**` was **read
+only**, for transcription. No file under `crates/` or `workers/` was modified or
+deleted. No code and no test was written, weakened, skipped or deleted. No
+composition root was touched. No `git` command was run. **`docs/rewrite/SPEC-TRANSCRIPTS.md`
+is the only file this task wrote.**
+
+**This part does not reverse, qualify, or reopen the owner's decision to drop
+S1.** `POST /v1/functions/execute` answers `501` and this document asks for no
+change to that. It records a definition that expires with `crates/**`, so that
+the decision stays reversible on evidence rather than on memory.
+
+Every claim above carries a `crates/…:line`, a `docs/…:line`, or an explicit
+`OPEN` marker. The citations are checkable against the working tree until the
+moment `crates/**` is removed; after that they are provenance.
