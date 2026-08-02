@@ -196,7 +196,11 @@ export async function mintDelegationLink(
     };
   }
   if (grant.scope.length === 0) {
-    return { ok: false, reason: "invalid_scope", detail: "a delegation must grant at least one scope" };
+    return {
+      ok: false,
+      reason: "invalid_scope",
+      detail: "a delegation must grant at least one scope",
+    };
   }
   if (grant.lifetimeSeconds <= 0 || grant.lifetimeSeconds > MAX_DELEGATION_LIFETIME_SECONDS) {
     return {

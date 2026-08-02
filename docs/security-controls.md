@@ -163,6 +163,45 @@ without an owner (`crates/ferrogate-auth-service/src/lib.rs`
 `handle_admin_team_invite`, `handle_admin_team_change_role`,
 `handle_admin_team_revoke`).
 
+### Agent delegation chain (#691)
+
+When an agent calls on a user's behalf and then calls another agent, the
+gateway used to see one credential and could attribute an incident no further
+than that key. A caller may now present `x-ferrogate-delegation`: an ordered
+chain of compact-JWS links, root first, each naming its delegator (`act`), its
+delegate (`sub`), the api-key id that delegate authenticates with, an
+attenuated `scope` set, and the previous link's `jti`.
+
+- **Signed and verified, never trusted.** HMAC-SHA-256 over the transmitted
+  bytes. The key is `DELEGATION_SIGNING_KEY`, one fleet-wide secret bound from
+  the Cloudflare Secrets Store at deploy time; `packages/identity/src/delegation/`
+  implements both halves and `apps/gateway/src/delegation/middleware.ts` runs
+  the verifier on the authenticated request path. A Worker with no key bound
+  refuses a delegated request `503 delegation_verification_unavailable` rather
+  than serving it with the header ignored.
+- **Attenuation is enforced, not recorded.** A link claiming more than its
+  delegator refuses the whole chain (`403 delegation_scope_widened`); the
+  chain may not exceed the presenting credential's own scopes; and the
+  operation's required scope is re-checked against the attenuated set.
+- **Bounded.** At most 8 links, an 8 KiB header checked before any decoding, a
+  15-minute per-link lifetime cap, and the leaf bound to the api-key id that
+  presents it — so a captured header is useless without that credential.
+- **Revocable.** Every `jti` and every principal in the chain is checked on
+  every request against `delegation_revocations` (control D1), with a 5-second
+  per-isolate memo. Revoking a middle link breaks every chain through it. A
+  revocation list that cannot be read refuses the request.
+- **Attributable.** A verified chain is written to
+  `request_logs.delegation_chain` / `.delegation_root` and is queryable through
+  `GET /admin/v1/cost-records?delegation_root=…` and its chargeback export.
+
+**What it does not establish.** A verified chain proves each delegation was
+AUTHORISED. It says nothing about whether the agent behaved, stayed on task, or
+was itself manipulated — that is the guardrails control, not this one. The
+signature is also the mint authority's rather than a delegator-held private
+key, because Secrets Store bindings resolve at deploy time; the reasoning and
+its consequences are written out at the top of
+`packages/identity/src/delegation/link.ts`.
+
 ## Transport Security
 
 FerroGate terminates TLS itself: manual certificate configuration, ACME

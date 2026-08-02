@@ -115,7 +115,12 @@ beforeEach(async () => {
   });
   await seedRequestLogs([DELEGATED_A, DELEGATED_B, PLAIN]);
   await seedBillingEvents([
-    { id: "be-del-a", requestId: DELEGATED_A.requestId, occurredAtUnix: 1_700_000_101, event: EVENT },
+    {
+      id: "be-del-a",
+      requestId: DELEGATED_A.requestId,
+      occurredAtUnix: 1_700_000_101,
+      event: EVENT,
+    },
   ]);
 });
 

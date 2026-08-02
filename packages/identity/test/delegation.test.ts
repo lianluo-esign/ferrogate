@@ -274,7 +274,9 @@ describe("the verifier chooses the algorithm, never the token", () => {
   it("refuses a link whose header claims alg none", async () => {
     // The classic forgery primitive. It is refused by STRUCTURE, before a key
     // is imported and before any claim is read.
-    const token = await forge(ROOT_CLAIMS, { header: { alg: "none", typ: DELEGATION_JWS_HEADER.typ } });
+    const token = await forge(ROOT_CLAIMS, {
+      header: { alg: "none", typ: DELEGATION_JWS_HEADER.typ },
+    });
     expect(codeOf(await verify(token))).toBe("delegation_malformed");
   });
 
@@ -495,7 +497,10 @@ function stubRevocations(revoked: readonly string[]): DelegationRevocationSource
   const calls: string[][] = [];
   return {
     calls,
-    async revoked(_tenant: string, subjects: readonly string[]): Promise<DelegationRevocationResolution> {
+    async revoked(
+      _tenant: string,
+      subjects: readonly string[],
+    ): Promise<DelegationRevocationResolution> {
       calls.push([...subjects]);
       return { ok: true, revoked: subjects.filter((subject) => revoked.includes(subject)) };
     },

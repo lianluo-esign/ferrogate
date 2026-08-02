@@ -67,7 +67,11 @@ export interface DelegationBindings {
  * to "off" at exactly the moment someone was trying to switch it on.
  */
 export type DelegationVerifier =
-  | { readonly state: "ready"; readonly key: CryptoKey; readonly revocations: DelegationRevocationSource }
+  | {
+      readonly state: "ready";
+      readonly key: CryptoKey;
+      readonly revocations: DelegationRevocationSource;
+    }
   | { readonly state: "unconfigured" }
   | { readonly state: "misconfigured"; readonly detail: string };
 

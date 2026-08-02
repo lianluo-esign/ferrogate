@@ -214,7 +214,10 @@ export async function verifyDelegationChain(
       return refuse("delegation_expired", `link ${index} expired at ${link.exp}`);
     }
     if (link.iat - DELEGATION_CLOCK_SKEW_SECONDS > input.nowUnix) {
-      return refuse("delegation_not_yet_valid", `link ${index} is issued at ${link.iat}, in the future`);
+      return refuse(
+        "delegation_not_yet_valid",
+        `link ${index} is issued at ${link.iat}, in the future`,
+      );
     }
     if (link.exp - link.iat > MAX_DELEGATION_LIFETIME_SECONDS) {
       return refuse(
@@ -285,7 +288,10 @@ export async function verifyDelegationChain(
   }
 
   // --- 9. attenuation is ENFORCED, not merely recorded ---------------------
-  if (input.requiredScope !== undefined && !delegationScopeSubset([input.requiredScope], leaf.scope)) {
+  if (
+    input.requiredScope !== undefined &&
+    !delegationScopeSubset([input.requiredScope], leaf.scope)
+  ) {
     return refuse(
       "delegation_scope_denied",
       `this delegation grants ${JSON.stringify(leaf.scope)}, which does not include the ` +

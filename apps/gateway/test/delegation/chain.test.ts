@@ -130,7 +130,9 @@ function gateway(options: { readonly signingKey?: string | null } = {}): Harness
     // The REAL control database: the request-log row and the revocation lookup
     // both go through the same D1 the deployed Worker uses.
     CONTROL_DB: bindings["CONTROL_DB"],
-    ...(options.signingKey === null ? {} : { DELEGATION_SIGNING_KEY: options.signingKey ?? SIGNING_SECRET }),
+    ...(options.signingKey === null
+      ? {}
+      : { DELEGATION_SIGNING_KEY: options.signingKey ?? SIGNING_SECRET }),
   };
 
   const { app } = createGatewayApp({

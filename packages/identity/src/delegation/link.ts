@@ -201,7 +201,9 @@ export function parseDelegationPrincipal(
   if (typeof value !== "string") return null;
   const separator = value.indexOf(":");
   if (separator <= 0) return null;
-  const kind = DELEGATION_PRINCIPAL_KINDS.find((candidate) => candidate === value.slice(0, separator));
+  const kind = DELEGATION_PRINCIPAL_KINDS.find(
+    (candidate) => candidate === value.slice(0, separator),
+  );
   if (kind === undefined) return null;
   const id = value.slice(separator + 1);
   // A blank id, or one carrying the path separator, would make the rendered

@@ -70,7 +70,11 @@ import type { Context, MiddlewareHandler, Next } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
 import { contributeRequestLogFacts } from "../requestlog/facts.js";
-import { type DelegationBindings, type DelegationVerifier, delegationVerifierFromEnv } from "./source.js";
+import {
+  type DelegationBindings,
+  type DelegationVerifier,
+  delegationVerifierFromEnv,
+} from "./source.js";
 
 /**
  * The HTTP status each refusal is rendered with.
@@ -157,7 +161,7 @@ export function delegationChain(
         verifier.state === "misconfigured"
           ? `this deployment cannot verify delegation chains: ${verifier.detail}`
           : "this deployment cannot verify delegation chains (DELEGATION_SIGNING_KEY is not bound), " +
-            "so a request presenting one is refused rather than served with the chain ignored",
+              "so a request presenting one is refused rather than served with the chain ignored",
       );
     }
 
