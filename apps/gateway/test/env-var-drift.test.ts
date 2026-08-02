@@ -387,9 +387,11 @@ describe("the env-var drift gate itself", () => {
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
     // GW-T18 counted 49 `[vars]`; WAVE 20 committed the two `BILLING_ALERTS_*`
-    // knobs, so 51. Pinning the exact number makes an accidental parser
-    // regression (or a silently deleted table) loud here first.
-    expect(DECLARED.vars.size).toBe(51);
+    // knobs, so 51; #664 committed `REQUEST_LOG_RETENTION_DAYS` and
+    // `REQUEST_LOG_RETENTION_POLICIES`, so 53. Pinning the exact number makes
+    // an accidental parser regression (or a silently deleted table) loud here
+    // first.
+    expect(DECLARED.vars.size).toBe(53);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -606,7 +608,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(51);
+    expect(rows.length).toBe(53);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -640,8 +642,16 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // and `test/metering/budget-alerts.test.ts` supplies its own URL and secret
     // on the env it passes. The committed value is therefore inert rather than
     // absent, which is what keeps it from shadowing a fixture.
+    //
+    // #664: 46 -> 48. `REQUEST_LOG_RETENTION_DAYS` ("400") and
+    // `REQUEST_LOG_RETENTION_POLICIES` ("{}") are observable for the same
+    // reason and are NOT inert — the committed 400-day window is a live policy,
+    // which is the point (an unset window means "keep forever", and an evidence
+    // table that grows without bound is the half of #664 that is not about
+    // reading). `test/requestlog/mount.test.ts` asserts the committed value
+    // parses into a real policy rather than a blank.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(46);
+    expect(observable.length).toBe(48);
     expect(rows.length - observable.length).toBe(5);
   });
 });
