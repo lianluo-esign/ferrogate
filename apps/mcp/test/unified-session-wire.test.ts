@@ -30,9 +30,18 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { ensureMcpIdentitySchema } from "../src/durable.js";
 import { inMemoryPorts, resetInMemoryPorts } from "../src/ports.js";
 import { parseSseEvents } from "../src/transport.js";
-import { EXEC_KEY, READ_KEY, TENANT, rpcRequest, tenantAuth, upstreamConfig } from "./fixtures.js";
+import {
+  EXEC_KEY,
+  READ_KEY,
+  TENANT,
+  rpcRequest,
+  setMcpEnvVar,
+  tenantAuth,
+  upstreamConfig,
+} from "./fixtures.js";
 
 /** The header the MCP Streamable-HTTP transport carries a session on. */
 const SESSION_HEADER = "mcp-session-id";
@@ -373,5 +382,108 @@ describe("the resume cursor is meaningful across the whole fan-out", () => {
       { lastEventId: "1:whatever" },
     );
     expect(res.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The `recordUpstreamHealth` MOUNT (#764)
+// ---------------------------------------------------------------------------
+
+/**
+ * A drop observed on ONE request is still there on the NEXT one.
+ *
+ * The Durable Object method and the attribution sink that feeds it were each
+ * pinned individually (`unified-session.test.ts`), but the WIRE between them —
+ * the `binding.store.recordUpstreamHealth(...)` call in
+ * `src/routes/ingress.ts` — was not: deleting it left all 537 tests green
+ * (#764). Pinning the call site itself would only have repeated the mistake one
+ * level up, so what is asserted here is the CLIENT-VISIBLE consequence: a
+ * client that comes back on a later request is told which leg of its fan-out
+ * dropped, without having asked for it again and without a new session.
+ *
+ * Two properties of the design make that a real end-to-end path rather than a
+ * round trip through one function:
+ *
+ *  - the drop is written AFTER dispatch, by `respondInSession`, on request N;
+ *  - it is read BEFORE dispatch, by `resolveUnifiedSession`'s reconcile, on
+ *    request N+1 — and request N+1 deliberately uses `ping`, which touches no
+ *    upstream at all. So the only way `dropped` can be non-empty on that
+ *    response is that request N's write survived in the Durable Object. When
+ *    the request itself observes a failure the ingress reports it directly from
+ *    the attribution sink, which is why the reading request must not be one.
+ *
+ * The upstream is made unreachable WITHOUT the network: a `streamable_http`
+ * row with a NULL `url` makes `HttpMcpUpstreams`'s handshake throw
+ * `mcp_server_unavailable` before any fetch. `@cloudflare/vitest-pool-workers`
+ * 0.18.8 exports no `fetchMock`, so an outbound interceptor is not on the
+ * table, and a test whose failure mode depends on DNS is not one worth having.
+ */
+describe("an upstream drop recorded on one request is visible to the client on the next", () => {
+  const DB = env.DB as unknown as D1Database;
+  const DROPPED_META = "ferrogate/sessionUpstreamsDropped";
+
+  /** The `_meta` of the first (or only) frame of a response. */
+  async function meta(res: Response): Promise<Record<string, unknown>> {
+    const body = JSON.parse((await frames(res))[0]?.data ?? "{}") as {
+      result?: { _meta?: Record<string, unknown> };
+    };
+    return body.result?._meta ?? {};
+  }
+
+  beforeEach(async () => {
+    await ensureMcpIdentitySchema(DB);
+    await DB.prepare("DELETE FROM mcp_servers").run();
+    // `streamable_http` with no url: the config decodes, the session is
+    // configured, and the FIRST thing the handshake does is refuse for want of
+    // an endpoint. That failure is what `fanIn` reports as `degraded`.
+    await DB.prepare(
+      `INSERT INTO mcp_servers
+         (tenant_id, name, transport, url, auth_type, tools_to_execute,
+          tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
+       VALUES (?, 'offline', 'streamable_http', NULL, 'none', ?, ?, NULL, NULL, NULL, 5000)`,
+    )
+      .bind(TENANT, JSON.stringify(["ping"]), JSON.stringify([]))
+      .run();
+    // Swap the dev bundle's in-memory host for the real D1-backed one. An
+    // in-memory upstream cannot be unreachable, so it can never be dropped.
+    setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", "1");
+  });
+
+  afterEach(async () => {
+    setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", undefined);
+    await DB.prepare("DELETE FROM mcp_servers").run();
+  });
+
+  it("tells a returning client which upstream dropped, on a request that touches none", async () => {
+    const sessionId = await openSession();
+
+    // Request N: the fan-in reaches for `offline` and cannot have it.
+    const listed = await send(
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { session: sessionId },
+    );
+    expect(listed.status).toBe(200);
+    // The control for the whole scenario: this request really did observe the
+    // drop. Without it, an empty `dropped` below would be indistinguishable
+    // from an upstream that was never broken in the first place.
+    expect(await meta(listed)).toHaveProperty("ferrogate/degradedUpstreams");
+
+    // Request N+1 — the reconnect. `ping` reaches no upstream, so nothing on
+    // THIS request can observe the drop; the only source is the session record
+    // request N wrote.
+    const resumed = await send({ jsonrpc: "2.0", id: 3, method: "ping" }, { session: sessionId });
+    expect(resumed.status).toBe(200);
+    expect(resumed.headers.get(SESSION_HEADER)).toBe(sessionId);
+    expect((await meta(resumed))[DROPPED_META]).toEqual(["offline"]);
+  });
+
+  it("reports nothing dropped when no request under the session ever failed", async () => {
+    // The paired CONTROL: the same catalogue, the same `ping`, the same session
+    // — minus the request that touched the broken upstream. If `dropped` were
+    // populated from anywhere but the recorded drop, it would show up here too.
+    const sessionId = await openSession();
+    const resumed = await send({ jsonrpc: "2.0", id: 2, method: "ping" }, { session: sessionId });
+    expect(resumed.status).toBe(200);
+    expect((await meta(resumed))[DROPPED_META]).toBeUndefined();
   });
 });

@@ -105,8 +105,9 @@ These areas are implemented in the current open-source gateway:
   egress metering with download quotas and audit, 304/Range pull caching,
   retention policies and unreferenced-blob GC, static-site serve mode under
   `/sites/{site}/{path}` — private by default, anonymous per site and per
-  channel — and agent consumption via MCP resources and the `fetch_asset`
-  tool.
+  channel — verified custom domains routed to the same serve path through a
+  DNS-TXT ownership proof, and agent consumption via MCP resources and the
+  `fetch_asset` tool.
 - Time-based agent schedules (cron/interval) firing `agent_run` targets into
   the dispatch lease queue, with an `/admin/v1/agent-schedules` CRUD API,
   run-now, and fire history.
@@ -191,7 +192,7 @@ feed the pillars above:
 | Theme | Goal | Tracking |
 | --- | --- | --- |
 | Firecracker real guest execution | Run real workloads inside Firecracker microVMs in `agent-worker`; blocked on KVM-capable infrastructure. Per-VM rootfs isolation and the boot-validation harness are already in place. | [#280](https://github.com/lianluo-esign/ferrogate/issues/280) |
-| Static-site custom domains | Bind a hosted site to a hostname via ACME HTTP-01/DNS-01 plus graceful upgrade. | [#265](https://github.com/lianluo-esign/ferrogate/issues/265) |
+| Static-site custom-domain CERTIFICATES | [#738](https://github.com/lianluo-esign/ferrogate/issues/738) shipped the serve path, the Cloudflare for SaaS custom-hostname client (`packages/cloudflare/src/custom-hostnames.ts`) and `certificate_status` on `GET /admin/v1/site-domains/{hostname}` (`docs/assets/custom-domains.md` §6). What is still open is AUTOMATIC provisioning: `ensureCustomHostname` exists and nothing calls it, because creating a billable Cloudflare resource from a tenant-triggered admin write needs its own rate-limiting, unbind-cleanup and no-entitlement answers. TLS termination and SNI remain deploy-time and unprovable offline. | [#265](https://github.com/lianluo-esign/ferrogate/issues/265) |
 | Audio endpoints | `/v1/audio/speech` and `/v1/audio/transcriptions`; needs multipart request and binary response handling in the body path (images shipped first). | Backlog, child of [#266](https://github.com/lianluo-esign/ferrogate/issues/266) |
 | Hosted control plane | Expand hosted Admin API and dashboard workflows after the self-hosted durable control-plane contract is stable. | Backlog |
 | DNS provider expansion | Add DNS providers beyond the current Cloudflare ACME DNS-01 implementation and external hook boundary. | Backlog |

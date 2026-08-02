@@ -120,11 +120,59 @@ export function planSitePath(rest: string, search = ""): SitePathPlan {
   if (slug === null || slug === "" || ILLEGAL_DECODED.test(slug) || slug === "." || slug === "..") {
     return { kind: "invalid", reason: "the first path segment must name a site" };
   }
+  return planWithin(slug, `/sites/${encodeURIComponent(slug)}`, rawSegments.slice(1), search);
+}
 
+/**
+ * The same plan for a request that arrived on a VERIFIED CUSTOM DOMAIN (issue
+ * #738), where the site occupies the WHOLE authority instead of a `/sites/{slug}`
+ * subtree.
+ *
+ * Everything a static host has to get right about URLs — the trailing-slash
+ * canonicalisation, the `index.html` collapse, the traversal and
+ * percent-encoded-separator refusals — is {@link planWithin}, called with a
+ * different base and with the slug supplied by the hostname rather than read
+ * off the path. That is deliberate and it is the same rule the serve path
+ * follows: a second copy of these rules is how `..` comes to be refused on one
+ * URL space and normalised on the other.
+ *
+ * `path` is the raw (still percent-encoded) request path, INCLUDING its leading
+ * `/`; the base is the empty string, so every redirect this produces is
+ * authority-relative (`/docs/`) and never leaks the internal `/sites/{slug}`
+ * spelling to a browser that asked for the custom domain.
+ */
+export function planSiteDomainPath(slug: string, path: string, search = ""): SitePathPlan {
+  if (ENCODED_SEPARATOR.test(path)) {
+    return { kind: "invalid", reason: "path contains a percent-encoded separator" };
+  }
+  // `"/"` splits to `["", ""]`; dropping the leading empty segment leaves
+  // `[""]`, which {@link planWithin} reads as "the root directory URL" — the
+  // same shape `/sites/{slug}/` produces. A path that somehow arrives without
+  // its leading slash is treated identically rather than rejected, because the
+  // only thing the leading slash carries here is that emptiness.
+  const segments = path.startsWith("/") ? path.slice(1).split("/") : path.split("/");
+  return planWithin(slug, "", segments, search);
+}
+
+/**
+ * The shared core: which document a URL names inside ONE site, given the URL
+ * prefix that site is mounted under.
+ *
+ * `base` is `"/sites/{slug}"` for the path route and `""` for a custom domain,
+ * and it appears only in the redirect LOCATIONS — the resolved file path is a
+ * bundle path and is identical either way, which is what makes the two entry
+ * points resolve the same bytes through the same `AssetService`.
+ */
+function planWithin(
+  slug: string,
+  base: string,
+  rawTail: readonly string[],
+  search: string,
+): SitePathPlan {
   // A trailing empty segment IS the trailing slash — `docs/a/` splits to
   // ["docs","a",""]. Drop it and remember it, because it is the difference
   // between "serve this file" and "serve this directory's index".
-  const tail = rawSegments.slice(1);
+  const tail = [...rawTail];
   const directory = tail.length > 0 && tail[tail.length - 1] === "";
   if (directory) tail.pop();
 
@@ -142,11 +190,11 @@ export function planSitePath(rest: string, search = ""): SitePathPlan {
     decoded.push(segment);
   }
 
-  const base = `/sites/${encodeURIComponent(slug)}`;
   const path = decoded.join("/");
 
   // `/sites/s` — the site root without its slash. One redirect, so the site's
   // own relative links resolve against the site and not against `/sites/`.
+  // Unreachable from a custom domain, where the root is always `/`.
   if (path === "" && !directory) {
     return { kind: "redirect", location: `${base}/${search}` };
   }

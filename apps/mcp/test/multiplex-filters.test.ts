@@ -36,6 +36,7 @@ import {
   toolPermitted,
 } from "../src/ports.js";
 import { MCP_PROTOCOL_VERSION } from "../src/protocol.js";
+import { DurableMcpSessionStore } from "../src/session.js";
 import { HttpMcpUpstreams } from "../src/transport.js";
 import { EXEC_KEY, READ_KEY, TENANT, rpcRequest, tenantAuth, upstreamConfig } from "./fixtures.js";
 
@@ -239,6 +240,111 @@ describe("HttpMcpUpstreams honours the exclude list", () => {
     // rule that takes effect "eventually" is not a deny rule.
     config.toolsToExclude = ["write"];
     expect((await host.fanIn()).tools.map((tool) => tool.remoteName)).toEqual(["search"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The ADOPTED list — the second `#sessionTools` return (#764)
+// ---------------------------------------------------------------------------
+
+/**
+ * `#sessionTools` has TWO early returns that hand back a cached tool list, and
+ * they are reached by different callers:
+ *
+ *  - the ISOLATE-cache one, pinned by "applies the exclusion on a WARM session"
+ *    above — the same isolate reads its own `session.tools` a second time;
+ *  - the ADOPTED one, reached only by a COLD isolate whose `#negotiate` took
+ *    the tool list off the shared `MCP_SESSION` Durable Object.
+ *
+ * Until #764 only the first was held: mutating the second to `return
+ * session.tools` left the whole suite green. That is the path the multiplexing
+ * argument actually leans on — a warm upstream costing a cold isolate one DO
+ * read instead of a handshake — so the half that was proven was not the half
+ * the argument was about.
+ *
+ * The scenario is the real one rather than a contrived one: the shared session
+ * was published BEFORE the operator wrote the exclusion, so the DO carries a
+ * pre-exclusion list. Every isolate that adopts it must still apply the filter,
+ * or the deny rule waits for the fleet's next reconnect.
+ */
+describe("the exclusion is applied to a list ADOPTED from the shared Durable Object", () => {
+  const SESSIONS = env.MCP_SESSION as NonNullable<typeof env.MCP_SESSION>;
+
+  /** A fetch that cannot be used. Reaching the wire at all fails the test. */
+  function refusingFetch(): typeof fetch {
+    return (async () => {
+      throw new Error(
+        "the cold isolate must adopt the shared session's tool list, not re-discover it",
+      );
+    }) as unknown as typeof fetch;
+  }
+
+  function sharedTool(remoteName: string): McpTool {
+    return {
+      name: `srv-${remoteName}`,
+      serverName: "srv",
+      remoteName,
+      inputSchema: { type: "object" },
+      autoExecute: false,
+    };
+  }
+
+  /** Publish a warm, pre-exclusion session for `srv` under a fresh tenant. */
+  async function warmSharedSession(tenantId: string): Promise<DurableMcpSessionStore> {
+    const shared = new DurableMcpSessionStore(SESSIONS, tenantId);
+    await shared.connected(
+      "srv",
+      { mode: "modern", version: MCP_PROTOCOL_VERSION },
+      [sharedTool("search"), sharedTool("write")],
+      1_700,
+    );
+    return shared;
+  }
+
+  it("serves the whole adopted list when nothing is excluded", async () => {
+    // The CONTROL, and it carries most of this pair's weight: it proves the
+    // cold isolate really does take BOTH tools off the Durable Object without
+    // touching the wire. Without it, "the list is just [search]" below could
+    // mean the adoption path never ran at all.
+    const shared = await warmSharedSession("t-adopt-control");
+    const host = new HttpMcpUpstreams([httpConfig()], refusingFetch(), { sessions: shared });
+    expect((await host.fanIn()).tools.map((tool) => tool.remoteName).sort()).toEqual([
+      "search",
+      "write",
+    ]);
+  });
+
+  it("still excludes a tool the Durable Object published before the exclusion existed", async () => {
+    const shared = await warmSharedSession("t-adopt-excluded");
+    const host = new HttpMcpUpstreams(
+      [httpConfig({ toolsToExclude: ["write"] })],
+      refusingFetch(),
+      {
+        sessions: shared,
+      },
+    );
+    const fan = await host.fanIn();
+    // No upstream was unreachable — if the handshake had run, `refusingFetch`
+    // would have put `srv` in `degraded` and the empty list would prove nothing.
+    expect(fan.degraded).toEqual([]);
+    expect(fan.tools.map((tool) => tool.remoteName)).toEqual(["search"]);
+  });
+
+  it("refuses to DISPATCH an adopted tool that is excluded", async () => {
+    // The listing and the chokepoint are two code paths and an operator's
+    // posture depends on both: a tool hidden from discovery but still callable
+    // by name is a hole, not a cosmetic inconsistency.
+    const shared = await warmSharedSession("t-adopt-dispatch");
+    const host = new HttpMcpUpstreams(
+      [httpConfig({ toolsToExclude: ["write"] })],
+      refusingFetch(),
+      {
+        sessions: shared,
+      },
+    );
+    await expect(
+      host.callTool(sharedTool("write"), {}, McpDispatchHeaders.empty(), context),
+    ).rejects.toThrow(/not allowlisted for execution/);
   });
 });
 

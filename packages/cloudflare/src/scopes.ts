@@ -56,6 +56,16 @@ export const REQUIRED_TOKEN_PERMISSION_GROUPS: readonly TokenPermissionGroup[] =
     access: "Write, Edit",
     usedBy: "Workflows orchestration",
   },
+  // The ONE zone-level row in an otherwise account-level table, and it is left
+  // in the same list on purpose: `preflight()` reports the full foundational set
+  // so an operator provisions once, and splitting the advice into two tables is
+  // how half of it stops being read. The level is stated in `access` so nobody
+  // hunts for it under Account in the dashboard.
+  {
+    name: "SSL and Certificates",
+    access: "Edit (ZONE level, on the fallback-origin zone)",
+    usedBy: "Cloudflare for SaaS custom hostnames — the #738 custom-domain certificate",
+  },
 ];
 
 /** The permission-group names, in table order, for embedding in an error. */

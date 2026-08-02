@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ensureMcpIdentitySchema } from "../src/durable.js";
 import { type McpEnv, type McpTool, inMemoryPorts } from "../src/ports.js";
-import type { McpNegotiatedProtocol } from "../src/protocol.js";
+import { MCP_PROTOCOL_VERSION, type McpNegotiatedProtocol } from "../src/protocol.js";
 import {
   DEFAULT_RECONNECT_POLICY,
   DurableMcpSessionStore,
@@ -32,6 +32,7 @@ import {
   sessionKey,
   statusOf,
 } from "../src/session.js";
+import { HttpMcpUpstreams } from "../src/transport.js";
 import {
   durableUpstreamsBound,
   resolveUpstreams,
@@ -198,6 +199,42 @@ async function seedServerRow(
     .run();
 }
 
+/** The REST transport of the same chokepoint — `POST /v1/mcp/tool/execute`. */
+function executeTool(name: string, key: string): Promise<Response> {
+  return SELF.fetch(
+    new Request("https://ferrogate.test/v1/mcp/tool/execute", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ name, arguments: {} }),
+    }),
+  );
+}
+
+/**
+ * An upstream that completes the modern handshake and advertises one tool.
+ *
+ * Deliberately NOT the real network: `@cloudflare/vitest-pool-workers` 0.18.8
+ * exports no `fetchMock`, so the only honest way to exercise a SUCCESSFUL
+ * handshake is to hand `HttpMcpUpstreams` its `fetchImpl` directly.
+ */
+function discoveringFetch(): typeof fetch {
+  return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { method: string };
+    const result =
+      body.method === "server/discover"
+        ? {
+            resultType: "complete",
+            capabilities: {},
+            supportedVersions: [MCP_PROTOCOL_VERSION],
+          }
+        : { tools: [{ name: "echo", inputSchema: { type: "object" } }] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+}
+
 async function toolNames(key: string): Promise<string[]> {
   const res = await SELF.fetch(
     rpcRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { key }),
@@ -254,6 +291,120 @@ describe("the durable upstream catalog is MOUNTED on the exported Worker", () =>
     // tenant has no such row, so deny-by-default must refuse it rather than
     // falling through to the seeded in-memory handler.
     expect(JSON.stringify(await res.json())).toContain("not allowlisted for execution");
+  });
+
+  /**
+   * The REST transport of the SAME chokepoint (#764).
+   *
+   * `src/routes/ingress.ts` mounts `withTenantUpstreams` TWICE — once on
+   * `POST /v1/mcp` and once on `POST /v1/mcp/tool/execute` — and its comment
+   * claims "both ingress paths must resolve the tenant's real host or the two
+   * transports disagree about which tools exist". Only the JSON-RPC half was
+   * held: the #764 sweep deleted the REST one and all 537 tests stayed green,
+   * so the claim about the pair was proven for one of the pair.
+   */
+  it("resolves the tenant's durable host on the REST transport too", async () => {
+    setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", "1");
+    const res = await executeTool("srv-echo", EXEC_KEY);
+    // Same reasoning as the JSON-RPC case above: `srv-echo` belongs to the
+    // seeded IN-MEMORY host. Under the durable host this tenant has no such
+    // row, so leaving the REST leg on `ports` would execute the in-memory
+    // handler and answer 200 — the two transports disagreeing about which
+    // tools exist, which is precisely what the mount exists to prevent.
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(await res.json())).toContain("not allowlisted for execution");
+  });
+
+  it("CONTROL: the REST transport serves the in-memory host without the opt-in", async () => {
+    // Without this, "403" above would also be satisfied by a REST transport
+    // that refuses `srv-echo` under every posture.
+    const res = await executeTool("srv-echo", EXEC_KEY);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toContain("tool_execution");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The WIRE between HttpMcpUpstreams and the shared MCP_SESSION (#764)
+// ---------------------------------------------------------------------------
+
+/**
+ * `DurableMcpSessionStore` is exercised directly at the top of this file, and
+ * `HttpMcpUpstreams` is exercised against a stub fetch elsewhere. The #764
+ * sweep found that the WIRE between them was held by nothing: deleting the
+ * `#store?.connected(...)` publish, the `#store?.failed(...)` report, or even
+ * the `{ sessions: ... }` argument in `resolveUpstreams` left the whole suite
+ * green. Without that wire the shared session is a Durable Object nobody
+ * writes to — every isolate re-handshakes, and an upstream outage is a
+ * per-isolate fact rather than a fleet-wide one, which is the entire reason
+ * the object exists.
+ *
+ * `test/env-var-drift.test.ts` does assert `MCP_SESSION` is READ somewhere in
+ * the source text. That is a scanner over the file contents, not a test of
+ * behaviour: it passes against a mount that is present and broken.
+ */
+describe("the shared MCP_SESSION is WRITTEN by the host on the request path", () => {
+  beforeEach(async () => {
+    seedFixture();
+    await ensureMcpIdentitySchema(DB);
+    await DB.prepare("DELETE FROM mcp_servers").run();
+  });
+
+  afterEach(async () => {
+    setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", undefined);
+    await DB.prepare("DELETE FROM mcp_servers").run();
+  });
+
+  it("records an upstream failure observed by a REAL request on the shared session", async () => {
+    // A `streamable_http` row with no url: the handshake refuses for want of
+    // an endpoint BEFORE any fetch, so this needs no network and no
+    // interceptor (pool-workers 0.18.8 exports no `fetchMock`).
+    await seedServerRow(TENANT, "offline", "streamable_http", null);
+    setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", "1");
+
+    // The control: nothing has been written yet, so a non-zero counter below
+    // cannot be left over from another test's tenant.
+    expect((await store(TENANT).read("offline")).reconnectAttempts).toBe(0);
+
+    // ONE ordinary request through the Worker the deploy entrypoint exports.
+    expect(await toolNames(READ_KEY)).not.toContain("offline-ping");
+
+    // The failure the request observed is now a fact on the SHARED object, so
+    // the next isolate — and the operator's view of the fleet — sees it. This
+    // is the leg `resolveUpstreams` supplies with `{ sessions: ... }`; drop
+    // that argument and the host has no store to write to.
+    const state = await store(TENANT).read("offline");
+    expect(state.connected).toBe(false);
+    expect(state.reconnectAttempts).toBe(1);
+    expect(state.lastError).toContain("requires url");
+  });
+
+  it("publishes a discovered catalogue to the shared session for the next isolate", async () => {
+    const tenantId = "t-publish";
+    const config = {
+      name: "srv",
+      transport: "streamable_http" as const,
+      url: "https://srv.upstream.test/mcp",
+      authType: "none" as const,
+      toolsToExecute: ["echo"],
+      toolsToAutoExecute: ["echo"],
+      timeoutMs: 5_000,
+    };
+    const shared = store(tenantId);
+    // The control: the shared session starts empty, so the tool list below can
+    // only have been put there by the discovery this test ran.
+    expect((await shared.read("srv")).tools).toEqual([]);
+
+    const host = new HttpMcpUpstreams([config], discoveringFetch(), { sessions: shared });
+    expect((await host.fanIn()).tools.map((tool) => tool.name)).toEqual(["srv-echo"]);
+
+    const state = await shared.read("srv");
+    expect(state.connected).toBe(true);
+    // The tool LIST specifically, not merely `connected`: the handshake writes
+    // a connected session with an empty list one line earlier, so asserting
+    // only `connected` would leave the publish of the catalogue unheld.
+    expect(state.tools.map((tool) => tool.name)).toEqual(["srv-echo"]);
+    expect(state.negotiation?.mode).toBe("modern");
   });
 });
 

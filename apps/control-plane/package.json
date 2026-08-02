@@ -15,6 +15,7 @@
     "@ferrogate/schemas": "workspace:*",
     "@ferrogate/config": "workspace:*",
     "@ferrogate/storage": "workspace:*",
+    "@ferrogate/cloudflare": "workspace:*",
     "@ferrogate/secrets": "workspace:*",
     "@ferrogate/identity": "workspace:*",
     "@ferrogate/sso": "workspace:*",
