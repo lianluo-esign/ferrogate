@@ -223,7 +223,8 @@ export type ProviderAdapterFamily =
   | "OpenRouter"
   | "AzureOpenAi"
   | "Bedrock"
-  | "Vertex";
+  | "Vertex"
+  | "WorkersAi";
 
 export interface ProviderAdapterFamilyDescriptor {
   family: ProviderAdapterFamily;
@@ -258,6 +259,19 @@ export const SUPPORTED_PROVIDER_ADAPTER_FAMILIES: readonly ProviderAdapterFamily
   { family: "AzureOpenAi", canonicalKind: "azure-openai", aliases: ["azure"] },
   { family: "Bedrock", canonicalKind: "bedrock", aliases: ["aws-bedrock"] },
   { family: "Vertex", canonicalKind: "vertex", aliases: ["vertex-ai"] },
+  /**
+   * The NINTH family (issue #673). It has no Rust ancestor — a Rust process has
+   * no `env.AI` — so unlike the eight above there is no `SUPPORTED_PROVIDER_
+   * ADAPTER_FAMILIES` row to port; the aliases are the spellings an operator is
+   * likely to reach for. `cloudflare` is deliberately NOT one of them: a
+   * provider row already carries an unrelated `cloudflare_ai_gateway` concept
+   * (`./cloudflare.ts`), and one word meaning both would be a trap.
+   */
+  {
+    family: "WorkersAi",
+    canonicalKind: "workers-ai",
+    aliases: ["cloudflare-workers-ai", "cf-workers-ai", "workersai"],
+  },
 ];
 
 /** Resolve a provider `kind` (trimmed, case-insensitive) to its family. */

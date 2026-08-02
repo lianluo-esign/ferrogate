@@ -315,24 +315,27 @@ const DOCUMENTED_BUT_UNDECLARED = [
 ] as const;
 
 /**
- * A CLOUDFLARE PRODUCT BINDING the source reads that this Worker does not
- * declare — so the code path behind it is UNREACHABLE in production.
+ * CLOUDFLARE PRODUCT BINDINGS the source reads that this Worker does not
+ * declare — so the code path behind each one is UNREACHABLE in production.
  *
- * `src/guardrails/config.ts` reads `env.AI` to build the Workers AI Llama Guard
- * detector, and `wrangler.toml` has no `[ai]` stanza; it carries a PORT-TODO
- * for one instead. That is an honest, recorded state rather than a surprise,
- * and the assertion below pins it as such: the day someone adds `[ai]` this
- * goes red, because the name will then be DECLARED and must leave this list.
+ * **EMPTY as of issue #673, and the entry that used to be here was `AI`.**
  *
- * Measured while proving this gate: adding the stanza is not a free edit.
- * Declaring `[ai] binding = "AI"` makes `@cloudflare/vitest-pool-workers` try to
- * start a REMOTE proxy session — Workers AI has no local emulation — and the
- * whole suite then dies with *"it's necessary to set a CLOUDFLARE_API_TOKEN
- * environment variable"* before a single test imports. So declaring it costs
- * the offline, docker-free property this project's testing strategy is built
- * on, which is a real reason the PORT-TODO stands rather than an excuse.
+ * The old note said `src/guardrails/config.ts` reads `env.AI` for the Workers AI
+ * Llama-Guard detector while `wrangler.toml` carried only a PORT-TODO, and it
+ * pinned that as a deliberate state because "declaring it costs the offline,
+ * docker-free property this project's testing strategy is built on" — the
+ * `@cloudflare/vitest-pool-workers` remote-proxy failure. That measurement was
+ * correct and still reproduces; the CONCLUSION drawn from it no longer holds,
+ * because the cost is avoidable. `vitest.config.ts` now points the pool at a
+ * derived config with the `[ai]` stanza stripped, so the suite stays offline
+ * AND the deployed Worker gets the binding. `[ai] binding = "AI"` is committed
+ * and `AI` is therefore DECLARED, which is what the assertions below now say.
+ *
+ * This is not a test being routed around: the old claim was that the AI code
+ * path is dead in production, and issue #673 is the work that made it live.
+ * Leaving the claim standing would have been the lie.
  */
-const UNDECLARED_BINDINGS = ["AI"] as const;
+const UNDECLARED_BINDINGS: readonly string[] = [];
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.
@@ -472,12 +475,24 @@ describe("every var the source reads is declared or explicitly excepted", () => 
         documentedNear(name, /PORT-TODO/, 6),
         `${name} is read by src/ with no binding declared and no PORT-TODO explaining it`,
       ).toBe(true);
-      // The reachability claim itself, stated so it cannot rot: with no `[ai]`
-      // stanza the binding is undefined in production and the Llama Guard
-      // detector is never constructed.
       expect(DECLARED.bindings.has(name)).toBe(false);
-      expect(/^\[ai\]/m.test(WRANGLER_TOML)).toBe(false);
     }
+  });
+
+  /**
+   * The INVERSE of the claim this file used to pin (issue #673).
+   *
+   * `AI` sat in {@link UNDECLARED_BINDINGS} with an assertion that
+   * `wrangler.toml` has NO `[ai]` stanza — i.e. that every Workers AI code path
+   * is dead in production. Two readers exist now (the `workers-ai` provider
+   * family's dispatcher and the Llama-Guard detector), so that claim had to be
+   * inverted rather than deleted: the stanza must be present, and the binding
+   * must be reachable under the name the source actually reads.
+   */
+  it("declares the [ai] binding the Workers AI code paths read", () => {
+    expect(/^\[ai\]/m.test(WRANGLER_TOML)).toBe(true);
+    expect(DECLARED.bindings.get("AI")).toBe("[ai]");
+    expect(READS.named.has("AI")).toBe(true);
   });
 
   it("pins the exact set of reads wrangler.toml does not even mention", () => {

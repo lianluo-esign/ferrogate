@@ -772,7 +772,15 @@ export interface InferenceDeps {
    */
   readonly models?: ModelResolver | ModelResolverFactory;
   readonly adapters?: AdapterRegistry;
-  readonly dispatcher?: UpstreamDispatcher;
+  /**
+   * The provider egress, or a factory resolved per Worker `env` — the same
+   * shape `circuit` / `shadowBudget` / `workflows` use, and for the same
+   * reason: the `AI` binding the `workers-ai` family dispatches through only
+   * exists per request, while this deps object is built once per router
+   * (issue #673). Absent ⇒ `dispatcherFromEnv`, i.e. `fetch` for every family
+   * plus the `env.AI` short-circuit for Workers AI.
+   */
+  readonly dispatcher?: UpstreamDispatcher | ((env: InferenceBindings) => UpstreamDispatcher);
   readonly usage?: UsageSink;
   readonly normalizers?: StreamNormalizers;
   readonly translator?: AnthropicTranslator;

@@ -1019,6 +1019,48 @@ binding = "TELEMETRY_COLLECTOR"
 service = "ferrogate-telemetry"
 
 # ---------------------------------------------------------------------------
+# [ai] — Workers AI (issue #673)
+#
+# TWO readers, and both were written before this stanza existed, which is why
+# it lands now rather than earlier:
+#
+#   1. `src/inference/workers-ai.ts` — the transport for the `workers-ai`
+#      provider family. A `[[providers]]` row with `kind = "workers-ai"` is
+#      dispatched through `env.AI.run(...)`, so chat and embeddings on a
+#      Cloudflare-hosted model never leave the platform and pay no egress. With
+#      this stanza deleted the family fails CLOSED — `502
+#      provider_dispatch_error: workers-ai provider '<name>' requires the AI
+#      binding` — rather than silently egressing to `api.cloudflare.com` with no
+#      credential.
+#   2. `src/guardrails/config.ts:149` reads `env.AI` for the Llama-Guard
+#      detector (`@ferrogate/guardrails`' `workersAiBindingClient`). That reader
+#      has existed since the guardrail slice and the binding it needed was never
+#      declared, so the detector has been silently taking its REST fallback (or
+#      disabling itself) on every deploy. Declaring `AI` closes that too — it is
+#      the PORT-TODO named in the NOT-DECLARED block below.
+#
+# No account resource and no placeholder: unlike `database_id` / `bucket_name`,
+# `[ai]` names nothing account-specific and deploys exactly as written.
+#
+# It is NOT exercisable offline. `@cloudflare/vitest-pool-workers` resolves this
+# binding against the live Workers AI API, so `test/inference/workers-ai.test.ts`
+# installs a recording double on `env.AI` instead and drives the deployed Worker
+# through `SELF.fetch`. That proves the WIRING (dispatcher selection, request
+# shaping, response/stream translation, usage extraction); it cannot prove
+# Workers AI's own wire behaviour, which needs a real account.
+# ---------------------------------------------------------------------------
+[ai]
+binding = "AI"
+# LOCAL DEVELOPMENT ONLY, and load-bearing for the test suite. Wrangler treats
+# the AI binding as REMOTE by default, which makes `wrangler dev` and
+# `@cloudflare/vitest-pool-workers` open a proxy session against the live
+# Cloudflare API — in CI that fails the WHOLE gateway suite before a single test
+# file is imported ("it's necessary to set a CLOUDFLARE_API_TOKEN"). `false`
+# keeps local runs offline and has no effect on a deployed Worker, where the
+# binding is always the real Workers AI service.
+remote = false
+
+# ---------------------------------------------------------------------------
 # Cron — the billing-outbox recovery sweep
 #
 # Handled by `scheduled` on the default export of `src/worker.ts`, which calls
@@ -1071,9 +1113,12 @@ crons = ["* * * * *"]
 #   [[durable_objects.bindings]]  SESSION
 #       streaming-session state. `RATE_LIMIT` landed in wave 5; `SESSION` has no
 #       reader yet. PORT-TODO(inventory-request-path §1.7).
-#   [ai] / AI Gateway
-#       Workers AI Llama Guard guardrail detector + governed provider egress.
-#       PORT-TODO(inventory-request-path §1.6 "Workers AI Llama Guard").
+#   AI Gateway (`cf-aig-*` routing through a named gateway id)
+#       still undeclared and still unmounted — see the header of
+#       `packages/providers/src/registry.ts`. `[ai]` itself is now DECLARED
+#       above (issue #673), which closes the "Workers AI Llama Guard" half of
+#       the old PORT-TODO; the AI-GATEWAY half is a different product surface
+#       and is unchanged.
 #   [[analytics_engine_datasets]]  binding = "TELEMETRY"
 #       the durable sink behind `AssetAuditSink` / request logs. Today
 #       `InMemoryAssetAuditSink` keeps a bounded 1000-event ring per isolate,
