@@ -116,7 +116,7 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 274;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -131,7 +131,7 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
  * `docs/openapi/runtime-api-contract.json` after every merge rather than
  * incremented from whichever side happened to land first.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 211;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 213;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

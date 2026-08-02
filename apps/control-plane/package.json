@@ -21,7 +21,8 @@
     "@ferrogate/sso": "workspace:*",
     "@ferrogate/observability": "workspace:*",
     "@ferrogate/policy": "workspace:*",
-    "@ferrogate/guardrails": "workspace:*"
+    "@ferrogate/guardrails": "workspace:*",
+    "@ferrogate/routing": "workspace:*"
   },
   "devDependencies": {
     "hyparquet": "^1.27.1"

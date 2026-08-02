@@ -34,6 +34,7 @@ import { adminAgentWorkflowRoutes } from "./admin_agent_workflow.js";
 import { adminApiKeyRoutes } from "./admin_api_key.js";
 import { adminConfigOpsRoutes } from "./admin_config_ops.js";
 import { adminCostRecordRoutes } from "./admin_cost_record.js";
+import { adminExperimentRoutes } from "./admin_experiment.js";
 import { adminGatewayConfigRoutes } from "./admin_gateway_config.js";
 import { adminManagedWorkerRoutes } from "./admin_managed_worker.js";
 import { adminMcpServerRoutes } from "./admin_mcp_server.js";
@@ -72,6 +73,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   adminApiKeyRoutes,
   adminConfigOpsRoutes,
   adminCostRecordRoutes,
+  adminExperimentRoutes,
   adminGatewayConfigRoutes,
   adminManagedWorkerRoutes,
   adminMcpServerRoutes,
