@@ -45,6 +45,7 @@
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
+import type { ExperimentObserver } from "../experiments/index.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
@@ -1194,6 +1195,17 @@ export interface InferenceDeps {
    * or no tenant database.
    */
   readonly audioObjects?: AudioObjectSource | ((env: InferenceBindings) => AudioObjectSource);
+  /**
+   * Issue #693 — where the SHADOW arm's observation row goes.
+   *
+   * Absent ⇒ built per Worker `env` by `experiments/sink.ts::experimentObserverFor`,
+   * which writes `experiment_shadow_legs` in the control database and counts a
+   * `dropped` leg on a deployment that binds none. A shadow mirror is the one
+   * arm of an experiment with no request log — nothing was served, so there is
+   * no client request to log — and before this port its cost, latency and error
+   * rate were invisible by construction.
+   */
+  readonly experiments?: ExperimentObserver | ((env: InferenceBindings) => ExperimentObserver);
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -1218,4 +1230,6 @@ export interface ResolvedInferenceDeps {
   readonly byok: ByokPorts | null;
   /** Issue #703 — resolves a `file_ref` to a stored recording's bytes. */
   readonly audioObjects: AudioObjectSource;
+  /** Issue #693 — the shadow arm's evidence writer. */
+  readonly experiments: ExperimentObserver;
 }

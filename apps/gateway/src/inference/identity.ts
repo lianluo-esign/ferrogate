@@ -241,6 +241,13 @@ export interface InferenceLogFacts {
   readonly totalTokens?: number | undefined;
   readonly streamed?: boolean | undefined;
   readonly providerAttemptIndex?: number | undefined;
+  /**
+   * #693 — the traffic-split experiment and the arm that served this request.
+   * Only this app knows both: the candidate list is resolved here and so is the
+   * candidate that answered.
+   */
+  readonly experimentId?: string | undefined;
+  readonly experimentArm?: string | undefined;
 }
 
 /** A `log` sink for a request nobody is logging. */

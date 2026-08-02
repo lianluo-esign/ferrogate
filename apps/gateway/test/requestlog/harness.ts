@@ -21,6 +21,8 @@ import ssoNonceSql from "../../../../sql/d1-ts/control/0002_sso_flow_nonce.sql?r
 import requestLogColumnsSql from "../../../../sql/d1-ts/control/0003_request_log_columns.sql?raw";
 import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_evaluations.sql?raw";
 import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_chain.sql?raw";
+import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
+import experimentOutcomesSql from "../../../../sql/d1-ts/control/0010_experiment_outcomes.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 
@@ -92,6 +94,31 @@ export async function applyControlMigrations(): Promise<void> {
   // second `vitest run` with "duplicate column name".
   if (!names.has("delegation_chain")) {
     for (const statement of sqlStatements(delegationChainSql)) {
+      await db.prepare(statement).run();
+    }
+  }
+
+  // `0009` (#692) and `0010` (#693) are applied here even though neither is a
+  // request-log migration, and the reason is `0010`: it adds
+  // `request_logs.experiment_id` / `.experiment_arm`, which `REQUEST_LOG_UPSERT_SQL`
+  // now writes on EVERY row. A harness that stopped at `0008` would fail every
+  // insert with "no such column" — so the request-log suite's schema is the
+  // whole committed set from here on, not a prefix of it.
+  //
+  // Order is load-bearing: `0010` alters `online_eval_scores`, which `0009`
+  // creates. Both get the same column-presence guard the alters above get,
+  // because the pool PERSISTS this database under `.wrangler/state` and a blind
+  // re-apply fails the second `vitest run` with "duplicate column name".
+  const quotaColumns = await db.prepare("PRAGMA table_info(quota_policies)").all();
+  const quotaNames = new Set(
+    (quotaColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
+  );
+  for (const statement of sqlStatements(onlineEvalSql)) {
+    if (quotaNames.has("online_eval_enabled") && statement.startsWith("ALTER TABLE")) continue;
+    await db.prepare(statement).run();
+  }
+  if (!names.has("experiment_arm")) {
+    for (const statement of sqlStatements(experimentOutcomesSql)) {
       await db.prepare(statement).run();
     }
   }

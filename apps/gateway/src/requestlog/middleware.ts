@@ -155,6 +155,8 @@ export function requestLogRecordFrom(
     // responsible rather than the last credential to touch the request.
     delegationChain: facts.delegationChain,
     delegationRoot: facts.delegationRoot,
+    experimentId: facts.experimentId,
+    experimentArm: facts.experimentArm,
     // The AUTHENTICATED tenancy, never a client-declared header. A
     // platform-operator credential carries none, and the row records that
     // absence rather than inventing a tenant — which is also what keeps the

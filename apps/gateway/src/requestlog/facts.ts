@@ -70,6 +70,22 @@ export interface RequestLogFacts {
    */
   readonly delegationChain?: string | undefined;
   readonly delegationRoot?: string | undefined;
+  /**
+   * #693 — the traffic-split experiment this request belonged to, and the arm
+   * that served it (`control` / `canary`).
+   *
+   * Contributed by the inference router, which is the only thing that knows the
+   * model's candidate list AND which candidate answered. Absent for every
+   * request whose model declares no canary and no shadow, which is almost all
+   * of them: a model with no variant is not an experiment.
+   *
+   * Never `shadow`. A mirror is stripped from the servable ladder before
+   * eligibility runs, so no served response can come from one; the shadow arm's
+   * evidence is its own table (`experiment_shadow_legs`), because a leg no
+   * client received must not become a row in the record of client requests.
+   */
+  readonly experimentId?: string | undefined;
+  readonly experimentArm?: string | undefined;
 }
 
 const FACTS = new WeakMap<Request, RequestLogFacts>();
