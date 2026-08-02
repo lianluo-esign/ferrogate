@@ -207,6 +207,20 @@ export function decodeServerDocument(document: unknown): McpServerConfig | undef
   );
   if (toolsToAutoExecute === undefined) return undefined;
 
+  // #687 — the exclude half. Decoded with the SAME reader as the include lists,
+  // which means a malformed entry REFUSES the document rather than being
+  // filtered out. For a DENY list that direction is load-bearing: dropping the
+  // entries it could not read would permit more than the operator wrote.
+  //
+  // An absent field yields `[]` from `readAllowlist`, and an empty exclude list
+  // is left OFF the config below rather than stored as `[]`, so a server that
+  // excludes nothing is indistinguishable from one written before this field —
+  // which is what keeps `decodeServerDocument`'s output stable for every
+  // existing document.
+  const rawExclude = document.tools_to_exclude ?? document.toolsToExclude;
+  const toolsToExclude = readAllowlist(rawExclude);
+  if (toolsToExclude === undefined) return undefined;
+
   const headers = readHeaders(document.headers);
   if (headers === null) return undefined;
   const oauth = readOauth(document.oauth);
@@ -229,6 +243,7 @@ export function decodeServerDocument(document: unknown): McpServerConfig | undef
     toolsToAutoExecute,
     timeoutMs,
   };
+  if (toolsToExclude.length > 0) config.toolsToExclude = toolsToExclude;
   if (typeof document.url === "string" && document.url !== "") config.url = document.url;
   if (headers !== undefined) config.headers = headers;
   if (oauth !== undefined) config.oauth = oauth;

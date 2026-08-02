@@ -146,6 +146,19 @@ export interface McpServerConfig {
   authType: McpAuthType;
   /** Deny-by-default execution allowlist. Empty ⇒ nothing is listed or callable. */
   toolsToExecute: string[];
+  /**
+   * The subtractive half of the multiplex filter pair (#687).
+   *
+   * ABSENT means "exclude nothing", which is the only backwards-compatible
+   * default and the only one a database that predates the column can express.
+   * It is NOT the fail-open direction it looks like: the INCLUDE list is still
+   * deny-by-default, so an absent exclude list leaves a server exposing exactly
+   * what it exposed before this field existed.
+   *
+   * EXCLUDE WINS over {@link toolsToExecute}. See {@link toolPermitted} for why
+   * that is forced rather than chosen.
+   */
+  toolsToExclude?: string[];
   /** Subset of {@link toolsToExecute} that may run without an approval. */
   toolsToAutoExecute: string[];
   /** Static headers merged into every dispatch (`shared_headers`). */
@@ -1173,8 +1186,9 @@ export class InMemoryUpstreams implements McpUpstreamPort {
     const listed: McpTool[] = [];
     for (const config of this.#servers.values()) {
       for (const tool of this.#tools.get(config.name) ?? []) {
-        // Deny-by-default: an un-allowlisted tool is never even advertised.
-        if (!toolAllowlisted(config.toolsToExecute, tool.name)) continue;
+        // Deny-by-default MINUS the exclude list (#687): an un-allowlisted or
+        // explicitly excluded tool is never even advertised.
+        if (!toolPermitted(config, tool.name)) continue;
         const entry: McpTool = {
           name: namespacedToolName(config.name, tool.name),
           serverName: config.name,
@@ -1229,7 +1243,7 @@ export class InMemoryUpstreams implements McpUpstreamPort {
         `MCP server ${config.name} uses the stdio transport, which Workers cannot host (no process spawn); move it to a Container or an HTTP transport`,
       );
     }
-    if (!toolAllowlisted(config.toolsToExecute, tool.remoteName)) {
+    if (!toolPermitted(config, tool.remoteName)) {
       throw new McpExecutionError(
         "tool_denied",
         `MCP tool ${config.name}-${tool.remoteName} is not allowlisted for execution`,
@@ -1249,6 +1263,44 @@ export class InMemoryUpstreams implements McpUpstreamPort {
 /** Deny-by-default allowlist check. Port of `manager::tool_allowlisted`. */
 export function toolAllowlisted(allowlist: readonly string[], name: string): boolean {
   return allowlist.includes(name);
+}
+
+/** The subtractive half. An absent list excludes nothing. */
+export function toolExcluded(denylist: readonly string[] | undefined, name: string): boolean {
+  return denylist?.includes(name) ?? false;
+}
+
+/**
+ * The multiplex filter pair (#687): INCLUDE ∖ EXCLUDE, by the upstream's own
+ * remote tool name.
+ *
+ * ## Why EXCLUDE wins, and why that is forced rather than preferred
+ *
+ * `toolsToExecute` is deny-by-DEFAULT. A tool that is listable or callable at
+ * all is therefore NECESSARILY on the include list. So if include won a
+ * conflict, writing a name into the exclude list could never change any
+ * outcome — the exclude list would be decorative, and an operator who added an
+ * exclusion and watched the tool stay callable would be holding a security
+ * hole, not a preference mismatch. There is exactly one order in which both
+ * lists mean something, and this is it.
+ *
+ * It is also the fail-CLOSED direction, which is the tie-break this app applies
+ * everywhere else a decode or a policy is ambiguous.
+ *
+ * ## Where it must be applied
+ *
+ * EVERY read, not only where a tool list is first discovered. `HttpMcpUpstreams`
+ * caches the discovered list per isolate and publishes it to the shared
+ * `MCP_SESSION` Durable Object, so an exclusion applied only at discovery would
+ * leave every warm session serving the excluded tool until its next reconnect.
+ * A deny rule that takes effect eventually is not a deny rule.
+ */
+export function toolPermitted(
+  config: Pick<McpServerConfig, "toolsToExecute" | "toolsToExclude">,
+  remoteName: string,
+): boolean {
+  if (toolExcluded(config.toolsToExclude, remoteName)) return false;
+  return toolAllowlisted(config.toolsToExecute, remoteName);
 }
 
 // `resolveNamespacedTool` — the longest-prefix port of

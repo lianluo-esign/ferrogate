@@ -58,6 +58,7 @@ import {
   type McpTool,
   type McpUpstreamPort,
   toolAllowlisted,
+  toolPermitted,
 } from "./ports.js";
 import {
   FERROGATE_CLIENT_INFO,
@@ -671,7 +672,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
         `MCP server ${session.config.name} uses the stdio transport, which Workers cannot host (no process spawn)`,
       );
     }
-    if (!toolAllowlisted(session.config.toolsToExecute, tool.remoteName)) {
+    if (!toolPermitted(session.config, tool.remoteName)) {
       throw new McpExecutionError(
         "tool_denied",
         `MCP tool ${session.config.name}-${tool.remoteName} is not allowlisted for execution`,
@@ -709,14 +710,28 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     }
   }
 
+  /**
+   * The exclude half of the multiplex filter pair (#687), applied on EVERY
+   * read of a tool list.
+   *
+   * `session.tools` is a cache — the isolate's own, and (through `#negotiate`)
+   * the shared `MCP_SESSION` Durable Object's. Filtering only where the list is
+   * DISCOVERED would leave every warm session serving an excluded tool until
+   * its next reconnect, which for a deny rule is a security window rather than
+   * a staleness nuisance. So the filter runs on the way OUT, not on the way in.
+   */
+  #permitted(session: UpstreamSession, tools: readonly McpTool[]): McpTool[] {
+    return tools.filter((tool) => toolPermitted(session.config, tool.remoteName));
+  }
+
   async #sessionTools(session: UpstreamSession): Promise<McpTool[]> {
-    if (session.tools.length > 0) return session.tools;
+    if (session.tools.length > 0) return this.#permitted(session, session.tools);
     if (session.config.transport === "stdio") return [];
     const negotiation = await this.#negotiate(session);
     // `#negotiate` may have ADOPTED the shared session's tool list, which is
     // the whole point of the manager: a warm upstream costs a cold isolate one
     // DO read instead of a handshake plus a `tools/list`.
-    if (session.tools.length > 0) return session.tools;
+    if (session.tools.length > 0) return this.#permitted(session, session.tools);
     const params = negotiation.mode === "modern" ? modernRequestParams({}) : {};
     const response = await this.#post(
       session,
@@ -733,7 +748,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
     }
     const parsed: ParsedToolDef[] = parseToolsList(response.json);
     session.tools = parsed
-      .filter((tool) => toolAllowlisted(session.config.toolsToExecute, tool.name))
+      .filter((tool) => toolPermitted(session.config, tool.name))
       .map((tool) => {
         const entry: McpTool = {
           name: namespacedToolName(session.config.name, tool.name),
@@ -755,7 +770,7 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
         this.#now(),
       );
     }
-    return session.tools;
+    return this.#permitted(session, session.tools);
   }
 
   /**
