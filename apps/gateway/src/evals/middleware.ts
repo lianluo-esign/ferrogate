@@ -371,7 +371,14 @@ export function onlineEvaluation(
             nowUnix: Math.floor(now() / 1000),
           });
           if (sample === undefined) {
-            sink.skip("response_not_evaluable");
+            // DIFFERENT from `response_not_evaluable` above, deliberately: that
+            // one is "this response was never a candidate" (streamed, refused,
+            // not JSON), this one is "it was a candidate and the body was not a
+            // shape `./content.ts` could read". The first is a property of the
+            // deployment's traffic; the second is a gap in the extractor, i.e.
+            // a bug to fix. One counter for both would hide the second inside
+            // the first on any deployment that streams.
+            sink.skip("content_not_extractable");
             return;
           }
           await sink.enqueue(sample, { env: c.env });

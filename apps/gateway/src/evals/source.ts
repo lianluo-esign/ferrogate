@@ -218,7 +218,8 @@ export function d1OnlineEvalPolicySource(db: OnlineEvalDatabase): OnlineEvalPoli
 
 function schemaPredatesOnlineEval(detail: string): boolean {
   return (
-    /no such column:\s*online_eval_/i.test(detail) || /no such table:\s*quota_policies/i.test(detail)
+    /no such column:\s*online_eval_/i.test(detail) ||
+    /no such table:\s*quota_policies/i.test(detail)
   );
 }
 

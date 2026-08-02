@@ -419,5 +419,7 @@ export function onlineEvalCapturePlan(input: OnlineEvalSamplingInput): OnlineEva
   }
 
   const decision = onlineEvalSamplingDecision(input);
-  return decision.sampled ? { capture: true, decision } : { capture: false, reason: decision.reason };
+  return decision.sampled
+    ? { capture: true, decision }
+    : { capture: false, reason: decision.reason };
 }

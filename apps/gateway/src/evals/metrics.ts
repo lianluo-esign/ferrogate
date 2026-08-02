@@ -51,9 +51,7 @@ function attribute(key: string, value: string | undefined): { key: string; value
 }
 
 /** One gauge point per scored criterion. */
-export function onlineEvalScorePoints(
-  records: readonly OnlineEvalScoreRecord[],
-): OtlpGaugePoint[] {
+export function onlineEvalScorePoints(records: readonly OnlineEvalScoreRecord[]): OtlpGaugePoint[] {
   return records.map((record) => ({
     name: ONLINE_EVAL_SCORE_METRIC,
     description: "Judge score for one sampled production request, in [0, 1].",
