@@ -29,6 +29,14 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll } from "vitest";
 import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sql?raw";
+// Issue #695. Every control migration the gateway READS from has to be applied
+// here, not just the init one: `src/cache/governance.ts` queries
+// `semantic_cache_policies` on the request path of every cacheable call, and a
+// bound CONTROL_DB whose table is missing makes the cache fail CLOSED (bypass)
+// — which would look like "the cache is off" rather than "the suite forgot a
+// migration". `0002` is not listed because it is an `ALTER TABLE` on a control
+// table no `apps/gateway` code path reads.
+import semanticCacheMigrationSql from "../../../sql/d1-ts/control/0003_semantic_cache_policies.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;
@@ -90,8 +98,10 @@ beforeAll(async () => {
    * is `CREATE … IF NOT EXISTS` throughout so re-application is a no-op.
    */
   if (CONTROL_DB !== undefined) {
-    for (const statement of sqlStatements(controlMigrationSql)) {
-      await CONTROL_DB.prepare(statement).run();
+    for (const migration of [controlMigrationSql, semanticCacheMigrationSql]) {
+      for (const statement of sqlStatements(migration)) {
+        await CONTROL_DB.prepare(statement).run();
+      }
     }
   }
 });
