@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(272);
+    expect(OPENAPI_OPERATION_COUNT).toBe(275);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {

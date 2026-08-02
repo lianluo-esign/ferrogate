@@ -661,7 +661,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // `../sites/host.ts`.
   app.use("*", options.siteDomains ?? defaultSiteDomainRouting());
 
-  // ONE table-driven guard for all 272 operations, ahead of every route.
+  // ONE table-driven guard for all 275 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.
   app.use("*", contractAuth(options.deps ?? depsFromEnv));
 
@@ -747,7 +747,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   //
   // LAST, and the position is the whole correctness argument: Hono runs matched
   // handlers in REGISTRATION order, so an `app.all("*")` placed any earlier
-  // would shadow all 272 contract operations AND `/health`. It is registered
+  // would shadow all 275 contract operations AND `/health`. It is registered
   // after every `router.register`, after every caller-supplied module, and after
   // `/health` above.
   //

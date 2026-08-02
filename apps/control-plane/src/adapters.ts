@@ -4,7 +4,7 @@
  * The STORE is now the real one: {@link resolveStore} builds
  * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
  * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
- * it — the 211 handlers still talk only to `ControlPlaneStore`, which is what
+ * it — the 214 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
  * CREDENTIALS, RBAC and the TENANCY LIFECYCLE GATE are now durable too, on the

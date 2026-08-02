@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 272-operation runtime API contract, as a
+ * The control-plane slice of the 275-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -13,7 +13,7 @@
  *     one source of truth, no generated copy that can drift;
  *  2. validate it eagerly at module load (throw, mirroring the Rust panic);
  *  3. expose lookup by `(method, path)`, by `operation_id`, and by contract
- *     `group`, restricted to the 211 operations `ROUTE-MAP.md` assigns to
+ *     `group`, restricted to the 214 operations `ROUTE-MAP.md` assigns to
  *     `apps/control-plane`.
  *
  * `matchit`'s radix tree is re-implemented as a specificity-ranked segment
@@ -116,12 +116,18 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 275;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
- * (206) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
+ * (209) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
  * `GET /metrics` (5).
+ *
+ * 211 -> 214 with #743's three asset-fleet operations (`GET /admin/v1/assets`,
+ * `GET /admin/v1/assets/quarantine`,
+ * `POST /admin/v1/assets/quarantine/{asset_id}`), counted — not incremented —
+ * out of the merged document, which is why the figure below is 214 and not the
+ * 277 a stale "main is at 274" would have produced.
  *
  * 209 -> 211 with #677's two chargeback reads (`GET /admin/v1/cost-records`
  * and `GET /admin/v1/cost-record-exports`). The 209 itself was a three-way
@@ -131,7 +137,7 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 272;
  * `docs/openapi/runtime-api-contract.json` after every merge rather than
  * incremented from whichever side happened to land first.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 211;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 214;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate
@@ -418,7 +424,7 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 272). */
+/** Every operation in the document, in document order (all 275). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
 /** The operations this Worker owns, in document order (211). */
@@ -430,7 +436,7 @@ export const OPERATIONS_BY_GROUP: ReadonlyMap<string, readonly ApiOperation[]> =
 /** Every group this Worker owns at least one operation in, sorted. */
 export const CONTROL_PLANE_GROUPS: readonly string[] = [...CONTRACT.byGroup.keys()].sort();
 
-/** Lookup by `operation_id` — across ALL 272, so a mis-assignment is visible. */
+/** Lookup by `operation_id` — across ALL 275, so a mis-assignment is visible. */
 export function operationById(operationId: string): ApiOperation | undefined {
   return CONTRACT.byOperationId.get(operationId);
 }

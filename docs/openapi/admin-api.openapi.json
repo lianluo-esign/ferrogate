@@ -19366,6 +19366,351 @@
           }
         }
       }
+    },
+    "/admin/v1/assets": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listFleetAssets",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Fleet inventory of stored asset versions, filtered by tenant, asset type and visibility (metadata only; never bytes or an object key).",
+        "description": "Cross-tenant reads require the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it and being a platform operator does not grant it. A tenant credential is confined to its own tenant and naming another is a 403. The response carries `unreadable_tenants` so a partial fan-out is never mistaken for a complete inventory.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "description": "Confine the read to one tenant. Required in effect for a platform operator on a deployment with more provisioned tenants than the fan-out cap.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset_type",
+            "in": "query",
+            "required": false,
+            "description": "Exact match on stored_assets.asset_type.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Exact match on stored_assets.name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "visibility",
+            "in": "query",
+            "required": false,
+            "description": "Exact match on the #366 screening state.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "visible",
+                "pending_scan",
+                "quarantined"
+              ]
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Pagination offset.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Asset inventory page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminFleetAssetList"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/assets/quarantine": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listQuarantinedAssets",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "The quarantine review queue: asset versions withheld by the #366 screener (metadata only).",
+        "description": "Cross-tenant reads require the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it and being a platform operator does not grant it. A tenant credential is confined to its own tenant and naming another is a 403. Only withheld versions appear here; `visibility=visible` is refused rather than silently ignored.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "description": "Confine the read to one tenant.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset_type",
+            "in": "query",
+            "required": false,
+            "description": "Exact match on stored_assets.asset_type.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Exact match on stored_assets.name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "visibility",
+            "in": "query",
+            "required": false,
+            "description": "Narrow the queue to one withheld state.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending_scan",
+                "quarantined"
+              ]
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Pagination offset.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Quarantine review queue page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminQuarantinedAssetList"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/assets/quarantine/{asset_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "asset_id",
+          "in": "path",
+          "required": true,
+          "description": "stored_assets.id of the withheld version under review.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "reviewQuarantinedAsset",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Release or reject one withheld asset version, with a reason, writing an attributed audit event.",
+        "description": "Cross-tenant reads require the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it and being a platform operator does not grant it. A tenant credential is confined to its own tenant and naming another is a 403. The decision record is written (and hash-chained into audit_events on the owning tenant's chain) BEFORE the version moves, so a crash between the two leaves an attributed decision that did not take effect rather than a release nobody can attribute. The applying write is a compare-and-set on the exact state that was reviewed; a live (non-withheld) version is a 409, because a takedown is a different verb.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminAssetReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Decision recorded and applied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAssetReviewResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -36401,6 +36746,411 @@
           "model",
           "input"
         ],
+        "additionalProperties": false
+      },
+      "AdminFleetAsset": {
+        "type": "object",
+        "description": "One stored asset version, as the operator inventory renders it. Metadata only: the R2 object key (storage_uri) is deliberately absent and no download link is offered — listing an artifact and fetching it are different permissions, and this surface grants only the first.",
+        "required": [
+          "object",
+          "id",
+          "tenant_id",
+          "asset_type",
+          "name",
+          "version",
+          "variant",
+          "content_type",
+          "content_hash",
+          "size_bytes",
+          "visibility",
+          "yanked",
+          "downloadable",
+          "created_at_unix",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "fleet_asset"
+          },
+          "id": {
+            "type": "string",
+            "description": "stored_assets.id — the version row identity."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "asset_type": {
+            "type": "string",
+            "description": "e.g. static_site, binary, dataset."
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string",
+            "description": "Platform/arch variant; the empty string is the default artifact."
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Digest of the stored bytes. A digest identifies bytes an investigator already holds; it is NOT a locator, which is why it is disclosed here while the object key is not."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "#366 trust-screening state. Only `visible` is resolvable and downloadable; `pending_scan` and `quarantined` are excluded from every artifact read path."
+          },
+          "yanked": {
+            "type": "boolean"
+          },
+          "downloadable": {
+            "type": "boolean",
+            "description": "True only for `visible`. Stated explicitly so an operator triaging the queue does not have to know the mapping."
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminQuarantinedAsset": {
+        "type": "object",
+        "description": "One WITHHELD asset version awaiting operator review. Same metadata-only projection as AdminFleetAsset; `visibility` is never `visible` on this surface.",
+        "required": [
+          "object",
+          "id",
+          "tenant_id",
+          "asset_type",
+          "name",
+          "version",
+          "variant",
+          "content_type",
+          "content_hash",
+          "size_bytes",
+          "visibility",
+          "yanked",
+          "downloadable",
+          "created_at_unix",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "quarantined_asset"
+          },
+          "id": {
+            "type": "string",
+            "description": "stored_assets.id — the version row identity."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "asset_type": {
+            "type": "string",
+            "description": "e.g. static_site, binary, dataset."
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string",
+            "description": "Platform/arch variant; the empty string is the default artifact."
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Digest of the stored bytes. A digest identifies bytes an investigator already holds; it is NOT a locator, which is why it is disclosed here while the object key is not."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "#366 trust-screening state. Only `visible` is resolvable and downloadable; `pending_scan` and `quarantined` are excluded from every artifact read path."
+          },
+          "yanked": {
+            "type": "boolean"
+          },
+          "downloadable": {
+            "type": "boolean",
+            "description": "True only for `visible`. Stated explicitly so an operator triaging the queue does not have to know the mapping."
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminFleetAssetList": {
+        "type": "object",
+        "description": "Fleet inventory page plus the tenants that could not be read.",
+        "required": [
+          "object",
+          "data",
+          "unreadable_tenants"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminFleetAsset"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Present only when the request carried a query string (the paginated envelope)."
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "unreadable_tenants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tenants whose database this deployment could not reach on a fleet fan-out. ALWAYS present, empty array included: an absent field would be indistinguishable from 'nothing was missed', and a partial inventory read as complete is how an abuse response misses the abuse. A single-tenant request answers 503 instead."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminQuarantinedAssetList": {
+        "type": "object",
+        "description": "Quarantine review queue page plus the tenants that could not be read.",
+        "required": [
+          "object",
+          "data",
+          "unreadable_tenants"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminQuarantinedAsset"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Present only when the request carried a query string (the paginated envelope)."
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "unreadable_tenants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tenants whose database this deployment could not reach on a fleet fan-out. ALWAYS present, empty array included: an absent field would be indistinguishable from 'nothing was missed', and a partial inventory read as complete is how an abuse response misses the abuse. A single-tenant request answers 503 instead."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAssetReviewRequest": {
+        "type": "object",
+        "description": "An operator's decision about one withheld asset version.",
+        "required": [
+          "decision",
+          "reason"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "description": "Tenant that owns the version. REQUIRED for a platform operator (whose credential names no tenant); a tenant credential may omit it and may not disagree with it."
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "release",
+              "reject"
+            ],
+            "description": "`release` moves the version to `visible` through the same column every read path filters on. `reject` HARDENS it to `quarantined` so a reviewed row is distinguishable from an unscreened one; it deletes nothing."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "WHY. Required and non-empty: an unattributed, unexplained quarantine release is worse than no surface at all."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAssetReview": {
+        "type": "object",
+        "description": "The durable decision record. It is written BEFORE the version moves and is hash-chained into audit_events on the owning tenant's chain, so a release is always attributable.",
+        "required": [
+          "id",
+          "tenant_id",
+          "asset_id",
+          "decision",
+          "reason",
+          "from_visibility",
+          "to_visibility",
+          "applied",
+          "actor_scope",
+          "decided_at_unix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "asset_id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "release",
+              "reject"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "from_visibility": {
+            "type": "string",
+            "enum": [
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "The state the operator actually reviewed. The applying UPDATE is a compare-and-set on exactly this value."
+          },
+          "to_visibility": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "pending_scan",
+              "quarantined"
+            ]
+          },
+          "applied": {
+            "type": "boolean",
+            "description": "False until the guarded UPDATE has committed, so 'recorded' never silently reads as 'done'."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "conflict"
+            ]
+          },
+          "actor_scope": {
+            "type": "string",
+            "enum": [
+              "platform_operator",
+              "tenant"
+            ]
+          },
+          "actor_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The credential that decided, when it carries an id."
+          },
+          "actor_tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decided_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AdminAssetReviewResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "asset_review"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "asset_review"
+          },
+          "asset_review": {
+            "$ref": "#/components/schemas/AdminAssetReview"
+          }
+        },
         "additionalProperties": false
       }
     }

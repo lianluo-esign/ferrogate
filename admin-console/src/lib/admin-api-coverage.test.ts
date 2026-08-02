@@ -168,6 +168,44 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "every governed field is a TRI-STATE (null means inherit the deployment value, which is not the same as false or 0) and the group has no PATCH for exactly that reason, so a generic CRUD form would silently turn 'inherit' into a concrete value; it also carries a purge action that is not a CRUD leg. Belongs beside the gateway cache panel. Deferred, needs UI",
   },
+  // #743's asset FLEET surface: the inventory, the quarantine review queue and
+  // the release/reject decision. Three reasons a generic CRUD resource would be
+  // WRONG here rather than merely thin, which is why this is a deferral with a
+  // named shape instead of a registry entry:
+  //
+  //  1. **It is not CRUD.** There is no create, no update and no delete — the
+  //     only write is a decision (`release` | `reject`) that carries a MANDATORY
+  //     free-text reason and is refused without one. The generic form renders
+  //     editable fields and a Save button; that is the wrong affordance for an
+  //     irreversible moderation verdict, and a Save that silently 400s on a
+  //     missing reason is worse than no button.
+  //  2. **The cross-tenant read is gated on a scope the console session may not
+  //     hold.** `admin.assets.fleet` must be held EXACTLY (the admin wildcard
+  //     does not grant it), so the page has a first-class "you are not
+  //     authorized for the fleet view, here is the grant to mint" state that no
+  //     other console resource has, plus a per-tenant fallback view.
+  //  3. **The list is deliberately not linkable to bytes.** No cell may become a
+  //     download link and no preview may be rendered: metadata is a smaller
+  //     permission than content, and the generic renderer's habit of turning a
+  //     URL-ish string into an anchor is exactly the mistake to avoid. The API
+  //     withholds `storage_uri` so the console cannot make one by accident, but
+  //     the SCREEN still has to be designed around "you can see it and you
+  //     cannot fetch it".
+  //
+  // The eventual UI is a two-pane abuse-response screen — the fleet inventory
+  // with tenant/type/visibility filters, and a quarantine queue whose row action
+  // opens a decision dialog that requires the reason before it enables Release
+  // or Reject — mounted beside the hosting surfaces (`/app/site-domains`), not
+  // in the CRUD registry. Operators are not blocked meanwhile: all three
+  // operations are ordinary `/admin/v1` calls the CLI and the generated SDKs
+  // reach today. Deferred, needs UI — tracked on the #313 chain as the #743
+  // hosting-abuse-response follow-up. This entry must be DELETED when that
+  // screen lands; an obsolete exclusion fails the check below.
+  assets: {
+    owner: "hosting abuse-response console surface (#743 follow-up, #313 chain)",
+    reason:
+      "asset fleet inventory plus a quarantine review queue whose only write is a reasoned release/reject decision, not a CRUD leg; it also needs a distinct-scope ('admin.assets.fleet' held exactly) unauthorized state and a list that must never link to bytes, so a generic CRUD resource would render the wrong affordances. Belongs as a two-pane abuse-response screen beside the site-domains hosting surfaces — deferred, needs UI",
+  },
 };
 
 /**
