@@ -3,665 +3,291 @@
   Developed by the commercial cloud service company represented by https://token4ai.cloud.
   Author: jamesduan (X: https://x.com/JamesDuanL)
   Created: 2026-06-11
-  description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+  description: Token4AI Cloud, FerroGate AI Gateway, TypeScript on Cloudflare Workers, agent-native AI traffic infrastructure.
 -->
 
 # FerroGate
 
 **Language:** English | [简体中文](README.zh-CN.md)
 
-FerroGate is an open-source Rust API gateway and AI gateway built on
-Cloudflare Pingora. It gives teams a self-hostable control point for AI traffic:
-OpenAI-compatible and Anthropic-native APIs, multi-vendor provider routing,
-virtual API keys, policy checks, token accounting settled against a standalone
-billing service, MCP/tool execution, opt-in agent runs and schedules, isolated
-`agent-worker` execution (managed or self-hosted over verified mTLS), a hosted
-asset closed loop for agent-consumable artifacts and static sites,
-observability, Admin APIs, cluster operations, and automatic HTTPS.
+FerroGate is an open-source AI gateway that runs entirely on Cloudflare
+Workers. It is a control point for AI traffic: OpenAI-compatible and
+Anthropic-native inference APIs, multi-vendor provider routing with canary and
+shadow rollouts, virtual API keys with scopes and tenant isolation, policy and
+guardrail screening, rate limits, quotas and prepaid wallets, durable token
+metering and billing, an asset closed loop, an MCP server, agent runs, and a
+~250-operation admin API.
+
+It is written in TypeScript end to end and deploys as a fleet of Workers backed
+by D1, R2, KV, Durable Objects, Queues and Analytics Engine.
 
 The project is developed as the open-source gateway foundation behind
 [Token4AI Cloud](https://token4ai.cloud).
 
-For the longer capability inventory and current implementation status, read the
-[Product Overview](docs/product-overview.md).
+## Architecture at a glance
 
-## Where the project is going
+Six deployables live under `apps/`. Five are Workers; the sixth is a CLI binary.
 
-Three directions are actively shaping the codebase. They are stated here
-because they change what a contributor should build *toward*, not just what
-exists today.
+| Deployable | Worker name | What it is |
+|---|---|---|
+| `apps/gateway` | `ferrogate-gateway` | The **data plane**. A Hono streaming proxy for inference, plus the asset surface. Owns 31 contract operations. |
+| `apps/control-plane` | `ferrogate-control-plane` | The **admin API** — 197 contract operations (192 under `/admin/v1/**`, plus the `/admin` pages and `/metrics`), and the admin-console session surface, SAML, OIDC and SCIM. |
+| `apps/mcp` | `ferrogate-mcp` | Model Context Protocol server: JSON-RPC ingress, OAuth flow, sessions, governed tool execution. 6 contract operations. |
+| `apps/agent-runtime` | `ferrogate-agent-runtime` | Agent runs and jobs, A2A agent upstreams, and the self-hosted worker plane. 15 contract operations. |
+| `apps/telemetry` | `ferrogate-telemetry` | OTLP receiver that writes to Analytics Engine. Owns no contract route; the other Workers feed it over a service binding. |
+| `apps/cli` | — | `ferrogate`, the management CLI. A Bun-compiled binary, not a Worker. |
 
-**1. Cloudflare-native as a first-class deployment target.** Beyond using
-Pingora as the proxy core, FerroGate is growing a real Cloudflare runtime: a
-shared [`ferrogate-cloudflare`](crates/ferrogate-cloudflare) client, D1 as a
-control-plane backend, R2 for asset storage, Secrets Store (`cf://`) for
-credential resolution, and Workers under [`workers/`](workers) — including an
-agent-gateway that runs agent workloads in Containers. Self-hosting on your own
-infrastructure remains fully supported; Cloudflare becomes an alternative
-substrate rather than a replacement. See
-[`docs/cloudflare-integration.md`](docs/cloudflare-integration.md) and
-[`docs/cloudflare-deploy-topology.md`](docs/cloudflare-deploy-topology.md).
+`/healthz` and `/readyz` are implemented in every Worker.
 
-**2. Every privileged action is attributable.** The gateway is meant to be
-auditable end to end, not only authenticated. That means a canonical action
-identity and fingerprint shared between the runtime and the CLI, a decision
-receipt on every mutating CLI verb (actor, target fingerprint, policy decision,
-dry-run flag, rollback pointer, audit id — and an explicit `null` with a stated
-reason where the control plane does not yet return one), and client-side
-attribution on every API call. Fields that cannot be determined are rendered
-absent with a reason rather than guessed: **a wrong value in an audit trail is
-worse than a missing one.**
+### The gateway request path
 
-**3. Explicit tenancy over implicit defaults.** Platform-root authority is
-becoming something an operator writes down rather than something an omitted
-field grants, and tenant scoping is enforced at one chokepoint per seam rather
-than per handler. Work in this direction treats a silently-permissive default
-as a defect in its own right.
+A request to `apps/gateway` passes through one table-driven chain, in this
+order:
 
-## Highlights
+1. **Request id** and request metrics.
+2. **Network gate** — pre-auth IP allow/deny, so a flood never pays for a
+   credential lookup.
+3. **Contract auth** — one guard for all 251 operations, driven by the route
+   contract's `auth.kind` / `auth.scope` / `rbac_action`.
+4. **Admission** — rate limit (Durable Object counter), quota, monthly budget,
+   prepaid wallet hold.
+5. **Guardrails** — request-stage screening.
+6. **Drain gate** — `503 node_draining` on spend-producing operations when the
+   fleet is drained.
+7. **Response cache** — exact-match or opt-in semantic (in-tree feature-hashing
+   embedder and cosine similarity; no vector database), over the Cache API.
+8. **Zod validation**, then the **model registry** (logical models, fallback,
+   canary and shadow splits).
+9. **Upstream dispatch** — provider adapters with a circuit breaker Durable
+   Object, retry and failover; SSE framing is preserved byte-for-byte and a
+   client disconnect aborts the upstream.
+10. **Durable metering** — the ledger row and the billing-outbox row commit in
+    the same D1 `batch()`, then publish onto a Queue.
 
-- **Multi-protocol inference gateway:** `GET /v1/models`,
-  `POST /v1/chat/completions`, `POST /v1/responses`, Anthropic-native
-  `POST /v1/messages`, `POST /v1/embeddings`, and
-  `POST /v1/images/generations`, including streaming SSE forwarding.
-- **Provider orchestration:** OpenAI-compatible APIs, OpenAI, Azure OpenAI,
-  OpenRouter, Anthropic, Gemini, and Grok/xAI with logical models, fallback
-  routing, and canary plus shadow/mirror traffic splitting for model
-  rollouts. Ships a ready-to-run [token4ai.cloud](https://token4ai.cloud)
-  example (`config/ferrogate.token4ai.example.toml`) serving gpt-5.5 through
-  the same OpenAI-compatible adapter.
-- **Governance:** virtual API keys, scopes, tenant context, allow/deny rules,
-  request rate limits, token budgets with local tokenizer pre-request
-  estimation, wallet reserve/hold for exact-amount spends, and exact-match
-  plus opt-in semantic (vector-similarity) response caching.
-- **Asset hosting closed loop:** publish, govern, and agent-consume artifacts
-  through `/v1/assets/*` — versioned assets with channels/semver and
-  platform variants, signature and malware-scan supply-chain gates, MCP
-  `resources/*` ingress plus a built-in `fetch_asset` tool for agent
-  consumption, static-site serve mode at `GET /sites/{tenant}/{site}/{path}`
-  with ETag/Range/304 caching, a presigned large-file path against a private
-  S3-compatible bucket (Supabase Storage), egress metering/audit,
-  retention/GC lifecycle policies, and a `ferrogate assets` push/pull CLI.
-- **Service decomposition:** `ferrogate auth serve` and `ferrogate billing
-  serve` run tenant/RBAC and token-usage settlement as independent REST
-  services from the same binary, each with an optional durable Supabase
-  backend — a durable, dead-letter-tracked outbox delivers settled usage from
-  the gateway to the billing service without blocking the request hot path.
-- **Agent and tool traffic:** dual-era MCP host/client adapters with stateless
-  2026-07-28 candidate discovery and per-request metadata plus strict fallback
-  to initialize-based 2025-11-25/2025-06-18 peers. Native `POST /v1/mcp`
-  implements the same pinned candidate ingress contract. External official-SDK
-  interoperability is available as the opt-in locked
-  `ferrogate-test mcp-candidate-client-official` path; a command existing is not
-  a passing result, and final-spec conformance is not claimed. Malformed modern
-  request metadata fails as JSON-RPC `-32602`, while missing/mismatched
-  Streamable-HTTP routing headers fail as `-32020`. The runtime
-  also provides explicit `POST /v1/agent-runs`,
-  cron/interval agent schedules with an admin CRUD API, governed A2A ingress
-  with policy/guardrails/billing on message bodies, governed tool execution,
-  plugin registration, an isolated `agent-worker` process for
-  Firecracker-backed execution — self-hosted workers connect over verified
-  mTLS with control-plane cert issuance and CRL revocation — and audit
-  events.
-- **Governed CLI:** `ferrogate ctl` covers the Admin API resource families
-  under an OpenAPI-to-CLI parity gate, and every *mutating* verb returns a
-  decision receipt rather than a bare response body — actor, target
-  fingerprint (byte-identical to the runtime's `CanonicalCapabilityTarget`
-  contract), policy decision, `--dry-run` state, rollback pointer and audit id.
-  The receipt shape is enforced by the command registry at compile time, and a
-  dry run provably issues no state-changing request.
-- **Operator visibility:** request logs, usage and metering events, provider
-  health, cache/tool metrics, agent run timelines, structured agent-run OTLP
-  spans, Prometheus, OTLP export, Admin API, and dashboard. Where a signal
-  cannot be read, the surface reports *unknown* rather than a confident
-  negative — a presence-store outage does not render as "not running".
-- **Production operations:** durable control-plane storage options, a
-  retention engine with per-tenant TTL/purge for request logs and audit
-  events, analytics warehouse delivery, reload/drain readiness, cluster
-  counters, Docker, Kubernetes manifests, Helm chart, and ACME HTTPS.
+Per-tenant D1 routing sits behind the auth step, so tenant state can live in an
+isolated database per tenant.
 
-## Quick Start
+### Shared packages
 
-Prerequisites:
+Fifteen packages under `packages/`. Each exports `src/*.ts` directly — there is
+no per-package build step.
 
-- Rust toolchain compatible with the workspace `rust-version`.
-- `cmake`, `g++`, `make`, and `pkg-config` for Pingora's native dependency
-  chain.
+| Package | Responsibility |
+|---|---|
+| `core` | Request identity, tenant/workspace attribution, tool primitives, approval policy, redaction guard, boundary errors. |
+| `schemas` | Zod wire envelopes and the OpenAPI contract registry. |
+| `config` | The operator configuration model, loader and validation. |
+| `policy` | Pure allow/deny rules, quota merge, workflow execution budgets. |
+| `guardrails` | Detector contracts and runtimes with deadlines, bulkheads, circuit state and SSRF-safe endpoint validation. |
+| `secrets` | Secret-reference resolution: `env://`, `vault://`, `cf://` (Cloudflare Secrets Store). |
+| `providers` | Provider adapters — canonical plan in, upstream wire request out, normalized response/usage back. |
+| `routing` | Route match plus deterministic canary/shadow rollout selection. |
+| `storage` | The persistence boundary over D1/KV/R2. |
+| `billing` | Rate cards, pricing, the idempotent ledger, outbox delivery. |
+| `payments` | The x402 / Solana client-side wire contract (deprioritized). |
+| `observability` | Logging, metrics and OTLP request construction. |
+| `cloudflare` | The Cloudflare account-management REST surface (R2 buckets, scoped tokens, D1 database lifecycle). |
+| `sso` | SAML 2.0 service provider. |
+| `identity` | OIDC relying party and SCIM 2.0 provisioning. |
 
-`ferrogate` is one binary whose subcommand selects which service process
-runs. `run` (below) starts the AI gateway itself; the standalone `auth serve`
-and `billing serve` services are covered under
-[Service Decomposition](#service-decomposition).
+### Cloudflare products in use
 
-Run the default development gateway:
+- **D1** — one control database plus per-tenant databases. Migrations in
+  `sql/d1-ts/{control,tenant}/`.
+- **R2** — asset object storage.
+- **KV** — MCP OAuth state.
+- **Durable Objects** — 7 classes: rate limiter, provider circuit breaker,
+  shadow budget (gateway); MCP OAuth flow claim and MCP session (mcp); agent
+  run state and worker plane (agent-runtime).
+- **Queues** — the billing-report outbox producer.
+- **Cache API** — the response cache.
+- **Analytics Engine** — the telemetry sink.
+- **Service bindings** — gateway → telemetry.
+- **Secrets Store** — `cf://` secret references, bound at deploy time.
+- **Workers AI** — the Llama Guard guardrail detector adapter. The `[ai]`
+  binding is supplied at deploy time; it is not declared in the committed
+  configuration.
 
-```bash
-cargo run -- run --config Ferrogate/Caddyfile
-```
+## The route contract
 
-`Ferrogate/Caddyfile` ships with one model (`fast-chat` → OpenAI's
-`gpt-4o-mini`) and one development API key (`dev-secret`, real request
-auth — a wrong key is rejected). Set `OPENAI_API_KEY` first if you want an
-actual completion; without it, requests still route correctly and fail with
-a clean 401 from OpenAI.
+`docs/openapi/runtime-api-contract.json` is the authoritative source for the
+runtime surface: **251 operations**, each carrying `path`, `method`,
+`operation_id`, `visibility`, `auth.kind`, `auth.scope` and `rbac_action`.
+Every Worker imports it directly rather than restating it, and each app's
+contract test fails if an operation it owns is not registered.
 
-Validate configuration:
+The split is 193 admin, 51 public and 7 internal operations; auth kinds are 238
+bearer, 6 internal (worker-plane callbacks), 6 anonymous and 1
+method-dependent. `docs/rewrite/ROUTE-MAP.md` assigns each operation to a
+Worker. Field-level request and response bodies for the admin surface are in
+`docs/openapi/admin-api.openapi.json`.
+
+## Capabilities deliberately not offered
+
+Three operations are **mounted, guarded, and then refused** with
+`501 capability_not_offered`:
+
+- `POST /v1/functions/execute`
+- `GET /v1/tools` and `POST /v1/tools/execute`
+
+This is a product decision, not an outage, not unfinished work, and not a
+platform limit — nothing in the backlog tracks it and it is not a bug. The
+decision, its reasoning, and what a re-implementer would need are recorded in
+[`docs/rewrite/DROPPED-CAPABILITIES.md`](docs/rewrite/DROPPED-CAPABILITIES.md),
+and a test hard-codes the dropped set so the refusal cannot be softened without
+recording a decision.
+
+## Getting started
+
+Prerequisites: [Bun](https://bun.sh) (the version is pinned by
+`packageManager` in `package.json`). Wrangler and every other tool arrive as a
+dev dependency — no global installs, no Cloudflare account, and no network
+access are needed for the offline workflow below.
 
 ```bash
-cargo run -- validate --config Ferrogate/Caddyfile
-cargo run -- validate --config config/ferrogate.example.toml
+bun install
 ```
 
-Probe the gateway:
+### Run the tests
 
 ```bash
-curl http://127.0.0.1:8080/healthz
-curl http://127.0.0.1:8080/proxy/httpbin/get
-curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/v1/models
+bun run test        # every workspace
+bun run typecheck   # tsc --noEmit, every workspace
+bun run lint        # biome
 ```
 
-Send an OpenAI-compatible chat request:
+`bun run test` fans out to each workspace's own `test` script, and **that
+matters**: four workspaces chain a second (and `apps/gateway` a third) Vitest
+run behind a non-default config — `apps/gateway` (rate-limit and tenancy
+harnesses), `apps/agent-runtime` (durable harness), `packages/storage` (D1) and
+`packages/routing` (Durable Objects). A bare `vitest run` at the repo root or
+inside one of those workspaces silently under-reports.
+
+To run one workspace:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Authorization: Bearer dev-secret' \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}'
+bun run --filter '@ferrogate/app-gateway' test
 ```
 
-Send a Responses API request:
+### Run a Worker locally
+
+`wrangler dev --local` boots the real `workerd` against local D1/KV/R2/DO
+state. Apply the migrations first — `wrangler dev` provisions an empty SQLite
+file per database id and does not run `migrations_dir`, and the gateway
+correctly refuses to serve an empty schema:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/responses \
-  -H 'Authorization: Bearer dev-secret' \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"fast-chat","input":"hello"}'
+cd apps/gateway
+bunx wrangler d1 execute DB --local -y --file=../../sql/d1-ts/tenant/0001_init_tenant.sql
+bunx wrangler d1 execute BILLING_DB --local -y --file=../../sql/d1-ts/control/0001_init_control.sql
+bunx wrangler dev --local --ip 127.0.0.1 --port 8787
 ```
 
-Open the local dashboard:
+Each app also has `bun run dev` (`wrangler dev`) and `bun run deploy`
+(`wrangler deploy`).
+
+The committed `[vars]` are the **fail-closed empties**: with no credential
+configured, every authenticated route answers `401` before its handler runs,
+and with no provider or model configured the registry is empty and every model
+answers `400 model_not_found`. Override them for a local session with `--var`
+(the end-to-end harness does exactly this) or a gitignored `.dev.vars`.
+
+### End-to-end
+
+```bash
+bun run test:e2e
+```
+
+Playwright starts a real `wrangler dev` per app from that app's production
+`wrangler.toml`, applies the local D1 migrations, and drives the Workers over
+HTTP. There is no browser — every spec uses the `request` fixture. A cold
+`wrangler dev` takes 35–50s per app, so leave one running and the suite
+attaches to it.
+
+## Deploying
+
+Wrangler is the only bundler and the only deploy tool. There is no separate
+build step: `wrangler deploy` bundles `src/worker.ts` per app.
+
+**Read [`docs/rewrite/CLOUD-VERIFICATION.md`](docs/rewrite/CLOUD-VERIFICATION.md)
+before the first deploy.** It is the ordered runbook, and the order is not
+arbitrary — a service binding is resolved by name at deploy time, so
+`ferrogate-telemetry` must exist before `ferrogate-gateway` deploys, and the
+cross-Worker rate-limit bindings must be attached after it. That document also
+enumerates the preconditions the repository deliberately does not commit:
+
+- Every `database_id`, bucket name, queue name and KV namespace id in
+  `apps/*/wrangler.toml` is a placeholder. No real account id, database uuid or
+  secret is committed.
+- D1 migrations (`wrangler d1 migrations apply`) must be applied before the
+  first authenticated request.
+- Secrets go in with `wrangler secret put` — the admin-console JWT secret, and
+  one per tenant SSO `env://` reference.
+- Several committed `[vars]` are dev-posture defaults that must be overridden
+  in the deploy environment rather than flipped in the committed file, because
+  the offline suites drive the apps through them.
+
+Durable Objects, Queues and Analytics Engine require a paid Cloudflare plan.
+
+## Repository layout
 
 ```text
-http://127.0.0.1:8080/admin
+apps/          6 deployables — 5 Workers + the CLI binary
+packages/      15 shared TypeScript libraries (source-only, no build step)
+e2e/           Playwright black-box suite over real `wrangler dev`
+sql/d1-ts/     D1 migrations: control/ and tenant/
+docs/openapi/  the route contract + the admin OpenAPI document
+docs/rewrite/  architecture, testing, deploy and parity records
 ```
 
-Run the billing service alongside the gateway to see settled usage land in a
-durable ledger — each is its own process, started with its own subcommand
-(full explanation, including the fail-closed pricing rule, under
-[Service Decomposition](#service-decomposition)):
-
-```bash
-FERROGATE_BILLING_LISTEN=127.0.0.1:8092 cargo run -- billing serve &
-TOKEN4AI_API_KEY=sk-... cargo run -- gateway --config config/ferrogate.token4ai.example.toml
-
-curl -s http://127.0.0.1:8080/v1/chat/completions \
-  -H 'authorization: Bearer client-secret' -H 'content-type: application/json' \
-  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
-
-curl -s http://127.0.0.1:8092/v1/billing/ledger
-```
-
-## Agentic Gateway
-
-FerroGate supports explicit agent traffic without turning every AI request into
-an agent loop. Normal Chat Completions and Responses calls keep their existing
-behavior; agent execution is opt-in through agent runtime, upstream, workflow,
-skill, prompt, and plugin control-plane surfaces.
-
-Implemented agentic gateway surfaces include:
-
-- Agent discovery through `/.well-known/agent.json` and visible skill packages
-  through `GET /v1/skills` and `GET /v1/skills/{id}`.
-- Governed A2A-style agent upstreams with tenant/API-key visibility,
-  `agents.read`/`agents.invoke` scopes, request forwarding, and streaming
-  forwarding for `message:stream` paths.
-- Explicit `POST /v1/agent-runs` execution with max-turn and timeout limits.
-- Managed agent runtime contract that defaults to an external `agent-worker`
-  process owning Firecracker microVM lifecycle. The gateway records policy,
-  quota, template selection, capability-envelope, and evidence state; it does
-  not run the microVM in the request handler.
-- Explicit external-process provider support for local tests and harness
-  adapters. Production managed execution should go through `agent-worker` and
-  Firecracker microVM isolation.
-- A standalone `agent-worker` process boundary that owns Firecracker microVM
-  lifecycle, framework-handler adapters (Codex, Claude Code, Hermes), and
-  gateway-authorized governed execution of CLI, tool, MCP tool, skill, memory,
-  secret, network-egress, browser, REST, and filesystem actions. A shared
-  `--worker-type cloud|self-hosted` flag selects the trust/enforcement policy
-  on one binary; self-hosted workers run covered command families in
-  report-only mode, connect to the gateway's production ingress over verified
-  mTLS (single explicit issuing CA, control-plane certificate issuance,
-  rotation, and CRL revocation), and poll dispatched runs through
-  `/v1/self-hosted-workers/*`. See
-  [`docs/security/self-hosted-mtls-transport.md`](docs/security/self-hosted-mtls-transport.md).
-- Time-based agent schedules: cron/interval triggers fire `agent_run` targets
-  into the same dispatch lease queue self-hosted workers poll, managed
-  through `/admin/v1/agent-schedules` CRUD, `run-now`, and per-schedule fire
-  history.
-- Workflow graph policies with model/tool nodes, edge conditions, model-call
-  and tool-call budgets, token budgets, iteration limits, counters, and runtime
-  timelines.
-- Skill packages that can bundle visible capabilities and materialize owned
-  plugins, tools, MCP servers, prompt templates, and workflows.
-- Versioned prompt templates with audited `POST /v1/prompts/{id}/render`
-  output for Chat Completions or Responses request bodies.
-- Plugin registration and plugin-owned tool exposure with permissions, approval
-  policy, secret redaction, lifecycle status, and Admin API inspection.
-- Tool calls from agent runs go through the same gateway governance path as
-  ordinary tool execution: auth, scopes, policy, approvals, billing, and audit
-  evidence.
-- Durable `agent_run` and `agent_run_event` records, plus
-  `GET /admin/v1/agent-runs` and `GET /admin/v1/agent-runs/{run_id}` timelines
-  for request, billing, audit, tool, and run-event evidence.
-- Agent run timelines export as structured OTLP traces with
-  `ferrogate.agent.run`, provider-step, billing-write, audit/tool, and runtime
-  lifecycle spans, while preserving W3C trace context for external correlation.
-
-## Configuration
-
-FerroGate loads `Ferrogate/Caddyfile` by default today. Structured TOML and
-YAML configuration are also supported — the loader dispatches on the file
-extension.
-
-> **Direction:** a purpose-built **YAML** schema is becoming the primary
-> configuration format, and the Caddyfile dialect is being retired. The system
-> has outgrown what that dialect expresses well — optional nested records,
-> tri-state flags where `null` is meaningful, and unset-versus-explicit-zero
-> distinctions all need a bespoke line in the Caddyfile mapping layer. New
-> configuration surfaces should be designed against the YAML schema. The
-> Caddyfile examples below still work and will keep working through a stated
-> deprecation window.
-
-```bash
-ferrogate run --config Ferrogate/Caddyfile
-ferrogate run --config config/ferrogate.example.toml
-```
-
-Minimal Caddyfile-style AI gateway shape:
-
-```caddyfile
-:8080 {
-    log
-
-    respond /healthz "ok" 200
-
-    ai_gateway {
-        provider openai {
-            kind openai-compatible
-            base_url https://api.openai.com/v1
-            api_key {env.OPENAI_API_KEY}
-        }
-
-        model fast-chat -> openai:gpt-4o-mini {
-            capabilities chat streaming
-        }
-
-        api_key key_dev {
-            key {$FERROGATE_DEV_KEY}
-            scopes models.read chat.completions responses.create admin.read
-            allowed_models fast-chat
-            allowed_providers openai
-            # Every key states its tenant identity or the gateway refuses to
-            # start (#540) — an omitted field must never mean platform root.
-            # This one carries admin.read across the whole gateway, so it says
-            # so; a key scoped to one tenant says `organization_id <tenants.id>`
-            # instead. A Caddyfile has no deployment-wide opt-out.
-            platform_operator on
-        }
-    }
-}
-```
-
-Authentication is **required by default and stated, never inferred** (#542): a
-config with no credential source — no `[[api_keys]]`, no enabled
-`[auth_service]`, no durable `[storage]` backend (`postgres`, `supabase`,
-`cloudflare_d1`) holding virtual keys — refuses to start rather than admitting
-every unauthenticated request as a platform operator. A gateway that really is
-open says so by name. In TOML/YAML that is `[auth] disabled = true`; a
-Caddyfile says it in the global options block, which is the whole remedy for a
-migrated reverse proxy that has no `ai_gateway` block:
-
-```caddyfile
-{
-    auth off
-}
-
-:8080 {
-    handle_path /proxy/* {
-        reverse_proxy https://httpbin.org
-    }
-}
-```
-
-`ferrogate check --config <file>` runs the same gate the gateway does, so an
-undeclared posture surfaces before a restart rather than during one.
-
-Use these as the main configuration references:
-
-- Default development config: [`Ferrogate/Caddyfile`](Ferrogate/Caddyfile)
-- Full TOML example: [`config/ferrogate.example.toml`](config/ferrogate.example.toml)
-- Durable storage: [`docs/durable-storage.md`](docs/durable-storage.md)
-- Analytics warehouse: [`docs/analytics-warehouse.md`](docs/analytics-warehouse.md)
-- Cluster deployment: [`docs/cluster-deployment.md`](docs/cluster-deployment.md)
-
-For production client secrets, prefer hashed API keys:
-
-```bash
-ferrogate hash-key --secret 'your-client-secret'
-```
-
-## Service Decomposition
-
-`ferrogate` is one binary with subcommands that select which service process
-runs, rather than separate binaries per service:
-
-- `ferrogate run` (alias `gateway`) — the Pingora AI gateway.
-- `ferrogate auth serve` — the tenant/RBAC REST API, optionally backed by
-  Supabase for durable virtual API keys. See
-  [`docs/auth-service-contract.md`](docs/auth-service-contract.md).
-- `ferrogate billing serve` — the token-usage pricing and ledger REST API,
-  in-memory by default or durable via `--supabase-dsn`.
-- `ferrogate control-api serve` — the standalone **FerroGate Control Plane
-  API** service: a dedicated, fail-closed authenticated listener that proxies
-  the path-compatible `/admin/v1/*` (+ `/v1/assets/*`) surface to the gateway,
-  so control-plane traffic never rides the AI data-plane listener. Configured
-  under `[control_api]`. `ferrogate admin-api serve` and the `[admin_api]`
-  section remain a deprecated compatibility alias for the migration window.
-  See [`docs/admin-api-service.md`](docs/admin-api-service.md).
-- `ferrogate storage migrate-to-supabase` — one-shot migration of legacy
-  Postgres control-plane state into Supabase.
-
-Point the gateway at a running billing service with a `[billing_service]`
-config section (`enabled`, `endpoint`, `timeout_millis`, optional
-`token`/`token_env`). When enabled, config validation fails closed unless every
-model (and fallback route) carries `input_price_per_1m`/`output_price_per_1m`,
-so monthly budget enforcement can never silently diverge from the billing
-service's own ledger. The gateway then reports each settled usage event to the
-billing service fire-and-forget — the billing round trip never blocks the
-request hot path — and a durable, dead-letter-tracked outbox re-delivers on
-failure.
-
-Try the full loop with the token4ai.cloud (gpt-5.5) example:
-
-```bash
-FERROGATE_BILLING_LISTEN=127.0.0.1:8092 cargo run -- billing serve
-TOKEN4AI_API_KEY=sk-... cargo run -- gateway --config config/ferrogate.token4ai.example.toml
-
-curl -s http://127.0.0.1:8080/v1/chat/completions \
-  -H 'authorization: Bearer client-secret' -H 'content-type: application/json' \
-  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
-
-curl -s http://127.0.0.1:8092/v1/billing/ledger
-```
-
-Note that `GET /v1/billing/ledger` belongs to the standalone billing service's
-own port (`8092` above), not to the gateway's `/admin` or `/v1` surface.
-
-The admin console (`admin-console/`) is a standalone deployable: a
-static React SPA, not a `ferrogate` subcommand. It calls `ferrogate auth
-serve`'s `/v1/admin/*` endpoints for login/registration and, for everything
-else, the dedicated `ferrogate control-api serve` FerroGate Control Plane API
-service (issue #359, formerly `admin-api serve` from #315) when
-`ADMIN_API_BASE_URL` is set — falling back to the gateway's own
-`/admin/v1/*` surface (`GATEWAY_ADMIN_BASE_URL`) for backward
-compatibility. Both calls are cross-origin, so configure CORS for whatever
-origin the console is served from (the auth service's
-`--cors-allowed-origin` / `FERROGATE_AUTH_CORS_ALLOWED_ORIGIN`, plus
-`control_api.cors_allowed_origin` — or the deprecated `admin_api.cors_allowed_origin` —
-and the gateway's `admin.cors_allowed_origin` config fields). See
-[`admin-console/README.md`](admin-console/README.md) to run it locally.
-
-## Core Modules
-
-```text
-crates/
-  agent-worker              Standalone process for isolated agent execution:
-                             Firecracker microVMs, framework-handler adapters,
-                             governed CLI/tool/MCP/browser/REST/filesystem actions
-  ferrogate-admin           Scaffolding for a future dedicated admin-API service;
-                             not yet wired into any binary
-  ferrogate-auth-service    Standalone identity service: SSO/SAML/SCIM,
-                             admin-console sessions, tenant and RBAC REST API
-  ferrogate-billing         Standalone billing service: rate cards, ledger
-                             charging, durable outbox delivery
-  ferrogate-cli             CLI, Pingora runtime wiring, gateway/auth/billing/
-                             storage subcommands, gateway handlers
-  ferrogate-config          Caddyfile/TOML/YAML config model and parser
-  ferrogate-core            Shared domain primitives (tenant/request context,
-                             tool definitions, error types) used across crates
-  ferrogate-mcp             MCP host/client manager and tool execution bridge
-  ferrogate-observability   Metrics, spans, exporter contracts
-  ferrogate-policy          Policy decision models and engine
-  ferrogate-providers       AI provider adapters and model registry
-  ferrogate-routing         Scaffolding for a future shared route-matching
-                             boundary; not yet consumed by the runtime
-  ferrogate-runtime         Reload, lifecycle, bounded harness, managed worker
-                             isolation
-  ferrogate-storage         Repository traits and control-plane storage
-                             boundary (in-memory, Postgres, Supabase)
-tools/
-  ferrogate-test            End-to-end test harness driving admin/auth/gateway/
-                             billing/storage scenarios locally and via Docker
-
-admin-console/               Standalone admin console frontend (Vite + React +
-                             TypeScript + Tailwind + shadcn/ui), covering the
-                             full Admin API surface; not a `ferrogate` subcommand
-```
-
-## Docker And Deployment
-
-Run a published image with a mounted config:
-
-```bash
-docker run --rm \
-  -p 8080:8080 \
-  -v "$PWD/config/ferrogate.example.toml:/etc/ferrogate/ferrogate.toml:ro" \
-  -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ghcr.io/lianluo-esign/ferrogate:<tag>
-```
-
-Build locally when changing image contents:
-
-```bash
-docker build -t ferrogate .
-```
-
-Kubernetes examples and the optional Helm chart are checked in under
-[`deploy/kubernetes/`](deploy/kubernetes/) and [`charts/ferrogate/`](charts/ferrogate/).
-Validate them with:
-
-```bash
-scripts/check-kubernetes-examples.sh
-helm template ferrogate charts/ferrogate
-```
-
-These manifests currently deploy the gateway process only (`ferrogate run`) as
-a single container. The standalone billing and auth services (`ferrogate
-billing serve` / `ferrogate auth serve`, see
-[Service Decomposition](#service-decomposition)) ship in the same image but
-are not yet templated as sibling deployments — run them as their own
-workloads pointed at the gateway's `[billing_service]` config and auth
-contract until that lands.
-
-### Admin console
-
-The admin console frontend ships as its own image, built from
-`admin-console/Dockerfile` (a static SPA served by nginx — not part of the
-main `ferrogate` image):
-
-```bash
-docker build -t ferrogate-admin-console admin-console/
-docker run --rm -p 8081:8080 \
-  -e AUTH_BASE_URL=https://auth.ferrogate.example.com \
-  -e GATEWAY_ADMIN_BASE_URL=https://ferrogate.example.com \
-  ferrogate-admin-console
-```
-
-`AUTH_BASE_URL`/`GATEWAY_ADMIN_BASE_URL` are rendered into `env-config.js` by
-the image's nginx entrypoint at container start (see
-[`admin-console/README.md`](admin-console/README.md)), so the same image
-works across environments without a rebuild — unlike the Vite
-`VITE_AUTH_BASE_URL`/`VITE_GATEWAY_ADMIN_BASE_URL` build-time env vars used
-for local `npm run dev`.
-
-It has its own Kubernetes manifest
-([`deploy/kubernetes/admin-console.yaml`](deploy/kubernetes/admin-console.yaml))
-and an optional, disabled-by-default Helm component (`adminConsole.enabled:
-true` in [`charts/ferrogate/values.yaml`](charts/ferrogate/values.yaml)) —
-both covered by the same `scripts/check-kubernetes-examples.sh` / `helm
-template` validation above.
-
-## Admin API
-
-The checked-in OpenAPI 3.1 document lives at
-[`docs/openapi/admin-api.openapi.json`](docs/openapi/admin-api.openapi.json).
-
-This is a representative subset — the OpenAPI document is authoritative for
-the full surface, which also covers virtual API keys, quota policies,
-self-hosted worker registration, MCP server/plugin CRUD, tenant/project/
-workspace management, and more.
-
-```text
-GET  /healthz
-GET  /readyz
-GET  /v1/models
-POST /v1/chat/completions
-POST /v1/responses
-POST /v1/messages
-POST /v1/embeddings
-POST /v1/images/generations
-POST /v1/agent-runs
-GET  /.well-known/agent.json
-GET  /v1/skills
-GET  /v1/skills/{id}
-POST /v1/prompts/{id}/render
-GET  /v1/tools
-POST /v1/tools/execute
-POST /v1/mcp
-POST /v1/mcp/tool/execute
-POST /v1/functions/execute
-GET  /v1/assets
-GET/PUT/DELETE /v1/assets/{asset_type}/{name}/{version}
-POST /v1/assets/presign/upload/{asset_type}/{name}/{version}
-POST /v1/assets/presign/commit/{asset_type}/{name}/{version}
-GET  /v1/assets/presign/download/{asset_type}/{name}/{version}
-GET  /sites/{tenant}/{site}/{path}
-POST /v1/self-hosted-workers/heartbeat
-POST /v1/self-hosted-workers/runs/poll
-GET  /admin/v1/agent-runs
-GET  /admin/v1/agent-runs/{run_id}
-GET  /admin/v1/agent-upstreams
-GET  /admin/v1/agent-upstreams/{id}
-GET  /admin/v1/agent-workflows
-GET  /admin/v1/agent-workflows/{id}
-GET  /admin/v1/skill-packages
-GET  /admin/v1/skill-packages/{id}
-GET  /admin/v1/prompt-templates
-GET  /admin/v1/prompt-templates/{id}
-GET  /admin/v1/plugins
-GET  /admin/v1/plugins/{plugin_id}
-GET  /admin/v1/plugins/{plugin_id}/tools
-GET  /admin/v1/virtual-keys
-GET  /admin/v1/quota-policies
-GET/POST /admin/v1/agent-schedules
-POST /admin/v1/agent-schedules/{id}/run-now
-GET  /admin/v1/agent-schedules/{id}/fires
-GET  /admin/v1/self-hosted-workers
-GET  /admin/v1/status
-GET  /admin/v1/providers
-GET  /admin/v1/provider-health
-GET  /admin/v1/request-logs
-GET  /admin/v1/audit-events
-GET  /admin/v1/metering-events
-GET  /admin/v1/billing-events
-GET  /admin/v1/usage-aggregates
-GET  /admin/v1/usage-reports
-GET  /admin/v1/billing-outbox-dead-letters
-GET/POST /admin/v1/drain
-POST /admin/v1/config/validate
-POST /admin/v1/config/reload
-GET  /metrics
-GET  /admin
-```
-
-The standalone billing service (`ferrogate billing serve`) exposes its own
-`GET /v1/billing/ledger` and `POST /v1/billing/charge` on its own listen
-address — these are billing-service routes, not gateway routes.
-
-## Quality And Security
-
-Run the local gate before committing:
-
-```bash
-./scripts/security-check.sh
-```
-
-Strict mode requires cargo-deny and cargo-audit, and is what CI enforces on
-every change (see [`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)):
-
-```bash
-FERROGATE_SECURITY_REQUIRE_TOOLS=1 ./scripts/security-check.sh
-```
-
-See [`SECURITY.md`](SECURITY.md) for the vulnerability-disclosure process and
-[`docs/security-controls.md`](docs/security-controls.md) for a control-family
-mapping of shipped security capabilities.
-
-For narrower local checks:
-
-```bash
-cargo fmt --all -- --check
-cargo metadata --locked --format-version=1
-python3 scripts/check-openapi.py
-git diff --check
-```
-
-The external MCP candidate opponent is a separate opt-in gate. It installs the
-exact official TypeScript SDK package from its committed npm lockfile, starts
-two real local FerroGate instances, alternates consecutive stateless modern
-requests across them, and independently checks the SDK-generated modern and
-legacy wire flows:
-
-```bash
-./target/debug/ferrogate-test mcp-candidate-client-official
-```
+Roughly 90k lines of TypeScript source and 114k lines of tests: 7,051 tests
+across 385 files in 21 workspaces, plus 22 Playwright end-to-end tests.
+
+## Testing strategy
+
+Three layers, all of which run **offline and without Docker**. See
+[`docs/rewrite/TESTING.md`](docs/rewrite/TESTING.md).
+
+1. **Unit and integration** — Vitest on `@cloudflare/vitest-pool-workers`,
+   which boots the real local `workerd`. D1, KV, R2 and Durable Object bindings
+   genuinely work; they are not mocked. Integration tests dispatch through
+   `SELF` from `cloudflare:test`.
+2. **Upstream mocking** — MSW intercepts the gateway's outbound `fetch()` to
+   provider hosts and returns canned SSE, so token counting, stream
+   normalization and MCP forwarding are exercised deterministically. No real
+   LLM is ever called.
+3. **End-to-end** — Playwright over `wrangler dev`, which is the only layer
+   that exercises Wrangler's own bundle and `workerd`'s service registration —
+   a Worker can be correct under `SELF.fetch` and still fail to start as a
+   service.
 
 ## Documentation
 
-- Product overview and status: [`docs/product-overview.md`](docs/product-overview.md)
-- Cloudflare integration: [`docs/cloudflare-integration.md`](docs/cloudflare-integration.md)
-- Cloudflare deploy topology: [`docs/cloudflare-deploy-topology.md`](docs/cloudflare-deploy-topology.md)
-- Autonomous development loop: [`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md)
-- Agentic gateway architecture: [`docs/agentic-gateway-architecture.md`](docs/agentic-gateway-architecture.md)
-- Agent framework compatibility: [`docs/agent-framework-compatibility.md`](docs/agent-framework-compatibility.md)
-- Agent worker protocol: [`docs/agent-worker-protocol.md`](docs/agent-worker-protocol.md)
-- Durable storage: [`docs/durable-storage.md`](docs/durable-storage.md)
-- Analytics warehouse: [`docs/analytics-warehouse.md`](docs/analytics-warehouse.md)
-- Cluster deployment: [`docs/cluster-deployment.md`](docs/cluster-deployment.md)
-- Auth service contract: [`docs/auth-service-contract.md`](docs/auth-service-contract.md)
-- Cloudflare integration reference (AI Gateway, MCP, R2/Workers/Pages, managed agents, Secrets Store, D1): [`docs/cloudflare-integration.md`](docs/cloudflare-integration.md)
-- Hosting a FerroGate-defined MCP server on Cloudflare (McpAgent Worker, deploy flow, OAuth/KV): [`docs/cloudflare-mcp-hosting.md`](docs/cloudflare-mcp-hosting.md)
-- Performance testing: [`docs/performance-testing.md`](docs/performance-testing.md)
-- Security controls: [`docs/security-controls.md`](docs/security-controls.md)
-- Guardrail investigation view (who/why/target/action/cost for a blocked request): [`docs/guardrails/investigation-view.md`](docs/guardrails/investigation-view.md)
-- Supply-chain verification (SBOM, cosign signing, provenance): [`docs/security/supply-chain.md`](docs/security/supply-chain.md)
-- Agent sandbox security model: [`docs/security/agent-sandbox-model.md`](docs/security/agent-sandbox-model.md)
-- Self-hosted worker mTLS transport: [`docs/security/self-hosted-mtls-transport.md`](docs/security/self-hosted-mtls-transport.md)
-- Private asset-bucket migration runbook: [`docs/assets/private-bucket-migration.md`](docs/assets/private-bucket-migration.md)
-- SOC 2 audit scoping: [`docs/soc2-audit-scoping.md`](docs/soc2-audit-scoping.md)
-- Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+The current architecture is documented under `docs/rewrite/`:
+
+- Architecture and package map: [`PORT-PLAN.md`](docs/rewrite/PORT-PLAN.md)
+- Route ownership per Worker: [`ROUTE-MAP.md`](docs/rewrite/ROUTE-MAP.md)
+- Testing strategy: [`TESTING.md`](docs/rewrite/TESTING.md)
+- Deploy runbook and preconditions: [`CLOUD-VERIFICATION.md`](docs/rewrite/CLOUD-VERIFICATION.md)
+- Capabilities not offered: [`DROPPED-CAPABILITIES.md`](docs/rewrite/DROPPED-CAPABILITIES.md)
+- Current state, open findings and known gaps: [`CUTOVER-READINESS.md`](docs/rewrite/CUTOVER-READINESS.md)
+- Cross-Worker consistency invariants: [`FLEET-CONSISTENCY.md`](docs/rewrite/FLEET-CONSISTENCY.md)
+- Where each mounted surface is proven: [`MOUNT-SEAMS.md`](docs/rewrite/MOUNT-SEAMS.md)
+
+The API contracts are in `docs/openapi/`. Other documents under `docs/` predate
+the TypeScript implementation and describe the earlier system; treat
+`docs/rewrite/` and the contracts as authoritative where they disagree.
 
 ## Contributing
 
 FerroGate is built for human maintainers and AI coding agents working together.
 The best contributions are small, issue-linked slices that can be reviewed,
-tested, and explained from the operator's point of view.
+tested, and explained from the operator's point of view. Day-to-day development
+runs as cooperating agent roles — one generating code, one reviewing it, one
+testing it end to end; the contract is in
+[`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md).
 
-Day-to-day development runs as **three cooperating agent roles** — one that
-generates code, one that reviews it, and one that tests it end to end — moving
-issues across a GitHub Project board and bouncing anything that fails back with
-findings. The contract is in
-[`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md). Two conventions
-from it are worth knowing even for a one-off human patch:
+Two conventions from it are worth knowing even for a one-off human patch:
 
 - **Say what you did not verify.** Commits carry `Tested:` and `Not-tested:`
   trailers, and a handoff that reads as verified when it is not costs a whole
@@ -671,29 +297,25 @@ from it are worth knowing even for a one-off human patch:
   is the single most common defect this project has had to reject. If you add a
   guard, name the mutation that would break it.
 
-Good contribution areas:
+Practical rules:
 
-- Provider adapters, model registry coverage, routing strategies, fallback, and
-  streaming correctness.
-- Policy, virtual API keys, rate limits, token budgets, metering, audit, and
-  request-log evidence.
-- MCP gateway behavior, Agentic Lite tools, OpenAI-compatible client
-  compatibility, and examples for agent frameworks.
-- Admin API, dashboard visibility, OpenAPI schema coverage, config validation,
-  reload behavior, and cluster operations.
-- Documentation that makes an implemented runtime path usable in production.
+1. Keep behaviour in the owning package; avoid cross-cutting rewrites.
+2. Ship tests in the same change as the logic.
+3. A new runtime route needs a contract entry — the contract is imported, not
+   restated, so a handler without one is unreachable and a contract entry
+   without a handler fails its app's test.
+4. Include exact verification commands and known gaps in the PR.
 
-Workflow:
+## Security
 
-1. Start from a GitHub issue.
-2. Define the end-to-end proof before editing: operator input, runtime path,
-   failure behavior, admin/log/metric evidence, and focused regression tests.
-3. Keep behavior in the owning crate; avoid cross-cutting rewrites.
-4. Keep patches narrow, typed, reversible, and dependency-light.
-5. Include exact verification commands and known gaps in the PR.
+See [`SECURITY.md`](SECURITY.md) for the vulnerability-disclosure process.
+Report suspected vulnerabilities privately; do not open a public issue.
 
-For autonomous issue selection and AI-agent execution, follow
-[`docs/dynamic-workflow.md`](docs/dynamic-workflow.md).
+## Project history
+
+FerroGate was previously implemented in Rust on Cloudflare Pingora. That
+implementation was replaced by this one and is preserved at the git tag
+`legacy-rs`.
 
 ## License
 

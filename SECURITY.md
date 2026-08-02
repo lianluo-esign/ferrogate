@@ -26,25 +26,38 @@ fix before public disclosure.
 
 In scope:
 
-- The `ferrogate` binary and all workspace crates under `crates/`.
+- The deployable Workers and the `ferrogate` CLI under `apps/`.
+- The shared libraries under `packages/`.
+- The D1 migrations under `sql/d1-ts/`.
+- The route contract and admin OpenAPI documents under `docs/openapi/`.
 - The admin console (`admin-console/`).
-- Deployment manifests under `deploy/` and `charts/`.
 
 Out of scope:
 
-- Vulnerabilities in third-party upstream AI providers, Supabase, or other
-  operator-supplied infrastructure.
-- Findings that require an operator to have already misconfigured a
-  documented security control (e.g. running with `insecure_skip_verify: true`
-  intentionally set).
+- Vulnerabilities in third-party upstream AI providers, in Cloudflare platform
+  services, or in other operator-supplied infrastructure.
+- Findings that require an operator to have already misconfigured a documented
+  security control — in particular, deploying with a dev-posture variable that
+  [`docs/rewrite/CLOUD-VERIFICATION.md`](docs/rewrite/CLOUD-VERIFICATION.md)
+  §0 requires be overridden (for example `GATEWAY_DEV_AUTH`,
+  `FG_DEV_IN_MEMORY_PORTS`, or `FG_REQUIRE_PRODUCTION_MTLS`).
 
 ## Supply-Chain Controls
 
-Every change is gated by `scripts/security-check.sh`, which runs `cargo fmt`,
-`cargo clippy -D warnings`, a locked-metadata check, a high-confidence secret
-scan, `cargo deny check licenses bans sources`, and `cargo audit`. CI enforces
-the full strict gate (`FERROGATE_SECURITY_REQUIRE_TOOLS=1`) on every change —
-see [`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml).
+Dependencies are resolved by Bun from the committed `bun.lock`. The repository
+ships a high-confidence secret scan over every tracked authored file,
+`scripts/check-secret-scan.sh`, which fails loudly rather than skipping when
+neither `rg` nor `git grep` is available. Alongside it, `bun run typecheck`
+(`tsc --noEmit`), `bun run lint` (Biome) and `bun run test` run offline against
+the real local `workerd`.
 
-See [`docs/security-controls.md`](docs/security-controls.md) for a mapping of
-shipped capabilities to common security-review control families.
+No account id, database uuid, bucket name or secret is committed: every such
+value in `apps/*/wrangler.toml` is a placeholder supplied at deploy time, and
+per-tenant IdP credentials are stored as `env://` references rather than as
+values.
+
+[`docs/security-controls.md`](docs/security-controls.md) maps shipped
+capabilities to common security-review control families. It predates the
+TypeScript implementation and describes the earlier system, so treat
+[`docs/rewrite/`](docs/rewrite/) and the contracts under
+[`docs/openapi/`](docs/openapi/) as authoritative where they disagree.
