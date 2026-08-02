@@ -260,6 +260,39 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
     reason:
       "cache purge action rather than a CRUD leg; lands with the rest of the semantic-cache policy verbs — tracked as the #695 CLI follow-up",
   },
+  // ---------------------------------------------------------------------
+  // #677 — per-request cost attribution, surfaced here by #747.
+  //
+  // Same shape as the #734 rows above and for the same reason: #677 routed
+  // `listAdminCostRecords` and `exportAdminCostRecords` without describing
+  // them, so this gate — which derives its surface FROM
+  // `admin-api.openapi.json` — could not see either operation. The CLI has had
+  // no cost-attribution verbs since #677 landed; #747 describing the contract
+  // is what makes that visible for the first time. It is a pre-existing gap
+  // with a name now, not a regression.
+  //
+  // The two are excluded TOGETHER because an operator handed a `list` with no
+  // way to pull the file would ask for the export immediately, and the export
+  // is the half that needs design: it answers CSV, JSONL or a binary Parquet
+  // body with a `content-disposition` filename, none of which the CLI's
+  // JSON-shaping output path can render. Deciding whether that verb streams to
+  // a `--output` file, refuses a TTY, or prints bytes is a UX decision, and
+  // making it inside a documentation-integrity fix would ship an undesigned
+  // surface. Both rows must be DELETED when the verbs land — `buildReport`
+  // fails on a stale exclusion, so this cannot rot into a rubber stamp.
+  // ---------------------------------------------------------------------
+  {
+    operationId: "listAdminCostRecords",
+    owner: "cost attribution family (#677, #365 parity chain)",
+    reason:
+      "per-request chargeback read; its verb lands together with the export half rather than shipping a list an operator cannot then download — tracked as the #677 CLI follow-up",
+  },
+  {
+    operationId: "exportAdminCostRecords",
+    owner: "cost attribution family (#677, #365 parity chain)",
+    reason:
+      "downloads a CSV, JSONL or binary Parquet attachment rather than a JSON document, so the verb first needs an output-file grammar the CLI does not have — tracked as the #677 CLI follow-up",
+  },
 ];
 
 /** The coverable and non-coverable operation sets parsed from an OpenAPI document. */

@@ -311,3 +311,146 @@ describe("#734: the twelve operations are described, not merely routed", () => {
     expect(value?.default).toBeUndefined();
   });
 });
+
+/**
+ * #677's two cost operations, named individually — the drift this file was
+ * already RED on when #747 picked it up.
+ *
+ * The sweep at the top of this file only checks that a `METHOD path` key EXISTS
+ * with a matching operationId and classification. That is not enough for these
+ * two. `admin-api.openapi.json` is a code-generator input, so a `200: {}` would
+ * turn the sweep green while emitting a client whose `exportAdminCostRecords()`
+ * has no return type and no way to ask for Parquet — the same "shipped but
+ * uncallable" failure #734 built this gate to end, one layer down.
+ *
+ * So the assertions below pin what a GENERATED CLIENT needs, against what
+ * `apps/control-plane/src/routes/admin_cost_record.ts` actually does:
+ *
+ *  - the list answers the paginated envelope UNCONDITIONALLY
+ *    (`listCostRecordsHandler`, admin_cost_record.ts:508) — not the bare
+ *    `{object,data}` fork most collection reads take, so a typed client that
+ *    treated `total` as optional here would be wrong;
+ *  - the export emits ONE of three media types chosen by `?format=`
+ *    (`exportCostRecordsHandler`, admin_cost_record.ts:691), and a client that
+ *    only knows about CSV cannot decode the other two;
+ *  - an unrecognised `?format=` is a 400, not a silent fallback to CSV
+ *    (`resolveFormat`, admin_cost_record.ts:614).
+ */
+describe("#677: the two cost operations are described for a generated client", () => {
+  const LIST = "GET /admin/v1/cost-records";
+  const EXPORT = "GET /admin/v1/cost-record-exports";
+
+  interface DocumentedOperation extends RawOpenApiOperation {
+    parameters?: { name?: string; $ref?: string }[];
+  }
+
+  const documented = openapiOperations(OPENAPI) as Map<string, DocumentedOperation>;
+
+  /** The named query parameters of an operation, resolving `$ref`s by name. */
+  function queryParameterNames(name: string): string[] {
+    const componentParameters = (
+      openapiDocument as unknown as {
+        components: { parameters: Record<string, { name?: string } | undefined> };
+      }
+    ).components.parameters;
+    return (documented.get(name)?.parameters ?? [])
+      .map((parameter) => {
+        if (typeof parameter.$ref !== "string") return parameter.name;
+        const component = parameter.$ref.split("/").pop() ?? "";
+        return componentParameters[component]?.name;
+      })
+      .filter((entry): entry is string => typeof entry === "string")
+      .sort();
+  }
+
+  /** The `200` response body of an operation, keyed by media type. */
+  function successContent(name: string): Record<string, { schema?: unknown }> {
+    const responses = documented.get(name)?.responses as
+      | Record<string, { content?: Record<string, { schema?: unknown }> } | undefined>
+      | undefined;
+    return responses?.["200"]?.content ?? {};
+  }
+
+  it("describes both operations at all", () => {
+    const missing = [LIST, EXPORT].filter((name) => !documented.has(name));
+    expect(missing, `routed by #677 but absent from the OpenAPI: ${missing.join(", ")}`).toEqual(
+      [],
+    );
+  });
+
+  it("types the cost list against the paginated envelope, not a bare object", () => {
+    const schema = successContent(LIST)["application/json"]?.schema as
+      | { $ref?: string }
+      | undefined;
+    expect(schema?.$ref, "the cost list has no application/json success schema").toBe(
+      "#/components/schemas/PaginatedList_CostRecord",
+    );
+
+    // A `$ref` to a schema that does not exist generates as `unknown`, so the
+    // pointer is worth exactly as much as its target.
+    const schemas = (
+      openapiDocument as unknown as {
+        components: {
+          schemas: Record<string, { properties?: Record<string, unknown> } | undefined>;
+        };
+      }
+    ).components.schemas;
+    expect(Object.keys(schemas.PaginatedList_CostRecord?.properties ?? {}).sort()).toEqual([
+      "data",
+      "limit",
+      "object",
+      "offset",
+      "total",
+    ]);
+
+    // The three-state cost answer (`metered`/`priced`/`cost_usd`) is the whole
+    // point of the record: a client that cannot see the flags cannot tell
+    // "nothing metered it" from "$0", which is the defect #677 exists to fix.
+    const record = Object.keys(schemas.CostRecord?.properties ?? {});
+    for (const field of ["cost_usd", "metered", "priced", "unpriced_attempts", "tags"]) {
+      expect(record, `CostRecord is missing ${field}`).toContain(field);
+    }
+  });
+
+  it("describes all three media types the export can emit", () => {
+    // `exportCostRecordsHandler` returns exactly these three content types.
+    expect(Object.keys(successContent(EXPORT)).sort()).toEqual([
+      "application/vnd.apache.parquet",
+      "application/x-ndjson",
+      "text/csv",
+    ]);
+    const untyped = Object.entries(successContent(EXPORT))
+      .filter(([, media]) => media.schema === undefined)
+      .map(([type]) => type);
+    expect(untyped, `export media types with no schema: ${untyped.join(", ")}`).toEqual([]);
+  });
+
+  it("documents the 400 an unsupported ?format= answers with", () => {
+    const responses = documented.get(EXPORT)?.responses as Record<string, unknown> | undefined;
+    expect(Object.keys(responses ?? {})).toContain("400");
+  });
+
+  it("names the filters both operations accept, so a client can send them", () => {
+    // Every dimension `costFilters` reads, plus the paging pair. A filter that
+    // is not described is a filter no generated client can pass, which turns a
+    // chargeback query into a full download the caller has to filter locally.
+    const FILTERS = [
+      "agent_run_id",
+      "api_key_id",
+      "limit",
+      "model",
+      "offset",
+      "project",
+      "provider",
+      "since",
+      "tag",
+      "tenant",
+      "until",
+      "workspace",
+    ];
+    expect(queryParameterNames(LIST)).toEqual(FILTERS);
+    // The export takes the same filters and one more: `?format=` is how a
+    // caller picks between the three bodies above.
+    expect(queryParameterNames(EXPORT)).toEqual([...FILTERS, "format"].sort());
+  });
+});

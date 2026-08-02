@@ -17978,6 +17978,376 @@
         }
       }
     },
+    "/admin/v1/cost-records": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listAdminCostRecords",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List per-request cost attribution records, newest first.",
+        "description": "One row per REQUEST, joining the decision (request_logs, #664) to the priced provider attempts (billing_events, #663/#667) so a chargeback question can be answered down to the customer, project, key, model, tag and agent run that produced a charge (#677). It is a JOIN, not a third durable figure: there is no cost_records table, so this surface can never disagree with the billing ledger. Tenant-fenced -- a tenant-scoped admin sees only its own traffic, and the total is computed after the fence, so it cannot leak the existence of another tenant's requests. metered/priced/cost_usd are three separate answers on purpose: cost_usd null with metered false means nothing metered the request (refused, rate-limited), metered true with priced false means some or all attempts could not be priced, and unpriced_attempts names exactly how many -- collapsing any of those into $0 would make a finance total quietly low. The paginated envelope is answered unconditionally, so an un-queried call cannot be mistaken for the whole month.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one tenant id. AND-ed with the caller's tenant fence rather than replacing it, so a tenant-scoped caller asking for another tenant gets the empty set.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one project id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one workspace id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "api_key_id",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to the API key that authenticated the request.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_run_id",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one agent run, so an agent's spend can be totalled across its requests.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one upstream provider id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "description": "Matches EITHER spelling of the model -- the logical name the caller asked for or the provider model actually invoked -- because matching only one would silently drop half of that model's spend.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, INCLUSIVE lower bound on the request start.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, EXCLUSIVE upper bound on the request start, so two adjacent billing periods partition the traffic instead of both claiming the boundary second.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "description": "Attribution metadata filter. `key` matches the presence of the key; `key:value` matches the pair, and only the FIRST colon splits, so a value may itself contain colons (owner:svc:checkout is owner -> svc:checkout).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of per-request cost records, ordered by start time descending with the request id as a stable tiebreaker. `total` counts the records the caller may see after the tenant fence and the filters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedList_CostRecord"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/cost-record-exports": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "exportAdminCostRecords",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Download the per-request cost records as CSV, JSONL or Parquet.",
+        "description": "The same fenced, filtered, ordered records as listAdminCostRecords -- both operations run one query, so an export can never see a row the list cannot -- projected onto a downloadable file (#677). `?format=` selects the body: csv (the default, RFC 4180 with a header row), jsonl (one cost record document per line) or parquet (the tabular projection as a Parquet file). The CSV and Parquet column ORDER is part of the contract because chargeback pipelines index it positionally; new columns are appended rather than inserted, and `tags` is one JSON-encoded column rather than a column per key so two months of the same query concatenate. Every response carries content-disposition with a filename. The page is bounded (default 1000 rows, maximum 10000) because a Worker materializes the whole file in memory: pull further pages with `?offset=`.",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "Export encoding. An unrecognised value is refused with 400 rather than silently falling back to CSV, so a pipeline that asked for Parquet never parses bytes as something they are not.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "csv",
+                "jsonl",
+                "parquet"
+              ],
+              "default": "csv"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one tenant id. AND-ed with the caller's tenant fence rather than replacing it.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one project id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one workspace id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "api_key_id",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to the API key that authenticated the request.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_run_id",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one agent run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "description": "Narrow to one upstream provider id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "description": "Matches either the logical model or the provider model actually invoked.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, INCLUSIVE lower bound on the request start.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, EXCLUSIVE upper bound on the request start.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "description": "Attribution metadata filter: `key` or `key:value`, split on the first colon.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows in this export. Larger default than the list because a finance pull wants a month, and bounded because the whole file is built in memory before it is written.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The export file. Exactly ONE of the three media types below is returned, selected by `?format=`; the body is a download rather than an inline document, so content-disposition names the file.",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "contentMediaType": "text/csv",
+                  "description": "RFC 4180 CSV whose first line is the fixed column header. Served as `text/csv; charset=utf-8; header=present` so a reader does not have to guess whether row one is data."
+                },
+                "examples": {
+                  "row": {
+                    "summary": "Header line plus one record (columns elided)",
+                    "value": "request_id,started_at_unix,completed_at_unix,tenant_id,project_id,...,tags\nfg-example,1767225600,1767225601,acme,checkout,...,\"{\\\"team\\\":\\\"growth\\\"}\"\n"
+                  }
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "contentMediaType": "application/x-ndjson",
+                  "description": "One CostRecord document per line -- the same JSON objects the list returns in `data`. An empty export is zero bytes rather than a blank line, because JSONL readers treat a blank line as an error."
+                },
+                "examples": {
+                  "record": {
+                    "summary": "One JSONL record (fields elided)",
+                    "value": "{\"object\":\"cost_record\",\"id\":\"fg-example\",\"request_id\":\"fg-example\",\"cost_usd\":0.0041,\"metered\":true,\"priced\":true}\n"
+                  }
+                }
+              },
+              "application/vnd.apache.parquet": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary",
+                  "contentMediaType": "application/vnd.apache.parquet",
+                  "description": "The same fixed tabular projection as the CSV, as a Parquet file. Binary: decode the bytes, never the text."
+                }
+              }
+            },
+            "headers": {
+              "content-disposition": {
+                "description": "Always `attachment` with a filename -- ferrogate-cost-records.csv, .jsonl or .parquet, matching `?format=`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/x402-spend-policies": {
       "parameters": [
         {
@@ -33291,6 +33661,278 @@
             }
           }
         ]
+      },
+      "PaginatedList_CostRecord": {
+        "type": "object",
+        "description": "The paginated envelope listAdminCostRecords answers UNCONDITIONALLY. The three paging fields are always present, unlike the collection reads that omit them for an un-queried call: on a spend report, a first page that looks like the whole set is a wrong number rather than a missing one.",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CostRecord"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Records matching the fence and the filters, computed in the same statement as the page so the two cannot disagree under a concurrent write."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "CostRecord": {
+        "type": "object",
+        "description": "The cost of ONE request: the authenticated attribution and resolved model from the request log, joined to the priced provider attempts from the metering events (#677). The chargeback unit is the request, so `id` is the request id and every other evidence surface (request-logs, investigations, audit-events) is addressable by the same key.",
+        "required": [
+          "object",
+          "id",
+          "request_id",
+          "trace_id",
+          "agent_run_id",
+          "tenant_id",
+          "project_id",
+          "workspace_id",
+          "api_key_id",
+          "provider",
+          "logical_model",
+          "provider_model",
+          "route",
+          "status_code",
+          "error_code",
+          "cache_status",
+          "streamed",
+          "latency_ms",
+          "started_at_unix",
+          "completed_at_unix",
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "cached_input_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "cost_usd",
+          "metered",
+          "priced",
+          "billed_attempts",
+          "unpriced_attempts",
+          "tags"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "cost_record"
+          },
+          "id": {
+            "type": "string",
+            "description": "The request id -- the same value as request_id, repeated because every admin document carries an id."
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent run this request belongs to, when one declared itself."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "api_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key that authenticated the request -- the identifier, never the key material."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logical_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model name the caller asked for."
+          },
+          "provider_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model the provider was actually asked for, which for a dated snapshot differs from logical_model."
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 100,
+            "maximum": 599
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cache_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "streamed": {
+            "type": "boolean"
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "started_at_unix": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Whole seconds. The list is ordered by this descending, with request_id ascending as the tiebreaker, so a page boundary inside a busy second cannot re-serve one row and skip another."
+          },
+          "completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "prompt_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cached_input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Null rather than 0 when nothing metered the request: 0 would assert the provider reported no cached tokens, which nobody ever asked it."
+          },
+          "cache_write_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Null when the request was never metered; see cached_input_tokens."
+          },
+          "reasoning_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Null when the request was never metered; see cached_input_tokens."
+          },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Summed cost of the priced attempts, or null when nothing could be priced. Read it together with metered and priced: null with metered false means nothing metered the request at all (refused, rate-limited), and a number with priced false means SOME attempts were priced and others could not be."
+          },
+          "metered": {
+            "type": "boolean",
+            "description": "True when at least one provider attempt was metered (billed_attempts > 0)."
+          },
+          "priced": {
+            "type": "boolean",
+            "description": "True only when the request was metered AND every metered attempt carried a price. False with a non-null cost_usd means the figure is incomplete."
+          },
+          "billed_attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Provider attempts that produced a metering event."
+          },
+          "unpriced_attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Metered attempts with no price-book entry. Non-zero means a re-price would change this row, which is how an operator finds the rows a low total came from."
+          },
+          "tags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The request's attribution metadata, bounded to string values at ingress. `{}` when there is none."
+          }
+        },
+        "additionalProperties": false
       },
       "AdminAgentCostBurnList": {
         "type": "object",
