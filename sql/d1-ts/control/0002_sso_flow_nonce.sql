@@ -1,0 +1,13 @@
+-- Wave 18: the OIDC `nonce` column on the shared pending-flow table.
+--
+-- `0001_init_control.sql` shipped `sso_pending_flows` with the SAML columns
+-- (`request_id`) and the OIDC PKCE verifier, but not the OIDC `nonce`. The
+-- nonce is not decoration: it is what binds an ID token to THIS authorize
+-- request, and without it a token minted for one login can be replayed into
+-- another. `packages/identity`'s `StoredSsoPendingFlow` carries it, so the
+-- column has to exist for the callback ladder to be able to check it.
+--
+-- Nullable on purpose: a SAML flow has no nonce, and the two protocols share
+-- one table because `provider_kind` is the discriminant that stops a tenant
+-- being configured for both at once.
+ALTER TABLE sso_pending_flows ADD COLUMN nonce TEXT;

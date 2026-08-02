@@ -1,0 +1,59 @@
+name = "ferrogate-telemetry"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Analytics Engine (the sink) --------------------------------------------
+# The ONLY write path Cloudflare exposes for Analytics Engine is this binding's
+# `writeDataPoint()`. The dataset's HTTP API is SQL READ-only, which is exactly
+# why FerroGate cannot write telemetry to Cloudflare without this Worker.
+#
+# The dataset need not be pre-created — it is created on first write.
+#
+# `dataset` below is a PLACEHOLDER: replace it with the real dataset name for
+# the environment you deploy to (e.g. `ferrogate_telemetry_prod`). No Cloudflare
+# account id belongs in this file; the account is supplied by `wrangler`'s
+# credentials at deploy time.
+#
+# With this binding ABSENT the Worker still boots: `/v1/{metrics,traces,logs}`
+# answer `503 telemetry_sink_unavailable` and `/readyz` answers 503 `not_ready`,
+# rather than crashing on an undefined binding.
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "PLACEHOLDER_ferrogate_telemetry"
+
+[vars]
+# Per-request OTLP body ceiling in BYTES, as a string (Worker vars are strings).
+# Over it the receiver answers 413 rather than buffering an unbounded batch.
+# Default when unset or unparseable: 4194304 (4 MiB) — `DEFAULT_MAX_BODY_BYTES`
+# in `src/limits.ts`.
+MAX_BODY_BYTES = "4194304"
+
+# --- Observability ----------------------------------------------------------
+# THREE INDEPENDENT SWITCHES. `enabled` alone does NOT turn on tracing — the
+# traces sub-table is its own opt-in, and omitting it leaves this Worker's own
+# spans unrecorded.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+# Invocation logs are the automatic one-per-request "request" events, billed the
+# same as the structured lines this Worker emits deliberately. Off, because they
+# roughly DOUBLE the billable log events of an ingest Worker while duplicating
+# what the ingest summary line already carries.
+invocation_logs = false
+
+[observability.traces]
+enabled = true
+
+# --- Secrets (NOT stored here) ----------------------------------------------
+# COLLECTOR_TOKEN is the shared bearer secret every `/v1/*` request must present
+# (`@ferrogate/observability`'s `CloudflareBackend` sends it as
+# `Authorization: Bearer <token>`). It is NEVER committed. Seed it out-of-band,
+# once per environment:
+#
+#   wrangler secret put COLLECTOR_TOKEN
+#
+# With the secret unset the Worker fails CLOSED (500
+# `telemetry_collector_unconfigured`) rather than accepting anonymous telemetry.

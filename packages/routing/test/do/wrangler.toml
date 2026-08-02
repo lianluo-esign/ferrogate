@@ -1,0 +1,15 @@
+# Test fixture only — `@ferrogate/routing` is a library and ships no Worker.
+# This exists so `vitest.do.config.ts` can boot a real `workerd` with a real
+# Durable Object namespace bound to `ShadowBudgetDurableObject`.
+name = "ferrogate-routing-do-test"
+main = "entry.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "SHADOW_BUDGET"
+class_name = "ShadowBudgetDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ShadowBudgetDurableObject"]

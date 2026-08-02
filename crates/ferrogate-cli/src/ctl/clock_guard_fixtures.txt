@@ -1,6 +1,0 @@
-let stamped = SystemTime::now().duration_since(UNIX_EPOCH);
-let started = Instant::now().elapsed();
-let stamped = Utc::now().timestamp();
-let stamped = Local::now().timestamp();
-let stamped = UNIX_EPOCH.elapsed().unwrap().as_secs();
-let forged = ServerIssuedClientSentAt { issued_at_unix: 0 };

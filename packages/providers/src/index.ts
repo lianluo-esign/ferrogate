@@ -1,0 +1,156 @@
+/**
+ * `@ferrogate/providers` — the AI-provider adapter boundary.
+ *
+ * Clean-room TypeScript port of the Rust crate `ferrogate-providers`: it
+ * translates FerroGate's canonical chat/responses/embeddings/images/catalog
+ * "plans" into each provider's upstream wire request and normalizes
+ * responses/errors/usage back. Pure and synchronous — dispatch (the `fetch()`)
+ * is the gateway's job. Upstream calls may additionally be routed through
+ * Cloudflare AI Gateway (issue #406).
+ *
+ * Modules:
+ *  - `types`              — `ProviderAdapter`, config/plan/request shapes, the
+ *                           `AdapterError` taxonomy, `SecretValue`, family table.
+ *  - `cloudflare`         — Cloudflare AI Gateway request-rewrite (issue #406).
+ *  - `canonical`          — `/v1/responses` → per-family request canonicalization.
+ *  - `models`             — logical→physical `ModelRegistry`.
+ *  - `registry`           — `ProviderAdapterRegistry` (8 adapters + CF routing).
+ *  - `sigv4`              — AWS SigV4 signing (Bedrock; byte-exact).
+ *  - `openai`/`anthropic`/`azure`/`bedrock`/`gemini`/`grok`/`openrouter`/`vertex`
+ *                         — the 8 provider adapters.
+ *  - `anthropic_messages` — Anthropic Messages ⇄ OpenAI chat translation (#272).
+ *  - `schemas`            — Zod wire schemas for the data shapes (§3.3).
+ */
+
+// Core types + trait + family table.
+export {
+  AdapterError,
+  BaseProviderAdapter,
+  SecretValue,
+  SUPPORTED_PROVIDER_ADAPTER_FAMILIES,
+  canonicalProviderAdapterFamily,
+  isOpenAiCompatibleProviderKind,
+  providerCompatibilityKind,
+} from "./types.js";
+export type {
+  AdapterErrorKind,
+  AwsProviderCredentials,
+  ChatCompletionPlan,
+  EmbeddingsPlan,
+  GcpProviderCredentials,
+  ImagesPlan,
+  ProviderAdapter,
+  ProviderAdapterFamily,
+  ProviderAdapterFamilyDescriptor,
+  ProviderCatalogModel,
+  ProviderCatalogRequest,
+  ProviderConfig,
+  ProviderErrorResponse,
+  ProviderHeader,
+  ProviderHttpRequest,
+  ProviderUsage,
+  ResponsesPlan,
+} from "./types.js";
+
+// JSON value model + accessors.
+export type { Json, JsonObject } from "./json.js";
+
+// Cloudflare AI Gateway routing.
+export {
+  applyCloudflareAiGatewayRouting,
+  DEFAULT_CLOUDFLARE_AI_GATEWAY_MODE,
+} from "./cloudflare.js";
+export type {
+  CloudflareAiGatewayMode,
+  CloudflareAiGatewayRouting,
+  CloudflareAiGatewaySurface,
+} from "./cloudflare.js";
+
+// Canonical request model.
+export { CanonicalAiRequest } from "./canonical.js";
+
+// Model registry.
+export {
+  DEFAULT_ROUTING_STRATEGY,
+  ModelRegistry,
+  ModelRegistryError,
+  modelCapabilityAsStr,
+  modelCapabilityFromStr,
+  modelRouteWithRouting,
+  newModelRegistryEntry,
+  newModelRoute,
+  routingStrategyAsStr,
+  routingStrategyFromStr,
+} from "./models.js";
+export type {
+  ModelCapability,
+  ModelRegistryEntry,
+  ModelRegistryErrorKind,
+  ModelRoute,
+  ResolvedModelRoute,
+  RoutingStrategy,
+} from "./models.js";
+
+// Adapters + registry.
+export { OpenAiCompatibleAdapter } from "./openai.js";
+export { AnthropicAdapter } from "./anthropic.js";
+export { AzureOpenAiAdapter } from "./azure.js";
+export { BedrockAdapter } from "./bedrock.js";
+export { GeminiAdapter } from "./gemini.js";
+export { GrokAdapter } from "./grok.js";
+export { OpenRouterAdapter } from "./openrouter.js";
+export { VertexAiAdapter } from "./vertex.js";
+export { ProviderAdapterRegistry } from "./registry.js";
+
+// Anthropic Messages ⇄ OpenAI translation.
+export {
+  chatCompletionToMessage,
+  finishReasonToStopReason,
+  isAnthropicMessage,
+  parseArguments,
+  toChatCompletions,
+} from "./anthropic_messages.js";
+
+// SigV4 signing.
+export {
+  canonicalQueryString,
+  formatTimestamps,
+  presignQuery,
+  presignQueryBound,
+  sign,
+  signStreamedWithContentHashHeader,
+  signWithContentHashHeader,
+  signWithContentHashHeaderAndQuery,
+} from "./sigv4.js";
+export type {
+  AwsCredentials,
+  BoundPresignedUpload,
+  PresignBoundPayload,
+  PresignRequest,
+  SignedHeaders,
+  SigningRequest,
+  StreamedSigningRequest,
+} from "./sigv4.js";
+
+// Zod wire schemas.
+export {
+  chatCompletionPlanSchema,
+  embeddingsPlanSchema,
+  imagesPlanSchema,
+  modelCapabilitySchema,
+  modelSchema,
+  providerAdapterFamilySchema,
+  providerCatalogModelSchema,
+  providerConfigWireSchema,
+  providerErrorResponseSchema,
+  providerHttpRequestWireSchema,
+  providerUsageSchema,
+  responsesPlanSchema,
+  routingStrategySchema,
+} from "./schemas.js";
+export type {
+  Model,
+  ProviderCatalogModelWire,
+  ProviderConfigWire,
+  ProviderUsageWire,
+} from "./schemas.js";

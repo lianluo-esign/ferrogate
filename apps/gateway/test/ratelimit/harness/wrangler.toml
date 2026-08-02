@@ -1,0 +1,92 @@
+# Wrangler config for the rate-limit HARNESS Worker (test/ratelimit/harness/worker.ts).
+#
+# This is NOT a deployable: it exists so `@cloudflare/vitest-pool-workers` can
+# boot a Worker that has a REAL `RATE_LIMIT` Durable Object namespace, which the
+# app's own `apps/gateway/wrangler.toml` cannot have until the integrate step
+# adds the binding + the `export { RateLimiterDurableObject }` on
+# `src/worker.ts`. The two blocks below are verbatim what that step must copy
+# into the real config — see the WIRING block in `src/ratelimit/index.ts`.
+
+name = "ferrogate-gateway-ratelimit-harness"
+main = "worker.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ===========================================================================
+# COPY THESE TWO BLOCKS INTO apps/gateway/wrangler.toml
+# ===========================================================================
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiterDurableObject"]
+# ===========================================================================
+
+[vars]
+
+# --- credentials -----------------------------------------------------------
+# Read by `ConfiguredApiKeyAuthenticator.fromEnv` (src/adapters.ts). Every key
+# holds only `models.read`, so `GET /v1/models` is the cheapest authenticated
+# contract operation to drive the limiter with (it returns `{object:"list",
+# data:[]}` with the empty model registry below).
+#
+# `key_attacker_collide` is the CROSS-TENANT ATTACK: its api key id is the
+# literal string `tenant:tenant_victim`, i.e. the counter key the victim
+# tenant's aggregate RPM window would use if key-scope counters were not
+# namespaced. It belongs to `tenant_attacker`.
+GATEWAY_NATIVE_API_KEYS = '''
+[
+  { "key": "fg_rl_a1",       "id": "key_a1",               "tenant_id": "tenant_rl",       "scopes": ["models.read"] },
+  { "key": "fg_rl_a2",       "id": "key_a2",               "tenant_id": "tenant_rl",       "scopes": ["models.read"] },
+  { "key": "fg_rl_perkey",   "id": "key_perkey_rpm",       "tenant_id": "tenant_free",     "scopes": ["models.read"] },
+  { "key": "fg_rl_multi",    "id": "key_multi",            "tenant_id": "tenant_multi",    "project_id": "proj_multi", "workspace_id": "ws_multi", "scopes": ["models.read"] },
+  { "key": "fg_rl_victim",   "id": "key_victim",           "tenant_id": "tenant_victim",   "scopes": ["models.read"] },
+  { "key": "fg_rl_attacker", "id": "tenant:tenant_victim", "tenant_id": "tenant_attacker", "scopes": ["models.read"] },
+  { "key": "fg_rl_disabled", "id": "key_disabled",         "tenant_id": "tenant_disabled", "scopes": ["models.read"] },
+  { "key": "fg_rl_free",     "id": "key_plan",             "tenant_id": "tenant_plan",     "scopes": ["models.read"] }
+]
+'''
+GATEWAY_STATIC_API_KEYS = "[]"
+SELF_HOSTED_WORKER_REGISTRY = "[]"
+TENANCY_LIFECYCLE = "{}"
+TENANT_RBAC_ACTIONS = "{}"
+GATEWAY_DEV_AUTH = "false"
+GATEWAY_PROVIDERS = "[]"
+GATEWAY_MODELS = "[]"
+ASSET_ENTITLEMENTS = "{}"
+
+# --- quota policies (read by `quotaPolicySourceFromEnv`, src/ratelimit/quota.ts)
+#
+#  tenant_rl        rpm 3   → ONE aggregate window shared by key_a1 + key_a2.
+#  tenant_multi 10 / proj_multi 4 / ws_multi 7 / key_multi 6
+#                           → the merge must pick 4 AND count it at
+#                             `project:proj_multi`, not at the key.
+#  tenant_victim    rpm 2   → the window the attacker must NOT be able to touch.
+#  key `tenant:tenant_victim` rpm 50
+#                           → the attacker's own generous key-scope budget. If
+#                             key-scope counters were not `"key:"`-namespaced,
+#                             this key would count into `tenant:tenant_victim`
+#                             and drain the victim in 2 requests.
+#  tenant_disabled  enabled=false → 403 `quota_scope_disabled`, not a 429.
+GATEWAY_QUOTA_POLICIES = '''
+[
+  { "scope_type": "tenant",    "scope_id": "tenant_rl",             "rpm_limit": 3 },
+  { "scope_type": "tenant",    "scope_id": "tenant_multi",          "rpm_limit": 10, "tpm_limit": 5000 },
+  { "scope_type": "project",   "scope_id": "proj_multi",            "rpm_limit": 4,  "tpm_limit": 900 },
+  { "scope_type": "workspace", "scope_id": "ws_multi",              "rpm_limit": 7 },
+  { "scope_type": "key",       "scope_id": "key_multi",             "rpm_limit": 6 },
+  { "scope_type": "tenant",    "scope_id": "tenant_victim",         "rpm_limit": 2 },
+  { "scope_type": "key",       "scope_id": "tenant:tenant_victim",  "rpm_limit": 50 },
+  { "scope_type": "tenant",    "scope_id": "tenant_disabled",       "rpm_limit": 100, "enabled": false }
+]
+'''
+
+# Plan FLOOR (issue #168): a field takes the plan default only when NO policy
+# in the chain set it. `tenant_plan` has no policy row at all, so its RPM comes
+# from the plan and is counted at the tenant scope.
+GATEWAY_PLANS = '''
+{ "free": { "slug": "free", "default_rpm_limit": 2, "default_tpm_limit": 100 } }
+'''
+GATEWAY_TENANT_PLANS = '{ "tenant_plan": "free" }'

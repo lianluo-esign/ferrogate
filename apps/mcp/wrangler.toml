@@ -1,0 +1,297 @@
+name = "ferrogate-mcp"
+main = "src/worker.ts"
+
+# Nothing declared below needs a newer runtime. `nodejs_compat` is what `hono`
+# and the WebCrypto code in `src/ports.ts` (`webCryptoIdentityCipher`) expect.
+# Raise the date only for a binding that demands it — this Worker uses no
+# containers and no `enable_ctx_exports`.
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ===========================================================================
+# Bindings for `ferrogate-mcp`
+#
+# The rule this file follows (same as `apps/gateway/wrangler.toml`): declare
+# what the Worker reads or is about to read, and nothing else. An undeclared
+# binding the code reads is a production failure no test sees; a declared
+# binding nothing will ever read is dead configuration that drifts. Anything
+# deliberately WITHHELD is written out at the bottom with the reason.
+#
+# Values that identify an ACCOUNT RESOURCE (`id`, `database_id`, …) are
+# PLACEHOLDERS. `wrangler deploy` will refuse them, which is intentional: the
+# real ids come from whoever provisions the resources and are never invented
+# and committed here.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# [vars]
+# ---------------------------------------------------------------------------
+[vars]
+
+# DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`
+# (including a static API-key table). Production MUST NOT set this: without it
+# `resolvePorts` binds `UnboundAuth` and the Worker fails CLOSED — every
+# authenticated surface answers `503 mcp_auth_unavailable`, and `GET /readyz`
+# answers `503 not_ready` (`portsBound` in `src/ports.ts` is the single source
+# of truth both branch on), while `/healthz` still answers 200.
+FG_DEV_IN_MEMORY_PORTS = "1"
+
+# DEV / TEST ONLY. JSON `{ keywords?, regex?, secretPatterns?, targets? }`
+# configuring the MANAGED-ACTION guardrail (#200/#204) that scans MCP tool
+# ARGUMENTS before execution and tool RESULTS after, evaluated by the real
+# `@ferrogate/guardrails` deterministic detector — the clean-room port of
+# `crates/ferrogate-gateway/src/server/managed_action_guardrail.rs`.
+#
+# ABSENT OR EMPTY means NO detector is configured, which matches nothing and
+# allows everything — the same answer Rust's `match_guardrail` gives when no
+# managed-action policy is registered. This is deliberately NOT the enforcement
+# policy store: real detector policy is tenant-scoped and lives in the control
+# plane, so a `[vars]` entry could only ever be a per-deployment default.
+#
+# `targets` is Rust's `ManagedActionSelector.targets` over the canonical target
+# `mcp:{server}:{tool}`; an empty list selects every target.
+FG_DEV_MCP_GUARDRAILS = ""
+
+# ---------------------------------------------------------------------------
+# KV — per-user MCP OAuth flow state
+#
+# Read as `env.MCP_OAUTH_KV`. This is the durable home of `StoredMcpOauthFlow`
+# (`src/ports.ts`), the in-flight authorization records `startMcpOauth` writes
+# and `completeMcpOauth` consumes. KV is the right primitive precisely because
+# the security property of the ANONYMOUS `GET /v1/mcp/identity/callback` is
+# carried by that record: a single-use, TIME-BOUNDED, sha256-keyed `state`.
+# KV's native per-key `expirationTtl` enforces the time bound, and `delete()`
+# after a successful exchange enforces single use.
+#
+# WIRING STATE — LIVE. `src/durable.ts`'s `KvOauthFlowStore` reads and writes
+# this namespace, and `resolvePorts` binds it whenever `durableIdentityBound`
+# holds (D1 + this KV + the identity key). A browser redirected back to a
+# DIFFERENT isolate than the one that started the flow now completes.
+#
+# The ONE property KV cannot give is the atomic single-use claim: Workers KV
+# has no compare-and-swap and no conditional write, so `get` + `delete` is not
+# the one indivisible operation the Rust store's `UPDATE mcp_oauth_flows SET
+# consumed_at = now WHERE consumed_at IS NULL RETURNING *` is. That is why the
+# claim now runs through the MCP_OAUTH_FLOWS Durable Object declared below and
+# KV is the documented fallback. Pinned by `test/durable-identity.test.ts` and
+# `test/oauth-flow-claim.test.ts`.
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "MCP_OAUTH_KV"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
+# DURABLE OBJECTS — the atomic single-use claim on an in-flight OAuth flow
+#
+# Read as `env.MCP_OAUTH_FLOWS`. One instance per sha256(state) digest
+# (`idFromName`), so two callbacks racing on the same `state` are serialized
+# through one single-threaded actor and the read+delete inside
+# `blockConcurrencyWhile` is indivisible. This is what closes the gap KV leaves
+# on the ANONYMOUS `GET /v1/mcp/identity/callback`, whose entire authorization
+# is that record being single-use and time-bounded.
+#
+# `class_name` resolves against the ENTRY module, so `McpOauthFlowClaim` is
+# re-exported from `src/worker.ts`. Dropping that re-export fails the Worker at
+# startup — including under `@cloudflare/vitest-pool-workers`.
+#
+# DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`,
+# NOT `new_classes`).
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "MCP_OAUTH_FLOWS"
+class_name = "McpOauthFlowClaim"
+
+# ---------------------------------------------------------------------------
+# DURABLE OBJECTS — the SHARED upstream-MCP session (the `McpManager` port)
+#
+# Read as `env.MCP_SESSION`. One instance per `(tenant, server)` upstream via
+# `idFromName(sessionKey(tenantId, serverName))`, so every isolate serving a
+# tenant observes the SAME negotiated protocol revision, tool list and
+# connection health instead of re-handshaking per cold isolate and discovering
+# an outage once per isolate. That closes
+# PORT-TODO(inventory-edge-control §MCP "session manager"), which was never a
+# platform limit — the primitive was always here.
+#
+# The tenant id being part of the DO NAME is the cross-tenant isolation
+# property: two tenants configuring an upstream called `search` address two
+# different objects by construction, not by a check that can be forgotten.
+#
+# `class_name` resolves against the ENTRY module, so `FerroGateMcpSession` is
+# re-exported from `src/worker.ts`. Dropping that re-export fails the Worker at
+# startup, including under `@cloudflare/vitest-pool-workers`.
+#
+# The binding is OPTIONAL to the code: `HttpMcpUpstreams` takes the store as an
+# option and falls back to its per-isolate map when none is supplied, so a
+# deployment without this namespace degrades to the previous behaviour rather
+# than failing closed on a session lookup.
+#
+# DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`).
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "MCP_SESSION"
+class_name = "FerroGateMcpSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["McpOauthFlowClaim"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FerroGateMcpSession"]
+
+# ---------------------------------------------------------------------------
+# D1 — per-user MCP identity grants + the upstream server catalog
+#
+# Read as `env.DB`. The D1 twin of the Postgres tables the Rust
+# `McpCredentialRepository` owns (PORT-PLAN.md "Postgres→D1"):
+#
+#   mcp_oauth_credentials  the sealed per-(tenant, workspace, user, server)
+#                          grant — refresh/access token ciphertext + nonce +
+#                          the bound OIDC `sub`. It MUST outlive the isolate:
+#                          a revoked grant that "comes back" on the next
+#                          isolate is a security regression, and today it does
+#                          exactly that (`InMemoryCredentialStore`).
+#   mcp_servers            the tenant's upstream MCP server configs and tool
+#                          allowlists (`McpServerConfig`), today reachable only
+#                          through `InMemoryUpstreams.register`.
+#
+# WIRING STATE — LIVE. `src/durable.ts` owns the schema (`MCP_IDENTITY_SCHEMA`,
+# applied idempotently by `ensureMcpIdentitySchema`), `D1CredentialGrants`
+# implements the grant half, and `loadServerCatalog` reads `mcp_servers` for one
+# tenant. `resolvePorts` binds them. `database_id` remains a documented
+# placeholder — the real id comes from whoever provisions the database.
+#
+# Two guards worth not losing in a refactor, both pinned by
+# `test/durable-identity.test.ts`:
+#   * `commit` runs the authorization-generation check INSIDE the INSERT
+#     (`INSERT ... SELECT ... WHERE (SELECT generation ...) = ?`), so a
+#     revocation landing mid-flow cannot be overwritten by a read-then-write.
+#   * `revoke` carries `AND revoked_at_unix IS NULL` in the UPDATE's own WHERE,
+#     so a second revoke returns nothing instead of rewriting the timestamp.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-control"
+database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+# `migrations_dir` — ADDED WAVE 22, and it was a real hole, not tidiness.
+#
+# `apps/gateway` declares it for the same database (as `CONTROL_DB`) and
+# `apps/control-plane` declares it as `DB`; this stanza did not, so:
+#
+#  * `wrangler dev --local` provisioned an EMPTY local D1 with no schema. Every
+#    control this Worker resolves durably — the drain document, the tenancy
+#    lifecycle chain, the guardrail policy binding, the server catalog — then
+#    failed its lookup and this Worker ran, correctly, in its fail-CLOSED
+#    posture on a developer's machine. The wave-22 INTEGRATE boot proof caught
+#    it as `/readyz 503 drain_state_unavailable`;
+#  * `wrangler d1 migrations apply DB` had nowhere to read the schema FROM, so
+#    `CLOUD-VERIFICATION.md` §3's migration step had no mcp entry and could not
+#    have had one.
+#
+# It points at the CONTROL schema because `database_name` says so and
+# `src/ports.ts` says so ("`env.DB` already IS the control database"). Per-tenant
+# databases are resolved at runtime through `tenant_databases`, never bound here.
+migrations_dir = "../../sql/d1-ts/control"
+
+# ===========================================================================
+# NOT DECLARED — and why
+#
+# * SECRETS STORE — `FERROGATE_MCP_IDENTITY_KEY`, the 32-byte AEAD key
+#   `webCryptoIdentityCipher` seals stored grants under, and the OAuth client
+#   secrets `SecretResolverPort.resolve` dereferences. Secret VALUES never
+#   belong in this file, so there is nothing to declare here; the name is read
+#   off `env` and seeded per environment with `wrangler secret put` (or a
+#   Secrets Store binding of the same name — identical from the code's side).
+#
+#   The consuming half IS implemented: `decodeIdentityKey` in `src/durable.ts`
+#   accepts base64 or hex, REFUSES anything that is not exactly 32 bytes, and
+#   `identityCipherFrom` returns undefined on refusal so `durableIdentityBound`
+#   is false and `/readyz` answers 503 — instead of the Worker quietly sealing
+#   grants under the ephemeral per-isolate key that only the dev bundle should
+#   ever use.
+#
+#   // PORT-TODO(inventory-edge-control §MCP): what remains is a platform
+#   // constraint, not missing code — CF bindings (Secrets Store included)
+#   // resolve at DEPLOY time. There is no runtime "open secret by name/uuid"
+#   // API, so this Worker cannot fetch its own key, cannot hold two key
+#   // versions at once, and cannot rotate without a redeploy. That is why
+#   // `StoredMcpOauthCredential.keyVersion` is carried but never used to select
+#   // a key here: honest field, no runtime resolver to feed it.
+#
+# * ANALYTICS ENGINE. `InMemoryAuditSink` keeps the `tool.execute` /
+#   `mcp.identity.*` rows — including the `agent_run_id` correlation column
+#   (#522) — only for the life of the isolate, so audit evidence does not
+#   survive eviction. The durable sink is `apps/telemetry`, reached by a
+#   service binding or an Analytics Engine dataset.
+#   PORT-TODO(inventory-edge-control §MCP "audit"): NOT a platform limit — CF
+#   has the primitive (Analytics Engine is binding-only, which is exactly what
+#   a Worker can use). It is a cross-app deferral on `apps/telemetry`.
+#   CONSEQUENCE while it stands: the `agent_run_id` correlation rows this
+#   Worker threads correctly (#522, pinned by `test/agent-run-id.test.ts`) are
+#   still WRITTEN to an isolate-local sink, so the threading is proven but the
+#   evidence is not yet durable.
+#
+# * SERVICE BINDINGS. `[[services]]` names another deployed Worker; an
+#   unimplemented target turns every call into a runtime error instead of a
+#   clean 503, so the gateway / control-plane hops stay `fetch()` for now.
+# ===========================================================================
+
+# ===========================================================================
+# DURABLE OBJECTS — the SHARED admission counter (wave 16, finding D1)
+#
+# WRITTEN OUT AND COMMENTED, exactly like the D1 stanzas in
+# `apps/agent-runtime/wrangler.toml`, for a measured harness reason (below).
+# UNCOMMENT AT DEPLOY TIME.
+#
+#   [[durable_objects.bindings]]
+#   name = "RATE_LIMIT"
+#   class_name = "RateLimiterDurableObject"
+#   script_name = "ferrogate-gateway"
+#
+# Read as `env.RATE_LIMIT` by `src/admission/counters.ts::limiterForEnv`. This
+# is NOT a class this script defines: `script_name` names `apps/gateway`'s
+# already-deployed `RateLimiterDurableObject`, so `idFromName("key:<id>")` here
+# addresses the SAME instance the gateway addresses. That sharing IS the fix —
+# a credential at 60 rpm is charged ONE window across `/v1/chat/completions`,
+# `/v1/mcp` and `/v1/mcp/tool/execute`. A private class here would compile,
+# deploy, pass every test, and hand this Worker its own full quota: a quieter
+# version of the admission bypass this wave closes.
+#
+# NO `[[migrations]]` stanza belongs here, now or when it is uncommented. A
+# migration INTRODUCES a class and the class is introduced by the script that
+# DEFINES it — `apps/gateway`, whose `new_sqlite_classes =
+# ["RateLimiterDurableObject"]` already exists. A second `new_sqlite_classes`
+# here would claim to define a class this script does not export and `wrangler
+# deploy` rejects it. For the same reason there is no `src/worker.ts`
+# re-export: this Worker BINDS the class, it does not define it. (If the class
+# is ever MOVED into this app, the stanza must be `new_sqlite_classes`, never
+# `new_classes` — the latter deploys cleanly and silently swaps SQLite for the
+# key-value storage backend.)
+#
+# DEPLOY ORDER: `ferrogate-gateway` FIRST. A `script_name` binding to a script
+# that does not exist yet fails at deploy.
+#
+# WHY IT IS COMMENTED — measured on 2026-08-01, not feared. `vitest.config.ts`
+# loads this file through `wrangler: { configPath }`, and neither
+# `@cloudflare/vitest-pool-workers` nor `wrangler dev --local` can resolve a
+# cross-script DO binding: workerd refuses to START the Worker with
+#
+#   Worker "core:user:vitest-pool-workers-runner-"'s binding "RATE_LIMIT"
+#   refers to a service "core:user:ferrogate-gateway", but no such service is
+#   defined.
+#
+# Committed uncommented, the whole MCP suite goes to 0 tests / 23 collection
+# errors on a correct tree, and `bunx wrangler dev --local` never reaches
+# "Ready on". This seam is therefore DEPLOY-ONLY in the sense of
+# `docs/rewrite/MOUNT-SEAMS.md` §1: it cannot be proven by any offline gate,
+# and pretending otherwise by deleting the sharing is the worse trade.
+#
+# WHILE IT IS COMMENTED, `limiterForEnv` falls back to the per-isolate
+# `InMemoryMcpRateLimiter`: the quota-scope chain, the monthly USD budget and
+# the prepaid-wallet no-oversell hold are ALL still enforced and ALL durable;
+# only the RPM window is counted per isolate (a 60 rpm cap is 60·N across N
+# isolates). One of five legs degraded, versus none of five enforced before.
+# `test/env-var-drift.test.ts` pins `RATE_LIMIT` as read-but-undeclared so this
+# cannot be forgotten, and `docs/rewrite/CLOUD-VERIFICATION.md` carries the
+# human deploy step.
+# ===========================================================================

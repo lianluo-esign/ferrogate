@@ -1,0 +1,139 @@
+name = "ferrogate-control-plane"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# FALLBACK vars for the ports in `src/adapters.ts`.
+#
+# These are no longer the credential path: `resolveApiKeys` resolves operator
+# keys from the control database's HASHED `static_api_keys` table and consults
+# `CONTROL_PLANE_STATIC_API_KEYS` only when the database has no matching row
+# (`src/store/api_keys.ts`); `resolveRbac` does the same over
+# `tenant_role_bindings` for `TENANT_RBAC_ACTIONS`. Provisioning rows is
+# therefore how a real deployment states its credentials, and a stale var can
+# never re-enable a key the database disabled.
+#
+# `TENANCY_LIFECYCLE` moved the same way: `resolveLifecycle` gates on the
+# `tenant-accounts` / `projects` / `workspaces` rows the admin surface writes
+# (`src/store/lifecycle.ts`, walking the whole tenant -> project -> workspace
+# chain like Rust's `resolve_lifecycle_chain`), and reads this map only for a
+# tenancy that has no durable row. Suspending a tenant is now
+# `PATCH /admin/v1/tenant-accounts/{id} {"status":"suspended"}` and takes effect
+# on that tenant's next request; it used to need an edit here and a redeploy.
+#
+# `CONTROL_PLANE_NATIVE_API_KEYS` is the one that CANNOT move: a durable virtual
+# key's scopes live in the per-tenant database and Workers resolve D1 bindings at
+# deploy time, so this Worker cannot read them — see the kept platform-limit
+# PORT-TODO in `src/store/api_keys.ts`.
+#
+# `CONTROL_PLANE_SEED` now seeds ONLY the in-memory fallback store. With the
+# `DB` binding below present the Worker uses the D1 store and ignores it; it is
+# kept so a database-less local run (`CONTROL_PLANE_STORE = "memory"`) still has
+# a way to state its world.
+#
+# `CONTROL_PLANE_STORE` is deliberately UNSET: absent means "D1 whenever `DB` is
+# bound", so a deployment that provisions a database cannot accidentally serve
+# an in-memory store whose writes vanish with the isolate. Set it to `"memory"`
+# only for a local run with no database.
+#
+# `ADMIN_CONSOLE_ALLOWED_ORIGIN` is deliberately ABSENT: with no console origin
+# configured the `OPTIONS /admin/{*rest}` preflight surface does not exist at
+# all, which is the contract's `dynamic_surfaces` semantics. Set it only for a
+# deployment that actually fronts an admin console.
+[vars]
+CONTROL_PLANE_NATIVE_API_KEYS = "[]"
+CONTROL_PLANE_STATIC_API_KEYS = "[]"
+TENANCY_LIFECYCLE = "{}"
+TENANT_RBAC_ACTIONS = "{}"
+CONTROL_PLANE_SEED = "{}"
+
+# ---------------------------------------------------------------------------
+# D1: the control database
+# ---------------------------------------------------------------------------
+#
+# `env.DB` is the native binding that replaces BOTH legacy paths at once
+# (`docs/legacy/inventory-edge-control.md` §7 "Inside a Worker most of this
+# collapses to native bindings", §9.3):
+#
+#   * the D1 REST client (`ferrogate-cloudflare::d1`) — admin/low-volume
+#     create/list/query, which had no transactions and no `RETURNING`; and
+#   * the `workers/d1-proxy` Worker (#450/#455) — the atomic hot path, a
+#     bearer-gated HTTP front over `env.DB.batch([...])` and
+#     `prepare().bind().all()` with `RETURNING`.
+#
+# Both become direct `env.DB` calls here, so `D1_PROXY_TOKEN` and the proxy's
+# base URL disappear with it — there is no longer an HTTP hop to authenticate.
+#
+# `src/store/d1.ts` reads this binding. Every admin collection persists into the
+# schema's generic `control_plane_resources` document table (`resource_kind` =
+# the collection, `document_json` = the whole record) and every applied mutation
+# appends an `audit_events` row — both tables are the control-database
+# migration's, unchanged: `sql/d1-ts/control/0001_init_control.sql`.
+#
+# `migrations_dir` points at that same directory, so
+# `wrangler d1 migrations apply ferrogate-control [--local]` provisions exactly
+# the DDL the test suite applies (`vitest.config.ts` reads it with
+# `readD1Migrations`). Tests and deploys therefore cannot run different schemas.
+#
+# `database_id` is a DOCUMENTED PLACEHOLDER, not a real resource. `wrangler
+# deploy` will refuse it, which is deliberate: the id must be supplied by
+# whoever provisions the database (`wrangler d1 create ferrogate-control`),
+# never invented and committed here.
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-control"
+database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+migrations_dir = "../../sql/d1-ts/control"
+
+# ---------------------------------------------------------------------------
+# ENTERPRISE IDENTITY (wave 18) — the deploy-time secrets, as PLACEHOLDERS
+# ---------------------------------------------------------------------------
+#
+# These are `wrangler secret put` values, NOT `[vars]`, and that asymmetry is
+# the point: a `[vars]` entry is committed plaintext in this file, and both of
+# the values below mint or unlock a credential.
+#
+#   ADMIN_CONSOLE_JWT_SECRET   — REQUIRED by `/v1/admin/*` (the console session
+#       surface) and by every SSO login, which ends in the same session. HS256
+#       signing key. ABSENT ⇒ every one of those routes answers
+#       `503 admin_console_unconfigured`; there is deliberately NO default,
+#       because a constant is forgeable by anyone who reads the source and a
+#       per-isolate random value silently invalidates every session on isolate
+#       eviction. Provision with:
+#           wrangler secret put ADMIN_CONSOLE_JWT_SECRET --name ferrogate-control-plane
+#
+#   <OIDC client secrets>      — NOT named here, by construction. A tenant's
+#       `sso_provider_configs.oidc_client_secret_ref` holds a REFERENCE
+#       (`env://NAME`), never the secret, so the control-plane row can never
+#       leak a live IdP credential. The operator provisions one
+#       `wrangler secret put <NAME>` per tenant IdP and writes `env://<NAME>`
+#       into the config. An unresolvable reference fails the login CLOSED.
+#
+# `docs/rewrite/CLOUD-VERIFICATION.md` §B carries the deploy checklist for both.
+# Neither is declared in `[vars]` on purpose — a secret in this file would be
+# committed to git, and `test/env-var-drift.test.ts` treats them as the
+# documented secret-binding exception rather than as drift.
+
+# TODO(bindings): the remaining bindings, configured per this app's inventory
+# before first deploy. Do NOT commit real resource IDs — placeholders only.
+#   [[d1_databases]]  binding = "TENANT_DB_<slug>" -> per-tenant database, the
+#       `database` binding selector the d1-proxy took per request
+#       (inventory-edge-control §7). One block per provisioned tenant; they are
+#       created by the provisioning flow, so they cannot be enumerated here.
+#   [[kv_namespaces]]       binding = "SESSIONS" -> console/refresh tokens
+#   [[secrets_store]]       admin JWT + provider creds (deploy-time binding)
+#   [[analytics_engine_datasets]] audit/evidence sink
+#   route groups: /admin/v1/* (canonical), /control/v1/* (alias), /v1/admin/* (auth service)
+
+# ---------------------------------------------------------------------------
+# The agent-schedule TICK (`src/schedule/scheduled.ts`, dispatched from the
+# `scheduled` handler on `src/worker.ts`'s default export).
+#
+# `* * * * *` is the finest granularity Cron Triggers offer, which is also the
+# finest granularity a 5-field cron expression can ask for, so nothing is lost:
+# a sub-minute schedule would need a Durable Object alarm instead. Without this
+# stanza `runScheduleTick` is reachable only through `run-now`, i.e. schedules
+# never fire on their own.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["* * * * *"]

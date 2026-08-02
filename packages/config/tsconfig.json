@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // `test/source-hygiene.test.ts` reads this package's own files off disk
+    // (see its header), so the Node built-ins are needed for the TEST program.
+    // The `src` tree stays pure — nothing under it imports `node:*`, and
+    // `test/source-hygiene.test.ts` is where that is asserted.
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src", "test"]
+}

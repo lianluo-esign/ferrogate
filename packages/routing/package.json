@@ -1,0 +1,17 @@
+{
+  "name": "@ferrogate/routing",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./durable-objects": "./src/shadow-budget-do.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run && vitest run --config vitest.do.config.ts",
+    "test:pure": "vitest run",
+    "test:do": "vitest run --config vitest.do.config.ts"
+  }
+}
