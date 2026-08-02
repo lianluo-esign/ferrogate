@@ -1,140 +1,98 @@
 # Token4AI Cloud Attribution
 # Developed by the commercial cloud service company represented by https://token4ai.cloud.
 # Author: jamesduan (X: https://x.com/JamesDuanL)
-# Created: 2026-06-11
-# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+# description: Token4AI Cloud, FerroGate AI Gateway on Cloudflare Workers, agent-native AI traffic infrastructure.
+
+# CI for the TypeScript / Cloudflare Workers tree.
+#
+# This replaces the Rust release-gate workflow, which had become a workflow that
+# could not run: it called twelve `rust-*.yml` files deleted along with the Rust
+# tree, and it only triggered on `release: published` while branch protection
+# required its `rust-ci` aggregate job — a status that could therefore never be
+# reported, on a workflow that would have failed to resolve if it had been.
+#
+# The shape is deliberately different. This runs on every push and pull request,
+# because the previous arrangement checked nothing between releases, and a tree
+# that is not checked between releases is how you accumulate the never-executed
+# test this project keeps finding.
+#
+# The suite runs under `@cloudflare/vitest-pool-workers`, i.e. real workerd,
+# offline — no Docker, no live Cloudflare account, no credentials. That is what
+# makes it safe to run on every push.
 
 name: CI
 
-# CI runs on GitHub-hosted runners (moved off self-hosted archlinux runners,
-# which were unreliable/offline — see issue #189). This is a release-gate
-# workflow, not a per-commit CI check: it triggers only when a GitHub Release
-# is published. Tag pushes, pull requests, branch pushes, and manual dispatch
-# do not spend cloud runner-minutes. Day-to-day development stays local:
-# compile FerroGate and run `ferrogate-test` directly in the development
-# container.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main, main-ts]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: rust-quality
-    uses: ./.github/workflows/rust-quality.yml
-
-  workers:
-    name: workers
-    uses: ./.github/workflows/workers.yml
-
-  api-contract-drift:
-    name: api-contract-drift
-    uses: ./.github/workflows/api-contract-drift.yml
-
-  admin-console:
-    name: admin-console
-    uses: ./.github/workflows/admin-console.yml
-
-  core-policy-tests:
-    name: rust-core-policy-tests
-    uses: ./.github/workflows/rust-core-policy-tests.yml
-
-  control-plane-tests:
-    name: rust-control-plane-tests
-    uses: ./.github/workflows/rust-control-plane-tests.yml
-
-  agentic-gateway-tests:
-    name: rust-agentic-gateway-tests
-    uses: ./.github/workflows/rust-agentic-gateway-tests.yml
-
-  ai-proxy-tests:
-    name: rust-ai-proxy-tests
-    uses: ./.github/workflows/rust-ai-proxy-tests.yml
-
-  # #470: the authority and the veto-only Worker shell, over one committed
-  # corpus. Fails CI on divergence.
-  governed-decision-conformance:
-    name: governed-decision-conformance
-    uses: ./.github/workflows/governed-decision-conformance.yml
-
-  cli-tooling-tests:
-    name: rust-cli-tooling-tests
-    uses: ./.github/workflows/rust-cli-tooling-tests.yml
-
-  # #561: the gateway trunk, agent-worker, and the secret/payment/edge crates.
-  # Every one of them was compiled by CI and executed by no job until this line
-  # existed.
-  platform-crate-tests:
-    name: rust-platform-crate-tests
-    uses: ./.github/workflows/rust-platform-crate-tests.yml
-
-  gateway-runtime:
-    name: rust-gateway-runtime
-    uses: ./.github/workflows/rust-gateway-runtime.yml
-
-  e2e-harness:
-    name: rust-e2e-harness
-    uses: ./.github/workflows/rust-e2e-harness.yml
-
-  supabase-storage-tests:
-    name: rust-supabase-storage-tests
-    uses: ./.github/workflows/rust-supabase-storage-tests.yml
-    secrets:
-      supabase_dsn: ${{ secrets.FERROGATE_SUPABASE_DSN }}
-      supabase_tls_ca_cert: ${{ secrets.FERROGATE_SUPABASE_TLS_CA_CERT }}
-      supabase_tls_mode: ${{ secrets.FERROGATE_SUPABASE_TLS_MODE }}
-      token4ai_openai_api_key: ${{ secrets.FERROGATE_TOKEN4AI_OPENAI_API_KEY }}
-
-  rust-ci:
-    name: rust-ci
+  ci:
+    name: ci
     runs-on: ubuntu-latest
-    needs:
-      - quality
-      - admin-console
-      - core-policy-tests
-      - control-plane-tests
-      - agentic-gateway-tests
-      - ai-proxy-tests
-      - governed-decision-conformance
-      - cli-tooling-tests
-      - platform-crate-tests
-      - gateway-runtime
-      - e2e-harness
-      - supabase-storage-tests
+    timeout-minutes: 45
     steps:
-      - name: Confirm Rust CI modules passed
-        run: echo "rust-ci aggregate passed after feature-module tests, admin-console, gateway runtime, and e2e harness modules."
+      - uses: actions/checkout@v4
 
-  image:
-    name: ghcr-image
-    needs: rust-ci
-    uses: ./.github/workflows/ci-image.yml
-    permissions:
-      actions: read
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
-    secrets: inherit
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to the repo's `packageManager` field. Keep the two in step —
+          # a floating version here would let a Bun release change resolution
+          # without a commit that says so.
+          bun-version: 1.3.14
 
-  package:
-    name: publish-release-tags
-    needs: image
-    uses: ./.github/workflows/package.yml
-    with:
-      image: ${{ needs.image.outputs.image }}
-      digest: ${{ needs.image.outputs.digest }}
-      release-tag: ${{ github.event.release.tag_name }}
-      source-digest: ${{ github.sha }}
-      workflow-ref: ${{ github.ref }}
-    permissions:
-      contents: read
-      packages: write
-    secrets: inherit
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Runs every workspace's vitest suite. `vitest-pool-workers` boots real
+      # workerd in-process, so this covers the Worker composition roots and the
+      # Durable Object classes, not just pure functions.
+      - name: Test
+        run: bun run test
+
+      # NON-BLOCKING, AND THAT IS A DELIBERATE, TEMPORARY CHOICE.
+      #
+      # `bun run lint` currently reports ~1954 errors (apps 711, packages 679,
+      # admin-console 564) — biome has never been clean on this tree, including
+      # on the freshly written TypeScript. Making it blocking today would mean
+      # committing a gate that is red on a correct tree, which is exactly the
+      # failure mode the Rust `rust-ci` check just demonstrated: a required
+      # status nobody can satisfy teaches everyone to bypass the gate.
+      #
+      # So it reports without failing the build, and the count is written into
+      # the job summary so the number is visible and can be driven down. Flip
+      # `continue-on-error` to false in the same commit that reaches zero.
+      - name: Lint (non-blocking — see comment)
+        id: lint
+        continue-on-error: true
+        run: |
+          set +e
+          bun run lint 2>&1 | tee /tmp/lint.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "## Lint"
+            echo
+            if [ "$status" -eq 0 ]; then
+              echo "Clean. **Make this gate blocking** — remove \`continue-on-error\` from the lint step."
+            else
+              echo "Not clean yet — non-blocking on purpose."
+              echo
+              echo '```'
+              tail -5 /tmp/lint.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
