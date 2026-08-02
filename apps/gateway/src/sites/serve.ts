@@ -214,7 +214,8 @@ export class SiteServer {
   constructor(options: SiteServerOptions = {}) {
     this.#options = options;
     this.#fixed =
-      options.service ?? (options.depsFromEnv === undefined ? buildAssetService(options.deps) : null);
+      options.service ??
+      (options.depsFromEnv === undefined ? buildAssetService(options.deps) : null);
   }
 
   serviceFor(c: Context<SiteEnv>): AssetService {

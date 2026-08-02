@@ -93,7 +93,11 @@ export type SiteDomainDecision =
   /** Not a custom site domain at all — the request routes normally. */
   | { readonly kind: "unbound" }
   /** Claimed, but not serving. The request is REFUSED, not routed. */
-  | { readonly kind: "inactive"; readonly hostname: string; readonly reason: SiteDomainInactiveReason }
+  | {
+      readonly kind: "inactive";
+      readonly hostname: string;
+      readonly reason: SiteDomainInactiveReason;
+    }
   /** Serve this tenant's site. */
   | { readonly kind: "route"; readonly route: SiteDomainRoute };
 

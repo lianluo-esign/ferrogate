@@ -31,10 +31,10 @@ import {
 import { networkAccess } from "../middleware/network.js";
 import { responseCache } from "../middleware/response-cache.js";
 import type { GatewayEnv } from "../ports.js";
+import { defaultSiteDomainRouting } from "../sites/host.js";
 import { agentDiscoveryHandler } from "./agent-discovery.js";
 import { nodeDrainGate } from "./drain.js";
 import { metricsHandler, requestMetrics } from "./metrics.js";
-import { defaultSiteDomainRouting } from "../sites/host.js";
 import { renderPromptTemplateHandler } from "./prompts.js";
 import { readinessResponse } from "./readiness.js";
 import { reverseProxyFallThrough } from "./reverse-proxy.js";
@@ -645,9 +645,7 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // Inert unless `CONTROL_DB` is bound AND holds a `site_domains` row for the
   // inbound host AND that row's owner holds a live DNS ownership proof. See
   // `../sites/host.ts`.
-  // MOUNT PENDING — the seam exists and nothing calls it. This is the defect
-  // #738 describes: the ownership half is fully built and entirely dead.
-  void defaultSiteDomainRouting;
+  app.use("*", options.siteDomains ?? defaultSiteDomainRouting());
 
   // ONE table-driven guard for all 268 operations, ahead of every route.
   // Passed straight through (no wrapping middleware) — see `contractAuth`.

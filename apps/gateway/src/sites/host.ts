@@ -94,12 +94,12 @@ export const SITE_DOMAIN_INACTIVE_CODE = "site_domain_not_active";
  * logs.
  */
 export function siteDomainInactiveMessage(hostname: string): string {
-  return (
-    `${hostname} is not served here: this gateway has no live ownership proof binding ` +
-    "that hostname to a published site. Complete the DNS-TXT verification at " +
-    "POST /admin/v1/site-domains/{hostname}/verify, or remove the DNS record that " +
-    "points it here."
-  );
+  return [
+    `${hostname} is not served here: this gateway holds no live ownership proof`,
+    "binding that hostname to a published site. Complete the DNS-TXT challenge at",
+    "POST /admin/v1/site-domains/{hostname}/verify, or remove the DNS record that",
+    "points it here.",
+  ].join(" ");
 }
 
 /** Worker bindings this middleware reads. */
@@ -121,7 +121,10 @@ export interface SiteDomainRoutingOptions extends SiteServerOptions {
    * {@link D1SiteDomainDirectory} on `env.CONTROL_DB`, memoized per env object
    * so one isolate holds one cache.
    */
-  readonly directory?: SiteDomainDirectory | ((env: Record<string, unknown>) => SiteDomainDirectory | null) | undefined;
+  readonly directory?:
+    | SiteDomainDirectory
+    | ((env: Record<string, unknown>) => SiteDomainDirectory | null)
+    | undefined;
   /** Injectable clock, in whole seconds. Defaults to the wall clock. */
   readonly now?: (() => number) | undefined;
 }
