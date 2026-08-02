@@ -1,7 +1,7 @@
 /**
  * The generic, contract-driven resource machinery.
  *
- * 200 operations, and roughly 170 of them are the SAME six shapes over ~60
+ * 209 operations, and roughly 170 of them are the SAME six shapes over ~60
  * named collections:
  *
  * ```

@@ -37,6 +37,7 @@
  * A misconfiguration can therefore never *widen* what is reachable — the same
  * rule `parseJsonVar` follows for the auth tables in `src/adapters.ts`.
  */
+import { BYOK_ALIAS_PATTERN } from "@ferrogate/secrets";
 import { z } from "zod";
 import {
   type ProviderSecretResolution,
@@ -93,6 +94,20 @@ export const providerRecordSchema = z
      * Never the value. See `src/keys/provider-secrets.ts`.
      */
     api_key_var: z.string().trim().min(1).optional(),
+    /**
+     * `byok_alias` (issue #682) — the DEFAULT per-tenant credential alias for
+     * this provider. An alias, never a credential, and never a tenant: the
+     * tenant is the authenticated caller's, so one provider row serves every
+     * tenant with that tenant's own negotiated key.
+     *
+     * NOT resolved here. Catalog construction is synchronous and per-env, while
+     * a BYOK lookup is a per-request, per-tenant D1 read — resolving it at this
+     * seam would bake ONE tenant's credential into an isolate-wide catalog,
+     * which is the cross-tenant leak this feature exists to prevent. The alias
+     * is carried onto the route and `src/inference/byok.ts` resolves it per
+     * request.
+     */
+    byok_alias: z.string().trim().regex(BYOK_ALIAS_PATTERN).optional(),
     /** Credential scheme override; defaults to the family's Rust hard-coding. */
     auth_scheme: z.enum(["bearer", "x-api-key"]).optional(),
     /** `ProviderConfig.openrouter_http_referer` — OpenRouter attribution only. */
@@ -643,6 +658,9 @@ export function buildModelCatalog(
         providerKind: provider.kind,
         baseUrl: provider.base_url,
         ...(apiKey !== undefined ? { apiKey } : {}),
+        // The ALIAS only. `src/inference/byok.ts` turns it into a credential
+        // per request, inside the caller's tenant scope.
+        ...(provider.byok_alias === undefined ? {} : { byokAlias: provider.byok_alias }),
         ...(credentials.aws === undefined ? {} : { awsCredentials: credentials.aws }),
         ...(credentials.gcp === undefined ? {} : { gcpCredentials: credentials.gcp }),
         authScheme: provider.auth_scheme ?? defaultAuthScheme(provider.kind),

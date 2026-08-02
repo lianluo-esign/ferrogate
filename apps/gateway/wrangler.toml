@@ -472,7 +472,7 @@ FERROGATE_ASSET_PUBLISHER_MINISIGN_KEYS = ""
 # in `docs/rewrite/parity-audit-request-path.md`).
 #
 # Read by `routeTableFromEnv` (src/routes/reverse-proxy.ts), which
-# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 251 contract
+# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 264 contract
 # operations and after `/health`, so nothing it does can shadow a contract
 # route.
 #
@@ -514,6 +514,38 @@ GATEWAY_UPSTREAMS = "[]"
 # ---------------------------------------------------------------------------
 GATEWAY_GUARDRAIL_POLICIES = "[]"
 GATEWAY_GUARDRAIL_BINDINGS = "[]"
+
+# ---------------------------------------------------------------------------
+# PER-TENANT BYOK (issue #682) — FERROGATE_BYOK_MASTER_KEY
+# ---------------------------------------------------------------------------
+# The FLEET-WIDE AES-256 key that seals every tenant's own provider credential
+# in the control database's `tenant_provider_credentials` table. It is a SECRET
+# and is deliberately NOT declared here — set it with
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put FERROGATE_BYOK_MASTER_KEY
+#
+# (or `@ferrogate/secrets`' `generateByokMasterKey()`), or bind it through
+# Cloudflare Secrets Store; `byokPortsFromEnv` reads either shape.
+#
+# THIS IS ONE BINDING FOR THE WHOLE FLEET, NOT ONE PER TENANT. That is the
+# entire design: Secrets Store bindings resolve at DEPLOY time, so a per-tenant
+# binding would mean a deploy per tenant and a deploy per rotation. Instead the
+# binding set is fixed and the tenant-visible `alias -> credential` mapping is
+# ROW DATA — onboarding a tenant is an INSERT and rotating their key is an
+# UPDATE, neither of which is a deploy.
+#
+# Rotating THIS key (rare — an operator event, not a tenant one) adds
+# FERROGATE_BYOK_MASTER_KEY_V2 and keeps the v1 secret bound until every row has
+# been re-sealed; rows record the version that sealed them.
+#
+# Absent ⇒ BYOK is simply OFF: `byokPortsFromEnv` returns null, provider
+# credentials resolve exactly as they did before #682, and a request that
+# explicitly asks for an alias is refused 503 `byok_not_configured` rather than
+# being served — and billed — on the platform's own provider key.
+#
+# Requires the CONTROL_DB binding (declared below) and migration
+# `sql/d1-ts/control/0003_tenant_provider_credentials.sql`.
+# ---------------------------------------------------------------------------
 
 # Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
 # negative D1 key resolution may be reused inside one isolate. `"0"` (the
@@ -1044,6 +1076,82 @@ binding = "TELEMETRY_COLLECTOR"
 service = "ferrogate-telemetry"
 
 # ---------------------------------------------------------------------------
+# [ai] — Workers AI (issue #673)
+#
+# TWO readers, and both were written before this stanza existed, which is why
+# it lands now rather than earlier:
+#
+#   1. `src/inference/workers-ai.ts` — the transport for the `workers-ai`
+#      provider family. A `[[providers]]` row with `kind = "workers-ai"` is
+#      dispatched through `env.AI.run(...)`, so chat and embeddings on a
+#      Cloudflare-hosted model never leave the platform and pay no egress. With
+#      this stanza deleted the family fails CLOSED — `502
+#      provider_dispatch_error: workers-ai provider '<name>' requires the AI
+#      binding` — rather than silently egressing to `api.cloudflare.com` with no
+#      credential.
+#   2. `src/guardrails/config.ts:149` reads `env.AI` for the Llama-Guard
+#      detector (`@ferrogate/guardrails`' `workersAiBindingClient`). That reader
+#      has existed since the guardrail slice and the binding it needed was never
+#      declared, so the detector has been silently taking its REST fallback (or
+#      disabling itself) on every deploy. Declaring `AI` closes that too — it is
+#      the PORT-TODO named in the NOT-DECLARED block below.
+#
+# No account resource and no placeholder: unlike `database_id` / `bucket_name`,
+# `[ai]` names nothing account-specific and deploys exactly as written.
+#
+# THE INFERENCE IS NOT EXERCISABLE OFFLINE, but the BINDING loads offline. Both
+# `wrangler dev --local` and `@cloudflare/vitest-pool-workers` bind `env.AI` to a
+# real `Ai` object that throws `Binding AI needs to be run remotely` the moment
+# anything calls `.run()` — measured on wrangler 4.116, 2026-08-02, with no
+# credentials in the environment. Nothing egresses and nothing is charged. So
+# `test/inference/workers-ai.test.ts` installs a recording double over `env.AI`
+# and drives the deployed Worker through `SELF.fetch`: that proves the WIRING
+# (dispatcher selection, request shaping, response/stream translation, usage
+# extraction), and it cannot prove Workers AI's own wire behaviour, which needs
+# a real account.
+#
+# NO `remote` KEY, DELIBERATELY, AND DO NOT ADD ONE (#673 regression, #666
+# framing). This file is loaded by `wrangler dev`, by `wrangler deploy` and by
+# this app's `vitest.config.ts`, and wrangler's `warnOrError` branches on that
+# one key:
+#
+#   remote = false -> UserError, thrown before the Worker starts:
+#                     "AI bindings do not support local development." That is a
+#                     REFUSAL TO BOOT, not a downgrade: `wrangler dev --local`
+#                     never reaches "Ready on", which takes out the gateway leg
+#                     of `scripts/wave25-boot-proof.sh` and the Playwright
+#                     webServer in `e2e/playwright.config.ts` with it.
+#   remote = true  -> a proxy session against the live Cloudflare API, which
+#                     needs a `CLOUDFLARE_API_TOKEN` that this repo's offline
+#                     gates do not have and must not need.
+#   (absent)       -> a warning ("AI bindings always access remote resources"),
+#                     `env.AI ... not supported` in the binding table, and the
+#                     Worker BOOTS. This is the only value that lets the
+#                     committed config be the config every runner loads.
+#
+# WHAT FAILS IF THIS STANZA GOES MISSING — not a comment asking someone to
+# remember it, which is the thing #666 ruled out:
+#
+#   * `test/env-var-drift.test.ts` "declares the [ai] binding the Workers AI
+#     code paths read" reads this file's committed text and goes red.
+#   * `test/inference/workers-ai.test.ts` "the committed [ai] stanza is the one
+#     the pool actually loaded" goes red, because the pool boots from THIS file
+#     and `env.AI` would no longer exist in it.
+#
+# And because the pool boots from THIS file, adding `remote = false` back cannot
+# be committed quietly either: the gateway suite then dies at pool startup with
+# the same UserError, 0 tests collected, before any assertion runs.
+#
+# Both run in `bun run test`, i.e. in the release CI (.github/workflows/ci.yml)
+# that every deploy goes through. The resolved upload manifest can also be read
+# back directly, without touching the account:
+#
+#   bunx wrangler deploy --dry-run   # "Your Worker has access to…" lists env.AI
+# ---------------------------------------------------------------------------
+[ai]
+binding = "AI"
+
+# ---------------------------------------------------------------------------
 # Cron — the billing-outbox recovery sweep
 #
 # Handled by `scheduled` on the default export of `src/worker.ts`, which calls
@@ -1096,9 +1204,12 @@ crons = ["* * * * *"]
 #   [[durable_objects.bindings]]  SESSION
 #       streaming-session state. `RATE_LIMIT` landed in wave 5; `SESSION` has no
 #       reader yet. PORT-TODO(inventory-request-path §1.7).
-#   [ai] / AI Gateway
-#       Workers AI Llama Guard guardrail detector + governed provider egress.
-#       PORT-TODO(inventory-request-path §1.6 "Workers AI Llama Guard").
+#   AI Gateway (`cf-aig-*` routing through a named gateway id)
+#       still undeclared and still unmounted — see the header of
+#       `packages/providers/src/registry.ts`. `[ai]` itself is now DECLARED
+#       above (issue #673), which closes the "Workers AI Llama Guard" half of
+#       the old PORT-TODO; the AI-GATEWAY half is a different product surface
+#       and is unchanged.
 #   [[analytics_engine_datasets]]  binding = "TELEMETRY"
 #       the durable sink behind `AssetAuditSink` / request logs. Today
 #       `InMemoryAssetAuditSink` keeps a bounded 1000-event ring per isolate,

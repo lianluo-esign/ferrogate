@@ -158,7 +158,7 @@ export async function chargeAndRecord(
 ): Promise<LedgerEntry> {
   const entry = charge(config.price_book, event);
   // AWAITED, not fire-and-forget: on Workers every durable sink is
-  // promise-valued, and an unawaited `record` would let the 200 ship before the
+  // promise-valued, and an unawaited `record` would let the 206 ship before the
   // write settled — turning a `billing_idempotency_conflict` (409) into an
   // unhandled rejection the caller never sees.
   await config.sink.record(entry);
@@ -177,7 +177,7 @@ export async function chargeAndRecord(
  * declared out of the Cloudflare topology. **Declared out of it**, for three
  * reasons that are each independently checkable:
  *
- *  1. The committed 255-operation route contract
+ *  1. The committed 264-operation route contract
  *     (`docs/openapi/runtime-api-contract.json`) carries NO `/v1/billing/*`
  *     operation. Mounting these would mean ADDING operations to the contract —
  *     a product change, not a port.

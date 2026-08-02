@@ -222,7 +222,7 @@ export interface ListPage {
  * The narrow persistence surface every route module talks to.
  *
  * Deliberately generic over a collection name rather than one method per
- * resource: the 200 operations are overwhelmingly CRUD over ~60 named
+ * resource: the 209 operations are overwhelmingly CRUD over ~60 named
  * collections, and a per-resource method-per-operation interface would be the
  * hand-written-197-handlers problem moved down a layer.
  *

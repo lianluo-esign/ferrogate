@@ -15,6 +15,7 @@ import {
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
+import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
 import type { ProviderCircuitNamespace } from "./circuit-do.js";
@@ -46,6 +47,7 @@ import type {
 import { ProviderRoutingMetrics } from "./strategy.js";
 import type { RoutingMetrics } from "./strategy.js";
 import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
+import { workersAiDispatcherFromEnv } from "./workers-ai.js";
 import type { WorkflowGateBindings } from "./workflow.js";
 
 /**
@@ -271,6 +273,17 @@ export const fetchDispatcher: UpstreamDispatcher = {
  * upstream already speaks the ingress dialect, and because a test that wants to
  * assert raw relaying can inject it explicitly.
  */
+/**
+ * The deployed egress: {@link fetchDispatcher} for the eight network families,
+ * short-circuited through `env.AI` for the ninth (issue #673).
+ *
+ * A factory because bindings are per request while `InferenceDeps` is built
+ * once per router — `resolveDeps` calls this once per `env` object.
+ */
+export function dispatcherFromEnv(env: InferenceBindings): UpstreamDispatcher {
+  return workersAiDispatcherFromEnv(env, fetchDispatcher);
+}
+
 export const passthroughNormalizers: StreamNormalizers = {
   normalizerFor(): TransformStream<Uint8Array, Uint8Array> | null {
     return null;
@@ -377,7 +390,15 @@ export function resolveDeps(
   return {
     models: models ?? emptyModelResolver,
     adapters: deps.adapters ?? defaultAdapterRegistry,
-    dispatcher: deps.dispatcher ?? fetchDispatcher,
+    // Env-resolved like `circuit`: `dispatcherFromEnv` wraps `fetchDispatcher`
+    // so a `workers-ai` route is served by the `AI` binding (no egress) while
+    // every other family still goes out over `fetch` (issue #673). An injected
+    // dispatcher — value or factory — always wins, which keeps every existing
+    // test that stubs the egress independent of the environment.
+    dispatcher:
+      typeof deps.dispatcher === "function"
+        ? deps.dispatcher(env)
+        : (deps.dispatcher ?? dispatcherFromEnv(env)),
     usage: deps.usage ?? new InMemoryUsageSink(),
     normalizers: deps.normalizers ?? defaultStreamNormalizers,
     translator: deps.translator ?? defaultAnthropicTranslator,
@@ -415,5 +436,17 @@ export function resolveDeps(
         ? deps.workflowHistory(env)
         : (deps.workflowHistory ?? workflowHistoryFromEnv(env as WorkflowGateBindings)),
     nowUnixSeconds: deps.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    // Per-tenant BYOK (issue #682). Env-resolved like `circuit`, and DEFAULT-ON
+    // in the sense that a deployment with CONTROL_DB and a master key bound gets
+    // it without a switch — `byokPortsFromEnv` returns `null` when either is
+    // absent, so a deployment that has not opted in is byte-for-byte unchanged.
+    // An explicit `null` turns it off even where it could be built, which is
+    // what lets a test pin the pre-#682 behaviour.
+    byok:
+      deps.byok === undefined
+        ? byokPortsFromEnv(env)
+        : typeof deps.byok === "function"
+          ? deps.byok(env)
+          : deps.byok,
   };
 }

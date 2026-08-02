@@ -45,6 +45,7 @@
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
+import type { ByokPorts, ByokPortsFactory } from "./byok.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
 import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
@@ -123,6 +124,18 @@ export interface PhysicalRoute {
   readonly baseUrl: string;
   /** Provider credential. Resolved from Secrets Store in production. */
   readonly apiKey?: string | undefined;
+  /**
+   * The PER-ROUTE BYOK alias (issue #682) — `[[providers]].byok_alias`.
+   *
+   * Present ⇒ this route prefers the CALLING TENANT's own credential registered
+   * under that alias, resolved per request by `./byok.ts`. It holds an alias,
+   * never a credential and never a tenant: the tenant is the authenticated
+   * caller's, so the same route serves every tenant with that tenant's own key.
+   *
+   * A route that names an alias the caller has not registered is served with NO
+   * credential rather than with the platform's — see `applyByokOverride`.
+   */
+  readonly byokAlias?: string | undefined;
   /**
    * `ProviderConfig.aws_credentials` — required by the `bedrock` family and
    * unread by every other one. Absent for a Bedrock route means the adapter
@@ -583,7 +596,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 255
+ * enforcement belong to the ONE contract-driven middleware that covers all 264
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
@@ -819,7 +832,15 @@ export interface InferenceDeps {
    */
   readonly models?: ModelResolver | ModelResolverFactory;
   readonly adapters?: AdapterRegistry;
-  readonly dispatcher?: UpstreamDispatcher;
+  /**
+   * The provider egress, or a factory resolved per Worker `env` — the same
+   * shape `circuit` / `shadowBudget` / `workflows` use, and for the same
+   * reason: the `AI` binding the `workers-ai` family dispatches through only
+   * exists per request, while this deps object is built once per router
+   * (issue #673). Absent ⇒ `dispatcherFromEnv`, i.e. `fetch` for every family
+   * plus the `env.AI` short-circuit for Workers AI.
+   */
+  readonly dispatcher?: UpstreamDispatcher | ((env: InferenceBindings) => UpstreamDispatcher);
   readonly usage?: UsageSink;
   readonly normalizers?: StreamNormalizers;
   readonly translator?: AnthropicTranslator;
@@ -882,6 +903,16 @@ export interface InferenceDeps {
    * than a sleep.
    */
   readonly nowUnixSeconds?: () => number;
+  /**
+   * Per-tenant BYOK (issue #682) — the alias store plus the fleet master
+   * keyring. Absent ⇒ built per Worker `env` by `byok.ts::byokPortsFromEnv`
+   * (CONTROL_DB + FERROGATE_BYOK_MASTER_KEY), and `null` there when the
+   * deployment has not enabled BYOK.
+   *
+   * `null` explicitly turns it OFF even on a deployment that has both bindings,
+   * which is what lets a test assert the pre-#682 behaviour is untouched.
+   */
+  readonly byok?: ByokPorts | ByokPortsFactory | null;
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -902,4 +933,6 @@ export interface ResolvedInferenceDeps {
   readonly workflows: WorkflowCatalogSource;
   readonly workflowHistory: WorkflowRunHistory;
   readonly nowUnixSeconds: () => number;
+  /** `null` = BYOK is not enabled on this deployment. */
+  readonly byok: ByokPorts | null;
 }

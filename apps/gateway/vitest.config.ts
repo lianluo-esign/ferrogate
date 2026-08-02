@@ -6,6 +6,27 @@ import { defineConfig } from "vitest/config";
 const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
 
 /**
+ * THE `[ai]` STANZA AND THIS POOL (issue #673, corrected).
+ *
+ * This config used to generate a DERIVED `wrangler.vitest.toml` — the committed
+ * file minus its `[ai]` stanza — on the belief that an offline pool cannot load
+ * that stanza at all. That reading was wrong in the same way #666's was: what
+ * wrangler refuses is the explicit `remote = false` on an AI binding
+ * ("AI bindings do not support local development", thrown by `warnOrError`
+ * before anything starts), not the binding itself. With no `remote` key
+ * `wrangler.toml` loads here exactly as it loads in `wrangler dev --local` and
+ * in `wrangler deploy`, `env.AI` is a real `Ai` object, and calling `.run()` on
+ * it throws `Binding AI needs to be run remotely` rather than reaching the
+ * network — measured, wrangler 4.116, no credentials in the environment.
+ *
+ * So there is no second deploy config any more: the pool boots from the
+ * COMMITTED file, which is the property `test/wrangler-bindings.test.ts`,
+ * `test/cron-trigger.test.ts` and `test/env-var-drift.test.ts` have always
+ * wanted, and `test/inference/workers-ai.test.ts` pins the link directly (the
+ * committed `[ai]` stanza is the one that produced this pool's `env.AI`).
+ */
+
+/**
  * The REAL tenant-database migration, read from the same directory
  * `wrangler.toml`'s `migrations_dir` points `wrangler d1 migrations apply` at.
  * `test/setup-d1.ts` applies it to `env.DB` before every test file.
@@ -118,7 +139,18 @@ const TELEMETRY_COLLECTOR_STUB = {
 export default defineConfig({
   plugins: [
     cloudflareTest({
+      // The COMMITTED config — the same file `wrangler deploy` uploads and
+      // `wrangler dev --local` boots. See the `[ai]` note at the top.
       wrangler: { configPath: "./wrangler.toml" },
+      // No remote-binding proxy, and this is LOAD-BEARING now that `[ai]` is
+      // loaded here: an AI binding is classified remote-only, so flipping this
+      // to `true` makes the pool open a proxy session against the live
+      // Cloudflare API and the suite dies before collection with "it's
+      // necessary to set a CLOUDFLARE_API_TOKEN environment variable"
+      // (measured 2026-08-02). `false` keeps it hermetic — `env.AI` exists and
+      // throws `Binding AI needs to be run remotely` if a test ever calls it
+      // for real instead of installing a double.
+      remoteBindings: false,
       miniflare: {
         bindings: {
           GATEWAY_NATIVE_API_KEYS: JSON.stringify(NATIVE_API_KEYS),

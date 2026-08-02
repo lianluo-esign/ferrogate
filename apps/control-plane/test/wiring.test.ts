@@ -63,7 +63,7 @@ const HONO_ROUTES: readonly HonoRoute[] = (
 const HONO_KEYS = new Set(HONO_ROUTES.map((route) => `${route.method} ${route.path}`));
 
 /**
- * The routes `src/index.ts` mounts that are not among the 200 operations this
+ * The routes `src/index.ts` mounts that are not among the 209 operations this
  * app OWNS. They are named here so the "nothing extra is mounted" assertion
  * below is exact rather than a tolerance.
  *
@@ -107,7 +107,7 @@ function contractKey(operationId: string): string {
   return `${operation.method} ${operation.honoPath}`;
 }
 
-describe("the app src/index.ts exports has all 200 operations in its ROUTING TABLE", () => {
+describe("the app src/index.ts exports has all 209 operations in its ROUTING TABLE", () => {
   it("mounts every contract operation this app owns — naming any that fell off", () => {
     // THE gate. `HONO_KEYS` comes from Hono, not from the contract, so this is
     // a comparison between two independent things.
@@ -121,7 +121,7 @@ describe("the app src/index.ts exports has all 200 operations in its ROUTING TAB
     ).toEqual([]);
   });
 
-  it("mounts NOTHING beyond the 200 + the shared probes + /health + /version", () => {
+  it("mounts NOTHING beyond the 209 + the shared probes + /health + /version", () => {
     const expected = new Set<string>([
       ...CONTROL_PLANE_OPERATIONS.map((operation) => `${operation.method} ${operation.honoPath}`),
       ...NON_CONTRACT_ROUTES,
@@ -260,7 +260,7 @@ beforeEach(() => {
 
 describe("the DEPLOYED Worker serves every mounted operation", () => {
   it("answers no contract operation with the app's own 'no route' 404", async () => {
-    // The full 200. Every request goes through `export default` in workerd with
+    // The full 209. Every request goes through `export default` in workerd with
     // a credential that clears the guard, so anything that comes back as
     // `no route for …` is a route that is not mounted.
     const unreachable: string[] = [];
@@ -304,6 +304,20 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["admin_plugin", "listAdminPlugins", "GET", "/admin/v1/plugins", 200],
   ["admin_policy", "listAdminPolicies", "GET", "/admin/v1/policies", 200],
   ["admin_provider", "listAdminProviders", "GET", "/admin/v1/providers", 200],
+  // 403, not 200, and that IS the mounted behaviour (issue #682): a per-tenant
+  // BYOK credential belongs to a tenant, and this probe drives a PLATFORM
+  // OPERATOR key, which has no tenant scope to register or list one in.
+  // Answering 200 with someone's aliases would mean the handler had picked a
+  // tenant on the caller's behalf, which is the cross-tenant read the feature
+  // exists to prevent. `isRouterMiss` still distinguishes this from an
+  // unmounted route, so the probe keeps proving the mount.
+  [
+    "admin_provider_credential",
+    "listProviderCredentials",
+    "GET",
+    "/admin/v1/provider-credentials",
+    403,
+  ],
   ["admin_request_log", "listAdminRequestLogs", "GET", "/admin/v1/request-logs", 200],
   ["admin_tool", "listAdminTools", "GET", "/admin/v1/tools", 200],
   ["admin_virtual_key", "listVirtualKeys", "GET", "/admin/v1/virtual-keys", 200],
@@ -316,6 +330,13 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["quota_policy", "listQuotaPolicies", "GET", "/admin/v1/quota-policies", 200],
   ["rbac", "listPermissions", "GET", "/admin/v1/permissions", 200],
   ["self_hosted_worker", "listAdminSelfHostedWorkers", "GET", "/admin/v1/self-hosted-workers", 200],
+  [
+    "semantic_cache_policy",
+    "listSemanticCachePolicies",
+    "GET",
+    "/admin/v1/semantic-cache-policies",
+    200,
+  ],
   ["site_domain", "listSiteDomains", "GET", "/admin/v1/site-domains", 200],
   ["skill", "listAdminSkillPackages", "GET", "/admin/v1/skill-packages", 200],
   ["tenant_hierarchy", "listAdminTenants", "GET", "/admin/v1/tenants", 200],
@@ -324,7 +345,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 31 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 32 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });

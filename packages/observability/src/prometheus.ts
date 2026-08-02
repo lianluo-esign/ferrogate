@@ -29,6 +29,7 @@
  * A module-scope `Map` here would look like a port and silently under-report.
  */
 import type {
+  CacheTenantMetricTotal,
   GatewayMetricsSnapshot,
   UnjoinableActionMetricTotal,
 } from "./metrics.js";
@@ -532,6 +533,72 @@ export function renderUnjoinableActionsText(
     out.push(
       `ferrogate_unjoinable_actions_total{tenant="${tenant}",surface="${surface}"} ${total.requests}\n`,
     );
+  }
+  return out.join("");
+}
+
+/**
+ * #695: the PER-TENANT cache series, rendered as its own block.
+ *
+ * Kept out of {@link GatewayMetricsSnapshot} for the same reason
+ * {@link renderUnjoinableActionsText} is: the snapshot is a flat bag of
+ * scalars, and a variable-length labelled family sourced from a separate
+ * accumulator does not belong in it. Unlike that one, this block IS wired —
+ * `apps/gateway/src/routes/metrics.ts` appends it to the `/metrics` body, and
+ * `apps/gateway/test/cache/telemetry.test.ts` fails if the append is removed.
+ *
+ * Two families:
+ *
+ *  - `ferrogate_ai_cache_requests_total{tenant,status}` — the SAME metric name
+ *    and the SAME `status` label values as the deployment-wide family above, so
+ *    a dashboard can sum the per-tenant series and get the aggregate. That is
+ *    deliberate: a second metric name would let the two drift and would give an
+ *    operator two numbers with no defined relationship. A scrape therefore
+ *    carries both the unlabelled aggregate and the labelled breakdown, which
+ *    Prometheus treats as distinct series of one family — exactly what they are.
+ *  - `ferrogate_ai_cache_hit_ratio{tenant}` — a GAUGE, because a ratio is not a
+ *    counter. It is exported rather than left to the scraper because it is the
+ *    number a tenant-facing surface quotes, and computing it in one place stops
+ *    two consumers disagreeing about whether a semantic hit belongs in the
+ *    numerator (it does: it is a subset of `hit`).
+ *
+ * The `tenant` label is bounded by the PRODUCER
+ * (`apps/gateway/src/cache/metrics.ts`), not here — see the cardinality note in
+ * that file. A renderer cannot bound cardinality without dropping data it was
+ * handed, and silently dropping a series is worse than a coarse bucket.
+ */
+export function renderCacheTenantText(
+  totals: readonly CacheTenantMetricTotal[],
+): string {
+  const out: string[] = [];
+  pushHelp(
+    out,
+    "ferrogate_ai_cache_requests_total",
+    "AI response cache lookups grouped by governed tenant and cache status.",
+    "counter",
+  );
+  for (const total of totals) {
+    const tenant = escapeLabelValue(total.tenant);
+    out.push(
+      `ferrogate_ai_cache_requests_total{tenant="${tenant}",status="hit"} ${total.hits}\n`,
+    );
+    out.push(
+      `ferrogate_ai_cache_requests_total{tenant="${tenant}",status="miss"} ${total.misses}\n`,
+    );
+    out.push(
+      `ferrogate_ai_cache_requests_total{tenant="${tenant}",status="semantic_hit"} ${total.semanticHits}\n`,
+    );
+  }
+
+  pushHelp(
+    out,
+    "ferrogate_ai_cache_hit_ratio",
+    "Fraction of a tenant's cacheable AI requests served from the response cache.",
+    "gauge",
+  );
+  for (const total of totals) {
+    const tenant = escapeLabelValue(total.tenant);
+    out.push(`ferrogate_ai_cache_hit_ratio{tenant="${tenant}"} ${total.hitRatio}\n`);
   }
   return out.join("");
 }
