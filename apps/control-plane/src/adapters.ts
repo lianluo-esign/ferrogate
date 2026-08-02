@@ -4,7 +4,7 @@
  * The STORE is now the real one: {@link resolveStore} builds
  * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
  * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
- * it — the 197 handlers still talk only to `ControlPlaneStore`, which is what
+ * it — the 200 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
  * CREDENTIALS, RBAC and the TENANCY LIFECYCLE GATE are now durable too, on the
@@ -734,6 +734,18 @@ export function resolveControlDatabase(env: ControlPlaneBindings): D1Database | 
   return env.DB ?? null;
 }
 
+/**
+ * The prompt-label KV namespace, or `null` when this deployment binds none.
+ *
+ * No fallback, and deliberately no in-memory stand-in: the pointer's ONLY
+ * consumer is a different Worker, so an isolate-local map would make every
+ * label look like it moved while `apps/gateway` saw nothing. `null` reaches
+ * `routes/prompt.ts`, which refuses with a 503 that names the missing binding.
+ */
+export function resolvePromptLabels(env: ControlPlaneBindings): KVNamespace | null {
+  return env.PROMPT_LABELS ?? null;
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -748,6 +760,7 @@ export function resolveDeps(
     store,
     tenantDatabases: resolveTenantDatabases(env),
     controlDatabase: resolveControlDatabase(env),
+    promptLabels: resolvePromptLabels(env),
     runtime: new StoreRuntimeStatus(store),
     txtResolver: resolveTxtResolver(env),
     // Absent or blank ⇒ NO admin-console origin ⇒ the preflight surface does
