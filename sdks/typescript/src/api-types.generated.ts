@@ -18392,6 +18392,8 @@ export interface operations {
             query?: {
                 /** @description Platform/architecture variant. Required when resolution is otherwise ambiguous. */
                 platform?: string;
+                /** @description Serve ONE file out of an expanded static_site bundle version (issue #736), e.g. `assets/app.css`. Bundle-relative; absolute paths and `..` segments are refused with 400 `asset_bundle_path_invalid`, and a path the bundle does not contain answers 404 `asset_bundle_file_not_found`. This does NOT change how the version is resolved: the `version` path segment is still resolved through channels, semver ranges and yank exactly as it is without it, and only the bytes served differ. Omit it to download the version's archive itself. */
+                path?: string;
             };
             header?: {
                 /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
