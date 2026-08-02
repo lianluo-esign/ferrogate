@@ -42,6 +42,7 @@ import {
 } from "./requestlog/index.js";
 import type { RequestLogMessageBatch } from "./requestlog/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
+import { siteRouteModule } from "./sites/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
 import { tenantDatabase } from "./tenancy/index.js";
 
@@ -162,6 +163,13 @@ const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
   inferenceRouteModule({ models: modelsFromEnv, dispatcher: dispatcherFromEnv, usage }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
+  // The static-site serve mode (issue #737), wired to the SAME `env.ASSETS`
+  // bucket and the same tenant D1 bundle index the asset module is: it serves
+  // published `static_site` bundles through `AssetService.pullAsset`, so a site
+  // read and an asset read cannot resolve differently. With no bucket bound it
+  // degrades exactly as the asset module does — `503 asset_bucket_unavailable`
+  // — rather than serving nothing quietly.
+  siteRouteModule({ depsFromEnv: assetDepsFromEnv }),
 ];
 
 /**

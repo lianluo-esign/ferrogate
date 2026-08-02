@@ -136,11 +136,27 @@ export const TOOLING_OPERATION_IDS = [
   "getAgentDiscovery",
 ] as const;
 
-/** All 34 operations `apps/gateway` owns per ROUTE-MAP.md. */
+/**
+ * The `site` route group — `GET /sites/{*rest}` (issue #737).
+ *
+ * Its own list rather than a 19th entry in {@link ASSET_OPERATION_IDS}, because
+ * the contract puts it in a different route GROUP (`site`, not `asset`) and
+ * because its guard is different in kind: every asset operation is
+ * bearer-guarded by the contract middleware, while this one is `anonymous`
+ * there and runs the bearer ladder inside its handler, per site. Folding it
+ * into the asset list would have hidden that distinction inside a count.
+ *
+ * Mounted by `src/sites/index.ts`, which serves it out of the same
+ * `AssetService` the asset operations use.
+ */
+export const SITE_OPERATION_IDS = ["serveSite"] as const;
+
+/** All 35 operations `apps/gateway` owns per ROUTE-MAP.md. */
 export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
   ...ASSET_OPERATION_IDS,
+  ...SITE_OPERATION_IDS,
 ];
 
 /**

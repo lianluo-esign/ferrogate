@@ -362,6 +362,16 @@ export interface AssetPullInput {
   readonly headers: Headers;
   /** `HEAD` suppresses the body but keeps every header. */
   readonly method?: string | undefined;
+  /**
+   * `cache-control` for THIS response (issue #737).
+   *
+   * Absent ⇒ {@link DEFAULT_ASSET_CACHE_CONTROL}, which is what
+   * `GET /v1/assets/**` has always sent and still sends. The site serve mode
+   * supplies its own, because cacheability there is a property of the file and
+   * of how the reader was authenticated, not of the surface: see
+   * `src/sites/policy.ts`.
+   */
+  readonly cacheControl?: string | undefined;
 }
 
 export interface WithheldListInput {
@@ -1089,15 +1099,28 @@ export class AssetService {
   // getAsset — the pull
   // -------------------------------------------------------------------------
 
-  async pullAsset(
+  /**
+   * Resolve `{asset_type}/{name}/{reference}` (+ platform) to ONE stored row —
+   * the step every read surface shares.
+   *
+   * Extracted verbatim from {@link pullAsset} for issue #737, and extracted
+   * rather than copied for the reason #736 wrote into the bundle index's own
+   * schema note: a second resolution path is how a yanked site stays servable.
+   * `/sites/*` must probe a bundle's index (does this directory have an
+   * `index.html`?) before it knows which file to serve, and the only way that
+   * probe can be guaranteed to see the same version a pull would is for both to
+   * enter through here. Everything a resolution decides — the withholding of
+   * `pending_scan`/`quarantined` rows, channel and semver-range precedence, the
+   * yank rules, variant selection, the response headers that describe them —
+   * happens once, in one place.
+   */
+  async #resolveArtifact(
     caller: AssetCaller,
     ref: AssetName & { readonly reference: string },
-    input: AssetPullInput,
-    context: AssetRequestContext = { requestId: "" },
-  ): Promise<AssetPullResult> {
-    const denied = this.#requireTenant(caller);
-    if (denied) return denied;
-
+    requestedPlatform: string | undefined,
+  ): Promise<
+    AssetResult<{ selected: StoredAsset; version: string; headers: Record<string, string> }>
+  > {
     const all = await this.#assetVersions(caller.tenantId, ref);
     // #366: withhold pending/quarantined rows from RESOLUTION entirely, so an
     // unproven asset is absent from exact/channel/range resolution and can
@@ -1118,8 +1141,6 @@ export class AssetService {
       );
     }
 
-    const requestedPlatform =
-      input.platform ?? input.headers.get("x-ferrogate-platform") ?? undefined;
     const versionRows = assets.filter((asset) => asset.version === resolved.version);
     const choice = selectVariant(versionRows, requestedPlatform);
     if (choice.kind === "not_found") {
@@ -1138,20 +1159,76 @@ export class AssetService {
     }
     const selected = choice.asset;
 
-    const extra: Record<string, string> = {
+    const headers: Record<string, string> = {
       "x-ferrogate-asset-resolved": resolutionHeaderValue(resolved.how, resolved.version),
       "x-ferrogate-asset-version": resolved.version,
     };
     if (selected.variant !== "") {
-      extra["x-ferrogate-asset-variant"] = selected.variant;
+      headers["x-ferrogate-asset-variant"] = selected.variant;
     }
     if (resolved.yanked) {
       // An EXACT pull of a yanked version still succeeds — existing pins keep
       // working — but it says so, loudly and machine-readably.
-      extra["warning"] =
+      headers["warning"] =
         `299 ferrogate "asset ${ref.assetType}/${ref.name}/${resolved.version} is yanked"`;
-      extra["x-ferrogate-asset-yanked"] = "true";
+      headers["x-ferrogate-asset-yanked"] = "true";
     }
+    return { ok: true, status: 200, body: { selected, version: resolved.version, headers } };
+  }
+
+  /**
+   * Which of `candidates` exists inside the bundle version `ref` resolves to —
+   * the FIRST one, or `null` when none does (issue #737).
+   *
+   * This is what makes `/sites/*` able to decide between serving a file,
+   * redirecting to a directory's canonical URL, falling back to a site's own
+   * `404.html` and refusing, WITHOUT reading or billing a single byte:
+   * {@link pullAsset} charges the resolved object's whole size to the egress
+   * budget before it reads anything, so probing with it would bill a tenant for
+   * bytes nobody was ever sent.
+   *
+   * It is not a second resolution path. It calls {@link #resolveArtifact} — the
+   * same code `pullAsset` enters through — and then does one index lookup per
+   * candidate, which is exactly the last step `#projectBundleFile` performs.
+   * A withheld, quarantined or yanked-out-of-channel version is therefore
+   * unresolvable here for the same reason and at the same line as it is there.
+   */
+  async siteFileProbe(
+    caller: AssetCaller,
+    ref: AssetName & { readonly reference: string },
+    candidates: readonly string[],
+  ): Promise<AssetResult<{ readonly version: string; readonly path: string | null }>> {
+    const denied = this.#requireTenant(caller);
+    if (denied) return denied;
+    const resolved = await this.#resolveArtifact(caller, ref, undefined);
+    if (!resolved.ok) return resolved;
+    const { selected } = resolved.body;
+    for (const candidate of candidates) {
+      if (bundlePathRejection(candidate) !== undefined) continue;
+      const file = await this.#bundles.getBundleFile(selected.id, normalizeBundlePath(candidate));
+      if (file !== null) {
+        return { ok: true, status: 200, body: { version: selected.version, path: candidate } };
+      }
+    }
+    return { ok: true, status: 200, body: { version: selected.version, path: null } };
+  }
+
+  async pullAsset(
+    caller: AssetCaller,
+    ref: AssetName & { readonly reference: string },
+    input: AssetPullInput,
+    context: AssetRequestContext = { requestId: "" },
+  ): Promise<AssetPullResult> {
+    const denied = this.#requireTenant(caller);
+    if (denied) return denied;
+
+    const requestedPlatform =
+      input.platform ?? input.headers.get("x-ferrogate-platform") ?? undefined;
+    const resolution = await this.#resolveArtifact(caller, ref, requestedPlatform);
+    if (!resolution.ok) return resolution;
+    const { selected, version } = resolution.body;
+
+    const extra: Record<string, string> = { ...resolution.body.headers };
 
     // #736: `?path=` narrows the already-resolved artifact to ONE file of an
     // expanded bundle. `served` is that file projected onto the version row, so
@@ -1188,7 +1265,15 @@ export class AssetService {
       ...extra,
       etag,
       "last-modified": formatHttpDate(selected.updated_at_unix),
-      "cache-control": DEFAULT_ASSET_CACHE_CONTROL,
+      // PER-RESPONSE since #737. It was one hard-coded constant for every byte
+      // this method has ever served, which is right for an artifact pulled by
+      // identity by a credential and wrong for a static site: a fingerprinted
+      // `app.4f3a9c21.js` is immutable for a year, an HTML document behind a
+      // mutable channel pointer must revalidate every time, and the two cannot
+      // share one value. The caller supplies the policy because the caller is
+      // the one that knows which URL shape produced the request; the DEFAULT is
+      // unchanged, so every existing pull answers exactly what it did before.
+      "cache-control": input.cacheControl ?? DEFAULT_ASSET_CACHE_CONTROL,
     };
     const isHead = (input.method ?? "GET").toUpperCase() === "HEAD";
     const outcome = evaluateConditionalRequest(
@@ -1222,7 +1307,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version: resolved.version },
+          { assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -1242,7 +1327,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version: resolved.version },
+          { assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {

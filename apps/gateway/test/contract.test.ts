@@ -31,6 +31,7 @@ import { hasScope } from "../src/ports.js";
 import {
   ASSET_OPERATION_IDS,
   GATEWAY_OWNED_OPERATION_IDS,
+  SITE_OPERATION_IDS,
   INFERENCE_OPERATION_IDS,
   OBSERVABILITY_OPERATION_IDS,
   PENDING_MODULE_OPERATION_IDS,
@@ -45,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 268 operations", () => {
+  it("carries exactly 269 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 268 unique operation ids", () => {
+  it("has 269 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -74,10 +75,15 @@ describe("contract table", () => {
     // parallel and each parent wrote its own increment, which is the collision
     // this file's header warns about. `Counter(o["auth"]["kind"] for o in
     // operations)` over the merged JSON is what produced it.
+    //
+    // `anonymous` moves 6 -> 7 with `serveSite` (issue #737) — the FIRST
+    // addition since the cutover that is not bearer, and a deliberate one. See
+    // the "may skip auth" case below for why the site serve route cannot be
+    // declared `bearer` and what enforces its credential instead.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
       bearer: 255,
       internal: 6,
-      anonymous: 6,
+      anonymous: 7,
       method_dependent: 1,
     });
   });
@@ -98,8 +104,11 @@ describe("contract table", () => {
       // `getModel` (issue #670), public for the same reason as `listModels`.
       // Both parents independently wrote 52, so git merged that clean — 53 was
       // the merged truth, and `createRerank` (issue #676) takes it to 54: a
-      // data-plane operation, publicly reachable, bearer-guarded.
-      public: 54,
+      // data-plane operation, publicly reachable, bearer-guarded. `serveSite`
+      // (issue #737) takes it to 55 — publicly reachable in the strongest
+      // sense of the word, since an opted-in site may be read with no
+      // credential at all.
+      public: 55,
       internal: 7,
     });
   });
@@ -121,8 +130,11 @@ describe("contract table", () => {
       // adds two more GETs (`/admin/v1/cost-records` and
       // `/admin/v1/cost-record-exports`) for 123, and #676 one more POST
       // (`/v1/rerank`) for 82. Both landed in parallel, so both figures were
-      // re-counted off the merged document rather than added up.
-      GET: 123,
+      // re-counted off the merged document rather than added up. #737's
+      // `GET /sites/{*rest}` then takes GET to 124 — the contract's first
+      // operation whose path is a CATCH-ALL, because a static site is a tree of
+      // unknown depth and a fixed segment count cannot address it.
+      GET: 124,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
       POST: 82,
@@ -132,8 +144,32 @@ describe("contract table", () => {
     });
   });
 
-  it("names exactly the 6 operations that may skip auth", () => {
+  it("names exactly the 7 operations that may skip auth", () => {
     // ROUTE-MAP invariant 3 — nothing else may be unauthenticated.
+    //
+    // ## `serveSite` is the SEVENTH, and it is a decision (issue #737)
+    //
+    // It was 6 for the whole port. `serveSite` is added here deliberately, and
+    // this comment is the record of why, because "an operation moved into the
+    // anonymous set" is otherwise indistinguishable from an auth hole.
+    //
+    // A site's credential requirement is DATA, not a property of the route: a
+    // site is PRIVATE by default (bearer + `assets.read`, tenant-scoped), and
+    // anonymous serving is a per-site, per-channel operator opt-in. `auth.kind`
+    // has exactly four values and none of them can say that. Declaring
+    // `bearer` would make the opt-in unreachable — the middleware would 401
+    // every anonymous reader before a handler ran — so the only expressible
+    // choice is `anonymous` at the contract layer with the ladder in the
+    // handler.
+    //
+    // What keeps that from being a bypass is that the handler does NOT
+    // re-implement the ladder: `src/sites/index.ts` calls
+    // `authenticateBearer` — the exact function `contractAuth` itself calls —
+    // so key resolution, scope, tenancy-lifecycle admission and RBAC are the
+    // same code, not a copy that can drift. `test/sites/serve.test.ts` proves
+    // the refusals on the wire (no credential, wrong scope, other tenant), and
+    // `test/sites/access.test.ts` proves the opt-in is the ONLY thing that
+    // opens a site to an anonymous reader.
     const anonymous = OPERATIONS.filter((operation) => operation.auth.kind === "anonymous").map(
       (operation) => operation.operationId,
     );
@@ -145,6 +181,7 @@ describe("contract table", () => {
         "getAdminDashboardSlash",
         "getAdminDashboardAlias",
         "completeMcpIdentityOauth",
+        "serveSite",
       ]),
     );
   });
@@ -307,12 +344,16 @@ describe("route registration", () => {
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 34 operations ROUTE-MAP assigns to apps/gateway", () => {
+  it("owns exactly the 35 operations ROUTE-MAP assigns to apps/gateway", () => {
     // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
     // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
     // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
     // number here is re-derived by COUNTING the list, never incremented.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(34);
+    //
+    // 34 -> 35 with `serveSite` (issue #737), the `site` route group's first
+    // operation — counted off `GATEWAY_OWNED_OPERATION_IDS` after the merge,
+    // which is now four lists rather than three.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(35);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -326,14 +367,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 34 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 35 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 34 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 35 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 35th owned
@@ -366,7 +407,7 @@ describe("route registration", () => {
     // The modules are the ones the composition root uses, not a copy.
     const fromModules = GATEWAY_ROUTE_MODULES.flatMap((module) => module.operationIds);
     expect(new Set(fromModules)).toEqual(
-      new Set([...INFERENCE_OPERATION_IDS, ...ASSET_OPERATION_IDS]),
+      new Set([...INFERENCE_OPERATION_IDS, ...ASSET_OPERATION_IDS, ...SITE_OPERATION_IDS]),
     );
     // Every id a module claims is actually registered by that module.
     for (const operationId of fromModules) {

@@ -419,10 +419,15 @@ describe("the env-var drift gate itself", () => {
     // #681 committed TWO: `GATEWAY_RESIDENCY_POLICIES` ("[]"), the
     // no-control-database fallback for the residency policy, and
     // `GATEWAY_LOG_REGION` (""), the operator's assertion about where this
-    // deployment's durable request log physically lives. 57 -> 59, re-derived
-    // by running this gate against the merged `wrangler.toml` and
-    // cross-checked with the same grep (⇒ 59).
-    expect(DECLARED.vars.size).toBe(59);
+    // deployment's durable request log physically lives. 57 -> 59.
+    //
+    // #737 committed `GATEWAY_SITES` ("{}"), the slug -> tenant binding table
+    // the `/sites/*` serve mode reads. #681 and #737 were in flight at the same
+    // time and each wrote its own increment against 57, which is exactly the
+    // collision this comment block keeps warning about: the merged figure is
+    // neither parent's. Re-derived with the same grep against the MERGED file
+    // (⇒ 60), not by adding the two increments together.
+    expect(DECLARED.vars.size).toBe(60);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -653,8 +658,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
     expect(rows.length).toBe(DECLARED.vars.size);
     // #678: 56 -> 57 (`GATEWAY_ATTRIBUTION_POLICIES`). Same re-derivation as
     // the `DECLARED.vars.size` pin above.
-    // #681: 57 -> 59 (`GATEWAY_RESIDENCY_POLICIES`, `GATEWAY_LOG_REGION`).
-    expect(rows.length).toBe(59);
+    // #681: 57 -> 59 (`GATEWAY_RESIDENCY_POLICIES`, `GATEWAY_LOG_REGION`);
+    // #737: + `GATEWAY_SITES`. Counted off the merged file, not summed.
+    expect(rows.length).toBe(60);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -717,8 +723,15 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // says `log_residency = "in_region"`, so with no such tenant the blank
     // constrains nothing. `test/residency/enforcement.test.ts` supplies both on
     // the env it drives, so the committed blanks cannot shadow them.
+    //
+    // #737: + `GATEWAY_SITES` ("{}"), observable and INERT for the same reason
+    // — an empty binding table means every site is private and none is
+    // anonymously readable, which is the posture the suite needs. A committed
+    // binding would publish a site `test/sites/*` never asked for and could
+    // make an anonymous read pass for a reason no test stated; those suites
+    // pass their own bindings to `siteRouteModule` in their own isolate.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(54);
+    expect(observable.length).toBe(55);
     expect(rows.length - observable.length).toBe(5);
   });
 });
