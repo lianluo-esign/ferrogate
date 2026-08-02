@@ -30,6 +30,15 @@ import {
   routePriceSettledCostUsd,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
+import {
+  consumeRequestLogBatch,
+  createRequestLogSink,
+  requestLogBindingsFromEnv,
+  requestLogDatabaseFrom,
+  requestLogging,
+  sweepRequestLogs,
+} from "./requestlog/index.js";
+import type { RequestLogMessageBatch } from "./requestlog/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
 import { tenantDatabase } from "./tenancy/index.js";
@@ -91,6 +100,20 @@ const usage = createMeteringUsageSink({
     },
   },
 });
+
+/**
+ * The durable request-log sink (#664) — one evidence row per decision.
+ *
+ * Module scope, and a binding RESOLVER rather than bindings, for the same
+ * reason `usage` above is: the middleware is built once and Worker bindings are
+ * per request, and workerd refuses I/O started on behalf of a different
+ * request, so a captured `env` is a correctness bug that only shows up under
+ * concurrency. `requestLogBindingsFromEnv` reads `env.REQUEST_LOG` (the Queue
+ * producer) and `env.CONTROL_DB` (the CONTROL database that owns
+ * `request_logs` — NOT the tenant `DB`, whose migration has no such table) off
+ * whichever request is being served.
+ */
+const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
@@ -233,6 +256,20 @@ export const GATEWAY_MIDDLEWARE = [
   // Inert until `TELEMETRY_TOKEN` is set (a secret, never a committed var):
   // `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a no-op.
   requestTelemetry(),
+  // #664 — the per-decision evidence row, on `ctx.waitUntil`.
+  //
+  // THIRD, and specifically AHEAD of `rateLimit()` and `guardrails()`: it
+  // wraps `await next()`, so everything below it is inside its window and the
+  // responses those two SHORT-CIRCUIT with (429 `rate_limited`, 403
+  // `guardrail_*`) are recorded. Mounting it below either would delete from the
+  // trail exactly the refusals an incident review and an audit are looking for
+  // — an evidence surface that only records the requests that succeeded is the
+  // same lie, one layer down, as the one this issue closes.
+  //
+  // Behind `meteringDrain` and `requestTelemetry` because money outranks
+  // evidence for outermost position and nothing is lost by sitting two layers
+  // in: both return the same `Response` object they received.
+  requestLogging(requestLogs),
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),
@@ -315,6 +352,44 @@ export async function gatewayScheduled(
   ctx: { waitUntil(work: Promise<unknown>): void },
 ): Promise<void> {
   await usage.sweep({ env, ctx });
+  await gatewayRequestLogRetention(env);
+}
+
+/**
+ * The request-log retention sweep (#664), on the same Cron tick.
+ *
+ * `@ferrogate/storage`'s `retention.ts` has said for two waves that its
+ * planners are ported and tested and that *nothing ever CALLED a planner*, so
+ * `request_logs` grows without bound in a deployed environment — a library
+ * package has no entry module and therefore no `[triggers] crons` to hang a
+ * schedule on. This is that call site.
+ *
+ * Never throws: `sweepRequestLogs` swallows its own failures, and a retention
+ * outage must not take the billing-outbox sweep down with it. With neither
+ * `REQUEST_LOG_RETENTION_DAYS` nor `REQUEST_LOG_RETENTION_POLICIES` set it
+ * resolves zero scopes and touches nothing, because keeping evidence is the
+ * only safe default.
+ */
+async function gatewayRequestLogRetention(env: unknown): Promise<void> {
+  const db = requestLogDatabaseFrom(env);
+  if (db === undefined) return;
+  await sweepRequestLogs(db, env, Math.floor(Date.now() / 1000));
+}
+
+/**
+ * The `[[queues.consumers]]` handler — request-log messages become D1 rows.
+ *
+ * Exposed here and re-exported through `src/worker.ts` for the same reason
+ * `gatewayScheduled` is: workerd only dispatches a queue event to a handler
+ * found on the ENTRY module's DEFAULT export, so a named export alone would be
+ * silently accepted as a service entrypoint and the queue would fill and
+ * dead-letter with nothing consuming it.
+ */
+export async function gatewayQueue(
+  batch: RequestLogMessageBatch,
+  env: unknown,
+): Promise<void> {
+  await consumeRequestLogBatch(batch, env);
 }
 
 export { createGatewayApp, GatewayRouter } from "./routes/index.js";

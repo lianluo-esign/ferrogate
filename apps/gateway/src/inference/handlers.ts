@@ -73,8 +73,8 @@ import {
   genAiOperationForRouteLabel,
   observeGenAiInvocation,
 } from "../telemetry/genai.js";
-import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
-import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
+import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -139,7 +139,13 @@ export interface InferenceEnv {
      */
     inferenceTokens: TokenGovernor;
     /**
-     * The INBOUND `Request` object, captured before {@link readInferenceBody}
+     * #664 — where this app reports the facts a REQUEST LOG needs, bound to the
+     * OUTER request (see `./identity.ts`). Inert when the inner router is
+     * driven directly, exactly like {@link inferenceTokens}.
+     */
+    inferenceLog: (facts: InferenceLogFacts) => void;
+
+    /**
      * replaces `c.req.raw`.
      *
      * #669. The GenAI observation seam (`src/telemetry/genai.ts`) is a
@@ -976,8 +982,29 @@ function observeInvocation(
     responseModel: base.providerModel,
   });
 }
-
-/** Record a metering event; never allowed to fail the response. */
+/**
+ * Record a metering event AND the request log's share of the same facts; never
+ * allowed to fail the response.
+ *
+ * ## Why the request-log contribution belongs exactly here
+ *
+ * This is the single chokepoint every dispatched request passes through, on
+ * every ending it can have: the buffered success path, the upstream-ERROR path
+ * (which calls it with no usage — a 502 is still a decision, and an audit trail
+ * that omitted provider failures would omit the interesting half), and the SSE
+ * tap's `flush()`/`cancel()`. It is also the only place that holds `base`,
+ * which already carries the route label, the provider, BOTH model names and
+ * the dispatch attempt index — i.e. everything about this request that only
+ * this app knows.
+ *
+ * The alternative — assembling the same facts in the outer middleware — cannot
+ * work: `inner.fetch` opens a fresh context, so none of this is visible there.
+ * See `./identity.ts::InferenceRequestScope.log`.
+ *
+ * The two sinks are reported to independently and both are wrapped, because a
+ * metering failure must not cost the evidence row and an evidence failure must
+ * certainly not cost the charge.
+ */
 function recordUsage(
   c: InferenceContext,
   deps: ResolvedInferenceDeps,
@@ -1009,6 +1036,21 @@ function recordUsage(
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
     // to the caller. Same contract here.
+  }
+  try {
+    c.get("inferenceLog")({
+      route: base.route,
+      provider: base.provider,
+      logicalModel: base.logicalModel,
+      providerModel: base.providerModel,
+      streamed: base.stream,
+      providerAttemptIndex: base.providerAttemptIndex,
+      promptTokens: usage?.promptTokens,
+      completionTokens: usage?.completionTokens,
+      totalTokens: usage?.totalTokens,
+    });
+  } catch {
+    // Same contract: evidence is best-effort at the seam, never a 500.
   }
 }
 
@@ -1115,6 +1157,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // not be re-described by a default that grants platform-operator scope.
     c.set("inferenceCaller", scope?.caller ?? resolved.caller(c.req.raw));
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
+    c.set("inferenceLog", scope?.log ?? noInferenceLog);
     await next();
   });
 

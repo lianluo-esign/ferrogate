@@ -1120,6 +1120,25 @@ describe("§4 fleet-wide ratchets", () => {
       "audit_events",
       "billing_report_outbox",
       "usage_monthly_rollups",
+      // #664 — the per-decision evidence trail. Newly SHARED (written by
+      // `apps/gateway/src/requestlog/`, read by
+      // `apps/control-plane/src/routes/admin_request_log.ts`), and classified
+      // here for the same reason `audit_events` immediately above is: it
+      // records what the system DID, and nothing consults it before deciding
+      // anything. Answering this ratchet's question explicitly — "does a change
+      // to it apply to both Workers?" — yes, and it is enforced by the schema
+      // rather than by a registry entry: both Workers name the columns of
+      // `sql/d1-ts/control/0003_request_log_columns.sql`, both suites apply the
+      // deployed migration rather than a fixture, and a column rename breaks
+      // `apps/gateway/test/requestlog/write.test.ts` and
+      // `apps/control-plane/test/request-logs-read.test.ts` together.
+      //
+      // The one thing on this table that IS a fence — the tenant filter on the
+      // admin read — is not shared: only the control plane serves it, and
+      // `request-logs-read.test.ts` proves it from both tenants' sides plus the
+      // JSONL export. If a second Worker ever grows a `request_logs` READ, that
+      // fence becomes a fleet property and this entry must move into CONTROLS.
+      "request_logs",
       // Money the admission ladder reads; the CONTROL is the ladder, which is
       // registered as `admission`.
       "wallets",
