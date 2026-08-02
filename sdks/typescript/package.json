@@ -1,0 +1,22 @@
+{
+  "name": "@ferrogate/admin-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin typed TypeScript client for the FerroGate Control Plane API, generated from docs/openapi/admin-api.openapi.json.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "generate": "openapi-typescript ../../docs/openapi/admin-api.openapi.json -o src/api-types.generated.ts && bun scripts/stamp-generated-header.ts"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0"
+  }
+}

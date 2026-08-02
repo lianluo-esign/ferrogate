@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"],
+    // The official SDKs are published for a DOM-ish lib set (they reference
+    // `AbortSignal`, `ReadableStream`, `FormData`, `File`). `@cloudflare/workers-types`
+    // supplies all of those, but the SDK `.d.ts` files also mention `Response`
+    // from the standard DOM lib in a few places, so `skipLibCheck` (inherited
+    // from the base config) is what keeps this workspace typechecking against
+    // vendor declarations we do not own.
+    "lib": ["ES2022"]
+  },
+  "include": ["test", "vitest.config.ts"]
+}
