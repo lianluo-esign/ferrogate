@@ -108,6 +108,84 @@ async function refusalOf(port: { admit: (r: never) => Promise<unknown> }): Promi
   throw new Error("admission ADMITTED the request; expected a refusal");
 }
 
+describe("#679 a nested budget binds at EVERY level, not only the tightest number", () => {
+  /** A source with a budget at more than one rung of the chain. */
+  function nestedBudgets(): QuotaPolicySource {
+    const rung = (scopeType: string, scopeId: string, monthlyBudgetUsd: number) => ({
+      id: `${scopeType}:${scopeId}`,
+      scopeType,
+      scopeId,
+      modelAllowlist: [],
+      alertThresholdPcts: [],
+      enabled: true,
+      createdAtUnix: 0,
+      updatedAtUnix: 0,
+      monthlyBudgetUsd,
+    });
+    return {
+      async policiesFor() {
+        return {
+          ok: true as const,
+          lookup: (kind: string) =>
+            // biome-ignore lint/suspicious/noExplicitAny: narrow test double
+            (kind === "project"
+              ? rung("project", "proj-unit", 5_000)
+              : kind === "key"
+                ? rung("key", "key-unit", 100)
+                : undefined) as any,
+        };
+      },
+    };
+  }
+
+  it("refuses when the PROJECT is at its cap and this key is not", async () => {
+    // The chain mins to $100 at the key scope, whose rollup is empty. Enforcing
+    // only that winner admits a request against a project that has already
+    // spent its entire $5,000 — its sibling keys got there first.
+    const port = admissionPort({
+      env: NO_BINDINGS,
+      quotas: nestedBudgets(),
+      spend: {
+        async committedSpendUsd(scopeKind: string) {
+          return { ok: true, committedSpendUsd: scopeKind === "project" ? 5_000 : 0 };
+        },
+        async walletBalanceCredits() {
+          return { ok: true, availableCredits: null };
+        },
+      },
+      wallet: OPEN_WALLET,
+      counter: OPEN_COUNTER,
+    });
+    const error = await refusalOf(port);
+    expect(error.status).toBe(429);
+    expect(error.code).toBe("monthly_budget_exceeded");
+  });
+
+  it("admits when every rung of the ladder is under its own cap", async () => {
+    // The negative control: same policies, same shapes, only the spend differs.
+    const port = admissionPort({
+      env: NO_BINDINGS,
+      quotas: nestedBudgets(),
+      spend: {
+        async committedSpendUsd(scopeKind: string) {
+          return { ok: true, committedSpendUsd: scopeKind === "project" ? 4_000 : 10 };
+        },
+        async walletBalanceCredits() {
+          return { ok: true, availableCredits: null };
+        },
+      },
+      wallet: OPEN_WALLET,
+      counter: OPEN_COUNTER,
+    });
+    await expect(
+      (port as { admit: (r: never) => Promise<unknown> }).admit({
+        auth: AUTH,
+        requestId: "req-1",
+      } as never),
+    ).resolves.toBeDefined();
+  });
+});
+
 describe("every lookup failure is a 503, never a 429 and never an admission", () => {
   it("a quota-policy lookup failure → 503 quota_resolution_unavailable", async () => {
     const port = admissionPort({
