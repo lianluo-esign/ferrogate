@@ -531,7 +531,6 @@ describe("FC-2 one suspension reaches every Worker that spends on the credential
       ).toContain(app);
     }
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -779,19 +778,43 @@ describe("FC-6 single-Worker controls, pinned so they stay single-Worker or get 
 });
 
 // ---------------------------------------------------------------------------
-// FC-7 — a control that is PARSED everywhere and enforced in two places
+// FC-7 — a control that was PARSED everywhere and enforced in two places
 // ---------------------------------------------------------------------------
 
-describe("FC-7 rbac_action is carried by four Workers and consulted by two", () => {
+describe("FC-7 rbac_action is carried AND consulted by all four credential Workers", () => {
   /**
-   * `apps/mcp` and `apps/agent-runtime` both parse `rbac_action` off the shared
-   * contract table into their `ApiOperation` and never read it again. That is
-   * harmless TODAY and only today: every operation in
-   * `docs/openapi/runtime-api-contract.json` carrying an `rbac_action` is an
-   * `/admin/v1/guardrail-*` or `/admin/v1/investigations` path, which those two
-   * Workers do not serve. The day one lands on a data-plane path it is silently
-   * unenforced on two of five Workers — the same shape as both shipped
-   * defects, pre-armed. This turns that day RED.
+   * ## What FC-7 was
+   *
+   * `apps/mcp` and `apps/agent-runtime` both parsed `rbac_action` off the
+   * shared contract table into their `ApiOperation` and never read it again.
+   * Only `apps/gateway` and `apps/control-plane` called an authorizer, so a
+   * role an operator used to withhold an action was enforced on two of the four
+   * credential Workers and silently ignored on the other two.
+   *
+   * It was harmless on the day it was found and only on that day: every
+   * operation in `docs/openapi/runtime-api-contract.json` carrying an
+   * `rbac_action` is an `/admin/v1/guardrail-*` or `/admin/v1/investigations`
+   * path, which those two Workers do not serve. The day one landed on a
+   * data-plane path it would have been unenforced on two of five Workers, with
+   * every per-Worker suite green — both shipped defects' shape, pre-armed.
+   *
+   * ## What it is now — CLOSED (issue #668)
+   *
+   * All four credential Workers consult an authorizer over the SAME durable
+   * `permissions` / `roles` / `tenant_role_bindings` graph
+   * (`apps/mcp/src/rbac.ts`, `apps/agent-runtime/src/rbac.ts`, mounted in each
+   * Worker's composition root and called from its auth chokepoint). The
+   * assertion that RECORDED the divergence is inverted below — the ratchet in
+   * §5 doing what it is for: a closed divergence has to go RED and force this
+   * block, `FLEET-CONSISTENCY.md` and the code to move in one commit.
+   *
+   * The MECHANICAL half is `./fleet-control-matrix.test.ts` §3 control
+   * `rbac-action`, which names no Worker: it computes the credential role set
+   * and requires every member to enforce the control off the same
+   * source-of-truth class, so a sixth credential Worker is held to it without
+   * an edit. The DECISION half — that the four agree on the answer, not merely
+   * that they all ask — is `./fleet-rbac-action.test.ts`, which drives one
+   * seeded control database through every Worker's own authorizer.
    */
   const operations = (contractDocument as { operations: readonly Record<string, unknown>[] })
     .operations;
@@ -800,32 +823,44 @@ describe("FC-7 rbac_action is carried by four Workers and consulted by two", () 
     expect(operations.length).toBeGreaterThan(200);
   });
 
-  it("only gateway and control-plane consult an authorizer", () => {
-    expect(appsMatching(PROBE.consultsRbacAuthorizer)).toEqual(["gateway", "control-plane"]);
+  it("CLOSED: every credential Worker consults an authorizer", () => {
+    // Was `["gateway", "control-plane"]` — the recorded divergence. The two
+    // Workers added here are the fix; `telemetry` is correctly absent, because
+    // it authenticates one operator-issued collector token and owns no tenant
+    // state for a role to restrict.
+    expect(appsMatching(PROBE.consultsRbacAuthorizer)).toEqual([...CREDENTIAL_WORKERS]);
   });
 
-  it("four Workers parse the field", () => {
-    expect(appsMatching(PROBE.parsesRbacAction)).toEqual([
-      "gateway",
-      "control-plane",
-      "mcp",
-      "agent-runtime",
-    ]);
+  it("the Workers that PARSE the field are exactly the Workers that consult it", () => {
+    // The sharp statement of FC-7, and the one that stays useful now that it is
+    // closed: parsing without consulting is the divergence, and any future
+    // Worker that adds the contract parser without the authorizer re-opens it.
+    expect(appsMatching(PROBE.parsesRbacAction)).toEqual(
+      appsMatching(PROBE.consultsRbacAuthorizer),
+    );
   });
 
-  it("every rbac-guarded operation is on an admin path the two enforcers serve", () => {
+  it("an rbac_action on a data-plane path is no longer a silent bypass", () => {
+    // The ORIGINAL assertion said every rbac-guarded operation must be on an
+    // `/admin/v1/` path, because the two data-plane Workers could not enforce
+    // one. That is no longer the property to hold — the whole point of the fix
+    // is that such an operation IS now enforced fleet-wide — so what is
+    // asserted is the precondition that made the old fence unnecessary:
+    // whatever paths carry an `rbac_action`, every Worker that could serve them
+    // consults the graph. The old fence is deliberately gone rather than
+    // silently kept; keeping it would forbid the very product change (M6) this
+    // fix exists to make safe.
     const guarded = operations.filter((op) => (op as { rbac_action?: string }).rbac_action);
     expect(
       guarded.length,
       "no rbac_action operations found — the probe went stale",
     ).toBeGreaterThan(0);
-    const offPath = guarded
-      .map((op) => String((op as { path?: string }).path ?? ""))
-      .filter((path) => !path.startsWith("/admin/v1/"));
+    const unenforcedOn = CREDENTIAL_WORKERS.filter(
+      (app) => !CODE[app].some(([, code]) => PROBE.consultsRbacAuthorizer.test(code)),
+    );
     expect(
-      offPath,
-      "an rbac_action landed on a non-admin path; apps/mcp and apps/agent-runtime parse the " +
-        "field and never consult an authorizer, so it is unenforced there",
+      unenforcedOn,
+      `${guarded.length} contract operations declare an rbac_action and these credential Workers consult no authorizer — an operation moving onto a path they serve would be silently unenforced there`,
     ).toEqual([]);
   });
 });
