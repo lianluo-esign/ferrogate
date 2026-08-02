@@ -42,9 +42,11 @@
  * cannot block the tenant that actually owns the domain.
  */
 import {
+  D1SiteDomainVerificationStore,
   SITE_DOMAIN_VERIFICATION_ATTEMPT_COOLDOWN_SECONDS,
   type StoredSiteDomainVerification,
   effectiveSiteDomainVerificationState,
+  hasLiveDnsOwnershipProof,
   markCheckFailed,
   markVerified,
   pendingSiteDomainVerification,
@@ -61,6 +63,12 @@ import {
   resolveChallenge,
 } from "../site_domain_txt.js";
 import {
+  SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE,
+  claimSiteDomain,
+  documentTenantId,
+  releaseSiteDomain,
+} from "../store/site_domain.js";
+import {
   type GroupModule,
   adminRecordSchema,
   crudGroup,
@@ -70,26 +78,23 @@ import {
 } from "./resource.js";
 
 /**
- * PORT-TODO(P: inventory-edge-control §sites) — verification is real; what it
- * unlocks is not built, and the durable store for it is unmounted.
+ * CLOSED — former PORT-TODO(P: inventory-edge-control §sites). Both halves.
  *
- * The challenge/TXT/cooldown machinery below is a faithful port and is proven
- * (`test/site-domain-cas.test.ts` races two callers through the CAS). What is
- * missing is both ends of it:
+ *  - **Nothing served a verified hostname.** #738 built it:
+ *    `apps/gateway/src/sites/host.ts` resolves an inbound authority against the
+ *    typed `site_domains` + `site_domain_verifications` tables and serves the
+ *    tenant's bundle through the same `SiteServer.serve` that
+ *    `/sites/{slug}/{path}` runs.
+ *  - **The durable stores were dead code.** They are mounted here now. The
+ *    verification row goes through `D1SiteDomainVerificationStore` (the only
+ *    writer of `site_domain_verifications`) and the serving claim through
+ *    `../store/site_domain.ts` (the only writer of `site_domains`, which had
+ *    none at all).
  *
- *  - **Nothing serves a verified hostname.** Rust `server/sites.rs` +
- *    `site_domains.rs` route an inbound request by verified custom hostname to
- *    the tenant's static site. `grep -ri "site.domain" apps/gateway/src` → 0.
- *    So a hostname can be verified and then does nothing.
- *  - **The durable verification store is dead code.**
- *    `packages/storage/src/d1/site-domain-d1.ts::D1SiteDomainVerificationStore`
- *    is the only writer of the `site_domain_verifications` table and is imported
- *    by no application module; this group keeps verification state as
- *    `control_plane_resources` documents instead, and the `site_domains` control
- *    table has no writer at all.
- *
- * These are two separable slices: mounting the durable store here is local to
- * this app; hostname-routed site serving is an `apps/gateway` change.
+ * The `control_plane_resources` DOCUMENTS are still written, and still first:
+ * they are what the admin surface lists, and the typed rows are the projection
+ * the DATA plane reads. See `../store/site_domain.ts` for the ordering argument
+ * and for why the `site_domains` row is taken at VERIFY rather than at BIND.
  */
 const SITE_DOMAINS = "site-domains";
 /** `site_domain_verifications` — EVIDENCE, keyed `(tenant_id, hostname)`. */
@@ -164,7 +169,27 @@ function toDocument(verification: StoredSiteDomainVerification): Record<string, 
 
 export const siteDomainRoutes: GroupModule = crudGroup(
   "site_domain",
-  [{ segment: SITE_DOMAINS, object: "site_domain", idField: "hostname", body: siteDomainSchema }],
+  [
+    {
+      segment: SITE_DOMAINS,
+      object: "site_domain",
+      idField: "hostname",
+      body: siteDomainSchema,
+      // No `project`: the `site_domains` PRIMARY KEY admits ONE tenant per
+      // hostname, so writing the row at BIND time would hand the only serving
+      // slot to whoever POSTed first — a name it has proved nothing about. The
+      // row is taken by `verifySiteDomain` below, on proof.
+      //
+      // `unproject` WITHOUT `project` is therefore deliberate and not an
+      // oversight: DELETE must still drop whatever the verify path claimed, or
+      // the operator is told the binding is gone while the gateway keeps
+      // serving it. It runs BEFORE the document is removed, which is the right
+      // order for a row that IS the grant.
+      unproject: async (db, hostname, record) => {
+        await releaseSiteDomain(db, hostname, documentTenantId(record));
+      },
+    },
+  ],
   {
     verifySiteDomain: async (c) => {
       const deps = c.get("deps");
@@ -315,6 +340,47 @@ export const siteDomainRoutes: GroupModule = crudGroup(
         verification_status: state,
         verified: state === "verified" || state === "grandfathered",
       });
+
+      // (4) THE PROJECTION — the documents above are what the ADMIN surface
+      // lists; these two rows are what the DATA plane reads (#738). Without
+      // them the whole challenge is ceremony: `apps/gateway` routes an inbound
+      // hostname through the typed `site_domains` + `site_domain_verifications`
+      // tables, and until this landed nothing wrote either one, so a verified
+      // hostname served nothing on every deployment.
+      //
+      // `controlDatabase` is `null` only on a deployment with no control
+      // database at all (`CONTROL_PLANE_STORE = "memory"`), where there is no
+      // table for a row to live in and the document store is not durable
+      // either. Skipping is then the whole truth, not a downgrade.
+      const control = deps.controlDatabase;
+      if (control !== null) {
+        // The EVIDENCE first, unconditionally — a failed check is evidence too,
+        // and `attempt_count` / `last_failure_reason` are what an operator
+        // triages from. `upsertVerification` writes `last_checked_at_unix` from
+        // the record, which is the reservation this request already took.
+        await new D1SiteDomainVerificationStore(control).upsertVerification(verification);
+        // The CLAIM second, and only on a LIVE DNS proof —
+        // `hasLiveDnsOwnershipProof` is narrower than "serves" on purpose: the
+        // `grandfathered` migration state may keep an existing binding alive,
+        // but it must never be able to TAKE a hostname away from another
+        // tenant, because nobody ever proved it.
+        if (hasLiveDnsOwnershipProof(verification, now)) {
+          const claimed = await claimSiteDomain(
+            control,
+            hostname,
+            tenantId,
+            typeof record.site_id === "string" ? record.site_id : "",
+            now,
+          );
+          if (!claimed) {
+            // Another tenant proved this hostname first and holds the only row
+            // the primary key allows. The loser is TOLD: a 200 here would leave
+            // it believing its domain is live while the gateway serves somebody
+            // else's bundle on it, which is the worst of the available outcomes.
+            throw new HttpError(409, "conflict", SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE);
+          }
+        }
+      }
 
       return json(c, 200, {
         ...adminItem("site_domain", domain),
