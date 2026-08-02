@@ -11,7 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "generate": "openapi-typescript ../../docs/openapi/admin-api.openapi.json -o src/api-types.generated.ts && bun scripts/stamp-generated-header.ts"
+    "generate": "bun ../../tools/generated-clients/generate.mjs --only sdks/typescript"
   },
   "dependencies": {
     "openapi-fetch": "0.17.0"
