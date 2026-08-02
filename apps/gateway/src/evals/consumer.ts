@@ -240,6 +240,8 @@ export async function consumeOnlineEvalBatch(
         provider: sample.provider,
         logicalModel: sample.logicalModel,
         providerModel: sample.providerModel,
+        experimentId: sample.experimentId,
+        experimentArm: sample.experimentArm,
         samplingKey: sample.samplingKey,
         samplingUnit: sample.samplingUnit,
         sampleRate: sample.sampleRate,

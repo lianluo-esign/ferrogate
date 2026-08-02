@@ -46,6 +46,24 @@ export interface OnlineEvalSample {
   readonly logicalModel?: string | undefined;
   /** The model the PROVIDER served, which is what actually changed on a swap. */
   readonly providerModel?: string | undefined;
+  /**
+   * #693 — the traffic-split experiment this response belonged to, and the ARM
+   * that produced it.
+   *
+   * This is what makes a canary-vs-control quality comparison possible at all:
+   * the comparison is only legitimate between two populations scored by the
+   * SAME judge under the SAME criterion, and both of those are already on the
+   * score row — the arm is the third grouping key that turns "one tenant's
+   * scores" into "this arm's scores against that arm's".
+   *
+   * Absent for a sample taken outside an experiment, which is almost all of
+   * them. Carried on the WIRE rather than joined back from `request_logs` at
+   * read time because a score and its arm must not be able to disagree: the
+   * request log can be re-written by a later leg, and a score is a measurement
+   * of the response that actually existed when the sample was taken.
+   */
+  readonly experimentId?: string | undefined;
+  readonly experimentArm?: string | undefined;
   /** The bucket key, so a conversation's scores can be grouped as one. */
   readonly samplingKey: string;
   readonly samplingUnit: OnlineEvalSamplingUnit;
@@ -87,6 +105,8 @@ export function onlineEvalSampleToWire(sample: OnlineEvalSample): OnlineEvalSamp
     ["provider", sample.provider],
     ["logical_model", sample.logicalModel],
     ["provider_model", sample.providerModel],
+    ["experiment_id", sample.experimentId],
+    ["experiment_arm", sample.experimentArm],
   ];
   for (const [key, value] of optional) {
     if (value !== undefined && value !== "") wire[key] = value;
@@ -156,6 +176,8 @@ export function onlineEvalSampleFromWire(body: unknown): OnlineEvalSample | unde
     provider: str(wire, "provider"),
     logicalModel: str(wire, "logical_model"),
     providerModel: str(wire, "provider_model"),
+    experimentId: str(wire, "experiment_id"),
+    experimentArm: str(wire, "experiment_arm"),
     samplingKey,
     samplingUnit: unit === "conversation" ? "conversation" : "request",
     sampleRate: typeof rate === "number" && Number.isFinite(rate) ? rate : 0,
@@ -199,6 +221,9 @@ export interface OnlineEvalScoreRecord {
   readonly provider?: string | undefined;
   readonly logicalModel?: string | undefined;
   readonly providerModel?: string | undefined;
+  /** #693 — see {@link OnlineEvalSample.experimentId}. */
+  readonly experimentId?: string | undefined;
+  readonly experimentArm?: string | undefined;
   readonly samplingKey: string;
   readonly samplingUnit: OnlineEvalSamplingUnit;
   readonly sampleRate: number;

@@ -209,6 +209,13 @@ export function onlineEvalSampleFrom(input: {
     provider: facts.provider,
     logicalModel: facts.logicalModel,
     providerModel: facts.providerModel,
+    // #693 — read off the SAME fact set the model and provider come from, which
+    // the inference router contributed at dispatch. So a score's arm and the
+    // request log's arm are one fact recorded twice, never two facts that could
+    // disagree, and a canary-vs-control comparison groups on exactly the arm
+    // that produced the response the judge was shown.
+    experimentId: facts.experimentId,
+    experimentArm: facts.experimentArm,
     samplingKey: input.samplingKey,
     samplingUnit: policy.samplingUnit,
     sampleRate: input.rate,
