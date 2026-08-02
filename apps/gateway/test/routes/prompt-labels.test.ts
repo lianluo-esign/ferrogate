@@ -133,7 +133,14 @@ async function clearLabels(): Promise<void> {
 }
 
 const TENANT_A = "tenant_a";
-const TENANT_B = "tenant_b";
+/**
+ * NOT `tenant_b`: `vitest.config.ts` pins `TENANCY_LIFECYCLE` with `tenant_b`
+ * SUSPENDED, so a credential there is refused by the lifecycle gate long before
+ * any label is read — which would make the fence cases pass for the wrong
+ * reason. This tenant is healthy, so a cross-tenant refusal below can only come
+ * from the label fence itself.
+ */
+const TENANT_B = "tenant_other";
 let secretA = "";
 
 beforeEach(async () => {

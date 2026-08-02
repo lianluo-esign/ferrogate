@@ -197,6 +197,7 @@ bunx wrangler secret put TELEMETRY_TOKEN
 | `BILLING` (`[[queues.producers]]`) | gateway | Write-only by design; no consumer Worker exists in this repo. A successful publish proves the producer half only. |
 | `TELEMETRY` (`[[analytics_engine_datasets]]`) | telemetry | `writeDataPoint()` is the only write path and it is fire-and-forget: a failed write does not surface in the response. Reading back requires the AE SQL API, which is a separate (read-only) HTTP call. |
 | `MCP_OAUTH_KV` | mcp | Gated on **B3**; if the token lacks KV the deploy fails rather than degrading. |
+| `PROMPT_LABELS` | control-plane **writes**, gateway **reads** | **Added with prompt deployment labels (#694).** Also gated on **B3** (the account token's KV rights). The shape of the risk is the same as the `runtime-state/drain` row below, one product over: both `wrangler.toml`s declare the binding by the same NAME, but the deploy supplies the *id*, and pointing the two Workers at two different namespaces leaves every suite green while the gateway reads an empty key space — so every labelled request answers `404 prompt_label_not_found`. That is loud (it does not silently render the wrong prompt) but it is universal, and it is invisible until the first request. **Supply ONE namespace id to both apps and confirm it before the deploy.** With no KV at all, `PUT /admin/v1/prompt-templates/{id}/labels/{label}` answers `503 prompt_labels_unavailable` and the gateway refuses every label — neither Worker degrades to a default prompt. |
 | `DB` / `CONTROL_DB` on agent-runtime | agent-runtime | **Not declared at all** (B4) — the authenticated surface fails closed. **Wave 22 raised the cost again**: that handle is now also how this Worker reads the operator drain and the tenant lifecycle authority, so with it unbound `POST /admin/v1/drain` and a tenant SUSPENSION both stop two of three spend Workers and leave this one out of the answer. See **B11**. |
 | `runtime-state/drain` (a ROW, not a binding) | control-plane writes, gateway + mcp + agent-runtime read | **Added wave 22.** There is nothing to declare and nothing to supply — the drain is a `control_plane_resources` row addressed by `(resource_kind='runtime-state', resource_id='drain')` through each Worker's existing control-database handle. It is listed here because it is the one control whose *deploy-time* correctness is a function of §2's D1 uuids rather than of a stanza: point two Workers at DIFFERENT control databases and each drains independently while every suite stays green. **All three spend Workers must resolve the SAME control database uuid.** `apps/gateway` uses the same uuid for `BILLING_DB` and `CONTROL_DB` (§2a) and `apps/mcp` binds it as `DB`; check the three values match before the deploy, and confirm with **V-FC1** below. |
 | `/v1/admin/*`, `/scim/v2/*` (wave 18) | control-plane | **Mounted and locally proven** (`apps/control-plane/test/identity-mount.test.ts`, 23 SELF-driven cases including the adversarial refusals), but three legs cross the network and NO local runner can prove them: the OIDC discovery fetch, the token-endpoint exchange and the JWKS fetch all go to a real IdP. The offline suite stands a stand-in IdP over `globalThis.fetch`. **A live run must complete one real OIDC login and one real SAML login end to end**, or those three legs stay unproven against a real provider's document shapes. |
@@ -216,12 +217,15 @@ Preconditions (once, by hand):
 3. `wrangler queues create <billing-reports-queue>`; record the name.
 4. (If B2 resolved by enabling R2) `wrangler r2 bucket create <assets-bucket>`.
 5. (If B3 resolved by enabling KV) `wrangler kv namespace create MCP_OAUTH_KV`;
-   record the id.
+   record the id. Also `wrangler kv namespace create PROMPT_LABELS` — ONE
+   namespace, whose id goes into BOTH `apps/control-plane/wrangler.toml` (the
+   writer) and `apps/gateway/wrangler.toml` (the reader). Two ids is the silent
+   half-bound posture for this seam; see §5.
 
 Fill in the placeholders — **do not commit these edits**:
 
-6. gateway: `database_id` ×3, `bucket_name` ×2, queue name.
-7. control-plane: `database_id`.
+6. gateway: `database_id` ×3, `bucket_name` ×2, queue name, `PROMPT_LABELS` id.
+7. control-plane: `database_id`, `PROMPT_LABELS` id (the SAME one).
 8. mcp: `database_id`, KV `id`, and `FG_DEV_IN_MEMORY_PORTS = "0"` (B1).
 9. agent-runtime: `FG_DEV_IN_MEMORY_PORTS = "0"` (B1) and, if in scope,
    **both** D1 stanzas (B4 — `CONTROL_DB` and `DB` together or neither; see

@@ -274,6 +274,6 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
   test("the baseline is far short of the contract, and says so in numbers", () => {
     const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
     expect(seeded).toBe(10);
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(241);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(244);
   });
 });
