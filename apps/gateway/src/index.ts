@@ -5,7 +5,7 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 251
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 252
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
@@ -224,7 +224,7 @@ export const GATEWAY_MIDDLEWARE = [
   // layer in: `meteringDrain` returns the same `Response` object it received,
   // so the status this emitter records is the client's.
   //
-  // `src/inference/route-module.ts` ALSO emits, so the six inference
+  // `src/inference/route-module.ts` ALSO emits, so the seven inference
   // operations pass through two emitters; `emitRequestTelemetry` de-duplicates
   // on the inbound `Request` object, so they still produce exactly one span
   // and one metric point. Mounting here is what widens the coverage from those

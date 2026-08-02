@@ -9156,6 +9156,90 @@
         }
       }
     },
+    "/v1/messages/count_tokens": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "countMessageTokens",
+        "x-ferrogate-data-plane": true,
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Count the input tokens an Anthropic-native Messages request would be charged, without dispatching it.",
+        "description": "Returns the same prompt-token number the gateway reserves against the caller's token-per-minute window and monthly budget when the identical body is sent to POST /v1/messages, so a client can size a context window or pre-estimate cost without paying for a completion. No provider is contacted. The operation carries the same bearer scope as createMessage (messages.create): it is not an unauthenticated counting oracle.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "messages.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The input-token count for the supplied Messages request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "input_tokens"
+                  ],
+                  "properties": {
+                    "input_tokens": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Prompt tokens the request would be charged."
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/images/generations": {
       "parameters": [
         {

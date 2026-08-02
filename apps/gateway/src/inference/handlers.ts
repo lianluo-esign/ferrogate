@@ -1,5 +1,5 @@
 /**
- * Hono handlers for the six inference operations owned by `apps/gateway`.
+ * Hono handlers for the seven inference operations owned by `apps/gateway`.
  *
  * | contract operation      | method + path              | scope              | Rust handler |
  * |-------------------------|----------------------------|--------------------|--------------|
@@ -7,8 +7,15 @@
  * | `createChatCompletion`  | POST /v1/chat/completions  | `chat.completions` | `chat.rs::handle_chat_completions` |
  * | `createResponse`        | POST /v1/responses         | `responses.create` | `chat.rs::handle_responses` |
  * | `createMessage`         | POST /v1/messages          | `messages.create`  | `messages.rs::handle_messages` |
+ * | `countMessageTokens`    | POST /v1/messages/count_tokens | `messages.create` | *(none — new in TS, issue #671)* |
  * | `createEmbedding`       | POST /v1/embeddings        | `embeddings.create`| `embeddings.rs::handle_embeddings` |
  * | `createImage`           | POST /v1/images/generations| `images.generate`  | `images.rs::handle_images` |
+ *
+ * `countMessageTokens` is the ONE row with no Rust counterpart: the Rust tree
+ * never exposed the estimator it already computed on every dispatch, so a
+ * client could not size a context window or pre-estimate spend without paying
+ * for a completion (issue #671). It reuses the estimator rather than adding a
+ * second one — see {@link handleCountMessageTokens}.
  *
  * The Rust pipeline for every POST is the same six steps, and the ORDER is
  * load-bearing (`chat.rs:158`: "authenticate before reading the body, so an
@@ -25,7 +32,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 251 operations, and duplicating a per-route
+ * table-driven middleware for all 252 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -55,6 +62,7 @@ import {
 import { errorResponse, jsonResponse, rawUpstreamResponse, reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import {
+  countMessagesInputTokens,
   estimateChatCompletionUsage,
   estimateEmbeddingsUsage,
   estimateImagesUsage,
@@ -90,6 +98,7 @@ import type {
   Usage,
 } from "./ports.js";
 import {
+  anthropicCountTokensRequestSchema,
   anthropicMessagesRequestSchema,
   chatCompletionRequestSchema,
   embeddingsRequestSchema,
@@ -98,7 +107,7 @@ import {
   responsesRequestSchema,
   validateRequestMetadata,
 } from "./schemas.js";
-import type { OpenAiModelList, RequestMetadata } from "./schemas.js";
+import type { AnthropicTokenCount, OpenAiModelList, RequestMetadata } from "./schemas.js";
 import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
@@ -1138,6 +1147,17 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     (c) => handleMessages(c, c.get("inferenceDeps")),
   );
 
+  // -- POST /v1/messages/count_tokens ---------------------------------------
+  // Registered AFTER `/v1/messages`; Hono matches both statically, so neither
+  // shadows the other and the order is documentary only (it keeps the two
+  // Anthropic-native surfaces adjacent).
+  app.post(
+    "/v1/messages/count_tokens",
+    body,
+    validateBody(anthropicCountTokensRequestSchema, "invalid Anthropic count_tokens request"),
+    (c) => handleCountMessageTokens(c, c.get("inferenceDeps")),
+  );
+
   // -- POST /v1/embeddings ---------------------------------------------------
   app.post(
     "/v1/embeddings",
@@ -1474,6 +1494,138 @@ async function handleMessages(
   // either way.
   const message = deps.translator.chatCompletionToMessage(parsed, logicalModel);
   return jsonResponse(message, requestId, upstreamResponse.status);
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/messages/count_tokens — `countMessageTokens` (issue #671)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Anthropic-native token-count pre-flight.
+ *
+ * A client cannot size a context window or pre-estimate spend without sending
+ * the request and paying for it. This answers the same question the gateway
+ * already asks itself before every `/v1/messages` dispatch, and answers it with
+ * the SAME arithmetic (`countMessagesInputTokens` is a projection of
+ * `estimateMessagesUsage`, see `./estimate.ts`) so the number a caller budgets
+ * against is the number that will be reserved against their TPM window, their
+ * monthly token budget and their prepaid wallet.
+ *
+ * ## Which parts of the `/v1/messages` ladder this runs, and which it does not
+ *
+ * Kept, because they decide what the ANSWER even means or who may ask:
+ *
+ *  - auth + scope. Registered as a contract operation (`countMessageTokens`,
+ *    bearer, `messages.create`), so the ONE table-driven guard in
+ *    `middleware/auth.ts` covers it and the request-rate/quota middleware the
+ *    app mounts for every operation covers it too. A free, unauthenticated
+ *    counting oracle is an abuse surface with no owner, so this is not
+ *    negotiable and it is asserted directly by `test/inference/count-tokens.test.ts`.
+ *  - the MODEL gate — `can_use_model` (403), then resolution (400
+ *    `model_not_found` / `model_disabled`), then the tenant visibility check
+ *    (400 `model_not_found`). Without it the endpoint becomes exactly the
+ *    enumeration oracle issue #515 closed: a probe that reveals which logical
+ *    model names exist and which tenants own the private ones.
+ *
+ * Deliberately NOT run, each for a stated reason:
+ *
+ *  - **the rest of `planUpstream`** — eligibility, canary/shadow, strategy
+ *    ordering, adapter preparation. Beyond being pure waste for a request that
+ *    dispatches nothing, the context-window leg of the eligibility gate would
+ *    REFUSE a body larger than the model's window — i.e. refuse to tell the
+ *    caller the number precisely when they most need it, which inverts the
+ *    endpoint's purpose. It also builds an upstream request carrying provider
+ *    credentials, which no counting request should ever materialize.
+ *  - **the TPM admission** (`admitTokens`). The window meters tokens spent at a
+ *    provider and this request spends none; charging it would bill a caller for
+ *    asking what something would cost. The per-request rate limit above still
+ *    bounds the surface.
+ *  - **the workflow graph gate + metering.** Both record a MODEL CALL, and
+ *    counting is not one. A step written here would consume `max_model_calls`
+ *    and put a row in the ledger for a call that never happened.
+ *  - **guardrail screening.** See `guardrails/middleware.ts`: the prompt is
+ *    never inferred over, so a denial would block a size estimate on grounds
+ *    that apply to dispatch, and an evidence row would record a screening of
+ *    content that never reached a provider.
+ *  - **the operator drain gate.** Draining refuses new AI requests so a node
+ *    can be retired; a count consumes no capacity and produces no spend, so
+ *    refusing it would turn a decided "stop spending" into "stop answering".
+ */
+function handleCountMessageTokens(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Response {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const request = c.get("inferenceBody") as Record<string, unknown>;
+  const logicalModel = String(request["model"]);
+
+  const gate = countTokensModelGate(deps, caller, logicalModel);
+  if (gate !== null) {
+    return errorResponse(gate, requestId);
+  }
+
+  // Translate first, exactly as `handleMessages` does: `to_chat_completions`
+  // folds Anthropic's top-level `system` prompt into `messages[0]`, and the
+  // estimator reads `messages`. Counting the untranslated body would silently
+  // report a smaller number than the one that is later reserved, for every
+  // request that carries a system prompt.
+  const translated = deps.translator.toChatCompletions(request);
+  if (!translated.ok) {
+    return errorResponse(
+      reject(
+        400,
+        "invalid_request",
+        `could not translate Anthropic messages request: ${adapterErrorMessage(translated.error)}`,
+      ),
+      requestId,
+    );
+  }
+
+  const count: AnthropicTokenCount = {
+    input_tokens: countMessagesInputTokens(translated.body, logicalModel),
+  };
+  return jsonResponse(count, requestId);
+}
+
+/**
+ * The model half of `planUpstream`, and only that half.
+ *
+ * Extracted rather than inlined so the three refusals stay recognisably the
+ * same three refusals `/v1/messages` produces — same order, same codes, same
+ * messages. Returns `null` when the caller may count against this model.
+ */
+function countTokensModelGate(
+  deps: ResolvedInferenceDeps,
+  caller: Caller,
+  logicalModel: string,
+): InferenceRejection | null {
+  // BEFORE resolution, so a denied key cannot probe which model names exist.
+  if (!callerCanUseModel(caller, logicalModel)) {
+    return reject(
+      403,
+      "model_not_allowed",
+      `API key is not allowed to use model ${logicalModel}`,
+    );
+  }
+
+  const resolved = resolveCandidates(deps.models, logicalModel);
+  if (resolved.length === 0) {
+    const known = deps.models
+      .catalog()
+      .find((candidate) => candidate.logicalModel === logicalModel);
+    return known === undefined
+      ? reject(400, "model_not_found", `unknown model ${logicalModel}`)
+      : reject(400, "model_disabled", `model ${logicalModel} is disabled`);
+  }
+
+  // Tenancy lives on the registry ENTRY, so every candidate carries the same
+  // answer and checking the primary checks all of them (issue #515).
+  if (!scopeCanSeeModel(caller.scope, caller.projectId, resolved[0] as PhysicalRoute)) {
+    return reject(400, "model_not_found", `unknown model ${logicalModel}`);
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------

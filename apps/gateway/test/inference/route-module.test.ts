@@ -1,5 +1,5 @@
 /**
- * The inference `RouteModule` seam — the adapter that mounts the six inference
+ * The inference `RouteModule` seam — the adapter that mounts the seven inference
  * operations on the contract-driven gateway router.
  *
  * `test/inference/*.test.ts` drives the standalone `createInferenceRouter`
@@ -51,12 +51,12 @@ function gateway(limits?: { inferenceBodyMaxBytes?: number }) {
 }
 
 describe("inferenceRouteModule", () => {
-  it("claims exactly the 6 contract inference operation ids", () => {
+  it("claims exactly the 7 contract inference operation ids", () => {
     expect(new Set(inferenceRouteModule().operationIds)).toEqual(new Set(INFERENCE_OPERATION_IDS));
-    expect(inferenceRouteModule().operationIds).toHaveLength(6);
+    expect(inferenceRouteModule().operationIds).toHaveLength(7);
   });
 
-  it("registers all 6 on the contract-driven router", () => {
+  it("registers all 7 on the contract-driven router", () => {
     const { router } = gateway();
     for (const operationId of INFERENCE_OPERATION_IDS) {
       expect(router.registeredOperationIds(), operationId).toContain(operationId);
