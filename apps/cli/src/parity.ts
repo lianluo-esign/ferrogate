@@ -157,6 +157,109 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
     reason:
       "dashboard-facing control-plane overview aggregate; ctl verb is optional follow-up, tracked with the #343 console UI",
   },
+  // ---------------------------------------------------------------------
+  // #734 — the twelve operations that were ROUTED but never DESCRIBED.
+  //
+  // These are not new gaps. #682 (BYOK), #694 (prompt deployment labels) and
+  // #695 (semantic-cache policy) all merged while
+  // `.github/workflows/api-contract-drift.yml` was disabled, so their
+  // operations never reached `admin-api.openapi.json` and this gate never saw
+  // them — the CLI has been missing these verbs since those PRs landed, silently.
+  // #734 restores the OpenAPI descriptions, which is what makes the shortfall
+  // visible here for the first time.
+  //
+  // They are excluded rather than mapped in #734 because that issue is scoped to
+  // the published contract and its enforcement: minting twelve operator verbs
+  // (with their argument grammar, help text, output shaping and golden tests) as
+  // a side effect of a documentation-integrity fix would ship an un-designed CLI
+  // surface. Each row below names the family that owns the verbs and must be
+  // deleted when they land — `buildReport` flags a stale exclusion, so this table
+  // cannot rot.
+  // ---------------------------------------------------------------------
+  // #682 — per-tenant BYOK. `ctl provider-credentials put` would take a provider
+  // API KEY as an argument, so its verb design has to settle how the secret is
+  // supplied (stdin/env, never argv, where a shell history would keep it) before
+  // it can be built. That is a credential-handling decision, not a mapping.
+  {
+    operationId: "listProviderCredentials",
+    owner: "provider/BYOK family (#682, #365 parity chain)",
+    reason:
+      "BYOK registration verbs are unbuilt; the group's write verb takes a provider secret, so its argument grammar must first settle how the value is supplied without reaching argv — tracked as the #682 CLI follow-up",
+  },
+  {
+    operationId: "putProviderCredential",
+    owner: "provider/BYOK family (#682, #365 parity chain)",
+    reason:
+      "registers or rotates a provider API key; the verb must read the secret from stdin or the environment rather than argv, which is an unmade credential-handling decision — tracked as the #682 CLI follow-up",
+  },
+  {
+    operationId: "revokeProviderCredential",
+    owner: "provider/BYOK family (#682, #365 parity chain)",
+    reason:
+      "BYOK revocation lands with the rest of the provider-credentials verbs rather than shipping alone — tracked as the #682 CLI follow-up",
+  },
+  // #694 — prompt deployment labels are a SUB-resource of an existing group
+  // (`/admin/v1/prompt-templates/{id}/labels/{label}`). Every mapped group in
+  // `registry.ts` today addresses a top-level collection, so covering these
+  // needs a nested-resource verb shape the registry does not yet have.
+  {
+    operationId: "listAdminPromptTemplateLabels",
+    owner: "prompt family (#694, #365 parity chain)",
+    reason:
+      "prompt-template labels are a nested sub-resource; the registry has no nested-collection verb shape yet, so the verbs land with that shape rather than as a bespoke group — tracked as the #694 CLI follow-up",
+  },
+  {
+    operationId: "putAdminPromptTemplateLabel",
+    owner: "prompt family (#694, #365 parity chain)",
+    reason:
+      "label deployment is the call that replaces a deploy; it belongs with the nested prompt-template verb shape — tracked as the #694 CLI follow-up",
+  },
+  {
+    operationId: "deleteAdminPromptTemplateLabel",
+    owner: "prompt family (#694, #365 parity chain)",
+    reason:
+      "label retirement belongs with the nested prompt-template verb shape — tracked as the #694 CLI follow-up",
+  },
+  // #695 — semantic-cache policy. Composite `{scope_type}/{scope_id}` key like
+  // `quota-policies`, plus an `invalidate` action verb that is a purge, not a
+  // CRUD leg; the group's verbs land together so `invalidate` is never the one
+  // that is missing when an operator needs it.
+  {
+    operationId: "listSemanticCachePolicies",
+    owner: "cache/policy family (#695, #365 parity chain)",
+    reason:
+      "semantic-cache policy verbs are unbuilt; the group carries a purge action alongside its CRUD legs and lands as one set — tracked as the #695 CLI follow-up",
+  },
+  {
+    operationId: "createSemanticCachePolicy",
+    owner: "cache/policy family (#695, #365 parity chain)",
+    reason:
+      "semantic-cache policy verbs land as one set with the purge action — tracked as the #695 CLI follow-up",
+  },
+  {
+    operationId: "getSemanticCachePolicy",
+    owner: "cache/policy family (#695, #365 parity chain)",
+    reason:
+      "semantic-cache policy verbs land as one set with the purge action — tracked as the #695 CLI follow-up",
+  },
+  {
+    operationId: "replaceSemanticCachePolicy",
+    owner: "cache/policy family (#695, #365 parity chain)",
+    reason:
+      "semantic-cache policy verbs land as one set with the purge action — tracked as the #695 CLI follow-up",
+  },
+  {
+    operationId: "deleteSemanticCachePolicy",
+    owner: "cache/policy family (#695, #365 parity chain)",
+    reason:
+      "semantic-cache policy verbs land as one set with the purge action — tracked as the #695 CLI follow-up",
+  },
+  {
+    operationId: "invalidateSemanticCachePolicy",
+    owner: "cache/policy family (#695, #365 parity chain)",
+    reason:
+      "cache purge action rather than a CRUD leg; lands with the rest of the semantic-cache policy verbs — tracked as the #695 CLI follow-up",
+  },
 ];
 
 /** The coverable and non-coverable operation sets parsed from an OpenAPI document. */

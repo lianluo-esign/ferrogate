@@ -66,6 +66,17 @@ jobs:
       - name: Test
         run: bun run test
 
+      # `sdks/python` has no `package.json`, so it is NOT a bun workspace and
+      # `bun run test` (which is `bun run --filter '*' test`) cannot reach it.
+      # Without this step its suite only runs when a human remembers to type the
+      # root script — which is precisely how a hand-written client that mirrors
+      # a machine-readable contract turns into a rotting duplicate.
+      #
+      # A separate step rather than a line inside `test:*` because the failure
+      # should read as "the Python SDK broke", not as an opaque workspace error.
+      - name: Test (Python SDK)
+        run: bun run test:sdk-python
+
       # NON-BLOCKING, AND THAT IS A DELIBERATE, TEMPORARY CHOICE.
       #
       # `bun run lint` currently reports ~1954 errors (apps 711, packages 679,

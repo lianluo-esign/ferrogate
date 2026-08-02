@@ -123,6 +123,24 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "derived-from-API-key-config compatibility read with no durable records; the console renders the authoritative tenant-accounts registry at /app/tenants instead",
   },
+  // Two groups surfaced by #734, not created by it. #682 (BYOK) and #695
+  // (semantic cache) merged while the API-contract-drift workflow was disabled,
+  // so their operations never reached `admin-api.openapi.json` and this gate —
+  // which derives its group list FROM that file — could not see them. The
+  // console has had no surface for either since those PRs landed; #734 restoring
+  // the contract is what makes the gap visible. Both are deferred rather than
+  // built inside a documentation-integrity fix, and both must lose their entry
+  // here when the page lands (an obsolete exclusion fails the check below).
+  "provider-credentials": {
+    owner: "provider/BYOK console surface (#682 follow-up, #313 chain)",
+    reason:
+      "per-tenant BYOK registration: the write verb takes a provider API key, so the page needs a credential-entry control that never renders the value back (the API returns only a last4 hint) and a rotation affordance distinct from create — a UX decision that has not been made, so a generic CRUD resource would be actively wrong here. Deferred, needs UI",
+  },
+  "semantic-cache-policies": {
+    owner: "cache governance console surface (#695 follow-up, #313 chain)",
+    reason:
+      "every governed field is a TRI-STATE (null means inherit the deployment value, which is not the same as false or 0) and the group has no PATCH for exactly that reason, so a generic CRUD form would silently turn 'inherit' into a concrete value; it also carries a purge action that is not a CRUD leg. Belongs beside the gateway cache panel. Deferred, needs UI",
+  },
 };
 
 /**

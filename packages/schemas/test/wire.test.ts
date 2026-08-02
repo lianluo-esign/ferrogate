@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 266.
+ * ANTI-DRIFT GATE for the third copy of 268.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(266);
+    expect(OPENAPI_OPERATION_COUNT).toBe(268);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -278,15 +278,20 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // `countMessageTokens` (#671) added one contract operation and the
     // prompt-deployment-label operations (#694) added three more, taking the
     // shortfall to 245. From there the three BYOK-alias operations (#682), the
-    // six `/admin/v1/semantic-cache-policies` operations (#695), `getModel`
-    // (#670) and `createRerank` (#676) all landed. None of the fifteen carries a
-    // wire schema and `seeded` is unchanged at 10, so the shortfall is
-    // 245 + 3 + 6 + 1 + 1 = 256 = 266 - 10.
+    // six `/admin/v1/semantic-cache-policies` operations (#695) and `getModel`
+    // (#670) all landed, taking the shortfall to 245 + 3 + 6 + 1 = 255. #677's
+    // two chargeback reads (`listAdminCostRecords`,
+    // `exportAdminCostRecords`) carry no wire schema either — their response is
+    // the generic `AdminList` envelope and three export MEDIA types, none of
+    // which is a per-operation Zod shape — and neither does #676's
+    // `createRerank`, whose request/response Zod shapes live in
+    // `apps/gateway/src/inference/schemas.ts` beside the handler that serves
+    // them. So `seeded` is still 10 and the shortfall is 255 + 2 + 1 = 258.
     //
-    // The right-hand side is the one to trust: it is `OPENAPI_OPERATION_COUNT`
-    // minus a counted `seeded`, and the assertion above already pins
-    // `OPENAPI_OPERATION_COUNT` against the committed JSON. The running sum is
-    // narrative.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(256);
+    // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
+    // against the committed JSON by the assertion above) minus a COUNTED
+    // `seeded`, i.e. 268 - 10. The running sum is narrative, and #677 and #676
+    // landing in parallel is exactly why it must not be the source.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(258);
   });
 });

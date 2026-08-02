@@ -1,0 +1,319 @@
+"""The FerroGate Control Plane API client for Python.
+
+## What this is, and what it deliberately is not
+
+The control plane is 209 operations (``docs/rewrite/ROUTE-MAP.md``), and the
+answer to "who writes the method for each one" is the same as in the
+TypeScript SDK: nobody does. There, the request/response TYPES are generated
+from ``docs/openapi/admin-api.openapi.json`` by ``openapi-typescript``, which
+this repository already pins for the console and for
+``tools/openapi-client-smoke``.
+
+Python has no such generator in this tree. FerroGate is a Bun/TypeScript
+project on Cloudflare Workers: there is no ``pyproject.toml``, no packaging,
+no pip toolchain, and the only Python that runs here is repo tooling under
+``scripts/`` driven by ``python3 -m unittest``. Adding
+``openapi-python-client`` (a pip dependency, a generated package of hundreds
+of model modules, and a second toolchain in CI) is a decision that deserves
+its own issue rather than a paragraph in this one.
+
+So the Python half is the honest half of the pair: a THIN core — base URL,
+credential, tenant header, deadline, JSON encoding, and the error envelope
+decoded into the same typed exception the TypeScript SDK and the CLI raise —
+over the whole 209-operation surface addressed BY PATH. Requests and
+responses are plain ``dict``/``list``; there are no generated models, and the
+docstring for :meth:`AdminClient.request` says so rather than implying a
+typing guarantee that does not exist.
+
+Zero dependencies: ``urllib.request`` from the standard library, and an
+injectable transport so every test runs with no server and no network.
+
+## Usage
+
+```python
+from ferrogate_admin import AdminClient, FerrogateApiError
+
+client = AdminClient("https://gateway.example.com", token=read_operator_token())
+
+page = client.get("/admin/v1/projects", query={"tenant_id": "t_1", "limit": 50})
+for project in page["data"]:
+    print(project["slug"])
+
+try:
+    client.delete("/admin/v1/plugins/{plugin_id}", path={"plugin_id": "plug_1"})
+except FerrogateApiError as error:
+    if error.code == "scope_denied":
+        ...
+```
+
+## Not implemented, on purpose
+
+**Pagination.** The surface pages three different ways (``offset``/``limit``,
+``after_event_id``, ``cursor``), and a helper that guesses wrong walks page one
+forever while reporting success. ``apps/cli/src/paging.ts`` carries the
+classification rules; until they are shared, a caller passing the endpoint's
+own query parameters is correct and a generic paginator would not be.
+
+**Retries.** A retry policy that is not the server's is a way to amplify an
+outage. ``retry_after_seconds`` is decoded off the response so a caller can
+honour the server's schedule.
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Any, Callable, Mapping, MutableMapping
+
+from .errors import FerrogateTransportError, api_error_from
+
+__all__ = [
+    "AdminClient",
+    "HttpRequest",
+    "HttpResponse",
+    "Transport",
+    "urllib_transport",
+]
+
+DEFAULT_TIMEOUT_SECONDS = 30.0
+
+#: The two URI prefixes the same stable surface is served under (issue #453).
+CONTROL_PLANE_PREFIXES = ("/admin/v1", "/control/v1")
+
+
+@dataclass(frozen=True)
+class HttpRequest:
+    """One outbound request, as the transport receives it."""
+
+    method: str
+    url: str
+    headers: Mapping[str, str] = field(default_factory=dict)
+    body: bytes | None = None
+    timeout: float = DEFAULT_TIMEOUT_SECONDS
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    """One inbound response, as the transport returns it."""
+
+    status: int
+    headers: Mapping[str, str]
+    text: str
+
+
+#: A transport is anything that turns a request into a response. Injecting one
+#: is how every test in this package runs with no server and no network.
+Transport = Callable[[HttpRequest], HttpResponse]
+
+
+def _lowercase(headers: Mapping[str, str]) -> dict[str, str]:
+    """HTTP header names are case-insensitive; the rest of this module is not."""
+    return {key.lower(): value for key, value in headers.items()}
+
+
+def urllib_transport(request: HttpRequest) -> HttpResponse:
+    """The default transport: ``urllib.request``, standard library only.
+
+    A non-2xx does NOT raise here — it is returned like any other response, so
+    the ONE place that classifies a failure is :meth:`AdminClient.request`.
+    """
+    prepared = urllib.request.Request(
+        request.url,
+        data=request.body,
+        headers=dict(request.headers),
+        method=request.method,
+    )
+    try:
+        with urllib.request.urlopen(prepared, timeout=request.timeout) as response:
+            return HttpResponse(
+                status=response.status,
+                headers=_lowercase(dict(response.headers.items())),
+                text=response.read().decode("utf-8", errors="replace"),
+            )
+    except urllib.error.HTTPError as error:  # a RESPONSE, not a transport failure
+        return HttpResponse(
+            status=error.code,
+            headers=_lowercase(dict(error.headers.items())),
+            text=error.read().decode("utf-8", errors="replace"),
+        )
+    except urllib.error.URLError as error:
+        raise FerrogateTransportError(
+            request.url, f"request to {request.url} failed: {error.reason}"
+        ) from error
+    except TimeoutError as error:
+        raise FerrogateTransportError(
+            request.url, f"request to {request.url} timed out after {request.timeout}s"
+        ) from error
+
+
+class AdminClient:
+    """A thin, typed-failure client for the FerroGate Control Plane API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str | None = None,
+        api_key: str | None = None,
+        tenant: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        prefix: str = "/admin/v1",
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        transport: Transport | None = None,
+    ) -> None:
+        if token is not None and api_key is not None:
+            # `extractApiKey` prefers `x-api-key`, so sending both would
+            # silently authenticate with one while the caller believes it used
+            # the other. Refusing is the only answer that cannot mislead.
+            raise ValueError(
+                "AdminClient: pass token or api_key, not both — the server prefers "
+                "x-api-key when both are sent, which would silently decide which "
+                "credential authenticated the request"
+            )
+        if prefix not in CONTROL_PLANE_PREFIXES:
+            raise ValueError(f"AdminClient: prefix must be one of {CONTROL_PLANE_PREFIXES}")
+
+        self.base_url = base_url.rstrip("/")
+        self.prefix = prefix
+        self.timeout = timeout
+        self._transport: Transport = transport or urllib_transport
+
+        self._headers: dict[str, str] = {"accept": "application/json"}
+        if token is not None:
+            self._headers["authorization"] = f"Bearer {token}"
+        if api_key is not None:
+            self._headers["x-api-key"] = api_key
+        if tenant is not None:
+            self._headers["x-ferrogate-tenant"] = tenant
+        self._headers.update(_lowercase(headers or {}))
+
+    # -- URL building --------------------------------------------------------
+
+    def build_url(
+        self,
+        path: str,
+        *,
+        path_params: Mapping[str, str] | None = None,
+        query: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Template ``{name}`` segments, apply the prefix alias, add the query.
+
+        Path parameter values are percent-encoded with ``safe=""``: a tenant id
+        containing ``/`` must not be able to reach a different operation.
+        """
+        if not path.startswith("/"):
+            raise ValueError(f"path must be absolute, got {path!r}")
+
+        rendered = path
+        for name, value in (path_params or {}).items():
+            placeholder = "{" + name + "}"
+            if placeholder not in rendered:
+                raise ValueError(f"path {path!r} has no parameter {placeholder}")
+            rendered = rendered.replace(placeholder, urllib.parse.quote(str(value), safe=""))
+        if "{" in rendered:
+            raise ValueError(f"unfilled path parameter in {rendered!r}")
+
+        if self.prefix != "/admin/v1" and rendered.startswith("/admin/v1"):
+            rendered = self.prefix + rendered[len("/admin/v1") :]
+
+        url = f"{self.base_url}{rendered}"
+        pairs = _query_pairs(query)
+        return f"{url}?{urllib.parse.urlencode(pairs)}" if pairs else url
+
+    # -- the one request path ------------------------------------------------
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        path_params: Mapping[str, str] | None = None,
+        query: Mapping[str, Any] | None = None,
+        body: Any = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        """Issue one request and return the decoded JSON body.
+
+        Returns ``None`` for a 204 or an empty body. Raises
+        :class:`~ferrogate_admin.errors.FerrogateApiError` for any non-2xx and
+        :class:`~ferrogate_admin.errors.FerrogateTransportError` when no
+        response arrived.
+
+        The return value is whatever the operation answers — a ``dict`` or a
+        ``list``, NOT a generated model. See this module's docstring for why
+        Python has no generated models in this tree.
+        """
+        request_headers: MutableMapping[str, str] = dict(self._headers)
+        request_headers.update(_lowercase(headers or {}))
+
+        payload: bytes | None = None
+        if body is not None:
+            payload = json.dumps(body).encode("utf-8")
+            request_headers["content-type"] = "application/json"
+
+        response = self._transport(
+            HttpRequest(
+                method=method.upper(),
+                url=self.build_url(path, path_params=path_params, query=query),
+                headers=dict(request_headers),
+                body=payload,
+                timeout=self.timeout,
+            )
+        )
+
+        response_headers = _lowercase(response.headers)
+        if not 200 <= response.status < 300:
+            raise api_error_from(response.status, response_headers, response.text)
+        if response.status == 204 or response.text.strip() == "":
+            return None
+        try:
+            return json.loads(response.text)
+        except ValueError as error:
+            # A 2xx that is not JSON is a broken server, and saying so beats
+            # letting a JSONDecodeError escape from a client call.
+            raise api_error_from(
+                response.status,
+                response_headers,
+                response.text,
+            ) from error
+
+    # -- verbs ---------------------------------------------------------------
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        return self.request("GET", path, **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Any:
+        return self.request("POST", path, **kwargs)
+
+    def put(self, path: str, **kwargs: Any) -> Any:
+        return self.request("PUT", path, **kwargs)
+
+    def patch(self, path: str, **kwargs: Any) -> Any:
+        return self.request("PATCH", path, **kwargs)
+
+    def delete(self, path: str, **kwargs: Any) -> Any:
+        return self.request("DELETE", path, **kwargs)
+
+
+def _query_pairs(query: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    """Flatten a query mapping, dropping ``None`` and expanding sequences.
+
+    ``True``/``False`` render as ``true``/``false`` — Python's ``str(True)`` is
+    ``"True"``, which no JSON server parses as a boolean.
+    """
+    pairs: list[tuple[str, str]] = []
+    for key, value in (query or {}).items():
+        if value is None:
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for item in values:
+            if item is None:
+                continue
+            if isinstance(item, bool):
+                pairs.append((key, "true" if item else "false"))
+            else:
+                pairs.append((key, str(item)))
+    return pairs

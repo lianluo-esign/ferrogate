@@ -6,7 +6,7 @@ path). A Hono streaming proxy that serves the **33 gateway-owned operations** of
 `docs/openapi/runtime-api-contract.json`: 8 inference, 18 assets, and the
 tools/skills/prompts/functions + `/.well-known/agent.json` surface.
 
-Routing and auth are contract-driven: `src/contract.ts` is the 266-operation
+Routing and auth are contract-driven: `src/contract.ts` is the 268-operation
 table, `src/middleware/auth.ts` is the single guard that enforces each
 operation's `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts`
 mounts what this Worker owns. The deployed module list is

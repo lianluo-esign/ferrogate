@@ -1,0 +1,14 @@
+{
+  "name": "ferrogate-sdk-conformance",
+  "private": true,
+  "type": "module",
+  "description": "Drives the DEPLOYED gateway Worker with the OFFICIAL openai / @anthropic-ai/sdk clients inside workerd.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.115.0",
+    "openai": "7.3.0"
+  }
+}

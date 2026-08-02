@@ -1,5 +1,5 @@
 /**
- * This app's slice of the 266-operation runtime API contract.
+ * This app's slice of the 268-operation runtime API contract.
  *
  * `ROUTE-MAP.md` assigns `apps/agent-runtime` **15** operations:
  * `/v1/agent-runs` (1), `/v1/agent-jobs/**` (5), `/v1/agents/**` (3) and the six

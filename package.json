@@ -3,16 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "FerroGate AI Gateway — TypeScript on Cloudflare Workers (Bun + Hono + Zod + Wrangler).",
+  "description": "FerroGate AI Gateway \u2014 TypeScript on Cloudflare Workers (Bun + Hono + Zod + Wrangler).",
   "packageManager": "bun@1.3.14",
   "workspaces": [
     "packages/*",
     "apps/*",
-    "e2e"
+    "e2e",
+    "tools/sdk-conformance",
+    "sdks/typescript"
   ],
   "scripts": {
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
+    "test:sdk-python": "python3 -m unittest discover -s sdks/python",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "build": "bun run --filter '*' build",
     "lint": "biome check .",
@@ -25,8 +28,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@cloudflare/workers-types": "^4.20260702.1",
     "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@playwright/test": "^1.50.0",
     "@types/node": "^22.10.2",
     "typescript": "5.5.4",
