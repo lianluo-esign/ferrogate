@@ -149,9 +149,10 @@ describe("generated clients", () => {
   it("banners every artifact with the one root regeneration command", () => {
     for (const artifact of ARTIFACTS) {
       const committed = readFileSync(path.join(REPO_ROOT, artifact.output), "utf8");
-      expect(committed.startsWith(BANNER), `${artifact.output} does not carry the shared banner`).toBe(
-        true,
-      );
+      expect(
+        committed.startsWith(BANNER),
+        `${artifact.output} does not carry the shared banner`,
+      ).toBe(true);
     }
     expect(BANNER).toContain(GENERATE_COMMAND);
   });
@@ -166,13 +167,20 @@ function isGitIgnored(absolutePath) {
 describe("generation is one command", () => {
   /** Every tracked package.json, as [relative path, parsed]. */
   function trackedPackageJson() {
-    return execFileSync("git", ["ls-files", "--", "package.json", "*/package.json", "*/*/package.json"], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-    })
+    return execFileSync(
+      "git",
+      ["ls-files", "--", "package.json", "*/package.json", "*/*/package.json"],
+      {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      },
+    )
       .split("\n")
       .filter(Boolean)
-      .map((relative) => [relative, JSON.parse(readFileSync(path.join(REPO_ROOT, relative), "utf8"))]);
+      .map((relative) => [
+        relative,
+        JSON.parse(readFileSync(path.join(REPO_ROOT, relative), "utf8")),
+      ]);
   }
 
   it("regenerates every client from the repo root", () => {
@@ -218,11 +226,15 @@ describe("generation is one command", () => {
     // gate's verdict depend on which install it happened to find.
     const pins = new Map();
     for (const [file, pkg] of trackedPackageJson()) {
-      const pin = pkg.devDependencies?.["openapi-typescript"] ?? pkg.dependencies?.["openapi-typescript"];
+      const pin =
+        pkg.devDependencies?.["openapi-typescript"] ?? pkg.dependencies?.["openapi-typescript"];
       if (pin) pins.set(file, pin);
     }
     expect(pins.size, "no package installs openapi-typescript any more").toBeGreaterThan(0);
-    expect(new Set(pins.values()).size, `conflicting pins: ${JSON.stringify(Object.fromEntries(pins))}`).toBe(1);
+    expect(
+      new Set(pins.values()).size,
+      `conflicting pins: ${JSON.stringify(Object.fromEntries(pins))}`,
+    ).toBe(1);
   });
 
   it("passes its own standalone CLI on a clean tree", () => {
@@ -230,6 +242,9 @@ describe("generation is one command", () => {
     // goes through check.mjs rather than Vitest; prove that path too.
     const cli = path.join(REPO_ROOT, "tools", "generated-clients", "check.mjs");
     expect(existsSync(cli)).toBe(true);
-    execFileSync(process.execPath, [cli], { cwd: REPO_ROOT, stdio: ["ignore", "ignore", "inherit"] });
+    execFileSync(process.execPath, [cli], {
+      cwd: REPO_ROOT,
+      stdio: ["ignore", "ignore", "inherit"],
+    });
   });
 });

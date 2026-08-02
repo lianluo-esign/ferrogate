@@ -59,6 +59,15 @@ export const ARTIFACTS = [
     spec: "docs/openapi/admin-api.openapi.json",
     output: "sdks/typescript/src/api-types.generated.ts",
   },
+  {
+    // The one this issue exists for. admin-console is not a Bun workspace (it
+    // is npm/Vite with its own lockfile), so its own guard is unreachable from
+    // root `bun run test`; registering it here is what puts it in front of the
+    // suite everybody actually runs.
+    slug: "admin-console",
+    spec: "docs/openapi/admin-api.openapi.json",
+    output: "admin-console/src/lib/api-types.generated.ts",
+  },
 ];
 
 /** @param {string} slug */
@@ -125,10 +134,14 @@ export function render(artifact) {
     // `process.execPath` is `bun` under the root suite and `node` under
     // admin-console's npm scripts. The CLI is plain JS and both runtimes
     // produce byte-identical output, so the gate cannot flap on who ran it.
-    execFileSync(process.execPath, [resolveGeneratorCli(), path.join(REPO_ROOT, artifact.spec), "-o", tempOut], {
-      cwd: REPO_ROOT,
-      stdio: ["ignore", "ignore", "inherit"],
-    });
+    execFileSync(
+      process.execPath,
+      [resolveGeneratorCli(), path.join(REPO_ROOT, artifact.spec), "-o", tempOut],
+      {
+        cwd: REPO_ROOT,
+        stdio: ["ignore", "ignore", "inherit"],
+      },
+    );
     const text = BANNER + readFileSync(tempOut, "utf8");
     renderedBySpec.set(artifact.spec, text);
     return text;
@@ -160,7 +173,11 @@ export function checkArtifact(artifact) {
 
   const committed = readFileSync(outputPath, "utf8");
   if (committed === expected) {
-    return { slug: artifact.slug, ok: true, reason: `${artifact.output} is in sync with ${artifact.spec}` };
+    return {
+      slug: artifact.slug,
+      ok: true,
+      reason: `${artifact.output} is in sync with ${artifact.spec}`,
+    };
   }
 
   return {

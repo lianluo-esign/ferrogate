@@ -10,7 +10,7 @@
 //
 // Exit 0 = in sync, exit 1 = stale (with the fix instruction on stderr).
 // It never writes to a committed file — regeneration is `bun run generate`.
-import { selectArtifacts, checkArtifact } from "./artifacts.mjs";
+import { checkArtifact, selectArtifacts } from "./artifacts.mjs";
 
 const artifacts = selectArtifacts(process.argv.slice(2));
 let stale = 0;

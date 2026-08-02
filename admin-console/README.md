@@ -66,21 +66,31 @@ npm run build       # tsc -b && vite build && check:bundle, output in dist/
 committed contract `docs/openapi/admin-api.openapi.json`:
 
 ```bash
-npm run generate:api      # openapi-typescript + stamp banner -> api-types.generated.ts
+bun run generate          # PREFERRED, from the repo root: every generated client at once
+npm run generate:api      # the same thing for this client only
 ```
+
+Both go through `tools/generated-clients/`, which since #766 owns the generator
+invocation and the banner for every client generated from that document — this
+console's and `sdks/typescript`'s. Two private pipelines are what let one be
+regenerated and the other forgotten.
 
 Stale-but-still-compilable types slip past `tsc`, so a spec change that lands
 without regenerating silently drifts the client (the regression #379 had to
-clean up). `npm run check:api-types` guards against that: it replays
-`generate:api` into an OS temp file (never touching the committed file) and
-fails when the result differs from the checked-in `api-types.generated.ts`:
+clean up). `npm run check:api-types` guards against that: it renders the
+contract into an OS temp file (never touching the committed file) and fails
+when the result differs from the checked-in `api-types.generated.ts`:
 
 ```bash
-npm run check:api-types   # exit 1 + "run `npm run generate:api` and commit" on drift
+npm run check:api-types   # exit 1 + "run `bun run generate` and commit" on drift
 ```
 
-It runs as a step in `scripts/check-admin-console.sh` (the local/release gate),
-so any contract change must regenerate the client types to pass.
+It runs as a step in `scripts/check-admin-console.sh` (the local/release gate).
+It is ALSO run, on the same code, by root `bun run test` via
+`tools/generated-clients/test/drift.test.mjs` — because this package is not a
+Bun workspace, its own guard was unreachable from the repo root and this client
+went stale twice without a report (#736, #737). A guard nothing runs is not a
+guard.
 
 ## Lint
 
