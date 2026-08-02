@@ -223,6 +223,14 @@
       "group": "admin_config_ops"
     },
     {
+      "pattern": "/admin/v1/provider-credentials",
+      "group": "admin_provider_credential"
+    },
+    {
+      "pattern": "/admin/v1/provider-credentials/{*rest}",
+      "group": "admin_provider_credential"
+    },
+    {
       "pattern": "/admin/v1/providers",
       "group": "admin_provider"
     },
@@ -385,6 +393,14 @@
     {
       "pattern": "/admin/v1/virtual-keys/{*rest}",
       "group": "admin_virtual_key"
+    },
+    {
+      "pattern": "/admin/v1/semantic-cache-policies",
+      "group": "semantic_cache_policy"
+    },
+    {
+      "pattern": "/admin/v1/semantic-cache-policies/{*rest}",
+      "group": "semantic_cache_policy"
     },
     {
       "pattern": "/admin/v1/quota-policies",
@@ -751,6 +767,39 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/provider-credentials",
+      "method": "get",
+      "operation_id": "listProviderCredentials",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/provider-credentials/{alias}",
+      "method": "put",
+      "operation_id": "putProviderCredential",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/provider-credentials/{alias}",
+      "method": "delete",
+      "operation_id": "revokeProviderCredential",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     },
@@ -1704,6 +1753,39 @@
       "path": "/admin/v1/prompt-templates/{id}",
       "method": "delete",
       "operation_id": "archiveAdminPromptTemplate",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/prompt-templates/{id}/labels",
+      "method": "get",
+      "operation_id": "listAdminPromptTemplateLabels",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/prompt-templates/{id}/labels/{label}",
+      "method": "put",
+      "operation_id": "putAdminPromptTemplateLabel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/prompt-templates/{id}/labels/{label}",
+      "method": "delete",
+      "operation_id": "deleteAdminPromptTemplateLabel",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",
@@ -3314,6 +3396,72 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies",
+      "method": "get",
+      "operation_id": "listSemanticCachePolicies",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies",
+      "method": "post",
+      "operation_id": "createSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}",
+      "method": "get",
+      "operation_id": "getSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}",
+      "method": "put",
+      "operation_id": "replaceSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}",
+      "method": "delete",
+      "operation_id": "deleteSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}/invalidate",
+      "method": "post",
+      "operation_id": "invalidateSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     }

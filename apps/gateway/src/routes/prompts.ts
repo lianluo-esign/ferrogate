@@ -58,8 +58,8 @@
  * D1 insert would both carry it. It is called out here rather than silently
  * dropped so the next owner does not assume this route is audited.
  */
-import { type PromptTemplate, type PromptTemplateVersion, promptTemplateSchema } from "@ferrogate/config";
 import type { Context } from "hono";
+import { PromptLabelError } from "@ferrogate/config";
 import { resolveCandidates } from "../inference/defaults.js";
 import { modelsFromEnv } from "../inference/catalog.js";
 import { callerFromAuth } from "../inference/identity.js";
@@ -70,239 +70,108 @@ import {
   callerCanUseProvider,
   scopeCanSeeModel,
 } from "../inference/ports.js";
+import type { PromptLabelBindings } from "../prompts/labels.js";
+import { promptLabelRejection, resolvePromptLabel } from "../prompts/labels.js";
+import {
+  PromptRenderError,
+  type PromptTemplateBindings,
+  findPromptTemplateVersion,
+  parsePromptTemplates,
+  renderPromptTemplate,
+} from "../prompts/template.js";
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
 
-/** JSON array of `PromptTemplate` records — Rust `[[prompt_templates]]`. */
-export const PROMPT_TEMPLATES_VAR = "GATEWAY_PROMPT_TEMPLATES";
+// The renderer moved to `../prompts/template.ts` (#694) so the inference
+// prompt-by-reference expander can reach it without `inference/` importing
+// `routes/`, which already imports `inference/`. Re-exported verbatim: every
+// existing importer and every existing test keeps working, and the module that
+// OWNS the algorithm is now the one with no dependencies on either side.
+export {
+  PROMPT_TEMPLATES_VAR,
+  PromptRenderError,
+  activePromptTemplateVersion,
+  findPromptTemplateVersion,
+  parsePromptTemplates,
+  promptVariableToString,
+  promptVariableValue,
+  renderPromptTemplate,
+  renderPromptText,
+} from "../prompts/template.js";
+export type { PromptTemplateBindings, RenderedPrompt } from "../prompts/template.js";
 
-/** Bindings this module reads on top of `GatewayBindings`. */
-export interface PromptTemplateBindings {
-  readonly GATEWAY_PROMPT_TEMPLATES?: string | undefined;
-}
-
-/** `PromptTemplateRenderRequest`. Both members are `#[serde(default)]`. */
+/**
+ * `PromptTemplateRenderRequest`. All three members are optional.
+ *
+ * `label` is the #694 addition and it is EXCLUSIVE with `revision`: a body
+ * carrying both is a caller who does not know which one they meant, and
+ * silently preferring one would make the other look honoured. See
+ * {@link readRenderRequest}.
+ */
 export interface PromptTemplateRenderRequest {
   readonly variables: Readonly<Record<string, unknown>>;
   readonly revision: number | null;
+  readonly label: string | null;
 }
 
-/** The rendered request body Rust writes back. Shape depends on `target`. */
-export type RenderedPrompt = Record<string, unknown>;
-
-/**
- * Parse the var, fail-closed — same posture and same reasoning as
- * `parseSkillPackages`: a malformed table renders NOTHING (every id 404s)
- * rather than rendering something the operator did not author.
- */
-export function parsePromptTemplates(raw: string | undefined): readonly PromptTemplate[] {
-  if (raw === undefined || raw.trim() === "") return [];
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(decoded)) return [];
-  const templates: PromptTemplate[] = [];
-  for (const entry of decoded) {
-    const parsed = promptTemplateSchema.safeParse(entry);
-    if (parsed.success) templates.push(parsed.data);
-  }
-  return templates;
-}
-
-/**
- * `active_prompt_template_version` — the highest-revision ACTIVE version, and
- * if none is active, the highest-revision version of any status.
- *
- * The fallback is Rust's (`.or_else(|| … max_by_key(revision))`) and it is not
- * dead code: the caller then checks `version.status != Active` and answers
- * `409 prompt_template_version_inactive`. Returning the newest INACTIVE version
- * rather than `None` is what makes the refusal say "the version is inactive"
- * instead of "no such version".
- */
-export function activePromptTemplateVersion(
-  template: PromptTemplate,
-): PromptTemplateVersion | undefined {
-  const highest = (versions: readonly PromptTemplateVersion[]): PromptTemplateVersion | undefined =>
-    versions.reduce<PromptTemplateVersion | undefined>(
-      (best, version) => (best === undefined || version.revision > best.revision ? version : best),
-      undefined,
-    );
-  return highest(template.versions.filter((v) => v.status === "active")) ?? highest(template.versions);
-}
-
-/** `find_prompt_template_version`: an explicit revision, else the active one. */
-export function findPromptTemplateVersion(
-  template: PromptTemplate,
-  revision: number | null,
-): PromptTemplateVersion | undefined {
-  if (revision !== null) {
-    return template.versions.find((version) => version.revision === revision);
-  }
-  return activePromptTemplateVersion(template);
-}
-
-/**
- * `prompt_template_json_value_to_string`.
- *
- * `null` becomes the EMPTY STRING, not the four characters `null` — so a client
- * that sends `{"who": null}` erases the placeholder rather than writing the word
- * "null" into the operator's prompt. Arrays and objects are re-serialized as
- * compact JSON, which is `serde_json::Value::to_string`.
- */
-export function promptVariableToString(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "boolean" || typeof value === "number") return String(value);
-  return JSON.stringify(value);
-}
-
-/** Raised by the renderer; the caller renders it as `400 prompt_template_render_failed`. */
-export class PromptRenderError extends Error {
-  override readonly name = "PromptRenderError";
-}
-
-/**
- * `prompt_template_variable_value`.
- *
- * An UNDECLARED variable is an error even when the client supplied a value:
- * the template's `variables` list is the contract, so `{{secret}}` cannot be
- * smuggled into a prompt by a client that happens to send a `secret` key.
- */
-export function promptVariableValue(
-  template: PromptTemplate,
-  name: string,
-  variables: Readonly<Record<string, unknown>>,
-): string {
-  const declaration = template.variables.find((variable) => variable.name === name);
-  if (declaration === undefined) {
-    throw new PromptRenderError(`prompt variable ${name} is not declared`);
-  }
-  if (Object.hasOwn(variables, name)) {
-    return promptVariableToString(variables[name]);
-  }
-  if (declaration.default !== null) {
-    return declaration.default;
-  }
-  if (declaration.required) {
-    throw new PromptRenderError(`required prompt variable ${name} is missing`);
-  }
-  return "";
-}
-
-/**
- * `render_prompt_template_text` — `{{name}}` substitution, single pass.
- *
- * SINGLE PASS is the security property, not a simplification: the cursor only
- * ever moves FORWARD past a substituted value, so a variable whose value itself
- * contains `{{other}}` is emitted literally and never re-expanded. A recursive
- * renderer would let a client's variable reach a second variable's default.
- *
- * An unterminated `{{` is an error rather than a literal — Rust `bail!`s — so a
- * malformed template fails loudly instead of leaking its own source text.
- */
-export function renderPromptText(
-  template: PromptTemplate,
-  content: string,
-  variables: Readonly<Record<string, unknown>>,
-): string {
-  let rendered = "";
-  let cursor = 0;
-  for (;;) {
-    const start = content.indexOf("{{", cursor);
-    if (start === -1) break;
-    rendered += content.slice(cursor, start);
-    const end = content.indexOf("}}", start + 2);
-    if (end === -1) {
-      throw new PromptRenderError("unclosed prompt variable");
-    }
-    rendered += promptVariableValue(template, content.slice(start + 2, end).trim(), variables);
-    cursor = end + 2;
-  }
-  return rendered + content.slice(cursor);
-}
-
-/**
- * `render_prompt_template` — the rendered request body.
- *
- * `target` decides the member name and nothing else: `chat_completions` emits
- * `messages`, `responses` emits `input`. The three sampling fields are emitted
- * ONLY when the version declares them, so an absent `temperature` stays absent
- * rather than becoming an invented default the provider would then apply.
- */
-export function renderPromptTemplate(
-  template: PromptTemplate,
-  version: PromptTemplateVersion,
-  variables: Readonly<Record<string, unknown>>,
-): RenderedPrompt {
-  const messages = version.messages.map((message) => ({
-    role: message.role,
-    content: renderPromptText(template, message.content, variables),
-  }));
-  const request: Record<string, unknown> = { model: template.model };
-  if (template.target === "responses") {
-    request["input"] = messages;
-  } else {
-    request["messages"] = messages;
-  }
-  if (version.temperature !== null) request["temperature"] = version.temperature;
-  if (version.top_p !== null) request["top_p"] = version.top_p;
-  if (version.max_tokens !== null) request["max_tokens"] = version.max_tokens;
-  return request;
-}
+/** The one message every malformed body gets, so the shape is never inferable. */
+const INVALID_RENDER_BODY =
+  "request body must be JSON with variables and an optional revision or label";
 
 /**
  * `PromptTemplateRenderRequest` off the wire.
  *
- * An EMPTY body is `{ variables: {}, revision: null }`, not a 400 — Rust checks
- * `body.is_empty()` first, so `POST` with no body renders the active version
- * with defaults. Anything present but not a JSON object is
+ * An EMPTY body is `{ variables: {}, revision: null, label: null }`, not a 400 —
+ * Rust checks `body.is_empty()` first, so `POST` with no body renders the active
+ * version with defaults. Anything present but not a JSON object is
  * `400 invalid_request_body`.
  */
 async function readRenderRequest(c: Context<GatewayEnv>): Promise<PromptTemplateRenderRequest> {
   const raw = await c.req.text();
   if (raw.trim() === "") {
-    return { variables: {}, revision: null };
+    return { variables: {}, revision: null, label: null };
   }
   let decoded: unknown;
   try {
     decoded = JSON.parse(raw);
   } catch {
-    throw new HttpError(
-      400,
-      "invalid_request_body",
-      "request body must be JSON with variables and optional revision",
-    );
+    throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
   }
   if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
-    throw new HttpError(
-      400,
-      "invalid_request_body",
-      "request body must be JSON with variables and optional revision",
-    );
+    throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
   }
   const body = decoded as Record<string, unknown>;
   const variables = body["variables"];
   const revision = body["revision"];
+  const label = body["label"];
   if (variables !== undefined && (typeof variables !== "object" || variables === null || Array.isArray(variables))) {
-    throw new HttpError(
-      400,
-      "invalid_request_body",
-      "request body must be JSON with variables and optional revision",
-    );
+    throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
   }
   if (revision !== undefined && revision !== null && !Number.isInteger(revision)) {
+    throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
+  }
+  if (label !== undefined && label !== null && typeof label !== "string") {
+    throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
+  }
+  // EXCLUSIVE, not "label wins" or "revision wins". A body naming both is a
+  // caller who does not know which one they meant, and either precedence rule
+  // makes the ignored one look honoured — which is how a rollback lands on the
+  // revision it was rolling back FROM.
+  if (
+    typeof revision === "number" &&
+    typeof label === "string" &&
+    label.trim() !== ""
+  ) {
     throw new HttpError(
       400,
       "invalid_request_body",
-      "request body must be JSON with variables and optional revision",
+      "request body must not name both a revision and a label",
     );
   }
   return {
     variables: (variables as Record<string, unknown> | undefined) ?? {},
     revision: typeof revision === "number" ? revision : null,
+    label: typeof label === "string" && label.trim() !== "" ? label : null,
   };
 }
 
@@ -323,6 +192,38 @@ const NO_CREDENTIAL: AuthContext = {
   platformOperator: false,
   source: "static_config",
 };
+
+/**
+ * Resolve a label to a revision, turning every failure into an HTTP refusal.
+ *
+ * There is no fallback arm on purpose. "Label not found ⇒ render the active
+ * revision" would be a 200 carrying a prompt the operator did not deploy, and
+ * "label not found ⇒ render nothing" would be a 200 carrying an empty system
+ * prompt. Both are invisible until the output quality or the bill moves, which
+ * is precisely the failure mode #694 exists to remove.
+ */
+async function labelledRevision(
+  c: Context<GatewayEnv>,
+  scope: Parameters<typeof resolvePromptLabel>[1],
+  templateId: string,
+  label: string,
+): Promise<number> {
+  try {
+    const pointer = await resolvePromptLabel(
+      c.env as PromptLabelBindings | undefined,
+      scope,
+      templateId,
+      label,
+    );
+    return pointer.revision;
+  } catch (error) {
+    if (error instanceof PromptLabelError) {
+      const rejection = promptLabelRejection(error);
+      throw new HttpError(rejection.status, rejection.code, rejection.message);
+    }
+    throw error;
+  }
+}
 
 /** The `renderPromptTemplate` operation handler. */
 export async function renderPromptTemplateHandler(c: Context<GatewayEnv>): Promise<Response> {
@@ -389,7 +290,15 @@ export async function renderPromptTemplateHandler(c: Context<GatewayEnv>): Promi
     throw new HttpError(409, "prompt_template_inactive", `prompt template ${id} is not active`);
   }
 
-  const version = findPromptTemplateVersion(template, request.revision);
+  // --- label resolution, at the EDGE -------------------------------------
+  // AFTER the model ladder and the template-status gate, for the same reason
+  // those come first: a caller who may not use this template must not learn
+  // which labels it has. The pointer read is one KV `get` against a key derived
+  // from the AUTHENTICATED caller's scope, so a tenant cannot reach another
+  // tenant's pointer by naming the same template id and label.
+  const revision = request.label === null ? request.revision : await labelledRevision(c, caller.scope, id, request.label);
+
+  const version = findPromptTemplateVersion(template, revision);
   if (version === undefined) {
     throw new HttpError(
       404,

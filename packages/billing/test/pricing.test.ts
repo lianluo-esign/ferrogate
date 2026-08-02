@@ -50,7 +50,17 @@ describe("credits + egress", () => {
     const b = PriceBook.withDefaultRateCard();
     expect(b.egress_price_per_gb).toBe(DEFAULT_EGRESS_PRICE_PER_GB);
     expect(b.egressCostUsd(2_000_000_000)!).toBeGreaterThan(0);
-    expect(b.priceFor("token4ai", "gpt-4o-mini")).toEqual(modelPriceUsd(0.15, 0.6));
+    // CHANGED BY #667. This was `toEqual(modelPriceUsd(0.15, 0.6))` — a
+    // whole-object equality that also asserted the entry carries NO other
+    // fields, which is exactly the assertion that had to move once the default
+    // card started stating each family's published cache-read multiplier. The
+    // two base rates, which are what this egress test is actually about, are
+    // asserted unchanged; the cache rates have their own golden test in
+    // `./cached-tokens.test.ts`.
+    const mini = b.priceFor("token4ai", "gpt-4o-mini");
+    expect(mini?.input_price_per_1m).toBe(0.15);
+    expect(mini?.output_price_per_1m).toBe(0.6);
+    expect(mini?.currency).toBe(modelPriceUsd(0.15, 0.6).currency);
   });
 });
 

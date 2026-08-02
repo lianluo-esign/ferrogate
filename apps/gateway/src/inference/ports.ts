@@ -45,6 +45,7 @@
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
+import type { ByokPorts, ByokPortsFactory } from "./byok.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
 import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
@@ -124,6 +125,18 @@ export interface PhysicalRoute {
   /** Provider credential. Resolved from Secrets Store in production. */
   readonly apiKey?: string | undefined;
   /**
+   * The PER-ROUTE BYOK alias (issue #682) — `[[providers]].byok_alias`.
+   *
+   * Present ⇒ this route prefers the CALLING TENANT's own credential registered
+   * under that alias, resolved per request by `./byok.ts`. It holds an alias,
+   * never a credential and never a tenant: the tenant is the authenticated
+   * caller's, so the same route serves every tenant with that tenant's own key.
+   *
+   * A route that names an alias the caller has not registered is served with NO
+   * credential rather than with the platform's — see `applyByokOverride`.
+   */
+  readonly byokAlias?: string | undefined;
+  /**
    * `ProviderConfig.aws_credentials` — required by the `bedrock` family and
    * unread by every other one. Absent for a Bedrock route means the adapter
    * fails closed at request-preparation time rather than sending an unsigned
@@ -166,6 +179,20 @@ export interface PhysicalRoute {
   readonly inputPricePer1m?: number | undefined;
   /** `ModelRoute.output_price_per_1m` — USD per 1,000,000 COMPLETION tokens. */
   readonly outputPricePer1m?: number | undefined;
+  /**
+   * `ModelRoute.cached_input_price_per_1m` — USD per 1M CACHE-READ prompt
+   * tokens (issue #667).
+   *
+   * Unlike the two rates above, these three are read ONLY by settlement
+   * (`metering/route-price.ts`), never by routing: a cache-read discount is a
+   * property of a request that has already happened, and the router chooses
+   * before it knows whether the prompt will hit the cache.
+   */
+  readonly cachedInputPricePer1m?: number | undefined;
+  /** `ModelRoute.cache_write_price_per_1m` — USD per 1M CACHE-WRITE prompt tokens. */
+  readonly cacheWritePricePer1m?: number | undefined;
+  /** `ModelRoute.reasoning_price_per_1m` — USD per 1M reasoning tokens. */
+  readonly reasoningPricePer1m?: number | undefined;
   /**
    * `ModelRegistryEntry.routing_strategy` — the order the ladder walks the
    * eligible candidates in (`strategy.ts`).
@@ -439,6 +466,21 @@ export interface Usage {
   readonly promptTokens?: number | undefined;
   readonly completionTokens?: number | undefined;
   readonly totalTokens?: number | undefined;
+  /**
+   * Prompt tokens served from a prompt cache — a SUBSET of {@link promptTokens}
+   * (issue #667).
+   *
+   * The subset normalization and each vendor's conversion onto it are documented
+   * on `./usage.ts::ProviderUsage`. What matters HERE is that `promptTokens`
+   * remains the WHOLE billable input on every family, so a consumer that ignores
+   * this field still bills a correct total — it simply bills the cached portion
+   * at the fresh rate instead of the cached one.
+   */
+  readonly cachedInputTokens?: number | undefined;
+  /** Prompt tokens written INTO a prompt cache — a SUBSET of {@link promptTokens}. */
+  readonly cacheWriteTokens?: number | undefined;
+  /** Reasoning/thinking tokens — a SUBSET of {@link completionTokens}. */
+  readonly reasoningTokens?: number | undefined;
   /** `/v1/images/generations` settles on the image count, not tokens (issue #275). */
   readonly imageCount?: number | undefined;
   /** Caller-supplied request tags (issue #171), already bounds-checked. */
@@ -488,6 +530,24 @@ export interface Usage {
   readonly inputPricePer1m?: number | undefined;
   /** See {@link Usage.inputPricePer1m} — USD per 1M completion tokens. */
   readonly outputPricePer1m?: number | undefined;
+  /**
+   * `[[models]].cached_input_price_per_1m` — USD per 1M CACHE-READ prompt
+   * tokens (issue #667). Absent ⇒ cache reads settle at
+   * {@link Usage.inputPricePer1m}.
+   *
+   * The fallback direction is deliberate and is the same one the rate card
+   * takes: a row that states no cached rate has NOT stated a discount, and
+   * inventing one would shrink an invoice by a number no operator chose. The
+   * cost of the conservative choice is that a cache-heavy Anthropic call on a
+   * row-priced model bills its cache reads at the fresh rate until the operator
+   * states the discount — visible, and correctable in config, which is exactly
+   * what an invisible discount would not be.
+   */
+  readonly cachedInputPricePer1m?: number | undefined;
+  /** `[[models]].cache_write_price_per_1m` — USD per 1M CACHE-WRITE prompt tokens. */
+  readonly cacheWritePricePer1m?: number | undefined;
+  /** `[[models]].reasoning_price_per_1m` — USD per 1M reasoning tokens. */
+  readonly reasoningPricePer1m?: number | undefined;
 }
 
 /**
@@ -536,7 +596,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 252
+ * enforcement belong to the ONE contract-driven middleware that covers all 264
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
@@ -772,7 +832,15 @@ export interface InferenceDeps {
    */
   readonly models?: ModelResolver | ModelResolverFactory;
   readonly adapters?: AdapterRegistry;
-  readonly dispatcher?: UpstreamDispatcher;
+  /**
+   * The provider egress, or a factory resolved per Worker `env` — the same
+   * shape `circuit` / `shadowBudget` / `workflows` use, and for the same
+   * reason: the `AI` binding the `workers-ai` family dispatches through only
+   * exists per request, while this deps object is built once per router
+   * (issue #673). Absent ⇒ `dispatcherFromEnv`, i.e. `fetch` for every family
+   * plus the `env.AI` short-circuit for Workers AI.
+   */
+  readonly dispatcher?: UpstreamDispatcher | ((env: InferenceBindings) => UpstreamDispatcher);
   readonly usage?: UsageSink;
   readonly normalizers?: StreamNormalizers;
   readonly translator?: AnthropicTranslator;
@@ -835,6 +903,16 @@ export interface InferenceDeps {
    * than a sleep.
    */
   readonly nowUnixSeconds?: () => number;
+  /**
+   * Per-tenant BYOK (issue #682) — the alias store plus the fleet master
+   * keyring. Absent ⇒ built per Worker `env` by `byok.ts::byokPortsFromEnv`
+   * (CONTROL_DB + FERROGATE_BYOK_MASTER_KEY), and `null` there when the
+   * deployment has not enabled BYOK.
+   *
+   * `null` explicitly turns it OFF even on a deployment that has both bindings,
+   * which is what lets a test assert the pre-#682 behaviour is untouched.
+   */
+  readonly byok?: ByokPorts | ByokPortsFactory | null;
 }
 
 /** Fully-populated deps, after `defaults.ts` has filled the blanks. */
@@ -855,4 +933,6 @@ export interface ResolvedInferenceDeps {
   readonly workflows: WorkflowCatalogSource;
   readonly workflowHistory: WorkflowRunHistory;
   readonly nowUnixSeconds: () => number;
+  /** `null` = BYOK is not enabled on this deployment. */
+  readonly byok: ByokPorts | null;
 }

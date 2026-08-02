@@ -33,6 +33,7 @@ const BASE: CacheKeyInput = {
   requestBody: { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
   guardrailPolicyFingerprint: "gfp-1",
   registryFingerprint: "rfp-1",
+  governanceFingerprint: "epoch=0|mode=semantic|threshold=0.92|ttl=300",
 };
 
 /** Every field, with a value that differs from {@link BASE}. */
@@ -53,6 +54,25 @@ const VARIANTS: ReadonlyArray<[string, Partial<CacheKeyInput>]> = [
   ["requestBody", { requestBody: { model: "gpt-4o-mini", messages: [] } }],
   ["guardrailPolicyFingerprint", { guardrailPolicyFingerprint: "gfp-2" }],
   ["registryFingerprint", { registryFingerprint: "rfp-2" }],
+  // #695. Three separate rows rather than one, because these are three
+  // DIFFERENT governance changes and each has to rotate the key on its own:
+  // an explicit purge, a threshold the tenant tuned, and the mode they chose.
+  // One combined row would stay green if two of the three fell out of the
+  // fingerprint, which is exactly the shape a later refactor would produce.
+  [
+    "governanceFingerprint → invalidation epoch",
+    { governanceFingerprint: "epoch=1|mode=semantic|threshold=0.92|ttl=300" },
+  ],
+  [
+    "governanceFingerprint → similarity threshold",
+    { governanceFingerprint: "epoch=0|mode=semantic|threshold=0.6|ttl=300" },
+  ],
+  [
+    "governanceFingerprint → mode",
+    {
+      governanceFingerprint: "epoch=0|mode=exact_match|threshold=0.92|ttl=300",
+    },
+  ],
 ];
 
 describe("aiResponseCacheKey", () => {

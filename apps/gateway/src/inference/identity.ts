@@ -6,7 +6,7 @@
  *
  * `inferenceRouteModule` delegates by calling `inner.fetch(c.req.raw, c.env,
  * ctx)`. That is deliberate — it is what keeps ROUTE-MAP invariant 1 (one
- * table-driven auth guard for all 252 operations) intact, because the inner app
+ * table-driven auth guard for all 264 operations) intact, because the inner app
  * carries no auth of its own. But `inner.fetch` starts a FRESH Hono context, so
  * everything the outer middleware chain resolved onto `c` — `c.get("auth")`
  * from `contractAuth`, the merged quota windows from `rateLimit()` — is
@@ -177,7 +177,47 @@ export interface InferenceRequestScope {
   readonly caller?: Caller | undefined;
   /** The TPM window `rateLimit()` resolved on the outer context. */
   readonly tokens?: TokenGovernor | undefined;
+  /**
+   * #664 — where the inference path reports the facts a REQUEST LOG needs, and
+   * which only this app knows: the physical route it chose, the provider model
+   * it actually called, and the tokens the provider reported.
+   *
+   * It travels on the scope for exactly the reason `caller` and `tokens` do —
+   * `inner.fetch` opens a fresh Hono context, so the outer middleware that
+   * WRITES the row cannot see anything this app sets on its own `c`. Passing a
+   * callback rather than importing the request-log module here keeps the
+   * dependency pointing outward: `src/requestlog/` knows about inference, and
+   * inference knows only that someone wants to be told.
+   *
+   * Optional, and a no-op when absent, so an inner-app unit test that builds
+   * `createInferenceRouter` directly is unaffected.
+   */
+  readonly log?: ((facts: InferenceLogFacts) => void) | undefined;
 }
+
+/**
+ * The facts the inference path contributes to a request log.
+ *
+ * Structurally a subset of `src/requestlog/facts.ts::RequestLogFacts` and
+ * declared separately on purpose: this module must not import the request-log
+ * slice (see {@link InferenceRequestScope.log}), and the compiler still checks
+ * the two agree at the one place they meet, `route-module.ts`.
+ */
+export interface InferenceLogFacts {
+  /** The Rust route label, e.g. `openai.chat.completions`. */
+  readonly route?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly logicalModel?: string | undefined;
+  readonly providerModel?: string | undefined;
+  readonly promptTokens?: number | undefined;
+  readonly completionTokens?: number | undefined;
+  readonly totalTokens?: number | undefined;
+  readonly streamed?: boolean | undefined;
+  readonly providerAttemptIndex?: number | undefined;
+}
+
+/** A `log` sink for a request nobody is logging. */
+export const noInferenceLog: (facts: InferenceLogFacts) => void = () => undefined;
 
 const SCOPES = new WeakMap<Request, InferenceRequestScope>();
 

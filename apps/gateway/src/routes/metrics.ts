@@ -80,10 +80,11 @@
 import {
   type GatewayMetricsSnapshot,
   defaultGatewayMetricsSnapshot,
+  renderCacheTenantText,
   renderPrometheusText,
 } from "@ferrogate/observability";
 import type { Context, MiddlewareHandler } from "hono";
-import { responseCacheMetrics } from "../cache/metrics.js";
+import { responseCacheMetrics, responseCacheTenantMetrics } from "../cache/metrics.js";
 import type { GatewayEnv } from "../ports.js";
 import { SERVICE_NAME } from "./service.js";
 
@@ -163,9 +164,27 @@ export function requestMetrics(): MiddlewareHandler<GatewayEnv> {
   };
 }
 
-/** `handle_metrics` — render this isolate's snapshot. */
+/**
+ * `handle_metrics` — render this isolate's snapshot.
+ *
+ * Two blocks, because they have two different SHAPES, not because they have two
+ * different sources. `renderPrometheusText` renders the flat scalar bag;
+ * `renderCacheTenantText` renders the variable-length per-tenant cache family
+ * (#695), whose accumulator lives in `src/cache/metrics.ts` and whose label
+ * cardinality is bounded there.
+ *
+ * The APPEND is the wiring, and it is the thing that rots: this package already
+ * carries one labelled renderer — `renderUnjoinableActionsText` — that nothing
+ * in the fleet calls, so its series have never appeared on a scrape.
+ * `test/cache/telemetry.test.ts` drives `GET /metrics` and asserts the
+ * per-tenant series are present, so deleting this concatenation fails a test
+ * rather than silently emptying a dashboard.
+ */
 export function metricsHandler(c: Context<GatewayEnv>): Response {
-  return new Response(renderPrometheusText(gatewayMetricsSnapshot()), {
+  const body =
+    renderPrometheusText(gatewayMetricsSnapshot()) +
+    renderCacheTenantText(responseCacheTenantMetrics());
+  return new Response(body, {
     status: 200,
     headers: { "content-type": PROMETHEUS_CONTENT_TYPE },
   });

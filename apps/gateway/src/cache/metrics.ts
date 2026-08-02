@@ -53,22 +53,109 @@ let hits = 0;
 let misses = 0;
 let semanticHits = 0;
 
-/** Rust `AppState::record_ai_cache_hit`. Both kinds of hit reach it. */
-export function recordCacheHit(): void {
+// ---------------------------------------------------------------------------
+// PER-TENANT totals — the hit rate a tenant can actually act on (#695)
+// ---------------------------------------------------------------------------
+
+/**
+ * One governed scope's cache outcomes.
+ *
+ * The three deployment-wide counters above answer "is the cache working"; they
+ * cannot answer "is it working FOR ME", which is the question a tenant tuning
+ * their own similarity threshold is asking and the reason #695 lists hit-rate
+ * telemetry beside the tunable. A single deployment number also hides the case
+ * that matters most: one tenant's traffic being entirely uncacheable while the
+ * aggregate looks healthy.
+ */
+export interface CacheTenantMetric {
+  readonly tenant: string;
+  readonly hits: number;
+  readonly misses: number;
+  readonly semanticHits: number;
+  /** `hits / (hits + misses)`, or 0 when nothing has been observed. */
+  readonly hitRatio: number;
+}
+
+interface TenantCounters {
+  hits: number;
+  misses: number;
+  semanticHits: number;
+}
+
+/**
+ * The cardinality bound, and why there is one at all.
+ *
+ * A Prometheus label whose value is a tenant id is unbounded by construction,
+ * and an unbounded label set is how a metrics endpoint takes down the thing it
+ * is monitoring. Issue #500's low-cardinality rule is the tree's standing
+ * answer; this is that rule applied. Past the bound new tenants are folded into
+ * {@link CACHE_TENANT_OVERFLOW} rather than dropped, so the deployment totals
+ * derived from these series still add up — a silently dropped tenant would make
+ * the per-tenant view disagree with the aggregate one, which is worse than a
+ * coarse bucket.
+ */
+export const CACHE_TENANT_LABEL_LIMIT = 64;
+export const CACHE_TENANT_OVERFLOW = "__other__";
+
+/** Credentials with no tenancy (a static operator key) share one label. */
+export const CACHE_TENANT_UNSCOPED = "__unscoped__";
+
+const tenantCounters = new Map<string, TenantCounters>();
+
+function countersFor(tenant: string | null | undefined): TenantCounters {
+  const label =
+    tenant === null || tenant === undefined || tenant === "" ? CACHE_TENANT_UNSCOPED : tenant;
+  const existing = tenantCounters.get(label);
+  if (existing !== undefined) return existing;
+  const key = tenantCounters.size >= CACHE_TENANT_LABEL_LIMIT ? CACHE_TENANT_OVERFLOW : label;
+  const created = tenantCounters.get(key) ?? { hits: 0, misses: 0, semanticHits: 0 };
+  tenantCounters.set(key, created);
+  return created;
+}
+
+/**
+ * Rust `AppState::record_ai_cache_hit`. Both kinds of hit reach it.
+ *
+ * `tenant` is optional so the deployment-wide counters keep their pre-#695
+ * call shape; the middleware always passes the AUTHENTICATED tenancy, never
+ * anything a client asserted.
+ */
+export function recordCacheHit(tenant?: string | null): void {
   hits += 1;
+  countersFor(tenant).hits += 1;
 }
 
 /** Rust `AppState::record_ai_cache_miss`. */
-export function recordCacheMiss(): void {
+export function recordCacheMiss(tenant?: string | null): void {
   misses += 1;
+  countersFor(tenant).misses += 1;
 }
 
 /**
  * Rust `AppState::record_semantic_cache_hit` (`state_routing.rs:367`), called
  * from inside `lookup_semantic_response_cache` on a similarity hit only.
  */
-export function recordSemanticCacheHit(): void {
+export function recordSemanticCacheHit(tenant?: string | null): void {
   semanticHits += 1;
+  countersFor(tenant).semanticHits += 1;
+}
+
+/** Per-tenant totals, sorted so the exposition is stable across scrapes. */
+export function responseCacheTenantMetrics(): readonly CacheTenantMetric[] {
+  return [...tenantCounters.entries()]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([tenant, counters]) => {
+      const looked = counters.hits + counters.misses;
+      return {
+        tenant,
+        hits: counters.hits,
+        misses: counters.misses,
+        semanticHits: counters.semanticHits,
+        // 0 rather than NaN for an untouched tenant: NaN renders as `NaN` in
+        // the Prometheus text format and poisons every aggregation over it.
+        hitRatio: looked === 0 ? 0 : counters.hits / looked,
+      };
+    });
 }
 
 /** This isolate's counters, in the shape the exporters render. */
@@ -85,4 +172,5 @@ export function resetResponseCacheMetrics(): void {
   hits = 0;
   misses = 0;
   semanticHits = 0;
+  tenantCounters.clear();
 }

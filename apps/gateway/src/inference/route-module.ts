@@ -37,6 +37,7 @@ import {
   settleTokenUsage,
 } from "../ratelimit/middleware.js";
 import type { TokenAdmission } from "../ratelimit/ports.js";
+import { contributeRequestLogFacts } from "../requestlog/facts.js";
 import {
   GatewayRouter,
   INFERENCE_OPERATION_IDS,
@@ -210,12 +211,20 @@ function emitInferenceTelemetry(
  */
 function publishRequestScope(c: Context<GatewayEnv>): void {
   const auth = c.get("auth");
-  setInferenceRequestScope(c.req.raw, {
+  const request = c.req.raw;
+  setInferenceRequestScope(request, {
     // `auth` is absent only for a contract-`anonymous` operation, which none of
     // the seven inference operations is; leaving it undefined keeps the injected
     // `deps.caller` in charge rather than fabricating an identity.
     ...(auth === null || auth === undefined ? {} : { caller: callerFromAuth(auth) }),
     tokens: honoTokenGovernor(c),
+    // #664 — the request log's model/provider/token facts. `request` is the
+    // OUTER inbound `Request`, which is both the key the fact collector uses
+    // and the object `requestLogging()` reads back on the way out; the inner
+    // app's own `c.req.raw` is a DIFFERENT object by the time the handlers run
+    // (`readInferenceBody()` re-presents it), which is why the identity is
+    // captured here rather than inside the callback.
+    log: (facts) => contributeRequestLogFacts(request, facts),
   });
 }
 

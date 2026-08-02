@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 252-operation runtime API contract, as a
+ * The control-plane slice of the 264-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -13,7 +13,7 @@
  *     one source of truth, no generated copy that can drift;
  *  2. validate it eagerly at module load (throw, mirroring the Rust panic);
  *  3. expose lookup by `(method, path)`, by `operation_id`, and by contract
- *     `group`, restricted to the 197 operations `ROUTE-MAP.md` assigns to
+ *     `group`, restricted to the 209 operations `ROUTE-MAP.md` assigns to
  *     `apps/control-plane`.
  *
  * `matchit`'s radix tree is re-implemented as a specificity-ranked segment
@@ -116,14 +116,22 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 252;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 264;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
- * (192) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
+ * (204) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
  * `GET /metrics` (5).
+ *
+ * 200 -> 209, and neither parent's number is right. From the 200 both sides
+ * branched at, `origin/main` reached 203 with the three
+ * `/admin/v1/provider-credentials*` BYOK-alias operations (issue #682), while
+ * this branch reached 206 with the six `/admin/v1/semantic-cache-policies/**`
+ * operations (issue #695). Both sets landed, so the merged figure is
+ * 200 + 3 + 6 = 209 — re-derived by counting `/admin/v1/` paths in
+ * `docs/openapi/runtime-api-contract.json`, not taken from either parent.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 197;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 209;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate
@@ -410,10 +418,10 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 252). */
+/** Every operation in the document, in document order (all 264). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
-/** The operations this Worker owns, in document order (197). */
+/** The operations this Worker owns, in document order (209). */
 export const CONTROL_PLANE_OPERATIONS: readonly ApiOperation[] = CONTRACT.owned;
 
 /** Owned operations, keyed by contract `group` (`rbac`, `billing`, `wallets`, …). */
@@ -422,7 +430,7 @@ export const OPERATIONS_BY_GROUP: ReadonlyMap<string, readonly ApiOperation[]> =
 /** Every group this Worker owns at least one operation in, sorted. */
 export const CONTROL_PLANE_GROUPS: readonly string[] = [...CONTRACT.byGroup.keys()].sort();
 
-/** Lookup by `operation_id` — across ALL 252, so a mis-assignment is visible. */
+/** Lookup by `operation_id` — across ALL 264, so a mis-assignment is visible. */
 export function operationById(operationId: string): ApiOperation | undefined {
   return CONTRACT.byOperationId.get(operationId);
 }

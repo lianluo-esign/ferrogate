@@ -17,7 +17,7 @@
  * authenticates with `api-key`), which is precisely why aliasing them was
  * refused before they were ported.
  *
- * ALL EIGHT families are resolvable. The other three — `gemini`, `bedrock` and
+ * ALL NINE families are resolvable. Three — `gemini`, `bedrock` and
  * `vertex` — are not re-written here: they are `@ferrogate/providers`'
  * `GeminiAdapter`, `BedrockAdapter` (SigV4) and `VertexAiAdapter` (a pre-minted
  * GCP OAuth2 access token), the ports of `gemini.rs` / `bedrock.rs` /
@@ -25,6 +25,11 @@
  * {@link packageProviderAdapter} — which is the same crate boundary the Rust
  * has. Writing a second translation for any of them in this file would be the
  * duplication the port rules forbid.
+ *
+ * The NINTH family, `workers-ai`, is the one with no Rust ancestor at all — a
+ * Rust process has no `env.AI`. It is wrapped from `@ferrogate/providers` the
+ * same way (issue #673); see {@link workersAiAdapter}, and `./workers-ai.ts`
+ * for the binding that serves it without leaving Cloudflare.
  *
  * Bedrock and Vertex needed a COMPOSITE credential rather than the single
  * opaque `apiKey` string every other family carries, which is the only reason
@@ -48,6 +53,7 @@ import {
   structuredOutputFromChatBody,
   structuredOutputFromResponsesBody,
   VertexAiAdapter,
+  WorkersAiAdapter,
 } from "@ferrogate/providers";
 import type {
   Json,
@@ -187,6 +193,12 @@ export const PROVIDER_ADAPTER_FAMILIES: ReadonlyArray<{
   { canonicalKind: "azure-openai", aliases: ["azure"] },
   { canonicalKind: "bedrock", aliases: ["aws-bedrock"] },
   { canonicalKind: "vertex", aliases: ["vertex-ai"] },
+  // The ninth family (issue #673). It has no Rust ancestor, so this row is not
+  // a port of a `SUPPORTED_PROVIDER_ADAPTER_FAMILIES` entry — it is the same
+  // table as `@ferrogate/providers`' and MUST stay identical to it, which
+  // `test/inference/provider-families.test.ts` and `catalog.ts`'s fail-closed
+  // `unsupported kind` check both depend on.
+  { canonicalKind: "workers-ai", aliases: ["cloudflare-workers-ai", "cf-workers-ai", "workersai"] },
 ];
 
 /** `canonical_provider_adapter_family` — trimmed, ASCII-case-insensitive. */
@@ -936,6 +948,25 @@ export const vertexAdapter: ProviderAdapter = packageProviderAdapter(
   new VertexAiAdapter(),
 );
 
+/**
+ * `workers-ai` — `@ferrogate/providers`' `WorkersAiAdapter` (issue #673), the
+ * ninth family and the only one with no Rust ancestor.
+ *
+ * Wrapped here, through `packageProviderAdapter`, because THIS is the registry
+ * the deployed data plane resolves against. `packages/providers`'
+ * `ProviderAdapterRegistry` also knows the family, but its header records that
+ * nothing in `apps/gateway` constructs it for dispatch — a ninth family added
+ * only there would answer `unsupported provider kind` on every real request.
+ *
+ * The prepared request addresses Workers AI's REST run surface. Whether it is
+ * SERVED over the network or short-circuited through the `env.AI` binding is
+ * the dispatcher's decision, not the adapter's — see `./workers-ai.ts`.
+ */
+export const workersAiAdapter: ProviderAdapter = packageProviderAdapter(
+  "workers-ai",
+  new WorkersAiAdapter(),
+);
+
 /** `ferrogate_providers::registry` — kind → adapter, alias-aware. */
 export const defaultAdapterRegistry: AdapterRegistry = {
   adapterFor(providerKind: string): ProviderAdapter | null {
@@ -957,6 +988,8 @@ export const defaultAdapterRegistry: AdapterRegistry = {
         return bedrockAdapter;
       case "vertex":
         return vertexAdapter;
+      case "workers-ai":
+        return workersAiAdapter;
       default:
         // `canonicalProviderKind` returned `null`: the operator named a family
         // that does not exist in `PROVIDER_ADAPTER_FAMILIES`. The handler

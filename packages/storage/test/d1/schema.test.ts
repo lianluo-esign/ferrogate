@@ -240,6 +240,12 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
   });
 
   test("usage_monthly_rollups", async () => {
+    // The last three names were APPENDED by `0002_cached_reasoning_tokens.sql`
+    // (#667). This list is order-sensitive on purpose, and the order is the
+    // evidence: `ALTER TABLE ... ADD COLUMN` appends, so seeing them anywhere
+    // but at the end would mean someone edited `0001_init_tenant.sql` in place
+    // — which would leave every already-migrated database disagreeing with the
+    // committed schema while this test still passed.
     expect(await columnNames(env.TENANT_DB_A, "usage_monthly_rollups")).toEqual([
       "id",
       "period_month",
@@ -252,6 +258,9 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
       "request_count",
       "error_count",
       "updated_at_unix",
+      "cached_input_tokens",
+      "cache_write_tokens",
+      "reasoning_tokens",
     ]);
   });
 

@@ -25,6 +25,7 @@ import {
   createFetchGatewayClient,
   createNodeIo,
   createNodeKeyHasher,
+  runtimeConfigTextParsers,
 } from "./ports.js";
 import type { CliRuntime, CommandNode } from "./runtime.js";
 import { findChild } from "./runtime.js";
@@ -47,6 +48,10 @@ export function createDefaultRuntime(): CliRuntime {
     contextStorage: createFileContextStorage(io),
     configValidator: createFerrogateConfigValidator(),
     keyHasher: createNodeKeyHasher(),
+    // The SAME `Bun.TOML`/`Bun.YAML` seam the config validator uses, so
+    // `ferrogate apply -f x.yaml` and `ferrogate validate -c x.yaml` agree on
+    // what "this runtime can read YAML" means.
+    documentParsers: runtimeConfigTextParsers(),
   };
 }
 

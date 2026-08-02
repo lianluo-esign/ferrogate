@@ -32,7 +32,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 252 operations, and duplicating a per-route
+ * table-driven middleware for all 264 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -48,6 +48,7 @@ import {
   servableCandidates,
 } from "./candidates.js";
 import type { ModelEndpointKind } from "./candidates.js";
+import { byokScopedModels } from "./byok.js";
 import { resolveCandidates, resolveDeps } from "./defaults.js";
 import { dispatchWithFailover } from "./reliability.js";
 import type { AttemptCandidate } from "./reliability.js";
@@ -73,8 +74,9 @@ import {
   genAiOperationForRouteLabel,
   observeGenAiInvocation,
 } from "../telemetry/genai.js";
-import { inferenceRequestScope, unmeteredTokenGovernor } from "./identity.js";
-import type { TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
+import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { expandPromptReference } from "./prompt-reference.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -139,7 +141,13 @@ export interface InferenceEnv {
      */
     inferenceTokens: TokenGovernor;
     /**
-     * The INBOUND `Request` object, captured before {@link readInferenceBody}
+     * #664 — where this app reports the facts a REQUEST LOG needs, bound to the
+     * OUTER request (see `./identity.ts`). Inert when the inner router is
+     * driven directly, exactly like {@link inferenceTokens}.
+     */
+    inferenceLog: (facts: InferenceLogFacts) => void;
+
+    /**
      * replaces `c.req.raw`.
      *
      * #669. The GenAI observation seam (`src/telemetry/genai.ts`) is a
@@ -938,10 +946,25 @@ function workflowConstraintOf(gate: WorkflowGateOutcome): WorkflowProviderConstr
 function routePricing(route: PhysicalRoute): {
   inputPricePer1m?: number;
   outputPricePer1m?: number;
+  cachedInputPricePer1m?: number;
+  cacheWritePricePer1m?: number;
+  reasoningPricePer1m?: number;
 } {
   return {
     ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
     ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
+    // #667 — the cached/reasoning rates travel with the other two, for the same
+    // reason: a failover means the route that ANSWERED is not the route that
+    // was planned, and the two can be priced differently.
+    ...(route.cachedInputPricePer1m !== undefined
+      ? { cachedInputPricePer1m: route.cachedInputPricePer1m }
+      : {}),
+    ...(route.cacheWritePricePer1m !== undefined
+      ? { cacheWritePricePer1m: route.cacheWritePricePer1m }
+      : {}),
+    ...(route.reasoningPricePer1m !== undefined
+      ? { reasoningPricePer1m: route.reasoningPricePer1m }
+      : {}),
   };
 }
 
@@ -976,12 +999,41 @@ function observeInvocation(
     responseModel: base.providerModel,
   });
 }
-
-/** Record a metering event; never allowed to fail the response. */
+/**
+ * Record a metering event AND the request log's share of the same facts; never
+ * allowed to fail the response.
+ *
+ * ## Why the request-log contribution belongs exactly here
+ *
+ * This is the single chokepoint every dispatched request passes through, on
+ * every ending it can have: the buffered success path, the upstream-ERROR path
+ * (which calls it with no usage — a 502 is still a decision, and an audit trail
+ * that omitted provider failures would omit the interesting half), and the SSE
+ * tap's `flush()`/`cancel()`. It is also the only place that holds `base`,
+ * which already carries the route label, the provider, BOTH model names and
+ * the dispatch attempt index — i.e. everything about this request that only
+ * this app knows.
+ *
+ * The alternative — assembling the same facts in the outer middleware — cannot
+ * work: `inner.fetch` opens a fresh context, so none of this is visible there.
+ * See `./identity.ts::InferenceRequestScope.log`.
+ *
+ * The two sinks are reported to independently and both are wrapped, because a
+ * metering failure must not cost the evidence row and an evidence failure must
+ * certainly not cost the charge.
+ */
 function recordUsage(
   c: InferenceContext,
   deps: ResolvedInferenceDeps,
-  base: Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">,
+  base: Omit<
+    Usage,
+    | "promptTokens"
+    | "completionTokens"
+    | "totalTokens"
+    | "cachedInputTokens"
+    | "cacheWriteTokens"
+    | "reasoningTokens"
+  >,
   providerKind: string,
   usage: ProviderUsage | undefined,
 ): void {
@@ -1005,10 +1057,38 @@ function recordUsage(
         ? { completionTokens: usage.completionTokens }
         : {}),
       ...(usage?.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+      // #667. Absent stays absent all the way to the billing event, where the
+      // wire schema defaults it to 0 — so "the provider reported no cached
+      // tokens" and "this response predates the counter" settle identically,
+      // and neither can be mistaken for an observed zero mid-stream.
+      ...(usage?.cachedInputTokens !== undefined
+        ? { cachedInputTokens: usage.cachedInputTokens }
+        : {}),
+      ...(usage?.cacheWriteTokens !== undefined
+        ? { cacheWriteTokens: usage.cacheWriteTokens }
+        : {}),
+      ...(usage?.reasoningTokens !== undefined
+        ? { reasoningTokens: usage.reasoningTokens }
+        : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
     // to the caller. Same contract here.
+  }
+  try {
+    c.get("inferenceLog")({
+      route: base.route,
+      provider: base.provider,
+      logicalModel: base.logicalModel,
+      providerModel: base.providerModel,
+      streamed: base.stream,
+      providerAttemptIndex: base.providerAttemptIndex,
+      promptTokens: usage?.promptTokens,
+      completionTokens: usage?.completionTokens,
+      totalTokens: usage?.totalTokens,
+    });
+  } catch {
+    // Same contract: evidence is best-effort at the seam, never a 500.
   }
 }
 
@@ -1113,12 +1193,47 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // the injected resolver otherwise (an inner-app unit test, or a deployment
     // where the guard has not run). Never both — an authenticated request must
     // not be re-described by a default that grants platform-operator scope.
-    c.set("inferenceCaller", scope?.caller ?? resolved.caller(c.req.raw));
+    const caller = scope?.caller ?? resolved.caller(c.req.raw);
+    c.set("inferenceCaller", caller);
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
+    c.set("inferenceLog", scope?.log ?? noInferenceLog);
+
+    // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
+    // provider credential for the platform one before anything is planned.
+    //
+    // Here, and not in `planUpstream`, for two structural reasons: the
+    // credential must be in place before `adapter.buildUpstreamRequest` bakes it
+    // into the `Authorization` header, and `planUpstream` is synchronous while
+    // the lookup is a D1 read. Doing it once in the shared middleware also means
+    // every dispatching surface is covered by construction — a new one cannot
+    // forget it, which is the same argument `dispatchCandidates` makes for
+    // firing the shadow mirror from one place.
+    //
+    // Returning the rejection here rather than degrading to the platform
+    // credential is the fail-closed half: a tenant that asked to be billed on
+    // its own agreement must never be silently served on FerroGate's key.
+    const models = await byokScopedModels(resolved.models, resolved.byok, caller, c.req.raw);
+    if (isRejection(models)) {
+      return errorResponse(models, c.get("requestId"));
+    }
+    if (models !== resolved.models) {
+      c.set("inferenceDeps", { ...resolved, models });
+    }
+
     await next();
+    return;
   });
 
   const body = readInferenceBody();
+  // Prompt-by-reference (#694). Between the body read and Zod, because the
+  // expansion is what PRODUCES the `model` and `messages` Zod is about to
+  // require — after validation it would always be too late. Mounted only on the
+  // two OpenAI-dialect operations: `prompt_templates.target` is
+  // `chat_completions | responses`, so those are the two bodies a rendered
+  // template is shaped for. Anthropic `/v1/messages`, embeddings and images
+  // pass it through untouched and refuse the unknown member on their own
+  // schema, which is the honest answer for a body the renderer cannot produce.
+  const promptReference = expandPromptReference();
 
   // -- GET /v1/models --------------------------------------------------------
   app.get("/v1/models", (c) => handleModels(c, c.get("inferenceDeps")));
@@ -1127,6 +1242,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/chat/completions",
     body,
+    promptReference,
     validateBody(chatCompletionRequestSchema, "invalid chat completion request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "chat.completions"),
   );
@@ -1135,6 +1251,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/responses",
     body,
+    promptReference,
     validateBody(responsesRequestSchema, "invalid responses request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "responses"),
   );

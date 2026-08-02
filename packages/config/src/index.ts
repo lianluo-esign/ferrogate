@@ -86,5 +86,14 @@ export { x402ConfirmationWindowSecs, x402HoldTtlFloorSecs } from "./x402-hold.js
 export type { X402ReconcilerLike } from "./x402-hold.js";
 export * from "./x402-scope.js";
 
+// Declarative desired-state document + the pure GitOps diff engine (#702).
+export * from "./desired-state.js";
+
 // Signed cluster config snapshots (Ed25519).
 export * from "./signed-snapshot.js";
+
+// Prompt deployment labels: the `label -> revision` pointer and its KV key.
+// Exported from the CONFIG package rather than either Worker because
+// `apps/control-plane` writes the pointer and `apps/gateway` reads it, and a
+// key derivation that exists twice is a key derivation that drifts silently.
+export * from "./prompt-label.js";
