@@ -1,0 +1,74 @@
+-- ===========================================================================
+-- Data-residency and zero-data-retention policy on `quota_policies` (#681)
+--
+-- An EU tenant could not state "inference and logs stay in the EU, and never
+-- route to a provider without a ZDR agreement". The gateway HAD a region gate
+-- (`inference/candidates.ts::routeExclusionReasons`, ported for #173) and
+-- nothing to arm it with: the field it reads, `Caller.regionAllowlist`, was
+-- never populated from any credential or policy row, so on every deployed
+-- request the gate saw an empty list and passed every route.
+--
+-- ## Why these three columns live on `quota_policies` rather than a new table
+--
+-- Verbatim the argument `0006_attribution_tag_policy.sql` makes for #678, and
+-- deliberately the same table. `quota_policies` is already the per-scope
+-- governance row: it is what `PUT /admin/v1/quota-policies/{scope_type}/{scope_id}`
+-- writes, what `store/quota_registry.ts` projects into, and what the gateway
+-- already reads on the admission path of every authenticated request. It
+-- already has RBAC and the #185 scoped-authorization rule that stops a
+-- tenant-scoped admin editing another tenant's governance. A separate
+-- `residency_policies` table would have needed its own admin group - six more
+-- contract operations and a second copy of that authorization rule - to express
+-- one list, one flag and one enum.
+--
+-- ## The gateway reads the TENANT scope only
+--
+-- `apps/gateway/src/residency/source.ts` matches
+-- `scope_type = 'tenant' AND scope_id = ?` against the AUTHENTICATED tenant.
+-- The columns are physically settable on any scope (the table has one shape),
+-- and a `project`/`workspace`/`key` row's values are simply not read today.
+-- Residency is a property of the legal entity, and a chain merge would have to
+-- answer "does a project row that states no regions relax the tenant's?" - a
+-- question whose wrong answer is a silent compliance breach rather than a
+-- visible refusal. Stated here so the next owner adds the merge rule
+-- deliberately instead of inheriting it.
+--
+-- ## Defaults, and how each column reads when it is not set
+--
+--   * `residency_regions_json` defaults to `'[]'` - "this tenant names no
+--     region", which is the pre-#681 behaviour exactly, so applying this
+--     migration changes nothing for anyone.
+--   * `require_zero_data_retention` defaults to `0`. NOT NULL because there is
+--     no third meaning to express: either the tenant requires ZDR or it does
+--     not. (The three-state modelling lives on the ROUTE - see
+--     `zero_data_retention` in `GATEWAY_MODELS` - where "nobody has said" is a
+--     real and distinct answer.)
+--   * `log_residency` is NULLABLE with no default and reads as
+--     `'unconstrained'`. A tenant that only cares about INFERENCE residency
+--     states nothing here, and silently tightening every existing row to
+--     `in_region` would refuse traffic nobody asked to have refused.
+--
+-- ## The reader FAILS CLOSED on a value it cannot parse
+--
+-- The opposite of `on_missing_tags` beside it, and the asymmetry is the point.
+-- An unreadable ATTRIBUTION requirement can only refuse traffic that was
+-- already being served, so failing open costs a bill line and failing closed
+-- costs an outage. An unreadable RESIDENCY requirement read as "not enforced"
+-- refuses nothing - it SERVES, possibly out of region, and every request
+-- succeeds, so nobody finds out. `residency/source.ts` therefore answers
+-- `503 residency_policy_unavailable` for a row it cannot read, and
+-- `residency/policy.ts::parseResidencyPolicyRow` rejects rather than repairs
+-- (a non-string entry in the region list is an error, not something to drop:
+-- dropping it narrows the allowlist by one region without telling anyone).
+--
+-- No CHECK constraint on `log_residency`: this file follows the dialect rule
+-- inherited in `0001_init_control.sql` - descriptive enumerations are validated
+-- by the writer and again by the reader.
+--
+-- No index: the columns are read as part of a row already located by the
+-- existing `UNIQUE (scope_type, scope_id)` / `idx_quota_policies_scope` seek.
+-- ===========================================================================
+
+ALTER TABLE quota_policies ADD COLUMN residency_regions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE quota_policies ADD COLUMN require_zero_data_retention INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE quota_policies ADD COLUMN log_residency TEXT;
