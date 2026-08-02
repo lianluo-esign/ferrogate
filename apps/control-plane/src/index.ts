@@ -1,6 +1,6 @@
 import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 /**
- * `ferrogate-control-plane` Worker — the 203-operation `/admin/v1/**` surface.
+ * `ferrogate-control-plane` Worker — the 206-operation `/admin/v1/**` surface.
  *
  * Replaces `ferrogate-admin` (the naming/stability contract),
  * `ferrogate-auth-service` (server side) and the legacy `d1-proxy` Worker.
@@ -18,7 +18,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  *   use    → cors preflight    OPTIONS /admin/* — only when configured
  *   use    → contractAuth      405 → CSRF → anonymous → bearer+scope
  *                              → lifecycle → rbac_action
- *   route  → 203 handlers      registered from the contract
+ *   route  → 197 handlers      registered from the contract
  *   error  → uniform envelope  { error: { message, type, code, request_id } }
  * ```
  *
@@ -27,7 +27,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  * middleware sits before every handler so no route can be reached unguarded.
  *
  * Still to come on this Worker (they are NOT contract operations, so they are
- * not part of the 203 and do not affect the anti-drift gate):
+ * not part of the 206 and do not affect the anti-drift gate):
  * `/v1/admin/*` console identity, `/v1/auth/*` resolve-api-key + authorize, and
  * `/scim/v2/*` provisioning — see `docs/legacy/inventory-edge-control.md` §5.1.
  */
@@ -85,7 +85,7 @@ app.use("*", contractAuth());
  * admin-console session, OIDC + SCIM, and SAML — and that
  * `docs/rewrite/MODULE-OWNERSHIP.md` found precisely because they are not in
  * `docs/openapi/runtime-api-contract.json`. None of their paths is one of the
- * 203, so mounting them cannot move the anti-drift operation count; they mount
+ * 197, so mounting them cannot move the anti-drift operation count; they mount
  * OUTSIDE `registerRoutes` exactly as `/healthz` and `/version` do.
  *
  * The ORDER is load-bearing:
@@ -152,9 +152,9 @@ export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES
  *
  * They stay OUTSIDE the contract-driven registry — `registerRoutes` mounts them
  * without appending them to the record it returns — because folding them into
- * the loop would move them inside the 203-operation count the anti-drift test
+ * the loop would move them inside the 206-operation count the anti-drift test
  * pins. `contractAuth` still runs over them (it is an `app.use("*", …)`) and
- * passes them through, because neither path is one of the 203 it guards, which
+ * passes them through, because neither path is one of the 206 it guards, which
  * is the same treatment `/health` and `/version` have always had.
  *
  * `/health` and `/version` are NOT contract operations, are described by no

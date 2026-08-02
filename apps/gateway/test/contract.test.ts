@@ -45,23 +45,25 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 258 operations", () => {
+  it("carries exactly 261 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 258 unique operation ids", () => {
+  it("has 261 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
   it("reproduces the documented auth-kind census", () => {
-    // ROUTE-MAP.md: bearer 245 · internal 6 · anonymous 6 · method_dependent 1.
+    // ROUTE-MAP.md: bearer 248 · internal 6 · anonymous 6 · method_dependent 1.
     // bearer went 238 -> 239 with `countMessageTokens` (issue #671), which is
-    // bearer-`messages.create` like the `createMessage` it pre-flights, and
-    // 239 -> 245 with the six `/admin/v1/semantic-cache-policies/**` operations
+    // bearer-`messages.create` like the `createMessage` it pre-flights,
+    // 239 -> 242 with the three prompt-deployment-label operations (issue
+    // #694), which are bearer-guarded like the rest of the prompt registry, and
+    // 242 -> 248 with the six `/admin/v1/semantic-cache-policies/**` operations
     // (issue #695), which are `admin.read` / `admin.write` like every other
     // admin surface.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 245,
+      bearer: 248,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -70,7 +72,10 @@ describe("contract table", () => {
 
   it("reproduces the documented visibility census", () => {
     expect(census(OPERATIONS.map<Visibility>((operation) => operation.visibility))).toEqual({
-      admin: 199,
+      // 193 -> 196 with the three prompt-deployment-label operations (issue
+      // #694): prompt-registry management is admin-visibility; 196 -> 202 with
+      // the six semantic-cache-policy operations (issue #695), likewise.
+      admin: 202,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded.
       public: 52,
@@ -80,11 +85,15 @@ describe("contract table", () => {
 
   it("reproduces the documented method census", () => {
     expect(census(OPERATIONS.map<HttpMethod>((operation) => operation.method))).toEqual({
-      GET: 118,
+      // GET/PUT/DELETE each +1 with the prompt-deployment-label operations
+      // (issue #694): list/read, upsert, and delete of a label pointer; then
+      // GET +2 / POST +2 / PUT +1 / DELETE +1 with the six semantic-cache-policy
+      // operations (issue #695), whose POSTs are `create` and `invalidate`.
+      GET: 119,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671).
       POST: 81,
-      DELETE: 25,
-      PUT: 18,
+      DELETE: 26,
+      PUT: 19,
       PATCH: 16,
     });
   });

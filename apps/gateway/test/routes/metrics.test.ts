@@ -13,7 +13,7 @@
  * > exposing them means a gateway-side `/metrics` or an Analytics Engine query
  * > binding.*
  *
- * This file is the gateway-side `/metrics`. `getMetrics` is one of the 258
+ * This file is the gateway-side `/metrics`. `getMetrics` is one of the 261
  * contract operations (`visibility: internal`, `auth.kind: bearer`,
  * `auth.scope: admin.read`), so mounting it puts it behind the SAME guard Rust
  * put it behind — `handle_metrics` opens with an auth check, and
@@ -30,12 +30,12 @@
  * assertion below claims a fleet-wide total.
  */
 import { SELF, env } from "cloudflare:test";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   defaultGatewayMetricsSnapshot,
   renderCacheTenantText,
   renderPrometheusText,
 } from "@ferrogate/observability";
-import { afterEach, describe, expect, it } from "vitest";
 import { operationById } from "../../src/contract.js";
 import { PROMETHEUS_CONTENT_TYPE, gatewayMetricsSnapshot } from "../../src/routes/metrics.js";
 

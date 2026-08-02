@@ -32,7 +32,7 @@
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 258 operations, and duplicating a per-route
+ * table-driven middleware for all 261 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -75,6 +75,7 @@ import {
 } from "../telemetry/genai.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
 import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import { expandPromptReference } from "./prompt-reference.js";
 import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -1162,6 +1163,15 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   });
 
   const body = readInferenceBody();
+  // Prompt-by-reference (#694). Between the body read and Zod, because the
+  // expansion is what PRODUCES the `model` and `messages` Zod is about to
+  // require — after validation it would always be too late. Mounted only on the
+  // two OpenAI-dialect operations: `prompt_templates.target` is
+  // `chat_completions | responses`, so those are the two bodies a rendered
+  // template is shaped for. Anthropic `/v1/messages`, embeddings and images
+  // pass it through untouched and refuse the unknown member on their own
+  // schema, which is the honest answer for a body the renderer cannot produce.
+  const promptReference = expandPromptReference();
 
   // -- GET /v1/models --------------------------------------------------------
   app.get("/v1/models", (c) => handleModels(c, c.get("inferenceDeps")));
@@ -1170,6 +1180,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/chat/completions",
     body,
+    promptReference,
     validateBody(chatCompletionRequestSchema, "invalid chat completion request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "chat.completions"),
   );
@@ -1178,6 +1189,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   app.post(
     "/v1/responses",
     body,
+    promptReference,
     validateBody(responsesRequestSchema, "invalid responses request"),
     (c) => handleOpenAiInference(c, c.get("inferenceDeps"), "responses"),
   );

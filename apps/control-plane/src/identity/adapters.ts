@@ -721,7 +721,7 @@ export class ControlPlaneAdminSessionPort implements AdminSessionPort {
 // ---------------------------------------------------------------------------
 
 /**
- * `ApiKeyAuthenticatorPort` for SCIM, over the SAME resolver the 203 admin
+ * `ApiKeyAuthenticatorPort` for SCIM, over the SAME resolver the 206 admin
  * operations authenticate with.
  *
  * Consequence, and it is the point: revoking or rotating a SCIM token through
