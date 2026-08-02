@@ -373,11 +373,15 @@ describe("#677: the two cost operations are described for a generated client", (
 
   it("describes both operations at all", () => {
     const missing = [LIST, EXPORT].filter((name) => !documented.has(name));
-    expect(missing, `routed by #677 but absent from the OpenAPI: ${missing.join(", ")}`).toEqual([]);
+    expect(missing, `routed by #677 but absent from the OpenAPI: ${missing.join(", ")}`).toEqual(
+      [],
+    );
   });
 
   it("types the cost list against the paginated envelope, not a bare object", () => {
-    const schema = successContent(LIST)["application/json"]?.schema as { $ref?: string } | undefined;
+    const schema = successContent(LIST)["application/json"]?.schema as
+      | { $ref?: string }
+      | undefined;
     expect(schema?.$ref, "the cost list has no application/json success schema").toBe(
       "#/components/schemas/PaginatedList_CostRecord",
     );
