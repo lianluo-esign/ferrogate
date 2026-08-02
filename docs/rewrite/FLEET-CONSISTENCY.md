@@ -1,9 +1,12 @@
 # FLEET-CONSISTENCY — one capability, five Workers, one answer
 
 **Status: DERIVED FROM `src/` ON 2026-08-01 (wave 21), MECHANISED AND FULLY
-CLOSED IN WAVE 22.** All five divergences the matrix found (FC-1 · FC-2 · FC-3 ·
-FC-4 · FC-5) are closed; FC-5 was never a live defect and its gate stays. Both
-gate files are green with no `test.todo` — see §9.7.
+CLOSED IN WAVE 22; FC-7 CLOSED AND MECHANISED 2026-08-02 (issue #668).** All
+five divergences the matrix found (FC-1 · FC-2 · FC-3 · FC-4 · FC-5) are closed;
+FC-5 was never a live defect and its gate stays. FC-7 — the PRE-ARMED one, where
+two Workers parsed `rbac_action` and never read it — is closed too, and its cell
+moved from LEDGER to MECH in the same commit. Both gate files are green with no
+`test.todo` — see §9.7.
 Every cell below was produced by scanning comment-stripped source across all
 deployed Workers, not by reading a design document. Two executable gates hold it:
 
@@ -120,7 +123,7 @@ document holds it.
 | 6 | Admission: prepaid wallet (`429`) | **D** | n/a | **D** | **D** | n/a | ✅ | MECH §4.2 |
 | 7 | Admission: RPM window (`429`) | **D** | n/a | **D** | **D** | n/a | ⚠️ **FC-5** | MECH §3 `rpm-counter` + §3.6 (one definer, borrowers pinned to `script_name`) |
 | 8 | **Tenancy lifecycle / suspension** | **D** | **D** | **D** | **D** | n/a | ✅ *(FC-2, closed 2026-08-01)* | MECH §3 `tenant-lifecycle` — the authority is the `status` COLUMN, not the `tenants` table |
-| 9 | RBAC `rbac_action` | **D** | **D** | parsed, unread | parsed, unread | — | ⚠️ **FC-7** | LEDGER (hand-listed) |
+| 9 | **RBAC `rbac_action`** | **D** | **D** | **D** | **D** | — | ✅ *(FC-7, closed 2026-08-02)* | MECH §3 `rbac-action` — the authority is the `permissions` × `roles` × `tenant_role_bindings` graph, demanded of every CREDENTIAL Worker |
 | 10 | Tenant fencing on reads/writes | **D** | **D** | **D** | **D** | n/a | ✅ | INSPECTION |
 | 11 | **Guardrail screening policy** | **D** | **D** (write half) | **D** | **D** | — | ✅ *(FC-3, closed 2026-08-01)* | MECH §3 `guardrail-binding` |
 | 12 | **Agent-upstream catalog** | **D** | **D** (write half) | n/a | **D** | n/a | ✅ *(FC-4, closed 2026-08-01)* | MECH §3 `agent-upstream-catalog` + behavioural `routes/agent-upstream-fleet-withdrawal.test.ts` |
@@ -129,7 +132,7 @@ document holds it.
 | 15 | Operator deny rules (`[[policies]]`) | **V** | — | — | — | — | ⚠️ **FC-6c** | MECH §3 `operator-deny-rules` (single-Worker pin) |
 | 16 | Metering / usage rollup WRITE | **D** | — | — | — | n/a | ✅ (single writer by design) | INSPECTION (`usage_monthly_rollups` declared a non-control in §4.3) |
 | 17 | Monthly-spend rollup READ | **D** | — | **D** | **D** | n/a | ✅ | MECH §3.4b — `usage_monthly_rollups` is an authority of `admission`, so every spend Worker must read it |
-| 18 | Response cache | **V** | n/a | n/a | n/a | n/a | ✅ single-Worker | LEDGER |
+| 18 | Response cache | **D** (+ V floor) | **D** (write half) | n/a | n/a | n/a | ✅ single-Worker *(#695, 2026-08-02)* | LEDGER |
 | 19 | Pre-auth network gate (IP allowlist, unauth flood) | **V** | — | — | — | — | ✅ single-Worker | LEDGER |
 | 20 | Secrets resolution (`@ferrogate/secrets`) | ✔ | ✔ | ✔ | — | — | ✅ (see §6.4) | INSPECTION — and §6.4 records it as an unresolved question, not a verdict |
 | 21 | Self-hosted-worker transport identity | **D** | **D** (write half) | n/a | **D** | n/a | ✅ | INSPECTION (declared a non-control in §4.3) |
@@ -138,9 +141,11 @@ document holds it.
 
 **No cell diverges. All five divergences the wave-21 matrix found are CLOSED,
 and four of the five (FC-1 · FC-2 · FC-3 · FC-4) are gated MECHANICALLY; FC-5
-is a live trap rather than a divergence and is gated too. Thirteen of the
-twenty-three rows are gated MECHANICALLY; ten are not, and §9.4 names them —
-those ten are the rot risk this document now carries.**
+is a live trap rather than a divergence and is gated too. FC-7 — `rbac_action`
+enforced on two of four credential Workers — is closed and MECH as of
+2026-08-02. Fourteen of the twenty-three rows are gated MECHANICALLY; nine are
+not, and §9.4 names them — those nine are the rot risk this document now
+carries.**
 
 ---
 
@@ -575,7 +580,42 @@ was skipped both times a bypass shipped.
   unauthenticated flood limit). The gateway is the only public ingress; the
   other four are reached through it or through an operator credential.
 * **FC-6b — response cache.** Nothing else in the fleet serves a cacheable
-  body.
+  body. `apps/mcp` and `apps/agent-runtime` dispatch TOOLS and A2A calls, not
+  inference; an agent run that spends on a provider reaches one **through** this
+  gateway, which is the same fact FC-6e relies on for the metering write.
+
+  **Updated 2026-08-02 (issue #695).** The row's Worker set is unchanged and the
+  reason above still holds. What changed is its SOURCE-OF-TRUTH class, from
+  **V** to **D + V**, and that is worth recording here because §1.1 names
+  var-only as the shape of both shipped bypasses. `[cache]` was entirely
+  deploy-time: a tenant could not enable semantic caching, tune the similarity
+  threshold, scope it to a model set, observe a hit rate or invalidate it.
+  `semantic_cache_policies` on the CONTROL database is now the per-tenant
+  overlay, written by `/admin/v1/semantic-cache-policies/**` and read on the
+  request path by `apps/gateway/src/cache/governance.ts`; the vars remain the
+  OPERATOR floor, and `GATEWAY_CACHE_ENABLED=false` is a master switch a tenant
+  row cannot override upward.
+
+  Three properties are gated rather than asserted in prose, because they are the
+  ones a later refactor would quietly break:
+
+    - the effective governed values are inside the CACHE KEY
+      (`CacheKeyInput.governanceFingerprint`), so a threshold change or a purge
+      makes the entries admitted under the old rules unreachable instead of
+      re-matching them — the same guarantee the guardrail-policy fingerprint
+      (#233) gives, extended to the cache's own rules now that they are mutable
+      without a deploy;
+    - an UNREADABLE governance row is `x-ferrogate-cache: bypass`, never a
+      silent fall-back to the vars, because every fall-back is in the widening
+      direction;
+    - the fingerprint deliberately does NOT carry the scope id, so it cannot
+      mask a regression in the tenancy fields of the key itself.
+
+  The gate is `apps/gateway/test/fleet-consistency.test.ts` ("the response
+  cache's governance is DURABLE now, and still gateway-only"), which asserts
+  both halves: the durable reader exists on the gateway, and it exists ONLY
+  there. The day `apps/mcp` or `apps/agent-runtime` dispatches to a provider
+  directly, that assertion is what forces the reader to move with it.
 * **FC-6c — operator deny rules (`[[policies]]`) — with a caveat, and the caveat
   is an OPEN QUESTION, not a finding.** Rust evaluated
   `policy_engine.evaluate(request, model, provider)` from `chat.rs` only, so a
@@ -604,25 +644,89 @@ was skipped both times a bypass shipped.
 
 ---
 
-### FC-7 — `rbac_action` IS CARRIED BY FOUR WORKERS AND CONSULTED BY TWO
+### FC-7 — `rbac_action` WAS CARRIED BY FOUR WORKERS AND CONSULTED BY TWO **— CLOSED 2026-08-02 (issue #668)**
 
-**Blast radius: zero today. Pre-armed for tomorrow.**
+**Blast radius: zero on the day it was found. Pre-armed for tomorrow, which is
+what made it worth closing before tomorrow arrived.**
+
+#### What it was
 
 `apps/mcp/src/contract.ts:253` and `apps/agent-runtime/src/contract.ts:328` both
-parse `rbac_action` off the shared contract table into their `ApiOperation` and
-**never read it again**. Only `apps/gateway` and `apps/control-plane` call an
-authorizer.
+parsed `rbac_action` off the shared contract table into their `ApiOperation` and
+**never read it again**. Only `apps/gateway` and `apps/control-plane` called an
+authorizer. A role an operator used to withhold an action was enforced on two of
+the four credential Workers and silently ignored on the other two.
 
-That is harmless today and only today: all 12 operations in
+It cost nothing at the time and only at the time: all 12 operations in
 `docs/openapi/runtime-api-contract.json` carrying an `rbac_action` are
 `/admin/v1/guardrail-*` or `/admin/v1/investigations` paths, which those two
-Workers do not serve. The day one lands on a data-plane path it is silently
-unenforced on two of five Workers — both shipped defects' shape, pre-armed and
-waiting.
+Workers do not serve. The day one landed on a data-plane path it would have been
+unenforced on two of five Workers, with every per-Worker suite green because
+every Worker was individually correct — both shipped defects' shape, pre-armed
+and waiting.
 
-*Gate.* `describe("FC-7 …")` — 4 assertions, including "every rbac-guarded
-operation is on an `/admin/v1/` path". RED the moment an `rbac_action` appears
-on a data-plane operation (M6).
+#### What it is now
+
+`apps/mcp/src/rbac.ts` and `apps/agent-runtime/src/rbac.ts` are the ports of
+`state_rbac.rs::tenant_has_permission_result` the other two Workers already had,
+step for step: the action must be DECLARED in `permissions`, the caller's
+`tenant_role_bindings` are walked, a `roles` row grants when its
+`permission_keys` names the action, a declared platform operator is exempt, and
+a storage failure is `503 rbac_unavailable` rather than a decision. Each is
+mounted in its Worker's composition root (`resolvePorts` / `resolveDeps`) and
+consulted from its auth chokepoint (`src/http.ts::authenticateRequest`,
+`src/middleware/auth.ts::bearerAuth`) for whatever the MATCHED contract
+operation declares — after the tenancy lifecycle, before admission, which is
+where the other two Workers run it and is itself part of the control: an
+authorization refusal must not first charge the caller's RPM window.
+
+Nothing about the fix is route-specific, and that is the whole point. No MCP or
+agent-runtime operation carries an `rbac_action` today; the day one does, the
+enforcement is already there.
+
+*Gates.* Three, at three altitudes:
+
+* **MECHANICAL** — `fleet-control-matrix.test.ts` §3 control `rbac-action`. It
+  names no Worker: `required: "credential"` is the role set §2 COMPUTES from
+  behaviour, so every Worker that resolves a tenant credential must enforce the
+  control (§3.2), off the same source-of-truth class (§3.3), reading ALL THREE
+  authority tables (§3.4b). The three RBAC tables were moved OUT of §4.3's
+  "declared non-control" list in the same commit — that list is where a shared
+  source of truth goes to stop being asked about.
+* **FLEET DECISION** — `fleet-rbac-action.test.ts`. One seeded grant graph, four
+  Workers, compared as data: the gateway behaviourally over `SELF` on a real
+  rbac-guarded contract operation, `apps/mcp` and `apps/agent-runtime` through
+  their own production authorizers over the same database handle, and
+  `apps/control-plane` as source text.
+* **PER-WORKER MOUNT** — `apps/mcp/test/rbac-action.test.ts` and
+  `apps/agent-runtime/test/durable/rbac-action.spec.ts`, which drive each
+  Worker's real auth chokepoint. They pass a synthetic `rbac_action` on a REAL
+  operation, because no request exists on those Workers that would carry one —
+  the same reason the control went unenforced for a whole wave.
+
+#### FC-7b — three RECORDED divergences on `apps/control-plane`, not fixed here
+
+`apps/control-plane/src/adapters.ts::D1RbacAuthorizer` predates this fix and
+decides slightly differently from the other three, in three ways its own file
+argues for:
+
+1. it does **not** require the permission to be DECLARED in `permissions` (it
+   treats that table as a human-facing catalogue rather than a gate), so a role
+   naming an un-catalogued key grants there and nowhere else;
+2. a role holding `"*"` **is** a grant there; Rust compares `key ==
+   permission_key`, so `"*"` is a permission literally named `*` on the other
+   three;
+3. every denial is named `guardrail_rbac_denied`; the other three derive the
+   code from the action's domain, so a NON-guardrail action denies as
+   `rbac_denied` on them.
+
+All three are in the loosen/rename direction and none is reachable today — every
+rbac-guarded operation in the contract is a guardrail one, so (3) coincides and
+(1)+(2) only ever admit a caller the admin plane's own operator configured. They
+are RECORDED as assertions in `fleet-rbac-action.test.ts` §3 rather than fixed,
+because changing an admin plane's authorization semantics is a decision with its
+own blast radius and belongs to the wave that takes it. Closing any of them
+turns that file red, which forces this paragraph to move with the code.
 
 ---
 
@@ -868,6 +972,40 @@ the port), and M31 is invisible to the port assertions (the port is mounted and
 honours the activation; the route asks and discards). Neither half subsumes the
 other.
 
+### 7.7 FC-7's fix, mutation-proven (2026-08-02, issue #668)
+
+The requirement the issue set was explicit and is the right one for this defect
+class: *neutralise the check and the test goes red on **all four** Workers, not
+two.* Each mutation below was applied, grepped back **off disk** to confirm the
+edit landed, run, and restored (`git status` clean, `grep -c "if (false"` → 0 on
+every mutated file afterwards).
+
+| # | Worker | Mutation | Confirmed off disk | Result |
+|---|---|---|---|---|
+| **M32** | `apps/mcp` | the RBAC block in `src/http.ts::authenticateRequest` is short-circuited (`if (false && operation.rbacAction !== null)`) — the call site present, the decision skipped | `276: if (false && operation.rbacAction !== null) {` | **5 RED of 8** in `apps/mcp/test/rbac-action.test.ts` |
+| **M33** | `apps/agent-runtime` | the same short-circuit on `src/middleware/auth.ts::bearerAuth` | `524: if (false && operation.rbacAction !== null) {` | **5 RED of 7** in `test/durable/rbac-action.spec.ts` |
+| **M34** | `apps/gateway` | the same short-circuit on `src/middleware/auth.ts` | `290: if (false && operation.rbacAction !== null) {` | **3 RED** — 2 in `test/rbac.test.ts`, 1 in `test/fleet-rbac-action.test.ts` §2.1 (the behavioural leg) |
+| **M35** | `apps/control-plane` | the same short-circuit on `src/middleware/auth.ts` | `246: if (false && operation.rbacAction !== null) {` | **4 RED of 10** in `apps/control-plane/test/rbac-d1.test.ts` |
+| **M36** | `apps/mcp` | the composition root UNMOUNTS the durable authorizer (`resolvePorts` binds `new UnboundRbacAuthorizer()`) — the module intact, the wiring gone | `1868: const rbac = new UnboundRbacAuthorizer(); // MUTATION` | **5 RED of 8** — including the GRANT case, which a 503 cannot satisfy |
+| **M37** | `apps/agent-runtime` | the same unmount in `resolveDeps` | `1543: rbac: new UnboundRbacAuthorizer(), // MUTATION` | **5 RED of 7** |
+| **M38** | `apps/mcp` | `McpRouter.register` stops publishing the matched operation (`recordOperation` deleted) — the "guard exists, route forgot it" shape | `153: // MUTATION: router no longer publishes the matched operation` | **29 RED of 40** across `test/tools.test.ts` + `test/identity.test.ts`: the chokepoint fails CLOSED on an unmatched request rather than skipping the gate |
+
+M32-M35 are the four the issue asked for, one per credential Worker. M36-M38 are
+the ones that matter more in this repository: they attack the MOUNT rather than
+the decision, which is the failure mode ("a module that exists and is not
+wired") that produced FC-7 in the first place.
+
+The MECHANICAL gate was also seen red before the fix, which is the only order
+that proves it is not decoration: adding the `rbac-action` control to
+`fleet-control-matrix.test.ts` §3 against the unfixed tree failed §3.2 with
+*`rbac-action: these credential Workers cannot enforce it — an operator who
+applies it there changes nothing: expected [ 'agent-runtime', 'mcp' ] to deeply
+equal []`*, and §3.4b with *`gateway does not read roles,
+tenant_role_bindings`* — the second being a real blind spot in the SQL scanner
+(the gateway's grant statement was split across concatenated fragments, so the
+gate could not see its own definer read the tables), fixed by making that
+statement a single literal.
+
 ---
 
 ## 8. What the next wave should do with this
@@ -1033,16 +1171,19 @@ RED.
 
 ### 9.4 What is NOT mechanically gated — the cells that will rot first
 
-Ten of the twenty-three rows. Listed here rather than left implicit, because an
-ungated cell that nobody has written down is indistinguishable from a gated one:
+Nine of the twenty-three rows. Listed here rather than left implicit, because an
+ungated cell that nobody has written down is indistinguishable from a gated one.
+(Row 9, `rbac_action`, was the tenth and was converted when FC-7 closed: it is
+now MECH §3 `rbac-action`, and the three RBAC tables moved out of §4.3's
+"declared non-control" list — which is where a shared source of truth goes to
+stop being asked about.)
 
 | Row | Capability | Held by | Why it is not MECH yet |
 |---|---|---|---|
-| 9 | RBAC `rbac_action` | LEDGER (`fleet-consistency.test.ts` FC-7) | the property is about the CONTRACT table, not about a source of truth; convertible |
 | 10 | Tenant fencing | INSPECTION | every Worker fences, but the fence is a SQL predicate rather than an authority, so §3's classifier cannot see it. **This is the most valuable conversion left** — a fence that weakens on one Worker is a cross-tenant read |
 | 13 | MCP server catalog | INSPECTION | one reader today; the day a second Worker resolves it, §4.3 will demand it be registered |
 | 16 | Metering WRITE | INSPECTION | declared a non-control in §4.3 (single writer by design) |
-| 18, 19 | Response cache, pre-auth network gate | LEDGER | pinned single-Worker in FC-6a/FC-6b |
+| 18, 19 | Response cache, pre-auth network gate | LEDGER | pinned single-Worker in FC-6a/FC-6b. Row 18 became **D + V** in #695; its ledger assertion now pins the DURABLE reader as gateway-only too, so a second reader is RED |
 | 20 | Secrets resolution | INSPECTION | §6.4 records it as an unresolved question, not a verdict — gating it would pin an answer nobody has established |
 | 21 | Self-hosted-worker transport identity | INSPECTION | declared a non-control in §4.3 |
 | 22 | Session / OAuth state | INSPECTION | genuinely distinct concerns on the two Workers |

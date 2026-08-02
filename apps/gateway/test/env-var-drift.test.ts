@@ -268,6 +268,11 @@ const SECRETS = [
   "ASSET_S3_ACCESS_KEY_ID",
   "ASSET_S3_SECRET_ACCESS_KEY",
   "ASSET_S3_SESSION_TOKEN",
+  // Issue #682: the fleet-wide AES-256 key that seals every tenant's own
+  // provider credential. ONE binding for the whole fleet — the per-tenant part
+  // is row data in control D1, which is what keeps onboarding and rotation off
+  // the deploy path. A committed value would decrypt every tenant's key.
+  "FERROGATE_BYOK_MASTER_KEY",
   "GATEWAY_DEV_API_KEY",
   "GATEWAY_TENANT_DB_API_TOKEN",
   "GUARDRAIL_EVIDENCE_HMAC_KEY",
@@ -315,24 +320,30 @@ const DOCUMENTED_BUT_UNDECLARED = [
 ] as const;
 
 /**
- * A CLOUDFLARE PRODUCT BINDING the source reads that this Worker does not
- * declare — so the code path behind it is UNREACHABLE in production.
+ * CLOUDFLARE PRODUCT BINDINGS the source reads that this Worker does not
+ * declare — so the code path behind each one is UNREACHABLE in production.
  *
- * `src/guardrails/config.ts` reads `env.AI` to build the Workers AI Llama Guard
- * detector, and `wrangler.toml` has no `[ai]` stanza; it carries a PORT-TODO
- * for one instead. That is an honest, recorded state rather than a surprise,
- * and the assertion below pins it as such: the day someone adds `[ai]` this
- * goes red, because the name will then be DECLARED and must leave this list.
+ * **EMPTY as of issue #673, and the entry that used to be here was `AI`.**
  *
- * Measured while proving this gate: adding the stanza is not a free edit.
- * Declaring `[ai] binding = "AI"` makes `@cloudflare/vitest-pool-workers` try to
- * start a REMOTE proxy session — Workers AI has no local emulation — and the
- * whole suite then dies with *"it's necessary to set a CLOUDFLARE_API_TOKEN
- * environment variable"* before a single test imports. So declaring it costs
- * the offline, docker-free property this project's testing strategy is built
- * on, which is a real reason the PORT-TODO stands rather than an excuse.
+ * The old note said `src/guardrails/config.ts` reads `env.AI` for the Workers AI
+ * Llama-Guard detector while `wrangler.toml` carried only a PORT-TODO, and it
+ * pinned that as a deliberate state because "declaring it costs the offline,
+ * docker-free property this project's testing strategy is built on" — the
+ * `@cloudflare/vitest-pool-workers` remote-proxy failure. The CONCLUSION drawn
+ * from it no longer holds, because the cost is avoidable — and the measurement
+ * itself was over-read. What a runner refuses is `remote = false` on an AI
+ * binding, not the binding; declared with no `remote` key and the pool's
+ * `remoteBindings: false`, `[ai]` loads offline in both the pool and
+ * `wrangler dev --local` and nothing proxies anywhere. So the suite stays
+ * offline AND the deployed Worker gets the binding. `[ai] binding = "AI"` is
+ * committed and `AI` is therefore DECLARED, which is what the assertions below
+ * now say.
+ *
+ * This is not a test being routed around: the old claim was that the AI code
+ * path is dead in production, and issue #673 is the work that made it live.
+ * Leaving the claim standing would have been the lie.
  */
-const UNDECLARED_BINDINGS = ["AI"] as const;
+const UNDECLARED_BINDINGS: readonly string[] = [];
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.
@@ -387,9 +398,14 @@ describe("the env-var drift gate itself", () => {
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
     // GW-T18 counted 49 `[vars]`; WAVE 20 committed the two `BILLING_ALERTS_*`
-    // knobs, so 51. Pinning the exact number makes an accidental parser
-    // regression (or a silently deleted table) loud here first.
-    expect(DECLARED.vars.size).toBe(51);
+    // knobs, so 51; #669 committed `TELEMETRY_ATTRIBUTE_PROFILE` (52) and #664
+    // committed `REQUEST_LOG_RETENTION_DAYS` + `REQUEST_LOG_RETENTION_POLICIES`
+    // (54), and #679 committed `GATEWAY_BUDGET_HOLD_USD` (55). Pinning the exact number makes an accidental parser regression (or
+    // a silently deleted table) loud here first — and it is why adding a var is
+    // deliberately a two-file change: the count below must be re-stated by
+    // whoever adds one, rather than drifting silently. Note this merge is why
+    // the number is 54 and not either branch's 52 or 53: BOTH sets landed.
+    expect(DECLARED.vars.size).toBe(55);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -467,12 +483,24 @@ describe("every var the source reads is declared or explicitly excepted", () => 
         documentedNear(name, /PORT-TODO/, 6),
         `${name} is read by src/ with no binding declared and no PORT-TODO explaining it`,
       ).toBe(true);
-      // The reachability claim itself, stated so it cannot rot: with no `[ai]`
-      // stanza the binding is undefined in production and the Llama Guard
-      // detector is never constructed.
       expect(DECLARED.bindings.has(name)).toBe(false);
-      expect(/^\[ai\]/m.test(WRANGLER_TOML)).toBe(false);
     }
+  });
+
+  /**
+   * The INVERSE of the claim this file used to pin (issue #673).
+   *
+   * `AI` sat in {@link UNDECLARED_BINDINGS} with an assertion that
+   * `wrangler.toml` has NO `[ai]` stanza — i.e. that every Workers AI code path
+   * is dead in production. Two readers exist now (the `workers-ai` provider
+   * family's dispatcher and the Llama-Guard detector), so that claim had to be
+   * inverted rather than deleted: the stanza must be present, and the binding
+   * must be reachable under the name the source actually reads.
+   */
+  it("declares the [ai] binding the Workers AI code paths read", () => {
+    expect(/^\[ai\]/m.test(WRANGLER_TOML)).toBe(true);
+    expect(DECLARED.bindings.get("AI")).toBe("[ai]");
+    expect(READS.named.has("AI")).toBe(true);
   });
 
   it("pins the exact set of reads wrangler.toml does not even mention", () => {
@@ -606,7 +634,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(51);
+    expect(rows.length).toBe(55);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -640,8 +668,16 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // and `test/metering/budget-alerts.test.ts` supplies its own URL and secret
     // on the env it passes. The committed value is therefore inert rather than
     // absent, which is what keeps it from shadowing a fixture.
+    //
+    // #664: 46 -> 48. `REQUEST_LOG_RETENTION_DAYS` ("400") and
+    // `REQUEST_LOG_RETENTION_POLICIES` ("{}") are observable for the same
+    // reason and are NOT inert — the committed 400-day window is a live policy,
+    // which is the point (an unset window means "keep forever", and an evidence
+    // table that grows without bound is the half of #664 that is not about
+    // reading). `test/requestlog/mount.test.ts` asserts the committed value
+    // parses into a real policy rather than a blank.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(46);
+    expect(observable.length).toBe(50);
     expect(rows.length - observable.length).toBe(5);
   });
 });

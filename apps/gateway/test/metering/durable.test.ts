@@ -415,8 +415,24 @@ describe("durable metering — a completed request", () => {
   });
 });
 
-describe("durable metering — fail closed (issue #129)", () => {
-  it("persists NOTHING for a model with no rate-card rule", async () => {
+describe("durable metering — fail closed (issue #129, corrected by #663)", () => {
+  /**
+   * CHANGED FOR #663, deliberately and not around.
+   *
+   * This block used to assert `billing_events` = 0 as CORRECT behaviour, i.e.
+   * it encoded the defect as intent: a served, billable request against a model
+   * outside the rate card was recorded NOWHERE, and the suite called that
+   * fail-closed. It is not. Rust's `state_billing_metering.rs:146-152` skipped
+   * only the WALLET DEBIT when `cost_usd` was absent and ran
+   * `append_billing_event_with_outbox_enqueue` regardless, so the same input
+   * produced an event row there and zero rows here.
+   *
+   * What #129 actually forbids is BILLING — a `billing_ledger` row, an outbox
+   * intent, a downstream report, a charge of zero. Those four assertions are
+   * unchanged and still the point of this test. The fifth, on `billing_events`,
+   * was wrong and is inverted.
+   */
+  it("bills nothing, but still records the usage (null cost_usd)", async () => {
     provider = interceptProviderFetch(() =>
       providerJson({
         ...BUFFERED_COMPLETION,
@@ -437,14 +453,36 @@ describe("durable metering — fail closed (issue #129)", () => {
     expect(response.status).toBe(200);
     await h.settle();
 
-    // No ledger row, no event row, no outbox row, no queue message. Billing at
-    // zero here would be a free-inference bug, and it would be invisible.
+    // NOTHING IS BILLED: no ledger row, no outbox intent, no queue message.
+    // Billing at zero here would be a free-inference bug, and it would be
+    // invisible. This is #129 and it is unchanged.
     expect(await rowCount("billing_ledger")).toBe(0);
-    expect(await rowCount("billing_events")).toBe(0);
     expect(await rowCount("billing_report_outbox")).toBe(0);
     expect(h.queue.sent).toHaveLength(0);
+
+    // …but the USAGE IS RECORDED (#663). Asserting 0 here — as this file used
+    // to — is asserting that a request the customer was served and the provider
+    // was paid for leaves no trace at all.
+    expect(await rowCount("billing_events")).toBe(1);
+    const stored = await billingDb()
+      .prepare("SELECT request_id, event_json FROM billing_events")
+      .first<{ request_id: string; event_json: string }>();
+    const event = JSON.parse(stored?.event_json ?? "{}") as {
+      provider_model: string;
+      cost_usd?: number | null;
+      usage: { prompt_tokens: number; completion_tokens: number };
+    };
+    expect(event.provider_model).toBe("unpriced-model-9000");
+    // NULL, never 0 — the row says "this happened and nobody could price it",
+    // which is a different statement from "this cost nothing".
+    expect(event.cost_usd ?? null).toBeNull();
+    // The token counts are what make it re-priceable once a rule is added.
+    expect(event.usage.prompt_tokens).toBe(100);
+    expect(event.usage.completion_tokens).toBe(100);
+
     // The refusal is COUNTED and inspectable, never silent.
     expect(h.sink.stats.priceNotFound).toBe(1);
+    expect(h.sink.stats.unpricedRecorded).toBe(1);
     expect(h.sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
   });
 });
@@ -507,7 +545,18 @@ describe("durable metering — streaming", () => {
       )?.entry_json ?? "{}",
     ) as { usage?: Record<string, number>; [key: string]: unknown };
     // The FINAL usage frame wins, not the early partial one.
-    expect(entry.usage).toEqual({ prompt_tokens: 11, completion_tokens: 40, total_tokens: 51 });
+    // The three zeros are #667's counters: this fixture's provider reports no
+    // cached or reasoning tokens, and the equality stays EXACT (rather than
+    // becoming a `toMatchObject`) so a future change that started smuggling
+    // non-zero cached tokens into an uncached request would fail here.
+    expect(entry.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 40,
+      total_tokens: 51,
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+    });
     // 11 * 0.15/1e6 + 40 * 0.6/1e6 = 2.565e-5 USD ⇒ 26 credits (25.65, rounded).
     expect(entry[CREDITS_EXACT_FIELD]).toBe("26");
     expect(h.queue.sent).toHaveLength(1);
@@ -547,7 +596,15 @@ describe("durable metering — streaming", () => {
           .first<{ entry_json: string }>()
       )?.entry_json ?? "{}",
     ) as { usage?: Record<string, number>; usage_source?: string; [key: string]: unknown };
-    expect(entry.usage).toEqual({ prompt_tokens: 11, completion_tokens: 2, total_tokens: 13 });
+    expect(entry.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 2,
+      total_tokens: 13,
+      // #667 — an abandoned stream reported no cached/reasoning counters.
+      cached_input_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+    });
     // 11 * 0.15/1e6 + 2 * 0.6/1e6 = 2.85e-6 USD ⇒ 3 credits.
     expect(entry[CREDITS_EXACT_FIELD]).toBe("3");
     expect(entry.usage_source).toBe("provider_usage");

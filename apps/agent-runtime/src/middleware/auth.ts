@@ -461,8 +461,25 @@ export function depsOrThrow(c: Context<AgentRuntimeEnv>): AgentRuntimeDeps {
  * looping on a mis-scoped key would deny service to its own correctly-scoped
  * ones.
  */
-/** The bearer leg. The ONLY consumer of the tenant API-key authority. */
-async function bearerAuth(c: Context<AgentRuntimeEnv>, operation: ApiOperation): Promise<void> {
+/**
+ * The bearer leg. The ONLY consumer of the tenant API-key authority.
+ *
+ * EXPORTED for one reason, and it is a provability reason rather than a
+ * convenience: no operation in the contract slice this Worker serves declares
+ * an `rbac_action` today (all 12 that do are `/admin/v1/guardrail-*` paths this
+ * Worker does not own), so the FC-7 gate below cannot be driven over `SELF` at
+ * all — there is no request a test could send that would reach it. Exporting
+ * the function `contractAuth` itself calls lets
+ * `test/rbac-action.test.ts` drive THIS code with a synthetic operation, so the
+ * assertion covers the real ladder in its real order rather than a copy of it.
+ * The alternative — asserting the gate through a private helper — would go
+ * green with the call site deleted, which is the vacuous shape this repository
+ * keeps finding.
+ */
+export async function bearerAuth(
+  c: Context<AgentRuntimeEnv>,
+  operation: ApiOperation,
+): Promise<void> {
   const presented = extractApiKey(c.req.raw.headers);
   if (presented === null) {
     throw new HttpError(401, "missing_api_key", MISSING_API_KEY_MESSAGE);
@@ -483,6 +500,39 @@ async function bearerAuth(c: Context<AgentRuntimeEnv>, operation: ApiOperation):
       "tenant_scope_denied",
       "API key names no tenant and cannot address tenant-scoped agent state",
     );
+  }
+
+  // THE RBAC HALF (FLEET-CONSISTENCY FC-7), and it runs HERE — after the scope
+  // and tenant-scope checks, BEFORE admission — because that is where
+  // `apps/gateway/src/middleware/auth.ts` and
+  // `apps/control-plane/src/middleware/auth.ts` run it, and the position is
+  // part of the control: an authorization refusal must not first charge the
+  // caller's RPM window, or a client looping on a denied action would deny
+  // service to its own permitted ones. It is the same argument the scope check
+  // above already makes, one rung further down.
+  //
+  // Deleting this block re-opens the defect FLEET-CONSISTENCY records: this
+  // Worker PARSES `rbac_action` off the shared contract (`src/contract.ts`) and
+  // never reads it, so a role an operator uses to withhold an action is
+  // enforced on two of the four credential Workers and silently ignored here —
+  // "call the other endpoint", the shape of both fleet defects already shipped.
+  //
+  // `operation` is whatever the CONTRACT declares for this route, so no
+  // operation added later can arrive without its guard. No agent-runtime
+  // operation carries an `rbac_action` today; that is exactly why the wiring,
+  // rather than a route-specific check, is the fix.
+  if (operation.rbacAction !== null) {
+    const decision = await deps.rbac.authorize(auth, operation.rbacAction);
+    if (decision.allowed === "unavailable") {
+      // An outage is never a decision — the same 503 and the same sentence
+      // `apps/gateway` and `apps/control-plane` answer with.
+      throw new HttpError(
+        503,
+        "rbac_unavailable",
+        `failed to resolve role permissions: ${decision.detail}`,
+      );
+    }
+    if (!decision.allowed) throw new HttpError(403, decision.code, decision.message);
   }
 
   // THE ADMISSION HALF. Throws the Rust refusal for an over-quota caller and

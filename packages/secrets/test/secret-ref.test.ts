@@ -63,9 +63,15 @@ describe("parseSecretRef", () => {
     );
   });
 
-  it("rejects an unsupported scheme, naming the three schemes", () => {
+  // DELIBERATELY CHANGED by issue #682, which added a FOURTH scheme (`byok://`).
+  // The old assertion read `/env:\/\/, vault:\/\/, or cf:\/\//` and was pinning
+  // the enumeration itself, so it had to move with the enumeration; the property
+  // it exists to hold — an unknown scheme is refused, and the refusal names
+  // every scheme that IS supported — is unchanged and is asserted below on all
+  // four, so this is a widening, not a weakening.
+  it("rejects an unsupported scheme, naming the four supported schemes", () => {
     expect(() => parseSecretRef("aws-sm://foo")).toThrow(
-      /env:\/\/, vault:\/\/, or cf:\/\//,
+      /env:\/\/, vault:\/\/, cf:\/\/, or byok:\/\//,
     );
   });
 

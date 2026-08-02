@@ -85,6 +85,21 @@ export interface UsageAggregateWrite {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Prompt tokens served from a prompt cache — a SUBSET of {@link promptTokens}
+   * (issue #667), so `totalTokens` is unaffected by it.
+   *
+   * Rolled up because the cached-read discount is otherwise priced into
+   * `costUsd` and visible nowhere else, which makes a surprising invoice
+   * unexplainable from the very tables the usage report reads. Absent is `0`,
+   * which is what a provider reporting no cached tokens means and what a row
+   * written before the #667 migration carries.
+   */
+  cachedInputTokens?: number;
+  /** Prompt tokens written INTO a prompt cache — a SUBSET of {@link promptTokens}. */
+  cacheWriteTokens?: number;
+  /** Reasoning/thinking tokens — a SUBSET of {@link completionTokens}. */
+  reasoningTokens?: number;
   costUsd: number;
   /** Non-2xx responses still meter (they consumed prompt tokens upstream). */
   isError: boolean;
@@ -144,6 +159,12 @@ export class D1UsageLedger {
     const periodMonth = periodMonthFromUnix(write.occurredAtUnix);
     const aggregateId = `${write.context.id}:${write.logicalModel}:${write.provider}`;
     const errorDelta = write.isError ? 1 : 0;
+    // #667. `?? 0` rather than a required field: a caller written before the
+    // cached counters existed still compiles and still accumulates correctly,
+    // because "not reported" and "zero cached tokens" are the same row delta.
+    const cachedInputTokens = write.cachedInputTokens ?? 0;
+    const cacheWriteTokens = write.cacheWriteTokens ?? 0;
+    const reasoningTokens = write.reasoningTokens ?? 0;
     // `""` (not NULL) for an org-less/legacy context: the deterministic rollup
     // id is `{period}:{org}:{key}:{value}`, and a NULL segment would make two
     // different rows collide on one id. The column defaults to `''` for the
@@ -174,13 +195,20 @@ export class D1UsageLedger {
         .prepare(
           "INSERT INTO usage_aggregate_rollups " +
             "(id, tenant_context_id, logical_model, provider, prompt_tokens, " +
-            " completion_tokens, total_tokens, updated_at_unix) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+            " completion_tokens, total_tokens, cached_input_tokens, cache_write_tokens, " +
+            " reasoning_tokens, updated_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
             "ON CONFLICT (id) DO UPDATE SET " +
             "prompt_tokens = usage_aggregate_rollups.prompt_tokens + excluded.prompt_tokens, " +
             "completion_tokens = usage_aggregate_rollups.completion_tokens + " +
             "                    excluded.completion_tokens, " +
             "total_tokens = usage_aggregate_rollups.total_tokens + excluded.total_tokens, " +
+            "cached_input_tokens = usage_aggregate_rollups.cached_input_tokens + " +
+            "                      excluded.cached_input_tokens, " +
+            "cache_write_tokens = usage_aggregate_rollups.cache_write_tokens + " +
+            "                     excluded.cache_write_tokens, " +
+            "reasoning_tokens = usage_aggregate_rollups.reasoning_tokens + " +
+            "                   excluded.reasoning_tokens, " +
             "updated_at_unix = max(usage_aggregate_rollups.updated_at_unix, " +
             "                      excluded.updated_at_unix)",
         )
@@ -192,6 +220,9 @@ export class D1UsageLedger {
           write.promptTokens,
           write.completionTokens,
           write.totalTokens,
+          cachedInputTokens,
+          cacheWriteTokens,
+          reasoningTokens,
           write.occurredAtUnix,
         ),
     ];
@@ -203,13 +234,20 @@ export class D1UsageLedger {
           .prepare(
             "INSERT INTO usage_monthly_rollups " +
               "(id, period_month, scope_type, scope_id, prompt_tokens, completion_tokens, " +
-              " total_tokens, cost_usd, request_count, error_count, updated_at_unix) " +
-              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) " +
+              " total_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, " +
+              " cost_usd, request_count, error_count, updated_at_unix) " +
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) " +
               "ON CONFLICT (id) DO UPDATE SET " +
               "prompt_tokens = usage_monthly_rollups.prompt_tokens + excluded.prompt_tokens, " +
               "completion_tokens = usage_monthly_rollups.completion_tokens + " +
               "                    excluded.completion_tokens, " +
               "total_tokens = usage_monthly_rollups.total_tokens + excluded.total_tokens, " +
+              "cached_input_tokens = usage_monthly_rollups.cached_input_tokens + " +
+              "                      excluded.cached_input_tokens, " +
+              "cache_write_tokens = usage_monthly_rollups.cache_write_tokens + " +
+              "                     excluded.cache_write_tokens, " +
+              "reasoning_tokens = usage_monthly_rollups.reasoning_tokens + " +
+              "                   excluded.reasoning_tokens, " +
               "cost_usd = usage_monthly_rollups.cost_usd + excluded.cost_usd, " +
               "request_count = usage_monthly_rollups.request_count + excluded.request_count, " +
               "error_count = usage_monthly_rollups.error_count + excluded.error_count, " +
@@ -224,6 +262,9 @@ export class D1UsageLedger {
             write.promptTokens,
             write.completionTokens,
             write.totalTokens,
+            cachedInputTokens,
+            cacheWriteTokens,
+            reasoningTokens,
             write.costUsd,
             errorDelta,
             write.occurredAtUnix,
@@ -361,7 +402,8 @@ export class D1UsageLedger {
       const row = await this.db
         .prepare(
           "SELECT id, period_month, scope_type, scope_id, prompt_tokens, completion_tokens, " +
-            "total_tokens, cost_usd, request_count, error_count, updated_at_unix " +
+            "total_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, " +
+            "cost_usd, request_count, error_count, updated_at_unix " +
             "FROM usage_monthly_rollups WHERE id = ?",
         )
         .bind(usageMonthlyRollupId(periodMonth, scopeType, scopeId))
@@ -373,6 +415,9 @@ export class D1UsageLedger {
           prompt_tokens: number;
           completion_tokens: number;
           total_tokens: number;
+          cached_input_tokens: number;
+          cache_write_tokens: number;
+          reasoning_tokens: number;
           cost_usd: number;
           request_count: number;
           error_count: number;
@@ -387,6 +432,12 @@ export class D1UsageLedger {
         promptTokens: row.prompt_tokens,
         completionTokens: row.completion_tokens,
         totalTokens: row.total_tokens,
+        // #667. `?? 0` guards the one case the column cannot: a database that
+        // has not yet run `0002_cached_reasoning_tokens.sql`, where D1 returns
+        // the row without the key rather than failing the SELECT.
+        cachedInputTokens: row.cached_input_tokens ?? 0,
+        cacheWriteTokens: row.cache_write_tokens ?? 0,
+        reasoningTokens: row.reasoning_tokens ?? 0,
         costUsd: row.cost_usd,
         requestCount: row.request_count,
         errorCount: row.error_count,

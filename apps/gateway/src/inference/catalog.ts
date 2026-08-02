@@ -37,6 +37,7 @@
  * A misconfiguration can therefore never *widen* what is reachable — the same
  * rule `parseJsonVar` follows for the auth tables in `src/adapters.ts`.
  */
+import { BYOK_ALIAS_PATTERN } from "@ferrogate/secrets";
 import { z } from "zod";
 import {
   type ProviderSecretResolution,
@@ -93,6 +94,20 @@ export const providerRecordSchema = z
      * Never the value. See `src/keys/provider-secrets.ts`.
      */
     api_key_var: z.string().trim().min(1).optional(),
+    /**
+     * `byok_alias` (issue #682) — the DEFAULT per-tenant credential alias for
+     * this provider. An alias, never a credential, and never a tenant: the
+     * tenant is the authenticated caller's, so one provider row serves every
+     * tenant with that tenant's own negotiated key.
+     *
+     * NOT resolved here. Catalog construction is synchronous and per-env, while
+     * a BYOK lookup is a per-request, per-tenant D1 read — resolving it at this
+     * seam would bake ONE tenant's credential into an isolate-wide catalog,
+     * which is the cross-tenant leak this feature exists to prevent. The alias
+     * is carried onto the route and `src/inference/byok.ts` resolves it per
+     * request.
+     */
+    byok_alias: z.string().trim().regex(BYOK_ALIAS_PATTERN).optional(),
     /** Credential scheme override; defaults to the family's Rust hard-coding. */
     auth_scheme: z.enum(["bearer", "x-api-key"]).optional(),
     /** `ProviderConfig.openrouter_http_referer` — OpenRouter attribution only. */
@@ -181,6 +196,19 @@ const routeFieldsSchema = {
   input_price_per_1m: z.number().nonnegative().optional(),
   /** `ModelRoute.output_price_per_1m` — USD per 1M completion tokens. */
   output_price_per_1m: z.number().nonnegative().optional(),
+  /**
+   * `ModelRoute.cached_input_price_per_1m` — USD per 1M CACHE-READ prompt
+   * tokens (issue #667). Absent ⇒ cache reads settle at `input_price_per_1m`.
+   *
+   * Settlement-only: `metering/route-price.ts` reads these three, and routing
+   * does not, because whether a prompt hits the cache is not known when the
+   * route is chosen.
+   */
+  cached_input_price_per_1m: z.number().nonnegative().optional(),
+  /** `ModelRoute.cache_write_price_per_1m` — USD per 1M CACHE-WRITE prompt tokens. */
+  cache_write_price_per_1m: z.number().nonnegative().optional(),
+  /** `ModelRoute.reasoning_price_per_1m` — USD per 1M reasoning tokens. */
+  reasoning_price_per_1m: z.number().nonnegative().optional(),
 } as const;
 
 /** One `[[models]].fallbacks` entry — a `ModelRoute` with no rollout split. */
@@ -630,6 +658,9 @@ export function buildModelCatalog(
         providerKind: provider.kind,
         baseUrl: provider.base_url,
         ...(apiKey !== undefined ? { apiKey } : {}),
+        // The ALIAS only. `src/inference/byok.ts` turns it into a credential
+        // per request, inside the caller's tenant scope.
+        ...(provider.byok_alias === undefined ? {} : { byokAlias: provider.byok_alias }),
         ...(credentials.aws === undefined ? {} : { awsCredentials: credentials.aws }),
         ...(credentials.gcp === undefined ? {} : { gcpCredentials: credentials.gcp }),
         authScheme: provider.auth_scheme ?? defaultAuthScheme(provider.kind),
@@ -646,6 +677,18 @@ export function buildModelCatalog(
           : {}),
         ...(leg.output_price_per_1m !== undefined
           ? { outputPricePer1m: leg.output_price_per_1m }
+          : {}),
+        // #667. Absent keys, never `undefined` values: `route-price.ts`
+        // distinguishes "this route states no cached rate" (fall back to the
+        // fresh input rate) from "priced at zero".
+        ...(leg.cached_input_price_per_1m !== undefined
+          ? { cachedInputPricePer1m: leg.cached_input_price_per_1m }
+          : {}),
+        ...(leg.cache_write_price_per_1m !== undefined
+          ? { cacheWritePricePer1m: leg.cache_write_price_per_1m }
+          : {}),
+        ...(leg.reasoning_price_per_1m !== undefined
+          ? { reasoningPricePer1m: leg.reasoning_price_per_1m }
           : {}),
         // `routing_strategy` belongs to the registry ENTRY, so it is copied from
         // `model` onto EVERY leg — never read off `leg`, which for a fallback

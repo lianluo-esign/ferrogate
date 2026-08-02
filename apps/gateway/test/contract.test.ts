@@ -45,18 +45,30 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 251 operations", () => {
+  it("carries exactly 264 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 251 unique operation ids", () => {
+  it("has 264 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
   it("reproduces the documented auth-kind census", () => {
-    // ROUTE-MAP.md: bearer 238 · internal 6 · anonymous 6 · method_dependent 1.
+    // ROUTE-MAP.md: bearer 251 · internal 6 · anonymous 6 · method_dependent 1.
+    // bearer went 238 -> 239 with `countMessageTokens` (issue #671), which is
+    // bearer-`messages.create` like the `createMessage` it pre-flights, then
+    // 239 -> 242 with the three prompt-deployment-label operations (issue
+    // #694), which are bearer-guarded like the rest of the prompt registry.
+    // From that shared 242 the two parents of this merge diverged: `main`
+    // reached 245 with the three `/admin/v1/provider-credentials*` BYOK-alias
+    // operations (issue #682), and this branch reached 248 with the six
+    // `/admin/v1/semantic-cache-policies/**` operations (issue #695), which are
+    // `admin.read` / `admin.write` like every other admin surface. Both sets
+    // landed, so the merged figure is 242 + 3 + 6 = 251 — neither parent's
+    // number. All twelve additions since 238 are bearer; none is anonymous or
+    // internal.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 238,
+      bearer: 251,
       internal: 6,
       anonymous: 6,
       method_dependent: 1,
@@ -65,18 +77,41 @@ describe("contract table", () => {
 
   it("reproduces the documented visibility census", () => {
     expect(census(OPERATIONS.map<Visibility>((operation) => operation.visibility))).toEqual({
-      admin: 193,
-      public: 51,
+      // 193 -> 196 with the three prompt-deployment-label operations (issue
+      // #694): prompt-registry management is admin-visibility. From that 196
+      // `main` reached 199 with the three #682 BYOK-alias operations and this
+      // branch reached 202 with the six #695 semantic-cache-policy operations,
+      // all admin for the same reason. BOTH sets landed, so this is
+      // 196 + 3 + 6 = 205 and not either parent's number.
+      admin: 205,
+      // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
+      // operation, publicly reachable, bearer-guarded.
+      public: 52,
       internal: 7,
     });
   });
 
   it("reproduces the documented method census", () => {
     expect(census(OPERATIONS.map<HttpMethod>((operation) => operation.method))).toEqual({
-      GET: 116,
-      POST: 78,
-      DELETE: 24,
-      PUT: 17,
+      // GET/PUT/DELETE each +1 with the prompt-deployment-label operations
+      // (issue #694: list/read, upsert, delete of a label pointer), moving
+      // GET/DELETE/PUT from 116/24/17 to 117/25/18. Then both parents moved the
+      // same three counters again, independently: `main` with #682's
+      // GET /provider-credentials plus PUT and DELETE
+      // /provider-credentials/{alias}, and this branch with the six #695
+      // semantic-cache-policy operations (GET +2 / POST +2 / PUT +1 /
+      // DELETE +1, whose POSTs are `create` and `invalidate`). Because both
+      // parents had independently written GET 118 / DELETE 26 / PUT 19 for
+      // their own increment, git merged those three lines with NO conflict —
+      // the true combined figures are 120/27/20, which is neither parent's
+      // number and had to be re-derived from
+      // `docs/openapi/runtime-api-contract.json`.
+      GET: 120,
+      // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
+      // 79 -> 81 with the two #695 semantic-cache-policy POSTs.
+      POST: 81,
+      DELETE: 27,
+      PUT: 20,
       PATCH: 16,
     });
   });
@@ -252,12 +287,13 @@ describe("route registration", () => {
   // The PRODUCTION router — the one `src/index.ts` hands to `export default`.
   // Deliberately NOT a bespoke `createGatewayApp({ modules: [...] })` built
   // here: a local module list is exactly how the deployed Worker came to mount
-  // 7 of its 31 operations while this suite stayed green.
+  // 7 of its 32 operations while this suite stayed green.
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 31 operations ROUTE-MAP assigns to apps/gateway", () => {
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(31);
+  it("owns exactly the 32 operations ROUTE-MAP assigns to apps/gateway", () => {
+    // 31 -> 32 with `countMessageTokens` (issue #671).
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(32);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -271,14 +307,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 31 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 32 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 31 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 32 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 32nd owned
@@ -375,7 +411,7 @@ async function envelope(response: Response): Promise<{ code: string; message: st
 }
 
 describe("the deployed Worker serves the mounted modules", () => {
-  it("mounts the 6 inference operations", async () => {
+  it("mounts the 7 inference operations", async () => {
     // GET /v1/models reaches the inference handler: an empty catalog, not a 404.
     const models = await SELF.fetch(`${BASE}/v1/models`, { headers: ROOT });
     expect(models.status).toBe(200);
@@ -387,6 +423,9 @@ describe("the deployed Worker serves the mounted modules", () => {
       "/v1/chat/completions",
       "/v1/responses",
       "/v1/messages",
+      // `count_tokens` shares the Messages schema, so `{}` is the same
+      // `invalid_request` (issue #671).
+      "/v1/messages/count_tokens",
       "/v1/embeddings",
       "/v1/images/generations",
     ];

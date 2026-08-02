@@ -69,6 +69,15 @@ export const NODE_DRAINING_MESSAGE =
  * list below: draining an operation this deployment refuses outright would
  * replace a decided refusal with a temporary one. If the drop is ever revisited
  * it belongs in this list on the same day the handler lands.
+ *
+ * `countMessageTokens` (`POST /v1/messages/count_tokens`, issue #671) is also
+ * deliberately absent, and for a different reason than `executeTool`: it is
+ * offered, it just produces no spend and consumes no provider capacity — it
+ * answers from the local estimator without contacting an upstream. A drain says
+ * "stop sending this node new AI work"; refusing a count would additionally say
+ * "stop answering questions about work", which is not what the operator asked
+ * for and would break a client's budget pre-flight while it is trying to move
+ * traffic away from the draining node.
  */
 export const DRAIN_GUARDED_OPERATION_IDS: readonly string[] = [
   "createChatCompletion",

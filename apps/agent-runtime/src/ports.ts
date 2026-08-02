@@ -38,8 +38,12 @@ import {
 import { agentUpstreamPortFromEnv } from "./agents/registry.js";
 import { normalizedCapabilities } from "./capabilities.js";
 import { timingSafeEqualStrings } from "./crypto.js";
-import { durableA2aGuardrailPort } from "./guardrails.js";
 import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
+import { durableA2aGuardrailPort } from "./guardrails.js";
+// `./rbac.js` imports the `AuthContext` TYPE back out of this module. The cycle
+// is type-only, so nothing is evaluated in either direction at module load —
+// the same shape `./admission/index.js` and `./guardrails.js` already have.
+import { type RbacAuthorizerPort, rbacAuthorizerFromEnv } from "./rbac.js";
 import { type WorkflowCatalogPort, workflowCatalogFromEnv } from "./runs/workflow.js";
 import { type FrameOpenResult, type SealedWorkerFrame, openWorkerFrame } from "./workers/frame.js";
 
@@ -588,6 +592,16 @@ export interface AgentRuntimeDeps {
    * spend controls either. Both fail closed together.
    */
   readonly admission: AdmissionPort;
+  /**
+   * THE RBAC GATE — an operation's `rbac_action` (`docs/rewrite/
+   * FLEET-CONSISTENCY.md` finding **FC-7**), see `src/rbac.ts`.
+   *
+   * It sits beside the credential authorities for the same reason
+   * {@link admission} does: in Rust these were one `authenticate()` chain, and
+   * a deployment that cannot consult its grant graph must not serve an
+   * rbac-guarded operation as though nothing were declared.
+   */
+  readonly rbac: RbacAuthorizerPort;
   readonly workerIdentities: WorkerIdentityPort;
   readonly governance: GovernancePort;
   readonly upstreams: AgentUpstreamPort;
@@ -1520,6 +1534,13 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
     // three are OPTIONAL and each degrades in the tightening direction only —
     // see `src/admission/index.ts`.
     admission: admissionFromEnv(env as AdmissionBindings),
+    // FC-7. THE MOUNT of the RBAC gate. Deleting this line returns the Worker
+    // to the state FLEET-CONSISTENCY records: `rbac_action` parsed off the
+    // contract (`src/contract.ts`) and never read, so a role an operator uses
+    // to withhold an action is enforced on `apps/gateway` and silently ignored
+    // here. `CONTROL_DB` unbound ⇒ 503, never an implicit grant — see
+    // `src/rbac.ts`.
+    rbac: rbacAuthorizerFromEnv(env),
     workerIdentities,
     governance: inMemoryGovernancePort({
       governedEgressHosts: parseGovernedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS),

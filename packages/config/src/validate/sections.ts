@@ -769,7 +769,7 @@ export function inertTlsWarnings(config: Config): string[] {
  * `token_env`. In Rust the gateway POSTs each settlement to a separate
  * `ferrogate-billing serve` process at that endpoint. On Cloudflare the gateway
  * settles IN-PROCESS (`apps/gateway/src/metering/*` calls `charge()` directly and
- * drains `billing_report_outbox`), the committed 251-operation contract carries
+ * drains `billing_report_outbox`), the committed 264-operation contract carries
  * no `/v1/billing/*` operation, and nothing dials `endpoint`. The handler in
  * `@ferrogate/billing` is retained as a portable Fetch handler for a
  * self-hosted deployment; it is mounted on no Worker here.

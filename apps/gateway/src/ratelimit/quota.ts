@@ -32,6 +32,7 @@ import {
   type EffectiveQuota,
   type QuotaScopeChain,
   type QuotaScopeKind,
+  QuotaScopeSelector,
   type StoredPlan,
   type StoredQuotaPolicy,
   resolveEffectiveQuota,
@@ -42,7 +43,7 @@ import {
   optionalNumber,
   periodMonthFromUnix,
 } from "@ferrogate/storage";
-import { type CounterWindow, requestWindows, tpmWindow } from "./keys.js";
+import { type CounterWindow, counterKeyForScope, requestWindows, tpmWindow } from "./keys.js";
 
 /**
  * Everything the limiter needs about one caller, projected out of the resolved
@@ -334,7 +335,11 @@ function rowToStoredPolicy(row: Record<string, unknown>): StoredQuotaPolicy {
     id,
     scopeType,
     scopeId: String(row["scope_id"] ?? ""),
-    modelAllowlist: jsonArrayColumn<string>(row["model_allowlist_json"], "model_allowlist_json", id),
+    modelAllowlist: jsonArrayColumn<string>(
+      row["model_allowlist_json"],
+      "model_allowlist_json",
+      id,
+    ),
     rpmLimit: optionalNumber(row["rpm_limit"]),
     tpmLimit: optionalNumber(row["tpm_limit"]),
     monthlyBudgetUsd: optionalNumber(row["monthly_budget_usd"]),
@@ -456,9 +461,7 @@ export function d1QuotaPolicySource(db: D1Database): QuotaPolicySource {
       if (tenantId !== undefined) {
         statements.push(
           db
-            .prepare(
-              "SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?",
-            )
+            .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
             .bind(tenantId),
         );
       }
@@ -738,6 +741,118 @@ export function monthlyBudgetScope(
     if (id !== undefined && id !== "") return { kind, id };
   }
   return null;
+}
+
+/**
+ * One rung of the nested budget as the ADMISSION PATH needs it: which scope's
+ * aggregate spend to read, what ceiling applies there, and which counter the
+ * in-flight holds contend on.
+ */
+export interface MonthlyBudgetCharge {
+  readonly kind: QuotaScopeKind;
+  readonly id: string;
+  readonly limitUsd: number;
+  /**
+   * The shared counter for this rung — `"{kind}:{id}"`, always namespaced (see
+   * `keys.ts`). A `project` rung is ONE counter for every key under the
+   * project, which is what makes "$5k/month, split however its keys like" a
+   * single budget instead of a per-key one.
+   */
+  readonly counterKey: string;
+}
+
+/**
+ * The full ladder of budgets a request must satisfy (#679), broadest first.
+ *
+ * Every rung is enforced, because each is measured against a DIFFERENT
+ * aggregate: a project rung against the project's rollup (every key under it),
+ * a key rung against that one credential. Enforcing only the tightest NUMBER —
+ * which is what {@link monthlyBudgetScope} alone gave — leaves the others
+ * unevaluated, and an ancestor cap that is never evaluated is not a cap.
+ *
+ * The fallback keeps the pre-#679 behavior for a quota that carries a budget
+ * but no ladder: a plan floor on a chain with no tenant id, and any caller that
+ * builds an `EffectiveQuota` by hand. It charges the single scope
+ * {@link monthlyBudgetScope} picks, exactly as before.
+ */
+export function monthlyBudgetCharges(
+  quota: EffectiveQuota,
+  chain: QuotaScopeChain,
+  apiKeyId: string,
+): MonthlyBudgetCharge[] {
+  const ladder = quota.monthlyBudgets ?? [];
+  if (ladder.length > 0) {
+    return ladder.map((rung) => ({
+      kind: rung.scope.kind,
+      id: rung.scope.id,
+      limitUsd: rung.limitUsd,
+      counterKey: counterKeyForScope(rung.scope, apiKeyId),
+    }));
+  }
+
+  const budgetUsd = quota.monthlyBudgetUsd;
+  if (budgetUsd === undefined) return [];
+  const scope = monthlyBudgetScope(quota, chain);
+  if (scope === null) return [];
+  return [
+    {
+      kind: scope.kind,
+      id: scope.id,
+      limitUsd: budgetUsd,
+      counterKey: counterKeyForScope(new QuotaScopeSelector(scope.kind, scope.id), apiKeyId),
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// The in-flight hold — sizing the reservation a request takes against a budget
+// ---------------------------------------------------------------------------
+
+/**
+ * USD held per admitted request when the operator configures none.
+ *
+ * ## Why a flat hold, and what it does and does not buy
+ *
+ * A budget hold has to be sized in middleware, BEFORE the body is parsed and
+ * the model resolved, so there is no price to hold (the same constraint
+ * `wallet.ts` documents for `GATEWAY_WALLET_HOLD_CREDITS`, and it disappears
+ * the day pre-dispatch pricing lands — then this number becomes the estimate).
+ *
+ * What the hold DOES bound: concurrency. A budget with `H` dollars of headroom
+ * admits at most `H / hold` genuinely-simultaneous requests, instead of
+ * unbounded (every one of them reading the same `cost_usd` off D1 and passing).
+ * At one cent that is 100 concurrent requests per dollar of remaining budget,
+ * and exactly ZERO once the budget is spent.
+ *
+ * What it does NOT bound: the cost of the requests it admits. A hold is not a
+ * price. Cumulative spend is still bounded by the rollup the metering path
+ * writes, which is why the read-based check upstream of the reservation is kept
+ * rather than replaced — the two gates compose (see `middleware.ts` step 2/2b).
+ *
+ * A cent, and not the smallest representable amount, because a hold far below
+ * a request's true cost bounds nothing in practice; and not a dollar, because
+ * that would refuse a caller with 99 cents of real headroom.
+ */
+export const DEFAULT_BUDGET_HOLD_USD = 0.01;
+
+/** Worker bindings that size the budget hold. */
+export interface BudgetHoldBindings {
+  /**
+   * USD to hold per admitted request against each budget rung. Absent or not a
+   * positive finite number ⇒ {@link DEFAULT_BUDGET_HOLD_USD}; a bad value is
+   * IGNORED rather than applied, because a `0` or `NaN` hold would silently
+   * disable the concurrency guard for every tenant.
+   */
+  readonly GATEWAY_BUDGET_HOLD_USD?: string | undefined;
+}
+
+/** {@link BudgetHoldBindings.GATEWAY_BUDGET_HOLD_USD}, validated. */
+export function budgetHoldUsdFromEnv(env: BudgetHoldBindings): number {
+  const raw = env.GATEWAY_BUDGET_HOLD_USD;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_BUDGET_HOLD_USD;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_BUDGET_HOLD_USD;
+  return parsed;
 }
 
 /** The current UTC `YYYY-MM`, Rust `AppState::current_period_month`. */

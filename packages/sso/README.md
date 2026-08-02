@@ -115,7 +115,7 @@ The three routes are `inventory-edge-control.md` §5.1's
 `GET /v1/admin/auth/saml/authorize`, `GET /v1/admin/auth/saml/acs`, and the
 `"saml"` branch of `POST /v1/admin/team/sso-config`. They are part of the
 `/v1/admin/*` console identity surface that `apps/control-plane/src/index.ts`'s
-header already lists as "still to come", and they are **not** among the 251
+header already lists as "still to come", and they are **not** among the 258
 contract operations, so they do not affect the anti-drift gate.
 
 ### 1. Dependency

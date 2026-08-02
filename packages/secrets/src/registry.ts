@@ -12,7 +12,21 @@
  *
  * An ambiguous (non-canonical) `cf://` name with no exact injected binding
  * errors **in the binding context, before the REST fallback**.
+ *
+ * A fourth scheme was added by issue #682:
+ *
+ *  4. `byok://<alias>` → the {@link TenantByokResolver} mounted with
+ *     {@link SecretResolverRegistry.withByok}, or a refusal.
+ *
+ * It is unlike the other three in one respect that governs how it is wired: it
+ * resolves PER TENANT, so a registry can only serve it when someone has bound a
+ * tenant to it. A registry with no BYOK resolver therefore REFUSES `byok://`
+ * rather than returning `null`. `null` would read as "this tenant has not
+ * registered that alias" and would let a request quietly fall back to the
+ * platform's own provider credential — i.e. FerroGate paying for traffic the
+ * tenant believes is on their own agreement.
  */
+import type { TenantByokResolver } from "./byok.js";
 import { type EnvLike, defaultEnv } from "./env.js";
 import { CfSecretBindings } from "./cloudflare-bindings.js";
 import { cfBindingEnvVar } from "./cloudflare-bindings.js";
@@ -28,6 +42,16 @@ export class SecretResolverRegistry {
   private vault: VaultSecretResolver | null;
   private cloudflare: CloudflareSecretResolver | null;
   private cfBindings: CfSecretBindings;
+  /**
+   * The per-tenant BYOK backend (issue #682), or `null`.
+   *
+   * NOT built by {@link SecretResolverRegistry.fromEnv}, and that omission is
+   * the point: this resolver is bound to ONE authenticated tenant, so it can
+   * only be constructed where a tenant is known — the request path. An env-built
+   * default would necessarily be tenant-less, which is the one thing a BYOK
+   * resolver must never be.
+   */
+  private byok: TenantByokResolver | null = null;
   private readonly env: EnvLike;
 
   private constructor(
@@ -68,6 +92,19 @@ export class SecretResolverRegistry {
   /** Enable the Cloudflare Secrets Store REST backend (builder). */
   withCloudflare(cloudflare: CloudflareSecretResolver): this {
     this.cloudflare = cloudflare;
+    return this;
+  }
+
+  /**
+   * Mount the per-tenant BYOK backend for `byok://` (builder, issue #682).
+   *
+   * Call this once per REQUEST with a resolver built from the authenticated
+   * caller's tenant — never once per isolate. A registry memoized across
+   * requests would serve whichever tenant happened to warm the isolate, which is
+   * exactly the cross-tenant read this feature exists to make impossible.
+   */
+  withByok(byok: TenantByokResolver): this {
+    this.byok = byok;
     return this;
   }
 
@@ -131,6 +168,16 @@ export class SecretResolverRegistry {
           );
         }
         return this.vault.resolve(reference);
+      case "byok":
+        if (this.byok === null) {
+          throw new Error(
+            `secret reference ${raw} is a per-tenant BYOK alias, but no tenant-bound resolver ` +
+              "is mounted on this registry (call withByok(new TenantByokResolver({ tenantId, " +
+              "store, keyring })) with the AUTHENTICATED caller's tenant). Refusing rather " +
+              "than falling back to the platform's own provider credential.",
+          );
+        }
+        return this.byok.resolve(reference);
       case "cfSecret": {
         // Decision #423: the binding context is the only path that can produce
         // a Secrets Store value (values are write-only over REST), so it is

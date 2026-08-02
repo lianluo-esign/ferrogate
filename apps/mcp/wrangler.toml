@@ -237,16 +237,14 @@ migrations_dir = "../../sql/d1-ts/control"
 # ===========================================================================
 
 # ===========================================================================
-# DURABLE OBJECTS — the SHARED admission counter (wave 16, finding D1)
+# DURABLE OBJECTS — the SHARED admission counter (wave 16 finding D1; #666)
 #
-# WRITTEN OUT AND COMMENTED, exactly like the D1 stanzas in
-# `apps/agent-runtime/wrangler.toml`, for a measured harness reason (below).
-# UNCOMMENT AT DEPLOY TIME.
-#
-#   [[durable_objects.bindings]]
-#   name = "RATE_LIMIT"
-#   class_name = "RateLimiterDurableObject"
-#   script_name = "ferrogate-gateway"
+# LIVE. It was committed COMMENTED OUT from wave 16 until issue #666, with
+# "UNCOMMENT AT DEPLOY TIME" written above it, which meant the committed tree
+# was the BROKEN configuration: a credential capped at 60 rpm was charged 60
+# here, 60 more on `apps/gateway` and 60 more per `apps/agent-runtime` isolate,
+# and nothing errored when a deploy forgot the two lines. See the harness note
+# at the bottom for why it can now be live.
 #
 # Read as `env.RATE_LIMIT` by `src/admission/counters.ts::limiterForEnv`. This
 # is NOT a class this script defines: `script_name` names `apps/gateway`'s
@@ -255,46 +253,53 @@ migrations_dir = "../../sql/d1-ts/control"
 # a credential at 60 rpm is charged ONE window across `/v1/chat/completions`,
 # `/v1/mcp` and `/v1/mcp/tool/execute`. A private class here would compile,
 # deploy, pass every test, and hand this Worker its own full quota: a quieter
-# version of the admission bypass this wave closes.
+# version of the admission bypass wave 16 closed.
 #
-# NO `[[migrations]]` stanza belongs here, now or when it is uncommented. A
-# migration INTRODUCES a class and the class is introduced by the script that
-# DEFINES it — `apps/gateway`, whose `new_sqlite_classes =
-# ["RateLimiterDurableObject"]` already exists. A second `new_sqlite_classes`
-# here would claim to define a class this script does not export and `wrangler
-# deploy` rejects it. For the same reason there is no `src/worker.ts`
-# re-export: this Worker BINDS the class, it does not define it. (If the class
-# is ever MOVED into this app, the stanza must be `new_sqlite_classes`, never
-# `new_classes` — the latter deploys cleanly and silently swaps SQLite for the
-# key-value storage backend.)
+# NO `[[migrations]]` stanza belongs to it. A migration INTRODUCES a class and
+# the class is introduced by the script that DEFINES it — `apps/gateway`, whose
+# `new_sqlite_classes = ["RateLimiterDurableObject"]` already exists. A second
+# `new_sqlite_classes` here would claim to define a class this script does not
+# export and `wrangler deploy` rejects it. For the same reason there is no
+# `src/worker.ts` re-export: this Worker BINDS the class, it does not define
+# it. (If the class is ever MOVED into this app, the stanza must be
+# `new_sqlite_classes`, never `new_classes` — the latter deploys cleanly and
+# silently swaps SQLite for the key-value storage backend.)
 #
 # DEPLOY ORDER: `ferrogate-gateway` FIRST. A `script_name` binding to a script
-# that does not exist yet fails at deploy.
+# that does not exist yet FAILS THE DEPLOY — which is the point. That refusal
+# is the deploy-time assertion the old comment could never be.
+# ===========================================================================
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+script_name = "ferrogate-gateway"
+
+# ---------------------------------------------------------------------------
+# HOW THE OFFLINE HARNESS RESOLVES THE LINE ABOVE
 #
-# WHY IT IS COMMENTED — measured on 2026-08-01, not feared. `vitest.config.ts`
-# loads this file through `wrangler: { configPath }`, and neither
-# `@cloudflare/vitest-pool-workers` nor `wrangler dev --local` can resolve a
-# cross-script DO binding: workerd refuses to START the Worker with
+# The measured reason this stanza was commented (2026-08-01) was real: a bare
+# `@cloudflare/vitest-pool-workers` session refuses to start with
 #
 #   Worker "core:user:vitest-pool-workers-runner-"'s binding "RATE_LIMIT"
 #   refers to a service "core:user:ferrogate-gateway", but no such service is
 #   defined.
 #
-# Committed uncommented, the whole MCP suite goes to 0 tests / 23 collection
-# errors on a correct tree, and `bunx wrangler dev --local` never reaches
-# "Ready on". This seam is therefore DEPLOY-ONLY in the sense of
-# `docs/rewrite/MOUNT-SEAMS.md` §1: it cannot be proven by any offline gate,
-# and pretending otherwise by deleting the sharing is the worse trade.
+# and the whole MCP suite went to 0 tests / 23 collection errors. The reading
+# that was WRONG is "workerd cannot resolve a cross-script binding offline".
+# workerd cannot resolve it against a script that is not in the SESSION —
+# `vitest.config.ts` now puts one there, an auxiliary worker named
+# `ferrogate-gateway` carrying the gateway's real `RateLimiterDurableObject`
+# (`apps/gateway/test/support/rate-limit-aux-worker.ts`). So the binding is
+# live, the suite is green, and `test/shared-rate-limit.test.ts` charges a
+# window as the gateway and requires THIS Worker to find it spent.
 #
-# WHILE IT IS COMMENTED, `limiterForEnv` falls back to the per-isolate
-# `InMemoryMcpRateLimiter`: the quota-scope chain, the monthly USD budget and
-# the prepaid-wallet no-oversell hold are ALL still enforced and ALL durable;
-# only the RPM window is counted per isolate (a 60 rpm cap is 60·N across N
-# isolates). One of five legs degraded, versus none of five enforced before.
-# `test/env-var-drift.test.ts` pins `RATE_LIMIT` as read-but-undeclared so this
-# cannot be forgotten, and `docs/rewrite/CLOUD-VERIFICATION.md` carries the
-# human deploy step.
-# ===========================================================================
+# `wrangler dev --local` on this app alone boots too (wrangler >=4.114 reports
+# the binding as `[not connected]` rather than refusing), so `e2e/` and the
+# boot proof are unaffected. To exercise the counter locally, put the gateway
+# in the same dev session:
+#
+#   bunx wrangler dev --local -c wrangler.toml -c ../gateway/wrangler.toml
+# ---------------------------------------------------------------------------
 # --- Workers Observability ---------------------------------------------------
 # Owner directive (2026-08-02): enable Workers Observability on the whole fleet
 # so production behaviour can be read back from the CLI (`wrangler tail`) and the

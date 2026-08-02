@@ -531,7 +531,6 @@ describe("FC-2 one suspension reaches every Worker that spends on the credential
       ).toContain(app);
     }
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -692,15 +691,19 @@ describe("FC-5 the RPM window is ONE counter across the three spend Workers", ()
    * instance from all three and a credential at 60 rpm is charged one window
    * across `/v1/chat/completions`, `tools/call` and `/v1/agent-jobs`.
    *
-   * Neither of the two binding stanzas can be committed live: workerd refuses
-   * to start on a cross-script DO binding under `wrangler dev --local` and
-   * `@cloudflare/vitest-pool-workers`, so both are written out and commented
-   * for deploy time. That leaves an obvious and catastrophic "fix" available
-   * to the next person who meets the boot error: define a private
-   * `RateLimiterDurableObject` in the app that fails. It compiles, deploys,
-   * passes every suite — and hands that Worker its own full RPM quota, which
-   * is the wave-16 bypass restored quietly. THIS is the assertion that stops
-   * it.
+   * Both binding stanzas are LIVE since issue #666. They were written out and
+   * COMMENTED until then, because a bare `@cloudflare/vitest-pool-workers`
+   * session refuses to start on a `script_name` it cannot resolve — which made
+   * the committed tree the broken configuration and left the sharing to a human
+   * remembering two lines at deploy time. The borrowers' harnesses now register
+   * an auxiliary `ferrogate-gateway` worker carrying this app's real limiter
+   * (`test/support/rate-limit-aux-worker.ts`), so the stanzas are live and
+   * offline-provable.
+   *
+   * The catastrophic "fix" this block exists to stop is unchanged: define a
+   * private `RateLimiterDurableObject` in the borrowing app. It compiles,
+   * deploys, passes every suite — and hands that Worker its own full RPM quota,
+   * which is the wave-16 bypass restored quietly.
    */
   it("all three spend Workers read the same binding name", () => {
     expect(appsMatching(PROBE.readsRateLimitBinding)).toEqual(SPEND_WORKERS);
@@ -715,29 +718,36 @@ describe("FC-5 the RPM window is ONE counter across the three spend Workers", ()
     ]);
   });
 
-  it("neither borrower declares the class in its LIVE config", () => {
-    // A live `[[durable_objects.bindings]]` naming the class WITHOUT
-    // `script_name` is the same private namespace by another route.
+  it("neither borrower declares the class WITHOUT script_name", () => {
+    // A live `[[durable_objects.bindings]]` naming the class and NOT naming a
+    // script is the same private namespace by another route: it deploys, and
+    // it silently gives that Worker its own full RPM allowance.
     for (const app of ["mcp", "agent-runtime"] as const) {
+      const stanza = /\[\[durable_objects\.bindings\]\][^[]*?RateLimiterDurableObject[^[]*/.exec(
+        tomlOf(app).live,
+      );
+      expect(stanza, `${app} no longer binds RateLimiterDurableObject at all`).not.toBeNull();
       expect(
-        /RateLimiterDurableObject/.test(tomlOf(app).live),
-        `${app} wrangler.toml declares the limiter class live`,
-      ).toBe(false);
+        /script_name\s*=\s*"ferrogate-gateway"/.test(stanza?.[0] ?? ""),
+        `${app} binds the limiter class without script_name — a private namespace`,
+      ).toBe(true);
     }
   });
 
-  it("both borrowers keep the deploy-time stanza, pointed at the gateway script", () => {
-    // The stanza is the deploy instruction; deleting it is how the shared
-    // counter silently stops being shared at the next deploy.
+  it("both borrowers keep the stanza LIVE, pointed at the gateway script", () => {
+    // WAS asserted against the whole file (`full`) INCLUDING comments, because
+    // the stanza was committed commented out. That is precisely what issue #666
+    // was: the assertion could not tell a deployed binding from a comment about
+    // one. It is asserted against `live` now.
     for (const app of ["mcp", "agent-runtime"] as const) {
-      const { full } = tomlOf(app);
-      expect(full, `${app} lost the RATE_LIMIT deploy stanza`).toContain(
+      const { live } = tomlOf(app);
+      expect(live, `${app} lost the LIVE RATE_LIMIT stanza`).toContain(
         'class_name = "RateLimiterDurableObject"',
       );
-      expect(full, `${app} lost script_name — a private namespace at deploy`).toContain(
+      expect(live, `${app} lost script_name — a private namespace at deploy`).toContain(
         'script_name = "ferrogate-gateway"',
       );
-      expect(full, `${app} lost the RATE_LIMIT binding name`).toContain('name = "RATE_LIMIT"');
+      expect(live, `${app} lost the RATE_LIMIT binding name`).toContain('name = "RATE_LIMIT"');
     }
   });
 
@@ -766,6 +776,46 @@ describe("FC-6 single-Worker controls, pinned so they stay single-Worker or get 
     expect(appsMatching(/GATEWAY_CACHE_ENABLED/)).toEqual(["gateway"]);
   });
 
+  /**
+   * #695 changed row 18's SOURCE-OF-TRUTH class without changing its Worker
+   * set, and both halves are asserted because only the pair is the finding.
+   *
+   * The class was **V** — var-only, the exact shape §1.1 names as the origin of
+   * both shipped bypasses. It is now **D + V**: the deployment vars are the
+   * operator's floor and `semantic_cache_policies` on the CONTROL database is
+   * the per-tenant overlay, read on the request path by
+   * `src/cache/governance.ts` and written by
+   * `/admin/v1/semantic-cache-policies/**`.
+   *
+   * The Worker set is UNCHANGED — still the gateway alone — and that is the
+   * assertion that has to keep holding. FC-6b's reason ("nothing else in the
+   * fleet serves a cacheable body") is what makes single-Worker correct here,
+   * and it survives #695: `apps/mcp` and `apps/agent-runtime` dispatch tools and
+   * A2A calls, not inference, and agent runs that DO spend on inference reach a
+   * provider through this gateway (FC-6e says the same thing about the metering
+   * write). The day one of them dispatches to a provider directly, the reader
+   * below has to move with it — which is the question this assertion forces.
+   */
+  it("the response cache's governance is DURABLE now, and still gateway-only", () => {
+    expect(appsMatching(/semantic_cache_policies/)).toEqual(["gateway", "control-plane"]);
+    expect(appsMatching(/cacheGovernanceSourceFromEnv/)).toEqual(["gateway"]);
+  });
+
+  /**
+   * The PREMISE of the assertion above, asserted rather than assumed.
+   *
+   * #695's "Done when" asks for the cache on "every Worker that serves
+   * inference", and the answer is "one Worker" — but that answer is only worth
+   * anything if it is measured. `@ferrogate/providers` is the SDK that speaks
+   * to OpenAI / Anthropic / Gemini / Bedrock / Vertex, so importing it is what
+   * "serves inference" means operationally. If a second Worker ever does, this
+   * goes red and the cache-reader question gets asked at that moment rather
+   * than after a tenant notices their governance applies to half their traffic.
+   */
+  it("EVIDENCE for FC-6b: exactly one Worker speaks to a model provider", () => {
+    expect(appsMatching(/@ferrogate\/providers/)).toEqual(["gateway"]);
+  });
+
   it("the operator deny table is the gateway's alone — with a caveat, see below", () => {
     // Rust evaluated `policy_engine.evaluate(request, model, provider)` from
     // `chat.rs` only, so a MODEL/PROVIDER-scoped deny rule being inference-only
@@ -779,19 +829,43 @@ describe("FC-6 single-Worker controls, pinned so they stay single-Worker or get 
 });
 
 // ---------------------------------------------------------------------------
-// FC-7 — a control that is PARSED everywhere and enforced in two places
+// FC-7 — a control that was PARSED everywhere and enforced in two places
 // ---------------------------------------------------------------------------
 
-describe("FC-7 rbac_action is carried by four Workers and consulted by two", () => {
+describe("FC-7 rbac_action is carried AND consulted by all four credential Workers", () => {
   /**
-   * `apps/mcp` and `apps/agent-runtime` both parse `rbac_action` off the shared
-   * contract table into their `ApiOperation` and never read it again. That is
-   * harmless TODAY and only today: every operation in
-   * `docs/openapi/runtime-api-contract.json` carrying an `rbac_action` is an
-   * `/admin/v1/guardrail-*` or `/admin/v1/investigations` path, which those two
-   * Workers do not serve. The day one lands on a data-plane path it is silently
-   * unenforced on two of five Workers — the same shape as both shipped
-   * defects, pre-armed. This turns that day RED.
+   * ## What FC-7 was
+   *
+   * `apps/mcp` and `apps/agent-runtime` both parsed `rbac_action` off the
+   * shared contract table into their `ApiOperation` and never read it again.
+   * Only `apps/gateway` and `apps/control-plane` called an authorizer, so a
+   * role an operator used to withhold an action was enforced on two of the four
+   * credential Workers and silently ignored on the other two.
+   *
+   * It was harmless on the day it was found and only on that day: every
+   * operation in `docs/openapi/runtime-api-contract.json` carrying an
+   * `rbac_action` is an `/admin/v1/guardrail-*` or `/admin/v1/investigations`
+   * path, which those two Workers do not serve. The day one landed on a
+   * data-plane path it would have been unenforced on two of five Workers, with
+   * every per-Worker suite green — both shipped defects' shape, pre-armed.
+   *
+   * ## What it is now — CLOSED (issue #668)
+   *
+   * All four credential Workers consult an authorizer over the SAME durable
+   * `permissions` / `roles` / `tenant_role_bindings` graph
+   * (`apps/mcp/src/rbac.ts`, `apps/agent-runtime/src/rbac.ts`, mounted in each
+   * Worker's composition root and called from its auth chokepoint). The
+   * assertion that RECORDED the divergence is inverted below — the ratchet in
+   * §5 doing what it is for: a closed divergence has to go RED and force this
+   * block, `FLEET-CONSISTENCY.md` and the code to move in one commit.
+   *
+   * The MECHANICAL half is `./fleet-control-matrix.test.ts` §3 control
+   * `rbac-action`, which names no Worker: it computes the credential role set
+   * and requires every member to enforce the control off the same
+   * source-of-truth class, so a sixth credential Worker is held to it without
+   * an edit. The DECISION half — that the four agree on the answer, not merely
+   * that they all ask — is `./fleet-rbac-action.test.ts`, which drives one
+   * seeded control database through every Worker's own authorizer.
    */
   const operations = (contractDocument as { operations: readonly Record<string, unknown>[] })
     .operations;
@@ -800,32 +874,44 @@ describe("FC-7 rbac_action is carried by four Workers and consulted by two", () 
     expect(operations.length).toBeGreaterThan(200);
   });
 
-  it("only gateway and control-plane consult an authorizer", () => {
-    expect(appsMatching(PROBE.consultsRbacAuthorizer)).toEqual(["gateway", "control-plane"]);
+  it("CLOSED: every credential Worker consults an authorizer", () => {
+    // Was `["gateway", "control-plane"]` — the recorded divergence. The two
+    // Workers added here are the fix; `telemetry` is correctly absent, because
+    // it authenticates one operator-issued collector token and owns no tenant
+    // state for a role to restrict.
+    expect(appsMatching(PROBE.consultsRbacAuthorizer)).toEqual([...CREDENTIAL_WORKERS]);
   });
 
-  it("four Workers parse the field", () => {
-    expect(appsMatching(PROBE.parsesRbacAction)).toEqual([
-      "gateway",
-      "control-plane",
-      "mcp",
-      "agent-runtime",
-    ]);
+  it("the Workers that PARSE the field are exactly the Workers that consult it", () => {
+    // The sharp statement of FC-7, and the one that stays useful now that it is
+    // closed: parsing without consulting is the divergence, and any future
+    // Worker that adds the contract parser without the authorizer re-opens it.
+    expect(appsMatching(PROBE.parsesRbacAction)).toEqual(
+      appsMatching(PROBE.consultsRbacAuthorizer),
+    );
   });
 
-  it("every rbac-guarded operation is on an admin path the two enforcers serve", () => {
+  it("an rbac_action on a data-plane path is no longer a silent bypass", () => {
+    // The ORIGINAL assertion said every rbac-guarded operation must be on an
+    // `/admin/v1/` path, because the two data-plane Workers could not enforce
+    // one. That is no longer the property to hold — the whole point of the fix
+    // is that such an operation IS now enforced fleet-wide — so what is
+    // asserted is the precondition that made the old fence unnecessary:
+    // whatever paths carry an `rbac_action`, every Worker that could serve them
+    // consults the graph. The old fence is deliberately gone rather than
+    // silently kept; keeping it would forbid the very product change (M6) this
+    // fix exists to make safe.
     const guarded = operations.filter((op) => (op as { rbac_action?: string }).rbac_action);
     expect(
       guarded.length,
       "no rbac_action operations found — the probe went stale",
     ).toBeGreaterThan(0);
-    const offPath = guarded
-      .map((op) => String((op as { path?: string }).path ?? ""))
-      .filter((path) => !path.startsWith("/admin/v1/"));
+    const unenforcedOn = CREDENTIAL_WORKERS.filter(
+      (app) => !CODE[app].some(([, code]) => PROBE.consultsRbacAuthorizer.test(code)),
+    );
     expect(
-      offPath,
-      "an rbac_action landed on a non-admin path; apps/mcp and apps/agent-runtime parse the " +
-        "field and never consult an authorizer, so it is unenforced there",
+      unenforcedOn,
+      `${guarded.length} contract operations declare an rbac_action and these credential Workers consult no authorizer — an operation moving onto a path they serve would be silently unenforced there`,
     ).toEqual([]);
   });
 });

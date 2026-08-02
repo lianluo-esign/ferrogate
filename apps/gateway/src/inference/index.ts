@@ -1,9 +1,9 @@
 /**
- * `apps/gateway` inference surface — the six OpenAPI operations in the
+ * `apps/gateway` inference surface — the seven OpenAPI operations in the
  * `inference` route group of `docs/openapi/runtime-api-contract.json`:
  *
  *   listModels · createChatCompletion · createResponse · createMessage ·
- *   createEmbedding · createImage
+ *   countMessageTokens · createEmbedding · createImage
  *
  * Mount it from the app shell as a contract-driven `RouteModule`:
  *
@@ -57,6 +57,14 @@ export * from "./workflow.js";
 export * from "./errors.js";
 export * from "./usage.js";
 export {
+  WORKERS_AI_BINDING,
+  workersAiDispatcher,
+  workersAiDispatcherFromEnv,
+  workersAiModelOf,
+  workersAiSseToOpenAi,
+} from "./workers-ai.js";
+export type { WorkersAiBinding } from "./workers-ai.js";
+export {
   DEFAULT_INFERENCE_LIMITS,
   InMemoryModelResolver,
   InMemoryUsageSink,
@@ -64,6 +72,7 @@ export {
   defaultRequestIds,
   defaultStreamNormalizers,
   emptyModelResolver,
+  dispatcherFromEnv,
   fetchDispatcher,
   isolateRoutingMetrics,
   passthroughNormalizers,
