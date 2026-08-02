@@ -1,5 +1,5 @@
 /**
- * The 272-operation runtime API contract, as a typed, table-driven route table.
+ * The 274-operation runtime API contract, as a typed, table-driven route table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`.
  * The Rust build `include_str!`s `docs/openapi/runtime-api-contract.json`,
@@ -18,7 +18,7 @@
  * segment; so does this, by ranking each candidate segment-wise
  * (static < param < catch-all) and taking the lexicographically smallest rank.
  *
- * Nothing here is gateway-specific: all 272 operations are present, including
+ * Nothing here is gateway-specific: all 274 operations are present, including
  * the ones other Workers own. Ownership is a separate concern
  * (`GATEWAY_OWNED_OPERATION_IDS` in `./routes/index.ts`).
  */
@@ -60,7 +60,7 @@ export interface OperationAuth {
   readonly scopeDiscriminator: ScopeDiscriminator | null;
 }
 
-/** One of the 272 contract operations (Rust `ApiOperation`). */
+/** One of the 274 contract operations (Rust `ApiOperation`). */
 export interface ApiOperation {
   /** Contract path template, e.g. `/v1/assets/{asset_type}/{name}/{version}`. */
   readonly path: string;
@@ -120,7 +120,7 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * makes this the anti-drift gate: if the JSON changes, the assertion in
  * `test/contract.test.ts` fails before any route silently disappears.
  */
-export const EXPECTED_OPERATION_COUNT = 272;
+export const EXPECTED_OPERATION_COUNT = 274;
 
 // ---------------------------------------------------------------------------
 // Segment matcher (the `matchit` radix tree, re-implemented)

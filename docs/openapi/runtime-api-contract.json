@@ -59,6 +59,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/responses/{response_id}",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/embeddings",
       "group": "inference"
     },
@@ -2254,6 +2258,28 @@
       "path": "/v1/responses",
       "method": "post",
       "operation_id": "createResponse",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "responses.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/responses/{response_id}",
+      "method": "get",
+      "operation_id": "getResponse",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "responses.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/responses/{response_id}",
+      "method": "delete",
+      "operation_id": "deleteResponse",
       "visibility": "public",
       "auth": {
         "kind": "bearer",

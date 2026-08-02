@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 272.
+ * ANTI-DRIFT GATE for the third copy of 274.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(272);
+    expect(OPENAPI_OPERATION_COUNT).toBe(274);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -297,8 +297,13 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 272 - 10. The running sum is narrative, and #703 and #737
+    // `seeded`, i.e. 274 - 10. The running sum is narrative, and #703 and #737
     // landing in parallel is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(262);
+    //
+    // #689's `getResponse` / `deleteResponse` are that story once more — the
+    // Responses conversation-state shapes live beside their handler in
+    // `apps/gateway/src/inference/` — so `seeded` is still 10 and the shortfall
+    // is 264.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(264);
   });
 });
