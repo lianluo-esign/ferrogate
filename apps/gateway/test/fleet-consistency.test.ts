@@ -791,6 +791,21 @@ describe("FC-6 single-Worker controls, pinned so they stay single-Worker or get 
     expect(appsMatching(/cacheGovernanceSourceFromEnv/)).toEqual(["gateway"]);
   });
 
+  /**
+   * The PREMISE of the assertion above, asserted rather than assumed.
+   *
+   * #695's "Done when" asks for the cache on "every Worker that serves
+   * inference", and the answer is "one Worker" — but that answer is only worth
+   * anything if it is measured. `@ferrogate/providers` is the SDK that speaks
+   * to OpenAI / Anthropic / Gemini / Bedrock / Vertex, so importing it is what
+   * "serves inference" means operationally. If a second Worker ever does, this
+   * goes red and the cache-reader question gets asked at that moment rather
+   * than after a tenant notices their governance applies to half their traffic.
+   */
+  it("EVIDENCE for FC-6b: exactly one Worker speaks to a model provider", () => {
+    expect(appsMatching(/@ferrogate\/providers/)).toEqual(["gateway"]);
+  });
+
   it("the operator deny table is the gateway's alone — with a caveat, see below", () => {
     // Rust evaluated `policy_engine.evaluate(request, model, provider)` from
     // `chat.rs` only, so a MODEL/PROVIDER-scoped deny rule being inference-only
