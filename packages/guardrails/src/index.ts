@@ -167,6 +167,7 @@ export {
   cnResidentIdValid,
   ibanValid,
   luhnValid,
+  piiDetectorConfig,
   piiEntityCategory,
   piiEntityLabel,
   usSsnValid,
@@ -177,12 +178,19 @@ export type {
   PiiAiStageConfig,
   PiiDetectorConfig,
   PiiEntity,
+  PiiHostCapabilities,
+  PiiPolicyDefinition,
   PiiRedactionMode,
   PiiTokenVault,
 } from "./pii.js";
 
 // JSON schema/pointer helpers.
-export { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "./jsonschema.js";
+export {
+  evaluateSchema,
+  isValidSchema,
+  jsonPointerExists,
+  resolveJsonPointer,
+} from "./jsonschema.js";
 
 // Net (SSRF).
 export {
@@ -278,6 +286,10 @@ export {
   policyRevisionStatusSchema,
   policyScopeSelectorSchema,
   policyStreamingModeSchema,
+  piiAiEntitySchema,
+  piiAiStageSchema,
+  piiEntitySchema,
+  piiRedactionModeSchema,
   scopeMatches,
   selectPolicyRevisions,
   selectedCheckIds,

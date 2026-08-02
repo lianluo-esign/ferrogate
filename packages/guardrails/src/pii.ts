@@ -872,6 +872,97 @@ export class PiiDetector implements GuardrailDetector {
 }
 
 // ---------------------------------------------------------------------------
+// Policy definition → detector config
+// ---------------------------------------------------------------------------
+
+/** The `kind: "pii"` shape, structurally — `policy.ts` imports THIS, not vice versa. */
+export interface PiiPolicyDefinition {
+  readonly entities: readonly PiiEntity[];
+  readonly redaction: PiiRedactionMode;
+  readonly max_input_bytes?: number | null | undefined;
+  readonly ai?:
+    | {
+        readonly model: string;
+        readonly entities: readonly PiiAiEntity[];
+        readonly timeout_ms: number;
+        readonly max_input_chars: number;
+      }
+    | null
+    | undefined;
+}
+
+/** What the HOST environment can supply that a policy document cannot name. */
+export interface PiiHostCapabilities {
+  readonly vault?: PiiTokenVault | undefined;
+  readonly workersAi?: WorkersAiClient | undefined;
+}
+
+/**
+ * Translate a policy definition into a detector config, ONCE.
+ *
+ * Two build sites construct detectors from a `DetectorDefinition`
+ * (`binding.ts`, for MCP/agent-runtime, and `apps/gateway/src/guardrails/detectors.ts`),
+ * and a PII detector is the wrong thing to translate twice: the two sites would
+ * be free to disagree about what happens when the host cannot satisfy the
+ * policy, and one of them would answer "build it anyway, weaker".
+ *
+ * Both host gaps below therefore raise, rather than degrade:
+ *
+ *  - `tokenize` with no vault would become IRREVERSIBLE. An operator who chose
+ *    reversible redaction and silently got irreversible redaction has lost data
+ *    they believed was recoverable, and nothing in the response says so.
+ *  - an `ai` stage with no Workers AI transport would quietly drop the only
+ *    layer that reaches names and addresses, leaving a policy that claims to
+ *    detect them and does not. Unlike `workers_ai_llama_guard` — whose graceful
+ *    disable removes the WHOLE check, visibly — a half-built PII detector still
+ *    returns `pass` on a name, which reads as "screened and clean".
+ */
+export function piiDetectorConfig(
+  id: string,
+  definition: PiiPolicyDefinition,
+  supportedSources: ContentSource[],
+  fingerprintKey: DetectorSecret,
+  host: PiiHostCapabilities,
+  buildError: (message: string) => Error,
+): PiiDetectorConfig {
+  if (definition.redaction === "tokenize" && host.vault === undefined) {
+    throw buildError(
+      "pii detector requests reversible (tokenize) redaction but no token vault is configured",
+    );
+  }
+  const ai = definition.ai;
+  if (ai !== null && ai !== undefined && host.workersAi === undefined) {
+    throw buildError(
+      "pii detector requests the Workers AI stage but no Workers AI transport is configured",
+    );
+  }
+  return {
+    id,
+    supported_sources: supportedSources,
+    entities: [...definition.entities],
+    redaction: definition.redaction,
+    fingerprint_key: fingerprintKey,
+    ...(host.vault !== undefined && definition.redaction === "tokenize"
+      ? { vault: host.vault }
+      : {}),
+    ...(definition.max_input_bytes !== null && definition.max_input_bytes !== undefined
+      ? { max_input_bytes: definition.max_input_bytes }
+      : {}),
+    ...(ai !== null && ai !== undefined
+      ? {
+          ai: {
+            client: host.workersAi as WorkersAiClient,
+            model: ai.model,
+            entities: [...ai.entities],
+            timeoutMs: ai.timeout_ms,
+            maxInputChars: ai.max_input_chars,
+          },
+        }
+      : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Workers AI wire shape
 // ---------------------------------------------------------------------------
 

@@ -9,29 +9,26 @@
  * functions returning void / throwing `DetectorError(invalid_configuration)`.
  */
 import { z } from "zod";
+import { DEFAULT_MODEL, normalizeHazardCode } from "./adapters/workers_ai_llama_guard.js";
 import {
   DetectorError,
+  type DetectorStage,
   MAX_DETECTOR_TIMEOUT_MS,
   detectorStageSchema,
-  type DetectorStage,
 } from "./contract.js";
+import { validateCustomHttpEndpoint } from "./custom_http.js";
 import {
-  ALL_CONTENT_SOURCES,
-  contentSourceSchema,
-  type ContentSource,
-} from "./envelope.js";
-import {
+  type JsonConstraints,
+  type RequestConstraints,
+  type SecretPattern,
   jsonConstraintsIsEmpty,
   jsonConstraintsSchema,
   requestConstraintsIsEmpty,
   requestConstraintsSchema,
   secretPatternSchema,
-  type JsonConstraints,
-  type RequestConstraints,
-  type SecretPattern,
 } from "./deterministic.js";
-import { validateCustomHttpEndpoint } from "./custom_http.js";
-import { DEFAULT_MODEL, normalizeHazardCode } from "./adapters/workers_ai_llama_guard.js";
+import { ALL_CONTENT_SOURCES, type ContentSource, contentSourceSchema } from "./envelope.js";
+import { PII_AI_DEFAULT_MODEL, PII_AI_ENTITIES, PII_ENTITIES } from "./pii.js";
 
 function invalidPolicy(message: string): DetectorError {
   return DetectorError.new("invalid_configuration", message);
@@ -109,7 +106,10 @@ export interface PolicySelectionContext {
   managed_action?: ManagedActionContext;
 }
 
-function managedSelectorMatches(selector: ManagedActionSelector, action: ManagedActionContext): boolean {
+function managedSelectorMatches(
+  selector: ManagedActionSelector,
+  action: ManagedActionContext,
+): boolean {
   const classMatches = selector.classes.length === 0 || selector.classes.includes(action.class);
   const targetMatches =
     selector.targets.length === 0 ||
@@ -238,6 +238,25 @@ const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_PRESIDIO_LANGUAGE = "en";
 const DEFAULT_SCORE_THRESHOLD_PERCENT = 50;
 
+export const piiEntitySchema = z.enum(PII_ENTITIES);
+export const piiAiEntitySchema = z.enum(PII_AI_ENTITIES);
+export const piiRedactionModeSchema = z.enum(["mask", "pseudonymize", "tokenize"]);
+
+/**
+ * The optional Workers AI second stage. Present in the POLICY (not just in the
+ * library config) because whether a tenant's prompts are sent to a model is a
+ * governance decision that belongs on a signed, versioned revision — not on a
+ * Worker environment variable somebody can change without an audit row.
+ */
+export const piiAiStageSchema = z
+  .object({
+    model: z.string().default(PII_AI_DEFAULT_MODEL),
+    entities: z.array(piiAiEntitySchema),
+    timeout_ms: z.number().int().nonnegative().default(DEFAULT_TIMEOUT_MS),
+    max_input_chars: z.number().int().nonnegative().default(4_000),
+  })
+  .strict();
+
 export const detectorDefinitionSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -257,7 +276,11 @@ export const detectorDefinitionSchema = z.discriminatedUnion("kind", [
       endpoint: z.string(),
       timeout_ms: z.number().int().nonnegative().default(DEFAULT_TIMEOUT_MS),
       max_concurrency: z.number().int().nonnegative().default(DEFAULT_MAX_CONCURRENCY),
-      circuit_failure_threshold: z.number().int().nonnegative().default(DEFAULT_CIRCUIT_FAILURE_THRESHOLD),
+      circuit_failure_threshold: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(DEFAULT_CIRCUIT_FAILURE_THRESHOLD),
       circuit_cooldown_ms: z.number().int().nonnegative().default(DEFAULT_CIRCUIT_COOLDOWN_MS),
       max_retries: z.number().int().nonnegative().default(0),
       max_payload_bytes: z.number().int().nonnegative().default(DEFAULT_MAX_PAYLOAD_BYTES),
@@ -271,7 +294,11 @@ export const detectorDefinitionSchema = z.discriminatedUnion("kind", [
       kind: z.literal("presidio"),
       endpoint: z.string(),
       language: z.string().default(DEFAULT_PRESIDIO_LANGUAGE),
-      score_threshold_percent: z.number().int().nonnegative().default(DEFAULT_SCORE_THRESHOLD_PERCENT),
+      score_threshold_percent: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(DEFAULT_SCORE_THRESHOLD_PERCENT),
       entities: z.array(z.string()).nullable().optional(),
       timeout_ms: z.number().int().nonnegative().default(DEFAULT_TIMEOUT_MS),
       max_payload_bytes: z.number().int().nonnegative().default(DEFAULT_MAX_PAYLOAD_BYTES),
@@ -285,12 +312,30 @@ export const detectorDefinitionSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("llm_guard_prompt_injection"),
       endpoint: z.string(),
-      score_threshold_percent: z.number().int().nonnegative().default(DEFAULT_SCORE_THRESHOLD_PERCENT),
+      score_threshold_percent: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(DEFAULT_SCORE_THRESHOLD_PERCENT),
       timeout_ms: z.number().int().nonnegative().default(DEFAULT_TIMEOUT_MS),
       max_payload_bytes: z.number().int().nonnegative().default(DEFAULT_MAX_PAYLOAD_BYTES),
       max_response_bytes: z.number().int().nonnegative().default(DEFAULT_MAX_RESPONSE_BYTES),
       allow_private_network: z.boolean().default(false),
       secret_ref: z.string().nullable().optional(),
+      fingerprint_secret_ref: z.string(),
+    })
+    .strict(),
+  // Native PII (#680). No endpoint, no credential, no SSRF surface — the whole
+  // point is that nothing leaves the isolate — so the only refs it carries are
+  // the MANDATORY fingerprint key and, when the optional AI stage is on, the
+  // Workers AI model slug.
+  z
+    .object({
+      kind: z.literal("pii"),
+      entities: z.array(piiEntitySchema).default([...PII_ENTITIES]),
+      redaction: piiRedactionModeSchema.default("mask"),
+      max_input_bytes: z.number().int().nonnegative().nullable().optional(),
+      ai: piiAiStageSchema.nullable().optional(),
       fingerprint_secret_ref: z.string(),
     })
     .strict(),
@@ -361,7 +406,9 @@ export function validateDetectorDefinition(def: DetectorDefinition): void {
         (request === undefined || requestConstraintsIsEmpty(request)) &&
         def.secret_patterns.length === 0
       ) {
-        throw invalidPolicy("local guardrail detector requires at least one deterministic constraint");
+        throw invalidPolicy(
+          "local guardrail detector requires at least one deterministic constraint",
+        );
       }
       if (def.keywords.some((k) => k.length === 0)) {
         throw invalidPolicy("local guardrail detector keywords cannot be empty");
@@ -380,7 +427,10 @@ export function validateDetectorDefinition(def: DetectorDefinition): void {
         throw invalidPolicy("local guardrail secret_patterns must be unique");
       }
       const fpr = def.fingerprint_secret_ref;
-      if (def.secret_patterns.length > 0 && (fpr === null || fpr === undefined || fpr.length === 0)) {
+      if (
+        def.secret_patterns.length > 0 &&
+        (fpr === null || fpr === undefined || fpr.length === 0)
+      ) {
         throw invalidPolicy("local secret detection requires fingerprint_secret_ref");
       }
       if (fpr !== null && fpr !== undefined && fpr.length === 0) {
@@ -406,7 +456,9 @@ export function validateDetectorDefinition(def: DetectorDefinition): void {
         def.max_response_bytes === 0 ||
         def.max_retries > 1
       ) {
-        throw invalidPolicy("custom_http detector limits are invalid or exceed the runtime ceiling");
+        throw invalidPolicy(
+          "custom_http detector limits are invalid or exceed the runtime ceiling",
+        );
       }
       if (def.secret_ref !== null && def.secret_ref !== undefined && def.secret_ref.length === 0) {
         throw invalidPolicy("custom_http detector secret_ref cannot be empty");
@@ -445,6 +497,33 @@ export function validateDetectorDefinition(def: DetectorDefinition): void {
       }
       break;
     }
+    case "pii": {
+      if (def.entities.length === 0 || new Set(def.entities).size !== def.entities.length) {
+        // An empty entity list would compile, run, find nothing and report a
+        // clean pass forever — the silent-miss failure mode this detector exists
+        // to remove, dressed up as a green control.
+        throw invalidPolicy("pii detector entities must be non-empty and unique");
+      }
+      if (def.fingerprint_secret_ref.trim().length === 0) {
+        throw invalidPolicy("pii detector requires fingerprint_secret_ref for keyed evidence");
+      }
+      if (def.max_input_bytes === 0) {
+        throw invalidPolicy("pii detector max_input_bytes must be greater than zero");
+      }
+      const ai = def.ai;
+      if (ai !== null && ai !== undefined) {
+        if (ai.entities.length === 0 || new Set(ai.entities).size !== ai.entities.length) {
+          throw invalidPolicy("pii detector AI entities must be non-empty and unique");
+        }
+        if (ai.timeout_ms === 0 || ai.timeout_ms > MAX_DETECTOR_TIMEOUT_MS) {
+          throw invalidPolicy("pii detector AI limits are invalid or exceed the runtime ceiling");
+        }
+        if (ai.model.trim().length === 0 || ai.max_input_chars === 0) {
+          throw invalidPolicy("pii detector AI model and input budget must be non-empty");
+        }
+      }
+      break;
+    }
     case "llm_guard_prompt_injection": {
       let endpoint: URL;
       try {
@@ -470,8 +549,14 @@ export function validateDetectorDefinition(def: DetectorDefinition): void {
           "workers_ai_llama_guard detector model must be an @cf/meta/llama-guard-* slug",
         );
       }
-      if (def.timeout_ms === 0 || def.timeout_ms > MAX_DETECTOR_TIMEOUT_MS || def.max_payload_bytes === 0) {
-        throw invalidPolicy("workers_ai_llama_guard detector limits are invalid or exceed the runtime ceiling");
+      if (
+        def.timeout_ms === 0 ||
+        def.timeout_ms > MAX_DETECTOR_TIMEOUT_MS ||
+        def.max_payload_bytes === 0
+      ) {
+        throw invalidPolicy(
+          "workers_ai_llama_guard detector limits are invalid or exceed the runtime ceiling",
+        );
       }
       if (def.fingerprint_secret_ref.trim().length === 0) {
         throw invalidPolicy(
@@ -546,7 +631,11 @@ export const policyActions = {
     code,
     message,
   }),
-  quarantine: (code: string, message: string): PolicyAction => ({ kind: "quarantine", code, message }),
+  quarantine: (code: string, message: string): PolicyAction => ({
+    kind: "quarantine",
+    code,
+    message,
+  }),
 };
 
 function validateAction(action: PolicyAction): void {
@@ -555,7 +644,10 @@ function validateAction(action: PolicyAction): void {
     action.kind === "redact" ||
     action.kind === "require_approval" ||
     action.kind === "quarantine";
-  if (enforcing && (!action.code || action.code.length === 0 || !action.message || action.message.length === 0)) {
+  if (
+    enforcing &&
+    (!action.code || action.code.length === 0 || !action.message || action.message.length === 0)
+  ) {
     throw invalidPolicy(
       "block, redact, require_approval, and quarantine actions require non-empty code and message",
     );
@@ -661,7 +753,9 @@ export function validatePolicyRevision(rev: PolicyRevision): void {
   }
   if (rev.aggregation.type === "threshold") {
     if (rev.aggregation.minimum === 0 || rev.aggregation.minimum > enabledChecks) {
-      throw invalidPolicy("guardrail policy threshold must be between one and the enabled check count");
+      throw invalidPolicy(
+        "guardrail policy threshold must be between one and the enabled check count",
+      );
     }
   }
   for (const [name, actions] of [
