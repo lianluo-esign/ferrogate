@@ -113,7 +113,15 @@ describe("resolveEffectiveQuota", () => {
     const q = resolveEffectiveQuota(
       { tenantId: "t1", keyId: "k1" },
       lookupFrom([
-        policy("tenant", "t1", ["fast-chat", "smart-chat", "vision"], undefined, undefined, undefined, true),
+        policy(
+          "tenant",
+          "t1",
+          ["fast-chat", "smart-chat", "vision"],
+          undefined,
+          undefined,
+          undefined,
+          true,
+        ),
         policy("key", "k1", ["fast-chat", "vision"], undefined, undefined, undefined, true),
       ]),
     );
@@ -180,7 +188,9 @@ describe("resolveEffectiveQuota", () => {
     expect(new QuotaScopeSelector("tenant", "t1").counterKey("vk-abc")).toBe("tenant:t1");
     expect(new QuotaScopeSelector("project", "p1").counterKey("vk-abc")).toBe("project:p1");
     // A virtual key id "tenant:victim" hashes to "key:tenant:victim", never "tenant:victim".
-    expect(new QuotaScopeSelector("key", "k1").counterKey("tenant:victim")).toBe("key:tenant:victim");
+    expect(new QuotaScopeSelector("key", "k1").counterKey("tenant:victim")).toBe(
+      "key:tenant:victim",
+    );
     expect(new QuotaScopeSelector("key", "k1").counterKey("tenant:victim")).not.toBe(
       new QuotaScopeSelector("tenant", "t1").counterKey("anything"),
     );
@@ -227,7 +237,9 @@ describe("resolveEffectiveQuota", () => {
     const merged = resolveEffectiveQuota(
       { tenantId: "t1", keyId: "k1" },
       lookupFrom([
-        policy("tenant", "t1", [], undefined, undefined, undefined, true, { agentCostBudgetUsd: 500 }),
+        policy("tenant", "t1", [], undefined, undefined, undefined, true, {
+          agentCostBudgetUsd: 500,
+        }),
         policy("key", "k1", [], undefined, undefined, undefined, true, { agentCostBudgetUsd: 120 }),
       ]),
     );
@@ -261,7 +273,9 @@ describe("resolveEffectiveQuota", () => {
       ]),
     );
     expect(clamped.monthlyEgressBytesBudget).toBe(1_000_000);
-    expect(clamped.monthlyEgressBytesScope?.equals(new QuotaScopeSelector("tenant", "t1"))).toBe(true);
+    expect(clamped.monthlyEgressBytesScope?.equals(new QuotaScopeSelector("tenant", "t1"))).toBe(
+      true,
+    );
   });
 
   test("#259 asset byte quotas are TENANT-scoped only; a nearer scope cannot set them", () => {
@@ -528,9 +542,7 @@ describe("resolveEffectiveQuota — nested monthly budgets (#679)", () => {
     test(testCase.name, () => {
       const quota = resolveEffectiveQuota(
         FULL_CHAIN,
-        lookupFrom(
-          testCase.budgets.map(([kind, usd]) => budgetPolicy(kind, SCOPE_IDS[kind], usd)),
-        ),
+        lookupFrom(testCase.budgets.map(([kind, usd]) => budgetPolicy(kind, SCOPE_IDS[kind], usd))),
       );
       expect(ladder(quota)).toEqual(testCase.expected);
     });
@@ -565,7 +577,11 @@ describe("resolveEffectiveQuota — nested monthly budgets (#679)", () => {
   });
 
   test("the plan FLOOR is a tenant-scoped rung when no policy configures a budget", () => {
-    const quota = resolveEffectiveQuota({ tenantId: "t1", keyId: "k1" }, lookupFrom([]), samplePlan());
+    const quota = resolveEffectiveQuota(
+      { tenantId: "t1", keyId: "k1" },
+      lookupFrom([]),
+      samplePlan(),
+    );
     expect(ladder(quota)).toEqual([["tenant", "t1", 250, "plan"]]);
   });
 
