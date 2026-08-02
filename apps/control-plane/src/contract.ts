@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 255-operation runtime API contract, as a
+ * The control-plane slice of the 258-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -13,7 +13,7 @@
  *     one source of truth, no generated copy that can drift;
  *  2. validate it eagerly at module load (throw, mirroring the Rust panic);
  *  3. expose lookup by `(method, path)`, by `operation_id`, and by contract
- *     `group`, restricted to the 200 operations `ROUTE-MAP.md` assigns to
+ *     `group`, restricted to the 203 operations `ROUTE-MAP.md` assigns to
  *     `apps/control-plane`.
  *
  * `matchit`'s radix tree is re-implemented as a specificity-ranked segment
@@ -116,14 +116,20 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 255;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 258;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
- * (192) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
+ * (198) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
  * `GET /metrics` (5).
+ *
+ * 197 -> 203. Two independent slices each added three `/admin/v1/**`
+ * operations: the prompt-deployment-label surface (issue #694) and the
+ * `/admin/v1/provider-credentials*` BYOK-alias surface (issue #682). Each side
+ * had written 200 on its own, so this is the one pin the merge must NOT take
+ * from either parent — both increments landed.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 200;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 203;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate
@@ -410,10 +416,10 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 255). */
+/** Every operation in the document, in document order (all 258). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
-/** The operations this Worker owns, in document order (197). */
+/** The operations this Worker owns, in document order (203). */
 export const CONTROL_PLANE_OPERATIONS: readonly ApiOperation[] = CONTRACT.owned;
 
 /** Owned operations, keyed by contract `group` (`rbac`, `billing`, `wallets`, …). */
@@ -422,7 +428,7 @@ export const OPERATIONS_BY_GROUP: ReadonlyMap<string, readonly ApiOperation[]> =
 /** Every group this Worker owns at least one operation in, sorted. */
 export const CONTROL_PLANE_GROUPS: readonly string[] = [...CONTRACT.byGroup.keys()].sort();
 
-/** Lookup by `operation_id` — across ALL 255, so a mis-assignment is visible. */
+/** Lookup by `operation_id` — across ALL 258, so a mis-assignment is visible. */
 export function operationById(operationId: string): ApiOperation | undefined {
   return CONTRACT.byOperationId.get(operationId);
 }

@@ -798,7 +798,7 @@ describe("validate_guardrails", () => {
         }),
       ]),
       "field guardrails[0].provider_secret_ref: unsupported secret reference scheme " +
-        "(expected env://, vault://, or cf://): raw",
+        "(expected env://, vault://, cf://, or byok://): raw",
     ],
     [
       "more than one detector retry",

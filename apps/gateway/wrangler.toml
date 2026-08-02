@@ -472,7 +472,7 @@ FERROGATE_ASSET_PUBLISHER_MINISIGN_KEYS = ""
 # in `docs/rewrite/parity-audit-request-path.md`).
 #
 # Read by `routeTableFromEnv` (src/routes/reverse-proxy.ts), which
-# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 251 contract
+# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 258 contract
 # operations and after `/health`, so nothing it does can shadow a contract
 # route.
 #
@@ -514,6 +514,38 @@ GATEWAY_UPSTREAMS = "[]"
 # ---------------------------------------------------------------------------
 GATEWAY_GUARDRAIL_POLICIES = "[]"
 GATEWAY_GUARDRAIL_BINDINGS = "[]"
+
+# ---------------------------------------------------------------------------
+# PER-TENANT BYOK (issue #682) — FERROGATE_BYOK_MASTER_KEY
+# ---------------------------------------------------------------------------
+# The FLEET-WIDE AES-256 key that seals every tenant's own provider credential
+# in the control database's `tenant_provider_credentials` table. It is a SECRET
+# and is deliberately NOT declared here — set it with
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put FERROGATE_BYOK_MASTER_KEY
+#
+# (or `@ferrogate/secrets`' `generateByokMasterKey()`), or bind it through
+# Cloudflare Secrets Store; `byokPortsFromEnv` reads either shape.
+#
+# THIS IS ONE BINDING FOR THE WHOLE FLEET, NOT ONE PER TENANT. That is the
+# entire design: Secrets Store bindings resolve at DEPLOY time, so a per-tenant
+# binding would mean a deploy per tenant and a deploy per rotation. Instead the
+# binding set is fixed and the tenant-visible `alias -> credential` mapping is
+# ROW DATA — onboarding a tenant is an INSERT and rotating their key is an
+# UPDATE, neither of which is a deploy.
+#
+# Rotating THIS key (rare — an operator event, not a tenant one) adds
+# FERROGATE_BYOK_MASTER_KEY_V2 and keeps the v1 secret bound until every row has
+# been re-sealed; rows record the version that sealed them.
+#
+# Absent ⇒ BYOK is simply OFF: `byokPortsFromEnv` returns null, provider
+# credentials resolve exactly as they did before #682, and a request that
+# explicitly asks for an alias is refused 503 `byok_not_configured` rather than
+# being served — and billed — on the platform's own provider key.
+#
+# Requires the CONTROL_DB binding (declared below) and migration
+# `sql/d1-ts/control/0003_tenant_provider_credentials.sql`.
+# ---------------------------------------------------------------------------
 
 # Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
 # negative D1 key resolution may be reused inside one isolate. `"0"` (the

@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(255);
+    expect(OPENAPI_OPERATION_COUNT).toBe(258);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -185,7 +185,7 @@ describe("wireSchemas registry", () => {
 
 /**
  * The registration MECHANISM, which is this package's half of inventory
- * §1.3/§1.4. The 249 remaining per-operation bodies are owned by the surfaces
+ * §1.3/§1.4. The 244 remaining per-operation bodies are owned by the surfaces
  * that serve them (`apps/gateway`, `apps/control-plane`, `apps/mcp`) — defining
  * them here would invert the dependency and guarantee drift. What this package
  * owes is a registry that cannot silently swap a route's validator, and that is
@@ -274,9 +274,10 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
   test("the baseline is far short of the contract, and says so in numbers", () => {
     const seeded = registeredWireSchemaNames().filter((n) => !n.startsWith("op_")).length;
     expect(seeded).toBe(10);
-    // 241 -> 245: `countMessageTokens` (#671) added one contract operation and
-    // the prompt-deployment-label operations (#694) added three more, none of
-    // them with a wire schema, so the shortfall grew by exactly four.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(245);
+    // 241 -> 248: `countMessageTokens` (#671) added one contract operation, the
+    // prompt-deployment-label operations (#694) added three more, and the
+    // BYOK-alias operations (#682) added three more again — none of the seven
+    // with a wire schema, so the shortfall grew by exactly seven.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(248);
   });
 });

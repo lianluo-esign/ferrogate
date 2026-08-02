@@ -119,6 +119,13 @@ const VAULT_DETAIL =
   "one. Bind the credential as a Worker secret and name it with env://, or resolve it " +
   "through an asynchronous seam";
 
+const BYOK_DETAIL =
+  "byok:// names a PER-TENANT credential, but api_key_var is resolved once per Worker env " +
+  "while the model catalog is built — there is no calling tenant at that point, so resolving " +
+  "one here would serve every tenant whichever tenant happened to warm the isolate. Write it " +
+  "as the provider row's byok_alias field instead, which is resolved per request inside the " +
+  "calling tenant's scope, or send it per request in the x-ferrogate-byok-alias header.";
+
 function detailOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -204,6 +211,24 @@ export function resolveProviderSecret(
 
     case "vault":
       return { ok: false, detail: VAULT_DETAIL };
+
+    case "byok":
+      // REFUSED HERE, ON PURPOSE, and not because of a platform limit.
+      //
+      // `api_key_var` is resolved once per Worker `env` while the catalog is
+      // built, which is isolate-wide and tenant-LESS. A `byok://` alias means
+      // "the calling tenant's own credential", so resolving one at this seam
+      // would bake whichever tenant happened to warm the isolate into a catalog
+      // every other tenant then dispatches with — the exact cross-tenant leak
+      // issue #682 exists to prevent, and it would be invisible in every test
+      // that drives one tenant at a time.
+      //
+      // The provider table has a field for this that IS resolved per request:
+      // `byok_alias` (see `src/inference/catalog.ts` and
+      // `src/inference/byok.ts`). Naming it in `api_key_var` is therefore a
+      // configuration mistake, and it fails the whole catalog loudly rather
+      // than half-working.
+      return { ok: false, detail: BYOK_DETAIL };
   }
 }
 
