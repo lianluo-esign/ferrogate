@@ -7,17 +7,17 @@
  * entirely a question of ORDER and of compensation. These tests drive the two
  * crash points (after the object, after the row) and both refusal paths.
  */
-import { applyD1Migrations, env } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
+  type AssetQuotaAdmission,
   R2AssetBlobStore,
   StorageError,
   assetObjectKey,
   classifyAssetQuotaAdmission,
   commitAssetWithBlob,
-  type AssetQuotaAdmission,
 } from "../../src/index.js";
-import { TENANT_A } from "./harness.js";
+import { TENANT_A, setupTenantRouter, tenantDb } from "./harness.js";
 
 declare global {
   namespace Cloudflare {
@@ -42,12 +42,15 @@ const ASSET = {
 let blobs: R2AssetBlobStore;
 
 beforeAll(async () => {
-  await applyD1Migrations(env.TENANT_DB_A, env.TENANT_MIGRATIONS);
+  // `setupTenantRouter()` rather than a bare `applyD1Migrations`: under the
+  // `durable_object` leg the tenant's schema is applied by the object itself on
+  // its first cold start, and there is no D1 database here to migrate.
+  await setupTenantRouter();
   blobs = new R2AssetBlobStore(env.ASSETS_BUCKET);
 });
 
 beforeEach(async () => {
-  await env.TENANT_DB_A.prepare("DELETE FROM stored_assets").run();
+  await tenantDb(TENANT_A).prepare("DELETE FROM stored_assets").run();
   const listing = await env.ASSETS_BUCKET.list();
   for (const object of listing.objects) await env.ASSETS_BUCKET.delete(object.key);
 });
@@ -59,28 +62,27 @@ async function insertRow(
   quotaBytes: number | undefined,
   id = "asset_1",
 ): Promise<AssetQuotaAdmission> {
-  const usedRow = await env.TENANT_DB_A.prepare(
-    "SELECT coalesce(sum(size_bytes), 0) AS used FROM stored_assets WHERE tenant_id = ?",
-  )
+  const usedRow = await tenantDb(TENANT_A)
+    .prepare("SELECT coalesce(sum(size_bytes), 0) AS used FROM stored_assets WHERE tenant_id = ?")
     .bind(ASSET.tenantId)
     .first<{ used: number }>();
   const used = Number(usedRow?.used ?? 0);
   const quotaOk = quotaBytes === undefined || used + sizeBytes <= quotaBytes;
 
-  const existsRow = await env.TENANT_DB_A.prepare(
-    "SELECT 1 AS present FROM stored_assets WHERE id = ?",
-  )
+  const existsRow = await tenantDb(TENANT_A)
+    .prepare("SELECT 1 AS present FROM stored_assets WHERE id = ?")
     .bind(id)
     .first<{ present: number }>();
   const idExists = existsRow !== null;
 
   let inserted = false;
   if (quotaOk && !idExists) {
-    const result = await env.TENANT_DB_A.prepare(
-      "INSERT INTO stored_assets (id, tenant_id, asset_type, name, version, content_type, " +
-        "content_hash, size_bytes, created_at_unix, updated_at_unix, storage_uri, variant) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING RETURNING id",
-    )
+    const result = await tenantDb(TENANT_A)
+      .prepare(
+        "INSERT INTO stored_assets (id, tenant_id, asset_type, name, version, content_type, " +
+          "content_hash, size_bytes, created_at_unix, updated_at_unix, storage_uri, variant) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING RETURNING id",
+      )
       .bind(
         id,
         ASSET.tenantId,
@@ -98,14 +100,7 @@ async function insertRow(
       .all<{ id: string }>();
     inserted = result.results.length > 0;
   }
-  return classifyAssetQuotaAdmission(
-    inserted,
-    idExists,
-    quotaOk,
-    used,
-    sizeBytes,
-    quotaBytes,
-  );
+  return classifyAssetQuotaAdmission(inserted, idExists, quotaOk, used, sizeBytes, quotaBytes);
 }
 
 const admitted = (o: AssetQuotaAdmission): boolean => o.kind === "admitted";
@@ -120,9 +115,7 @@ describe("assetObjectKey", () => {
   });
 
   test("a different content hash is a different key, so a push cannot overwrite bytes", () => {
-    expect(assetObjectKey({ ...ASSET, contentHash: "sha256:zzz" })).not.toBe(
-      assetObjectKey(ASSET),
-    );
+    expect(assetObjectKey({ ...ASSET, contentHash: "sha256:zzz" })).not.toBe(assetObjectKey(ASSET));
   });
 
   test("a `/` inside a name cannot forge a key path", () => {
@@ -200,9 +193,9 @@ describe("commitAssetWithBlob — the object-then-row protocol", () => {
     expect(commit.outcome.kind).toBe("admitted");
     expect(commit.compensated).toBe(false);
     expect(await blobs.exists(commit.storageUri)).toBe(true);
-    const row = await env.TENANT_DB_A.prepare(
-      "SELECT storage_uri FROM stored_assets WHERE id = 'asset_1'",
-    ).first<{ storage_uri: string }>();
+    const row = await tenantDb(TENANT_A)
+      .prepare("SELECT storage_uri FROM stored_assets WHERE id = 'asset_1'")
+      .first<{ storage_uri: string }>();
     expect(row?.storage_uri).toBe(commit.storageUri);
   });
 
@@ -236,7 +229,7 @@ describe("commitAssetWithBlob — the object-then-row protocol", () => {
     // No orphan: a refused push must not consume the quota it was refused for.
     expect(await blobs.exists(commit.storageUri)).toBe(false);
     expect(
-      await env.TENANT_DB_A.prepare("SELECT count(*) AS n FROM stored_assets").first<{
+      await tenantDb(TENANT_A).prepare("SELECT count(*) AS n FROM stored_assets").first<{
         n: number;
       }>(),
     ).toEqual({ n: 0 });
@@ -298,9 +291,9 @@ describe("the R2↔D1 platform limit these tests pin", () => {
     });
     // Simulated crash: the row insert never happens.
     expect(await blobs.exists(key)).toBe(true);
-    const rows = await env.TENANT_DB_A.prepare(
-      "SELECT count(*) AS n FROM stored_assets",
-    ).first<{ n: number }>();
+    const rows = await tenantDb(TENANT_A)
+      .prepare("SELECT count(*) AS n FROM stored_assets")
+      .first<{ n: number }>();
     expect(Number(rows?.n)).toBe(0);
     // The orphan is invisible to every read path (they go through the row) and
     // is reclaimable.

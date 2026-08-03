@@ -14,7 +14,7 @@ import {
   type UsageAggregateWrite,
   periodMonthFromUnix,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
 
 // 2026-07-15T00:00:00Z — inside a known calendar month so the period key is
 // asserted against a literal rather than against the code that produced it.
@@ -25,14 +25,14 @@ let handleA: TenantDatabaseHandle;
 let handleB: TenantDatabaseHandle;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
 });
 
 function call(overrides: Partial<UsageAggregateWrite> = {}): UsageAggregateWrite {
@@ -222,8 +222,8 @@ describe("D1UsageLedger — the cross-database platform limit", () => {
     // If workerd ever grew a cross-database batch, this expectation flips and
     // the PORT-TODO in src/d1/usage-d1.ts becomes closable.
     await expect(
-      env.TENANT_DB_A.batch([
-        env.TENANT_DB_A.prepare("DELETE FROM usage_monthly_rollups WHERE id = 'x'"),
+      tenantDb(TENANT_A).batch([
+        tenantDb(TENANT_A).prepare("DELETE FROM usage_monthly_rollups WHERE id = 'x'"),
         env.CONTROL_DB.prepare("DELETE FROM billing_events WHERE billing_event_id = 'x'"),
       ]),
     ).rejects.toThrow();

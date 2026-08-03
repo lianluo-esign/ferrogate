@@ -193,6 +193,19 @@ export * from "./tenant-router.js";
  * atomic/non-atomic table.
  */
 export * from "./tenant-rest.js";
+/**
+ * The DURABLE-OBJECT leg of the tenant router (strategy `durable_object`): a
+ * `D1Database`-shaped facade over one tenant's `TenantDataObject`, with
+ * `batch()` forwarded into the object's `transactionSync()` in ONE round trip
+ * and `supportsAtomicBatch: true`, so the 13 `requireAtomicBatch()` money paths
+ * RUN over it instead of refusing.
+ *
+ * Exporting it from this barrel is safe and `./tenant-data-object.js` is not:
+ * every reference this module makes to the object's types is `import type` and
+ * is erased at compile time, so nothing here reaches `cloudflare:workers`. See
+ * the note below on why the CLASS still ships through a subpath.
+ */
+export * from "./tenant-do.js";
 export * from "./d1/index.js";
 
 /**

@@ -148,6 +148,18 @@ const MOUNTED: [symbol: string, app: string][] = [
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
 const DEAD = [
+  // #823 — the `D1Database` facade over `TenantDataObject` and its router. They
+  // are DEAD ON PURPOSE, for now: this slice ships the facade and proves it by
+  // running the whole of `test/d1/**` through it (`vitest.d1do.config.ts`), and
+  // the slice that adds a `durable_object` mode to
+  // `apps/gateway/src/tenancy/resolver.ts` is the one that mounts them.
+  //
+  // Listed rather than omitted because "neither claimed live nor claimed dead"
+  // is the state this file's header identifies as how five classes rotted. When
+  // the resolver slice lands, THIS list is what goes red, and moving the two
+  // entries into MOUNTED is how the wiring gets recorded.
+  "DurableObjectTenantDatabaseRouter",
+  "DurableObjectD1Database",
   "D1BillingEventLedger",
   "D1RetentionPolicyStore",
   "D1AgentScheduleStore",

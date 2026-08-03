@@ -125,6 +125,39 @@ export interface TenantDataResult {
   readonly changes: number;
   /** Rows the statement read; billing-shaped diagnostics, nothing branches on it. */
   readonly rowsRead: number;
+  /**
+   * Rows WRITTEN, straight off the cursor — the `D1Result.meta.rows_written`
+   * equivalent, and deliberately NOT the same number as {@link changes}.
+   *
+   * The cursor counts INDEX row writes as well as table rows, so a row landing
+   * in a table with three indexes reports 4 here and 1 in `changes`. Both are
+   * true and neither substitutes for the other: D1 bills on `rows_written` and
+   * the guarded-write CAS branches on `changes`. Reporting one under the other's
+   * name would either bill wrong or publish an unscanned asset.
+   */
+  readonly rowsWritten: number;
+  /**
+   * `last_insert_rowid()` AFTER the statement — `D1Result.meta.last_row_id`.
+   *
+   * Read from the connection, not from the statement, so a statement that
+   * inserted nothing reports whatever the previous INSERT on this object left
+   * behind. That is exactly D1's behaviour (its `last_row_id` is a connection
+   * property too), and it is why nothing in this repo reads it: grepping
+   * `last_row_id|lastRowId|lastInsertRowid` over non-test source returns zero
+   * hits. It is carried anyway because `D1Meta.last_row_id` is non-optional, and
+   * a synthesized `0` there would be a lie a future caller could believe.
+   */
+  readonly lastRowId: number;
+  /**
+   * The object's SQLite database size in bytes after the statement —
+   * `D1Result.meta.size_after`. `ctx.storage.sql.databaseSize`, verbatim.
+   *
+   * Also unread by anything in this repo, and also carried rather than
+   * zero-filled: it is the one meta field that maps onto the 10 GB per-object
+   * ceiling, so an operator asking "how close is this tenant to the limit"
+   * should get a real answer rather than a placeholder.
+   */
+  readonly databaseSize: number;
 }
 
 /** What {@link TenantDataObject.schemaVersion} answers. */
@@ -367,16 +400,29 @@ export class TenantDataObject extends DurableObject {
    */
   #exec(statement: TenantDataStatement): TenantDataResult {
     const sql = this.#state.storage.sql;
-    const before = totalChanges(sql);
+    const before = connectionCounters(sql).changes;
     const cursor = sql.exec<Record<string, TenantDataValue>>(
       statement.sql,
       ...(statement.params ?? []),
     );
-    // Drained BEFORE `rowsRead` is read: the cursor's counters are only final
-    // once it has been consumed.
+    // Drained BEFORE `rowsRead`/`rowsWritten` are read: the cursor's counters
+    // are only final once it has been consumed.
     const results = cursor.toArray();
     const rowsRead = cursor.rowsRead;
-    return { results, changes: totalChanges(sql) - before, rowsRead };
+    const rowsWritten = cursor.rowsWritten;
+    // ONE trailing read for both connection-level counters. `total_changes()`
+    // and `last_insert_rowid()` are both properties of the connection rather
+    // than of the cursor, and reading them in a single `exec` keeps them from
+    // straddling a statement that a future edit might insert between them.
+    const after = connectionCounters(sql);
+    return {
+      results,
+      changes: after.changes - before,
+      rowsRead,
+      rowsWritten,
+      lastRowId: after.lastRowId,
+      databaseSize: sql.databaseSize,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -496,14 +542,24 @@ export class TenantDataObject extends DurableObject {
 }
 
 /**
- * `total_changes()` — rows changed on this connection since it opened.
+ * The two CONNECTION-level counters `#exec` needs: `total_changes()` (rows
+ * changed since the connection opened) and `last_insert_rowid()`.
  *
- * A free function so both reads in `#exec` are provably the same query; the
+ * A free function so both reads in `#exec` are provably the same query, and one
+ * `exec` for the pair so a future edit cannot slip a statement between them and
+ * silently attribute one statement's rowid to another's change count. The
  * cursor is drained immediately, in the caller's synchronous stretch.
+ *
+ * Reading these is itself a `SELECT`, which changes neither counter — that is
+ * what makes the before/after delta in `#exec` attributable to the caller's
+ * statement alone.
  */
-function totalChanges(sql: SqlStorage): number {
-  const rows = sql.exec<{ n: number }>("SELECT total_changes() AS n").toArray();
-  return rows[0]?.n ?? 0;
+function connectionCounters(sql: SqlStorage): { changes: number; lastRowId: number } {
+  const rows = sql
+    .exec<{ n: number; r: number }>("SELECT total_changes() AS n, last_insert_rowid() AS r")
+    .toArray();
+  const row = rows[0];
+  return { changes: row?.n ?? 0, lastRowId: row?.r ?? 0 };
 }
 
 /** The `[[durable_objects.bindings]]` namespace type for `env.TENANT_DATA`. */

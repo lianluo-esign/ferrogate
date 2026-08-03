@@ -64,6 +64,18 @@ export type TenantDatabaseSource =
    */
   | "rest"
   /**
+   * A SQLite-backed Durable Object, one per tenant, addressed
+   * `env.TENANT_DATA.idFromName(tenantId)` — `./tenant-do.ts` (#823).
+   *
+   * The only source that is BOTH deploy-free and money-safe, which is why it
+   * exists: the object is created by being addressed, so onboarding a tenant is
+   * not a `wrangler deploy`, and `ctx.storage.transactionSync()` is a real
+   * SQLite transaction, so `batch()` is one commit and `RETURNING` rows come
+   * back. `supportsAtomicBatch` is therefore `true` and the 13
+   * {@link requireAtomicBatch} money paths RUN over it rather than refusing.
+   */
+  | "durable_object"
+  /**
    * One shared database standing in for every tenant. DEVELOPMENT AND
    * SINGLE-TENANT DEPLOYMENTS ONLY — it provides no physical isolation.
    */
@@ -217,8 +229,10 @@ export function parseTenantDatabaseRegistryDocument(
   for (const [tenantId, uuid] of Object.entries(map)) {
     if (typeof uuid !== "string" || uuid.trim() === "") {
       throw StorageError.runtime(
-        `tenant database registry document maps tenant ${tenantId} to a non-string ` +
+        [
+          `tenant database registry document maps tenant ${tenantId} to a non-string`,
           "or empty database uuid",
+        ].join(" "),
       );
     }
     tenantDatabases[tenantId] = uuid;
@@ -327,7 +341,14 @@ export async function migrateTenantDatabaseRegistryDocument(
             " provisioned_at_unix, updated_at_unix) " +
             "VALUES (?, ?, ?, NULL, ?, ?, ?)",
         )
-        .bind(tenantId, databaseUuid, nameFor(tenantId, databaseUuid), schemaVersion, nowUnix, nowUnix)
+        .bind(
+          tenantId,
+          databaseUuid,
+          nameFor(tenantId, databaseUuid),
+          schemaVersion,
+          nowUnix,
+          nowUnix,
+        )
         .run();
     } catch (error) {
       throw StorageError.runtime(
@@ -615,10 +636,16 @@ export class SharedDatabaseTenantRouter implements TenantDatabaseRouter {
 // ---------------------------------------------------------------------------
 
 /**
- * The three ways to reach a per-tenant D1 database from a Worker, with the
- * honest cost of each. This constant is documentation that ships with the code
- * (and is asserted by a test, so it cannot silently rot); the same table is in
+ * The four ways to reach a per-tenant database from a Worker, with the honest
+ * cost of each. This constant is documentation that ships with the code (and is
+ * asserted by a test, so it cannot silently rot); the same table is in
  * `packages/storage/README.md`.
+ *
+ * Three of the four reach a per-tenant **D1** database and are constrained by
+ * the same fact — bindings resolve at DEPLOY time. The fourth,
+ * `durable_object`, is not a D1 strategy at all: it replaces the database with
+ * a SQLite-backed Durable Object and is the reason `test/platform-limits.test.ts`
+ * no longer asserts that the deploy-free × money-safe cell is empty.
  */
 export const D1_BINDING_STRATEGIES = {
   /**
@@ -698,6 +725,51 @@ export const D1_BINDING_STRATEGIES = {
     returning: true,
     requiresDeployPerTenant: false,
     tenantCeiling: "unbounded",
+    extraNetworkHop: true,
+  },
+  /**
+   * One SQLite-backed **Durable Object** per tenant, addressed
+   * `env.TENANT_DATA.idFromName(tenantId)` — `./tenant-do.ts` (#823),
+   * `docs/design/per-tenant-durable-object-storage-2026-08.md`.
+   *
+   * This is the row the other three exist to be compared against, because it is
+   * the one that answers the OPEN QUESTION in the `rest` entry from a different
+   * direction: it gives runtime addressing AND a multi-statement transaction.
+   * Not by finding a transaction envelope in the D1 HTTP API — that question is
+   * still open and still unverified — but by not using D1 for the tenant plane
+   * at all.
+   *
+   * `atomicBatch: true` is the load-bearing claim and it is not a doc-derived
+   * one: `TenantDataObject.batch()` runs the whole statement array inside ONE
+   * `ctx.storage.transactionSync()`, which is a real SQLite transaction that
+   * rolls back on throw. `packages/storage/test/do/tenant-do-facade.test.ts`
+   * proves it the way the `rest` entry says such a claim must be proved — with
+   * a rolled-back mid-batch failure, not with a doc quote.
+   *
+   * `requiresDeployPerTenant: false` because a Durable Object is created by
+   * being addressed. There is no stanza, no `wrangler deploy`, and no binding
+   * budget: ONE `[[durable_objects.bindings]]` entry serves every tenant that
+   * will ever exist. That is what makes `tenantCeiling` unbounded in a way the
+   * `native_binding` row can never be.
+   *
+   * `extraNetworkHop: true` and it must stay honest. A stub call is an RPC to
+   * wherever the object lives, which may be another colo; it is cheaper than
+   * the `rest` row's public HTTP round trip and it is not free. The facade's
+   * `batch()` makes the WHOLE statement array cross in ONE hop for exactly this
+   * reason — N sequential stub calls would be the `rest` strategy with extra
+   * steps, and would lose the transaction too.
+   *
+   * The costs this row does NOT hide: 10 GB per object (vs D1's 10 GB per
+   * database — the same number, but now a hard per-tenant wall with no shard),
+   * ~1,000 req/s per object single-threaded, and no way to ENUMERATE a
+   * namespace in production, which is why a `durable_object` router still reads
+   * `tenant_databases` to answer `provisionedTenants()`.
+   */
+  durable_object: {
+    atomicBatch: true,
+    returning: true,
+    requiresDeployPerTenant: false,
+    tenantCeiling: "unbounded; one binding serves every tenant, 10 GB per object",
     extraNetworkHop: true,
   },
 } as const;
