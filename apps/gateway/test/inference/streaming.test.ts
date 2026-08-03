@@ -390,4 +390,28 @@ describe("cross-dialect stream normalization", () => {
       provider.restore();
     }
   });
+
+  it("preserves a native Responses output-text delta exactly once", async () => {
+    const provider = interceptProviderFetch(() =>
+      providerSse([
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_test","output_index":0,"content_index":0,"delta":"native"}',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_test"}}',
+      ]),
+    );
+    try {
+      const h = harness();
+      const res = await h.post("/v1/responses", {
+        model: "gpt-4o-mini",
+        input: "hi",
+        stream: true,
+      });
+      const text = await readBody(res);
+
+      expect(res.status).toBe(200);
+      expect(text.match(/^event: response\.output_text\.delta$/gm) ?? []).toHaveLength(1);
+      expect(text).toContain('"delta":"native"');
+    } finally {
+      provider.restore();
+    }
+  });
 });
