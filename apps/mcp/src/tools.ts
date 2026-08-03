@@ -20,12 +20,6 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 
-import {
-  type AssetEgressQuota,
-  assetEgressQuotaDenial,
-  assetPullAuditMessage,
-  recordAssetEgress,
-} from "./asset-egress.js";
 import { resolveMcpIdentity } from "./identity/oauth.js";
 import {
   type JsonRpcId,
@@ -666,48 +660,6 @@ async function executeBuiltinTool(
   if (!read.ok) {
     return { ok: false, error: assetReadHttpError(read.error, assetType, name, version) };
   }
-
-  // #262 egress governance: fail-closed deny gate BEFORE the bytes are served.
-  // Uses the SAME helpers the gateway's REST asset pull uses, so an MCP read
-  // is never a metering or quota bypass.
-  const egressQuota = await ports.resolveEgressQuota(context.auth);
-  const egressDenied = await assetEgressQuotaDenial({
-    quota: egressQuota,
-    apiKeyId: context.auth.apiKeyId ?? "",
-    tenantId,
-    bytes: read.asset.sizeBytes,
-    counters: ports.egressCounters,
-  });
-  if (egressDenied !== null) {
-    return {
-      ok: false,
-      error: {
-        status: egressDenied.status,
-        code: egressDenied.code,
-        message: egressDenied.message,
-      },
-    };
-  }
-
-  // #262 egress metering: record the bytes served, accumulate the monthly
-  // counter, and emit the audit event. Best-effort: a metering failure is
-  // swallowed, never propagated.
-  await recordAssetEgress({
-    quota: egressQuota,
-    apiKeyId: context.auth.apiKeyId ?? "",
-    tenantId,
-    projectId: context.auth.projectId,
-    requestId: context.requestId,
-    agentRunId: context.agentRunId,
-    assetType: read.asset.assetType,
-    name: read.asset.name,
-    version: read.asset.version,
-    bytes: read.asset.sizeBytes,
-    pricePerGb: ports.egressPricePerGb,
-    counters: ports.egressCounters,
-    meter: ports.egressMeter,
-    nowUnix: ports.now(),
-  });
 
   return { ok: true, content: { content: [assetContentEntry(read.asset, read.content)] } };
 }

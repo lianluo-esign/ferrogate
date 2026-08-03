@@ -228,7 +228,9 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 #
 # It points at the CONTROL schema because `database_name` says so and
 # `src/ports.ts` says so ("`env.DB` already IS the control database"). Per-tenant
-# databases are resolved at runtime through `tenant_databases`, never bound here.
+# databases for the AUTH leg are resolved at runtime through `tenant_databases`;
+# the FLAT `TENANT_DB` binding below is a separate database holding the
+# `stored_assets` / `asset_channels` tables for the asset reader.
 migrations_dir = "../../sql/d1-ts/control"
 
 # ---------------------------------------------------------------------------
