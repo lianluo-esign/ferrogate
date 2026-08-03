@@ -81,7 +81,16 @@ import {
   type RateLimiterNamespace,
   admissionFromEnv,
 } from "./admission/index.js";
+import { type QuotaSubject, d1QuotaPolicySource, resolveQuotaWindows } from "./admission/quota.js";
 import { D1ToolApprovals } from "./approvals.js";
+import {
+  type AssetEgressCounters,
+  type AssetEgressMeter,
+  InMemoryAssetEgressCounters,
+  NO_ASSET_EGRESS_METER,
+  assetEgressCountersFromEnv,
+  assetEgressPricePerGb,
+} from "./asset-egress.js";
 import { D1McpAuth, type D1McpAuthOptions } from "./auth.js";
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
 import { D1ToolEntitlements } from "./entitlements.js";
@@ -1171,6 +1180,34 @@ export interface McpPorts {
   guardrails: GuardrailsPort;
   approvals: ApprovalPort;
   assets: AssetReaderPort;
+  /**
+   * Egress governance ports — the download-side quota gate and byte meter.
+   *
+   * Reuses the SAME helpers from `@ferrogate/billing` and `@ferrogate/policy`
+   * that `apps/gateway/src/assets/egress.ts` uses. The MCP read path
+   * (`resources/read`, `builtin.fetch_asset`) checks egress quota before
+   * serving and records egress metering after, exactly as the REST asset pull
+   * does — an MCP read must not be a metering or quota bypass.
+   *
+   * {@link egressCounters} are per-isolate (see the gateway's egress module
+   * docstring for what that does and does not guarantee on Workers).
+   * {@link egressMeter} is `NO_ASSET_EGRESS_METER` when no billing database is
+   * bound — the byte-budget gate still runs, so a configured budget is enforced
+   * with or without a billing sink.
+   */
+  egressCounters: AssetEgressCounters;
+  egressMeter: AssetEgressMeter;
+  /** `asset_egress_price_per_gb`. Absent ⇒ metered but not priced. */
+  egressPricePerGb?: number | undefined;
+  /**
+   * Resolve the egress quota for one caller.
+   *
+   * Returns the egress half of the caller's effective quota — the monthly byte
+   * budget and the download RPM cap. `{}` when the caller has no attributed
+   * key id or the quota resolution fails (a failed lookup yields no limits,
+   * which is the same posture the gateway's `resolveEgressQuota` takes).
+   */
+  resolveEgressQuota(auth: AuthContext): Promise<AssetEgressQuota>;
   credentials: McpCredentialStorePort;
   oauth: OauthProviderPort;
   secrets: SecretResolverPort;
@@ -1674,9 +1711,13 @@ export interface McpEnv {
    * `DB` for the control-plane tables.
    *
    * {@link D1R2AssetReader} queries this database for asset metadata before
-   * fetching the object body from {@link ASSETS}. The tenant database is
-   * resolved per-tenant at runtime through `EnvBindingTenantDatabaseRouter`,
-   * exactly as `apps/gateway` resolves its tenant databases.
+   * fetching the object body from {@link ASSETS}. The tenant database is a
+   * FLAT binding — tenant isolation is provided by the `WHERE tenant_id = ?1`
+   * predicate on every query, exactly as `apps/gateway`'s
+   * `D1AssetMetadataStore` works under its default `GATEWAY_TENANT_DB_ROUTING
+   * = "off"` posture. Per-tenant database routing through
+   * `EnvBindingTenantDatabaseRouter` is available when the deployment adds
+   * per-tenant D1 bindings and switches routing on.
    *
    * OPTIONAL, and its absence is a graceful degradation: {@link resolvePorts}
    * falls back to {@link InMemoryAssets} when either this or {@link ASSETS}
@@ -1838,6 +1879,18 @@ export function inMemoryPorts(): InMemoryMcpPorts {
     guardrails: deterministicManagedActionGuardrails({}),
     approvals: new AutoApproval(),
     assets: new InMemoryAssets(),
+    // Egress governance: per-isolate counters and a no-op meter. The deployed
+    // Worker's egress ports are overridden by `resolvePorts` in every posture
+    // where `env.DB` is bound, so the byte-budget gate is never this default.
+    // This default exists so a unit test that builds the bundle by hand is not
+    // forced to provide an egress backend.
+    egressCounters: new InMemoryAssetEgressCounters(),
+    egressMeter: NO_ASSET_EGRESS_METER,
+    egressPricePerGb: undefined,
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async resolveEgressQuota(): Promise<AssetEgressQuota> {
+      return {};
+    },
     credentials: new InMemoryCredentialStore(),
     oauth: unboundOauthProvider(),
     secrets: unresolvableSecrets(),
@@ -2179,14 +2232,46 @@ export function resolvePorts(env: McpEnv): McpPorts {
   const rbac = rbacAuthorizerFromEnv(env);
   const entitlements = durableEntitlements(env);
   // Asset reader: D1+R2 when both bindings are present, InMemoryAssets otherwise.
-  // Bound in the dev posture too, for the same provability reason the auth port
-  // is: the offline suite can only drive the deployed app end to end there, so a
-  // gate mounted anywhere else would be untestable over `SELF`. Deleting the
-  // `assets` line below turns `test/d1-r2-asset-reader.test.ts` red.
+  // NOTE: NOT bound in the dev posture — the dev posture uses InMemoryAssets from
+  // inMemoryPorts(). The D1R2AssetReader is only selected in the non-dev posture
+  // (env.FG_DEV_IN_MEMORY_PORTS !== "1"), because the dev posture is the offline
+  // test environment where R2 and the tenant D1 are not guaranteed to be present.
+  // The mount is tested directly through D1R2AssetReader unit tests and through
+  // the e2e test that seeds D1+R2 and drives SELF.fetch. Deleting the `assets`
+  // line below turns `test/d1-r2-asset-reader.test.ts` red.
   const assets: AssetReaderPort =
     env.ASSETS !== undefined && env.TENANT_DB !== undefined
       ? new D1R2AssetReader(env.TENANT_DB, env.ASSETS)
       : inMemoryPorts().assets;
+  // Egress governance: per-isolate counters and a no-op meter when no billing
+  // database is bound. The byte-budget gate still runs against whatever budget
+  // the caller's quota carries, so a configured budget is enforced with or
+  // without a billing sink — exactly as `apps/gateway/src/assets/egress.ts`
+  // does. The durable meter (`LedgerAssetEgressMeter`) is not wired here
+  // because this Worker has no billing database binding; the counters are
+  // per-isolate, which is the same posture the gateway's in-memory counters
+  // have (see the gateway's egress module docstring).
+  const egressCounters = assetEgressCountersFromEnv(env);
+  const egressMeter = NO_ASSET_EGRESS_METER;
+  const egressPricePerGb = assetEgressPricePerGb();
+  // Egress quota resolver: uses the same quota policy source the admission gate
+  // uses, so the egress budget is resolved identically to the inference budget.
+  const egressQuotaSource = env.DB !== undefined ? d1QuotaPolicySource(env.DB) : undefined;
+  const resolveEgressQuota = async (auth: AuthContext): Promise<AssetEgressQuota> => {
+    const apiKeyId = auth.apiKeyId ?? "";
+    if (apiKeyId === "" || egressQuotaSource === undefined) return {};
+    const subject: QuotaSubject = {
+      apiKeyId,
+      chain: {
+        ...(auth.organizationId === undefined ? {} : { tenantId: auth.organizationId }),
+        ...(auth.projectId === undefined ? {} : { projectId: auth.projectId }),
+        ...(auth.workspaceId === undefined ? {} : { workspaceId: auth.workspaceId }),
+        ...(apiKeyId === "" ? {} : { keyId: apiKeyId }),
+      },
+    };
+    const resolution = await resolveQuotaWindows(egressQuotaSource, subject);
+    return resolution.ok ? resolution.quota : {};
+  };
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
     return {
       ...inMemoryPorts(),
@@ -2198,6 +2283,10 @@ export function resolvePorts(env: McpEnv): McpPorts {
       lifecycle,
       rbac,
       entitlements,
+      egressCounters,
+      egressMeter,
+      egressPricePerGb,
+      resolveEgressQuota,
     };
   const ports = {
     ...inMemoryPorts(),
@@ -2210,6 +2299,10 @@ export function resolvePorts(env: McpEnv): McpPorts {
     rbac,
     entitlements,
     assets,
+    egressCounters,
+    egressMeter,
+    egressPricePerGb,
+    resolveEgressQuota,
   };
   if (durableIdentityBound(env)) {
     return {

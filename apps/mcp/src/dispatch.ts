@@ -25,32 +25,37 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 
+import {
+  assetEgressQuotaDenial,
+  assetPullAuditMessage,
+  recordAssetEgress,
+} from "./asset-egress.js";
 import { mcpJsonRpcMethodScopes } from "./contract.js";
 import {
+  JsonRpcErrorCode,
+  type JsonRpcResponse,
+  type McpIngressRequest,
   decodeMcpRequest,
   jsonRpcError,
   jsonRpcResult,
-  JsonRpcErrorCode,
   renderJsonRpcResponse,
-  type JsonRpcResponse,
-  type McpIngressRequest,
 } from "./jsonrpc.js";
+import { type DispatchContext, type McpPorts, hasScope, isJsonObjectValue } from "./ports.js";
 import {
-  completeModernResult,
   FERROGATE_SERVER_INFO,
+  MCP_PROTOCOL_VERSION,
+  SERVER_INFO_META,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  completeModernResult,
   ingressErrorCode,
   ingressErrorData,
   ingressErrorDisplay,
   ingressErrorMessage,
   ingressMode,
   isSupportedModernMethod,
-  MCP_PROTOCOL_VERSION,
   negotiateProtocolVersion,
-  SERVER_INFO_META,
-  SUPPORTED_MCP_PROTOCOL_VERSIONS,
   validateIngress,
 } from "./protocol.js";
-import { hasScope, isJsonObjectValue, type DispatchContext, type McpPorts } from "./ports.js";
 import {
   assetContentEntry,
   assetUri,
@@ -478,13 +483,54 @@ async function resourcesRead(
         );
     }
   }
+
+  // #262 egress governance: fail-closed deny gate BEFORE the bytes are served.
+  // Uses the SAME helpers the gateway's REST asset pull uses, so an MCP read
+  // is never a metering or quota bypass.
+  const egressQuota = await ports.resolveEgressQuota(context.auth);
+  const egressDenied = await assetEgressQuotaDenial({
+    quota: egressQuota,
+    apiKeyId: context.auth.apiKeyId ?? "",
+    tenantId,
+    bytes: read.asset.sizeBytes,
+    counters: ports.egressCounters,
+  });
+  if (egressDenied !== null) {
+    return jsonRpcError(rpc.id, JsonRpcErrorCode.ApplicationError, egressDenied.message);
+  }
+
+  // #262 egress metering: record the bytes served, accumulate the monthly
+  // counter, and emit the audit event. Best-effort: a metering failure is
+  // swallowed, never propagated.
+  const charge = await recordAssetEgress({
+    quota: egressQuota,
+    apiKeyId: context.auth.apiKeyId ?? "",
+    tenantId,
+    projectId: context.auth.projectId,
+    requestId: context.requestId,
+    agentRunId: context.agentRunId,
+    assetType: read.asset.assetType,
+    name: read.asset.name,
+    version: read.asset.version,
+    bytes: read.asset.sizeBytes,
+    pricePerGb: ports.egressPricePerGb,
+    counters: ports.egressCounters,
+    meter: ports.egressMeter,
+    nowUnix: ports.now(),
+  });
+
   ports.audit.record(
     auditEvent(
       context,
       "resource.read",
       assetUri(read.asset.assetType, read.asset.name, read.asset.version),
       "success",
-      `read asset resource ${read.asset.name}@${read.asset.version} (${read.asset.sizeBytes} bytes)`,
+      charge !== null
+        ? assetPullAuditMessage(
+            `${read.asset.assetType}/${read.asset.name}/${read.asset.version}`,
+            charge.bytes,
+          )
+        : `read asset resource ${read.asset.name}@${read.asset.version}`,
     ),
   );
   return jsonRpcResult(rpc.id, { contents: [assetContentEntry(read.asset, read.content)] });
