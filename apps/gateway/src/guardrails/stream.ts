@@ -64,6 +64,53 @@
  * A mid-stream REDACT rewrites the offending frame's text delta in place using
  * the detector's own `ContentPatch`es and forwards the rewritten frame; the
  * stream continues.
+ *
+ * ## EVERY frame that carries model text is screened, not just the deltas
+ *
+ * Issue #778. This screener used to read exactly ONE event per dialect on the
+ * Responses surface — `response.output_text.delta` — which meant a
+ * provider-relayed `response.completed`, whose `response.output` holds the FULL
+ * assembled answer, went past the response-stage policy untouched. #689's
+ * "stored == delivered" invariant still HELD there (the stored bytes were the
+ * delivered bytes); it simply was not protection, because the delivered bytes
+ * were themselves unscreened.
+ *
+ * The vocabulary below is therefore expressed as TEXT SLOTS — every position in
+ * a frame's payload that holds model-generated text — rather than as one delta
+ * field. On `openai.responses` that is `delta`, `text`, `arguments`, `refusal`,
+ * `part.*`, `item.*` and `response.output[].*`, which between them cover
+ * `response.output_text.delta|done`, `response.function_call_arguments.
+ * delta|done`, `response.refusal.delta|done`,
+ * `response.reasoning_summary_text.delta|done`,
+ * `response.output_item.added|done`, `response.content_part.added|done` and
+ * `response.completed|incomplete`. Patching the terminal frame and leaving a
+ * sibling is how a third instance of this bug survives, so the coverage is
+ * structural rather than a list of event names.
+ *
+ * Frames that carry NO model text — a usage-only terminal frame, `[DONE]`,
+ * `response.created`, a keep-alive — still yield no slots, so they never reach a
+ * detector and never produce an evidence row. That property is pinned in
+ * `test/guardrails/responses-stream.test.ts`.
+ *
+ * ## What a DENY on the TERMINAL frame does (issue #778)
+ *
+ * By the time `response.completed` arrives every delta is already on the wire,
+ * so "emit the envelope" is not available and neither is a status line. #733
+ * settled this for the general case of a failure after the headers are flushed:
+ * **fault the stream so the truncation is visible**, rather than ending it
+ * cleanly and pretending it completed. The same answer applies here, and it
+ * falls out of the existing block path unchanged:
+ *
+ *  - the offending `response.completed` is NEVER forwarded, and
+ *  - `response.failed` (carrying `guardrail_blocked`) plus `[DONE]` takes its
+ *    place.
+ *
+ * So the terminal EVENT NAME is what tells a caller "truncated by policy" from
+ * "complete" — a client that waits for `response.completed` sees
+ * `response.failed` instead and cannot mistake a policy truncation for a finished
+ * answer. Deleting `response.completed` outright was rejected for the same
+ * reason: a stream that just stops is a silent failure, and one that ends with a
+ * synthesized `response.completed` after a denial would be a lie.
  */
 import {
   type ContentPatch,
@@ -225,6 +272,8 @@ export function screenSseFrames(options: ScreenSseOptions): TransformStream<SseF
         return;
       }
 
+      // ALL of this frame's model text, every slot joined in wire order — not
+      // just a `delta` field. See the module header (#778).
       const delta = frameText(options.dialect, frame);
       if (delta.length === 0) {
         controller.enqueue(frame);
@@ -261,12 +310,11 @@ export function screenSseFrames(options: ScreenSseOptions): TransformStream<SseF
         return;
       }
 
-      const patched = applyDeltaPatches(delta, match.contentPatches);
-      const rewritten = withFrameText(options.dialect, frame, patched);
+      const rewritten = withFramePatches(options.dialect, frame, match.contentPatches);
       redactedMatch = match;
       redactedFrames += 1;
-      carry = tailBytes(carry + patched, overlapBytes);
-      controller.enqueue(rewritten);
+      carry = tailBytes(carry + rewritten.text, overlapBytes);
+      controller.enqueue(rewritten.frame);
     },
     flush() {
       if (redactedMatch !== undefined) {
@@ -331,11 +379,37 @@ function tailBytes(text: string, max: number): string {
 }
 
 /**
- * Apply the patches that target the DELTA segment, right-to-left so earlier
- * offsets stay valid. Patches arrive validated (non-overlapping, on UTF-8
- * character boundaries) from `validateContentPatchesForSegments`.
+ * Apply the patches that target the DELTA segment across the frame's text
+ * slots, right-to-left so earlier offsets stay valid.
+ *
+ * The detector sees ONE segment — the joined text of every slot — so its offsets
+ * are global to that join and have to be mapped back onto the slot they landed
+ * in. That is the same offset-mapping the carry/delta window already does, one
+ * level down: a slot boundary is always a character boundary (each slot holds a
+ * whole string), so an intersection with a slot is always on a character
+ * boundary too.
+ *
+ * A patch that STRADDLES two slots — possible only because the join is what the
+ * detector matched over — puts its replacement in the first slot it touches and
+ * deletes the touched range from the rest. That keeps the replacement text
+ * exactly once rather than once per slot.
+ *
+ * Patches arrive validated (non-overlapping, on UTF-8 character boundaries) from
+ * `validateContentPatchesForSegments`.
  */
-function applyDeltaPatches(delta: string, patches: readonly ContentPatch[]): string {
+function applyPatchesAcrossSlots(
+  slots: readonly TextSlot[],
+  patches: readonly ContentPatch[],
+): string {
+  const texts = slots.map((slot) => slot.read());
+  const lengths = texts.map((text) => byteLen(text));
+  const starts: number[] = [];
+  let offset = 0;
+  for (const length of lengths) {
+    starts.push(offset);
+    offset += length;
+  }
+
   const applicable = patches
     .filter((patch) => patch.segment_id === DELTA_SEGMENT_ID)
     .sort((a, b) => b.byte_start - a.byte_start);
@@ -343,151 +417,276 @@ function applyDeltaPatches(delta: string, patches: readonly ContentPatch[]): str
     // The finding sat entirely in the carry (already-delivered) text. There is
     // nothing left to scrub in THIS frame; the redaction that mattered was
     // applied when the carry itself was the delta.
-    return delta;
+    return texts.join("");
   }
-  let out = delta;
+
+  // A slot whose offsets we could not trust is scrubbed wholesale and then left
+  // alone: after a wholesale replacement the remaining offsets into it are
+  // meaningless, and re-slicing on them could re-expose the very bytes the
+  // fallback removed.
+  const scrubbed = new Set<number>();
+
   for (const patch of applicable) {
-    const head = byteSlice(out, 0, patch.byte_start);
-    const tail = byteSlice(out, patch.byte_end, byteLen(out));
-    if (head === undefined || tail === undefined) {
-      return "[REDACTED]";
+    const touched: number[] = [];
+    for (let index = 0; index < texts.length; index += 1) {
+      const start = starts[index] ?? 0;
+      const end = start + (lengths[index] ?? 0);
+      const overlaps =
+        patch.byte_end > patch.byte_start
+          ? patch.byte_end > start && patch.byte_start < end
+          : // A zero-length patch is an INSERT; it belongs to whichever slot
+            // contains its position (both, at a boundary — the extra one takes
+            // an empty edit and is unchanged).
+            patch.byte_start >= start && patch.byte_start <= end;
+      if (overlaps) {
+        touched.push(index);
+      }
     }
-    out = `${head}${patch.replacement}${tail}`;
+    const first = touched[0];
+    if (first === undefined) {
+      continue;
+    }
+    // Descending, so a lower slot's offsets are still valid when we reach it.
+    for (let cursor = touched.length - 1; cursor >= 0; cursor -= 1) {
+      const index = touched[cursor] ?? 0;
+      if (scrubbed.has(index)) {
+        continue;
+      }
+      const start = starts[index] ?? 0;
+      const localStart = Math.max(patch.byte_start - start, 0);
+      const localEnd = Math.min(patch.byte_end - start, lengths[index] ?? 0);
+      const current = texts[index] ?? "";
+      const head = byteSlice(current, 0, localStart);
+      const tail = byteSlice(current, localEnd, byteLen(current));
+      if (head === undefined || tail === undefined) {
+        texts[index] = FALLBACK_REDACTION;
+        scrubbed.add(index);
+        continue;
+      }
+      texts[index] = `${head}${index === first ? patch.replacement : ""}${tail}`;
+    }
   }
-  return out;
+
+  for (let index = 0; index < slots.length; index += 1) {
+    slots[index]?.write(texts[index] ?? "");
+  }
+  return texts.join("");
 }
+
+/** Used only when a patch offset does not land on a character boundary. */
+const FALLBACK_REDACTION = "[REDACTED]";
 
 // ---------------------------------------------------------------------------
 // Dialect frame vocabulary
 // ---------------------------------------------------------------------------
 
 /**
- * The model-generated text this frame carries, or `""` for a frame that carries
- * none (role chunks, ping, usage, `[DONE]`).
+ * One rewritable position holding model-generated text inside a frame payload.
+ *
+ * A slot is bound to the object it was collected from, so collecting over a
+ * CLONE and writing through the slots rewrites the clone — which is how
+ * {@link withFramePatches} redacts without touching the frame the client may
+ * already have been handed.
+ */
+interface TextSlot {
+  read(): string;
+  write(text: string): void;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Push a slot for `container[key]` when it holds a string. */
+function pushStringSlot(slots: TextSlot[], container: Record<string, unknown>, key: string): void {
+  if (typeof container[key] !== "string") {
+    return;
+  }
+  slots.push({
+    read: () => (typeof container[key] === "string" ? (container[key] as string) : ""),
+    write: (text) => {
+      container[key] = text;
+    },
+  });
+}
+
+/**
+ * Every position in this frame that carries model-generated text, in wire order.
  *
  * Deliberately narrow: guardrails screen MODEL CONTENT, so SSE plumbing must
- * never reach a detector — a `data: [DONE]` scanned as text would be a false
- * positive surface and a needless evidence row.
+ * never reach a detector — a `data: [DONE]`, a usage object or a `request_id`
+ * scanned as text would be a false-positive surface and a needless evidence row.
+ * Every arm below therefore names the fields it reads; nothing walks the payload
+ * generically.
+ */
+function frameTextSlots(dialect: StreamDialect, json: Record<string, unknown>): TextSlot[] {
+  const slots: TextSlot[] = [];
+  switch (dialect) {
+    case "openai.chat": {
+      const choices = json.choices;
+      if (!Array.isArray(choices)) {
+        return slots;
+      }
+      for (const choice of choices) {
+        const delta = asRecord(asRecord(choice)?.delta);
+        if (delta === undefined) {
+          continue;
+        }
+        pushStringSlot(slots, delta, "content");
+        const toolCalls = delta.tool_calls;
+        if (Array.isArray(toolCalls)) {
+          for (const call of toolCalls) {
+            const fn = asRecord(asRecord(call)?.function);
+            if (fn !== undefined) {
+              pushStringSlot(slots, fn, "arguments");
+            }
+          }
+        }
+      }
+      return slots;
+    }
+    case "openai.responses": {
+      // Structural, NOT keyed on the event name (#778): naming the events is
+      // exactly how `response.completed` was missed, and a fourth event would be
+      // missed the same way. Every field below is model output on this protocol
+      // whatever frame it arrives in.
+      //
+      //   delta      — output_text.delta, function_call_arguments.delta,
+      //                refusal.delta, reasoning_summary_text.delta
+      //   text       — output_text.done, reasoning_summary_text.done
+      //   arguments  — function_call_arguments.done
+      //   refusal    — refusal.done
+      //   part       — content_part.added|done
+      //   item       — output_item.added|done
+      //   response   — completed|incomplete: the FULL assembled output
+      pushStringSlot(slots, json, "delta");
+      pushStringSlot(slots, json, "text");
+      pushStringSlot(slots, json, "arguments");
+      pushStringSlot(slots, json, "refusal");
+      pushResponsesPartSlots(slots, json.part);
+      pushResponsesItemSlots(slots, json.item);
+      const response = asRecord(json.response);
+      if (response !== undefined) {
+        const output = response.output;
+        if (Array.isArray(output)) {
+          for (const item of output) {
+            pushResponsesItemSlots(slots, item);
+          }
+        }
+      }
+      return slots;
+    }
+    case "anthropic.messages": {
+      // The FIELDS are unchanged by #778 — on this dialect the only model text
+      // is a `content_block_delta`'s `delta.text` / `delta.partial_json`.
+      // `message_start` carries usage and a role, `content_block_start` opens an
+      // EMPTY block, `message_delta` carries a stop reason (its `delta` holds no
+      // string field, so it yields no slot), `message_stop` carries nothing.
+      // There is no assembled-output frame on this protocol — which is exactly
+      // why Responses had one to miss and this one did not.
+      //
+      // What did change: the gate is the SHAPE rather than the `event:` name, so
+      // a relay that sends the payload's own `type` without an `event:` line is
+      // screened too. Same fields, one less way to slip past.
+      const delta = asRecord(json.delta);
+      if (delta === undefined) {
+        return slots;
+      }
+      if (typeof delta.text === "string") {
+        pushStringSlot(slots, delta, "text");
+      } else {
+        pushStringSlot(slots, delta, "partial_json");
+      }
+      return slots;
+    }
+  }
+}
+
+/** `content_part.*` — one part of an assistant message. */
+function pushResponsesPartSlots(slots: TextSlot[], value: unknown): void {
+  const part = asRecord(value);
+  if (part === undefined) {
+    return;
+  }
+  pushStringSlot(slots, part, "text");
+  pushStringSlot(slots, part, "refusal");
+}
+
+/**
+ * `output_item.*` and each entry of `response.output` — a message, a function
+ * call or a reasoning item.
+ */
+function pushResponsesItemSlots(slots: TextSlot[], value: unknown): void {
+  const item = asRecord(value);
+  if (item === undefined) {
+    return;
+  }
+  pushStringSlot(slots, item, "text");
+  // A `function_call` item's assembled arguments: model-authored, and the same
+  // bytes `openai.chat` screens out of `tool_calls[].function.arguments`.
+  pushStringSlot(slots, item, "arguments");
+  pushStringSlot(slots, item, "refusal");
+  const content = item.content;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      pushResponsesPartSlots(slots, part);
+    }
+  }
+  // A reasoning item's summary parts.
+  const summary = item.summary;
+  if (Array.isArray(summary)) {
+    for (const part of summary) {
+      pushResponsesPartSlots(slots, part);
+    }
+  }
+}
+
+/**
+ * The model-generated text this frame carries, or `""` for a frame that carries
+ * none (role chunks, ping, usage, `response.created`, `[DONE]`).
+ *
+ * Frames with several slots are joined in wire order and screened as ONE
+ * segment, so a marker split across two of them — an answer whose halves land in
+ * two content parts — is caught, exactly as the carry window catches one split
+ * across two frames.
  */
 export function frameText(dialect: StreamDialect, frame: SseFrame): string {
   if (isDoneFrame(frame)) {
     return "";
   }
-  const value = frameJson(frame);
-  if (value === undefined || value === null || typeof value !== "object") {
+  const json = asRecord(frameJson(frame));
+  if (json === undefined) {
     return "";
   }
-  const json = value as Record<string, unknown>;
-  switch (dialect) {
-    case "openai.chat": {
-      const choices = json.choices;
-      if (!Array.isArray(choices)) {
-        return "";
-      }
-      let out = "";
-      for (const choice of choices) {
-        const delta = (choice as Record<string, unknown> | null)?.delta;
-        if (delta === null || typeof delta !== "object") {
-          continue;
-        }
-        const content = (delta as Record<string, unknown>).content;
-        if (typeof content === "string") {
-          out += content;
-        }
-        const toolCalls = (delta as Record<string, unknown>).tool_calls;
-        if (Array.isArray(toolCalls)) {
-          for (const call of toolCalls) {
-            const fn = (call as Record<string, unknown> | null)?.function;
-            const args = (fn as Record<string, unknown> | null)?.arguments;
-            if (typeof args === "string") {
-              out += args;
-            }
-          }
-        }
-      }
-      return out;
-    }
-    case "openai.responses": {
-      if (frame.event !== "response.output_text.delta") {
-        return "";
-      }
-      const delta = json.delta;
-      return typeof delta === "string" ? delta : "";
-    }
-    case "anthropic.messages": {
-      if (frame.event !== "content_block_delta") {
-        return "";
-      }
-      const delta = json.delta;
-      if (delta === null || typeof delta !== "object") {
-        return "";
-      }
-      const record = delta as Record<string, unknown>;
-      if (typeof record.text === "string") {
-        return record.text;
-      }
-      return typeof record.partial_json === "string" ? record.partial_json : "";
-    }
+  let out = "";
+  for (const slot of frameTextSlots(dialect, json)) {
+    out += slot.read();
   }
+  return out;
 }
 
-/** Rebuild a frame with its text delta replaced (redaction). */
-export function withFrameText(dialect: StreamDialect, frame: SseFrame, text: string): SseFrame {
+/**
+ * Rebuild a frame with the detector's patches applied to its text (redaction).
+ *
+ * Returns the rewritten frame AND the patched text, which is what the carry
+ * window is advanced with — the client-visible bytes, not the provider's.
+ */
+export function withFramePatches(
+  dialect: StreamDialect,
+  frame: SseFrame,
+  patches: readonly ContentPatch[],
+): { readonly frame: SseFrame; readonly text: string } {
   const value = frameJson(frame);
-  if (value === undefined || value === null || typeof value !== "object") {
-    return frame;
+  if (asRecord(value) === undefined) {
+    return { frame, text: "" };
   }
+  // Clone first, then collect the slots over the CLONE: a frame is not owned by
+  // this transform and the parsed payload may be shared with a tap.
   const json = structuredClone(value) as Record<string, unknown>;
-  switch (dialect) {
-    case "openai.chat": {
-      const choices = json.choices;
-      if (Array.isArray(choices)) {
-        let first = true;
-        for (const choice of choices) {
-          const delta = (choice as Record<string, unknown> | null)?.delta;
-          if (delta === null || typeof delta !== "object") {
-            continue;
-          }
-          const record = delta as Record<string, unknown>;
-          if (typeof record.content === "string") {
-            record.content = first ? text : "";
-            first = false;
-          }
-          const toolCalls = record.tool_calls;
-          if (Array.isArray(toolCalls)) {
-            for (const call of toolCalls) {
-              const fn = (call as Record<string, unknown> | null)?.function;
-              if (fn !== null && typeof fn === "object") {
-                const fnRecord = fn as Record<string, unknown>;
-                if (typeof fnRecord.arguments === "string") {
-                  fnRecord.arguments = first ? text : "";
-                  first = false;
-                }
-              }
-            }
-          }
-        }
-      }
-      break;
-    }
-    case "openai.responses": {
-      json.delta = text;
-      break;
-    }
-    case "anthropic.messages": {
-      const delta = json.delta;
-      if (delta !== null && typeof delta === "object") {
-        const record = delta as Record<string, unknown>;
-        if (typeof record.text === "string") {
-          record.text = text;
-        } else if (typeof record.partial_json === "string") {
-          record.partial_json = text;
-        }
-      }
-      break;
-    }
-  }
-  return jsonSseFrame(frame.event, json);
+  const text = applyPatchesAcrossSlots(frameTextSlots(dialect, json), patches);
+  return { frame: jsonSseFrame(frame.event, json), text };
 }
 
 /** The in-band terminal frames a mid-stream block delivers. */
