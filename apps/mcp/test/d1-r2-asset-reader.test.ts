@@ -394,6 +394,39 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
     });
   });
 
+  it("resources/list withholds pending_scan and yanked assets over SELF.fetch (#366)", async () => {
+    const { ASSETS, TENANT_DB } = requireBindings(bindings);
+    // Seed one visible asset (should appear), one pending_scan (should be hidden),
+    // and one yanked (should be hidden).
+    await seedAsset(TENANT_DB, ASSETS, { name: "deploy-visible" });
+    await seedAsset(TENANT_DB, ASSETS, {
+      name: "deploy-pending",
+      visibility: "pending_scan",
+    });
+    await seedAsset(TENANT_DB, ASSETS, {
+      name: "deploy-yanked",
+      yanked: true,
+    });
+
+    const res = await SELF.fetch(
+      rpcRequest(
+        { jsonrpc: "2.0", id: 1, method: "resources/list", params: {} },
+        { key: READ_KEY },
+      ),
+    );
+    const body = (await res.json()) as {
+      error?: { code: number; message: string };
+      result?: { resources?: { uri: string; name: string }[] };
+    };
+    expect(body.error).toBeUndefined();
+    // Only the visible asset should appear in the listing.
+    expect(body.result?.resources).toHaveLength(1);
+    expect(body.result?.resources?.[0]).toMatchObject({
+      uri: "asset://cli_tool/deploy-visible/1.0.0",
+      name: "deploy-visible@1.0.0",
+    });
+  });
+
   it("resources/read returns asset content over SELF.fetch", async () => {
     const { ASSETS, TENANT_DB } = requireBindings(bindings);
     await seedAsset(TENANT_DB, ASSETS);

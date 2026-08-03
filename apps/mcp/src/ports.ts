@@ -81,7 +81,6 @@ import {
   type RateLimiterNamespace,
   admissionFromEnv,
 } from "./admission/index.js";
-import { type QuotaSubject, d1QuotaPolicySource, resolveQuotaWindows } from "./admission/quota.js";
 import { D1ToolApprovals } from "./approvals.js";
 import { D1McpAuth, type D1McpAuthOptions } from "./auth.js";
 import { DurableCredentialStore, decodeIdentityKey, identityCipherFrom } from "./durable.js";
@@ -741,45 +740,29 @@ export class AutoApproval implements ApprovalPort {
 }
 
 /**
- * In-memory asset catalog.
+ * In-memory asset catalog — FALLBACK, no longer the production path.
  *
- * PORT-TODO(P: inventory-edge-control §MCP) — KEPT, and RE-DIAGNOSED. The previous
- * wording ("a deferral pending `@ferrogate/storage`'s asset surface") is no
- * longer true and would have sent the next reader to the wrong place: that
- * surface exists (`packages/storage/src/assets.ts`), and since `resolvePorts`
- * mounted `EnvBindingTenantDatabaseRouter` for the auth port, the CATALOG half
- * is reachable from here too — `stored_assets` is a TENANT-database table
- * (`sql/d1-ts/tenant/0001_init_tenant.sql`) and the router resolves a tenant
- * database by binding NAME at runtime.
+ * PORT-TODO(P: inventory-edge-control §MCP) — KEPT as the graceful fallback
+ * when `env.ASSETS` or `env.TENANT_DB` is absent (offline / tests). The
+ * production path is now {@link D1R2AssetReader} (D1 + R2), selected by
+ * {@link resolvePorts} when both bindings are present.
  *
- * What actually blocks it is the BYTES half, and it is a binding this Worker
- * does not have. `stored_assets` deliberately dropped the inline `content`
- * column in this rewrite; `storage_uri` points at an R2 object, and
- * `apps/mcp/wrangler.toml` declares NO `[[r2_buckets]]`. Workers bindings
- * resolve at DEPLOY time, so this file cannot open a bucket at runtime, and an
- * `AssetReaderPort.read` that returned metadata with no body would be a worse
- * lie than the in-memory map.
+ * The R2 bucket binding (`[[r2_buckets]]` with `binding = "ASSETS"`) is
+ * declared in `apps/mcp/wrangler.toml` at line 260. The tenant database
+ * binding (`TENANT_DB`) is declared at line 289. Both are flat bindings —
+ * tenant isolation is provided by the `WHERE tenant_id = ?1` predicate on
+ * every query, not by per-tenant database routing.
  *
- * TO CLOSE IT, the composition/deploy step must add to `apps/mcp/wrangler.toml`:
+ * NOTE (memory: the live account has R2 unactivated) that a bucket must be
+ * enabled on the account first; the `[[r2_buckets]]` stanza against an
+ * account without the R2 plan fails the deploy with error 10042, not 10000.
  *
- * ```toml
- * [[r2_buckets]]
- * binding = "ASSETS"
- * bucket_name = "ferrogate-assets"
- * ```
- *
- * ...after which this class is replaced by a reader that routes `tenantId`
- * through the tenant router for the `stored_assets` row and fetches
- * `storage_uri` from `env.ASSETS`. NOTE (memory: the live account has R2
- * unactivated) that a bucket must be enabled on the account first; a
- * `[[r2_buckets]]` stanza against an account without the R2 plan fails the
- * deploy with error 10042, not 10000.
- *
- * CONSEQUENCE while it stands: assets do not survive an isolate recycle, so
- * `resources/list` and `resources/read` answer only for what this isolate was
- * seeded with. The #366 property that DOES hold regardless of the backing store
- * is pinned in `read` below and by `test/assets.test.ts`: an undownloadable
- * (pending / quarantined) asset is indistinguishable from a missing one.
+ * CONSEQUENCE while this fallback is active: assets do not survive an
+ * isolate recycle, so `resources/list` and `resources/read` answer only for
+ * what this isolate was seeded with. The #366 property that DOES hold
+ * regardless of the backing store is pinned in `read` below and by
+ * `test/assets.test.ts`: an undownloadable (pending / quarantined) asset is
+ * indistinguishable from a missing one.
  */
 export class InMemoryAssets implements AssetReaderPort {
   readonly #assets = new Map<string, { asset: StoredAsset; content: Uint8Array }>();
@@ -843,10 +826,20 @@ function assetKey(tenantId: string, assetType: string, name: string, version: st
  *
  * ## #366 withholding
  *
- * An asset whose `visibility` is not `'visible'` or whose `yanked` flag is
- * `true` is indistinguishable from a missing one — on the listing AND on the
- * read. This matches the behaviour of {@link InMemoryAssets} and the REST
- * asset surface.
+ * On the READ side, this class enforces the withholding directly: an asset
+ * whose `visibility` is not `'visible'` or whose `yanked` flag is `true`
+ * returns `{ kind: "not_found" }` — indistinguishable from a missing one.
+ *
+ * On the LISTING side, this class returns every row (including hidden ones)
+ * with the `downloadable` field set to `false`. The actual withholding — the
+ * filter that removes hidden assets from the MCP resource listing — happens
+ * one layer up in {@link dispatch.ts}:
+ *
+ * ```ts
+ * const downloadable = assets.filter((asset) => asset.downloadable);
+ * ```
+ *
+ * Both halves are pinned by `test/d1-r2-asset-reader.test.ts`.
  *
  * ## Integrity verification
  *
@@ -1678,10 +1671,10 @@ export interface McpEnv {
    * fetching the object body from {@link ASSETS}. The tenant database is a
    * FLAT binding — tenant isolation is provided by the `WHERE tenant_id = ?1`
    * predicate on every query, exactly as `apps/gateway`'s
-   * `D1AssetMetadataStore` works under its default `GATEWAY_TENANT_DB_ROUTING
-   * = "off"` posture. Per-tenant database routing through
-   * `EnvBindingTenantDatabaseRouter` is available when the deployment adds
-   * per-tenant D1 bindings and switches routing on.
+   * `D1AssetMetadataStore` works. There is no per-tenant database routing
+   * for this reader: `resolvePorts` constructs
+   * `new D1R2AssetReader(env.TENANT_DB, env.ASSETS)` unconditionally, and
+   * the MCP Worker reads no routing variable for the asset surface.
    *
    * OPTIONAL, and its absence is a graceful degradation: {@link resolvePorts}
    * falls back to {@link InMemoryAssets} when either this or {@link ASSETS}
