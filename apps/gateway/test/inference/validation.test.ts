@@ -243,7 +243,10 @@ describe("request metadata bounds (issue #171)", () => {
 
 describe("model admission", () => {
   it("returns 400 model_not_found for an unknown model", async () => {
-    const res = await post("/v1/chat/completions", { model: "nope", messages: [{ role: "user", content: "hi" }] });
+    const res = await post("/v1/chat/completions", {
+      model: "nope",
+      messages: [{ role: "user", content: "hi" }],
+    });
     expect(res.status).toBe(400);
     const body = await errorBody(res);
     expect(body.error.code).toBe("model_not_found");
@@ -251,7 +254,10 @@ describe("model admission", () => {
   });
 
   it("returns 400 model_disabled for a configured-but-disabled model", async () => {
-    const res = await post("/v1/chat/completions", { model: "retired-model", messages: [{ role: "user", content: "hi" }] });
+    const res = await post("/v1/chat/completions", {
+      model: "retired-model",
+      messages: [{ role: "user", content: "hi" }],
+    });
     expect(res.status).toBe(400);
     const body = await errorBody(res);
     expect(body.error.code).toBe("model_disabled");
@@ -339,7 +345,10 @@ describe("capability gating (issue #275)", () => {
           enabled: true,
         },
       ]);
-      const res = await h.post("/v1/chat/completions", { model: "mystery-model", messages: [{ role: "user", content: "hi" }] });
+      const res = await h.post("/v1/chat/completions", {
+        model: "mystery-model",
+        messages: [{ role: "user", content: "hi" }],
+      });
 
       // An unknown family is operator misconfiguration: refuse rather than
       // guess a wire grammar, and above all dispatch nothing.
@@ -364,7 +373,10 @@ describe("capability gating (issue #275)", () => {
           enabled: true,
         },
       ]);
-      const res = await h.post("/v1/chat/completions", { model: "bedrock-model", messages: [{ role: "user", content: "hi" }] });
+      const res = await h.post("/v1/chat/completions", {
+        model: "bedrock-model",
+        messages: [{ role: "user", content: "hi" }],
+      });
 
       // Bedrock is ported now, but it requires byte-exact SigV4: dispatching an
       // UNSIGNED request would be worse than refusing, so the adapter refuses.

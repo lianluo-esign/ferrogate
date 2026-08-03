@@ -527,4 +527,23 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
     expect(first?.["object"]).toBeUndefined();
   });
+
+  it("models.retrieve() returns the OpenAI dialect on the Anthropic ingress (deliberate asymmetry, issue #727)", async () => {
+    // Unlike models.list(), models.retrieve() has NO dialect branch — it always
+    // answers in the OpenAI dialect ({id, object, created, owned_by}) regardless
+    // of ingress. The Anthropic SDK does not call this endpoint, so the
+    // asymmetry has no practical impact on Anthropic clients. Documented at
+    // handleModel in handlers.ts.
+    const model = await anthropicClient().models.retrieve("gpt-4o-mini");
+
+    expect(model.id).toBe("gpt-4o-mini");
+    // The Anthropic SDK's ModelInfo type has `type: "model"`, but the actual
+    // response from this endpoint is the OpenAI shape with `object: "model"`.
+    expect((model as unknown as Record<string, unknown>)?.["object"]).toBe("model");
+    expect((model as unknown as Record<string, unknown>)?.["created"]).toEqual(expect.any(Number));
+    expect((model as unknown as Record<string, unknown>)?.["owned_by"]).toEqual(expect.any(String));
+    // The Anthropic-dialect fields should NOT be present.
+    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toBeUndefined();
+  });
 });
