@@ -653,7 +653,7 @@ they were derived by the §2 walk and had never been enumerated.
 
 ---
 
-## 9. `apps/mcp` — 34 seams
+## 9. `apps/mcp` — 35 seams
 
 ### 9.1 Entry module `src/worker.ts` (3)
 
@@ -725,6 +725,25 @@ isolate), which OVERRIDES the toml's `main`. Since wave 14 it also binds
 Also read by this app's `[vars]`: `FG_DEV_MCP_GUARDRAILS = ""` — covered by the
 `test/env-var-drift.test.ts` derived read/declare contract rather than a row of
 its own, because MCP-P4 already gates the value's consumer.
+
+### 9.6 Durable Object lifecycle `src/unified.ts` (1)
+
+A mount that is neither a route nor a port slot: the thing that CALLS a method
+which would otherwise never be called. #765 was exactly that shape one step past
+the usual one — `FerroGateMcpUnifiedSession.close()` was written by #687, tested
+by #687, and invoked by nothing, so every `initialize` minted a Durable Object
+that lived forever.
+
+| ID | Seam | Mutation | Confirm | Expected RED | Channel | Tier |
+|---|---|---|---|---|---|---|
+| MCP-U1 | **NEW, #765.** The IDLE REAPER: `alarmArmedUnix: await this.#arm(…)` in `open`/`reconcile`(×2)/`recordUpstreamHealth`/`append` (5 call sites) plus `await this.close()` inside `override async alarm()`. Without the arming no alarm is ever scheduled and nothing evicts; without the `close()` the alarm fires and the session survives | `MUT-2` neutralise all five arms (replace `this.#arm(` with a function that returns the stored value unchanged); **and separately** `MUT-1` the `await this.close();` in `alarm()` | `grep -c 'MUTATION-765-ARM' src/unified.ts` → **5**; `grep -c 'MUTATION-765-CLOSE'` → 1 | `test/unified-session-eviction.test.ts` — **9 RED of 10** on the arming mutation (every behavioural one at `runDurableObjectAlarm` returning `false`; the survivor asserts constants only), **6 RED** on the `close()` deletion (the mount test at `expected 200 to be 400`: the resume is served as if the session were live). The refusal is TWO layers — the ingress answers off `store.status`, the object's own `replay` refuses with the same reason — and each has its own gate: dropping either alone is **1 RED**, dropping both is **3 RED**. The POLICY is pinned separately: 30min→5min is **1 RED**, and removing the renewal debounce is **1 RED** | DEF | T1 |
+
+**Not rows, but recorded here because the next wave will ask.** #687 landed
+`[[durable_objects.bindings]] MCP_CLIENT_SESSION` and `[[migrations]] tag = "v3"`
+in `apps/mcp/wrangler.toml` and registered neither in §9.5, so this app's deploy
+config has 12 seams and 10 rows. #765 did not add them: they are #687's to
+enumerate with #687's mutations, and inventing rows for someone else's slice is
+how a table stops meaning what it says.
 
 ---
 
@@ -867,14 +886,21 @@ and the reason the tool now EXITS NON-ZERO when the two disagree.
 |---|---:|---:|---:|---:|
 | `apps/gateway` | 62 | 44 | 16 | 2 |
 | `apps/control-plane` | 42 | 26 | 11 | 5 |
-| `apps/mcp` | 34 | 28 | 4 | 2 |
+| `apps/mcp` | 35 | 29 | 4 | 2 |
 | `apps/agent-runtime` | 38 | 26 | 10 | 2 |
 | `apps/telemetry` | 17 | 9 | 3 | 5 |
 | `apps/cli` | 8 | 3 | 5 | 0 |
-| **Total** | **201** | **136** | **49** | **16** |
+| **Total** | **202** | **137** | **49** | **16** |
 
 Plus **1 RETIRED tombstone** (`GW-C11`, §3.2), which is a row but not a seam and
-is excluded from every total above. 201 ID-bearing lines, 200 seams.
+is excluded from every total above. 202 ID-bearing lines, 201 seams.
+
+**#765 added `MCP-U1`** (§9.6, T1 — the idle reaper that finally calls the
+unified session's `close()`), which is the +1 in both cells above. It does NOT
+close §13.3's outstanding gap: `bun scripts/seam-proof.mjs --list` still reports
+one more parsed row than claimed, and the extra one is in `apps/gateway` (63
+parsed against 62 claimed), which predates this slice and belongs to whoever
+added it.
 
 **Wave 22 added TEN rows, all T1.** Five are FC-1 (the operator drain, joined
 across the fleet): `MCP-P12`/`MCP-P13`, `AR-P10`/`AR-P11` and `CP-P9` — see

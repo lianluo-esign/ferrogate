@@ -21,6 +21,8 @@
  * | no `Mcp-Session-Id`, method is `initialize` | mint one |
  * | no `Mcp-Session-Id`, any other method | no session — the stateless behaviour this ingress always had |
  * | `Mcp-Session-Id` naming a session this tenant never opened | `404 mcp_session_not_found` |
+ * | `Mcp-Session-Id` naming a session EVICTED for idleness (#765) | `404 mcp_session_not_found`, message naming the eviction |
+ * | ...with a `Last-Event-ID` as well | `400 mcp_session_not_resumable`, message naming the eviction |
  * | `Last-Event-ID` with no live session | `400 mcp_session_not_resumable` |
  * | `Last-Event-ID` on a non-SSE request | `400 mcp_session_not_resumable` |
  * | `Last-Event-ID` the log cannot honour exactly | `400 mcp_session_not_resumable` |
@@ -49,6 +51,7 @@ import {
   type UnifiedFrame,
   type UnifiedReconcile,
   UnifiedSessionStore,
+  evictionReason,
   mintSessionId,
   parseUnifiedCursor,
   unifiedCursorToken,
@@ -154,8 +157,25 @@ export async function resolveUnifiedSession(
     // The cross-tenant fence: this store can only address objects named
     // `(this tenant, id)`, so another tenant's id resolves to an object that
     // was never opened and is UNKNOWN here rather than forbidden.
-    const state = await store.describe(sessionId);
-    if (state === undefined) {
+    const status = await store.status(sessionId);
+    if (status.kind === "evicted") {
+      // #765. An evicted session is NOT the same answer as an unknown one, and
+      // the difference is the whole point of keeping a tombstone: this client
+      // had a real session and it was taken away by an operator policy, so it
+      // is told which policy and when. Everything else in this ladder would
+      // answer "no such session", which is true and useless.
+      const message = evictionReason(status.tombstone);
+      // With a cursor this is a RESUME refusal — the same code and shape as
+      // #687's three others, because the client's question was "continue this
+      // stream" and the honest answer is "that stream no longer exists".
+      // Without one the question was only "is my session open", which the
+      // 404 row already answers; only the message changes.
+      if (hasCursor) {
+        return { ok: false, status: 400, code: SESSION_NOT_RESUMABLE, message };
+      }
+      return { ok: false, status: 404, code: SESSION_NOT_FOUND, message };
+    }
+    if (status.kind === "unknown") {
       return {
         ok: false,
         status: 404,
