@@ -1,5 +1,5 @@
 /**
- * NO SOURCE OR TEST FILE MAY CONTAIN A RAW NUL BYTE.
+ * NO FILE UNDER THE SEVEN SCANNED SOURCE AND TEST TREES MAY CONTAIN A RAW NUL BYTE.
  *
  * This is not style. `grep` classifies a file containing a NUL as BINARY and
  * skips it silently — no warning, no non-zero exit, just a file that is not in
@@ -9,9 +9,9 @@
  * audit of this Worker reported on one fewer file than exists and nobody could
  * tell, because the omission looks exactly like a clean file.
  *
- * Two files in this repo have now done it. This test is why a third cannot:
- * `?raw` inlines the file's real bytes at build time, so the assertion runs
- * against what is on disk rather than against a re-encoding.
+ * Two files in this repo have now done it. This test is why a third cannot land
+ * in the scanned trees: `?raw` inlines the file's real bytes at build time, so
+ * the assertion runs against what is on disk rather than a re-encoding.
  *
  * The fix is never to remove the separator — it is to write `"\0"`, which
  * produces the identical one-character string at runtime and leaves the source
@@ -32,10 +32,22 @@
  * not missing; they were invisible. A test file is evidence, and evidence that
  * cannot be diffed or grepped is worse than absent, because absent is obvious.
  *
- * So the scan below is the union of every app's `src/` AND every app's
- * `test/`, at any extension — and note that widening it to `test/` is also what
- * finally brought the OTHER apps' `src/` under the NUL scan, which `SOURCES`
- * (this Worker's own TypeScript, and nobody else's) never covered either.
+ * So the scan below sweeps seven trees whole: `apps/`, `packages/`, `tools/`,
+ * `sdks/`, `admin-console/`, `tests/` and `e2e/`. Each uses a whole-tree glob
+ * (star-star-slash-star) rather than guessing internal src/test layout, because
+ * sdks/python/ has no src/ dir, tools/openapi-client-smoke/ has no test/ dir,
+ * and admin-console/ has scripts/, eslint-rules/ and root-level config files
+ * outside src/. Dotfile companions (star-star-slash-dot-star) are added per
+ * tree because Vite's import.meta.glob skips them by default. Build and cache
+ * directories are excluded so local artefacts cannot make the guard depend on
+ * machine state. The `apps/` tree was the last application tree to be widened —
+ * it was previously limited to `src/` and `test/` only, missing 27 tracked files
+ * (package.json, tsconfig.json, vitest.config.ts, wrangler.toml, spec/ scripts
+ * and README).
+ *
+ * This is not a repo-wide guard. Tracked files under docs/, scripts/, sql/,
+ * charts/, deploy/, skills/, .github/ and config/, plus repository-root files,
+ * remain outside its scope because they are neither source trees nor test trees.
  */
 import { describe, expect, it } from "vitest";
 
@@ -61,7 +73,7 @@ const NUL = String.fromCharCode(0);
  */
 declare global {
   interface ImportMeta {
-    glob(pattern: string, options: object): Record<string, string>;
+    glob(pattern: string | string[], options: object): Record<string, string>;
   }
 }
 
@@ -72,9 +84,9 @@ const SOURCES = import.meta.glob("../src/**/*.ts", {
 });
 
 /**
- * Every path under EVERY Worker's `src/`, extension-free — because the second
- * form of this hazard hides in the FILE NAME rather than the file contents, and
- * the `*.ts` glob above is blind to it by construction.
+ * Every path under all seven scanned trees, at any extension — because the
+ * second form of this hazard hides in the FILE NAME rather than the file
+ * contents, and the `*.ts` glob above is blind to it by construction.
  *
  * Wave 23 found two files in this repo whose NAMES contain literal newlines:
  *
@@ -100,38 +112,126 @@ const SOURCES = import.meta.glob("../src/**/*.ts", {
  * document, and it is the same class as the NUL-byte incident above: evidence
  * that looks complete and is not.
  */
-const ALL_WORKER_PATHS = import.meta.glob("../../*/src/**/*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
+// apps/ — the Worker tree, now scanned whole like the other six trees.
+// Previously limited to src/ and test/ only, which missed 27 tracked files
+// (package.json, tsconfig.json, vitest.config.ts, wrangler.toml, spec/
+// scripts and README). Dotfile companion included for the same reason as
+// the other trees, though apps/ currently has no tracked dotfiles.
+const ALL_APPS_PATHS = import.meta.glob(
+  [
+    "../../../apps/**/*",
+    "../../../apps/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
 
-/**
- * The same sweep over every app's `test/` tree, at any extension.
- *
- * This is the half of the guard that was missing until issue #736 (see the file
- * header). It must be a SEPARATE literal glob rather than a `{src,test}` brace
- * or a variable: `import.meta.glob` is a build-time textual transform, so the
- * pattern has to be written out where Vite can read it.
- *
- * Test dirs carry no binary fixtures in this repo — every file under every
- * app's test tree is text — so inlining them with `?raw` is safe. If a real
- * binary fixture is ever added, it belongs in a `fixtures/` dir excluded here
- * rather than being a reason to narrow the scan back to source.
- */
-const ALL_WORKER_TEST_PATHS = import.meta.glob("../../*/test/**/*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-});
+// packages/ — the shared library tree, scanned whole rather than guessing
+// internal src/test layout. Exclusions are defensive: these directories are
+// gitignored but may exist on disk after a local build.
+const ALL_PACKAGE_PATHS = import.meta.glob(
+  [
+    "../../../packages/**/*",
+    "../../../packages/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
 
-/**
- * Everything this guard is responsible for: every app's `src/` and every app's
- * `test/`. Vite normalises the CITING package's own matches to `../…` and every
- * sibling's to `../../<app>/…`, and the two maps cannot collide because one is
- * keyed under `/src/` and the other under `/test/`.
- */
-const ALL_SCANNED_PATHS = { ...ALL_WORKER_PATHS, ...ALL_WORKER_TEST_PATHS };
+// tools/ — the tooling tree, scanned whole. tools/openapi-client-smoke/ has
+// no test/ dir and tools/generated-clients/ has root-level .mjs scripts, so
+// a src/test-guessing glob would miss them.
+const ALL_TOOL_PATHS = import.meta.glob(
+  [
+    "../../../tools/**/*",
+    "../../../tools/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+// sdks/ — the published SDK tree, scanned whole. sdks/python/ has no src/
+// dir (its package is at sdks/python/ferrogate_admin/) and test_client.py
+// lives at the root, so a src/test-guessing glob would miss it.
+const ALL_SDK_PATHS = import.meta.glob(
+  [
+    "../../../sdks/**/*",
+    "../../../sdks/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+// admin-console/ — separate Vite SPA project, scanned whole. It has no
+// standardised src/test layout: scripts/, eslint-rules/, e2e/ and root-level
+// config files all live outside src/.
+const ALL_ADMIN_CONSOLE_PATHS = import.meta.glob(
+  [
+    "../../../admin-console/**/*",
+    "../../../admin-console/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+// tests/ — shared repository-level fixtures and test evidence.
+const ALL_TEST_PATHS = import.meta.glob(
+  [
+    "../../../tests/**/*",
+    "../../../tests/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+// e2e/ — repository-level Playwright tests, fixtures and configuration.
+const ALL_E2E_PATHS = import.meta.glob(
+  [
+    "../../../e2e/**/*",
+    "../../../e2e/**/.*",
+    "!**/node_modules/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/.next/**",
+    "!**/__pycache__/**",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+// Everything this guard is responsible for: seven source and test trees.
+const ALL_SCANNED_PATHS = {
+  ...ALL_APPS_PATHS,
+  ...ALL_PACKAGE_PATHS,
+  ...ALL_TOOL_PATHS,
+  ...ALL_SDK_PATHS,
+  ...ALL_ADMIN_CONSOLE_PATHS,
+  ...ALL_TEST_PATHS,
+  ...ALL_E2E_PATHS,
+};
 
 describe("source hygiene", () => {
   it("globbed every source file — an empty scan would assert nothing", () => {
@@ -139,7 +239,9 @@ describe("source hygiene", () => {
     // stopped matching (a moved directory, a changed vite root).
     const names = Object.keys(SOURCES);
     expect(names.length).toBeGreaterThan(50);
-    expect(names.some((name) => name.endsWith("/middleware/network.ts"))).toBe(true);
+    expect(names.some((name) => name.endsWith("/middleware/network.ts"))).toBe(
+      true,
+    );
     expect(names.some((name) => name.endsWith("/cache/config.ts"))).toBe(true);
   });
 
@@ -150,59 +252,23 @@ describe("source hygiene", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("scanned every app's src/ — an app-scoped glob would assert nothing", () => {
-    // The companion vacuity guard for the cross-app glob. Without it the
-    // path-name assertion below would pass trivially the day the relative
-    // pattern stops resolving.
-    //
-    // Vite normalises the CITING package's own matches to `../src/…` and every
-    // sibling's to `../../<app>/src/…`, so the owning app is `..`. Deriving the
-    // set from the keys rather than asserting a hand-written prefix is what
-    // keeps this honest when a sixth app is added.
-    const names = Object.keys(ALL_WORKER_PATHS);
-    expect(names.length).toBeGreaterThan(200);
-    const scanned = new Set(
-      names.map((name) => name.split("/src/")[0]?.replace(/^\.\.\/\.\.\//, "") ?? ""),
-    );
-    // `..` is `apps/gateway` itself.
-    expect([...scanned].sort()).toEqual([
-      "..",
-      "agent-runtime",
-      "cli",
-      "control-plane",
-      "mcp",
-      "telemetry",
-    ]);
-  });
-
-  it("scanned every app's test/ — a src-only glob would assert nothing", () => {
-    // The vacuity guard for the widened half. Written to fail LOUDLY if the
-    // `test/` glob ever stops resolving, because the day it silently returns
-    // `{}` is the day the NUL scan below goes back to being src-only without
-    // anyone noticing — which is exactly how issue #736 happened.
-    const names = Object.keys(ALL_WORKER_TEST_PATHS);
-    expect(names.length).toBeGreaterThan(200);
-
-    // Vite resolves the citing package's OWN matches against this file's
-    // directory, so the gateway's tests arrive as `./…` while every sibling's
-    // arrive as `../../<app>/test/…`. (Vite omits the importing module itself
-    // from its own glob, so this file is not among them — anchor on a peer.)
-    expect(names).toContain("./contract.test.ts");
-    // A sibling app's test file, so a gateway-only glob cannot pass this.
-    expect(names.some((name) => name.startsWith("../../telemetry/test/"))).toBe(true);
-    // And a nested one, so a single-level glob cannot pass it either.
-    expect(names.some((name) => name.startsWith("./assets/"))).toBe(true);
-
-    const scanned = new Set(
-      names.map((name) =>
-        // `..` for the gateway's own tests, to match the `src/` census above.
-        name.startsWith("./")
-          ? ".."
-          : (name.split("/test/")[0]?.replace(/^\.\.\/\.\.\//, "") ?? ""),
+  it("scanned every app — an apps glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_APPS_PATHS);
+    // ~95% of 814 tracked files: tight enough to catch a partial glob loss,
+    // loose enough to not churn on every new file added to an app.
+    expect(names.length).toBeGreaterThan(773);
+    // Vite resolves the glob relative to the project root (apps/gateway/), so
+    // apps paths arrive as `../../<member>/...` rather than `../../../apps/<member>/...`
+    // like the other trees. Gateway's own files arrive as `../...` or `./...`.
+    const members = [
+      ...new Set(
+        names.map((k) => {
+          if (k.startsWith("../../")) return k.split("/")[2];
+          return "..";
+        }),
       ),
-    );
-    // `..` is `apps/gateway` itself, exactly as in the `src/` census above.
-    expect([...scanned].sort()).toEqual([
+    ].sort();
+    expect(members).toEqual([
       "..",
       "agent-runtime",
       "cli",
@@ -212,17 +278,17 @@ describe("source hygiene", () => {
     ]);
   });
 
-  it("contains no raw NUL byte under any apps/*/src or apps/*/test", () => {
+  it("contains no raw NUL byte anywhere in the seven scanned source and test trees", () => {
     // The scan that issue #736 needed and did not have. `SOURCES` above covers
-    // only THIS Worker's `src/**/*.ts`; this covers every app's source and every
-    // app's tests, at any extension.
+    // only THIS Worker's `src/**/*.ts`; this covers the whole of apps/,
+    // packages/, tools/, sdks/, admin-console/, tests/ and e2e/.
     const offenders = Object.entries(ALL_SCANNED_PATHS)
       .filter(([, text]) => text.includes(NUL))
       .map(([name]) => name);
     expect(offenders).toEqual([]);
   });
 
-  it("no path under any apps/*/src or apps/*/test contains a control character", () => {
+  it("no path in the seven scanned source and test trees contains a control character", () => {
     // A newline in a FILE NAME makes `grep -rn` attribute one file's text to
     // another file's path. `\p{Cc}` is the Unicode control class: C0, DEL and
     // C1. A legitimate source path in this repo contains none of them.
@@ -230,7 +296,149 @@ describe("source hygiene", () => {
       .filter((name) => /\p{Cc}/u.test(name))
       // Report the FIRST line only: printing the whole name re-injects the
       // newline into the failure message and makes the report unreadable.
-      .map((name) => `${name.split(/\p{Cc}/u)[0]} …(+${name.split(/\p{Cc}/u).length - 1} lines)`);
+      .map(
+        (name) =>
+          `${name.split(/\p{Cc}/u)[0]} …(+${name.split(/\p{Cc}/u).length - 1} lines)`,
+      );
     expect(offenders).toEqual([]);
+  });
+
+  // -----------------------------------------------------------------------
+  // Per-member census for all seven scanned source and test trees
+  //
+  // Each test derives the set of top-level member names from the scanned
+  // keys and asserts it equals an explicit sorted literal list. A count
+  // threshold plus one .includes() anchor passes green when an individual
+  // package drops out of the scan — that is the very failure mode this
+  // issue exists to prevent. The per-member census fails LOUDLY, naming
+  // the missing member, the day any single sub-package or area is lost.
+  //
+  // Every key emitted by these globs contains `/<tree>/<member>`, so the regex
+  // always has a member. A tree-root file such as packages/README.md yields
+  // README.md; the equality assertion reports it as an unexpected member.
+  // -----------------------------------------------------------------------
+
+  function extractMember(path: string, tree: string): string {
+    return path.match(new RegExp(`/${tree}/([^/]+)`))![1] as string;
+  }
+
+  it("scanned every package — a packages glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_PACKAGE_PATHS);
+    // ~95% of 447 tracked files: tight enough to catch a partial glob loss,
+    // loose enough to not churn on every new file added to a package.
+    expect(names.length).toBeGreaterThan(425);
+    const members = [
+      ...new Set(names.map((k) => extractMember(k, "packages"))),
+    ].sort();
+    expect(members).toEqual([
+      "billing",
+      "cloudflare",
+      "config",
+      "core",
+      "guardrails",
+      "identity",
+      "observability",
+      "payments",
+      "policy",
+      "providers",
+      "routing",
+      "schemas",
+      "secrets",
+      "sso",
+      "storage",
+    ]);
+  });
+
+  it("scanned every tool — a tools glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_TOOL_PATHS);
+    // ~95% of 23 tracked files: tight enough to catch a partial glob loss,
+    // loose enough to not churn on every new file added to a tool.
+    expect(names.length).toBeGreaterThan(21);
+    const members = [
+      ...new Set(names.map((k) => extractMember(k, "tools"))),
+    ].sort();
+    expect(members).toEqual([
+      "generated-clients",
+      "openapi-client-smoke",
+      "sdk-conformance",
+    ]);
+  });
+
+  it("scanned every SDK — an SDK glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_SDK_PATHS);
+    // ~93% of 14 tracked files: close to the shared ~95% floor while remaining
+    // loose enough to not churn on every new file added to an SDK.
+    expect(names.length).toBeGreaterThan(12);
+    const members = [
+      ...new Set(names.map((k) => extractMember(k, "sdks"))),
+    ].sort();
+    expect(members).toEqual(["python", "typescript"]);
+  });
+
+  it("scanned every admin-console area — an admin-console glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_ADMIN_CONSOLE_PATHS);
+    // ~95% of 288 tracked files: tight enough to catch a partial glob loss,
+    // loose enough to not churn on every new file added to admin-console.
+    expect(names.length).toBeGreaterThan(273);
+    const topLevel = [
+      ...new Set(names.map((k) => extractMember(k, "admin-console"))),
+    ].sort();
+    expect(topLevel).toEqual([
+      ".dockerignore",
+      ".env.example",
+      ".gitignore",
+      "Dockerfile",
+      "README.md",
+      "bun.lock",
+      "components.json",
+      "e2e",
+      "eslint-rules",
+      "eslint.config.js",
+      "index.html",
+      "nginx.conf",
+      "package-lock.json",
+      "package.json",
+      "playwright.config.ts",
+      "postcss.config.js",
+      "public",
+      "render-env-config.sh",
+      "scripts",
+      "src",
+      "tailwind.config.js",
+      "tsconfig.app.json",
+      "tsconfig.e2e.json",
+      "tsconfig.json",
+      "tsconfig.node.json",
+      "vite.config.ts",
+    ]);
+  });
+
+  it("scanned every tests area — a tests glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_TEST_PATHS);
+    // ~95% of 39 tracked files: tight enough to catch a partial glob loss,
+    // loose enough to not churn on every new repository-level test fixture.
+    expect(names.length).toBeGreaterThan(37);
+    const members = [
+      ...new Set(names.map((k) => extractMember(k, "tests"))),
+    ].sort();
+    expect(members).toEqual(["fixtures"]);
+  });
+
+  it("scanned every e2e area — an e2e glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_E2E_PATHS);
+    // All 7 tracked files are required because this tree is too small for a
+    // useful ~95% floor; its explicit census makes additions readable.
+    expect(names.length).toBeGreaterThan(6);
+    const members = [
+      ...new Set(names.map((k) => extractMember(k, "e2e"))),
+    ].sort();
+    expect(members).toEqual([
+      "README.md",
+      "fixtures.ts",
+      "package.json",
+      "playwright.config.ts",
+      "tests",
+      "tsconfig.json",
+    ]);
   });
 });
