@@ -1,0 +1,38 @@
+# Test fixture only — `@ferrogate/storage` is a library and ships no Worker.
+# This exists so `vitest.do.config.ts` can boot a real `workerd` with real
+# SQLite-backed Durable Object namespaces.
+#
+# THE PRODUCTION STANZA IS `apps/gateway/wrangler.toml` (tag `v4`), and
+# `apps/gateway/test/wrangler-bindings.test.ts` is what gates it. This file
+# proves NOTHING about the deployed config: a harness toml is a different file,
+# and renaming `TENANT_DATA` there while leaving this alone would leave this
+# suite green. That asymmetry is recorded because it has already bitten the
+# rate-limiter binding once.
+#
+# `new_sqlite_classes`, never `new_classes`: the latter deploys cleanly and
+# silently swaps the key-value backend in, at which point `ctx.storage.sql`
+# does not exist and every test here fails for a reason that looks like a code
+# bug. It is also IMMUTABLE once a namespace exists (`storage_type_mismatch`),
+# which is why the harness mirrors the production choice rather than picking
+# its own.
+name = "ferrogate-storage-do-test"
+main = "entry.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+
+# The fault-injection twin. It is a SEPARATE namespace rather than a flag on the
+# real one because a migration set that throws must be applied by the real
+# constructor, on a real cold start, against a real database — a
+# `TenantDataObject` whose schema apply could be disabled by a parameter would
+# be testing a code path production never runs.
+[[durable_objects.bindings]]
+name = "FAULTY_TENANT_DATA"
+class_name = "FaultyTenantDataObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantDataObject", "FaultyTenantDataObject"]
