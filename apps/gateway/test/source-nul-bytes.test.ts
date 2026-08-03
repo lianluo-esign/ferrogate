@@ -125,13 +125,65 @@ const ALL_WORKER_TEST_PATHS = import.meta.glob("../../*/test/**/*", {
   eager: true,
 });
 
-/**
- * Everything this guard is responsible for: every app's `src/` and every app's
- * `test/`. Vite normalises the CITING package's own matches to `../…` and every
- * sibling's to `../../<app>/…`, and the two maps cannot collide because one is
- * keyed under `/src/` and the other under `/test/`.
- */
-const ALL_SCANNED_PATHS = { ...ALL_WORKER_PATHS, ...ALL_WORKER_TEST_PATHS };
+// packages/*/src/ — the shared library source tree
+const ALL_PACKAGE_SOURCES = import.meta.glob("../../packages/*/src/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+// packages/*/test/ — the shared library test tree
+const ALL_PACKAGE_TESTS = import.meta.glob("../../packages/*/test/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+// tools/*/test/ — the tooling test tree (no src/ dirs in tools)
+const ALL_TOOL_TESTS = import.meta.glob("../../tools/*/test/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+// sdks/*/src/ and sdks/*/test/ — the published SDK trees
+const ALL_SDK_SOURCES = import.meta.glob("../../sdks/*/src/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+const ALL_SDK_TESTS = import.meta.glob("../../sdks/*/test/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+// admin-console/src/ and admin-console/e2e/ — separate Vite SPA project
+const ALL_ADMIN_CONSOLE_SOURCES = import.meta.glob("../../admin-console/src/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+const ALL_ADMIN_CONSOLE_E2E = import.meta.glob("../../admin-console/e2e/**/*", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+// Everything this guard is responsible for: apps, packages, tools, sdks, admin-console
+const ALL_SCANNED_PATHS = {
+  ...ALL_WORKER_PATHS,
+  ...ALL_WORKER_TEST_PATHS,
+  ...ALL_PACKAGE_SOURCES,
+  ...ALL_PACKAGE_TESTS,
+  ...ALL_TOOL_TESTS,
+  ...ALL_SDK_SOURCES,
+  ...ALL_SDK_TESTS,
+  ...ALL_ADMIN_CONSOLE_SOURCES,
+  ...ALL_ADMIN_CONSOLE_E2E,
+};
 
 describe("source hygiene", () => {
   it("globbed every source file — an empty scan would assert nothing", () => {
@@ -232,5 +284,50 @@ describe("source hygiene", () => {
       // newline into the failure message and makes the report unreadable.
       .map((name) => `${name.split(/\p{Cc}/u)[0]} …(+${name.split(/\p{Cc}/u).length - 1} lines)`);
     expect(offenders).toEqual([]);
+  });
+
+  // -----------------------------------------------------------------------
+  // Vacuity assertions for packages/, tools/, sdks/ and admin-console/
+  // -----------------------------------------------------------------------
+
+  it("scanned every package's src/ — a packages glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_PACKAGE_SOURCES);
+    expect(names.length).toBeGreaterThan(50);
+    // Anchor on a known package source file.
+    expect(names.some((name) => name.includes("/packages/providers/src/caching.ts"))).toBe(true);
+    expect(names.some((name) => name.includes("/packages/core/src/"))).toBe(true);
+  });
+
+  it("scanned every package's test/ — a packages test glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_PACKAGE_TESTS);
+    expect(names.length).toBeGreaterThan(50);
+    expect(names.some((name) => name.includes("/packages/providers/test/"))).toBe(true);
+    expect(names.some((name) => name.includes("/packages/core/test/"))).toBe(true);
+  });
+
+  it("scanned every tool's test/ — a tools glob that matched nothing would assert nothing", () => {
+    const names = Object.keys(ALL_TOOL_TESTS);
+    expect(names.length).toBeGreaterThan(5);
+    expect(names.some((name) => name.includes("/tools/sdk-conformance/test/"))).toBe(true);
+  });
+
+  it("scanned every SDK's src/ and test/ — an SDK glob that matched nothing would assert nothing", () => {
+    const srcNames = Object.keys(ALL_SDK_SOURCES);
+    expect(srcNames.length).toBeGreaterThan(5);
+    expect(srcNames.some((name) => name.includes("/sdks/typescript/src/"))).toBe(true);
+
+    const testNames = Object.keys(ALL_SDK_TESTS);
+    expect(testNames.length).toBeGreaterThan(5);
+    expect(testNames.some((name) => name.includes("/sdks/typescript/test/"))).toBe(true);
+  });
+
+  it("scanned admin-console's src/ and e2e/ — an admin-console glob that matched nothing would assert nothing", () => {
+    const srcNames = Object.keys(ALL_ADMIN_CONSOLE_SOURCES);
+    expect(srcNames.length).toBeGreaterThan(50);
+    expect(srcNames.some((name) => name.includes("/admin-console/src/"))).toBe(true);
+
+    const e2eNames = Object.keys(ALL_ADMIN_CONSOLE_E2E);
+    expect(e2eNames.length).toBeGreaterThan(5);
+    expect(e2eNames.some((name) => name.includes("/admin-console/e2e/"))).toBe(true);
   });
 });
