@@ -169,6 +169,30 @@ export const SESSION_IDLE_TTL_SECS = 30 * 60;
  */
 export const SESSION_TOMBSTONE_TTL_SECS = 24 * 60 * 60;
 
+/**
+ * How often, at most, a busy session re-arms its idle alarm (#765).
+ *
+ * Arming on literally every touch is the obvious implementation and it was the
+ * first one; it is also a durable write per request, and that is not free. It
+ * cost ~10ms per appended frame under `@cloudflare/vitest-pool-workers` and took
+ * `test/unified-session.test.ts`'s 300-frame retention case from ~3s to ~20s,
+ * timing out under a loaded full-suite run. That is a fair proxy for what it
+ * would do to a chatty agent in production.
+ *
+ * So the deadline is re-armed at most once a minute, and the honest statement of
+ * the policy is a RANGE: a session is evicted somewhere between
+ * `SESSION_IDLE_TTL_SECS - SESSION_IDLE_RENEW_SECS` and `SESSION_IDLE_TTL_SECS`
+ * after its last request — 29 to 30 minutes. The error is 2% and it is on the
+ * EARLY side, which is the side that matters least here: a client evicted a
+ * minute early is told exactly what happened and opens a new session, whereas a
+ * write per request is paid by every request forever.
+ *
+ * The skew is bounded by construction rather than by hope: `alarmArmedUnix`
+ * records when the pending deadline was set, so the gap between the last touch
+ * and the firing alarm can never exceed this constant.
+ */
+export const SESSION_IDLE_RENEW_SECS = 60;
+
 /** The address of one client session's Durable Object. */
 export function clientSessionKey(tenantId: string, sessionId: string): string {
   // `\0` cannot occur in either field, so no pair of (tenant, session) values
@@ -204,6 +228,15 @@ export interface UnifiedSessionState {
    * rather than only that it is gone.
    */
   readonly lastSeenUnix: number;
+  /**
+   * When the PENDING idle alarm was armed, in unix seconds (#765).
+   *
+   * Not the same fact as {@link lastSeenUnix}: the alarm is re-armed at most
+   * once every {@link SESSION_IDLE_RENEW_SECS}, so this is what bounds how far
+   * the deadline can lag the last request. Absent on sessions written before
+   * this field existed, which the reaper reads as "arm it now".
+   */
+  readonly alarmArmedUnix?: number;
 }
 
 /**
@@ -347,22 +380,31 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
   }
 
   /**
-   * Push the idle deadline out by one {@link SESSION_IDLE_TTL_SECS} (#765).
+   * Push the idle deadline out by one {@link SESSION_IDLE_TTL_SECS}, at most
+   * once every {@link SESSION_IDLE_RENEW_SECS} (#765).
    *
    * Called by every mutator, INSIDE its `blockConcurrencyWhile`, so what the
-   * alarm eventually collects is a session nothing has touched for the whole
-   * interval. `setAlarm` replaces the pending alarm rather than adding one, so
-   * a busy session costs one overwrite per request and never accumulates
-   * timers.
+   * alarm eventually collects is a session nothing has touched for the interval.
+   * `setAlarm` replaces the pending alarm rather than adding one, so a session
+   * never accumulates timers; the debounce is about the WRITE, whose cost is
+   * measured in {@link SESSION_IDLE_RENEW_SECS}'s note.
    *
-   * The consequence worth stating: because the deadline moves on every touch,
-   * the alarm HANDLER needs no idleness check — if it runs, by construction no
-   * touch happened within the interval. That keeps the policy in exactly one
-   * place instead of split between a deadline and a second comparison that
-   * could disagree with it.
+   * Returns the `alarmArmedUnix` the caller must store — the old value when the
+   * write was skipped, so the skip is recorded rather than inferred.
+   *
+   * The consequence worth stating: because the deadline only ever moves forward
+   * with activity, the alarm HANDLER needs no idleness check — if it runs, no
+   * touch happened within the interval (minus the debounce). That keeps the
+   * policy in one place instead of split between a deadline and a second
+   * comparison that could disagree with it.
    */
-  async #arm(nowMs: number): Promise<void> {
+  async #arm(armedAtUnix: number | undefined, nowMs: number): Promise<number> {
+    const nowUnix = Math.floor(nowMs / 1000);
+    if (armedAtUnix !== undefined && nowUnix - armedAtUnix < SESSION_IDLE_RENEW_SECS) {
+      return armedAtUnix;
+    }
     await this.ctx.storage.setAlarm(nowMs + SESSION_IDLE_TTL_SECS * 1000);
+    return nowUnix;
   }
 
   /**
@@ -381,6 +423,9 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
         nextSeq: 1,
         oldestRetainedSeq: 1,
         lastSeenUnix: nowUnix,
+        // `undefined` for the pending-alarm argument: opening a session always
+        // arms, whatever the debounce would otherwise say.
+        alarmArmedUnix: await this.#arm(undefined, this.clock()),
       };
       await this.ctx.storage.put(STATE_KEY, state);
       // A tombstone at an address being opened again describes a DIFFERENT,
@@ -389,7 +434,6 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
       // flip. Not reachable through the ingress — session ids are freshly
       // minted UUIDs — but the store is a public seam.
       await this.ctx.storage.delete(TOMBSTONE_KEY);
-      await this.#arm(this.clock());
       return state;
     });
   }
@@ -420,9 +464,12 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
       // whose whole traffic is notifications appends no frame, and a session
       // evicted while it was talking would be an eviction of a live client.
       if (added.length === 0 && removed.length === 0) {
-        const touched = { ...state, lastSeenUnix: Math.floor(nowMs / 1000) };
+        const touched: UnifiedSessionState = {
+          ...state,
+          lastSeenUnix: Math.floor(nowMs / 1000),
+          alarmArmedUnix: await this.#arm(state.alarmArmedUnix, nowMs),
+        };
         await this.ctx.storage.put(STATE_KEY, touched);
-        await this.#arm(nowMs);
         return { added, removed, dropped, state: touched };
       }
       const upstreams: UnifiedSessionUpstream[] = servers.map(
@@ -432,9 +479,9 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
         ...state,
         upstreams,
         lastSeenUnix: Math.floor(nowMs / 1000),
+        alarmArmedUnix: await this.#arm(state.alarmArmedUnix, nowMs),
       };
       await this.ctx.storage.put(STATE_KEY, next);
-      await this.#arm(nowMs);
       return { added, removed, dropped, state: next };
     });
   }
@@ -466,9 +513,9 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
         ...state,
         upstreams,
         lastSeenUnix: Math.floor(nowMs / 1000),
+        alarmArmedUnix: await this.#arm(state.alarmArmedUnix, nowMs),
       };
       await this.ctx.storage.put(STATE_KEY, next);
-      await this.#arm(nowMs);
       return next;
     });
   }
@@ -498,10 +545,10 @@ export class FerroGateMcpUnifiedSession extends DurableObject {
         nextSeq: seq + 1,
         oldestRetainedSeq,
         lastSeenUnix: Math.floor(nowMs / 1000),
+        alarmArmedUnix: await this.#arm(state.alarmArmedUnix, nowMs),
       };
       await this.ctx.storage.put(FRAMES_KEY, frames);
       await this.ctx.storage.put(STATE_KEY, next);
-      await this.#arm(nowMs);
       return seq;
     });
   }

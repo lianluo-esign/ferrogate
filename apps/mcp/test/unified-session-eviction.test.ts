@@ -25,9 +25,13 @@
  *  - **The policy.** {@link SESSION_IDLE_TTL_SECS} is asserted as an interval,
  *    on the armed alarm, so the number in the source is the number in the
  *    deployment rather than a comment nobody checked.
- *  - **Renewal.** Eviction is on IDLENESS, not on age: a session that keeps
- *    talking pushes its deadline forward. Pinned with the DO's `clock` seam, so
- *    the assertion is exact rather than "the second number was bigger".
+ *  - **Renewal, and its debounce.** Eviction is on IDLENESS, not on age: a
+ *    session that keeps talking pushes its deadline forward — but at most once
+ *    every {@link SESSION_IDLE_RENEW_SECS}, because arming on every touch is a
+ *    durable write per request and it measurably was not free. Both halves are
+ *    pinned with the DO's `clock` seam, so the assertions are exact rather than
+ *    "the second number was bigger", and the resulting 29-to-30-minute eviction
+ *    window is a stated bound rather than an unnoticed one.
  *  - **The tombstone is bounded too.** An eviction that left a permanent record
  *    behind would be the same unbounded-growth defect one order of magnitude
  *    smaller.
@@ -44,6 +48,7 @@ import { inMemoryPorts, resetInMemoryPorts } from "../src/ports.js";
 import { parseSseEvents } from "../src/transport.js";
 import {
   type FerroGateMcpUnifiedSession,
+  SESSION_IDLE_RENEW_SECS,
   SESSION_IDLE_TTL_SECS,
   SESSION_TOMBSTONE_TTL_SECS,
   UnifiedSessionStore,
@@ -248,6 +253,14 @@ describe("the idle interval is a stated policy", () => {
       SESSION_TOMBSTONE_TTL_SECS,
       "24 hours: long enough that the support call an eviction causes gets an answer, short enough that the record is not itself unbounded growth",
     ).toBe(24 * 60 * 60);
+    expect(
+      SESSION_IDLE_RENEW_SECS,
+      "60s: the debounce on the deadline write, which is also the width of the eviction window — a session goes at 29-30 minutes idle, never later",
+    ).toBe(60);
+    // The window only means anything while it is a small fraction of the
+    // interval. At, say, 15 minutes the 'thirty minute' policy would really be
+    // 'somewhere between a quarter of an hour and half an hour'.
+    expect(SESSION_IDLE_RENEW_SECS * 10).toBeLessThan(SESSION_IDLE_TTL_SECS);
   });
 
   it("arms the alarm exactly one idle interval out", async () => {
@@ -285,6 +298,39 @@ describe("the idle interval is a stated policy", () => {
     });
     await send(PING, { session: sessionId });
     expect(await armedAt(sessionId)).toBe(t1 + SESSION_IDLE_TTL_SECS * 1000);
+  });
+
+  it("DEBOUNCES the renewal — a request inside the window writes no new deadline", async () => {
+    const sessionId = await openSession();
+    const stub = stubFor(sessionId);
+    const t0 = 1_800_000_000_000;
+    await runInDurableObject(stub, (instance) => {
+      instance.clock = () => t0;
+    });
+    await send(PING, { session: sessionId });
+    expect(await armedAt(sessionId)).toBe(t0 + SESSION_IDLE_TTL_SECS * 1000);
+
+    // Half a debounce window later, the deadline must NOT move. This is the
+    // trade #765 made after measuring: arming on every touch is a durable write
+    // per request, which cost ~10ms a frame and pushed the 300-frame retention
+    // test in `test/unified-session.test.ts` from ~3s to ~20s. The visible
+    // consequence is that eviction happens between 29 and 30 minutes idle, and
+    // an assertion that this deadline is UNCHANGED is what makes that a stated
+    // bound rather than an unnoticed one.
+    await runInDurableObject(stub, (instance) => {
+      instance.clock = () => t0 + (SESSION_IDLE_RENEW_SECS / 2) * 1000;
+    });
+    await send(PING, { session: sessionId });
+    expect(await armedAt(sessionId)).toBe(t0 + SESSION_IDLE_TTL_SECS * 1000);
+
+    // One second past the window, it moves again — the debounce is a debounce,
+    // not a "renew once and never again", which would evict on AGE.
+    const t2 = t0 + (SESSION_IDLE_RENEW_SECS + 1) * 1000;
+    await runInDurableObject(stub, (instance) => {
+      instance.clock = () => t2;
+    });
+    await send(PING, { session: sessionId });
+    expect(await armedAt(sessionId)).toBe(t2 + SESSION_IDLE_TTL_SECS * 1000);
   });
 });
 
