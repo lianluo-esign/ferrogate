@@ -33,6 +33,43 @@
  * equal the caller's tenant — so a storage blip denies rather than granting.
  * "Nonexistent means safe to touch" is explicitly the wrong default, and that is
  * reproduced exactly below.
+ *
+ * ## 2. The sibling fences, swept — where the next reader should look
+ *
+ * #782 is the SECOND instance of "a read-shaped fence authorising a write"
+ * (#743's asset review verb was the first), so the whole family was probed
+ * rather than reasoned about. Recorded here because a sweep whose result lives
+ * only in a merged PR body is a sweep the next reader repeats:
+ *
+ *  - `wallets.ts::authorizeWalletTenant` — **the same defect, on money, filed as
+ *    #790.** `walletAdjustSchema.amount_cents` is SIGNED and the module calls
+ *    `adjust` an "operator movement", but the fence is the read's: a tenant
+ *    `admin.write` key `POST`ing `/admin/v1/wallets/{its own id}/adjust` with
+ *    `+10_000_000` answered `200` and took `balance_cents` 500 → 10_000_500,
+ *    projecting `balance_credits` the gateway spends. Not fixed here: this file
+ *    is the quota surface, and whether a NEGATIVE self-adjustment stays open is
+ *    a product decision that deserves its own argument. `PATCH /wallets/{id}`
+ *    is NOT affected — the balance-move guard already holds it.
+ *  - `rbac.ts::authorizeTenantPath` — **same shape, filed as #791.** A tenant
+ *    key can `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store
+ *    stamps its tenant) and bind it to itself, and `D1RbacAuthorizer` allows on
+ *    `granted.has("*")`. Blast radius is that tenant's own RBAC-gated verbs —
+ *    today the twelve guardrail operations, `activate` and `archive` among them.
+ *    Left open deliberately: tenant self-service RBAC may be intended, which
+ *    #782's fence cannot decide for it.
+ *  - `billing.ts::authorizeReportTenant` — **correct as-is.** Sharing is fine
+ *    here because replay moves nothing the caller can choose: it clears a
+ *    dead-letter mark so the gateway's sweeper retries, idempotently on the
+ *    report id, which pushes a charge TOWARDS landing. There is no field a
+ *    tenant can raise, and it already runs before the CAS.
+ *  - `admin_semantic_cache.ts`'s copy of `authorizeScopedResource` — **same
+ *    shape, left alone on purpose.** A tenant `PUT`/`DELETE` on its own policy
+ *    answers `200`, but every knob there governs only that tenant's own traffic
+ *    and its own spend, and caching lowers cost rather than escaping a cap. The
+ *    one question that would change this is whether an operator ever sets
+ *    `enabled: false` there as a COMPLIANCE decision (no cross-request reuse for
+ *    a regulated tenant) — if that is ever true, this becomes the same defect
+ *    and needs the same split.
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
