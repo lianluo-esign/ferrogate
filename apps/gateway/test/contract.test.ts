@@ -46,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 276 operations", () => {
+  it("carries exactly 280 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 276 unique operation ids", () => {
+  it("has 280 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -85,23 +85,28 @@ describe("contract table", () => {
     // landed in parallel: bearer 258 and anonymous 7 are both COUNTED off the
     // MERGED document, which is the only side that holds both.
     //
-    // TWO parallel slices then moved bearer again, and each parent wrote its
-    // own +2 against the same 258 — the exact collision this file's header
-    // warns about, and the reason 262 below is COUNTED and not summed:
+    // Two more parallel slices then landed on top of that 258, and NEITHER
+    // parent's number survives:
+    //   - `getResponse` / `deleteResponse` (issue #689), bearer on the existing
+    //     `responses.create` scope like the `createResponse` whose state they
+    //     read and end — see the note beside their registration in
+    //     `src/inference/handlers.ts` for why the scope is a reuse and not two
+    //     new ones. That branch wrote 260.
+    //   - #743's four asset-fleet operations, all bearer: an operator inventory
+    //     of what tenants are hosting has no anonymous reading, and neither has
+    //     its force-delete. That branch wrote 262.
+    // Both landed, so the truth is 264 — a third number, RE-COUNTED with
+    // `Counter(o["auth"]["kind"] for o in operations)` over the merged
+    // `docs/openapi/runtime-api-contract.json`, never summed.
     //
-    //  - #693's two experiment reads (`listAdminExperiments` /
-    //    `getAdminExperiment`), `admin.read` like every other evidence read;
-    //  - #689's `getResponse` / `deleteResponse`, which are
-    //    bearer-`responses.create` like the `createResponse` whose state they
-    //    read and end — see the note beside their registration in
-    //    `src/inference/handlers.ts` for why the scope is a reuse and not two
-    //    new ones.
-    //
-    // Neither parent's 260 holds both. 262 comes from
-    // `Counter(o["x-ferrogate-contract"]["auth"]["kind"] for o in operations)`
-    // over the MERGED `docs/openapi/admin-api.openapi.json`.
+    // And then a THIRD pair: #693's two experiment reads
+    // (`listAdminExperiments` / `getAdminExperiment`), `admin.read` like every
+    // other evidence read, against #743's four. The #693 branch wrote 262
+    // against its own 276-operation document; main wrote 264 against its
+    // 278-operation one. Neither holds both, and the merged count is 266 —
+    // re-run over the merged JSON, not incremented off either parent.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 262,
+      bearer: 266,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -117,11 +122,16 @@ describe("contract table", () => {
       // all admin for the same reason. BOTH sets landed, so that leg is
       // 196 + 3 + 6 = 205 and not either parent's number; #677's two
       // chargeback reads then take it to 207, admin because a per-request cost
-      // record is the most identity-dense report in the product.
-      // 207 -> 209 with #693's two experiment reads: an experiment report names
+      // record is the most identity-dense report in the product. #743's four
+      // asset-fleet operations then take it to 211 — admin because a fleet
+      // inventory, a quarantine verdict and an operator takedown are operator
+      // surfaces, never caller-facing ones. COUNTED off the merged document.
+      // #693's two experiment reads take it to 213 — an experiment report names
       // a customer's models, their spend and their measured quality, so it is
-      // admin-visibility for the same reason a cost record is.
-      admin: 209,
+      // admin-visibility for the same reason a cost record is. That branch
+      // wrote 209 and main wrote 211; 213 is what counting the merged document
+      // produces, and is no parent's number.
+      admin: 213,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -135,7 +145,10 @@ describe("contract table", () => {
       // all. 58 is COUNTED off the merged document: neither parent's own number
       // (57, 55) holds both slices. `getResponse` / `deleteResponse` (issue
       // #689) take it to 60 — data-plane operations on data-plane state, as
-      // publicly reachable as the `createResponse` that produced it.
+      // publicly reachable as the `createResponse` that produced it. Neither
+      // #693 nor #743 adds a `public` operation, so both parents of THIS merge
+      // wrote 60 and git merged it with no marker. That agreement is not the
+      // evidence — the merged document was re-counted and it is still 60.
       public: 60,
       internal: 7,
     });
@@ -161,20 +174,32 @@ describe("contract table", () => {
       // re-counted off the merged document rather than added up. #737's
       // `GET /sites/{*rest}` then takes GET to 124 — the contract's first
       // operation whose path is a CATCH-ALL, because a static site is a tree of
-      // unknown depth and a fixed segment count cannot address it.
-      // Then two parallel slices moved GET again: #693's
-      // `GET /admin/v1/experiments` and `GET /admin/v1/experiments/{experiment_id}`
-      // (+2), and #689's `GET /v1/responses/{response_id}` (+1, its sibling
-      // taking DELETE to 28 — one path, two methods). One parent wrote 126, the
-      // other 125; the MERGED document holds all three, and 127 is what
-      // counting it produces.
-      GET: 127,
+      // unknown depth and a fixed segment count cannot address it. Then two
+      // parallel slices moved GET and DELETE again from that same 124/27 base:
+      // #689's `GET`/`DELETE /v1/responses/{response_id}` (one path, two
+      // methods — that branch wrote GET 125 / DELETE 28) and #743's
+      // `GET /admin/v1/assets` + `GET /admin/v1/assets/quarantine` and
+      // `DELETE /admin/v1/assets/{asset_id}`, the operator force-delete (that
+      // branch wrote GET 126 / DELETE 28). BOTH branches wrote `DELETE: 28`, so
+      // git merged that line with NO conflict marker and it was WRONG: the
+      // merged truth is GET 127 / DELETE 29, counted off
+      // `docs/openapi/runtime-api-contract.json`, not summed.
+      //
+      // IT HAPPENED AGAIN, on GET, on the very next merge. #693's two
+      // experiment reads are both GETs. The #693 branch reached 127 from its
+      // own 124/#689 base and main reached 127 from its 124/#689/#743 base —
+      // the SAME LITERAL from two different arithmetics — so git merged
+      // `GET: 127` clean, with no marker, and neither number was right. The
+      // merged document has GET 129. An identical figure on both sides of a
+      // merge is evidence of nothing; only re-counting the merged artifact is.
+      GET: 129,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
-      // #676's `/v1/rerank` and 85 with #703's three audio POSTs. Re-counted off
+      // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
+      // #743's `POST /admin/v1/assets/quarantine/{asset_id}`. Re-counted off
       // the merged document, never summed.
-      POST: 85,
-      DELETE: 28,
+      POST: 86,
+      DELETE: 29,
       PUT: 20,
       PATCH: 16,
     });

@@ -84,18 +84,18 @@ These areas are implemented in the current open-source gateway:
 - Prompt/response guardrails, request logs, token metering events, usage
   aggregates, provider health, Prometheus metrics, OTLP export, and ClickHouse
   analytics delivery through Vector pipeline mode or direct warehouse mode.
-- Dual-era MCP host/client adapters with stateless 2026-07-28 candidate
+- Dual-era MCP host/client adapters with stateless FINAL 2026-07-28
   discovery/per-request metadata and strict legacy fallback, plus native
   `/v1/mcp` support for 2025-11-25 and 2025-06-18 and JSON-RPC ingress including
-  `resources/list`/`resources/read` and the first pinned MCP 2026-07-28
-  candidate ingress slice: stateless `server/discover`, per-request metadata,
-  required routing headers, and typed transport errors (`-32602` for malformed
-  body metadata, `-32020` for header validation). The outbound negotiation
-  slice has focused in-repo peer coverage, and the locked opt-in
-  `mcp-candidate-client-official` command now supplies the official Tier-1 SDK
-  opponent with two-instance stateless request routing. Recording a passing
-  external run and final-spec conformance remain
-  roadmap work. Existing MCP
+  `resources/list`/`resources/read`: stateless `server/discover` advertising an
+  empty `extensions` map, per-request metadata, `resultType` and
+  `io.modelcontextprotocol/serverInfo` on every modern result, required routing
+  headers, and typed transport errors (`-32602` for malformed body metadata,
+  `-32020` for header validation, `-32022` naming the supported revisions).
+  Authorization follows RFC 9207 `iss` validation (SEP-2468) and per-issuer
+  credential binding (SEP-2352). Still roadmap work: `subscriptions/listen`,
+  the Tasks and MCP Apps extensions, the client half of MRTR, and recording a
+  passing external official-SDK run. Existing MCP
   execution also includes dispatch isolation, timeout handling, approval gates,
   immutable approval fingerprints, Codex compatibility, and Claude Code
   compatibility.

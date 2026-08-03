@@ -362,6 +362,55 @@ describe("the shadow arm is recorded even though nobody was served it", () => {
     expect(leg.cost_usd).toBeNull();
   });
 
+  it("records the mirror's NON-200 status on the leg, not just a null-with-error-code", async () => {
+    // The second half of #692's honesty rule, asserted DIRECTLY rather than by
+    // shared code path. The tests above cover the two ends — a 200 leg and a
+    // leg the mirror never completed (`status_code` NULL, `error_code` set) —
+    // and left the middle uncovered: a mirror that DID answer, with a failure
+    // status. That is the case where "not scored" and "not recorded" are
+    // easiest to confuse, because `runShadowMirror` only hands the body to the
+    // judge on a 200. The failure must still land in the arm's error rate.
+    provider = interceptProviderFetch((request) =>
+      new URL(request.url).host.startsWith("api.mirror")
+        ? providerJson({ error: { message: "upstream is down", type: "server_error" } }, 503)
+        : providerJson(COMPLETION),
+    );
+    const h = gateway([PRIMARY, SHADOW], "fg-shadow-503");
+    expect(
+      (
+        await h.call("/v1/chat/completions", {
+          method: "POST",
+          headers: AUTHED,
+          body: chatBody("split-model"),
+        })
+      ).status,
+    ).toBe(200);
+    await h.settle();
+
+    const legs = await storedShadowLegs();
+    expect(legs).toHaveLength(1);
+    const leg = legs[0] as NonNullable<(typeof legs)[0]>;
+
+    expect(leg.leg_id).toBe("fg-shadow-503~shadow");
+    expect(leg.client_request_id).toBe("fg-shadow-503");
+    // The whole point: a real provider status, persisted. `toBeNull()` here
+    // would mean the arm's 503s were indistinguishable from its unreachable
+    // dispatches, and `toBe(200)` would mean they were invisible altogether.
+    expect(leg.status_code).toBe(503);
+    // NOT an `error_code`: the mirror was reached and answered. Conflating the
+    // two would make a provider outage look like an adapter or budget refusal.
+    expect(leg.error_code).toBeNull();
+    // Still filed under the same experiment as the served arm, so the failure
+    // is grouped with the successes it has to be compared against.
+    expect(leg.experiment_id).toBe(
+      experimentIdFor({
+        logicalModel: "split-model",
+        control: { provider: "openai-main", providerModel: "gpt-4o-mini-2024-07-18" },
+        shadow: { provider: "mirror-provider", providerModel: "mirror-physical" },
+      }),
+    );
+  });
+
   it("writes no leg row when nothing was mirrored", async () => {
     provider = interceptProviderFetch(() => providerJson(COMPLETION));
     const h = gateway([PRIMARY, { ...SHADOW, shadowPercent: 0 }], "fg-shadow-off");

@@ -73,6 +73,10 @@ export function identityRouteModule(): RouteModule {
         const url = new URL(c.req.url);
         const code = url.searchParams.get("code");
         const state = url.searchParams.get("state");
+        // RFC 9207 (SEP-2468). OPTIONAL on the wire — an authorization server
+        // that predates the RFC omits it — so it is read, never required, and
+        // `completeMcpOauth` owns the decision about a present value.
+        const iss = url.searchParams.get("iss");
         if (code === null || state === null || code.length === 0 || state.length === 0) {
           return respondError(
             c,
@@ -88,6 +92,7 @@ export function identityRouteModule(): RouteModule {
           const view = await completeMcpOauth(ports, {
             state,
             code,
+            ...(iss === null ? {} : { iss }),
             requestId,
             ...(traceId === undefined ? {} : { traceId }),
           });

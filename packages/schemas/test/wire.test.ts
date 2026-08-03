@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 276.
+ * ANTI-DRIFT GATE for the third copy of 280.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(276);
+    expect(OPENAPI_OPERATION_COUNT).toBe(280);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -246,7 +246,7 @@ describe("registerWireSchema", () => {
 /**
  * The FACTUAL CLAIM the surviving PORT-TODO in `src/index.ts` makes, asserted
  * rather than asserted-in-prose: this package seeds exactly the cross-plane
- * envelopes plus the `ferrogate-core` primitives, and nothing else. The 241
+ * envelopes plus the `ferrogate-core` primitives, and nothing else. The 270
  * remaining contract operations are registered by `apps/*` at their own
  * composition time (nothing does so yet — that is the open half of the marker).
  *
@@ -295,24 +295,33 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
     // merged truth: it is 258 + 3 + 1 = 262.
     //
-    // #693's two experiment reads are the same story again: their response
-    // shapes are described in `docs/openapi/admin-api.openapi.json` and their
-    // handler lives in `apps/control-plane/src/routes/admin_experiment.ts`, so
-    // this package seeds no Zod for either. 262 -> 264.
-    //
+    // #743's four asset-fleet operations (`listFleetAssets`,
+    // `listQuarantinedAssets`, `reviewQuarantinedAsset`,
+    // `forceDeleteAssetVersion`) are the same story again: their response
+    // shapes are declared in `docs/openapi/admin-api.openapi.json`, their one
+    // request body is validated at the route by an inline Zod schema in
+    // `apps/control-plane/src/routes/admin_asset.ts`, and the force-delete
+    // takes query parameters rather than a body — so none of the four seeds a
+    // WIRE shape here. That branch wrote 262 + 4 = 266.
     //
     // #689's `getResponse` / `deleteResponse` are that story once more — the
     // Responses conversation-state shapes live beside their handler in
-    // `apps/gateway/src/inference/`. #689 and #693 landed in PARALLEL and each
-    // parent independently wrote 264 for its own +2 against the same 262, so
-    // 264 is NEITHER side's merged truth.
+    // `apps/gateway/src/inference/` — and that branch wrote 262 + 2 = 264. #743
+    // and #689 landed in PARALLEL, so neither 266 nor 264 is the merged truth.
+    //
+    // #693's two experiment reads (`listExperiments`, `getExperimentReport`)
+    // are the story a fifth time: their response shapes are declared in
+    // `docs/openapi/admin-api.openapi.json` and their handler lives in
+    // `apps/control-plane/src/routes/admin_experiment.ts`, so neither seeds a
+    // WIRE shape. #693 and #743 ALSO landed in parallel — the #693 branch wrote
+    // 266 against a 276-operation document and main wrote 268 against a
+    // 278-operation one, and neither is the merged truth.
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`. `docs/openapi/runtime-api-contract.json` carries 276
-    // operations after the merge and `seeded` is still 10, so the shortfall is
-    // 266. The running sum is narrative, and three pairs of parallel slices
-    // colliding on it is exactly why it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(266);
+    // `seeded`, i.e. 280 - 10 = 270. The running sum is narrative, and #703/#737
+    // and then #743/#689 and then #743/#693 landing in parallel is exactly why
+    // it must not be the source.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(270);
   });
 });

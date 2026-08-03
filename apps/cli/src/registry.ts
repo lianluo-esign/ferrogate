@@ -384,6 +384,8 @@ const INVESTIGATIONS = new ResourceApi("/admin/v1/investigations");
 const ASSETS = new ResourceApi("/v1/assets");
 const ASSET_PRESIGN = new ResourceApi("/v1/assets/presign");
 const SITE_DOMAINS = new ResourceApi("/admin/v1/site-domains");
+/** #743 — the OPERATOR asset surface, distinct from the tenant `/v1/assets`. */
+const ASSET_FLEET = new ResourceApi("/admin/v1/assets");
 
 const PROMPT_TEMPLATES = new ResourceApi("/admin/v1/prompt-templates");
 const PROMPTS = new ResourceApi("/v1/prompts");
@@ -1165,6 +1167,86 @@ export const GROUPS: readonly GroupDescriptor[] = [
           return SITE_DOMAINS.delete([firstSegment(input, "site-domain")]);
         default:
           throw CliError.usage(`verb '${verb}' is not a site-domains verb`);
+      }
+    },
+  },
+  /**
+   * The OPERATOR view of what tenants are hosting (#743) — distinct from the
+   * `assets` resource above, which is the tenant's own `/v1/assets` surface.
+   *
+   * Two things about these verbs are worth knowing before using them:
+   *
+   *  - **The cross-tenant view needs a scope the ordinary operator key does not
+   *    have.** `admin.assets.fleet` must be held EXACTLY; the admin wildcard
+   *    does not grant it. A 403 here names the scope to mint.
+   *  - **`review` requires `--yes`.** It is a moderation verdict on somebody
+   *    else's artifact, it is recorded against the owning tenant's audit chain
+   *    with the operator's reason, and `release` makes a withheld artifact
+   *    servable on the public internet. That is not a verb to fire from shell
+   *    history by accident. The reason is part of the request document
+   *    (`--data '{"tenant_id":"…","decision":"release","reason":"…"}'`) and the
+   *    API refuses the call without it.
+   */
+  {
+    name: "asset-fleet",
+    about: "Inspect the asset fleet and review quarantined versions (operator surface)",
+    verbs: [
+      read("list", "List stored asset versions across tenants (metadata only)", "listFleetAssets"),
+      read("quarantine", "List asset versions withheld by the screener", "listQuarantinedAssets"),
+      mutatingWithConfirmation(
+        "review",
+        "Release or reject one withheld asset version, with a reason",
+        "reviewQuarantinedAsset",
+      ),
+      withPositionalQuerySegments(
+        mutatingWithConfirmation(
+          "delete",
+          "Force-delete one asset version — row, bundle index and stored objects (irreversible)",
+          "forceDeleteAssetVersion",
+        ),
+        2,
+      ),
+    ],
+    build: (verb, input) => {
+      switch (verb) {
+        case "list":
+          return ASSET_FLEET.read([], input.list);
+        case "quarantine":
+          return ASSET_FLEET.read(["quarantine"], input.list);
+        case "review":
+          return ASSET_FLEET.action(
+            ["quarantine", firstSegment(input, "asset")],
+            requireBody(input, verb),
+          );
+        case "delete": {
+          // `<asset_id> <tenant_id> <reason> [force]`. The tenant and the reason
+          // are POSITIONAL rather than optional flags because the API refuses
+          // the call without either, and a verb that can only fail without an
+          // argument should not let you type it without one. `force` is the
+          // exception: it means "take a live site down", so it is opt-in and
+          // spelled out.
+          const [assetId, tenantId, reason, force] = input.segments;
+          if (assetId === undefined || tenantId === undefined || reason === undefined) {
+            throw CliError.usage("verb 'delete' requires <asset_id> <tenant_id> <reason> [force]");
+          }
+          if (force !== undefined && force !== "force") {
+            throw CliError.usage(
+              `verb 'delete' takes 'force' as its optional fourth argument (got ${JSON.stringify(force)})`,
+            );
+          }
+          const spec = ASSET_FLEET.mutate("DELETE", [assetId], undefined);
+          return {
+            ...spec,
+            query: [
+              ...spec.query,
+              ["tenant_id", tenantId] as const,
+              ["reason", reason] as const,
+              ...(force === "force" ? [["force", "true"] as const] : []),
+            ],
+          };
+        }
+        default:
+          throw CliError.usage(`verb '${verb}' is not an asset-fleet verb`);
       }
     },
   },

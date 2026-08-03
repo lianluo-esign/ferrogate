@@ -201,9 +201,48 @@ export async function startMcpOauth(
 // GET /v1/mcp/identity/callback
 // ---------------------------------------------------------------------------
 
+/**
+ * Validate the RFC 9207 `iss` authorization-response parameter (SEP-2468).
+ *
+ * The attack this closes is the authorization-server MIX-UP: an attacker who
+ * can steer FerroGate's redirect — a malicious upstream in a per-user-OAuth
+ * catalogue, a compromised discovery document — gets an honest AS to issue a
+ * code for the honest user and then has FerroGate REDEEM that code at the
+ * attacker's token endpoint, handing over a credential the user never granted.
+ * The `iss` parameter is what makes the two ends of the round trip comparable.
+ *
+ * Three deliberate choices:
+ *
+ *  - ABSENT is accepted. RFC 9207 §2.4 and the SEP both say a client must
+ *    validate a PRESENT `iss`; an authorization server that predates RFC 9207
+ *    sends none, and the dual-era promise covers authorization servers too.
+ *    A mismatch is the signal, not an omission.
+ *  - The comparison is EXACT (after trimming), with no normalisation of case,
+ *    trailing slash, or default port. RFC 8414 issuer identifiers are compared
+ *    as strings; guessing that `https://idp/` and `https://idp` are the same
+ *    principal is exactly the kind of leniency a mix-up exploits.
+ *  - The recorded issuer is the upstream's CURRENTLY configured `oauth.issuer`,
+ *    which is the same value {@link completeMcpOauth} is about to persist as
+ *    `credential.issuer`. That keeps the check and the SEP-2352 binding
+ *    consistent by construction. Residual: the flow record does not carry the
+ *    issuer that was in effect when the flow STARTED, so an operator who
+ *    repoints an upstream mid-flow makes an honest in-flight callback fail
+ *    closed here rather than succeed — the safe direction.
+ */
+function verifyAuthorizationResponseIssuer(iss: string | undefined, expected: string): void {
+  if (iss === undefined) return;
+  const declared = iss.trim();
+  if (declared.length === 0) return;
+  if (declared === expected) return;
+  throw McpIdentityError.unauthorized(
+    "mcp_oauth_issuer_mismatch",
+    "OAuth authorization response iss does not match the recorded authorization server",
+  );
+}
+
 export async function completeMcpOauth(
   ports: McpPorts,
-  params: { state: string; code: string; requestId: string; traceId?: string },
+  params: { state: string; code: string; iss?: string; requestId: string; traceId?: string },
 ): Promise<McpIdentityStatusView> {
   if (params.state.trim().length === 0 || params.code.trim().length === 0) {
     throw McpIdentityError.badRequest(
@@ -228,6 +267,12 @@ export async function completeMcpOauth(
     );
   }
   const oauth = requireOauth(server);
+  // BEFORE the token exchange, and before the discovery round trip that feeds
+  // it: the spec's requirement is to validate "before redeeming the
+  // authorization code", and redeeming a code at the wrong endpoint is the
+  // irreversible step. Consuming the single-use flow first is deliberate — a
+  // steered callback should still burn the state it was steered with.
+  verifyAuthorizationResponseIssuer(params.iss, oauth.issuer);
   const discovery = await ports.oauth.discover(oauth);
 
   const verifierBytes = await ports.cipher.decrypt(
@@ -474,6 +519,29 @@ export async function resolveMcpIdentity(
         throw McpIdentityError.unauthorized(
           "mcp_identity_not_connected",
           "per-user MCP identity is not connected",
+        );
+      }
+      // SEP-2352: a persisted credential is BOUND to the authorization server
+      // that minted it — "clients MUST key persisted credentials by the issuer
+      // identifier, MUST NOT reuse them with a different authorization server,
+      // and MUST re-register when the authorization server changes".
+      //
+      // FerroGate already persisted `issuer` on the credential; nothing read it
+      // back, so an operator repointing an upstream at a new authorization
+      // server silently replayed the OLD server's access token — and its
+      // refresh token — to the NEW one. The credential is keyed by (actor,
+      // server name) rather than by issuer, so this check is what supplies the
+      // issuer half of that key. It runs BEFORE the refresh branch below, so a
+      // stale grant is not refreshed at the wrong token endpoint either.
+      //
+      // The refusal is `mcp_identity_not_connected`'s sibling, not a 503: from
+      // the caller's side the connection is genuinely gone and the repair is
+      // the same one — re-run the authorize flow against the new server.
+      const configuredIssuer = server.oauth?.issuer;
+      if (configuredIssuer === undefined || configuredIssuer !== credential.issuer) {
+        throw McpIdentityError.unauthorized(
+          "mcp_identity_issuer_changed",
+          "per-user MCP identity was issued by a different authorization server and must be reconnected",
         );
       }
       if (credential.expiresAtUnix <= ports.now() + TOKEN_REFRESH_SKEW_SECS) {

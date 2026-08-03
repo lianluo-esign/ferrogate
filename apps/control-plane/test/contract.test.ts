@@ -50,6 +50,7 @@ interface RawOperation {
 
 const RAW = contractDocument as unknown as {
   version: number;
+  route_patterns: { pattern: string; group: string }[];
   operations: RawOperation[];
   dynamic_surfaces: { pattern: string }[];
 };
@@ -66,14 +67,24 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 276 operations", () => {
+  it("is version 1 and carries all 280 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 211 operations to apps/control-plane", () => {
+  it("assigns exactly 217 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
+  });
+
+  it("declares exactly 42 route groups", () => {
+    // `ROUTE-MAP.md` line 4 designates itself the source of truth and states
+    // the group count in PROSE, where nothing held it: it read "40 route
+    // groups" for two merges after the 41st group appeared, because a group
+    // count is not a length any existing assertion takes. This is that prose,
+    // asserted — an added or renamed `route_patterns[].group` now fails here
+    // before the document it documents can drift from it.
+    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(42);
   });
 
   it("ownership predicate agrees with the raw document, path by path", () => {

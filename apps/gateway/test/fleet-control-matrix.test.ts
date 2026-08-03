@@ -777,6 +777,73 @@ const CONTROLS: readonly FleetControl[] = [
     authorityText: /BasicPolicyEngine/,
     deployVar: /GATEWAY_POLICIES|\bpolicies\b/,
   },
+  {
+    /**
+     * `stored_assets.visibility` — the #366 screener's withholding, and since
+     * #743 a control an OPERATOR applies rather than only one a scanner writes.
+     *
+     * It is registered here because §4.3 caught it: `stored_assets` became a
+     * table two Workers read the day the control plane grew the quarantine
+     * review, and this file's whole subject is "one authority, two Workers, do
+     * they agree". They do, and the shape is the GOOD one rather than the
+     * defect one:
+     *
+     *  - `apps/gateway` ENFORCES it, and only by filtering — `isDownloadable`
+     *    inside `AssetService.#resolveArtifact`, so a withheld version drops
+     *    out of resolution before any read path can name it. That is why there
+     *    is no `refusalCode` on this row: the refusal is the ordinary `404` a
+     *    version that does not exist gets, deliberately indistinguishable, and
+     *    a literal code to scan for would have to be invented for this table.
+     *  - `apps/control-plane` enforces the OTHER half of the same predicate at
+     *    the review verb — `asset_not_withheld` refuses a decision on a live
+     *    version — and it WRITES the authority.
+     *
+     * Both resolve it `durable`, out of the same tenant-database column, which
+     * is what §3.3 checks. The failure this entry now makes impossible is the
+     * one that would matter most: a control plane that released an asset by
+     * writing something the gateway does not read.
+     */
+    id: "asset-withholding",
+    title: "the screener's withholding of an asset version, and its operator release (#366, #743)",
+    required: "self",
+    enforcement: /isDownloadable\(|"asset_not_withheld"/,
+    authorityTables: ["stored_assets"],
+  },
+  {
+    /**
+     * `asset_channels` — the pointer that decides whether a version is LIVE.
+     *
+     * Registered by §4.3 the moment #743's operator force-delete landed: the
+     * channel table became a source of truth two Workers act on, and the
+     * question this file exists to force is whether they agree about it. They
+     * do, and the agreement is the interesting part:
+     *
+     *  - `apps/gateway` refuses a TENANT's delete that would strand a channel,
+     *    with the guard INSIDE the statement (`ASSET_VARIANT_DELETE_SQL`:
+     *    another live variant survives, OR no channel points here).
+     *  - `apps/control-plane` computes the SAME predicate before an OPERATOR
+     *    force-delete, refuses with the SAME `asset_version_referenced` code —
+     *    and, uniquely, can be told `?force=true`, in which case it deletes the
+     *    channels WITH the version rather than leaving them dangling.
+     *
+     * That asymmetry is deliberate and is not a divergence: both Workers hold
+     * "a channel never points at an absent version" true, one by refusing and
+     * one by removing the channel too. What would be a divergence — and what
+     * this row makes impossible — is one of them deleting the version and
+     * leaving a channel resolving to nothing.
+     *
+     * No `refusalCode`: the two refusals share the code and the 409 but not the
+     * REMEDY, because the remedies differ by caller. A tenant is told to move
+     * or delete the channel (it has no other lever); an operator is told to
+     * re-send with `?force=true`. Pinning one wording would force the operator
+     * surface to hide the lever it has.
+     */
+    id: "asset-version-references",
+    title: "a channel may never point at a deleted asset version (#367, #737, #743)",
+    required: "self",
+    enforcement: /"asset_version_referenced"/,
+    authorityTables: ["asset_channels"],
+  },
 ];
 
 /** The Workers that ENFORCE a control. */
@@ -1216,6 +1283,15 @@ describe("§4 fleet-wide ratchets", () => {
       // control and belongs in CONTROLS instead, which is the decision this
       // list exists to force rather than to skip.
       "tenant_databases",
+      // The per-file index of a `static_site` bundle (#736). Both Workers now
+      // DELETE it — the gateway when a tenant deletes its own version, the
+      // control plane when an operator force-deletes one (#743) — and neither
+      // reads it to decide anything: it answers "which objects belong to this
+      // version", never "may you". The control on those bytes is the version
+      // row itself, registered above as `asset-withholding` and
+      // `asset-version-references`; this table follows it and cannot outlive
+      // it, because both deletes are keyed on the same `asset_id`.
+      "asset_bundle_files",
       // Schema introspection, not a row of state.
       "sqlite_master",
     ]);

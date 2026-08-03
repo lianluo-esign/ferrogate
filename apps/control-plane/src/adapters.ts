@@ -4,7 +4,7 @@
  * The STORE is now the real one: {@link resolveStore} builds
  * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
  * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
- * it — the 211 handlers still talk only to `ControlPlaneStore`, which is what
+ * it — the 214 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
  *
  * CREDENTIALS, RBAC and the TENANCY LIFECYCLE GATE are now durable too, on the
@@ -46,6 +46,7 @@ import {
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
+  AssetObjectReclaimer,
   AuthContext,
   ControlPlaneBindings,
   ControlPlaneDeps,
@@ -783,6 +784,32 @@ export function resolveSiemExportBucket(env: ControlPlaneBindings): R2Bucket | n
   return env.SIEM_EXPORTS ?? null;
 }
 
+/**
+ * The asset bucket (#743), NARROWED to delete — or `null` when unbound.
+ *
+ * The wrapper is the point and is not ceremony: `env.ASSETS` is a full
+ * `R2Bucket`, and handing that to {@link ControlPlaneDeps} would put `get()`
+ * over every tenant's asset bytes — including the versions the #366 screener is
+ * withholding — inside reach of every handler on this Worker. What crosses the
+ * composition root is an object with ONE method, so a future read path here
+ * does not compile rather than merely failing review. See
+ * {@link AssetObjectReclaimer}.
+ *
+ * An empty key list is not sent to R2 at all: `delete([])` is a pointless round
+ * trip, and the force-delete of a version with no stored objects (`storage_uri`
+ * null, no bundle files) is a real case rather than a hypothetical one.
+ */
+export function resolveAssetObjects(env: ControlPlaneBindings): AssetObjectReclaimer | null {
+  const bucket = env.ASSETS;
+  if (bucket === undefined) return null;
+  return {
+    delete: async (keys: readonly string[]): Promise<void> => {
+      if (keys.length === 0) return;
+      await bucket.delete([...keys]);
+    },
+  };
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -798,6 +825,8 @@ export function resolveDeps(
     tenantDatabases: resolveTenantDatabases(env),
     controlDatabase: resolveControlDatabase(env),
     promptLabels: resolvePromptLabels(env),
+    // Delete-only by construction — see `resolveAssetObjects`.
+    assetObjects: resolveAssetObjects(env),
     runtime: new StoreRuntimeStatus(store),
     txtResolver: resolveTxtResolver(env),
     // The certificate seam (#738). Its default answers `unconfigured` and makes
