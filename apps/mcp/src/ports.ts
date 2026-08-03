@@ -861,8 +861,7 @@ export class D1R2AssetReader implements AssetReaderPort {
   async list(tenantId: string): Promise<readonly StoredAsset[]> {
     const rows = await this.#db
       .prepare(
-        "SELECT asset_type, name, version, content_type, content_hash, size_bytes, " +
-          "yanked, visibility FROM stored_assets WHERE tenant_id = ?1",
+        `SELECT asset_type, name, version, content_type, content_hash, size_bytes, yanked, visibility FROM stored_assets WHERE tenant_id = ?1`,
       )
       .bind(tenantId)
       .all<Row>();
@@ -879,9 +878,7 @@ export class D1R2AssetReader implements AssetReaderPort {
   > {
     const rows = await this.#db
       .prepare(
-        "SELECT asset_type, name, version, content_type, content_hash, size_bytes, " +
-          "storage_uri, yanked, visibility FROM stored_assets " +
-          "WHERE tenant_id = ?1 AND asset_type = ?2 AND name = ?3 AND version = ?4",
+        `SELECT asset_type, name, version, content_type, content_hash, size_bytes, storage_uri, yanked, visibility FROM stored_assets WHERE tenant_id = ?1 AND asset_type = ?2 AND name = ?3 AND version = ?4`,
       )
       .bind(tenantId, assetType, name, version)
       .all<Row>();
