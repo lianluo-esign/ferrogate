@@ -4165,7 +4165,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Atomically adjust wallet credits. */
+        /**
+         * Atomically adjust wallet credits.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the wallet reads use (#790). A tenant-scoped credential -- including the credential of the very tenant that owns the wallet -- is refused `403 wallet_movement_operator_only`, and neither the balance nor the ledger moves. `amount_cents` is SIGNED and is applied as the delta, so before this fence a tenant `admin.write` key credited its own prepaid balance 500 -> 10_000_500 cents and projected the `balance_credits` the gateway spends. A NEGATIVE self-adjustment is refused too, deliberately: `adjust` writes ledger rows that assert an OPERATOR moved this money for this reason, and the entry id is derived from the caller-chosen `reference` while the replay check compares only the amount, so any tenant-written movement is also a claim on the operator's idempotency namespace. A tenant may still READ its balance on GET /admin/v1/wallets/{tenant_id} and its ledger on GET /admin/v1/wallets/{tenant_id}/ledger.
+         */
         post: operations["adjustWallet"];
         delete?: never;
         options?: never;
@@ -4193,7 +4196,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Charge a payment method and credit a wallet. */
+        /**
+         * Charge a payment method and credit a wallet.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the wallet reads use (#790). A tenant-scoped credential is refused `403 wallet_movement_operator_only`, and neither the balance nor the ledger moves. A charge always debits, so this is not an escalation of the balance; it is refused because it writes into the same operator ledger and the same `reference`-derived idempotency namespace as `adjust`, and because operator-only is what this surface already documents. A tenant that wants to spend its prepaid credit does so through the data plane, which debits `wallets.balance_credits` directly. The tenant's READ of its balance and ledger is unchanged.
+         */
         post: operations["chargeWallet"];
         delete?: never;
         options?: never;
