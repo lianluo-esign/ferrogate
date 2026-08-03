@@ -133,20 +133,23 @@ describe("a session that goes quiet is evicted", () => {
    * call site — pinning `close()`'s call site would repeat #764's mistake one
    * level up.
    *
-   * Measured, not asserted — each of these was applied and the RED observed:
+   * Measured, not asserted — each of these was applied to this tree and the RED
+   * observed (10 tests in the file):
    *
-   *  - neutralise the five `#arm` calls ⇒ **7 RED of 7**, every one of them at
-   *    `fireAlarm` returning `false`: no alarm is ever scheduled, which is
-   *    exactly the pre-#765 tree;
-   *  - delete the `close()` inside `alarm()` ⇒ **5 RED**, this test at
+   *  - neutralise the five `#arm` calls ⇒ **9 RED of 10**, every behavioural one
+   *    at `fireAlarm` returning `false`: no alarm is ever scheduled, which is
+   *    exactly the pre-#765 tree. The survivor asserts the constants only;
+   *  - delete the `close()` inside `alarm()` ⇒ **6 RED**, this test at
    *    `expected 200 to be 400` — the alarm runs, the session survives, and the
    *    resume is served as if nothing had happened;
    *  - delete the ingress's eviction branch ⇒ **1 RED**, the bare-reconnect test
    *    below at `expected 200 to be 404`. This test stays GREEN, because the
    *    refusal is TWO layers: the ingress answers off `status`, and the object's
-   *    own `replay` refuses a cursor with the same reason. Removing BOTH ⇒
-   *    **2 RED**, this one at `expected … to contain 'evicted'`. The lower layer
-   *    has its own gate below, so neither layer is load-free.
+   *    own `replay` refuses a cursor with the same reason. Removing only the
+   *    `replay` layer is also **1 RED** (its own gate, below); removing BOTH is
+   *    **3 RED**, this one at `expected … to contain 'evicted'`;
+   *  - set the idle interval to five minutes ⇒ **1 RED**, and dropping the
+   *    debounce ⇒ **1 RED** at `expected 1800001830000 to be 1800001800000`.
    */
   it("evicts it and REFUSES a cursor into it, naming the eviction", async () => {
     const sessionId = await openSession();
