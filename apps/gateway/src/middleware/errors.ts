@@ -181,8 +181,8 @@ export function writeJsonError(
   const headers: Record<string, string> = { ...extra, "content-type": "application/json" };
   if (requestId !== null) {
     headers["x-request-id"] = requestId;
-    // The Anthropic SDK reads `err.requestID` from the `request-id` header
-    // (lowercase). Emit both so both SDKs can find their correlation id.
+    // The Anthropic SDK reads `err.requestID` from the distinct `request-id`
+    // header. Emit it alongside `x-request-id` so both SDKs can correlate errors.
     headers["request-id"] = requestId;
     // The ADOPTED trace id when the caller arrived inside a trace, else the
     // request id — see `./trace.ts`. An error is exactly the response a caller

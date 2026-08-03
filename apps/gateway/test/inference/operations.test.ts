@@ -76,7 +76,7 @@ describe("GET /v1/models", () => {
     expect(res.headers.get("x-ferrogate-runtime")).toBe("workers");
   });
 
-  it("carries the lowercase request-id header the Anthropic SDK reads", async () => {
+  it("carries the request-id header the Anthropic SDK reads", async () => {
     const res = await harness().get("/v1/models");
     expect(res.headers.get("request-id")).toBe("fg-000000000000002a");
   });

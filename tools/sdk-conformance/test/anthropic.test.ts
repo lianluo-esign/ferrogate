@@ -416,7 +416,7 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     expect(error.type).toBe("ferrogate_error");
 
     // FIXED by #727: `requestID` is read from the `request-id` header.
-    // FerroGate now emits both `x-request-id` and `request-id` (lowercase), so
+    // FerroGate now emits both `x-request-id` and `request-id`, so
     // the Anthropic SDK can find its correlation id.
     expect(error.requestID).toEqual(expect.any(String));
     expect(error.requestID).not.toBeNull();
@@ -523,12 +523,11 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     expect(first?.["type"]).toBe("model");
     expect(first?.["display_name"]).toBe("gpt-4o-mini");
     expect(first?.["created_at"]).toEqual(expect.any(String));
-    // Three fields are emitted as null because FerroGate does not track the
+    // Two fields are emitted as null because FerroGate does not track the
     // Anthropic capability model or per-model max_tokens limits. These
     // assertions pin the omission as a recorded contract rather than an accident.
     expect(first?.["capabilities"]).toBeNull();
-    // max_input_tokens is mapped from context_window, which may be null.
-    expect(first?.["max_input_tokens"]).toBeNull();
+    expect(first?.["max_input_tokens"]).toBe(128_000);
     expect(first?.["max_tokens"]).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
     expect(first?.["object"]).toBeUndefined();
@@ -543,14 +542,17 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     expect(model.id).toBe("gpt-4o-mini");
     // The Anthropic SDK's ModelInfo type has `type: "model"`.
     expect((model as unknown as Record<string, unknown>)?.["type"]).toBe("model");
-    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toEqual(expect.any(String));
-    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toEqual(expect.any(String));
-    // Three fields are emitted as null because FerroGate does not track the
+    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toEqual(
+      expect.any(String),
+    );
+    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toEqual(
+      expect.any(String),
+    );
+    // Two fields are emitted as null because FerroGate does not track the
     // Anthropic capability model or per-model max_tokens limits. These
     // assertions pin the omission as a recorded contract rather than an accident.
     expect((model as unknown as Record<string, unknown>)?.["capabilities"]).toBeNull();
-    // max_input_tokens is mapped from context_window, which may be null.
-    expect((model as unknown as Record<string, unknown>)?.["max_input_tokens"]).toBeNull();
+    expect((model as unknown as Record<string, unknown>)?.["max_input_tokens"]).toBe(128_000);
     expect((model as unknown as Record<string, unknown>)?.["max_tokens"]).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
     expect((model as unknown as Record<string, unknown>)?.["object"]).toBeUndefined();

@@ -1963,13 +1963,14 @@ function isAnthropicIngress(c: InferenceContext): boolean {
  *
  * The Anthropic SDK's `ModelInfo` has seven fields: `id`, `type: "model"`,
  * `display_name`, `created_at`, `capabilities`, `max_input_tokens`,
- * `max_tokens`. Three of these are emitted as `null` because FerroGate does not
+ * `max_tokens`. Two of these are emitted as `null` because FerroGate does not
  * track the Anthropic capability model or per-model `max_tokens` limits:
  *
  *  - `capabilities` → `null` (FerroGate's own capability model is
  *    `ModelCapability[]`, not the Anthropic `ModelCapabilities` shape);
- *  - `max_tokens` → `null` (not tracked per model);
- *  - `max_input_tokens` → `descriptor.context_window` (same concept).
+ *  - `max_tokens` → `null` (not tracked per model).
+ *
+ * `max_input_tokens` maps to `descriptor.context_window` (the same concept).
  *
  * `display_name` is set to the model id — FerroGate's own choice, because the
  * upstream model descriptors carry no human-readable label, so the id is used
