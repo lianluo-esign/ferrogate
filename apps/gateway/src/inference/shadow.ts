@@ -81,9 +81,13 @@ import { ShadowBudgetLedger, shadowSampled } from "@ferrogate/routing";
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import { DurableObjectShadowBudgetLedger } from "@ferrogate/routing/durable-objects";
 import type { ShadowBudgetNamespace } from "@ferrogate/routing/durable-objects";
+import type { ShadowLegErrorCode } from "../experiments/index.js";
+import { routePriceSettledCostUsd } from "../metering/route-price.js";
 import { type ResidencyPolicy, residencyViolations } from "../residency/policy.js";
 import { stickyKeyFor } from "./candidates.js";
 import { dispatchDeadline, readBoundedProviderBody } from "./dispatch.js";
+import { usageFromResponseBody, usageProviderKindFor } from "./usage.js";
+import type { ProviderUsage } from "./usage.js";
 import type {
   Caller,
   InferenceBindings,
@@ -105,6 +109,54 @@ export interface ShadowMirror {
   readonly logicalModel: string;
   /** The client body to mirror. `stream` is forced off by {@link runShadowMirror}. */
   readonly body: Record<string, unknown>;
+  /**
+   * #693 — everything the shadow ARM's evidence row needs, gathered on the
+   * request path because none of it is reachable from inside the detached task.
+   *
+   * Attached by `handlers.ts::withShadowObservation`, which is the one place
+   * that has the mirror, the experiment and the id the CLIENT was told all at
+   * once. `undefined` when the model declares no experiment, or when the caller
+   * has no authenticated tenant — a leg with no tenant has nowhere to be filed
+   * and nobody the measurement could be reported to.
+   */
+  readonly observation?: ShadowMirrorObservationContext | undefined;
+  /**
+   * #693 (quality half) — hand the mirrored response body BACK, so the online
+   * evaluation sampler can score the arm no client was served.
+   *
+   * Attached by `handlers.ts::withShadowObservation` and ONLY when the sampler
+   * has already cleared this exchange for content capture
+   * (`evals/shadow-leg.ts` states the gate). Absent is the normal case and
+   * means the response is read for its token counts and discarded exactly as it
+   * always was.
+   *
+   * It is the resolver of a promise the sampler already holds, so it is
+   * IDEMPOTENT — a second call after the first is a no-op — which is what lets
+   * {@link runShadowMirror} guarantee settlement from a `finally` without
+   * having to know whether the success path already settled it.
+   */
+  readonly retain?: ((body: string | undefined) => void) | undefined;
+}
+
+/** The identity half of a shadow leg's evidence row. See {@link ShadowMirror}. */
+export interface ShadowMirrorObservationContext {
+  /**
+   * `{clientRequestId}~shadow`, computed ONCE by
+   * `handlers.ts::withShadowObservation`.
+   *
+   * DERIVED rather than random so a retried mirror overwrites its own row
+   * instead of inflating the arm's sample — and it is the id the shadow arm's
+   * eval SCORE is filed under too, so a leg's cost, latency and quality all
+   * join on one key. Carried here rather than re-derived by each consumer
+   * because two derivations of one id are two chances to disagree about it.
+   */
+  readonly legId: string;
+  readonly experimentId: string;
+  /** The id the CLIENT was told, which is what makes the two arms a PAIR. */
+  readonly clientRequestId: string;
+  readonly tenantId: string;
+  readonly projectId?: string | undefined;
+  readonly apiKeyId?: string | undefined;
 }
 
 /**
@@ -303,6 +355,14 @@ export function spawnShadowMirror(
  * a rejected `waitUntil` promise is a logged Worker exception on a request that
  * otherwise succeeded.
  *
+ * ALWAYS SETTLES `mirror.retain` (#693). The outer `finally` calls it with
+ * `undefined`, which is a no-op once the success path has already settled it
+ * with the body. That guarantee is load-bearing rather than tidy:
+ * `evals/middleware.ts` AWAITS the promise this resolver belongs to, from
+ * inside `ctx.waitUntil`, so a path that returned without settling would hold
+ * the isolate open until the platform killed it — on every mirrored request
+ * that took that path.
+ *
  * Exported so the budget/dispatch behaviour is directly assertable, but the
  * request path only ever reaches it through {@link spawnShadowMirror}.
  */
@@ -310,6 +370,49 @@ export async function runShadowMirror(
   deps: ResolvedInferenceDeps,
   mirror: ShadowMirror,
 ): Promise<void> {
+  const observation = mirror.observation;
+  const startedAt = Date.now();
+  /**
+   * #693 — record the leg, and swallow anything the recording itself throws.
+   *
+   * A no-op when there is no observation context (see {@link ShadowMirror}).
+   * `deps.experiments.observeShadowLeg` never rejects either, so the `try` here
+   * is depth at the one seam where a throw would become a logged Worker
+   * exception on a request that had already been served.
+   */
+  const record = async (outcome: {
+    readonly statusCode?: number | undefined;
+    readonly errorCode?: ShadowLegErrorCode | undefined;
+    readonly usage?: ProviderUsage | undefined;
+  }): Promise<void> => {
+    if (observation === undefined) return;
+    try {
+      await deps.experiments.observeShadowLeg({
+        // Computed once, on the request path — see the field's own docs.
+        legId: observation.legId,
+        clientRequestId: observation.clientRequestId,
+        experimentId: observation.experimentId,
+        tenantId: observation.tenantId,
+        projectId: observation.projectId,
+        apiKeyId: observation.apiKeyId,
+        logicalModel: mirror.logicalModel,
+        provider: mirror.route.provider,
+        providerModel: mirror.route.providerModel,
+        statusCode: outcome.statusCode,
+        errorCode: outcome.errorCode,
+        latencyMs: Math.max(0, Date.now() - startedAt),
+        promptTokens: outcome.usage?.promptTokens,
+        completionTokens: outcome.usage?.completionTokens,
+        totalTokens: outcome.usage?.totalTokens,
+        costUsd: shadowLegCostUsd(mirror, outcome.usage),
+        observedAtUnix: Math.floor(Date.now() / 1000),
+      });
+    } catch {
+      // A mirror is never allowed to fail a request, and its evidence is never
+      // allowed to fail the mirror.
+    }
+  };
+
   try {
     // Rust charges the budget LAST of the three gates, "only once we know we
     // would actually dispatch, so a disabled provider or an unsampled caller
@@ -321,11 +424,18 @@ export async function runShadowMirror(
       mirror.route.shadowMaxRequests ?? 0,
     );
     if (!admitted) {
+      // #693 — RECORDED, not dropped. A budget refusal is the operator's own
+      // cap doing its job, but an arm whose refused legs are invisible reports
+      // a smaller and healthier-looking sample than it actually took — and the
+      // shadow arm's sample size is what decides whether the comparison is
+      // shown at all.
+      await record({ errorCode: "shadow_budget_exhausted" });
       return;
     }
 
     const adapter = deps.adapters.adapterFor(mirror.route.providerKind);
     if (adapter === null) {
+      await record({ errorCode: "adapter_unavailable" });
       return;
     }
 
@@ -344,6 +454,7 @@ export async function runShadowMirror(
       body: { ...mirror.body, stream: false },
     });
     if (!built.ok) {
+      await record({ errorCode: "adapter_refused" });
       return;
     }
 
@@ -354,10 +465,111 @@ export async function runShadowMirror(
     const response = await deps.dispatcher.dispatch(built.request, deadline.signal);
 
     // Drain under the same cap the primary path uses, so a mirror cannot buffer
-    // an unbounded provider body into the isolate. The result is discarded:
-    // nothing here is returned, metered, or billed.
-    await readBoundedProviderBody(response, deps.limits.providerResponseMaxBytes);
+    // an unbounded provider body into the isolate. The result is still
+    // discarded: nothing here is returned, metered, or billed.
+    const text = await readBoundedProviderBody(response, deps.limits.providerResponseMaxBytes);
+
+    // #693 (quality half) — HAND THE BODY BACK, and only on a 200.
+    //
+    // A non-200 mirror has no answer for a judge to score, and scoring error
+    // envelopes would drag the arm's mean down whenever the mirrored provider
+    // had a bad hour — turning a reliability problem into a fake quality
+    // regression. That is the SAME rule
+    // `evals/middleware.ts::evaluableResponse` applies to the served arm,
+    // applied here rather than paralleled there because this is the only place
+    // the mirror's status exists. The failure is NOT lost: the leg row below
+    // records it, so the arm's error rate is unaffected by this.
+    //
+    // `retain` is absent unless the sampler asked for it, so on all other
+    // traffic the only thing that still leaves this body is token COUNTS.
+    if (response.status === 200) mirror.retain?.(text);
+
+    // The one thing taken from that body for the leg row, and it is a COUNT
+    // rather than content. The evidence row carries tokens and a cost; no
+    // prompt and no completion text is stored, exactly as
+    // `0009_online_eval.sql` refuses to store either.
+    await record({ statusCode: response.status, usage: shadowUsageFrom(mirror, text) });
   } catch {
-    // Swallowed, exactly as Rust swallows every arm of `execute_shadow_dispatch`.
+    // Swallowed, exactly as Rust swallows every arm of `execute_shadow_dispatch`
+    // — and the leg is STILL recorded, because an arm whose failures vanish
+    // looks healthier than the arm it is being compared against, which is the
+    // direction that promotes a bad variant.
+    await record({ errorCode: "provider_dispatch_error" });
+  } finally {
+    // #693 — SETTLE, whatever happened. Idempotent: a no-op once the success
+    // path above resolved it with the body. See this function's docblock for
+    // why an unsettled promise here would hold the isolate open.
+    mirror.retain?.(undefined);
   }
+}
+
+/**
+ * The mirror's own token counts, read from the body that was about to be
+ * discarded (#693).
+ *
+ * The dialect is chosen exactly as the served path chooses it
+ * (`usageProviderKindFor`), because the mirror is usually a DIFFERENT family
+ * from the primary — that is the point of the experiment — and reading an
+ * Anthropic body with the OpenAI extractor yields NO usage rather than wrong
+ * usage, i.e. an arm silently reported as costing nothing.
+ *
+ * Total: any parse failure is `undefined`, which the leg row stores as NULL.
+ * "The provider reported no usage" and "we could not read it" mean the same
+ * thing to a report — this row has no tokens — and neither may be recorded as
+ * an observed zero, which would drag the arm's mean cost down.
+ */
+function shadowUsageFrom(mirror: ShadowMirror, text: string): ProviderUsage | undefined {
+  // Only the two operations `usageProviderKindFor` accepts. The rest of the
+  // family (embeddings, rerank, images, the audio surface) settle on units a
+  // token extractor cannot read, so their legs carry latency and status and no
+  // tokens — which is the honest answer, not a gap.
+  const dialectOperation =
+    mirror.operation === "chat.completions" || mirror.operation === "responses"
+      ? mirror.operation
+      : undefined;
+  if (dialectOperation === undefined) return undefined;
+  try {
+    return usageFromResponseBody(
+      usageProviderKindFor(dialectOperation, mirror.route.providerKind),
+      JSON.parse(text) as unknown,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What the mirrored dispatch cost THE OPERATOR, priced from the shadow route's
+ * own registry rates (#693).
+ *
+ * `routePriceSettledCostUsd` is the same function the served path settles with
+ * (#663), reused rather than reimplemented so both arms' costs come out of one
+ * piece of code — two pricing paths that could disagree would turn a cost
+ * comparison between arms into a comparison between rounding rules.
+ *
+ * Nobody is BILLED for this number. The customer never received this response
+ * and never asked for the second provider, so `armChargedTo('shadow')` is
+ * `operator` and `deps.usage.record` is not reachable from this module at all.
+ * The figure exists so an operator can see what the experiment costs THEM.
+ */
+function shadowLegCostUsd(
+  mirror: ShadowMirror,
+  usage: ProviderUsage | undefined,
+): number | undefined {
+  if (usage === undefined) return undefined;
+  return routePriceSettledCostUsd({
+    requestId: mirror.observation?.clientRequestId ?? "",
+    route: `${mirror.route.provider}.shadow`,
+    logicalModel: mirror.logicalModel,
+    provider: mirror.route.provider,
+    providerModel: mirror.route.providerModel,
+    stream: false,
+    status: 200,
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+    totalTokens: usage.totalTokens,
+    inputPricePer1m: mirror.route.inputPricePer1m,
+    outputPricePer1m: mirror.route.outputPricePer1m,
+    cachedInputPricePer1m: mirror.route.cachedInputPricePer1m,
+  });
 }

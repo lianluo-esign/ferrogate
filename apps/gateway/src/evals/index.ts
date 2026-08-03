@@ -168,6 +168,21 @@ export {
 } from "./middleware.js";
 export type { OnlineEvalMiddlewareOptions } from "./middleware.js";
 
+/**
+ * #693 — the shadow arm's route to a judge. See `./shadow-leg.ts` for the
+ * retention gate and for why the comparability rule is inherited rather than
+ * paralleled.
+ */
+export {
+  SHADOW_EVAL_ARM,
+  publishShadowEvalLeg,
+  requestShadowEvalRetention,
+  shadowArmSampleFrom,
+  shadowEvalLegFor,
+  shadowEvalRetentionRequested,
+} from "./shadow-leg.js";
+export type { ShadowEvalLeg } from "./shadow-leg.js";
+
 export {
   JUDGE_SYSTEM_PROMPT,
   MAX_RATIONALE_CHARS,

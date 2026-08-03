@@ -60,6 +60,17 @@ export interface RequestLogRecord {
    */
   readonly delegationChain?: string | undefined;
   readonly delegationRoot?: string | undefined;
+  /**
+   * `#693` — the traffic-split experiment this request belonged to and the arm
+   * that served it (`control` or `canary`).
+   *
+   * Absent for every request whose model declares no canary and no shadow. A
+   * mirror is never servable, so `shadow` never appears here; the shadow arm's
+   * evidence is `experiment_shadow_legs`, because a leg no client received must
+   * not become a row in the record of client requests.
+   */
+  readonly experimentId?: string | undefined;
+  readonly experimentArm?: string | undefined;
   readonly tenantId?: string | undefined;
   readonly projectId?: string | undefined;
   readonly workspaceId?: string | undefined;
@@ -141,6 +152,8 @@ export function requestLogToWire(record: RequestLogRecord): RequestLogWire {
   put(wire, "agent_run_id", record.agentRunId);
   put(wire, "delegation_chain", record.delegationChain);
   put(wire, "delegation_root", record.delegationRoot);
+  put(wire, "experiment_id", record.experimentId);
+  put(wire, "experiment_arm", record.experimentArm);
   put(wire, "tenant_id", record.tenantId);
   put(wire, "project_id", record.projectId);
   put(wire, "workspace_id", record.workspaceId);
@@ -210,6 +223,8 @@ export function requestLogFromWire(body: unknown): RequestLogRecord | undefined 
     agentRunId: str(wire, "agent_run_id"),
     delegationChain: str(wire, "delegation_chain"),
     delegationRoot: str(wire, "delegation_root"),
+    experimentId: str(wire, "experiment_id"),
+    experimentArm: str(wire, "experiment_arm"),
     tenantId: str(wire, "tenant_id"),
     projectId: str(wire, "project_id"),
     workspaceId: str(wire, "workspace_id"),

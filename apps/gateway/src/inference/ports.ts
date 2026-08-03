@@ -45,6 +45,7 @@
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
+import type { ExperimentObserver } from "../experiments/index.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
@@ -829,7 +830,7 @@ export type CallerScope =
  * The slice of `auth::AuthContext` the inference path actually reads.
  *
  * ROUTE-MAP invariant 1 still holds: bearer authentication and `auth.scope`
- * enforcement belong to the ONE contract-driven middleware that covers all 279
+ * enforcement belong to the ONE contract-driven middleware that covers all 281
  * operations, not to this module. What the inference handlers own is only the
  * two model gates the Rust inference handlers owned — `can_use_model` (403
  * `model_not_allowed`) and the tenant model-visibility filter on `GET /v1/models`
@@ -1197,6 +1198,17 @@ export interface InferenceDeps {
    */
   readonly audioObjects?: AudioObjectSource | ((env: InferenceBindings) => AudioObjectSource);
   /**
+   * Issue #693 — where the SHADOW arm's observation row goes.
+   *
+   * Absent ⇒ built per Worker `env` by `experiments/sink.ts::experimentObserverFor`,
+   * which writes `experiment_shadow_legs` in the control database and counts a
+   * `dropped` leg on a deployment that binds none. A shadow mirror is the one
+   * arm of an experiment with no request log — nothing was served, so there is
+   * no client request to log — and before this port its cost, latency and error
+   * rate were invisible by construction.
+   */
+  readonly experiments?: ExperimentObserver | ((env: InferenceBindings) => ExperimentObserver);
+  /**
    * Issue #689 — the store behind `store` / `previous_response_id` and
    * `GET`/`DELETE /v1/responses/{id}`. Absent ⇒ built per Worker `env` by
    * `conversation-store.ts::conversationStoreFromEnv`, which answers
@@ -1241,6 +1253,8 @@ export interface ResolvedInferenceDeps {
   readonly byok: ByokPorts | null;
   /** Issue #703 — resolves a `file_ref` to a stored recording's bytes. */
   readonly audioObjects: AudioObjectSource;
+  /** Issue #693 — the shadow arm's evidence writer. */
+  readonly experiments: ExperimentObserver;
   /** Issue #689 — Responses conversation state; never `undefined`, see above. */
   readonly conversations: ConversationStore;
   readonly responseStoreMode: ResponseStoreMode;

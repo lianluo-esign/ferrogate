@@ -20054,6 +20054,190 @@
           "rbac_action": null
         }
       }
+    },
+    "/admin/v1/experiments": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listAdminExperiments",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List the canary/shadow splits that actually served traffic, with each arm's cost, latency and error rate.",
+        "description": "Experiments are DISCOVERED from observations rather than registered, so this lists exactly the splits that really routed traffic in the window -- an experiment a registry knew about but the router did not would be worse than no report (#693). Each arm carries requests, failures, error rate, mean latency and cost, plus `delivered` and `charged_to`, which are derived from the arm and not stored: a shadow arm's response is never delivered to a caller and its provider spend is the OPERATOR's, because the customer never saw the answer and never asked for the second provider. `error_rate` is computed on the requests each arm ANSWERED rather than on the requests assigned to it, so a variant's failure-with-fallback contributes to the control arm and does not raise the variant's rate -- see the field's own description before comparing the number across arms. Tenant-fenced; a NULL tenant matches nobody. Use GET /admin/v1/experiments/{experiment_id} for the quality comparison.",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, INCLUSIVE lower bound. Defaults to 30 days ago. An experiment's arms must be compared over a window in which the same thing was being compared: pooling a year of traffic across every config change made in it produces a difference that is mostly the config changes.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of experiments, most recently active first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedList_Experiment"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/experiments/{experiment_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "experiment_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAdminExperiment",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "One experiment's per-arm cost, latency and error rate, plus the quality verdict on the variant.",
+        "description": "The quality half is built on #692's online-evaluation scores and inherits their governing honesty: a score row means 'judge X, shown this exchange and asked criterion Y, answered Z', which licenses a RELATIVE comparison between two populations scored by the SAME judge under the SAME criterion and nothing else. That precondition is enforced structurally rather than documented -- the aggregate is grouped by (judge_model, criterion_id, arm) and arms are only ever paired inside one group, so arms scored differently appear under `quality.incomparable` with no difference and no means, and never as a number. Below `min_samples` in either arm the verdict is `insufficient_samples` and the means are OMITTED from the response, so a client cannot render a figure computed from two requests. A difference the spread does not support at `alpha` comes back as `no_measured_difference` rather than as a winner. The SHADOW arm is scored too: its mirrored response is retained just long enough to build one eval sample, derived from the SERVED sample so the judge, the criteria and the prompt are the same VALUES rather than a second resolution that could disagree -- and a shadow arm scored under a different judge or criterion is therefore still incomparable and still refuses. Retention happens only for an exchange the tenant's own eval policy already authorised: a tenant that is not opted in, a ZERO-DATA-RETENTION tenant, and a request outside the sample are never shadow-scored, and a region-pinned tenant is never mirrored in the first place. When reading `error_rate` across arms, see that field: it is computed on the requests each arm ANSWERED, so a variant's failure-with-fallback does not raise the variant's rate. Refuses with 409 when the experiment has no variant arm in the window, and with 400 when it has both a canary and a shadow and the caller did not name one -- picking one would be a rollout decision taken on the operator's behalf.",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, INCLUSIVE lower bound. Defaults to 30 days ago. An experiment's arms must be compared over a window in which the same thing was being compared: pooling a year of traffic across every config change made in it produces a difference that is mostly the config changes.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "variant",
+            "in": "query",
+            "required": false,
+            "description": "Which arm is compared against the control. Required when the experiment has both a canary and a shadow arm: pooling them would compare the control against a mixture of two different variants.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "canary",
+                "shadow"
+              ]
+            }
+          },
+          {
+            "name": "min_samples",
+            "in": "query",
+            "required": false,
+            "description": "Minimum scored samples in BOTH arms before any mean is reported. Defaults to 30. There is no universally right value -- it depends on the effect size that matters and on the judge's noise floor -- so it is always stated back in the response.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "alpha",
+            "in": "query",
+            "required": false,
+            "description": "Two-sided significance level for Welch's t-test. Defaults to 0.05.",
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The experiment's arms and the quality verdict on the chosen variant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -37858,6 +38042,366 @@
           },
           "asset_deletion": {
             "$ref": "#/components/schemas/AdminAssetDeletion"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentArmOutcome": {
+        "type": "object",
+        "description": "One arm's OPERATIONAL outcome over the window. `delivered` and `charged_to` are derived from the arm rather than stored, so a shadow arm can never be reported as having been delivered to a caller or as having been billed to the tenant.",
+        "required": [
+          "object",
+          "arm",
+          "requests",
+          "failures",
+          "error_rate",
+          "mean_latency_ms",
+          "cost_usd",
+          "delivered",
+          "charged_to"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "experiment_arm"
+          },
+          "arm": {
+            "type": "string",
+            "enum": [
+              "control",
+              "canary",
+              "shadow"
+            ]
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Legs that failed under the request LOG's rule (status >= 400 or an error code), not the circuit breaker's: a provider answering 400 to a body it dislikes failed the caller even though the breaker ignores it."
+          },
+          "error_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "NULL for an arm that served nothing. 0/0 is not 0, and rendering an idle canary as \"0% errors\" is how a split that is not receiving traffic gets promoted. THIS NUMBER DOES NOT MEAN THE SAME THING FOR EVERY ARM, and the difference is not a defect: a request is attributed to the arm that ACTUALLY ANSWERED, not to the arm the caller was assigned, so a variant that failed and fell back to the primary contributes a `control` row and does NOT raise the variant's error rate here. (A request nothing answered at all IS attributed to the assigned arm, so a total variant outage still lands on the variant.) The rule keeps `experiment_arm` consistent with the `provider`, `provider_model` and token columns of the same row, and keeps the quality comparison honest -- a score filed under an arm has to be a score of that arm's response. Those fallback failures are still observable per provider through the routing metrics and the circuit breaker; they are simply not in this ratio. Do not read a served arm's error rate as \"every way this arm failed\", and note that the SHADOW arm has no fallback at all, so its rate is every way it failed."
+          },
+          "mean_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "NULL for an arm that served nothing. Averaged over the same population `error_rate` is computed on -- see that field for why a served arm's population is \"requests this arm answered\" rather than \"requests assigned to this arm\"."
+          },
+          "cost_usd": {
+            "type": "number",
+            "description": "Provider spend attributed to this arm. For a SHADOW arm this is the OPERATOR's cost of taking the measurement -- see `charged_to`."
+          },
+          "delivered": {
+            "type": "boolean",
+            "description": "False for the shadow arm only: a mirror's response is discarded and no caller ever receives it."
+          },
+          "charged_to": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "operator"
+            ],
+            "description": "Who pays for this arm's provider spend. `tenant` for a served arm, exactly as with no experiment running. `operator` for the shadow arm: the customer never saw that response and never asked for the second provider, so the tokens are the operator's cost of running the experiment. The gateway backs this structurally -- the mirror has no code path to metering, the ledger, the billing outbox or the TPM governor."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentQualitySide": {
+        "type": "object",
+        "description": "One arm's side of a quality comparison. `mean` and `std_dev` are ABSENT -- not null -- when the verdict is `insufficient_samples`, so a client rendering that verdict has no number available to render.",
+        "required": [
+          "arm",
+          "count"
+        ],
+        "properties": {
+          "arm": {
+            "type": "string",
+            "enum": [
+              "control",
+              "canary",
+              "shadow"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Scored samples in this arm under this judge and criterion."
+          },
+          "mean": {
+            "type": "number"
+          },
+          "std_dev": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentQualityComparison": {
+        "type": "object",
+        "description": "A comparison between the control arm and the variant arm under ONE judge model and ONE criterion. Both arms in a comparison were scored by the same judge under the same criterion by construction: the aggregate is grouped by (judge_model, criterion_id, arm) and only arms inside one group are ever paired. Arms that do not share a group appear under `incomparable` instead and carry no difference at all.",
+        "required": [
+          "criterion_id",
+          "judge_model",
+          "verdict",
+          "min_samples",
+          "control",
+          "variant"
+        ],
+        "properties": {
+          "criterion_id": {
+            "type": "string"
+          },
+          "judge_model": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "variant_better",
+              "control_better",
+              "no_measured_difference",
+              "insufficient_samples"
+            ],
+            "description": "`insufficient_samples` means at least one arm is below `min_samples` and NO means are reported -- two requests per arm is not a result, and a number on a screen will be acted on however it is captioned. `no_measured_difference` means both arms are adequately sampled and the difference is not distinguishable from noise at `alpha`, which is itself a rollout decision. The two winners are decided by Welch's unequal-variance t-test, two-sided."
+          },
+          "min_samples": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "control": {
+            "$ref": "#/components/schemas/ExperimentQualitySide"
+          },
+          "variant": {
+            "$ref": "#/components/schemas/ExperimentQualitySide"
+          },
+          "difference": {
+            "type": "number",
+            "description": "variant mean minus control mean. Absent under `insufficient_samples`."
+          },
+          "p_value": {
+            "type": "number",
+            "description": "Two-sided Welch p-value. Absent under `insufficient_samples`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentIncomparableCell": {
+        "type": "object",
+        "description": "A (judge, criterion) pair only ONE arm was scored under, so no comparison exists. This is what a violated precondition looks like on this surface: it deliberately carries no mean and no difference, because a score row licenses only a relative comparison between two populations scored by the SAME judge under the SAME criterion (#692), and subtracting across instruments produces a plausible number that measures the instruments rather than the models.",
+        "required": [
+          "criterion_id",
+          "judge_model",
+          "reason",
+          "scored_arms",
+          "detail"
+        ],
+        "properties": {
+          "criterion_id": {
+            "type": "string"
+          },
+          "judge_model": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "control_arm_not_scored",
+              "variant_arm_not_scored"
+            ]
+          },
+          "scored_arms": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "control",
+                "canary",
+                "shadow"
+              ]
+            }
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentQuality": {
+        "type": "object",
+        "description": "The quality half of an experiment report.",
+        "required": [
+          "object",
+          "judge_mismatch",
+          "criterion_mismatch",
+          "comparisons",
+          "incomparable"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "experiment_quality"
+          },
+          "judge_mismatch": {
+            "type": "boolean",
+            "description": "True when some judge model carried scores from only one arm. Hoisted out of `incomparable` so a surface cannot render the report without it: it says the arms were measured with different instruments, which invalidates the whole comparison rather than one row of it."
+          },
+          "criterion_mismatch": {
+            "type": "boolean",
+            "description": "The same, for the criterion."
+          },
+          "comparisons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentQualityComparison"
+            }
+          },
+          "incomparable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentIncomparableCell"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Experiment": {
+        "type": "object",
+        "description": "One traffic-splitting experiment DISCOVERED from the observations, with its arms' operational outcomes. There is no experiments table: an experiment is the split a model's `[[models]].canary` / `.shadow` config already declares, and its id is a fingerprint of the control, canary and shadow routes -- so moving any of them starts a NEW experiment rather than pooling a population measured against one baseline with one measured against another.",
+        "required": [
+          "object",
+          "id",
+          "logical_model",
+          "first_seen_unix",
+          "last_seen_unix",
+          "arms"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "experiment"
+          },
+          "id": {
+            "type": "string"
+          },
+          "logical_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_seen_unix": {
+            "type": "integer"
+          },
+          "last_seen_unix": {
+            "type": "integer"
+          },
+          "arms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentArmOutcome"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentReport": {
+        "type": "object",
+        "description": "One experiment's arms and the verdict on the variant. The verdict is produced by the same pure comparator the unit tests hold (`@ferrogate/routing`), never by this route, so the three refusals -- different instrument, too few samples, a difference the spread does not support -- cannot be forgotten at the reporting layer.",
+        "required": [
+          "object",
+          "id",
+          "logical_model",
+          "variant_arm",
+          "since_unix",
+          "min_samples",
+          "alpha",
+          "arms",
+          "quality"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "experiment_report"
+          },
+          "id": {
+            "type": "string"
+          },
+          "logical_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variant_arm": {
+            "type": "string",
+            "enum": [
+              "canary",
+              "shadow"
+            ]
+          },
+          "since_unix": {
+            "type": "integer"
+          },
+          "min_samples": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "alpha": {
+            "type": "number"
+          },
+          "arms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentArmOutcome"
+            }
+          },
+          "quality": {
+            "$ref": "#/components/schemas/ExperimentQuality"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PaginatedList_Experiment": {
+        "type": "object",
+        "description": "The paginated envelope listAdminExperiments answers unconditionally. A first page that looks like the whole set is a wrong answer on a surface a rollout decision is made from.",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Experiment"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
           }
         },
         "additionalProperties": false

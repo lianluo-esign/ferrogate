@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 279.
+ * ANTI-DRIFT GATE for the third copy of 281.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(279);
+    expect(OPENAPI_OPERATION_COUNT).toBe(281);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -246,7 +246,7 @@ describe("registerWireSchema", () => {
 /**
  * The FACTUAL CLAIM the surviving PORT-TODO in `src/index.ts` makes, asserted
  * rather than asserted-in-prose: this package seeds exactly the cross-plane
- * envelopes plus the `ferrogate-core` primitives, and nothing else. The 241
+ * envelopes plus the `ferrogate-core` primitives, and nothing else. The 270
  * remaining contract operations are registered by `apps/*` at their own
  * composition time (nothing does so yet — that is the open half of the marker).
  *
@@ -313,11 +313,20 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // `apps/gateway/src/inference/` — and that branch wrote 262 + 2 = 264. #743
     // and #689 landed in PARALLEL, so neither 266 nor 264 is the merged truth.
     //
+    // #693's two experiment reads (`listExperiments`, `getExperimentReport`)
+    // are the story a fifth time: their response shapes are declared in
+    // `docs/openapi/admin-api.openapi.json` and their handler lives in
+    // `apps/control-plane/src/routes/admin_experiment.ts`, so neither seeds a
+    // WIRE shape. #693 and #743 ALSO landed in parallel — the #693 branch wrote
+    // 266 against a 276-operation document and main wrote 268 against a
+    // 278-operation one, and neither is the merged truth.
+    //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 279 - 10 = 269. The running sum is narrative, and #703/#737,
-    // then #743/#689, and then #697 landing on top of all of them is exactly why
-    // it must not be the source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(269);
+    // `seeded`, i.e. 281 - 10 = 271. The running sum is narrative, and
+    // #703/#737, then #743/#689, then #743/#693, and now #693/#697 landing in
+    // parallel is exactly why it must not be the source: this branch wrote 270
+    // and main wrote 269, and 271 is the value the merged document produces.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(271);
   });
 });

@@ -13,6 +13,7 @@ import {
   responsesNormalizeStream,
 } from "../streaming/index.js";
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
+import { experimentObserverFor } from "../experiments/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
 import { audioObjectsFromEnv } from "./audio-objects.js";
@@ -433,6 +434,15 @@ export function resolveDeps(
       typeof deps.shadowBudget === "function"
         ? deps.shadowBudget(env)
         : (deps.shadowBudget ?? shadowBudgetFor(env)),
+    // #693 — the shadow arm's evidence writer, env-resolved like `circuit` and
+    // `shadowBudget` and for the same reason: the D1 binding only exists per
+    // request while the deps object is built per router. `experimentObserverFor`
+    // closes over `env` and delegates to the isolate-wide observer, so the
+    // counters accumulate across requests while the binding stays per request.
+    experiments:
+      typeof deps.experiments === "function"
+        ? deps.experiments(env)
+        : (deps.experiments ?? experimentObserverFor(env)),
     // The default is the ISOLATE-WIDE singleton, not a per-request instance:
     // `lowest_latency` / `balanced` steer on observations accumulated ACROSS
     // requests, so a fresh recorder per request would record diligently and

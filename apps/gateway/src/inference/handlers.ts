@@ -41,7 +41,7 @@ import type { WorkflowProviderConstraint } from "@ferrogate/policy";
  *   7. adapter → dispatch           → `provider_dispatch_error` (502)
  *
  * Step 1 is NOT implemented here on purpose — ROUTE-MAP invariant 1 requires one
- * table-driven middleware for all 279 operations, and duplicating a per-route
+ * table-driven middleware for all 281 operations, and duplicating a per-route
  * guard is exactly what that invariant forbids. Everything from step 2 down is
  * this module's, and is implemented below.
  */
@@ -49,6 +49,11 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import type { z } from "zod";
+import {
+  type ExperimentAssignment,
+  experimentAssignmentFor,
+  servedArmFor,
+} from "../experiments/index.js";
 import { effectiveResidencyPolicy } from "../residency/policy.js";
 import { genAiOperationForRouteLabel, observeGenAiInvocation } from "../telemetry/genai.js";
 import { parseAudioObjectReference } from "./audio-objects.js";
@@ -119,7 +124,12 @@ import {
 } from "./estimate.js";
 import type { EstimatedUsage } from "./estimate.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
-import type { InferenceLogFacts, TokenAdmissionHandle, TokenGovernor } from "./identity.js";
+import type {
+  InferenceLogFacts,
+  InferenceShadowEvalLeg,
+  TokenAdmissionHandle,
+  TokenGovernor,
+} from "./identity.js";
 import { describeModel } from "./model-metadata.js";
 import type { ModelDescriptor } from "./model-metadata.js";
 import {
@@ -210,6 +220,17 @@ export interface InferenceEnv {
      * defaulted, which is the normal case.
      */
     inferenceAttributionDefaults: Readonly<Record<string, string>>;
+    /**
+     * #693 — where a spawned shadow mirror is published so the online-eval
+     * sampler can score the arm no client was served, bound to the OUTER
+     * request (see `./identity.ts`).
+     *
+     * `undefined` for every request the sampler did NOT clear for content
+     * capture, and that absence IS the retention gate: without it
+     * {@link withShadowObservation} attaches no retainer and the mirrored
+     * response is discarded exactly as it always was.
+     */
+    inferenceShadowEval: ((leg: InferenceShadowEvalLeg) => void) | undefined;
 
     /**
      * replaces `c.req.raw`.
@@ -589,6 +610,15 @@ interface PlannedRequest {
    * property that keeps a mirror off the ladder.
    */
   readonly shadow?: ShadowMirror | undefined;
+  /**
+   * #693 — the traffic-split experiment this model declares, or `undefined`
+   * when it declares none (almost every model).
+   *
+   * Rides on the plan for the same reason `shadow` does: it is derived from the
+   * FULL candidate list, which `servableCandidates` has already narrowed by the
+   * time dispatch runs.
+   */
+  readonly assignment?: ExperimentAssignment | undefined;
 }
 
 /** `ModelEndpointKind` for the eligibility gate. */
@@ -730,6 +760,12 @@ function planUpstream(
   // mirror the one leg that could put a governed prompt in an unexamined region.
   const shadow = shadowMirrorFor(resolved, caller, operation, logicalModel, body, residencyPolicy);
 
+  // #693 — the EXPERIMENT this model's split describes, computed from the FULL
+  // list for the same reason the mirror is: `servableCandidates` strips the
+  // shadow on the very next line, and the experiment's identity fingerprints
+  // all three routes. `null` for every model with no canary and no shadow.
+  const assignment = experimentAssignmentFor(resolved, logicalModel);
+
   // `AppState::canary_route` — promote the canary for the sticky subset of
   // callers it selects, drop it for everyone else — and then strip the SHADOW
   // route, which is a mirror and must never be servable to a client.
@@ -824,7 +860,97 @@ function planUpstream(
     );
   }
 
-  return { candidates, ...(shadow === null ? {} : { shadow }) };
+  return {
+    candidates,
+    ...(shadow === null ? {} : { shadow }),
+    ...(assignment === null ? {} : { assignment }),
+  };
+}
+
+/**
+ * #693 — attach the shadow arm's evidence identity to the mirror.
+ *
+ * Done HERE rather than inside `shadowMirrorFor` because this is the only place
+ * that has all three pieces at once: the mirror and the experiment (from the
+ * plan) and the id the CLIENT was told (`c.get("requestId")`, minted by the
+ * middleware, and what makes the two arms of one request a PAIRED sample).
+ * Keeping `shadowMirrorFor` at the Rust `shadow_decision` shape also keeps it a
+ * pure sampling decision, which is what `test/inference/shadow.test.ts` drives.
+ *
+ * Returns the mirror UNCHANGED — so `runShadowMirror` records nothing — in two
+ * cases, and both are honest rather than defensive:
+ *
+ *  - the model declares no experiment, so there is nothing to file a leg under;
+ *  - the caller has no authenticated tenant (a platform-operator credential
+ *    carries no tenancy at all), so there is nobody the measurement could be
+ *    reported to. This is the same `null`-tenancy arm `evals/middleware.ts`
+ *    refuses to build a sample on.
+ *
+ * ## The QUALITY half — retaining the mirrored response so it can be SCORED
+ *
+ * `c.get("inferenceShadowEval")` is present ONLY when the online-evaluation
+ * sampler has already cleared this exchange for content capture; see
+ * `evals/shadow-leg.ts` for the whole gate and for why it is a request FROM the
+ * sampler rather than a decision taken here. When it is present this attaches a
+ * `retain` resolver to the mirror and publishes the pending body, which is what
+ * lets the sampler derive the shadow arm's eval sample from the SERVED sample —
+ * same judge, same criteria, same prompt, by value rather than by coincidence.
+ *
+ * When it is absent nothing about the mirror is retained anywhere. That is the
+ * behaviour for a tenant that did not opt in, for a ZERO-DATA-RETENTION tenant,
+ * and for every request the sampler did not select — i.e. for almost all of
+ * them.
+ */
+function withShadowObservation(
+  c: InferenceContext,
+  mirror: ShadowMirror,
+  planned: PlannedRequest,
+): ShadowMirror {
+  const assignment = planned.assignment;
+  const caller = c.get("inferenceCaller");
+  if (assignment === undefined || caller.scope.kind !== "tenant") {
+    return mirror;
+  }
+  const clientRequestId = c.get("requestId");
+  // DERIVED from the client's request id, never random, and computed ONCE here
+  // rather than once per consumer: a retried mirror must overwrite its own leg
+  // row instead of inflating the arm's sample, and the shadow arm's SCORE is
+  // filed under this same id so it cannot collide with the served arm's score
+  // for the same request (`online_eval_scores` is keyed by request + criterion).
+  const legId = `${clientRequestId}~shadow`;
+  const observed: ShadowMirror = {
+    ...mirror,
+    observation: {
+      legId,
+      experimentId: assignment.experimentId,
+      clientRequestId,
+      tenantId: caller.scope.tenantId,
+      ...(caller.projectId === undefined ? {} : { projectId: caller.projectId }),
+      ...(caller.apiKeyId === undefined ? {} : { apiKeyId: caller.apiKeyId }),
+    },
+  };
+
+  const publish = c.get("inferenceShadowEval");
+  if (publish === undefined) return observed;
+
+  let settle: ((body: string | undefined) => void) | undefined;
+  const body = new Promise<string | undefined>((resolve) => {
+    settle = resolve;
+  });
+  publish({
+    legId,
+    experimentId: assignment.experimentId,
+    logicalModel: mirror.logicalModel,
+    // The MIRROR's identity. A sample carrying the primary's provider under the
+    // shadow label would be an arm measured with the other arm's facts.
+    provider: mirror.route.provider,
+    providerModel: mirror.route.providerModel,
+    body,
+  });
+  // The executor above runs synchronously, so `settle` is assigned by the time
+  // this line is reached; the fallback keeps the expression total rather than
+  // asserting it away with `!`.
+  return { ...observed, retain: settle ?? ((): void => undefined) };
 }
 
 /**
@@ -882,7 +1008,7 @@ async function dispatchCandidates(
     // Fire-and-forget. `spawnShadowMirror` returns synchronously, hands the
     // work to `ctx.waitUntil`, and swallows every failure — see `shadow.ts`
     // for the five mechanisms that keep a mirror off the client's response.
-    spawnShadowMirror(deps, planned.shadow, executionCtxOf(c));
+    spawnShadowMirror(deps, withShadowObservation(c, planned.shadow, planned), executionCtxOf(c));
   }
   // `auth.can_use_provider` — the credential's PROVIDER allowlist. Read from the
   // per-request caller (the same value `planUpstream` gates the model on) rather
@@ -917,6 +1043,44 @@ async function dispatchCandidates(
     },
     isRejection: (value): value is InferenceRejection => isRejection(value),
   });
+
+  // #693 — the ARM, contributed to the request log through the same seam the
+  // model and the provider travel on.
+  //
+  // ## The attribution rule, and the boundary it has
+  //
+  // On SUCCESS the arm is the route that ACTUALLY ANSWERED, not the one the
+  // caller was assigned. That keeps `experiment_arm` consistent with the
+  // `provider` / `provider_model` / token columns of the SAME row, and it keeps
+  // the quality comparison honest: #692 scores the response that was served, so
+  // a score filed under `canary` has to be a score of a canary response.
+  //
+  // The cost of that rule, stated here rather than discovered in a report: a
+  // variant that fails and falls back to the primary contributes a `control`
+  // row, so a failure-with-fallback does NOT raise the variant's error rate on
+  // this surface. Those failures are still visible —
+  // `deps.routingMetrics.recordFailure` counts them per provider and the
+  // circuit breaker acts on them — but an operator must not read the variant's
+  // error rate as "every way this variant failed". The alternative
+  // (intention-to-treat: label by the ASSIGNED arm) fixes the error rate and
+  // breaks the score attribution, which is the worse trade for a surface whose
+  // whole purpose is the quality comparison.
+  //
+  // When NOTHING answered there is no served route, so the FIRST candidate —
+  // the arm the caller was actually assigned to — takes the failure. A total
+  // variant outage is therefore attributed to the variant, which is the case
+  // that matters most.
+  const assignment = planned.assignment;
+  if (assignment !== undefined) {
+    const attributed = outcome.ok
+      ? outcome.candidate.route
+      : (planned.candidates[0] as AttemptCandidate).route;
+    c.get("inferenceLog")({
+      experimentId: assignment.experimentId,
+      experimentArm: servedArmFor(assignment, attributed),
+    });
+  }
+
   if (!outcome.ok) {
     return outcome.rejection;
   }
@@ -1554,6 +1718,9 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     c.set("inferenceTokens", scope?.tokens ?? unmeteredTokenGovernor);
     c.set("inferenceLog", scope?.log ?? noInferenceLog);
     c.set("inferenceAttributionDefaults", scope?.attributionDefaults ?? NO_ATTRIBUTION_DEFAULTS);
+    // #693 — `undefined` unless the online-eval sampler asked for this request's
+    // mirror to be retained. See `InferenceRequestScope.scoreShadowLeg`.
+    c.set("inferenceShadowEval", scope?.scoreShadowLeg);
 
     // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
     // provider credential for the platform one before anything is planned.
