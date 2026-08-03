@@ -15111,6 +15111,7 @@
           "admin-write"
         ],
         "summary": "Create a DB-backed permission action.",
+        "description": "OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: [\"*\"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has(\"*\")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
@@ -15233,6 +15234,7 @@
           "admin-read"
         ],
         "summary": "Delete a permission action.",
+        "description": "OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: [\"*\"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has(\"*\")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
@@ -15356,6 +15358,7 @@
           "admin-write"
         ],
         "summary": "Create a role from permission action keys.",
+        "description": "OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: [\"*\"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has(\"*\")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
@@ -15478,6 +15481,7 @@
           "admin-read"
         ],
         "summary": "Delete a DB-backed role.",
+        "description": "OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: [\"*\"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has(\"*\")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
@@ -15610,6 +15614,7 @@
           "admin-write"
         ],
         "summary": "Bind a DB-backed role to a tenant.",
+        "description": "OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: [\"*\"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has(\"*\")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {
@@ -15690,6 +15695,7 @@
           "admin-read"
         ],
         "summary": "Remove a tenant role binding.",
+        "description": "OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: [\"*\"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has(\"*\")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.",
         "x-ferrogate-contract": {
           "visibility": "admin",
           "auth": {

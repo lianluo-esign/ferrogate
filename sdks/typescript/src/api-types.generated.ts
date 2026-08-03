@@ -4442,7 +4442,10 @@ export interface paths {
          */
         get: operations["listPermissions"];
         put?: never;
-        /** Create a DB-backed permission action. */
+        /**
+         * Create a DB-backed permission action.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         post: operations["createPermission"];
         delete?: never;
         options?: never;
@@ -4475,7 +4478,10 @@ export interface paths {
         get: operations["getPermission"];
         put?: never;
         post?: never;
-        /** Delete a permission action. */
+        /**
+         * Delete a permission action.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         delete: operations["deletePermission"];
         options?: never;
         head?: never;
@@ -4506,7 +4512,10 @@ export interface paths {
          */
         get: operations["listRoles"];
         put?: never;
-        /** Create a role from permission action keys. */
+        /**
+         * Create a role from permission action keys.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         post: operations["createRole"];
         delete?: never;
         options?: never;
@@ -4539,7 +4548,10 @@ export interface paths {
         get: operations["getRole"];
         put?: never;
         post?: never;
-        /** Delete a DB-backed role. */
+        /**
+         * Delete a DB-backed role.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         delete: operations["deleteRole"];
         options?: never;
         head?: never;
@@ -4567,7 +4579,10 @@ export interface paths {
         /** List role bindings for a tenant. */
         get: operations["listTenantRoles"];
         put?: never;
-        /** Bind a DB-backed role to a tenant. */
+        /**
+         * Bind a DB-backed role to a tenant.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         post: operations["bindTenantRole"];
         delete?: never;
         options?: never;
@@ -4596,7 +4611,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Remove a tenant role binding. */
+        /**
+         * Remove a tenant role binding.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         delete: operations["unbindTenantRole"];
         options?: never;
         head?: never;
