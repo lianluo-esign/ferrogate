@@ -143,3 +143,68 @@ export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
     },
   };
 }
+
+/**
+ * The same trick for `TenantDataObject` (#820) — the namespace
+ * `apps/control-plane` borrows with `script_name = "ferrogate-gateway"` so that
+ * `idFromName(tenantId)` names the SAME object from both Workers.
+ *
+ * A SECOND function rather than a second class on the one above, because the two
+ * are never needed in the same session: `apps/mcp` and `apps/agent-runtime`
+ * borrow only RATE_LIMIT, `apps/control-plane` borrows only TENANT_DATA, and a
+ * session may contain exactly ONE auxiliary worker named `ferrogate-gateway`.
+ * Merging them would publish a class into sessions whose Worker never binds it —
+ * harmless today and exactly the kind of harmless that makes a later
+ * "why is this here" edit break a suite it has no visible connection to.
+ *
+ * `useSQLite: true` mirrors the gateway's `new_sqlite_classes = ["TenantDataObject"]`.
+ * Getting it wrong locally would exercise the key-value backend against a class
+ * whose entire implementation is `ctx.storage.sql`, so the suite would fail
+ * loudly rather than silently — but it would fail for a reason that has nothing
+ * to do with the code under test.
+ */
+export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
+  const { name, compatibilityDate } = gatewayIdentity(gatewayAppRoot);
+
+  const built = buildSync({
+    stdin: {
+      contents: [
+        // The SAME specifier `apps/gateway/src/worker.ts:140` re-exports, so a
+        // move of the class breaks this harness instead of detaching it.
+        'export { TenantDataObject } from "@ferrogate/storage/durable-objects";',
+        "export default {",
+        "  fetch() {",
+        '    return new Response("ferrogate-gateway test aux worker: RPC only", { status: 404 });',
+        "  },",
+        "};",
+      ].join("\n"),
+      resolveDir: fileURLToPath(gatewayAppRoot),
+      sourcefile: "tenant-data-aux-worker-entry.ts",
+      loader: "ts",
+    },
+    bundle: true,
+    format: "esm",
+    target: "es2022",
+    platform: "neutral",
+    external: ["cloudflare:workers"],
+    write: false,
+  });
+
+  const script = built.outputFiles[0]?.text;
+  if (script === undefined || script.length === 0) {
+    throw new Error("tenant-data aux worker: esbuild produced no output for the object bundle");
+  }
+  if (!script.includes("TenantDataObject")) {
+    throw new Error("tenant-data aux worker: bundle does not contain TenantDataObject");
+  }
+
+  return {
+    name,
+    compatibilityDate,
+    compatibilityFlags: ["nodejs_compat"],
+    modules: [{ type: "ESModule" as const, path: "index.mjs", contents: script }],
+    durableObjects: {
+      TENANT_DATA: { className: "TenantDataObject", useSQLite: true },
+    },
+  };
+}

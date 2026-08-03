@@ -206,6 +206,19 @@ export * from "./tenant-rest.js";
  * the note below on why the CLASS still ships through a subpath.
  */
 export * from "./tenant-do.js";
+/**
+ * TENANT ONBOARDING (#820): the tenant's own model catalog and the seeder that
+ * fills it once, plus the provisioner that refuses an unregistered tenant BEFORE
+ * addressing its object, records resumable state on `tenant_databases`, and
+ * states the deprovisioning retention decision as code rather than as a guess.
+ *
+ * Both are plain `D1Database` consumers — they reach a tenant through the
+ * `TenantDatabaseRouter` port and never through a `TenantDataObject` stub — so
+ * they run identically over `native_binding` and `durable_object`, and neither
+ * pulls `cloudflare:workers` into this barrel's graph.
+ */
+export * from "./tenant-model-catalog.js";
+export * from "./tenant-provisioning.js";
 export * from "./d1/index.js";
 
 /**
