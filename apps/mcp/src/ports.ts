@@ -747,11 +747,11 @@ export class AutoApproval implements ApprovalPort {
  * production path is now {@link D1R2AssetReader} (D1 + R2), selected by
  * {@link resolvePorts} when both bindings are present.
  *
- * The R2 bucket binding (`[[r2_buckets]]` with `binding = "ASSETS"`) is
- * declared in `apps/mcp/wrangler.toml` at line 260. The tenant database
- * binding (`TENANT_DB`) is declared at line 289. Both are flat bindings —
- * tenant isolation is provided by the `WHERE tenant_id = ?1` predicate on
- * every query, not by per-tenant database routing.
+ * The `[[r2_buckets]]` stanza binding `ASSETS` and the `[[d1_databases]]`
+ * stanza binding `TENANT_DB` are declared in `apps/mcp/wrangler.toml`. Both
+ * are flat bindings — tenant isolation is provided by the
+ * `WHERE tenant_id = ?1` predicate on every query, not by per-tenant database
+ * routing.
  *
  * NOTE (memory: the live account has R2 unactivated) that a bucket must be
  * enabled on the account first; the `[[r2_buckets]]` stanza against an
@@ -821,8 +821,9 @@ function assetKey(tenantId: string, assetType: string, name: string, version: st
  * the `storage_uri` column as the object key.
  *
  * Selected by {@link resolvePorts} when BOTH `env.ASSETS` and `env.TENANT_DB`
- * are present. Falls back to {@link InMemoryAssets} when either is absent
- * (offline / tests).
+ * are present and `FG_DEV_IN_MEMORY_PORTS !== "1"`. Uses
+ * {@link InMemoryAssets} when either binding is absent or when the dev posture
+ * explicitly selects in-memory ports.
  *
  * ## #366 withholding
  *
@@ -831,9 +832,10 @@ function assetKey(tenantId: string, assetType: string, name: string, version: st
  * returns `{ kind: "not_found" }` — indistinguishable from a missing one.
  *
  * On the LISTING side, this class returns every row (including hidden ones)
- * with the `downloadable` field set to `false`. The actual withholding — the
- * filter that removes hidden assets from the MCP resource listing — happens
- * one layer up in {@link dispatch.ts}:
+ * with `downloadable` computed per row: `true` only for visible, non-yanked
+ * rows, and `false` otherwise. The actual withholding — the filter that
+ * removes hidden assets from the MCP resource listing — happens one layer up
+ * in {@link dispatch.ts}:
  *
  * ```ts
  * const downloadable = assets.filter((asset) => asset.downloadable);
@@ -1650,9 +1652,9 @@ export interface McpEnv {
    * the object at `storage_uri` from this bucket.
    *
    * OPTIONAL, and its absence is a graceful degradation: {@link resolvePorts}
-   * falls back to {@link InMemoryAssets} when either this or {@link TENANT_DB}
-   * is absent, so offline / test environments continue to work with the
-   * in-memory store.
+   * uses {@link InMemoryAssets} when either this or {@link TENANT_DB} is absent,
+   * or when `FG_DEV_IN_MEMORY_PORTS === "1"` selects the dev posture, so
+   * offline / test environments continue to work with the in-memory store.
    *
    * NOTE: the live account (ferrogate) has R2 unactivated. A deploy with this
    * binding against an account without the R2 plan fails with error 10042.
@@ -1671,15 +1673,15 @@ export interface McpEnv {
    * fetching the object body from {@link ASSETS}. The tenant database is a
    * FLAT binding — tenant isolation is provided by the `WHERE tenant_id = ?1`
    * predicate on every query, exactly as `apps/gateway`'s
-   * `D1AssetMetadataStore` works. There is no per-tenant database routing
-   * for this reader: `resolvePorts` constructs
-   * `new D1R2AssetReader(env.TENANT_DB, env.ASSETS)` unconditionally, and
-   * the MCP Worker reads no routing variable for the asset surface.
+   * `D1AssetMetadataStore` works. There is no per-tenant database routing for
+   * this reader: when selected, {@link D1R2AssetReader} receives the flat
+   * `TENANT_DB` binding directly, and the MCP Worker reads no routing variable
+   * for the asset surface.
    *
    * OPTIONAL, and its absence is a graceful degradation: {@link resolvePorts}
-   * falls back to {@link InMemoryAssets} when either this or {@link ASSETS}
-   * is absent, so offline / test environments continue to work with the
-   * in-memory store.
+   * uses {@link InMemoryAssets} when either this or {@link ASSETS} is absent,
+   * or when `FG_DEV_IN_MEMORY_PORTS === "1"` selects the dev posture, so
+   * offline / test environments continue to work with the in-memory store.
    */
   TENANT_DB?: D1Database;
 

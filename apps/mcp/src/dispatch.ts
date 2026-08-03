@@ -27,30 +27,30 @@ import type { JsonValue } from "@ferrogate/core";
 
 import { mcpJsonRpcMethodScopes } from "./contract.js";
 import {
-  JsonRpcErrorCode,
-  type JsonRpcResponse,
-  type McpIngressRequest,
   decodeMcpRequest,
   jsonRpcError,
   jsonRpcResult,
+  JsonRpcErrorCode,
   renderJsonRpcResponse,
+  type JsonRpcResponse,
+  type McpIngressRequest,
 } from "./jsonrpc.js";
-import { type DispatchContext, type McpPorts, hasScope, isJsonObjectValue } from "./ports.js";
 import {
-  FERROGATE_SERVER_INFO,
-  MCP_PROTOCOL_VERSION,
-  SERVER_INFO_META,
-  SUPPORTED_MCP_PROTOCOL_VERSIONS,
   completeModernResult,
+  FERROGATE_SERVER_INFO,
   ingressErrorCode,
   ingressErrorData,
   ingressErrorDisplay,
   ingressErrorMessage,
   ingressMode,
   isSupportedModernMethod,
+  MCP_PROTOCOL_VERSION,
   negotiateProtocolVersion,
+  SERVER_INFO_META,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
   validateIngress,
 } from "./protocol.js";
+import { hasScope, isJsonObjectValue, type DispatchContext, type McpPorts } from "./ports.js";
 import {
   assetContentEntry,
   assetUri,
@@ -478,14 +478,13 @@ async function resourcesRead(
         );
     }
   }
-
   ports.audit.record(
     auditEvent(
       context,
       "resource.read",
       assetUri(read.asset.assetType, read.asset.name, read.asset.version),
       "success",
-      `read asset resource ${read.asset.name}@${read.asset.version}`,
+      `read asset resource ${read.asset.name}@${read.asset.version} (${read.asset.sizeBytes} bytes)`,
     ),
   );
   return jsonRpcResult(rpc.id, { contents: [assetContentEntry(read.asset, read.content)] });

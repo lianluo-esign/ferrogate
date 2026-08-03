@@ -660,7 +660,6 @@ async function executeBuiltinTool(
   if (!read.ok) {
     return { ok: false, error: assetReadHttpError(read.error, assetType, name, version) };
   }
-
   return { ok: true, content: { content: [assetContentEntry(read.asset, read.content)] } };
 }
 
