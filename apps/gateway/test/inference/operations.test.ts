@@ -113,17 +113,14 @@ describe("POST /v1/messages", () => {
       const body = upstream.body as Record<string, unknown>;
       expect(body["model"]).toBe("claude-3-5-sonnet-20241022");
       expect(body["max_tokens"]).toBe(256);
-      // The system prompt travels as a `system`-ROLE message, not as the
-      // top-level `system` field. `to_chat_completions` moves it into
-      // `messages[0]`, and the Anthropic adapter only lifts a top-level
-      // `system` that was already there (the `/v1/chat/completions` ingress
-      // case). Rust pins this at `messages_test.rs:139`; see the fidelity note
-      // in `src/inference/anthropic.ts`.
-      expect(body["system"]).toBeUndefined();
-      expect((body["messages"] as Array<Record<string, unknown>>)[0]).toEqual({
-        role: "system",
-        content: "be concise",
-      });
+      // The system prompt is the TOP-LEVEL parameter. `to_chat_completions`
+      // folds it into `messages[0]` as a `system`-role turn on the way in
+      // because that is the shape the OpenAI-side estimator and adapters read,
+      // and the Anthropic adapter lifts it back out on the way to the wire —
+      // the Messages API accepts only `user` and `assistant` turns, so the old
+      // body was one a real upstream would have rejected outright (issue #725).
+      expect(body["system"]).toBe("be concise");
+      expect(body["messages"]).toEqual([{ role: "user", content: "hi" }]);
     } finally {
       provider.restore();
     }

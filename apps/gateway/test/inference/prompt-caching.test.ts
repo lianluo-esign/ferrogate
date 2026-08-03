@@ -138,15 +138,17 @@ describe("the directive reaches the selected family's mechanism", () => {
       );
       expect(res.status).toBe(200);
       const body = provider.lastRequest().body as Record<string, any>;
-      expect(body["messages"][0]).toEqual({
-        role: "system",
-        content: [
-          { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
-        ],
-      });
+      // The breakpoint lands on the top-level `system` parameter, which is
+      // where Anthropic's static prefix actually lives — #725 lifted the
+      // system-role turn out of `messages`, so the prefix and the breakpoint
+      // are now the same object rather than a role the API does not accept.
+      expect(body["system"]).toEqual([
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+      ]);
       // The volatile turn stays OUTSIDE the cached prefix, or the cache would
       // be rewritten on every request and never read.
-      expect(JSON.stringify(body["messages"][1])).not.toContain("cache_control");
+      expect(body["messages"]).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
+      expect(JSON.stringify(body["messages"])).not.toContain("cache_control");
     } finally {
       provider.restore();
     }
@@ -271,10 +273,9 @@ describe("preparing one family never rewrites what another family sends", () => 
       expect(provider.requests).toHaveLength(2);
       const anthropic = provider.requests[1]!;
       expect(anthropic.url).toContain("api.anthropic.example");
-      expect((anthropic.body as Record<string, any>)["messages"][0]).toEqual({
-        role: "system",
-        content: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-      });
+      expect((anthropic.body as Record<string, any>)["system"]).toEqual([
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+      ]);
     } finally {
       provider.restore();
     }
@@ -380,12 +381,10 @@ describe("the /v1/messages ingress keeps the caller's caching intent", () => {
       });
       expect(res.status).toBe(200);
       const body = provider.lastRequest().body as Record<string, any>;
-      expect(body["messages"][0]).toEqual({
-        role: "system",
-        content: [
-          { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
-        ],
-      });
+      expect(body["system"]).toEqual([
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+      ]);
+      expect(body["messages"]).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
       // FerroGate's own member never reaches a provider.
       expect(JSON.stringify(body)).not.toContain("prompt_cache");
     } finally {

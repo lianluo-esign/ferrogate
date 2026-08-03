@@ -384,6 +384,38 @@ describe("the members FerroGate owns never reach the wire", () => {
 });
 
 describe("a member no one has classified is forwarded, never dropped", () => {
+  /**
+   * The INBOUND half of the same mechanism claim (issue #725).
+   *
+   * `/v1/messages` is translated into the OpenAI grammar before it is routed,
+   * and that translation was an allowlist too — `model`, `max_tokens`,
+   * `temperature`, `top_p`, `stream`, which #690 had already had to widen once
+   * for `prompt_cache`. So a member Anthropic has and OpenAI does not was lost
+   * at the DOOR, before the adapter this file mostly tests ever saw it: a
+   * `/v1/messages` caller could not reach `top_k` or `thinking` on an Anthropic
+   * upstream through its own protocol.
+   *
+   * These four are asserted together because they share one code path — there
+   * is no per-member code to forward, which is the point — but each is checked
+   * on its own so a partial fix cannot pass.
+   */
+  it("carries the Messages parameters that have no OpenAI name at all", async () => {
+    const out = await sent(
+      "/v1/messages",
+      messagesRequest({
+        top_k: 5,
+        thinking: { type: "enabled", budget_tokens: 1024 },
+        service_tier: "auto",
+        container: "container_725",
+      }),
+    );
+    expect(out.status).toBe(200);
+    expect(out.body["top_k"]).toBe(5);
+    expect(out.body["thinking"]).toEqual({ type: "enabled", budget_tokens: 1024 });
+    expect(out.body["service_tier"]).toBe("auto");
+    expect(out.body["container"]).toBe("container_725");
+  });
+
   it("carries an Anthropic-native member the OpenAI grammar has no name for", async () => {
     // This is the mechanism claim, not a feature request. The old code was an
     // ALLOWLIST, so the next field Anthropic adds was lost by default and

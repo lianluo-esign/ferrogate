@@ -62,6 +62,7 @@ import {
   VertexAiAdapter,
   WorkersAiAdapter,
 } from "@ferrogate/providers";
+import { chatCompletionsToMessages } from "./anthropic.js";
 import type {
   CloudflareAiGatewaySurface,
   Json,
@@ -490,47 +491,37 @@ export const anthropicAdapter: ProviderAdapter = {
       return invalid;
     }
 
-    // Anthropic's Messages API is not a superset of the OpenAI body: the adapter
-    // rebuilds a minimal native body rather than forwarding unknown members,
-    // because Anthropic rejects unknown top-level fields. `max_tokens` is
-    // REQUIRED there, hence the 1024 default when the caller omitted it.
+    // Anthropic's Messages API is not a superset of the OpenAI body, so the
+    // body has to be TRANSLATED rather than forwarded. It used to be REBUILT
+    // instead, from a five-member allowlist, which silently dropped the
+    // caller's `tools`, `tool_choice`, `temperature`, `stop` and more while
+    // answering 200 — issue #725. `chatCompletionsToMessages` classifies the
+    // whole body: re-spelled, gateway-owned, refused, or forwarded verbatim.
     const source = plan.body;
-    const draft: Record<string, Json> = {
-      model: plan.providerModel,
-      messages: (source["messages"] ?? []) as Json,
-      max_tokens: (source["max_tokens"] ?? 1024) as Json,
-      stream: plan.stream,
-    };
-    if (source["system"] !== undefined) {
-      draft["system"] = source["system"] as Json;
-    }
-    if (plan.operation === "responses") {
-      // `prepare_responses` additionally forwards the canonicalized tool fields.
-      if (source["tools"] !== undefined) {
-        draft["tools"] = source["tools"] as Json;
-      }
-      if (source["tool_choice"] !== undefined) {
-        draft["tool_choice"] = source["tool_choice"] as Json;
-      }
-    }
-    // Every subtree the draft just took (`messages`, `system`, `tools`) is
-    // still the CALLER's object, shared with every other candidate on the
-    // ladder — so a breakpoint or a coercion tool placed below would rewrite
-    // what a later OpenAI candidate sends. `ownBody` is the copy that makes
-    // this family's preparation the caller's business only, and it is the only
-    // way to produce the argument the `apply*` helpers accept: the next adapter
-    // that needs to normalise a field cannot skip it by forgetting to.
-    const anthropicBody = ownBody(draft);
-
-    // Structured output (issue #674). This adapter REBUILDS a minimal native
-    // body, which is exactly why `response_format` used to vanish here while
-    // surviving to an OpenAI upstream — a failover between the two silently
-    // changed the caller's output contract. Anthropic has no `response_format`,
-    // so the requirement becomes a forced tool call, and anything Anthropic
-    // cannot express is refused rather than sent unconstrained. The translation
-    // itself is `@ferrogate/providers`' canonical one, NOT a second copy of it:
-    // this file is a port of `anthropic.rs`, and the two must not drift.
     try {
+      const anthropicBody = ownBody(
+        plan.operation === "responses"
+          ? // `/v1/responses` reaches this adapter carrying the RESPONSES
+            // grammar (`input`, flattened tools), not a chat body, so the chat
+            // translation above would mis-read it. `prepare_responses`' own
+            // minimal rebuild is kept until that surface gets the same
+            // treatment; it at least forwards the canonicalized tool fields.
+            responsesDraft(plan, source)
+          : (chatCompletionsToMessages(source as Record<string, unknown>, {
+              model: plan.providerModel,
+              stream: plan.stream,
+              providerKind: "anthropic",
+            }) as Record<string, Json>),
+      );
+
+      // Structured output (issue #674). This adapter does not forward the
+      // caller's body, which is exactly why `response_format` used to vanish
+      // here while surviving to an OpenAI upstream — a failover between the two
+      // silently changed the caller's output contract. Anthropic has no
+      // `response_format`, so the requirement becomes a forced tool call, and
+      // anything Anthropic cannot express is refused rather than sent
+      // unconstrained. The translation itself is `@ferrogate/providers`'
+      // canonical one, NOT a second copy of it.
       const structured =
         plan.operation === "responses"
           ? structuredOutputFromResponsesBody(source as Json)
@@ -539,33 +530,61 @@ export const anthropicAdapter: ProviderAdapter = {
         applyStructuredOutputToAnthropic(anthropicBody, structured, "anthropic");
       }
       // Prompt caching (issue #690), same story one field over: this adapter
-      // rebuilds a minimal native body, so a caller's caching intent used to
+      // does not forward the caller's body, so a caller's caching intent used to
       // vanish here while an OpenAI upstream cached the prefix automatically —
       // the same request, two different bills, with no way to tell which one
       // ran. The directive becomes Anthropic's `cache_control` breakpoint (or
       // strips the caller's markers, for `mode: "off"`), using the SAME
       // canonical translation as `@ferrogate/providers`, not a second copy.
+      // Applied AFTER the translation, so the breakpoint lands on the LIFTED
+      // top-level `system` — the real static prefix — rather than on a
+      // `system`-role turn that no longer exists.
       const promptCache = promptCacheFromBody(source as Json);
       if (promptCache !== undefined) {
         applyPromptCacheToAnthropic(anthropicBody, promptCache, "anthropic");
       }
+
+      return {
+        ok: true,
+        request: {
+          provider: plan.route.provider,
+          method: "POST",
+          endpoint: endpoint(plan.route.baseUrl, "/messages"),
+          headers: anthropicHeaders(plan.route.apiKey, plan.route.authScheme ?? "x-api-key"),
+          body: anthropicBody,
+          stream: plan.stream,
+        },
+      };
     } catch (error) {
       return { ok: false, error: packageAdapterError(error) };
     }
-
-    return {
-      ok: true,
-      request: {
-        provider: plan.route.provider,
-        method: "POST",
-        endpoint: endpoint(plan.route.baseUrl, "/messages"),
-        headers: anthropicHeaders(plan.route.apiKey, plan.route.authScheme ?? "x-api-key"),
-        body: anthropicBody,
-        stream: plan.stream,
-      },
-    };
   },
 };
+
+/**
+ * The pre-#725 minimal rebuild, kept for `/v1/responses` only.
+ *
+ * That surface hands this adapter a RESPONSES body — `input` rather than
+ * `messages`, tools flattened to `{type:"function",name,parameters}` — so the
+ * chat translation would read the wrong members off it. Translating it properly
+ * means porting `CanonicalAiRequest::into_anthropic_body`, which is its own
+ * slice; until then this at least keeps the behavior #674 and #690 were built
+ * on rather than replacing one wrong body with another.
+ */
+function responsesDraft(plan: UpstreamPlan, source: Record<string, unknown>): Record<string, Json> {
+  const draft: Record<string, Json> = {
+    model: plan.providerModel,
+    messages: (source["messages"] ?? []) as Json,
+    max_tokens: (source["max_tokens"] ?? 1024) as Json,
+    stream: plan.stream,
+  };
+  for (const key of ["system", "tools", "tool_choice"]) {
+    if (source[key] !== undefined) {
+      draft[key] = source[key] as Json;
+    }
+  }
+  return draft;
+}
 
 // ---------------------------------------------------------------------------
 // The three OpenAI-compatible-on-the-wire families
