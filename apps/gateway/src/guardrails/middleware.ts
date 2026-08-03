@@ -245,8 +245,9 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
   //
   // A continuation is distinct from this GET binding. Its chain is assembled
   // inside the inference router, so the request-stage path below publishes the
-  // already-resolved engine through `conversation-replay.ts`; the router calls
-  // it at assembly only for turns written under another key (#779).
+  // already-resolved engine and selected revision marker through
+  // `conversation-replay.ts`; the router calls it at assembly for turns whose
+  // screening context differs (#779, #808).
   getResponse: {
     protocol: "responses",
     dialect: "openai.responses",
@@ -543,9 +544,9 @@ export function guardrails(
         // only distinguishes enforcement from shadow.
         plan = engine.streamingGuardrailPlan(context);
 
-        publishConversationReplayScreener(
-          inbound,
-          async ({ requestId: replayId, input, response }) => {
+        publishConversationReplayScreener(inbound, {
+          policyRevisionMarker: engine.policyRevisionMarker(context),
+          screen: async ({ requestId: replayId, input, response }) => {
             const replayRequestContext: GuardrailEvaluationContext = {
               ...context,
               requestId: replayId,
@@ -609,7 +610,7 @@ export function guardrails(
               };
             }
           },
-        );
+        });
 
         await next();
       } else {

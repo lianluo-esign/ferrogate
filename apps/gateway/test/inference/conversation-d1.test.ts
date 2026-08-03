@@ -38,6 +38,7 @@ function turn(
     responseId,
     previousResponseId,
     screeningApiKeyId: "key_test",
+    screeningPolicyRevision: '["policy@1"]',
     turnIndex,
     model: "gpt-4o-mini",
     input: [{ role: "user", content: `ask ${turnIndex}` }],
@@ -81,6 +82,11 @@ describe("D1ConversationStore", () => {
       "key_test",
       "key_test",
       "key_test",
+    ]);
+    expect(chain.ok && chain.turns.map((t) => t.screeningPolicyRevision)).toEqual([
+      '["policy@1"]',
+      '["policy@1"]',
+      '["policy@1"]',
     ]);
     // The stored body round-trips through JSON intact — the chain replays the
     // OUTPUT ITEMS, so a lossy round trip would silently flatten the transcript.

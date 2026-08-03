@@ -61,31 +61,25 @@
  * binding above re-decides under that reader's own live policy.
  *
  * ============================================================================
- * CROSS-KEY CONTINUATIONS (#779)
+ * CONTINUATIONS ACROSS SCREENING CONTEXTS (#779, #808)
  * ============================================================================
  *
  * This module still does not screen a continuation: it cannot, because the
  * chain is assembled inside the inner inference router. The router now closes
  * that leg at the assembly point:
  *
- *  - each row records the screening API-key id where known. The value is NULL
- *    for rows predating the column and callers without an API-key id. A NULL is
- *    foreign to a continuing caller with a known id, but compares as the same
- *    credential when the continuing caller also has no id;
- *  - the guardrail middleware publishes its already-resolved engine as a
- *    request-scoped replay capability; and
- *  - `handlers.ts::prepareConversation` re-decides stored input and output under
- *    the continuing key only when that id differs.
+ * Each row records the screening API-key id where known and a canonical marker
+ * for the complete active policy-revision set selected for that request. The
+ * marker is derived from the same `policiesFor(selection)` result the engine
+ * evaluates; it does not enumerate selection dimensions in this module.
  *
- * That id pins the credential, NOT the policy. `GuardrailEngine` selects policy
- * on every evaluation by organization/tenant, project, workspace, API key,
- * service account, gateway config, model, provider and managed-action scope.
- * Because replay is gated only on the API-key id, a same-key continuation whose
- * other selection inputs differ skips replay screening; issue #808 tracks that
- * gap. The current cost is O(foreign-credential turns), with zero detector work
- * for same-credential turns. The stored row remains byte-for-byte what its
- * writer received; replay screening works on a clone and never rewrites shared
- * state.
+ * `handlers.ts::prepareConversation` re-screens a stored turn when either its
+ * credential id or policy marker differs from the continuing request. A NULL
+ * policy marker is unknown (including rows predating migration 0007) and always
+ * re-screens. The guardrail middleware publishes the current marker and its
+ * already-resolved engine as one request-scoped replay capability; if that
+ * capability is missing, continuation refuses before provider dispatch. Replay
+ * screening works on a clone and does not rewrite the stored row.
  *
  * ============================================================================
  * THE SEAM

@@ -16,7 +16,7 @@ import { InMemoryConversationStore } from "../../src/inference/conversation-stor
 import type { StoredResponseTurn } from "../../src/inference/conversation-store.js";
 import { MAX_CONVERSATION_TURNS } from "../../src/inference/conversation.js";
 import type { Caller, InferenceDeps } from "../../src/inference/index.js";
-import { OPENAI_ROUTE, errorBody, harness, tenantCaller } from "./fixtures.js";
+import { ALL_ROUTES, OPENAI_ROUTE, errorBody, harness, tenantCaller } from "./fixtures.js";
 import { interceptProviderFetch, providerJson } from "./provider-mock.js";
 
 /**
@@ -136,6 +136,44 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
       expect(res.status).toBe(404);
       expect((await errorBody(res)).error.code).toBe("previous_response_not_found");
       // The refusal happens BEFORE dispatch: no provider call, nothing billed.
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("fails closed when a foreign turn needs screening but no screener is available", async () => {
+    const store = new InMemoryConversationStore();
+    await store.append(
+      { tenantId: "acme", projectId: "" },
+      {
+        responseId: "resp_foreign_unscreened",
+        previousResponseId: null,
+        screeningApiKeyId: "key_other",
+        turnIndex: 0,
+        model: "gpt-4o-mini",
+        input: [{ role: "user", content: "stored question" }],
+        response: responseBody("stored answer", "resp_foreign_unscreened"),
+        createdAtUnix: 0,
+        expiresAtUnix: 4_000_000_000,
+      },
+    );
+    const provider = interceptProviderFetch(() => providerJson(responseBody("must not dispatch")));
+    try {
+      const h = harness(
+        { conversations: store, caller: callerFor("acme") },
+        ALL_ROUTES,
+        {},
+        { conversationReplayScreener: false },
+      );
+      const res = await h.post("/v1/responses", {
+        model: "gpt-4o-mini",
+        input: "continue",
+        previous_response_id: "resp_foreign_unscreened",
+      });
+
+      expect(res.status).toBe(503);
+      expect((await errorBody(res)).error.code).toBe("guardrail_screening_unavailable");
       expect(provider.requests).toHaveLength(0);
     } finally {
       provider.restore();

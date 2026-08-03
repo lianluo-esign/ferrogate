@@ -1,6 +1,6 @@
 /**
- * The request-scoped capability used when `/v1/responses` replays a turn that
- * was screened under another credential (#779).
+ * The request-scoped capability used when `/v1/responses` replays a turn whose
+ * screening credential or selected policy revision differs (#779, #808).
  *
  * The guardrail middleware owns the compiled engine and policy context; the
  * inference router owns chain assembly. A WeakMap keyed by their shared outer
@@ -17,9 +17,11 @@ export type ConversationReplayScreeningResult =
   | { readonly ok: true; readonly response: Record<string, unknown> }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-export type ConversationReplayScreener = (
-  input: ConversationReplayScreeningInput,
-) => Promise<ConversationReplayScreeningResult>;
+export interface ConversationReplayScreener {
+  /** Canonical identity of every active policy revision selected for this request. */
+  readonly policyRevisionMarker: string;
+  screen(input: ConversationReplayScreeningInput): Promise<ConversationReplayScreeningResult>;
+}
 
 const SCREENERS = new WeakMap<Request, ConversationReplayScreener>();
 
