@@ -72,6 +72,11 @@
  * for the complete active policy-revision set selected for that request. The
  * marker is derived from the same `policiesFor(selection)` result the engine
  * evaluates; it does not enumerate selection dimensions in this module.
+ * Marker equality implies an equivalent verdict only when screening is a pure
+ * function of that policy set and content: `custom_http` receives `protocol`,
+ * `stage`, tenant `organization_id`, `team_id`, `project_id`, `user_id` and
+ * `api_key_id`, plus `model`, `provider`, `text` and `segments`, so it may decide
+ * differently for the same policy set in different request contexts.
  *
  * `handlers.ts::prepareConversation` re-screens a stored turn when either its
  * credential id or policy marker differs from the continuing request. A NULL
