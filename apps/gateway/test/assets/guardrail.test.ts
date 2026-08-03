@@ -13,6 +13,33 @@
  * `guardrailDepsFromEnv`) over the REAL gateway app with a REAL
  * `PolicyRevision` and a REAL detector. Nothing is stubbed to a convenient
  * verdict, so a screener that is built but never MOUNTED fails here.
+ *
+ * ============================================================================
+ * MUTATION LEDGER — what each of these actually holds
+ * ============================================================================
+ *
+ * This repo's dominant defect mode is correct code with a green test that does
+ * not hold it, so every claim below was measured by BREAKING the source and
+ * counting the red. Each mutation deleted a complete expression (none produced
+ * a compile error, and vitest reported the full 24 every time — a "no tests"
+ * run would have proved nothing).
+ *
+ * | # | mutation                                                        | red |
+ * |---|-----------------------------------------------------------------|-----|
+ * | 1 | `handlers.ts`: drop `withAssetGuardrailScreening` from the chain |   9 |
+ * | 2 | `service.ts`: delete the `screenBundleFiles?.(…)` call           |   5 |
+ * | 3 | `service.ts`: drop the per-file verdict from the CAS target      |   5 |
+ * | 4 | `guardrail-screener.ts`: remove the byte ceiling entirely        |   2 |
+ * | 5 | `service.ts`: the CAS promotes to `visible` whatever the verdict |   5 |
+ * | 6 | a `block`-mode MATCH no longer quarantines                       |   7 |
+ * | 7 | a `block`-mode UNDECIDABLE no longer withholds                   |   1 |
+ * | 8 | `strictestVisibility` returns its left operand                   |   9 |
+ * | 9 | the per-tenant mode override is ignored                          |   1 |
+ * |10 | the segment id stops carrying the bundle-relative path           |   1 |
+ *
+ * (5) is the one the issue asks for by name: it proves a screener verdict
+ * actually WITHHOLDS through the existing `AND visibility = 'pending_scan'`
+ * CAS, rather than being a label the read path ignores.
  */
 import { describe, expect, test } from "vitest";
 import {
