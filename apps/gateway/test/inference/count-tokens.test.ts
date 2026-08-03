@@ -122,13 +122,6 @@ const INPUT_TOKEN_GOLDENS: readonly Golden[] = [
     // this row is the one that fails if the scalar count is ever regressed.
     derivation: "3 + 4",
   },
-  {
-    name: "no turns at all reserves nothing",
-    body: { messages: [] },
-    inputTokens: 0,
-    // scalars 0 -> floor(3/4) = 0; overhead 0.
-    derivation: "0 + 0",
-  },
 ];
 
 /** The two provider families `/v1/messages` can be served by. */
@@ -150,6 +143,13 @@ describe("POST /v1/messages/count_tokens — golden arithmetic", () => {
         expect(await res.json()).toEqual({ input_tokens: golden.inputTokens });
       });
     }
+  }
+
+  for (const { family, model } of FAMILIES) {
+    it(`${family}: empty messages are refused with 400 (issue #727)`, async () => {
+      const res = await countTokens(model, { messages: [] });
+      expect(res.status).toBe(400);
+    });
   }
 
   it("returns the Anthropic-native shape and nothing else", async () => {
@@ -341,7 +341,7 @@ describe("the deployed Worker guards it like every other /v1 operation", () => {
     return await SELF.fetch(`${BASE}${PATH}`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ model: "m", messages: [] }),
+      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
     });
   }
 

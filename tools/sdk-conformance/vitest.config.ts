@@ -86,7 +86,12 @@ const PROVIDERS = [
 ];
 
 const MODELS = [
-  { name: "gpt-4o-mini", provider: "openai-upstream", provider_model: "gpt-4o-mini-2024-07-18" },
+  {
+    name: "gpt-4o-mini",
+    provider: "openai-upstream",
+    provider_model: "gpt-4o-mini-2024-07-18",
+    context_window: 128_000,
+  },
   {
     name: "claude-3-5-sonnet-20241022",
     provider: "anthropic-upstream",

@@ -75,6 +75,27 @@ describe("GET /v1/models", () => {
     expect(res.headers.get("x-request-id")).toBe("fg-000000000000002a");
     expect(res.headers.get("x-ferrogate-runtime")).toBe("workers");
   });
+
+  it("carries the request-id header the Anthropic SDK reads", async () => {
+    const res = await harness().get("/v1/models");
+    expect(res.headers.get("request-id")).toBe("fg-000000000000002a");
+  });
+
+  it("answers in the Anthropic dialect when the Anthropic SDK sends anthropic-version", async () => {
+    const res = await harness().get("/v1/models", {
+      headers: { "anthropic-version": "2023-06-01" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: Array<Record<string, unknown>> };
+    expect(body.data[0]).toMatchObject({
+      id: expect.any(String),
+      type: "model",
+      display_name: expect.any(String),
+      created_at: expect.any(String),
+    });
+    // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
+    expect((body.data[0] as Record<string, unknown>)["object"]).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

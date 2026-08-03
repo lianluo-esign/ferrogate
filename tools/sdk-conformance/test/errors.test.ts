@@ -108,10 +108,11 @@ describe("openai SDK — error taxonomy", () => {
     // Read off the body by the SDK, which is what application code switches on.
     expect(error.code).toBe("invalid_api_key");
     expect(error.message).toContain("invalid API key");
-    // DIVERGENCE (apps/gateway/src/inference/errors.ts): OpenAI's own bodies
-    // carry `type: "invalid_request_error"`; every FerroGate error carries the
-    // single constant `ferrogate_error`. The SDK does not care — it classifies
-    // by STATUS — but code that switches on `err.type` will not match.
+    // DELIBERATE: OpenAI's own bodies carry `type: "invalid_request_error"`;
+    // FerroGate supplies its single constant `ferrogate_error` instead, so
+    // `err.type`-based handling never matches. The SDKs classify by STATUS,
+    // so `err.type`-based code is rare — this is the same design choice the
+    // Anthropic-side test documents.
     expect(error.type).toBe("ferrogate_error");
     // The correlation id the SDK exposes as `error.requestID`, taken from the
     // `x-request-id` response header, and the SAME id the body carries.
@@ -143,12 +144,13 @@ describe("openai SDK — error taxonomy", () => {
       openaiClient().chat.completions.create({ ...REQUEST, model: "no-such-model" }),
     );
 
-    // DIVERGENCE (apps/gateway/src/inference/handlers.ts:396,406): the OpenAI
-    // API answers 404 for an unknown model, FerroGate answers 400. The SDK
-    // therefore raises `BadRequestError` where a client would have caught
-    // `NotFoundError`. Reported, deliberately NOT fixed here — the status is a
-    // behavioural choice inherited from the Rust gateway and changing it is a
-    // contract change, not a test change.
+    // DELIBERATE (apps/gateway/src/inference/handlers.ts:planUpstream): the
+    // OpenAI API answers 404 for an unknown model, FerroGate answers 400. The
+    // SDK therefore raises `BadRequestError` where a client would have caught
+    // `NotFoundError`. This is a behavioural choice inherited from the Rust
+    // gateway: on POST the ROUTE exists and the caller's BODY names something
+    // unusable, which is a bad request — the discovery path (GET /v1/models/
+    // {model}) answers 404 as the OpenAI API does.
     expect(error.status).toBe(400);
     expect(error.code).toBe("model_not_found");
     expect(error.message).toContain("no-such-model");
@@ -226,17 +228,19 @@ describe("openai SDK — error taxonomy", () => {
     }
   });
 
-  it("DIVERGENCE: an empty `messages` array is forwarded rather than refused", async () => {
+  it("an empty `messages` array is refused with 400 before dispatch", async () => {
     const upstream = interceptUpstream(() => upstreamJson(COMPLETION));
     try {
-      await openaiClient().chat.completions.create({ model: "gpt-4o-mini", messages: [] });
+      const error = await captured(() =>
+        openaiClient().chat.completions.create({ model: "gpt-4o-mini", messages: [] }),
+      );
 
-      // The OpenAI API answers 400 `invalid_request_error` for an empty
-      // `messages` array. FerroGate's request schema accepts it and dispatches,
-      // so the refusal — if any — comes from the provider, one hop later and
-      // billed as an upstream call. Asserted as it IS; reported in the PR.
-      expect(upstream.requests).toHaveLength(1);
-      expect((upstream.last().body as { messages: unknown[] }).messages).toEqual([]);
+      // FIXED by #727: the request schema now rejects an empty `messages` array
+      // with 400 `invalid_request`, so no upstream call is made.
+      expect(error.status).toBe(400);
+      expect(error.code).toBe("invalid_request");
+      expect(error.message).toContain("non-empty");
+      expect(upstream.requests).toHaveLength(0);
     } finally {
       upstream.restore();
     }

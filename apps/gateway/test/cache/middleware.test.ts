@@ -263,10 +263,14 @@ describe("cache isolation", () => {
     const provider = interceptProviderFetch(() => providerJson(completion("x")));
     try {
       const gw = gateway();
-      await gw.post(CHAT, "fg_a", { model: "gpt-4o-mini", messages: [], temperature: 0.2 });
+      await gw.post(CHAT, "fg_a", {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hi" }],
+        temperature: 0.2,
+      });
       const second = await gw.post(CHAT, "fg_a", {
         temperature: 0.2,
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         model: "gpt-4o-mini",
       });
       expect(second.headers.get(CACHE_STATUS_HEADER)).toBe("hit");

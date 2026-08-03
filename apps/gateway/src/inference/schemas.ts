@@ -150,10 +150,12 @@ export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export const chatCompletionRequestSchema = z
   .object({
     model: modelField,
-    messages: z.array(chatMessageSchema, {
-      required_error: 'chat completion request must include a "messages" array',
-      invalid_type_error: 'chat completion request must include a "messages" array',
-    }),
+    messages: z
+      .array(chatMessageSchema, {
+        required_error: 'chat completion request must include a "messages" array',
+        invalid_type_error: 'chat completion request must include a "messages" array',
+      })
+      .min(1, 'chat completion request must include a non-empty "messages" array'),
     stream: streamField,
     metadata: requestMetadataSchema.optional(),
   })
@@ -186,17 +188,13 @@ export type ResponsesRequest = z.infer<typeof responsesRequestSchema>;
 // ---------------------------------------------------------------------------
 
 /** One Anthropic content block; `type` drives the translation, rest is open. */
-export const anthropicContentBlockSchema = z
-  .object({ type: z.string().optional() })
-  .passthrough();
+export const anthropicContentBlockSchema = z.object({ type: z.string().optional() }).passthrough();
 
 /** One Anthropic turn. `content` is a string or an array of content blocks. */
 export const anthropicMessageSchema = z
   .object({
     role: z.string().optional(),
-    content: z
-      .union([z.string(), z.array(anthropicContentBlockSchema), z.null()])
-      .optional(),
+    content: z.union([z.string(), z.array(anthropicContentBlockSchema), z.null()]).optional(),
   })
   .passthrough();
 
@@ -208,15 +206,15 @@ export const anthropicMessageSchema = z
 export const anthropicMessagesRequestSchema = z
   .object({
     model: modelField,
-    messages: z.array(anthropicMessageSchema, {
-      required_error: 'Anthropic messages request must include a "messages" array',
-      invalid_type_error: 'Anthropic messages request must include a "messages" array',
-    }),
+    messages: z
+      .array(anthropicMessageSchema, {
+        required_error: 'Anthropic messages request must include a "messages" array',
+        invalid_type_error: 'Anthropic messages request must include a "messages" array',
+      })
+      .min(1, 'Anthropic messages request must include a non-empty "messages" array'),
     stream: streamField,
     max_tokens: z.number().optional(),
-    system: z
-      .union([z.string(), z.array(anthropicContentBlockSchema), z.null()])
-      .optional(),
+    system: z.union([z.string(), z.array(anthropicContentBlockSchema), z.null()]).optional(),
     stop_sequences: z.array(z.string()).optional(),
     temperature: z.number().optional(),
     top_p: z.number().optional(),
@@ -307,10 +305,7 @@ export type EmbeddingsRequest = z.infer<typeof embeddingsRequestSchema>;
  * at the adapter boundary ({@link rerankDocumentTexts} in `@ferrogate/providers`),
  * so nothing downstream carries two shapes.
  */
-const rerankDocumentField = z.union([
-  z.string(),
-  z.object({ text: z.string() }).passthrough(),
-]);
+const rerankDocumentField = z.union([z.string(), z.object({ text: z.string() }).passthrough()]);
 
 /**
  * `documents` must be a NON-EMPTY array.
@@ -596,6 +591,53 @@ export const openAiModelListSchema = z.object({
   data: z.array(openAiModelSchema),
 });
 export type OpenAiModelList = z.infer<typeof openAiModelListSchema>;
+
+// ---------------------------------------------------------------------------
+// Anthropic-dialect model objects — `GET /v1/models` on the Anthropic ingress
+// ---------------------------------------------------------------------------
+
+/**
+ * `AnthropicModel` — the Anthropic SDK's `ModelInfo` shape.
+ *
+ * The Anthropic SDK's `ModelInfo` has seven fields: `id`, `type: "model"`,
+ * `display_name`, `created_at`, `capabilities`, `max_input_tokens`,
+ * `max_tokens`. Two of these are emitted as `null` because FerroGate does not
+ * track the Anthropic capability model or per-model `max_tokens` limits:
+ *
+ *  - `capabilities` → `null` (FerroGate's own capability model is
+ *    `ModelCapability[]`, not the Anthropic `ModelCapabilities` shape);
+ *  - `max_tokens` → `null` (not tracked per model).
+ *
+ * `max_input_tokens` maps to `descriptor.context_window` (the same concept).
+ *
+ * `display_name` is the model id (FerroGate's own choice — the upstream model
+ * descriptors carry no human-readable label, so the id is used verbatim).
+ * `created_at` is an ISO-8601 string. This is served on the Anthropic ingress
+ * (requests carrying `anthropic-version`), while the OpenAI ingress keeps the
+ * OpenAI dialect (`{id, object:"model", created, owned_by}`).
+ */
+export const anthropicModelSchema = z.object({
+  id: z.string(),
+  type: z.literal("model"),
+  display_name: z.string(),
+  created_at: z.string(),
+  capabilities: z.null(),
+  max_input_tokens: z.number().nullable(),
+  max_tokens: z.null(),
+});
+export type AnthropicModel = z.infer<typeof anthropicModelSchema>;
+
+/**
+ * `AnthropicModelList` — the `data` field consumed by the Anthropic SDK's
+ * `Page`. The SDK's full response also declares `has_more`, `first_id`, and
+ * `last_id`; FerroGate omits them because its model catalog is not paginated.
+ * The SDK defaults those absent fields to `false`, `null`, and `null`, so
+ * `hasNextPage()` correctly returns `false`.
+ */
+export const anthropicModelListSchema = z.object({
+  data: z.array(anthropicModelSchema),
+});
+export type AnthropicModelList = z.infer<typeof anthropicModelListSchema>;
 
 // ---------------------------------------------------------------------------
 // Provider usage (response side)

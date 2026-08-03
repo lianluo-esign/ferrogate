@@ -370,7 +370,10 @@ describe("what cannot be judged is not queued", () => {
     // An unknown model is refused before any provider is dialled; there is no
     // answer to judge, and scoring error envelopes would drag every mean down
     // whenever an upstream had a bad hour.
-    const response = await h.call("fg_optin", { model: "nope", messages: [] });
+    const response = await h.call("fg_optin", {
+      model: "nope",
+      messages: [{ role: "user", content: "hi" }],
+    });
     expect(response.status).toBeGreaterThanOrEqual(400);
     await settle();
 

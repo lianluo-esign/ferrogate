@@ -214,7 +214,11 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
 
     const traces = collected[0]?.body as {
       resourceSpans: [
-        { scopeSpans: [{ spans: { attributes: { key: string; value: { stringValue: string } }[] }[] }] },
+        {
+          scopeSpans: [
+            { spans: { attributes: { key: string; value: { stringValue: string } }[] }[] },
+          ];
+        },
       ];
     };
     const attributes = Object.fromEntries(
@@ -257,7 +261,11 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
 
     const traces = collected[0]?.body as {
       resourceSpans: [
-        { scopeSpans: [{ spans: { attributes: { key: string; value: { stringValue: string } }[] }[] }] },
+        {
+          scopeSpans: [
+            { spans: { attributes: { key: string; value: { stringValue: string } }[] }[] },
+          ];
+        },
       ];
     };
     const spans = traces.resourceSpans[0].scopeSpans[0].spans;
@@ -346,7 +354,10 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
 
   it("emits an error metric for a request the gateway itself refused", async () => {
     // No upstream stub: an unknown model never reaches a provider.
-    const response = await chat({ model: "no-such-model", messages: [] });
+    const response = await chat({
+      model: "no-such-model",
+      messages: [{ role: "user", content: "hi" }],
+    });
     expect(response.status).toBe(400);
     await waitForCollected(2);
 

@@ -116,6 +116,11 @@ export function gatewayHeaders(requestId: string): Record<string, string> {
     "x-request-id": requestId,
     "x-trace-id": requestId,
     "x-ferrogate-runtime": GATEWAY_RUNTIME,
+    // The Anthropic SDK reads `err.requestID` from a SEPARATE header named
+    // `request-id` (not a case variant — HTTP header names are case-insensitive,
+    // so "lowercase variant" would be meaningless). FerroGate's own correlation
+    // id is `x-request-id`; the SDK looks for `request-id` — see issue #727.
+    "request-id": requestId,
   };
 }
 
