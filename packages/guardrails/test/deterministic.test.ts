@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 import {
   DetectorError,
+  type DetectorInput,
   DetectorSecret,
   DeterministicDetector,
   MAX_FINDINGS_PER_EVALUATION,
   normalizeRequest,
-  type DetectorInput,
 } from "../src/index.js";
 
 const AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"; // valid AKIA + 16 chars
@@ -56,7 +56,9 @@ describe("DeterministicDetector secret scanning", () => {
 
   test("expired deadline yields timeout", async () => {
     const input = inputFrom({ messages: [{ role: "user", content: "x" }] });
-    await expect(detector.evaluate(input, Date.now() - 1)).rejects.toMatchObject({ kind: "timeout" });
+    await expect(detector.evaluate(input, Date.now() - 1)).rejects.toMatchObject({
+      kind: "timeout",
+    });
   });
 });
 
@@ -164,7 +166,9 @@ describe("size + json + request constraints", () => {
         forbidden_providers: [],
       },
     });
-    const env = normalizeRequest("chat_completions", { messages: [{ role: "user", content: "hi" }] });
+    const env = normalizeRequest("chat_completions", {
+      messages: [{ role: "user", content: "hi" }],
+    });
     const result = await detector.evaluate(
       {
         protocol: "chat_completions",
@@ -274,7 +278,9 @@ describe("config validation", () => {
           (ordinary?.byte_start as number) < p.byte_end,
       ),
     ).toBe(true);
-  });
+    // 30s is sized against 745ms unloaded and a reproduced 7.983s at load >9;
+    // the >10k-match flood is the proof that evidence remains bounded.
+  }, 30_000);
 
   test("under the cap, no truncation marker is emitted", async () => {
     // The other half: the cap must not fire on ordinary traffic, or every

@@ -184,11 +184,5 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     setupFiles: ["./test/setup-d1.ts"],
-    // The bundle ceiling test deliberately compresses a 256 MiB zero file and
-    // streams it through workerd until the decompressed guard aborts. It hit
-    // Vitest's 5s default under CPU contention; shrinking the bomb would stop
-    // proving that decompression is abandoned mid-stream. 30s leaves headroom
-    // for that real work while still surfacing a hang promptly.
-    testTimeout: 30_000,
   },
 });

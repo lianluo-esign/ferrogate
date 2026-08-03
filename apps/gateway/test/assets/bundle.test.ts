@@ -210,9 +210,7 @@ describe("static_site bundle expansion refuses hostile archives", () => {
 });
 
 describe("static_site bundle ceilings are real bounds, not comments", () => {
-  test("a high-ratio gzip bomb is abandoned at the decompressed ceiling", async ({ task }) => {
-    expect(task.timeout).toBe(30_000);
-
+  test("a high-ratio gzip bomb is abandoned at the decompressed ceiling", async () => {
     // 256 MiB of zeros inside a tar, gzipped down to well under a megabyte: the
     // archive sails past every size check that looks at the UPLOAD, which is
     // exactly what a bomb is for. The tenant's storage quota tightens the
@@ -235,7 +233,9 @@ describe("static_site bundle ceilings are real bounds, not comments", () => {
     // And nothing durable survived the attempt.
     expect(await h.metadata.getAsset(assetId("1.0.0"))).toBeNull();
     expect(h.objects.objects.size).toBe(0);
-  });
+    // 30s is sized against 719ms unloaded and 2.744s at load 15-27; shrinking
+    // the 256 MiB bomb would stop proving that expansion aborts mid-stream.
+  }, 30_000);
 
   test("the file-count ceiling refuses an archive of many tiny files", async () => {
     // The REAL constant, not a tightened one: a count bomb costs no bytes.

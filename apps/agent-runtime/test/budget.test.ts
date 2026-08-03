@@ -142,7 +142,9 @@ describe("open-job budget", () => {
       { input: "work" },
     );
     expect(afterTtl.status).toBe(202);
-  });
+    // 10s is sized against 1.353s unloaded and 1.603s under load; 1.1s is an
+    // intentional wall-clock wait that proves a workerless tenant self-heals.
+  }, 10_000);
 });
 
 describe("operator kill switch", () => {

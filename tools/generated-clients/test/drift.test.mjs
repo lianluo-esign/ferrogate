@@ -56,16 +56,15 @@ function discoverGeneratedClients() {
 }
 
 describe("generated clients", () => {
-  it("allows enough time to render the complete contract", ({ task }) => {
-    expect(task.timeout).toBe(30_000);
-  });
-
   it.each(ARTIFACTS.map((artifact) => [artifact.slug, artifact]))(
     "%s is in sync with its contract",
     (_slug, artifact) => {
       const result = checkArtifact(artifact);
       expect(result.ok, result.reason).toBe(true);
     },
+    // 30s is sized against 518ms unloaded; the two complete generator runs in
+    // this suite took 7.46s together in the loaded root gate.
+    30_000,
   );
 
   it("registers every generated client that exists in the tree", () => {
@@ -247,5 +246,7 @@ describe("generation is one command", () => {
       cwd: REPO_ROOT,
       stdio: ["ignore", "ignore", "inherit"],
     });
-  });
+    // 30s is sized against 549ms unloaded; the two complete generator runs in
+    // this suite took 7.46s together in the loaded root gate.
+  }, 30_000);
 });
