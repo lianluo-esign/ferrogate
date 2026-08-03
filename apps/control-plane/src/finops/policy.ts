@@ -12,8 +12,9 @@
  *
  * | complaint                                   | knob                              |
  * |---------------------------------------------|-----------------------------------|
- * | "it fires on our nightly batch"             | `spend_anomaly_ratio` up, or `spend_anomaly_window_secs` up to cover the batch |
+ * | "it fires on our nightly batch"             | `spend_anomaly_ratio` up (the batch is IN the baseline, so widening `spend_anomaly_baseline_windows` will not help) |
  * | "it fires on trivial amounts"               | `spend_anomaly_min_window_usd` up |
+ * | "it compares us against the wrong stretch"  | `spend_anomaly_baseline_windows`, and the two cold-start gates with it |
  * | "it pages too often for one incident"       | `spend_anomaly_cooldown_secs` up  |
  * | "the forecast fires at the start of a month"| `spend_anomaly_forecast_min_pct` up |
  * | "we do not want this tenant watched at all" | `spend_anomaly_enabled = 0`       |
@@ -34,14 +35,17 @@
  * The one exception is `enabled`, where the stored `0` is meaningful and is
  * honoured exactly.
  */
-import { SPEND_ANOMALY_DEFAULTS, type SpendAnomalyTuning } from "./detector.js";
+import {
+  SPEND_ANOMALY_DEFAULTS,
+  SPEND_ANOMALY_MAX_BASELINE_WINDOWS,
+  type SpendAnomalyTuning,
+} from "./detector.js";
 
 /** The `quota_policies` columns this module reads, in one place. */
 export const SPEND_ANOMALY_POLICY_COLUMNS = [
   "scope_id",
   "monthly_budget_usd",
   "spend_anomaly_enabled",
-  "spend_anomaly_window_secs",
   "spend_anomaly_baseline_windows",
   "spend_anomaly_min_baseline_windows",
   "spend_anomaly_min_active_windows",
@@ -63,6 +67,21 @@ function positive(value: unknown, fallback: number): number {
 function positiveInt(value: unknown, fallback: number): number {
   const resolved = positive(value, fallback);
   return Number.isSafeInteger(resolved) ? resolved : fallback;
+}
+
+/**
+ * A positive integer no larger than `max`, or the default.
+ *
+ * The ceiling is not squeamishness about big numbers: `./pass.ts` widens the
+ * fleet bucket query to the LARGEST baseline any policy asks for, so one
+ * tenant's stray `spend_anomaly_baseline_windows = 1e9` would make every pass
+ * scan `request_logs` back to the epoch, for everybody. Out of range falls back
+ * to the documented default, which is the same direction every other reader
+ * here takes.
+ */
+function boundedInt(value: unknown, fallback: number, max: number): number {
+  const resolved = positiveInt(value, fallback);
+  return resolved <= max ? resolved : fallback;
 }
 
 /**
@@ -90,8 +109,11 @@ export function tuningFromRow(row: Record<string, unknown> | undefined): SpendAn
   const autoThrottleRpm = row["spend_anomaly_auto_throttle_rpm"];
   return {
     enabled: enabledFrom(row["spend_anomaly_enabled"]),
-    windowSecs: positiveInt(row["spend_anomaly_window_secs"], d.windowSecs),
-    baselineWindows: positiveInt(row["spend_anomaly_baseline_windows"], d.baselineWindows),
+    baselineWindows: boundedInt(
+      row["spend_anomaly_baseline_windows"],
+      d.baselineWindows,
+      SPEND_ANOMALY_MAX_BASELINE_WINDOWS,
+    ),
     minBaselineWindows: nonNegativeInt(
       row["spend_anomaly_min_baseline_windows"],
       d.minBaselineWindows,

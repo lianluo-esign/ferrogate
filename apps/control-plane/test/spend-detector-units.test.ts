@@ -35,6 +35,7 @@ function input(over: Partial<SpendAnomalyInput> = {}): SpendAnomalyInput {
     scopeId: "t",
     windowStartUnix: 0,
     observedUsd: 0,
+    observedWindowSecs: HOUR,
     baseline: [],
     periodSpendUsd: 0,
     periodRemainingSecs: 15 * 24 * HOUR,

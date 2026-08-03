@@ -103,15 +103,32 @@
 -- the WHOLE fleet, not per tenant.
 ALTER TABLE quota_policies ADD COLUMN spend_anomaly_enabled INTEGER NOT NULL DEFAULT 1;
 
--- The window a rate is measured over. Default 3600. Shorter reacts faster and
--- is noisier (the variance of a sum falls with its width); longer is the
--- opposite. This is the single knob with the largest effect on both the
--- detection lag and the false-positive rate, which is why it is first.
-ALTER TABLE quota_policies ADD COLUMN spend_anomaly_window_secs INTEGER;
+-- There is deliberately NO `spend_anomaly_window_secs` column.
+--
+-- The window a rate is measured over is a FLEET constant
+-- (`SPEND_ANOMALY_WINDOW_SECS`, 3600), because the pass buckets everybody with
+-- one `GROUP BY`, aligns everybody on one grid and claims one `window_start_unix`
+-- in `spend_anomaly_runs`. A per-scope width needs all three per distinct
+-- width, which is the fan-out that would make watching every tenant by default
+-- unaffordable — and a column that changed only ONE term of the arithmetic is
+-- strictly worse than no column: it was shipped in an earlier revision of this
+-- migration and, set to 600, turned a flat $1/hour tenant $25 into a `critical`
+-- `forecast_overrun` projecting $2,173 that pulled its own auto-throttle.
+-- `apps/control-plane/src/finops/detector.ts` carries the full account.
 
 -- How many preceding windows form the baseline. Default 24 — one day, so a
 -- scope is compared against its own daily shape rather than against a
--- fleet-wide notion of normal it never agreed to.
+-- fleet-wide notion of normal it never agreed to. Bounded at 168 (one week of
+-- hourly windows): the pass widens its fleet bucket query to the LARGEST value
+-- any policy holds, so an out-of-range value here would be one tenant making
+-- every pass scan `request_logs` for everybody. Out of range falls back to 24.
+--
+-- Narrowing this does NOT relax `spend_anomaly_min_baseline_windows` (12) or
+-- `spend_anomaly_min_active_windows` (6) with it: a 4-window baseline fails
+-- both cold-start gates by construction and the burn-rate leg stays SILENT
+-- until those are lowered too. That is deliberate — the gates exist so a thin
+-- baseline is not treated as a distribution — but it means this knob is set in
+-- company, not alone.
 ALTER TABLE quota_policies ADD COLUMN spend_anomaly_baseline_windows INTEGER;
 
 -- COLD START, part 1: how many of those windows must actually have been

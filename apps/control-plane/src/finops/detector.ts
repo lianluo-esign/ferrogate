@@ -127,7 +127,6 @@ export type SpendAnomalyBound = "ratio" | "robust" | "floor" | "forecast";
  */
 export interface SpendAnomalyTuning {
   readonly enabled: boolean;
-  readonly windowSecs: number;
   readonly baselineWindows: number;
   readonly minBaselineWindows: number;
   readonly minActiveWindows: number;
@@ -150,7 +149,6 @@ export interface SpendAnomalyTuning {
  */
 export const SPEND_ANOMALY_DEFAULTS: SpendAnomalyTuning = {
   enabled: true,
-  windowSecs: 3_600,
   baselineWindows: 24,
   minBaselineWindows: 12,
   minActiveWindows: 6,
@@ -162,6 +160,34 @@ export const SPEND_ANOMALY_DEFAULTS: SpendAnomalyTuning = {
   autoThrottleRpm: undefined,
   throttleTtlSecs: 3_600,
 };
+
+/**
+ * The width of a detection window, in seconds. A FLEET constant, not a knob.
+ *
+ * `./source.ts` buckets the whole fleet's spend with ONE `GROUP BY` at this
+ * width, which is what makes it affordable to watch every tenant by default.
+ * A per-scope width would need one bucket query, one window alignment and one
+ * `spend_anomaly_runs` claim key per distinct width, so it is not a column an
+ * operator can set — and the previous attempt at making it one is the defect
+ * this constant replaces: `spend_anomaly_window_secs` was read into the tuning
+ * and then used ONLY as the divisor of the forecast projection, so an operator
+ * who "narrowed the window" got the same hourly observation divided by ten
+ * minutes. A flat $1/hour tenant, $25 month-to-date against a $400 budget,
+ * projected to $2,173 and pulled its own auto-throttle. The projection now
+ * scales by {@link SpendAnomalyInput.observedWindowSecs} — the width the sum
+ * was actually taken over, and the same number written to
+ * `spend_anomaly_episodes.window_secs`.
+ */
+export const SPEND_ANOMALY_WINDOW_SECS = 3_600;
+
+/**
+ * The widest baseline an operator may ask for: one week of hourly windows.
+ *
+ * `./pass.ts` fetches buckets back to the WIDEST baseline any policy configured,
+ * so this is the bound on how far a single typo can make the fleet pass scan.
+ * A value above it falls back to the default, exactly as a negative one does.
+ */
+export const SPEND_ANOMALY_MAX_BASELINE_WINDOWS = 168;
 
 /**
  * The robust-bar multiplier, deliberately NOT a tuning column.
@@ -192,6 +218,18 @@ export interface SpendAnomalyInput {
   /** The closed window under evaluation. */
   readonly windowStartUnix: number;
   readonly observedUsd: number;
+  /**
+   * The width, in seconds, of the window `observedUsd` was SUMMED over.
+   *
+   * Supplied by the caller rather than taken from the tuning, because it is a
+   * property of the MEASUREMENT and not a preference: `./pass.ts` buckets with
+   * one fleet-wide `GROUP BY`, and the projection below multiplies by
+   * "remaining period / this", so any other number silently rescales a real
+   * observation. It is the same number written to
+   * `spend_anomaly_episodes.window_secs`, which is what lets a test recompute
+   * the projection from the episode row and catch the two drifting apart.
+   */
+  readonly observedWindowSecs: number;
   /**
    * The `baselineWindows` windows immediately before it, oldest first, with
    * zero-spend windows PRESENT as zeroes — see the module docblock. Windows
@@ -375,8 +413,11 @@ export function evaluateBurnRate(input: SpendAnomalyInput): BurnRateDecision {
  *
  * ```
  *   remainingSecs = periodSecs * (1 - elapsedFraction)
- *   projected     = periodSpendUsd + observedUsd * (remainingSecs / windowSecs)
+ *   projected     = periodSpendUsd + observedUsd * (remainingSecs / observedWindowSecs)
  * ```
+ *
+ * `observedWindowSecs` is the width `observedUsd` was measured over, and it is
+ * the ONLY window this arithmetic may use. See {@link SPEND_ANOMALY_WINDOW_SECS}.
  *
  * i.e. "keep spending exactly what you spent in the last hour, every hour,
  * until the period ends". Deliberately NOT the month-to-date AVERAGE rate: the
@@ -415,10 +456,15 @@ export function evaluateForecast(input: SpendAnomalyInput): ForecastDecision {
   // Clamped at zero: a negative remainder (a clock skew, a period boundary
   // crossed mid-pass) would project spend DOWNWARD and turn an overrun into
   // silence, which is exactly the wrong direction for a failure to take.
-  const remainingWindows = Math.max(input.periodRemainingSecs, 0) / tuning.windowSecs;
+  //
+  // `observedWindowSecs`, NOT a tuning value: `observedUsd` is a sum over a
+  // window of that width, so this ratio is "how many more windows like the one
+  // I measured fit in the rest of the period". Dividing by anything else
+  // fabricates a rate — see {@link SPEND_ANOMALY_WINDOW_SECS}.
+  const remainingWindows = Math.max(input.periodRemainingSecs, 0) / input.observedWindowSecs;
   const projectedUsd = periodSpendUsd + observedUsd * remainingWindows;
 
-  const burnRatePerHour = (observedUsd * 3_600) / tuning.windowSecs;
+  const burnRatePerHour = (observedUsd * 3_600) / input.observedWindowSecs;
   const hoursToExhaustion =
     burnRatePerHour > 0 ? Math.max(budgetUsd - periodSpendUsd, 0) / burnRatePerHour : null;
 

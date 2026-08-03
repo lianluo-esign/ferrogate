@@ -59,6 +59,7 @@ import {
   type BurnRateDecision,
   type ForecastDecision,
   SEVERITY_RANK,
+  SPEND_ANOMALY_WINDOW_SECS,
   type SpendAnomalySeverity,
   type SpendAnomalySignal,
   type SpendAnomalyTuning,
@@ -169,16 +170,14 @@ async function evaluateWindow(
   now: number,
   fetchImpl: typeof fetch | undefined,
 ): Promise<SpendAnomalyReport> {
-  // The FLEET window size. Per-scope `windowSecs` tunes the detector's own
-  // gates, but the bucketing is one `GROUP BY` for everybody, so the pass runs
-  // on the default cadence and a scope that configured a different window is
-  // evaluated on buckets of the default width. Stated plainly rather than
-  // pretending otherwise: `spend_anomaly_window_secs` currently changes the
-  // FORECAST arithmetic and the label on an alert, not the bucket width. A
-  // per-scope bucket width would need one query per distinct width, which is
-  // the fan-out this pass exists to avoid.
-  const defaults = tuningFromRow(undefined);
-  const windowSecs = defaults.windowSecs;
+  // The FLEET window size, and there is only one. It is a constant rather than
+  // a per-scope knob because the bucketing is one `GROUP BY` for everybody, the
+  // window alignment is one grid for everybody, and `spend_anomaly_runs` claims
+  // one window start for everybody — a per-scope width would need all three per
+  // distinct width, which is the fan-out this pass exists to avoid.
+  // `detector.ts` records what it cost to learn that the alternative (a knob
+  // that changed only the forecast divisor) manufactures critical alerts.
+  const windowSecs = SPEND_ANOMALY_WINDOW_SECS;
   const windowStartUnix = Math.floor(now / windowSecs) * windowSecs - windowSecs;
 
   // THE CLAIM. `INSERT OR IGNORE` returns `meta.changes === 0` when another
@@ -198,12 +197,26 @@ async function evaluateWindow(
   const period = monthBoundsUnix(windowStartUnix);
   const periodMonth = periodMonthFromUnix(windowStartUnix);
   const windowEnd = windowStartUnix + windowSecs;
-  const baselineFrom = windowStartUnix - defaults.baselineWindows * windowSecs;
 
-  const [buckets, periodSpend, policies] = await Promise.all([
+  // The policies are read FIRST, and the bucket query is then widened to the
+  // LONGEST baseline anyone configured. Reading them in parallel and slicing
+  // from the shipped default is what made `spend_anomaly_baseline_windows`
+  // inert: a scope that asked for 48 windows had only 24 fetched, so the knob
+  // could not have worked however the slice was written. `tuningFromRow` bounds
+  // the value, so this range is bounded too.
+  const policies = await readTenantPolicies(db);
+  const tunings = new Map<string, SpendAnomalyTuning>();
+  let widestBaseline = tuningFromRow(undefined).baselineWindows;
+  for (const [scopeId, row] of policies) {
+    const tuning = tuningFromRow(row);
+    tunings.set(scopeId, tuning);
+    widestBaseline = Math.max(widestBaseline, tuning.baselineWindows);
+  }
+  const baselineFrom = windowStartUnix - widestBaseline * windowSecs;
+
+  const [buckets, periodSpend] = await Promise.all([
     readSpendBuckets(db, baselineFrom, windowEnd, windowSecs),
     readPeriodSpend(db, period.startUnix, windowEnd),
-    readTenantPolicies(db),
   ]);
 
   // Index the buckets by tenant. A tenant appears here iff it produced at least
@@ -223,7 +236,7 @@ async function evaluateWindow(
   const evaluations: ScopeEvaluation[] = [];
   for (const [scopeId, byBucket] of series) {
     const policy = policies.get(scopeId);
-    const tuning = tuningFromRow(policy);
+    const tuning = tunings.get(scopeId) ?? tuningFromRow(undefined);
     const budgetUsd = budgetFromRow(policy);
     const observedUsd = byBucket.get(observedBucket) ?? 0;
 
@@ -234,8 +247,12 @@ async function evaluateWindow(
     // tenant clear a twelve-window baseline gate with ten fabricated zeroes.
     const firstBucket = Math.min(...byBucket.keys());
     const baseline: number[] = [];
+    // `tuning.baselineWindows`, which is the scope's OWN configured width — the
+    // audited defect was slicing from the shipped default here, so an operator
+    // who set 4 was compared against 24 and the episode reported `24` back at
+    // them.
     for (
-      let bucket = observedBucket - defaults.baselineWindows;
+      let bucket = observedBucket - tuning.baselineWindows;
       bucket < observedBucket;
       bucket += 1
     ) {
@@ -249,6 +266,9 @@ async function evaluateWindow(
       scopeId,
       windowStartUnix,
       observedUsd,
+      // The width the sum above was taken over — the SAME number written to
+      // `spend_anomaly_episodes.window_secs` a few lines below.
+      observedWindowSecs: windowSecs,
       baseline,
       periodSpendUsd,
       budgetUsd,

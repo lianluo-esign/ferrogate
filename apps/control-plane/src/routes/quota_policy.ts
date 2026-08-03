@@ -87,8 +87,7 @@ export const quotaPolicySchema = adminRecordSchema.extend({
    * merge patch.
    */
   spend_anomaly_enabled: z.boolean().optional(),
-  spend_anomaly_window_secs: z.number().int().min(60).nullish(),
-  spend_anomaly_baseline_windows: z.number().int().min(1).nullish(),
+  spend_anomaly_baseline_windows: z.number().int().min(1).max(168).nullish(),
   spend_anomaly_min_baseline_windows: z.number().int().min(0).nullish(),
   spend_anomaly_min_active_windows: z.number().int().min(0).nullish(),
   spend_anomaly_min_window_usd: z.number().min(0).nullish(),

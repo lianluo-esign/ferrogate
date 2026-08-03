@@ -65,7 +65,7 @@ Stated so nobody buys the wrong instrument. Each is asserted in
 |---|---|---|
 | a runaway that was **already running** when the baseline was collected | it *becomes* the baseline; deviation-from-self is structurally blind to a level shift older than its lookback | `forecast_overrun`, and only for a tenant with a budget |
 | a **slow creep** — 5 %/day compounding | never deviates from its own recent past by enough to bind | `forecast_overrun`, same caveat |
-| a **burst shorter than the window** | $400 in one minute of a $2,000 hour is not distinguishable from the hour | nothing here; shorten `spend_anomaly_window_secs` and accept the noise |
+| a **burst shorter than the window** | $400 in one minute of a $2,000 hour is not distinguishable from the hour | nothing here. The window is a **fleet constant** of one hour and there is no knob to shorten it — see *The window is not a knob* below |
 | anything for a tenant below the cold-start gates | deliberate silence — see below | the invoice |
 | spend that is metered but **not priced** (#663) | contributes nothing to `observed_usd` | nothing; the failure direction is *quieter*, never louder |
 
@@ -174,14 +174,60 @@ PUT /admin/v1/quota-policies/tenant/{tenant_id}
 
 | complaint | knob |
 |---|---|
-| "it fires on our nightly batch" | `spend_anomaly_ratio` up, or `spend_anomaly_window_secs` up to cover the batch |
+| "it fires on our nightly batch" | `spend_anomaly_ratio` up. Widening the baseline will *not* help — a nightly batch is already inside a 24-hour lookback |
 | "it fires on trivial amounts" | `spend_anomaly_min_window_usd` up |
 | "it pages too often for one incident" | `spend_anomaly_cooldown_secs` up |
 | "the forecast fires at the start of a month" | `spend_anomaly_forecast_min_pct` up |
+| "it compares us against the wrong stretch of history" | `spend_anomaly_baseline_windows`, **and the two cold-start gates with it** — see below |
 | "we do not want this tenant watched at all" | `spend_anomaly_enabled = 0` |
 
 `bound_by` on every episode answers the first column, so the right knob is
 readable off the row rather than guessed.
+
+### Every knob, and exactly what reads it
+
+Nothing on this table is settable-but-ignored. A knob an operator can write, and
+that the detector then does not consult, is worse than an absent one: they
+believe they have tuned something. This column exists because two of them were.
+
+| column | default | read by |
+|---|---|---|
+| `spend_anomaly_enabled` | `1` | both legs — `evaluateBurnRate`, `evaluateForecast` |
+| `spend_anomaly_baseline_windows` | `24` | the pass: it both **widens the fleet bucket query** to the largest value any policy holds and slices this tenant's baseline to it. Bounded at **168** (one week of hourly windows); the API rejects more, because the fetch it widens is everybody's |
+| `spend_anomaly_min_baseline_windows` | `12` | `evaluateBurnRate`, cold-start gate 1 |
+| `spend_anomaly_min_active_windows` | `6` | `evaluateBurnRate`, cold-start gate 2 |
+| `spend_anomaly_min_window_usd` | `1.0` | `evaluateBurnRate`, the `floor` bar |
+| `spend_anomaly_ratio` | `4.0` | `evaluateBurnRate`, the `ratio` bar |
+| `spend_anomaly_critical_ratio` | `10.0` | `evaluateBurnRate`, severity |
+| `spend_anomaly_cooldown_secs` | `21600` | the pass, the notification heartbeat |
+| `spend_anomaly_forecast_min_pct` | `5.0` | `evaluateForecast`, the `too_early` guard |
+| `spend_anomaly_auto_throttle_rpm` | unset | the pass, the brake |
+| `spend_anomaly_throttle_ttl_secs` | `3600` | the pass, the throttle expiry |
+
+**Narrowing the baseline does not narrow the gates with it.** With
+`spend_anomaly_baseline_windows = 4` and the shipped `min_baseline_windows = 12`
+the burn-rate leg is `insufficient_baseline` and **silent** — deliberately, since
+a four-window baseline is not a distribution. Lower both gates in the same call
+or the knob will look inert a second time.
+
+### The window is not a knob
+
+There is **no `spend_anomaly_window_secs`.** The detection window is a fleet
+constant of one hour (`SPEND_ANOMALY_WINDOW_SECS`), because the pass buckets the
+whole fleet with one `GROUP BY`, aligns everybody on one window grid, and claims
+one `window_start_unix` in `spend_anomaly_runs`. A per-tenant width needs all
+three *per distinct width*, which is the fan-out that would make watching every
+tenant by default unaffordable.
+
+An earlier revision of this slice shipped the column anyway, where it changed
+only the divisor of the forecast projection. Set to 600, it turned a flat
+**$1/hour** tenant — $25 month-to-date against a $400 budget, whose honest
+projection is $383 — into a `critical` `forecast_overrun` projecting **$2,173**,
+and with `spend_anomaly_auto_throttle_rpm` set that fabricated forecast **pulled
+the tenant's own brake on live traffic**. The projection now scales by the width
+the observation was actually summed over, and
+`test/spend-anomaly.test.ts` recomputes it from the episode row's own
+`window_secs` so the two cannot drift apart again.
 
 Detection is **on by default** for every tenant. The asymmetry with #692's
 opt-in evaluation is deliberate: evaluation copies a customer's traffic to a
@@ -226,11 +272,18 @@ The pass rides the existing every-minute Cron Trigger
 is an hour, so 59 of 60 ticks do nothing but one `INSERT OR IGNORE` into
 `spend_anomaly_runs` — the single-flight claim.
 
-The winner issues **two aggregate queries for the whole fleet** (windowed spend
-and month-to-date spend, both `GROUP BY tenant`, both driving from
-`idx_request_logs_tenant_started`) plus one read of the tenant-scope quota
-policies. It does not fan out per tenant, which is what makes watching everyone
-by default affordable.
+The winner issues one read of the tenant-scope quota policies and then **two
+aggregate queries for the whole fleet** (windowed spend and month-to-date spend,
+both `GROUP BY tenant`, both driving from `idx_request_logs_tenant_started`). It
+does not fan out per tenant, which is what makes watching everyone by default
+affordable.
+
+The policies are read *first*, and not in parallel with the other two, because
+the windowed query's lower bound is the **widest** `spend_anomaly_baseline_windows`
+any policy holds — a fixed lookback would silently starve any tenant that asked
+for a longer baseline than the shipped 24. That is the round trip the 168-window
+ceiling exists to bound: it is one tenant's column deciding how far back the
+whole fleet's scan reaches.
 
 That single-flight claim is also what makes the cooldown check safe: reading
 "when did we last notify" and then deciding is a race in general, but behind

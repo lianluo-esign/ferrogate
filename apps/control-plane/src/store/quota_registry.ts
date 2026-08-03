@@ -254,7 +254,6 @@ function missingTagActionOf(record: StoreRecord): string | null {
  * shipped, read by the gateway, and settable through no operation at all.
  */
 export const SPEND_ANOMALY_TUNING_FIELDS = [
-  "spend_anomaly_window_secs",
   "spend_anomaly_baseline_windows",
   "spend_anomaly_min_baseline_windows",
   "spend_anomaly_min_active_windows",

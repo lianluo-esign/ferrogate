@@ -34,6 +34,7 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { monthBoundsUnix } from "../src/finops/pass.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
@@ -151,10 +152,16 @@ interface EpisodeRow {
   readonly scope_id: string;
   readonly signal: string;
   readonly severity: string;
+  readonly window_start_unix: number;
+  readonly window_secs: number;
   readonly observed_usd: number;
   readonly baseline_usd: number | null;
   readonly threshold_usd: number | null;
   readonly bound_by: string | null;
+  readonly baseline_windows: number | null;
+  readonly active_windows: number | null;
+  readonly projected_usd: number | null;
+  readonly detail_json: string | null;
   readonly windows_seen: number;
   readonly notified_count: number;
   readonly resolved_at_unix: number | null;
@@ -575,6 +582,163 @@ describe("auto-throttle", () => {
     expect(report.spendAnomaly.throttled).toBe(0);
     expect(await throttles()).toEqual([]);
   });
+
+  /**
+   * THE BRAKE, ON A TENANT THAT SHOULD BE SILENT.
+   *
+   * Every other test in this block starts from a tenant that IS anomalous and
+   * asks whether the brake was pulled. None of them can catch the failure that
+   * matters most: the detector being WRONG and the brake being pulled anyway.
+   * A false alert is a channel an operator learns to mute; a false throttle is
+   * an outage we caused, on live traffic, for a customer who did nothing.
+   *
+   * The tenant here is flat $1/hour with a budget it is nowhere near — $383
+   * projected against $400 — so the correct behaviour is complete silence, and
+   * the assertion is that turning `spend_anomaly_auto_throttle_rpm` on does not
+   * change that.
+   */
+  it("keeps the brake off for a steady tenant that is inside its budget", async () => {
+    await seedFlatBaseline("steady", 1);
+    await seedHour("steady", 0, 1, 4);
+    await setPolicy("steady", {
+      monthly_budget_usd: 400,
+      spend_anomaly_auto_throttle_rpm: 5,
+    });
+
+    const report = await runScheduledTick(bindings(), NOW);
+
+    // $25 month-to-date is above the 5% forecast floor, so the forecast leg DID
+    // speak; it said "within budget" ($25 + $1/h * 358h = $383 < $400).
+    expect(report.spendAnomaly.evaluated).toBe(1);
+    // The brake first, because it is the assertion with a customer behind it.
+    expect(await throttles()).toEqual([]);
+    expect(report.spendAnomaly.throttled).toBe(0);
+    expect(await episodes()).toEqual([]);
+    expect(delivered).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The knobs, held against what they actually do
+// ---------------------------------------------------------------------------
+
+describe("the forecast is scaled by the window the observation was MEASURED over", () => {
+  /**
+   * The defect this pins: `observedUsd` is a sum over the FLEET bucket
+   * (`readSpendBuckets`, one `GROUP BY` at `SPEND_ANOMALY_WINDOW_SECS`), and
+   * dividing the remaining period by any OTHER number turns a flat tenant into
+   * a critical `forecast_overrun`. The episode row already records the width the
+   * observation came from, so the projection is checked against the ROW rather
+   * than against a constant — the two cannot drift apart again without this
+   * assertion breaking.
+   */
+  it("recomputes to exactly what the episode row's own window_secs implies", async () => {
+    await seedHour("scaled", 2, 200, 20);
+    await seedHour("scaled", 1, 200, 20);
+    await seedHour("scaled", 0, 200, 20);
+    await setPolicy("scaled", { monthly_budget_usd: 1_000 });
+
+    await runScheduledTick(bindings(), NOW);
+
+    const rows = await episodes();
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as EpisodeRow;
+    expect(row.signal).toBe("forecast_overrun");
+
+    const detail = JSON.parse(row.detail_json ?? "{}") as Record<string, number>;
+    const periodEnd = monthBoundsUnix(row.window_start_unix).endUnix;
+    const remainingSecs = periodEnd - (row.window_start_unix + row.window_secs);
+    const expected =
+      (detail["period_spend_usd"] as number) + row.observed_usd * (remainingSecs / row.window_secs);
+
+    expect(row.window_secs).toBe(HOUR);
+    expect(row.projected_usd).toBeCloseTo(expected, 6);
+    // …and the arithmetic really is load-bearing rather than a tautology of two
+    // numbers written by the same statement: $600 spent at $200/hour with 358
+    // hours of November left is $72,200.
+    expect(row.projected_usd).toBeCloseTo(72_200, 6);
+  });
+});
+
+describe("spend_anomaly_baseline_windows is the width of the baseline", () => {
+  /**
+   * The defect this pins: the column was read into `SpendAnomalyTuning` and the
+   * pass then sliced the baseline from the SHIPPED DEFAULT, so an operator who
+   * set it to 4 got a 24-window baseline and an episode that reported
+   * `baseline_windows 24` back at them.
+   *
+   * The tenant below is built so the two widths disagree in the loudest
+   * possible way: the last four hours are $2 and the twenty before them are
+   * $80. A 4-window baseline has a median of $2 and a $8 bar, which a $12 hour
+   * clears; a 24-window baseline has a median of $80 and a $320 bar, which it
+   * does not come near. So `baseline_usd` alone says which width was used.
+   */
+  it("compares against the four windows the operator asked for, not twenty-four", async () => {
+    for (let index = 5; index <= 24; index += 1) await seedHour("narrow", index, 80, 4);
+    for (let index = 1; index <= 4; index += 1) await seedHour("narrow", index, 2, 4);
+    await seedHour("narrow", 0, 12, 6);
+    await setPolicy("narrow", {
+      spend_anomaly_baseline_windows: 4,
+      // The two cold-start gates default to 12 and 6, both of which a 4-window
+      // baseline fails by construction. An operator narrowing the baseline has
+      // to narrow these with it, and the ladder in `docs/` says so.
+      spend_anomaly_min_baseline_windows: 4,
+      spend_anomaly_min_active_windows: 4,
+    });
+
+    await runScheduledTick(bindings(), NOW);
+
+    const rows = await episodes();
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as EpisodeRow;
+    expect(row.signal).toBe("burn_rate_spike");
+    expect(row.baseline_usd).toBeCloseTo(2, 6);
+    expect(row.threshold_usd).toBeCloseTo(8, 6);
+    expect(row.bound_by).toBe("ratio");
+    // The evidence the operator reads back. `24` here was the audited defect.
+    expect(row.baseline_windows).toBe(4);
+    expect(row.active_windows).toBe(4);
+  });
+
+  it("FETCHES as far back as the widest baseline any policy asks for", async () => {
+    // Narrowing the baseline is free — the data is already in hand. WIDENING it
+    // is not: the fleet bucket query has to reach further back, or the extra
+    // windows are simply absent and the knob is inert again in the one
+    // direction an operator most often wants it.
+    //
+    // Two days, opposite shapes: $80/hour on the older day, $2/hour on the
+    // newer one, and a $500 hour to judge. Across 48 windows the median is $41
+    // and the robust bar (MAD $39) is $214; across the 24 that a
+    // default-width fetch would return it is $2 with an $8 bar. The recorded
+    // `baseline_usd` therefore says which query ran.
+    for (let index = 25; index <= 48; index += 1) await seedHour("wideband", index, 80, 4);
+    for (let index = 1; index <= 24; index += 1) await seedHour("wideband", index, 2, 4);
+    await seedHour("wideband", 0, 500, 10);
+    await setPolicy("wideband", { spend_anomaly_baseline_windows: 48 });
+
+    await runScheduledTick(bindings(), NOW);
+
+    const rows = await episodes();
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as EpisodeRow;
+    expect(row.baseline_windows).toBe(48);
+    expect(row.baseline_usd).toBeCloseTo(41, 6);
+    expect(row.bound_by).toBe("robust");
+    expect(row.threshold_usd).toBeCloseTo(41 + 3 * 1.4826 * 39, 6);
+  });
+
+  it("still uses twenty-four when the operator has not narrowed it", async () => {
+    // The same traffic shape with no override: the $80 hours dominate the
+    // median, the $12 hour is far below the bar, and NOTHING fires. Without
+    // this, the test above would pass just as well against a hard-coded 4.
+    for (let index = 5; index <= 24; index += 1) await seedHour("wide", index, 80, 4);
+    for (let index = 1; index <= 4; index += 1) await seedHour("wide", index, 2, 4);
+    await seedHour("wide", 0, 12, 6);
+
+    await runScheduledTick(bindings(), NOW);
+
+    expect(await episodes()).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -703,6 +867,18 @@ describe("PUT /admin/v1/quota-policies/tenant/{id} tunes the detector", () => {
     await runScheduledTick(bindings(), NOW);
 
     expect(await episodes()).toEqual([]);
+  });
+
+  it("refuses a baseline wider than the pass is willing to fetch", async () => {
+    // The pass widens ONE fleet query to the largest baseline any policy holds,
+    // so a stray `1000` here is not this tenant's problem — it is every
+    // tenant's, as a `request_logs` scan back to six weeks ago on every tick.
+    // `tuningFromRow` also falls back above the bound, but a 201 followed by
+    // silent clamping is the "operator believes they tuned something" shape
+    // this whole slice was bounced for.
+    const response = await putPolicy({ spend_anomaly_baseline_windows: 1_000 });
+    expect(response.status, await response.clone().text()).toBe(400);
+    expect(await response.text()).toContain("spend_anomaly_baseline_windows");
   });
 
   it("refuses a tuning value that is not a number instead of silently defaulting", async () => {
