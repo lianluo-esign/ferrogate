@@ -1,7 +1,7 @@
 /**
  * `experiment_shadow_legs` in the CONTROL database.
  *
- * The table is defined by `sql/d1-ts/control/0010_experiment_outcomes.sql`, and
+ * The table is defined by `sql/d1-ts/control/0011_experiment_outcomes.sql`, and
  * lives in the CONTROL database for the reason `0009_online_eval.sql` and
  * `0004_guardrail_evaluations.sql` both give at length: the read that matters —
  * the shadow arm's cost and latency beside the SERVED arms' (`request_logs`,

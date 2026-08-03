@@ -658,7 +658,21 @@ const CONTROLS: readonly FleetControl[] = [
     title: "the wave-16 admission ladder (quota scope, budget, wallet, RPM)",
     required: "spend",
     enforcement: /"quota_scope_disabled"/,
-    authorityTables: ["quota_policies", "wallets", "usage_monthly_rollups"],
+    // `spend_throttles` (#697) joins the ladder's authorities rather than being
+    // declared a non-control, and the distinction is the whole point of §4.3: a
+    // row in it CHANGES WHAT THE GATEWAY DOES to a customer's live traffic (an
+    // rpm ceiling `d1QuotaPolicySource` mins into the resolved quota), which is
+    // an operator control by definition even though its writer is automated.
+    // Its unusual property — the only authority here written by a DETECTOR
+    // rather than by an operator — is exactly why it may only ever NARROW and
+    // why every row expires; both are held by
+    // `apps/gateway/test/ratelimit/spend-throttle.test.ts`.
+    authorityTables: [
+      "quota_policies",
+      "wallets",
+      "usage_monthly_rollups",
+      "spend_throttles",
+    ],
     deployVar: /FG_DEV_QUOTA_POLICIES|GATEWAY_QUOTA_POLICIES/,
     refusalCode: "quota_scope_disabled",
   },
@@ -1254,7 +1268,7 @@ describe("§4 fleet-wide ratchets", () => {
       // apply to both Workers?" — yes, and the schema enforces it rather than a
       // registry entry: both Workers name the columns of
       // `sql/d1-ts/control/0009_online_eval.sql` +
-      // `0010_experiment_outcomes.sql`, both suites apply the deployed
+      // `0011_experiment_outcomes.sql`, both suites apply the deployed
       // migrations rather than a fixture, and a column rename breaks
       // `apps/gateway/test/experiments/scored-arms.test.ts` and
       // `apps/control-plane/test/experiment-report.test.ts` together.

@@ -22,7 +22,7 @@ import requestLogColumnsSql from "../../../../sql/d1-ts/control/0003_request_log
 import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_evaluations.sql?raw";
 import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_chain.sql?raw";
 import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
-import experimentOutcomesSql from "../../../../sql/d1-ts/control/0010_experiment_outcomes.sql?raw";
+import experimentOutcomesSql from "../../../../sql/d1-ts/control/0011_experiment_outcomes.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 

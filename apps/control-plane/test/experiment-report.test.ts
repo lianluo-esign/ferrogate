@@ -30,7 +30,7 @@
  * different `wrangler.toml`, unreachable from this suite — and it is held end
  * to end by `apps/gateway/test/experiments/{attribution,scored-arms}.test.ts`,
  * which drive real requests and assert against these same columns. The two
- * halves meet at `sql/d1-ts/control/0010_experiment_outcomes.sql`, which both
+ * halves meet at `sql/d1-ts/control/0011_experiment_outcomes.sql`, which both
  * suites apply from the deployed migration directory rather than from a copy,
  * so a column rename breaks both. This is the same seam and the same argument
  * `test/request-logs-read.test.ts` states for #664.

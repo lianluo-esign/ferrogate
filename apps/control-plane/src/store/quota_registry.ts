@@ -246,6 +246,38 @@ function missingTagActionOf(record: StoreRecord): string | null {
 }
 
 /**
+ * The `spend_anomaly_*` numeric tuning fields, in COLUMN ORDER (#697).
+ *
+ * One list drives both the column list and the bind sequence, so a field cannot
+ * be accepted by the route and then silently dropped on the way to the table —
+ * which is exactly what happened to #692's `online_eval_*` opt-in columns:
+ * shipped, read by the gateway, and settable through no operation at all.
+ */
+export const SPEND_ANOMALY_TUNING_FIELDS = [
+  "spend_anomaly_baseline_windows",
+  "spend_anomaly_min_baseline_windows",
+  "spend_anomaly_min_active_windows",
+  "spend_anomaly_min_window_usd",
+  "spend_anomaly_ratio",
+  "spend_anomaly_critical_ratio",
+  "spend_anomaly_cooldown_secs",
+  "spend_anomaly_forecast_min_pct",
+  "spend_anomaly_auto_throttle_rpm",
+  "spend_anomaly_throttle_ttl_secs",
+] as const;
+
+/**
+ * `spend_anomaly_enabled` is `NOT NULL DEFAULT 1` — the detector watches every
+ * tenant unless one opts out — so an omitted field projects as `1`, not as
+ * `NULL`. Only an explicit `false`/`0` switches it off, the same rule
+ * {@link storedQuotaPolicy} applies to `enabled`.
+ */
+function spendAnomalyEnabledOf(record: StoreRecord): number {
+  const raw = record["spend_anomaly_enabled"];
+  return raw === false || raw === 0 ? 0 : 1;
+}
+
+/**
  * A UNIQUE-constraint failure on a projection is the operator's conflict, not
  * an internal error: two plans cannot share a slug. Anything else is re-thrown
  * unchanged so a real fault is not disguised as a 409.
@@ -424,9 +456,12 @@ export async function projectQuotaPolicy(
            monthly_budget_usd, enabled, created_at_unix, updated_at_unix,
            alert_threshold_pcts_json, asset_storage_quota_bytes,
            monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes,
-           agent_cost_budget_usd, required_tags_json, on_missing_tags
+           agent_cost_budget_usd, required_tags_json, on_missing_tags,
+           spend_anomaly_enabled, ${SPEND_ANOMALY_TUNING_FIELDS.join(", ")}
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${SPEND_ANOMALY_TUNING_FIELDS.map(
+           () => ", ?",
+         ).join("")})
          ON CONFLICT (id) DO UPDATE SET
            scope_type = excluded.scope_type,
            scope_id = excluded.scope_id,
@@ -443,7 +478,11 @@ export async function projectQuotaPolicy(
            asset_max_object_bytes = excluded.asset_max_object_bytes,
            agent_cost_budget_usd = excluded.agent_cost_budget_usd,
            required_tags_json = excluded.required_tags_json,
-           on_missing_tags = excluded.on_missing_tags`,
+           on_missing_tags = excluded.on_missing_tags,
+           spend_anomaly_enabled = excluded.spend_anomaly_enabled,
+           ${SPEND_ANOMALY_TUNING_FIELDS.map((field) => `${field} = excluded.${field}`).join(
+             ",\n           ",
+           )}`,
       )
       .bind(
         id,
@@ -470,6 +509,19 @@ export async function projectQuotaPolicy(
         // merge value type would imply a chain semantic nothing implements.
         JSON.stringify(requiredTagsOf(record)),
         missingTagActionOf(record),
+        // #697. Read off the DOCUMENT for the same reason #678's tags are: the
+        // spend-anomaly tuning is not part of the quota MERGE — the detector
+        // reads the TENANT-scope row only (`finops/pass.ts`), and threading
+        // these through `StoredQuotaPolicy` would imply a min-across-the-chain
+        // semantic nothing implements and that would be meaningless anyway (the
+        // tightest of two cooldowns is not a merge of them).
+        //
+        // ABSENT means "use the documented default", not "off", which is why
+        // every numeric field goes in as `NULL` rather than a substituted
+        // number: the defaults live in `finops/detector.ts` alone, and a copy
+        // baked in here would be the one that drifts.
+        spendAnomalyEnabledOf(record),
+        ...SPEND_ANOMALY_TUNING_FIELDS.map((field) => optionalNumber(record[field]) ?? null),
       )
       .run();
   } catch (error) {

@@ -167,7 +167,7 @@ describe("the mount record the composition root returned", () => {
     expect(unrecorded).toEqual([]);
   });
 
-  it("exports the PRODUCTION module list, covering exactly the 36 owned groups", () => {
+  it("exports the PRODUCTION module list, covering exactly the 37 owned groups", () => {
     expect(CONTROL_PLANE_ROUTE_MODULES).toHaveLength(CONTROL_PLANE_GROUPS.length);
     expect(CONTROL_PLANE_ROUTE_MODULES.map((module) => module.group).sort()).toEqual([
       ...CONTROL_PLANE_GROUPS,
@@ -337,6 +337,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
     403,
   ],
   ["admin_request_log", "listAdminRequestLogs", "GET", "/admin/v1/request-logs", 200],
+  ["admin_spend_anomaly", "listAdminSpendAnomalies", "GET", "/admin/v1/spend-anomalies", 200],
   ["admin_tool", "listAdminTools", "GET", "/admin/v1/tools", 200],
   ["admin_virtual_key", "listVirtualKeys", "GET", "/admin/v1/virtual-keys", 200],
   ["agent_run", "listAdminAgentRuns", "GET", "/admin/v1/agent-runs", 200],
@@ -363,7 +364,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 36 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 37 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });

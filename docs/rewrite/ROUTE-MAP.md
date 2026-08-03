@@ -1,7 +1,7 @@
-# FerroGate — route map (280 operations → Hono apps)
+# FerroGate — route map (281 operations → Hono apps)
 
 Derived from the authoritative contract `docs/openapi/runtime-api-contract.json`
-(`version: 1`, 280 operations, 42 route groups). **That JSON is the source of
+(`version: 1`, 281 operations, 43 route groups). **That JSON is the source of
 truth** — this document only assigns each operation to a Worker and records the
 auth/visibility invariants the Hono port must preserve.
 
@@ -9,21 +9,21 @@ auth/visibility invariants the Hono port must preserve.
 
 | App | Ops | Surface |
 |---|---:|---|
-| `apps/control-plane` | **217** | `/admin/v1/**` (212) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
+| `apps/control-plane` | **218** | `/admin/v1/**` (213) + `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status`, `/metrics` |
 | `apps/gateway` | **40** | inference (14): `/v1/{chat/completions,messages,messages/count_tokens,responses,responses/{response_id} (GET+DELETE),embeddings,rerank,images/generations,audio/transcriptions,audio/translations,audio/speech,models,models/{model}}`, assets `/v1/assets/**` (18), tools/skills/prompts/functions + `/.well-known/agent.json` (7), sites `/sites/{*rest}` (1) |
 | `apps/agent-runtime` | **15** | `/v1/agent-jobs/**` (5), `/v1/agents/**` (3), `/v1/agent-runs` (1), `/v1/self-hosted-workers/**` (6) |
 | `apps/mcp` | **6** | `/v1/mcp`, `/v1/mcp/tool/execute`, `/v1/mcp/identity/**` |
 | shared | **2** | `/healthz`, `/readyz` — implemented in **every** Worker |
-| **total** | **280** | |
+| **total** | **281** | |
 
 `apps/telemetry` owns no contract route: it is the observability sink
 (Analytics Engine / Logpush), fed by the other Workers.
 
 ## Invariants the port MUST preserve
 
-**Auth kinds** (280): `bearer` 266 · `internal` 6 · `anonymous` 7 · `method_dependent` 1.
-**Visibility**: `admin` 213 · `public` 60 · `internal` 7.
-**Methods**: GET 129 · POST 86 · DELETE 29 · PUT 20 · PATCH 16.
+**Auth kinds** (281): `bearer` 267 · `internal` 6 · `anonymous` 7 · `method_dependent` 1.
+**Visibility**: `admin` 214 · `public` 60 · `internal` 7.
+**Methods**: GET 130 · POST 86 · DELETE 29 · PUT 20 · PATCH 16.
 
 > `anonymous` is 7 and not 6 because of `serveSite` (`GET /sites/{*rest}`,
 > issue #737). It is the one operation whose credential requirement is DATA —
@@ -36,9 +36,9 @@ auth/visibility invariants the Hono port must preserve.
 > `packages/schemas`), and two branches that each add operations will each write
 > a plausible-but-wrong total.
 >
-> Eleven slices landed on top of the 251-operation baseline, six of them
-> developed in parallel. They account for 28 of the 29 operations added since
-> that baseline; the 29th is `serveSite` (`GET /sites/{*rest}`, issue #737),
+> Twelve slices landed on top of the 251-operation baseline, seven of them
+> developed in parallel. They account for 29 of the 30 operations added since
+> that baseline; the 30th is `serveSite` (`GET /sites/{*rest}`, issue #737),
 > described in the `anonymous` note above.
 >
 > - `countMessageTokens` (`POST /v1/messages/count_tokens`, issue #671): the
@@ -102,19 +102,34 @@ auth/visibility invariants the Hono port must preserve.
 >   All `admin`; the two reads are `admin.read`, the quarantine review and the
 >   force-delete are `admin.write` because both are operator VERBS, not
 >   read-shaped writes. `apps/control-plane`.
+> - The spend-anomaly episode ledger (issue #697): `GET /admin/v1/spend-anomalies`,
+>   a new `admin_spend_anomaly` group. `admin` / `admin.read`;
+>   `apps/control-plane`. A burn-rate episode names the tenant and its dollars, so
+>   it is an operator read behind the same bearer as the rest of `/admin/v1`.
 >
-> `apps/control-plane` went 197 → 217, `apps/gateway` went 31 → 40, and the route
-> group count went 40 → 42 across this merge. All three are COUNTED off the merged JSON — by
-> `/admin/v1/` path prefix, by path prefix, and by distinct
-> `route_patterns[].group` — never summed. #693 and #743 were parallel and each
-> parent wrote its own delta against a different intermediate, so NO parent's
-> number holds both: this branch said 213 ops / 40 groups, main said 215 / 41,
-> and the merged document is 217 / 42.
+> `apps/control-plane` went 197 → 218, `apps/gateway` went 31 → 40, and the route
+> group count went 40 → 43 across these merges. All three are COUNTED off the
+> merged JSON — by `/admin/v1/` path prefix, by path prefix, and by distinct
+> `route_patterns[].group` — never summed. #693, #743 and #697 were all parallel
+> and each parent wrote its own delta against a different intermediate, so NO
+> parent's number ever held them all: at the #693/#743 merge this branch said
+> 213 ops / 40 groups and main said 215 / 41 against a document that was really
+> 217 / 42, and at the #693/#697 merge this branch said 217 / 42 and main said
+> 216 / 42 against a document that is 218 / 43.
 >
-> Two figures merged CLEAN and were still wrong, because both parents wrote the
-> same literal and git had nothing to flag: `GET` was **127** on both sides and
-> is **129**, and `public` was 60 on both sides and is 60 (correct by accident).
-> An identical number on both sides of a merge is evidence of nothing.
+> Figures that merged CLEAN and were still wrong, because both parents wrote the
+> same literal and git had nothing to flag: `GET` was **127** on both sides of
+> the #693/#743 merge and was really **129**; `public` was 60 on both sides of
+> that merge and of this one, and is 60 — correct, but only because it was
+> re-counted, not because the parents agreed. An identical number on both sides
+> of a merge is evidence of nothing.
+>
+> A DISAPPEARANCE is the same class and does not look like a number at all: at
+> the #693/#697 merge each parent added a different dependency to
+> `apps/control-plane/package.json` (`@ferrogate/routing` here,
+> `@ferrogate/billing` on main) at the same position in the same list, so
+> resolving in favour of either side would have silently deleted the other's.
+> Check for things that vanished, not only for figures that are wrong.
 >
 > #677 and #676 were themselves parallel, and this is the merge that proves the
 > warning is not theoretical: the #676 branch was cut before #677 landed, wrote
@@ -133,7 +148,7 @@ auth/visibility invariants the Hono port must preserve.
 
 1. **Every operation carries `visibility`, `auth.kind`, `auth.scope`, and
    `rbac_action`.** Port these as Hono middleware driven by the contract, not as
-   hand-written per-route guards — one table-driven middleware keeps all 280 in sync.
+   hand-written per-route guards — one table-driven middleware keeps all 281 in sync.
 2. **`auth.kind: "internal"`** — the 6 `/v1/self-hosted-workers/*` operations
    (`artifacts`, `checkpoints`, `events`, `heartbeat`, `runs/ack`, `runs/poll`)
    are worker-plane callbacks. They must NOT be reachable with a normal tenant
@@ -153,7 +168,7 @@ auth/visibility invariants the Hono port must preserve.
 7. **`/control/v1/*` → `/admin/v1/*` alias canonicalization** must be kept
    (`ferrogate-admin`'s naming contract).
 
-## Dynamic surfaces (NOT in the 280)
+## Dynamic surfaces (NOT in the 281)
 
 From `dynamic_surfaces` in the contract — these are data, not contract:
 
@@ -168,7 +183,7 @@ From `dynamic_surfaces` in the contract — these are data, not contract:
 
 - Generate the route table from the JSON at build time (or import it directly)
   so a contract change can't silently drift from the implementation. Add a test
-  asserting **`routes.length === 280`** and that every contract `operation_id`
+  asserting **`routes.length === 281`** and that every contract `operation_id`
   has a handler — this is the anti-drift gate.
 - Zod schemas per operation live in `@ferrogate/schemas`; the validator is
   `@hono/zod-validator`.

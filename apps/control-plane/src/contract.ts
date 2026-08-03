@@ -1,5 +1,5 @@
 /**
- * The control-plane slice of the 280-operation runtime API contract, as a
+ * The control-plane slice of the 281-operation runtime API contract, as a
  * typed, table-driven operation table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`
@@ -13,7 +13,7 @@
  *     one source of truth, no generated copy that can drift;
  *  2. validate it eagerly at module load (throw, mirroring the Rust panic);
  *  3. expose lookup by `(method, path)`, by `operation_id`, and by contract
- *     `group`, restricted to the 217 operations `ROUTE-MAP.md` assigns to
+ *     `group`, restricted to the 218 operations `ROUTE-MAP.md` assigns to
  *     `apps/control-plane`.
  *
  * `matchit`'s radix tree is re-implemented as a specificity-ranked segment
@@ -116,17 +116,21 @@ const RAW = contractDocument as unknown as RawContract;
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
 /** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 280;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 281;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
- * (212) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
+ * (213) plus `/admin`, `/admin/`, `/admin/dashboard`, `/admin/status` and
  * `GET /metrics` (5).
  *
- * 215 -> 217 with #693's two experiment reads (`GET /admin/v1/experiments`,
- * `GET /admin/v1/experiments/{experiment_id}`). Both parents of that merge were
- * wrong — this branch said 213, main said 215 — so 217 was COUNTED off the
- * merged `/admin/v1/` paths, not obtained by adding two to either side.
+ * 215 -> 218 with #693's two experiment reads (`GET /admin/v1/experiments`,
+ * `GET /admin/v1/experiments/{experiment_id}`) AND #697's burn-rate episode
+ * ledger (`GET /admin/v1/spend-anomalies`). Those two slices landed in
+ * parallel, so no parent of this merge held 218: this branch reached 217 and
+ * main reached 216, each correct for its own document and neither correct for
+ * the merged one. 218 is what `len([o for o in operations if
+ * o["path"].startswith("/admin/v1/")]) + 5` returns over the MERGED
+ * `docs/openapi/runtime-api-contract.json`, and it is no parent's number.
  *
  * 211 -> 214 with #743's three asset-fleet operations (`GET /admin/v1/assets`,
  * `GET /admin/v1/assets/quarantine`,
@@ -137,14 +141,15 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 280;
  * document again rather than incremented off that 214.
  *
  * 209 -> 211 with #677's two chargeback reads (`GET /admin/v1/cost-records`
- * and `GET /admin/v1/cost-record-exports`). The 209 itself was a three-way
+ * and `GET /admin/v1/cost-record-exports`), and 211 -> 212 with #697's burn-rate
+ * episode ledger (`GET /admin/v1/spend-anomalies`). The 209 itself was a three-way
  * figure no parent held — 200 + 3 (`/admin/v1/provider-credentials*`, issue
  * #682) + 6 (`/admin/v1/semantic-cache-policies/**`, issue #695) — which is
  * why this number is RE-DERIVED by counting `/admin/v1/` paths in
  * `docs/openapi/runtime-api-contract.json` after every merge rather than
  * incremented from whichever side happened to land first.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 217;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 218;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate
@@ -431,10 +436,10 @@ const CONTRACT: ParsedContract = parseContract(RAW);
 // Public lookup surface
 // ---------------------------------------------------------------------------
 
-/** Every operation in the document, in document order (all 280). */
+/** Every operation in the document, in document order (all 281). */
 export const ALL_OPERATIONS: readonly ApiOperation[] = CONTRACT.all;
 
-/** The operations this Worker owns, in document order (217). */
+/** The operations this Worker owns, in document order (218). */
 export const CONTROL_PLANE_OPERATIONS: readonly ApiOperation[] = CONTRACT.owned;
 
 /** Owned operations, keyed by contract `group` (`rbac`, `billing`, `wallets`, …). */
@@ -443,7 +448,7 @@ export const OPERATIONS_BY_GROUP: ReadonlyMap<string, readonly ApiOperation[]> =
 /** Every group this Worker owns at least one operation in, sorted. */
 export const CONTROL_PLANE_GROUPS: readonly string[] = [...CONTRACT.byGroup.keys()].sort();
 
-/** Lookup by `operation_id` — across ALL 280, so a mis-assignment is visible. */
+/** Lookup by `operation_id` — across ALL 281, so a mis-assignment is visible. */
 export function operationById(operationId: string): ApiOperation | undefined {
   return CONTRACT.byOperationId.get(operationId);
 }

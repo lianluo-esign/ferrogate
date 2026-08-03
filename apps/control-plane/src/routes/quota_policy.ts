@@ -70,6 +70,33 @@ export const quotaPolicySchema = adminRecordSchema.extend({
    */
   required_tags: z.array(z.string().trim().min(1)).optional(),
   on_missing_tags: z.enum(["reject", "default_from_key"]).nullish(),
+  /**
+   * #697 — the spend burn-rate detector's tuning, at the `tenant` scope only
+   * (`apps/control-plane/src/finops/pass.ts` states why a per-key baseline is
+   * noise rather than sensitivity).
+   *
+   * Named here rather than left to `adminRecordSchema`'s `passthrough()`
+   * because the passthrough would ACCEPT `spend_anomaly_ratio: "four"` and the
+   * projection would then bind `NULL` and fall back to the default — an
+   * operator who believes they raised the bar, silently still at 4x, with a
+   * 200 in hand. A typed refusal is the only version of that an operator can
+   * act on.
+   *
+   * `.nullish()` throughout: `null` is a real value here and means "back to the
+   * documented default", which is the only way to UNDO a tuning through a JSON
+   * merge patch.
+   */
+  spend_anomaly_enabled: z.boolean().optional(),
+  spend_anomaly_baseline_windows: z.number().int().min(1).max(168).nullish(),
+  spend_anomaly_min_baseline_windows: z.number().int().min(0).nullish(),
+  spend_anomaly_min_active_windows: z.number().int().min(0).nullish(),
+  spend_anomaly_min_window_usd: z.number().min(0).nullish(),
+  spend_anomaly_ratio: z.number().min(1).nullish(),
+  spend_anomaly_critical_ratio: z.number().min(1).nullish(),
+  spend_anomaly_cooldown_secs: z.number().int().min(60).nullish(),
+  spend_anomaly_forecast_min_pct: z.number().min(0).max(100).nullish(),
+  spend_anomaly_auto_throttle_rpm: z.number().int().min(1).nullish(),
+  spend_anomaly_throttle_ttl_secs: z.number().int().min(60).nullish(),
 });
 
 const QUOTA_POLICIES = "quota-policies";

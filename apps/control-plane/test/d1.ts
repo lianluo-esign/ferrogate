@@ -75,6 +75,18 @@ export async function resetD1(): Promise<void> {
     // row that makes a LATER test see nothing and call it correct — the pump
     // would report `idle` over rows it had never sent, in this run.
     db().prepare(`DELETE FROM ${SIEM_CURSOR_TABLE}`),
+    // #697: the spend-anomaly ledger and its single-flight claim. The CLAIM is
+    // the dangerous leftover — `spend_anomaly_runs` makes a second evaluation
+    // of the same window a no-op, so without this every test after the first
+    // would observe a detector that "correctly found nothing" while never
+    // having run at all. The episode rows are the same trap one layer out: a
+    // previous test's alert would satisfy a later test's assertion.
+    db().prepare("DELETE FROM spend_anomaly_runs"),
+    db().prepare("DELETE FROM spend_anomaly_episodes"),
+    db().prepare("DELETE FROM spend_throttles"),
+    // Tuning rides `quota_policies`, so a policy row left behind would silently
+    // re-tune the next test's detector.
+    db().prepare("DELETE FROM quota_policies"),
   ]);
 }
 
