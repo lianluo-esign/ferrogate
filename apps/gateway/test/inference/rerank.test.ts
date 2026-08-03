@@ -369,7 +369,7 @@ const REST_ANSWER = {
   result: { response: [{ id: 0, score: 0.75 }] },
   success: true,
   errors: [],
-  messages: [],
+  messages: [{ role: "user", content: "hi" }],
 };
 
 describe("POST /v1/rerank is metered", () => {

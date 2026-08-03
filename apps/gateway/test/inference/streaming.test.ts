@@ -69,7 +69,7 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       const h = harness();
       const res = await h.post("/v1/chat/completions", {
         model: "gpt-4o-mini",
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         stream: true,
       });
       const text = await readBody(res);
@@ -199,7 +199,7 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       const h = harness();
       const res = await h.post("/v1/chat/completions", {
         model: "gpt-4o-mini",
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         stream: true,
         stream_options: "not-an-object",
       });
@@ -239,7 +239,7 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       const h = harness();
       const res = await h.post("/v1/chat/completions", {
         model: "gpt-4o-mini",
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         stream: true,
       });
       const text = await readBody(res);
@@ -266,7 +266,7 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       const h = harness();
       const res = await h.post("/v1/chat/completions", {
         model: "gpt-4o-mini",
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         stream: true,
       });
       await readBody(res);
@@ -292,7 +292,7 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       const h = harness();
       const res = await h.post("/v1/chat/completions", {
         model: "gpt-4o-mini",
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         stream: true,
       });
 
@@ -349,7 +349,7 @@ describe("cross-dialect stream normalization", () => {
       const h = harness();
       const res = await h.post("/v1/messages", {
         model: "gpt-4o-mini",
-        messages: [],
+        messages: [{ role: "user", content: "hi" }],
         stream: true,
       });
       await readBody(res);

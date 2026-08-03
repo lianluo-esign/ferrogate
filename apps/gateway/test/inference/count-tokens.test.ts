@@ -123,11 +123,12 @@ const INPUT_TOKEN_GOLDENS: readonly Golden[] = [
     derivation: "3 + 4",
   },
   {
-    name: "no turns at all reserves nothing",
+    name: "no turns at all is refused",
     body: { messages: [] },
-    inputTokens: 0,
-    // scalars 0 -> floor(3/4) = 0; overhead 0.
-    derivation: "0 + 0",
+    // FIXED by #727: empty messages are now refused with 400 before dispatch.
+    // This test verifies the refusal rather than the zero count.
+    inputTokens: undefined as number | undefined,
+    derivation: "refused",
   },
 ];
 
@@ -144,10 +145,15 @@ async function countTokens(model: string, body: Record<string, unknown>): Promis
 describe("POST /v1/messages/count_tokens — golden arithmetic", () => {
   for (const { family, model } of FAMILIES) {
     for (const golden of INPUT_TOKEN_GOLDENS) {
-      it(`${family}: ${golden.name} => ${golden.inputTokens} (${golden.derivation})`, async () => {
+      it(`${family}: ${golden.name} => ${golden.inputTokens ?? "refused"} (${golden.derivation})`, async () => {
         const res = await countTokens(model, golden.body);
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ input_tokens: golden.inputTokens });
+        if (golden.inputTokens === undefined) {
+          // Empty messages are refused with 400 (issue #727).
+          expect(res.status).toBe(400);
+        } else {
+          expect(res.status).toBe(200);
+          expect(await res.json()).toEqual({ input_tokens: golden.inputTokens });
+        }
       });
     }
   }
@@ -341,7 +347,7 @@ describe("the deployed Worker guards it like every other /v1 operation", () => {
     return await SELF.fetch(`${BASE}${PATH}`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ model: "m", messages: [] }),
+      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
     });
   }
 

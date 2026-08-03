@@ -147,7 +147,7 @@ describe("the deployed Worker serves from the response cache", () => {
     const res = await SELF.fetch(`${BASE}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "cache-probe", messages: [] }),
+      body: JSON.stringify({ model: "cache-probe", messages: [{ role: "user", content: "hi" }] }),
     });
     expect(res.status).toBe(401);
     // A 401 is not a cache outcome; labelling it would mean the middleware ran

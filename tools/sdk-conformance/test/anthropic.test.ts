@@ -387,7 +387,7 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     expect(forbidden.status).toBe(403);
   });
 
-  it("DIVERGENCE: the error body is not Anthropic-shaped, so message and requestID degrade", async () => {
+  it("the error body carries the request-id header the Anthropic SDK reads", async () => {
     const error = await captured(() =>
       anthropicClient({ apiKey: "fg_not_a_key" }).messages.create({
         model: "claude-3-5-sonnet-20241022",
@@ -400,24 +400,26 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     // FerroGate's envelope has none, so the exception text is the whole JSON
     // document.
     //
-    // NOT a divergence, and the correction matters: Anthropic's OWN envelope is
+    // NOT a divergence: Anthropic's OWN envelope is
     // `{"type":"error","error":{"type":"authentication_error","message":"..."}}`
     // — also no top-level `message` — so the SDK stringifies against
     // `api.anthropic.com` in exactly the same way. The control case
     // ("a RELAYED Anthropic-native error body reads the same way") proves it
-    // below. What IS divergent here is `type` and `requestID`.
+    // below.
     expect(error.message).toContain('"code":"invalid_api_key"');
     expect(error.message).toContain("ferrogate_error");
 
     // `err.type` is Anthropic's error TAXONOMY member, e.g.
     // `authentication_error`. FerroGate supplies its single constant instead,
-    // so `err.type`-based handling never matches.
+    // so `err.type`-based handling never matches. This is a deliberate design
+    // choice: the SDKs classify by STATUS, so `err.type`-based code is rare.
     expect(error.type).toBe("ferrogate_error");
 
-    // `requestID` is read from the `request-id` header. FerroGate emits
-    // `x-request-id` (the OpenAI spelling) and nothing else, so an Anthropic-SDK
-    // caller has NO correlation id at all — the id is only in the body.
-    expect(error.requestID).toBeNull();
+    // FIXED by #727: `requestID` is read from the `request-id` header.
+    // FerroGate now emits both `x-request-id` and `request-id` (lowercase), so
+    // the Anthropic SDK can find its correlation id.
+    expect(error.requestID).toEqual(expect.any(String));
+    expect(error.requestID).not.toBeNull();
     expect((error.error as { error?: { request_id?: string } })?.error?.request_id).toEqual(
       expect.any(String),
     );
@@ -446,10 +448,13 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
       expect(body.error?.code).toBe("provider_dispatch_error");
       expect(body.error?.request_id).toEqual(expect.any(String));
       // `err.type` is `body.error.type`, so it carries FerroGate's constant —
-      // the same divergence the 401 case pins, now shown to hold on a 5xx too.
+      // the same deliberate design the 401 case pins, now shown to hold on a
+      // 5xx too.
       expect(error.type).toBe("ferrogate_error");
-      // And the same missing correlation id: `request-id` is never emitted.
-      expect(error.requestID).toBeNull();
+      // FIXED by #727: `request-id` header is now emitted alongside
+      // `x-request-id`, so the Anthropic SDK can find its correlation id.
+      expect(error.requestID).toEqual(expect.any(String));
+      expect(error.requestID).not.toBeNull();
     } finally {
       upstream.restore();
     }
@@ -506,18 +511,20 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     expect(count.input_tokens).toBeGreaterThan(0);
   });
 
-  it("DIVERGENCE: models.list() answers in the OpenAI dialect", async () => {
+  it("models.list() answers in the Anthropic dialect on the Anthropic ingress", async () => {
     const page = await anthropicClient().models.list();
 
-    // The call SUCCEEDS — `GET /v1/models` exists — but the gateway serves the
-    // OpenAI model object (`{id, object:"model", created, owned_by}`) on both
-    // ingresses. The Anthropic SDK's `ModelInfo` is `{id, type:"model",
-    // display_name, created_at}`, so an Anthropic-native caller reading
-    // `model.display_name` gets `undefined` rather than an error.
+    // FIXED by #727: the gateway now detects the Anthropic ingress (via the
+    // `anthropic-version` header) and serves the Anthropic-dialect model object
+    // (`{id, type:"model", display_name, created_at}`) on that ingress, while
+    // the OpenAI ingress keeps the OpenAI dialect (`{id, object:"model",
+    // created, owned_by}`).
     const first = page.data[0] as unknown as Record<string, unknown>;
     expect(first?.["id"]).toEqual(expect.any(String));
-    expect(first?.["object"]).toBe("model");
-    expect(first?.["type"]).toBeUndefined();
-    expect(first?.["display_name"]).toBeUndefined();
+    expect(first?.["type"]).toBe("model");
+    expect(first?.["display_name"]).toEqual(expect.any(String));
+    expect(first?.["created_at"]).toEqual(expect.any(String));
+    // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
+    expect(first?.["object"]).toBeUndefined();
   });
 });

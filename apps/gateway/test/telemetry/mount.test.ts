@@ -346,7 +346,7 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
 
   it("emits an error metric for a request the gateway itself refused", async () => {
     // No upstream stub: an unknown model never reaches a provider.
-    const response = await chat({ model: "no-such-model", messages: [] });
+    const response = await chat({ model: "no-such-model", messages: [{ role: "user", content: "hi" }] });
     expect(response.status).toBe(400);
     await waitForCollected(2);
 

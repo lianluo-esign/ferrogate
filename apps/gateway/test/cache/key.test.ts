@@ -51,7 +51,7 @@ const VARIANTS: ReadonlyArray<[string, Partial<CacheKeyInput>]> = [
   ["platformOperator", { platformOperator: true }],
   ["scopeDigest", { scopeDigest: scopeDigest(["chat.completions", "admin.tenants.read"]) }],
   ["logicalModel", { logicalModel: "claude-logical" }],
-  ["requestBody", { requestBody: { model: "gpt-4o-mini", messages: [] } }],
+  ["requestBody", { requestBody: { model: "gpt-4o-mini", messages: [{ role: "user", content: "different" }] } }],
   ["guardrailPolicyFingerprint", { guardrailPolicyFingerprint: "gfp-2" }],
   ["registryFingerprint", { registryFingerprint: "rfp-2" }],
   // #695. Three separate rows rather than one, because these are three

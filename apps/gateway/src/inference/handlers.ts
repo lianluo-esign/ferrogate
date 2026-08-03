@@ -168,6 +168,7 @@ import {
   validateRequestMetadata,
 } from "./schemas.js";
 import type {
+  AnthropicModelList,
   AnthropicTokenCount,
   AudioUploadFile,
   OpenAiModelList,
@@ -1946,11 +1947,50 @@ function describeCatalogEntry(deps: ResolvedInferenceDeps, entry: PhysicalRoute)
   return describeModel(entry, resolveCandidates(deps.models, entry.logicalModel));
 }
 
+/**
+ * True when the request arrived on the Anthropic ingress.
+ *
+ * The Anthropic SDK always sends `anthropic-version`; the OpenAI SDK never does.
+ * This is the only reliable way to distinguish the two ingresses for shared
+ * endpoints like `GET /v1/models`.
+ */
+function isAnthropicIngress(c: InferenceContext): boolean {
+  return c.req.header("anthropic-version") !== undefined;
+}
+
+/**
+ * Build an Anthropic-dialect model object from a `ModelDescriptor`.
+ *
+ * The Anthropic SDK's `ModelInfo` is `{id, type:"model", display_name,
+ * created_at}`. `display_name` is derived from the model id when no better name
+ * is available; `created_at` is the ISO-8601 string the SDK expects.
+ */
+function anthropicModelFrom(descriptor: ModelDescriptor): {
+  id: string;
+  type: "model";
+  display_name: string;
+  created_at: string;
+} {
+  return {
+    id: descriptor.id,
+    type: "model",
+    display_name: descriptor.owned_by !== "" ? `${descriptor.id} by ${descriptor.owned_by}` : descriptor.id,
+    created_at: new Date(descriptor.created * 1000).toISOString(),
+  };
+}
+
 function handleModels(c: InferenceContext, deps: ResolvedInferenceDeps): Response {
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
 
   const data = discoverableModels(deps, caller).map((entry) => describeCatalogEntry(deps, entry));
+
+  if (isAnthropicIngress(c)) {
+    const listing: AnthropicModelList = {
+      data: data.map((entry) => anthropicModelFrom(entry)),
+    };
+    return jsonResponse(listing, requestId);
+  }
 
   const listing: OpenAiModelList = { object: "list", data };
   return jsonResponse(listing, requestId);
@@ -1986,7 +2026,11 @@ function handleModel(c: InferenceContext, deps: ResolvedInferenceDeps): Response
   if (entry === undefined) {
     return errorResponse(reject(404, "model_not_found", `unknown model ${requested}`), requestId);
   }
-  return jsonResponse(describeCatalogEntry(deps, entry), requestId);
+  const descriptor = describeCatalogEntry(deps, entry);
+  if (isAnthropicIngress(c)) {
+    return jsonResponse(anthropicModelFrom(descriptor), requestId);
+  }
+  return jsonResponse(descriptor, requestId);
 }
 
 // ---------------------------------------------------------------------------

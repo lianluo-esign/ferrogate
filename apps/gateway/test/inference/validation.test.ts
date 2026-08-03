@@ -46,7 +46,7 @@ describe("body parsing", () => {
       const h = harness();
       const res = await h.router.request("https://gw.test/v1/chat/completions", {
         method: "POST",
-        body: JSON.stringify({ model: "gpt-4o-mini", messages: [] }),
+        body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] }),
       });
       expect(res.status).toBe(200);
     } finally {
@@ -91,7 +91,7 @@ describe("Zod violations → 400 invalid_request", () => {
   });
 
   it("rejects a missing model", async () => {
-    const res = await post("/v1/chat/completions", { messages: [] });
+    const res = await post("/v1/chat/completions", { messages: [{ role: "user", content: "hi" }] });
     expect(res.status).toBe(400);
     expect((await errorBody(res)).error.code).toBe("invalid_request");
   });
@@ -99,7 +99,7 @@ describe("Zod violations → 400 invalid_request", () => {
   it("rejects a non-boolean stream", async () => {
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       stream: "true",
     });
     expect(res.status).toBe(400);
@@ -179,7 +179,7 @@ describe("request metadata bounds (issue #171)", () => {
     );
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       metadata,
     });
 
@@ -193,7 +193,7 @@ describe("request metadata bounds (issue #171)", () => {
   it("rejects an over-long key", async () => {
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       metadata: { ["k".repeat(65)]: "v" },
     });
     const body = await errorBody(res);
@@ -204,7 +204,7 @@ describe("request metadata bounds (issue #171)", () => {
   it("rejects an over-long value", async () => {
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       metadata: { customer_id: "v".repeat(257) },
     });
     const body = await errorBody(res);
@@ -216,7 +216,7 @@ describe("request metadata bounds (issue #171)", () => {
     // 100 × 3-byte characters = 300 bytes > 256, but only 100 JS characters.
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       metadata: { customer_id: "あ".repeat(100) },
     });
     expect((await errorBody(res)).error.code).toBe("invalid_request_metadata");
@@ -225,7 +225,7 @@ describe("request metadata bounds (issue #171)", () => {
   it("rejects non-string metadata values as invalid_request", async () => {
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       metadata: { count: 3 },
     });
     expect((await errorBody(res)).error.code).toBe("invalid_request");
@@ -234,7 +234,7 @@ describe("request metadata bounds (issue #171)", () => {
   it("accepts a map within every bound", async () => {
     const res = await post("/v1/chat/completions", {
       model: "gpt-4o-mini",
-      messages: [],
+      messages: [{ role: "user", content: "hi" }],
       metadata: { customer_id: "acme" },
     });
     expect(res.status).toBe(200);
@@ -243,7 +243,7 @@ describe("request metadata bounds (issue #171)", () => {
 
 describe("model admission", () => {
   it("returns 400 model_not_found for an unknown model", async () => {
-    const res = await post("/v1/chat/completions", { model: "nope", messages: [] });
+    const res = await post("/v1/chat/completions", { model: "nope", messages: [{ role: "user", content: "hi" }] });
     expect(res.status).toBe(400);
     const body = await errorBody(res);
     expect(body.error.code).toBe("model_not_found");
@@ -251,7 +251,7 @@ describe("model admission", () => {
   });
 
   it("returns 400 model_disabled for a configured-but-disabled model", async () => {
-    const res = await post("/v1/chat/completions", { model: "retired-model", messages: [] });
+    const res = await post("/v1/chat/completions", { model: "retired-model", messages: [{ role: "user", content: "hi" }] });
     expect(res.status).toBe(400);
     const body = await errorBody(res);
     expect(body.error.code).toBe("model_disabled");
@@ -261,7 +261,7 @@ describe("model admission", () => {
   it("returns 403 model_not_allowed when the key denies the model", async () => {
     const res = await post(
       "/v1/chat/completions",
-      { model: "gpt-4o-mini", messages: [] },
+      { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
       { caller: callerDenying("gpt-4o-mini") },
     );
     expect(res.status).toBe(403);
@@ -275,7 +275,7 @@ describe("model admission", () => {
     // 403, otherwise the 400/403 split leaks which logical names are configured.
     const res = await post(
       "/v1/chat/completions",
-      { model: "does-not-exist", messages: [] },
+      { model: "does-not-exist", messages: [{ role: "user", content: "hi" }] },
       { caller: callerDenying("does-not-exist") },
     );
     expect(res.status).toBe(403);
@@ -285,7 +285,7 @@ describe("model admission", () => {
   it("hides another tenant's private model behind model_not_found", async () => {
     const res = await post(
       "/v1/chat/completions",
-      { model: "acme-private", messages: [] },
+      { model: "acme-private", messages: [{ role: "user", content: "hi" }] },
       { caller: () => ({ scope: { kind: "tenant" as const, tenantId: "globex" } }) },
     );
     expect(res.status).toBe(400);
@@ -297,7 +297,7 @@ describe("model admission", () => {
   it("lets the owning tenant invoke its private model", async () => {
     const res = await post(
       "/v1/chat/completions",
-      { model: "acme-private", messages: [] },
+      { model: "acme-private", messages: [{ role: "user", content: "hi" }] },
       { caller: () => ({ scope: { kind: "tenant" as const, tenantId: "acme" } }) },
     );
     expect(res.status).toBe(200);
@@ -339,7 +339,7 @@ describe("capability gating (issue #275)", () => {
           enabled: true,
         },
       ]);
-      const res = await h.post("/v1/chat/completions", { model: "mystery-model", messages: [] });
+      const res = await h.post("/v1/chat/completions", { model: "mystery-model", messages: [{ role: "user", content: "hi" }] });
 
       // An unknown family is operator misconfiguration: refuse rather than
       // guess a wire grammar, and above all dispatch nothing.
@@ -364,7 +364,7 @@ describe("capability gating (issue #275)", () => {
           enabled: true,
         },
       ]);
-      const res = await h.post("/v1/chat/completions", { model: "bedrock-model", messages: [] });
+      const res = await h.post("/v1/chat/completions", { model: "bedrock-model", messages: [{ role: "user", content: "hi" }] });
 
       // Bedrock is ported now, but it requires byte-exact SigV4: dispatching an
       // UNSIGNED request would be worse than refusing, so the adapter refuses.

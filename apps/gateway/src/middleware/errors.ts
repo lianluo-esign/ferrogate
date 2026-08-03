@@ -181,6 +181,9 @@ export function writeJsonError(
   const headers: Record<string, string> = { ...extra, "content-type": "application/json" };
   if (requestId !== null) {
     headers["x-request-id"] = requestId;
+    // The Anthropic SDK reads `err.requestID` from the `request-id` header
+    // (lowercase). Emit both so both SDKs can find their correlation id.
+    headers["request-id"] = requestId;
     // The ADOPTED trace id when the caller arrived inside a trace, else the
     // request id — see `./trace.ts`. An error is exactly the response a caller
     // most needs to correlate, so the two must not diverge here.
@@ -280,6 +283,7 @@ export const requestId: MiddlewareHandler<GatewayEnv> = async (c, next) => {
   await next();
   if (!c.res.headers.has("x-request-id")) {
     c.res.headers.set("x-request-id", id);
+    c.res.headers.set("request-id", id);
     c.res.headers.set("x-trace-id", trace.traceId);
   }
 };
