@@ -99,6 +99,7 @@ import {
   AssetService,
   type AssetServiceDeps,
 } from "./service.js";
+import { withAssetGuardrailScreening } from "./guardrail-screener.js";
 import { type SignaturePolicyBindings, withSignatureVerification } from "./signature-screener.js";
 import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
 import { SigV4Presigner } from "./sigv4.js";
@@ -645,11 +646,17 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   // one than the service would have used.
   const scanScreener = assetScreenerFromEnv(env as AssetScannerBindings);
   const inner = scanScreener ?? new BuiltinEicarScreener();
-  const composed = withSignatureVerification(inner, env as SignaturePolicyBindings);
-  // `withSignatureVerification` returns its argument BY IDENTITY when neither
-  // publisher keys nor the requirement are configured. That case falls back to
-  // the existing `null ⇒ buildAssetService supplies the default` contract, so
-  // the default screener keeps living in exactly one place.
+  const signed = withSignatureVerification(inner, env as SignaturePolicyBindings);
+  // #740, the LAST stage: `signature-screener.ts` → scanner → guardrail, which
+  // is the order the issue asks for and the order that costs least — a push
+  // refused for a bad signature never pays for a detector pass. Like
+  // `withSignatureVerification` this returns its argument BY IDENTITY when no
+  // guardrail policy is configured.
+  const composed = withAssetGuardrailScreening(signed, env);
+  // Both decorators return their argument BY IDENTITY when unconfigured. That
+  // case falls back to the existing `null ⇒ buildAssetService supplies the
+  // default` contract, so the default screener keeps living in exactly one
+  // place.
   const screener = composed === inner ? scanScreener : composed;
   const metadata = assetMetadataStoreFromEnv(env);
   // #736: the `static_site` bundle file index lives in the SAME tenant D1 as

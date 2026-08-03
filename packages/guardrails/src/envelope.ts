@@ -50,6 +50,18 @@ export const guardrailProtocolSchema = z.enum([
   "audio_transcription",
   "managed_action",
   "a2a",
+  // Issue #740. A HOSTED ASSET — a published `mcp_manifest`, `config_file`,
+  // `skill_bundle` or a text file inside a `static_site` bundle.
+  //
+  // Its own member, and not `chat_completions` with a `text_attachment`
+  // segment, for the reason `rerank` is its own member: `normalizeRequest`
+  // extracts nothing from an asset for any existing protocol, so binding a
+  // policy to one of them would produce an EMPTY envelope — a screening that
+  // passes on nothing while writing an evidence row that says it ran. The
+  // asset screener builds its envelope directly with `envelopeFromText`,
+  // exactly as `apps/agent-runtime` does for `a2a`, so both extraction arms
+  // below are deliberately empty rather than absent.
+  "asset",
 ]);
 export type GuardrailProtocol = z.infer<typeof guardrailProtocolSchema>;
 
@@ -152,6 +164,8 @@ function protocolName(protocol: GuardrailProtocol): string {
       return "managed_action";
     case "a2a":
       return "a2a";
+    case "asset":
+      return "asset";
   }
 }
 
@@ -224,7 +238,12 @@ class EnvelopeBuilder {
     return this.segments.length === 0;
   }
 
-  push(source: ContentSource, location: string, contentType: SegmentContentType, text: string): void {
+  push(
+    source: ContentSource,
+    location: string,
+    contentType: SegmentContentType,
+    text: string,
+  ): void {
     if (text.length === 0) {
       return;
     }
@@ -290,6 +309,11 @@ export function normalizeRequest(protocol: GuardrailProtocol, body: unknown): Gu
     case "audio_transcription":
     case "managed_action":
     case "a2a":
+    // Issue #740. Same seam as `a2a`: the asset screener owns the envelope
+    // (there is no request BODY to walk — the content is an object in R2), so
+    // this arm must extract nothing rather than fall through to a generic walk
+    // that would find a JSON manifest and label it as a chat document.
+    case "asset":
       break;
   }
   return builder.finish();
@@ -316,7 +340,12 @@ export function normalizeResponse(
     protocol === "audio_speech" ||
     protocol === "images" ||
     protocol === "managed_action" ||
-    protocol === "a2a"
+    protocol === "a2a" ||
+    // Issue #740. An asset has no RESPONSE document: it is screened once, at
+    // publish, and the read path enforces that decision by withholding the row
+    // rather than by screening the bytes again. Falling through would hit the
+    // `response.raw` arm below and label a published binary `assistant`.
+    protocol === "asset"
   ) {
     return builder.finish();
   }
@@ -638,12 +667,7 @@ function extractToolCalls(calls: unknown, location: string, builder: EnvelopeBui
   arr.forEach((call, index) => {
     const args = asString(get(get(call, "function"), "arguments"));
     if (args !== undefined) {
-      builder.push(
-        "tool_arguments",
-        `${location}[${index}].function.arguments`,
-        "json",
-        args,
-      );
+      builder.push("tool_arguments", `${location}[${index}].function.arguments`, "json", args);
     }
   });
 }
@@ -815,7 +839,9 @@ export function validateContentPatchesForSegments(
       patch.byte_end > byteLen(segment.text) ||
       !isCharBoundary(segment.text, patch.byte_start) ||
       !isCharBoundary(segment.text, patch.byte_end) ||
-      (previous !== undefined && previous.id === patch.segment_id && patch.byte_start < previous.end)
+      (previous !== undefined &&
+        previous.id === patch.segment_id &&
+        patch.byte_start < previous.end)
     ) {
       throw patchError("guardrail patch has an invalid, non-UTF-8, or overlapping range");
     }
@@ -897,7 +923,10 @@ export function applyContentPatchesToDocument(
     }
     const text = target.get();
     if (typeof text !== "string") {
-      throw DetectorError.new("protected_path", "guardrail patch target is not an exact text field");
+      throw DetectorError.new(
+        "protected_path",
+        "guardrail patch target is not an exact text field",
+      );
     }
     const first = pathPatches[0];
     if (first !== undefined && contentFingerprint(text) !== first.expected_fingerprint) {

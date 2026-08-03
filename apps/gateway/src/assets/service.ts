@@ -56,6 +56,7 @@ import {
 import {
   type AssetAuditSink,
   type AssetBundleIndexStore,
+  type AssetBundleScreeningVerdict,
   type AssetCaller,
   type AssetMetadataStore,
   type AssetObjectStore,
@@ -71,6 +72,7 @@ import {
   type StoredBundleFile,
   isDownloadable,
   isScreeningRejection,
+  strictestVisibility,
 } from "./ports.js";
 import {
   compareVersionsNewestFirst,
@@ -922,6 +924,10 @@ export class AssetService {
       content: input.content,
       contentSha256: contentHash,
       nowUnix: now,
+      // #740: the join key for the guardrail evidence rows this screening may
+      // write, so `GET /admin/v1/investigations?request_id=…` finds the asset
+      // evaluation exactly as it finds an inference one.
+      requestId: context.requestId,
       ...(input.signature !== undefined ? { signature: input.signature } : {}),
     });
     if (isScreeningRejection(screening)) {
@@ -1043,6 +1049,7 @@ export class AssetService {
         id,
         input.content,
         contentType,
+        context,
       );
       if (!expanded.ok) {
         await this.#unwindBundlePublish(caller, ref, id, candidateKey);
@@ -1056,14 +1063,21 @@ export class AssetService {
         );
         return expanded;
       }
-      asset.visibility = await this.#promoteExpandedBundle(id, screening.visibility);
+      // #740: the archive verdict and the PER-FILE verdict are folded through
+      // `strictestVisibility`, so neither can lift the other. One bad file
+      // withholds the whole VERSION — see `AssetBundleScreeningVerdict` for
+      // why refusing a single file is not a representable product here.
+      asset.visibility = await this.#promoteExpandedBundle(
+        id,
+        strictestVisibility(screening.visibility, expanded.body.screening.visibility),
+      );
       this.#record(
         context,
         caller,
         "asset.push",
         id,
         "committed",
-        `asset ${id} pushed as a static_site bundle of ${expanded.body.length} files (${asset.size_bytes} archive bytes); ${screening.auditDetail}`,
+        `asset ${id} pushed as a static_site bundle of ${expanded.body.files.length} files (${asset.size_bytes} archive bytes); ${screening.auditDetail}; ${expanded.body.screening.auditDetail}`,
       );
     } else {
       this.#record(
@@ -1992,6 +2006,7 @@ export class AssetService {
       content: bytes,
       contentSha256: actualSha256,
       nowUnix: now,
+      requestId: context.requestId,
     });
     if (isScreeningRejection(screening)) {
       await this.#bestEffortDelete(stagingKey, caller.tenantId);
@@ -2096,8 +2111,16 @@ export class AssetService {
 
     // #736: expand AFTER the reservation row exists and BEFORE anything can
     // resolve it — the same order as the inline path, through the same helpers.
+    let bundleScreening = "";
     if (bundle) {
-      const expanded = await this.#expandBundleIntoStore(caller, objectRef, id, bytes, contentType);
+      const expanded = await this.#expandBundleIntoStore(
+        caller,
+        objectRef,
+        id,
+        bytes,
+        contentType,
+        context,
+      );
       if (!expanded.ok) {
         await this.#unwindBundlePublish(caller, ref, id, finalKey);
         await this.#bestEffortDelete(stagingKey, caller.tenantId);
@@ -2111,7 +2134,13 @@ export class AssetService {
         );
         return expanded;
       }
-      asset.visibility = await this.#promoteExpandedBundle(id, screening.visibility);
+      // #740, exactly as the inline path: the strictest of the two verdicts,
+      // applied through the ONE CAS that may move a bundle to `visible`.
+      asset.visibility = await this.#promoteExpandedBundle(
+        id,
+        strictestVisibility(screening.visibility, expanded.body.screening.visibility),
+      );
+      bundleScreening = `; ${expanded.body.screening.auditDetail}`;
     }
 
     this.#record(
@@ -2120,7 +2149,7 @@ export class AssetService {
       "asset.push",
       id,
       "committed",
-      `asset ${id} committed via presigned upload ${request.upload_id} (${asset.size_bytes} bytes); ${screening.auditDetail}; manifest=${JSON.stringify(screening.manifest)}`,
+      `asset ${id} committed via presigned upload ${request.upload_id} (${asset.size_bytes} bytes); ${screening.auditDetail}${bundleScreening}; manifest=${JSON.stringify(screening.manifest)}`,
     );
     await this.#bestEffortDelete(stagingKey, caller.tenantId);
     return {
@@ -2425,6 +2454,14 @@ export class AssetService {
    * turn a 10 MiB inline push into more storage than its whole quota. The
    * fixed {@link BUNDLE_MAX_TOTAL_BYTES} still binds independently — this only
    * ever lowers it.
+   *
+   * #740: the expanded FILES are also where guardrail screening happens, and
+   * this is the only place they exist as text — the archive is a gzip stream
+   * and the rows below carry only hashes. Screening the container instead
+   * would repeat the mistake #736 already corrected for content types:
+   * screening the archive is not screening its contents. The verdict is
+   * returned rather than applied, because the ONE place a bundle may become
+   * `visible` is {@link #promoteExpandedBundle}'s CAS.
    */
   async #expandBundleIntoStore(
     caller: AssetCaller,
@@ -2432,7 +2469,13 @@ export class AssetService {
     assetId: string,
     archive: Uint8Array,
     archiveContentType: string,
-  ): Promise<AssetResult<readonly StoredBundleFile[]>> {
+    context: AssetRequestContext,
+  ): Promise<
+    AssetResult<{
+      readonly files: readonly StoredBundleFile[];
+      readonly screening: AssetBundleScreeningVerdict;
+    }>
+  > {
     const expansion = await expandBundle(archive, {
       maxTotalBytes: caller.assetStorageQuotaBytes,
     });
@@ -2447,6 +2490,20 @@ export class AssetService {
         `${expansion.message} (pushed as ${archiveContentType})`,
       );
     }
+
+    // #740: over the expanded files, BEFORE anything is written — a screener
+    // that refuses must not have cost the bucket 2 000 puts first. A screener
+    // with no `screenBundleFiles` has no opinion about files, which is the
+    // honest answer for the archive-shaped screeners that predate bundles, so
+    // the absence is recorded rather than defaulted to a pass.
+    const screening: AssetBundleScreeningVerdict = (await this.#screener.screenBundleFiles?.({
+      assetId,
+      tenantId: caller.tenantId,
+      assetType: objectRef.assetType,
+      nowUnix: this.#now(),
+      requestId: context.requestId,
+      files: expansion.files,
+    })) ?? { visibility: "visible", auditDetail: "guardrail=not_screened(no_file_screener)" };
 
     const now = this.#now();
     const written: string[] = [];
@@ -2487,7 +2544,7 @@ export class AssetService {
         `the static_site bundle could not be expanded into the object bucket: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    return { ok: true, status: 200, body: rows };
+    return { ok: true, status: 200, body: { files: rows, screening } };
   }
 
   /**
