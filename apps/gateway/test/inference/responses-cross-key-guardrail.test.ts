@@ -40,18 +40,13 @@
  * and it is O(1)-per-turn; this binding is one screening pass over one stored
  * document on a read that would otherwise be free.
  *
- * ## The residual this file does NOT close, stated so it is not mistaken for covered
+ * ## Cross-key continuation (#779)
  *
  * A continuation — key B posting `previous_response_id` addressing A's turn —
- * replays A's stored text UPSTREAM as `input`, and binding `getResponse` does
- * nothing about that. It cannot: the chain is assembled INSIDE the inner
- * inference router, after `guardrails()` has already run its request stage on
- * the client's own body, so the assembled document is not visible to the
- * screener at any point before it is dispatched. Closing it means screening at
- * the point of assembly, which is a change inside the router and a different
- * cost argument (O(foreign turns) rather than O(1)). Tracked as #779, which
- * carries the measured upstream body; see also the note in
- * `src/guardrails/middleware.ts` on the `getResponse` binding.
+ * used to replay A's stored text upstream after the middleware had already
+ * screened B's client body. The continuation cases below pin the assembly-time
+ * fix: stored input is refused by B's request policy, stored output is redacted
+ * by B's response policy, and the provider never receives the raw card.
  *
  * ## Why these requests go through `SELF.fetch`
  *
@@ -97,6 +92,25 @@ const REDACT_FOR_B_ONLY = secretScanPolicy({
   onFail: [{ kind: "redact", code: "guardrail_redacted", message: "pii redacted" }],
 });
 
+const BLOCK_INPUT_FOR_B_ONLY = secretScanPolicy({
+  policyId: "responses-crosskey-input-block",
+  stage: "request",
+  scope: { api_key_ids: ["key_conv_b"] },
+  detector: {
+    kind: "pii",
+    entities: ["credit_card"],
+    redaction: "mask",
+    fingerprint_secret_ref: FINGERPRINT_SECRET_REF,
+  } as never,
+  onFail: [
+    {
+      kind: "block",
+      code: "guardrail_replayed_input_blocked",
+      message: "stored input blocked",
+    },
+  ],
+});
+
 const PROVIDERS = JSON.stringify([
   { name: "probe", kind: "openai", base_url: `https://${PROVIDER_HOST}/v1` },
 ]);
@@ -122,7 +136,7 @@ const OVERRIDES: Record<string, string> = {
   GATEWAY_NATIVE_API_KEYS: KEYS,
   // Must be on `env` before the FIRST request in this file: `guardrails()`
   // memoizes the compiled engine per `env` object.
-  GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([REDACT_FOR_B_ONLY]),
+  GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([REDACT_FOR_B_ONLY, BLOCK_INPUT_FOR_B_ONLY]),
   [FINGERPRINT_SECRET_REF]: "test-fingerprint-key",
 };
 
@@ -166,23 +180,31 @@ function providerAnswer(text: string): Record<string, unknown> {
 }
 
 interface Upstream {
+  readonly requests: readonly Record<string, unknown>[];
   restore(): void;
 }
 
 /** Answer the probe provider with `body`; anything else falls through. */
 function stubUpstream(body: Record<string, unknown>): Upstream {
   const original = globalThis.fetch;
+  const requests: Record<string, unknown>[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (new URL(url).hostname !== PROVIDER_HOST) {
       return await original(input as RequestInfo, init);
     }
+    requests.push((await new Request(input, init).json()) as Record<string, unknown>);
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
-  return { restore: () => void (globalThis.fetch = original) };
+  return {
+    requests,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 let upstream: Upstream | undefined;
@@ -223,11 +245,11 @@ function outputText(body: unknown): string {
 }
 
 /** Key A files one turn carrying the card, and it is stored VERBATIM. */
-async function storeVerbatimTurnAsKeyA(): Promise<string> {
+async function storeVerbatimTurnAsKeyA(input = "what did you charge"): Promise<string> {
   upstream = stubUpstream(providerAnswer(`your card ${CARD} was charged`));
   const created = await createResponse(KEY_A, {
     model: "crosskey-probe",
-    input: "what did you charge",
+    input,
     store: true,
   });
   expect(created.status).toBe(200);
@@ -240,16 +262,17 @@ async function storeVerbatimTurnAsKeyA(): Promise<string> {
   expect(created.headers.get("x-ferrogate-response-stored")).toBe("true");
 
   const rows = await DB.prepare(
-    "SELECT response_json FROM responses_conversations WHERE response_id = ?",
+    "SELECT response_json, screening_api_key_id FROM responses_conversations WHERE response_id = ?",
   )
-    .bind(String(body["id"]))
-    .all<{ response_json: string }>();
+    .bind(String(body.id))
+    .all<{ response_json: string; screening_api_key_id: string | null }>();
   expect(rows.results ?? []).toHaveLength(1);
   expect((rows.results ?? [])[0]?.response_json).toContain(CARD);
+  expect((rows.results ?? [])[0]?.screening_api_key_id).toBe("key_conv_a");
 
   upstream.restore();
   upstream = undefined;
-  return String(body["id"]);
+  return String(body.id);
 }
 
 describe("the redact policy really is scoped to key B (#689)", () => {
@@ -336,5 +359,42 @@ describe("GET /v1/responses/{id} is screened under the READER's policy (#689)", 
     expect(missing.status).toBe(404);
     const body = (await missing.json()) as { error: { code: string } };
     expect(body.error.code).toBe("previous_response_not_found");
+  });
+});
+
+describe("a continuation is screened under the continuing key's policy (#779)", () => {
+  it("does not replay key A's card upstream on key B's request", async () => {
+    const aId = await storeVerbatimTurnAsKeyA();
+
+    upstream = stubUpstream(providerAnswer("continuation complete"));
+    const continued = await createResponse(KEY_B, {
+      model: "crosskey-probe",
+      input: "and before?",
+      previous_response_id: aId,
+      store: false,
+    });
+
+    expect(continued.status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    const dispatched = JSON.stringify(upstream.requests[0]);
+    expect(dispatched).not.toContain(CARD);
+    expect(dispatched).toContain("your card [REDACTED:CREDIT_CARD] was charged");
+  });
+
+  it("does not replay key A's stored input past key B's request policy", async () => {
+    const aId = await storeVerbatimTurnAsKeyA(`charge ${CARD}?`);
+
+    upstream = stubUpstream(providerAnswer("must not dispatch"));
+    const continued = await createResponse(KEY_B, {
+      model: "crosskey-probe",
+      input: "and before?",
+      previous_response_id: aId,
+      store: false,
+    });
+
+    expect(continued.status).toBe(403);
+    const body = (await continued.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("guardrail_replayed_input_blocked");
+    expect(upstream.requests).toHaveLength(0);
   });
 });

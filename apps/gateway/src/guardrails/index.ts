@@ -138,3 +138,4 @@ export * from "./evidence-retention.js";
 export * from "./stream.js";
 export * from "./middleware.js";
 export * from "./config.js";
+export * from "./conversation-replay.js";

@@ -37,6 +37,7 @@ function turn(
   return {
     responseId,
     previousResponseId,
+    screeningApiKeyId: "key_test",
     turnIndex,
     model: "gpt-4o-mini",
     input: [{ role: "user", content: `ask ${turnIndex}` }],
@@ -76,9 +77,14 @@ describe("D1ConversationStore", () => {
       "resp_b",
       "resp_c",
     ]);
+    expect(chain.ok && chain.turns.map((t) => t.screeningApiKeyId)).toEqual([
+      "key_test",
+      "key_test",
+      "key_test",
+    ]);
     // The stored body round-trips through JSON intact — the chain replays the
     // OUTPUT ITEMS, so a lossy round trip would silently flatten the transcript.
-    expect(chain.ok && chain.turns[0]?.response["output"]).toEqual([
+    expect(chain.ok && chain.turns[0]?.response.output).toEqual([
       {
         type: "message",
         role: "assistant",
