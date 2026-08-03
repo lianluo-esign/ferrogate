@@ -17,6 +17,8 @@ export interface StoredResponseTurn {
   readonly previousResponseId: string | null;
   /** The credential under which this turn's guardrails were decided. */
   readonly screeningApiKeyId?: string | null;
+  /** The complete selected active policy-revision set, or NULL when unknown. */
+  readonly screeningPolicyRevision?: string | null;
   /** 0 for the first turn of a chain. */
   readonly turnIndex: number;
   readonly model: string;
@@ -229,13 +231,14 @@ export class InMemoryConversationStore implements ConversationStore {
 // ---------------------------------------------------------------------------
 
 const COLUMNS =
-  "response_id, previous_response_id, screening_api_key_id, turn_index, model, input_json, response_json, " +
-  "created_at_unix, expires_at_unix";
+  "response_id, previous_response_id, screening_api_key_id, screening_policy_revision, turn_index, " +
+  "model, input_json, response_json, created_at_unix, expires_at_unix";
 
 interface ConversationRow {
   response_id: string;
   previous_response_id: string | null;
   screening_api_key_id: string | null;
+  screening_policy_revision: string | null;
   turn_index: number;
   model: string;
   input_json: string;
@@ -249,6 +252,7 @@ function rowToTurn(row: ConversationRow): StoredResponseTurn {
     responseId: row.response_id,
     previousResponseId: row.previous_response_id,
     screeningApiKeyId: row.screening_api_key_id,
+    screeningPolicyRevision: row.screening_policy_revision,
     turnIndex: Number(row.turn_index),
     model: row.model,
     input: safeArray(row.input_json),
@@ -311,8 +315,9 @@ export class D1ConversationStore implements ConversationStore {
       `SELECT ${COLUMNS}, 0 FROM responses_conversations ` +
       " WHERE tenant_id = ? AND project_id = ? AND response_id = ?" +
       " UNION ALL " +
-      "SELECT r.response_id, r.previous_response_id, r.screening_api_key_id, r.turn_index, r.model, r.input_json, " +
-      " r.response_json, r.created_at_unix, r.expires_at_unix, chain.depth + 1 " +
+      "SELECT r.response_id, r.previous_response_id, r.screening_api_key_id, " +
+      " r.screening_policy_revision, r.turn_index, r.model, r.input_json, r.response_json, " +
+      " r.created_at_unix, r.expires_at_unix, chain.depth + 1 " +
       " FROM responses_conversations r JOIN chain ON r.response_id = chain.previous_response_id " +
       " WHERE r.tenant_id = ? AND r.project_id = ? AND chain.depth < ?" +
       `) SELECT ${COLUMNS} FROM chain`;
@@ -345,8 +350,9 @@ export class D1ConversationStore implements ConversationStore {
       .prepare(
         "INSERT OR REPLACE INTO responses_conversations " +
           "(tenant_id, project_id, response_id, previous_response_id, screening_api_key_id, " +
-          " turn_index, model, input_json, response_json, created_at_unix, expires_at_unix) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          " screening_policy_revision, turn_index, model, input_json, response_json, " +
+          " created_at_unix, expires_at_unix) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .bind(
         owner.tenantId,
@@ -354,6 +360,7 @@ export class D1ConversationStore implements ConversationStore {
         turn.responseId,
         turn.previousResponseId,
         turn.screeningApiKeyId ?? null,
+        turn.screeningPolicyRevision ?? null,
         turn.turnIndex,
         turn.model,
         JSON.stringify(turn.input),

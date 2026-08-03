@@ -10,6 +10,7 @@
  * `fetch` is intercepted (see `provider-mock.ts`).
  */
 import { Hono } from "hono";
+import { publishConversationReplayScreener } from "../../src/guardrails/conversation-replay.js";
 import {
   InMemoryModelResolver,
   InMemoryUsageSink,
@@ -111,6 +112,11 @@ export interface TestHarness {
   get(path: string, init?: RequestInit): Promise<Response>;
 }
 
+export interface TestHarnessOptions {
+  /** Opt out only when exercising the production fail-closed missing-capability branch. */
+  readonly conversationReplayScreener?: boolean;
+}
+
 /**
  * Build a router over {@link ALL_ROUTES} (or a supplied catalog).
  *
@@ -137,6 +143,7 @@ export function harness(
   overrides: InferenceDeps = {},
   routes: readonly PhysicalRoute[] = ALL_ROUTES,
   env: Record<string, unknown> = {},
+  options: TestHarnessOptions = {},
 ): TestHarness {
   const usage = new InMemoryUsageSink();
   const inner = createInferenceRouter({
@@ -147,6 +154,15 @@ export function harness(
   });
   const router = new Hono<{ Bindings: Record<string, unknown> }>();
   router.use("*", responseStateCommit());
+  router.use("*", async (c, next) => {
+    if (options.conversationReplayScreener !== false) {
+      publishConversationReplayScreener(c.req.raw, {
+        policyRevisionMarker: "[]",
+        screen: async ({ response }) => ({ ok: true, response }),
+      });
+    }
+    await next();
+  });
   // The same delegation `src/inference/route-module.ts` performs, including the
   // `c.req.raw` identity the pending-turn carrier is keyed by.
   router.all("*", (c) => inner.fetch(c.req.raw, c.env as Parameters<typeof inner.fetch>[1]));

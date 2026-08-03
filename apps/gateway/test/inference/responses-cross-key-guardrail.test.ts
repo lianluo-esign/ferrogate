@@ -92,6 +92,19 @@ const REDACT_FOR_B_ONLY = secretScanPolicy({
   onFail: [{ kind: "redact", code: "guardrail_redacted", message: "pii redacted" }],
 });
 
+const REDACT_FOR_MODEL_Y = secretScanPolicy({
+  policyId: "responses-samekey-model-redact",
+  stage: "response",
+  scope: { models: ["samekey-governed"] },
+  detector: {
+    kind: "pii",
+    entities: ["credit_card"],
+    redaction: "mask",
+    fingerprint_secret_ref: FINGERPRINT_SECRET_REF,
+  } as never,
+  onFail: [{ kind: "redact", code: "guardrail_redacted", message: "pii redacted" }],
+});
+
 const BLOCK_INPUT_FOR_B_ONLY = secretScanPolicy({
   policyId: "responses-crosskey-input-block",
   stage: "request",
@@ -117,6 +130,8 @@ const PROVIDERS = JSON.stringify([
 
 const MODELS = JSON.stringify([
   { name: "crosskey-probe", provider: "probe", provider_model: "crosskey-probe-physical" },
+  { name: "samekey-open", provider: "probe", provider_model: "samekey-open-physical" },
+  { name: "samekey-governed", provider: "probe", provider_model: "samekey-governed-physical" },
 ]);
 
 /**
@@ -136,7 +151,11 @@ const OVERRIDES: Record<string, string> = {
   GATEWAY_NATIVE_API_KEYS: KEYS,
   // Must be on `env` before the FIRST request in this file: `guardrails()`
   // memoizes the compiled engine per `env` object.
-  GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([REDACT_FOR_B_ONLY, BLOCK_INPUT_FOR_B_ONLY]),
+  GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([
+    REDACT_FOR_B_ONLY,
+    BLOCK_INPUT_FOR_B_ONLY,
+    REDACT_FOR_MODEL_Y,
+  ]),
   [FINGERPRINT_SECRET_REF]: "test-fingerprint-key",
 };
 
@@ -207,6 +226,30 @@ function stubUpstream(body: Record<string, unknown>): Upstream {
   };
 }
 
+/** Answer a streaming Responses request while recording the body sent upstream. */
+function stubStreamingUpstream(): Upstream {
+  const original = globalThis.fetch;
+  const requests: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (new URL(url).hostname !== PROVIDER_HOST) {
+      return await original(input as RequestInfo, init);
+    }
+    requests.push((await new Request(input, init).json()) as Record<string, unknown>);
+    const sse =
+      'data: {"choices":[{"delta":{"content":"continuation"}}]}\n\n' +
+      'data: {"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n' +
+      "data: [DONE]\n\n";
+    return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  return {
+    requests,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
 let upstream: Upstream | undefined;
 
 afterEach(() => {
@@ -245,10 +288,13 @@ function outputText(body: unknown): string {
 }
 
 /** Key A files one turn carrying the card, and it is stored VERBATIM. */
-async function storeVerbatimTurnAsKeyA(input = "what did you charge"): Promise<string> {
+async function storeVerbatimTurnAsKeyA(
+  input = "what did you charge",
+  model = "crosskey-probe",
+): Promise<string> {
   upstream = stubUpstream(providerAnswer(`your card ${CARD} was charged`));
   const created = await createResponse(KEY_A, {
-    model: "crosskey-probe",
+    model,
     input,
     store: true,
   });
@@ -262,13 +308,19 @@ async function storeVerbatimTurnAsKeyA(input = "what did you charge"): Promise<s
   expect(created.headers.get("x-ferrogate-response-stored")).toBe("true");
 
   const rows = await DB.prepare(
-    "SELECT response_json, screening_api_key_id FROM responses_conversations WHERE response_id = ?",
+    "SELECT response_json, screening_api_key_id, screening_policy_revision " +
+      "FROM responses_conversations WHERE response_id = ?",
   )
     .bind(String(body.id))
-    .all<{ response_json: string; screening_api_key_id: string | null }>();
+    .all<{
+      response_json: string;
+      screening_api_key_id: string | null;
+      screening_policy_revision: string | null;
+    }>();
   expect(rows.results ?? []).toHaveLength(1);
   expect((rows.results ?? [])[0]?.response_json).toContain(CARD);
   expect((rows.results ?? [])[0]?.screening_api_key_id).toBe("key_conv_a");
+  expect((rows.results ?? [])[0]?.screening_policy_revision).toBe("[]");
 
   upstream.restore();
   upstream = undefined;
@@ -396,5 +448,46 @@ describe("a continuation is screened under the continuing key's policy (#779)", 
     const body = (await continued.json()) as { error: { code: string } };
     expect(body.error.code).toBe("guardrail_replayed_input_blocked");
     expect(upstream.requests).toHaveLength(0);
+  });
+});
+
+describe("a continuation is screened under the selected policy revision (#808)", () => {
+  it("re-screens stored output when the same key continues under a governed model", async () => {
+    const firstId = await storeVerbatimTurnAsKeyA("what did you charge", "samekey-open");
+
+    upstream = stubUpstream(providerAnswer("continuation complete"));
+    const continued = await createResponse(KEY_A, {
+      model: "samekey-governed",
+      input: "and before?",
+      previous_response_id: firstId,
+      store: false,
+    });
+
+    expect(continued.status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    const dispatched = JSON.stringify(upstream.requests[0]);
+    expect(dispatched).not.toContain(CARD);
+    expect(dispatched).toContain("your card [REDACTED:CREDIT_CARD] was charged");
+  });
+
+  it("re-screens stored output for a streaming continuation under a governed model", async () => {
+    const firstId = await storeVerbatimTurnAsKeyA("what did you charge", "samekey-open");
+
+    upstream = stubStreamingUpstream();
+    const continued = await createResponse(KEY_A, {
+      model: "samekey-governed",
+      input: "and before?",
+      previous_response_id: firstId,
+      stream: true,
+      store: false,
+    });
+
+    expect(continued.status).toBe(200);
+    expect(continued.headers.get("content-type")).toContain("text/event-stream");
+    await continued.text();
+    expect(upstream.requests).toHaveLength(1);
+    const dispatched = JSON.stringify(upstream.requests[0]);
+    expect(dispatched).not.toContain(CARD);
+    expect(dispatched).toContain("your card [REDACTED:CREDIT_CARD] was charged");
   });
 });

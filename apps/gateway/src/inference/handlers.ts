@@ -2245,6 +2245,7 @@ interface ConversationPlan {
   readonly responseId: string;
   readonly previousResponseId: string | null;
   readonly screeningApiKeyId: string | null;
+  readonly screeningPolicyRevision: string | null;
   readonly turnIndex: number;
   /** THIS turn's own input items (the delta stored on the row). */
   readonly turnInput: readonly unknown[];
@@ -2334,6 +2335,7 @@ async function prepareConversation(
       responseId: mintResponseId(),
       previousResponseId: null,
       screeningApiKeyId: caller.apiKeyId ?? null,
+      screeningPolicyRevision: null,
       turnIndex: 0,
       turnInput: [],
       expiresAtUnix: nowUnix,
@@ -2371,28 +2373,29 @@ async function prepareConversation(
       return chainRejection("too_long", previousResponseId);
     }
     const currentApiKeyId = caller.apiKeyId ?? null;
-    const foreignTurns = resolved.turns.filter(
-      (turn) => turn.screeningApiKeyId !== currentApiKeyId,
-    );
-    if (foreignTurns.length === 0) {
-      prior = turnItems(resolved.turns);
-    } else {
-      const screen = conversationReplayScreenerFor(c.get("inferenceOriginRequest"));
-      if (screen === undefined) {
-        return reject(
-          503,
-          "guardrail_screening_unavailable",
-          "a stored response was screened under another credential, but the " +
-            "guardrail replay screener is unavailable",
-        );
-      }
+    const replay = conversationReplayScreenerFor(c.get("inferenceOriginRequest"));
+    if (replay === undefined) {
+      return reject(
+        503,
+        "guardrail_screening_unavailable",
+        "the current guardrail policy revision could not be resolved, so stored " +
+          "conversation turns cannot be replayed safely",
+      );
+    }
+    const needsScreening = (turn: StoredResponseTurn): boolean =>
+      turn.screeningApiKeyId !== currentApiKeyId ||
+      // Rows written before migration 0007 have no policy attribution. Unknown
+      // is never trusted as equivalent to the current policy: replay fails closed.
+      turn.screeningPolicyRevision == null ||
+      turn.screeningPolicyRevision !== replay.policyRevisionMarker;
+    if (resolved.turns.some(needsScreening)) {
       const replayTurns: StoredResponseTurn[] = [];
       for (const turn of resolved.turns) {
-        if (turn.screeningApiKeyId === currentApiKeyId) {
+        if (!needsScreening(turn)) {
           replayTurns.push(turn);
           continue;
         }
-        const screened = await screen({
+        const screened = await replay.screen({
           requestId: c.get("requestId"),
           input: turn.input,
           response: turn.response,
@@ -2403,6 +2406,8 @@ async function prepareConversation(
         replayTurns.push({ ...turn, response: screened.response });
       }
       prior = turnItems(replayTurns);
+    } else {
+      prior = turnItems(resolved.turns);
     }
   }
 
@@ -2421,6 +2426,8 @@ async function prepareConversation(
     responseId: mintResponseId(),
     previousResponseId: previousResponseId ?? null,
     screeningApiKeyId: caller.apiKeyId ?? null,
+    screeningPolicyRevision:
+      conversationReplayScreenerFor(c.get("inferenceOriginRequest"))?.policyRevisionMarker ?? null,
     turnIndex: parent === undefined ? 0 : parent.turnIndex + 1,
     turnInput,
     expiresAtUnix: nowUnix + retentionSeconds,
@@ -2560,6 +2567,7 @@ async function persistTurn(
       responseId: plan.responseId,
       previousResponseId: plan.previousResponseId,
       screeningApiKeyId: plan.screeningApiKeyId,
+      screeningPolicyRevision: plan.screeningPolicyRevision,
       turnIndex: plan.turnIndex,
       model: logicalModel,
       input: plan.turnInput,
