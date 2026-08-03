@@ -9800,6 +9800,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
+                "description": "Anthropic-native Messages API request body. The gateway passes through the full body to the upstream provider; only `prompt_cache` is interpreted by FerroGate itself.",
+                "properties": {
+                  "prompt_cache": {
+                    "$ref": "#/components/schemas/PromptCache"
+                  }
+                },
                 "additionalProperties": true
               }
             }
@@ -9884,6 +9890,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
+                "description": "Anthropic-native Count Message Tokens request body. The gateway passes through the full body to the upstream provider; only `prompt_cache` is interpreted by FerroGate itself.",
+                "properties": {
+                  "prompt_cache": {
+                    "$ref": "#/components/schemas/PromptCache"
+                  }
+                },
                 "additionalProperties": true
               }
             }
@@ -31902,6 +31914,24 @@
         },
         "additionalProperties": false
       },
+      "PromptCache": {
+        "type": "object",
+        "description": "Provider-neutral prompt-caching directive (#690). Controls whether and how the request prompt is cached by the upstream provider.",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["auto", "explicit", "off"],
+            "description": "`auto` — best-effort caching, never refused. `explicit` — a contract to place a cache breakpoint at the static prefix for `ttl`. `off` — a contract to not write this prompt into a provider prompt cache."
+          },
+          "ttl": {
+            "type": "string",
+            "enum": ["5m", "1h"],
+            "description": "Cache lifetime. Only meaningful with `mode: \"explicit\"`. Defaults to `\"5m\"` when omitted with `mode: \"explicit\"`. Rejected as invalid_request on any other mode."
+          }
+        },
+        "required": ["mode"],
+        "additionalProperties": false
+      },
       "AiRequest": {
         "type": "object",
         "properties": {
@@ -31916,6 +31946,9 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "prompt_cache": {
+            "$ref": "#/components/schemas/PromptCache"
           }
         },
         "additionalProperties": false,
