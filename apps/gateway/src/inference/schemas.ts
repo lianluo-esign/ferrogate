@@ -1,5 +1,5 @@
 /**
- * Zod request/response schemas for the twelve inference operations.
+ * Zod request/response schemas for the fourteen inference operations.
  *
  * Clean-room port of the Rust ingress extractors:
  *  - `ChatCompletionRequest`   (`server/chat.rs`, shared by `/v1/chat/completions`

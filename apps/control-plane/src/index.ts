@@ -1,6 +1,6 @@
 import { PUBLIC_API_MAJOR } from "@ferrogate/core";
 /**
- * `ferrogate-control-plane` Worker — the 211-operation `/admin/v1/**` surface.
+ * `ferrogate-control-plane` Worker — the 214-operation `/admin/v1/**` surface.
  *
  * Replaces `ferrogate-admin` (the naming/stability contract),
  * `ferrogate-auth-service` (server side) and the legacy `d1-proxy` Worker.
@@ -27,7 +27,7 @@ import { PUBLIC_API_MAJOR } from "@ferrogate/core";
  * middleware sits before every handler so no route can be reached unguarded.
  *
  * Still to come on this Worker (they are NOT contract operations, so they are
- * not part of the 211 and do not affect the anti-drift gate):
+ * not part of the 214 and do not affect the anti-drift gate):
  * `/v1/admin/*` console identity, `/v1/auth/*` resolve-api-key + authorize, and
  * `/scim/v2/*` provisioning — see `docs/legacy/inventory-edge-control.md` §5.1.
  */
@@ -152,9 +152,9 @@ export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES
  *
  * They stay OUTSIDE the contract-driven registry — `registerRoutes` mounts them
  * without appending them to the record it returns — because folding them into
- * the loop would move them inside the 211-operation count the anti-drift test
+ * the loop would move them inside the 214-operation count the anti-drift test
  * pins. `contractAuth` still runs over them (it is an `app.use("*", …)`) and
- * passes them through, because neither path is one of the 211 it guards, which
+ * passes them through, because neither path is one of the 214 it guards, which
  * is the same treatment `/health` and `/version` have always had.
  *
  * `/health` and `/version` are NOT contract operations, are described by no

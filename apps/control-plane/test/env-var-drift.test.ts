@@ -402,11 +402,17 @@ describe("the env-var drift gate itself", () => {
     // `SIEM_EXPORTS` (#683) is the SECOND R2 bucket, and the separation is
     // deliberate rather than incidental: `AUDIT_ANCHORS` is worth what it costs
     // to forge, so the bulk-export path must not hold write access to it.
+    // `ASSETS` (#743) is the THIRD R2 bucket and the only one this Worker does
+    // not own: it is the data plane's asset bucket, bound here for exactly one
+    // operation (the operator force-delete) and narrowed to `delete` at the
+    // composition root, so this Worker can reclaim an object and cannot fetch
+    // one.
     expect([...DECLARED.bindings.keys()]).toEqual([
       "DB",
       "PROMPT_LABELS",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",
+      "ASSETS",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the

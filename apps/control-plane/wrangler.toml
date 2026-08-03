@@ -329,6 +329,42 @@ binding = "SIEM_EXPORTS"
 bucket_name = "replace-at-deploy-ferrogate-siem-exports"
 
 # ---------------------------------------------------------------------------
+# R2: the ASSET bucket — the operator FORCE-DELETE, and nothing else (#743)
+# ---------------------------------------------------------------------------
+#
+# The SAME bucket `apps/gateway/wrangler.toml` binds as `ASSETS`: it holds the
+# bytes of every hosted artifact. Unlike the two buckets above, this one is not
+# this Worker's own store — it belongs to the data plane, and this Worker is
+# borrowing exactly one capability from it.
+#
+# WHY THE ADMIN WORKER HOLDS IT AT ALL. `DELETE /admin/v1/assets/{asset_id}` is
+# the operator takedown of a bad artifact (#743's third "Done when" bullet). A
+# takedown that deletes the `stored_assets` row and leaves the objects would
+# stop the artifact being served, keep charging the platform for the bytes, and
+# report `deleted` — a takedown that took nothing down. The reclamation has to
+# happen here or the verb should not exist.
+#
+# WHAT KEEPS IT FROM BECOMING A READ PATH. `src/adapters.ts::resolveAssetObjects`
+# wraps this binding in `AssetObjectReclaimer`, an interface with ONE method
+# (`delete`). Nothing downstream of the composition root can call `get()` on it,
+# so the "metadata is not content" decision the whole read side is built on (the
+# inventory withholds `storage_uri` precisely so this surface never becomes an
+# exfiltration path) survives the new capability: this Worker can destroy an
+# object and still cannot fetch one.
+#
+# ABSENT IS A REFUSAL, NOT A DEGRADED MODE. With no binding the force-delete
+# answers `503 asset_bucket_not_configured` and writes nothing — no row deleted,
+# no decision recorded. Every other operation on this Worker is unaffected. It
+# must be bound to the SAME bucket the gateway writes, or the delete removes
+# metadata and orphans bytes in a bucket nobody is looking at.
+#
+# `bucket_name` is a documented PLACEHOLDER; the deploy step substitutes the
+# account's real bucket, which must match the gateway's.
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "replace-at-deploy-ferrogate-assets"
+
+# ---------------------------------------------------------------------------
 # ENTERPRISE IDENTITY (wave 18) — the deploy-time secrets, as PLACEHOLDERS
 # ---------------------------------------------------------------------------
 #

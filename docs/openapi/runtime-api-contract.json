@@ -59,6 +59,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/responses/{response_id}",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/embeddings",
       "group": "inference"
     },
@@ -461,6 +465,14 @@
     {
       "pattern": "/admin/v1/site-domains/{*rest}",
       "group": "site_domain"
+    },
+    {
+      "pattern": "/admin/v1/assets",
+      "group": "admin_asset"
+    },
+    {
+      "pattern": "/admin/v1/assets/{*rest}",
+      "group": "admin_asset"
     },
     {
       "pattern": "/admin/v1/permissions",
@@ -2277,6 +2289,28 @@
       "rbac_action": null
     },
     {
+      "path": "/v1/responses/{response_id}",
+      "method": "get",
+      "operation_id": "getResponse",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "responses.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/responses/{response_id}",
+      "method": "delete",
+      "operation_id": "deleteResponse",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "responses.create"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/v1/embeddings",
       "method": "post",
       "operation_id": "createEmbedding",
@@ -2830,6 +2864,50 @@
       "path": "/admin/v1/site-domains/{hostname}/verify",
       "method": "post",
       "operation_id": "verifySiteDomain",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets",
+      "method": "get",
+      "operation_id": "listFleetAssets",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets/quarantine",
+      "method": "get",
+      "operation_id": "listQuarantinedAssets",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets/quarantine/{asset_id}",
+      "method": "post",
+      "operation_id": "reviewQuarantinedAsset",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/assets/{asset_id}",
+      "method": "delete",
+      "operation_id": "forceDeleteAssetVersion",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

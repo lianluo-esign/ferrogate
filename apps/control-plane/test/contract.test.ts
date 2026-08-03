@@ -66,12 +66,12 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 272 operations", () => {
+  it("is version 1 and carries all 279 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 211 operations to apps/control-plane", () => {
+  it("assigns exactly 214 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });

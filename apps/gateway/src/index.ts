@@ -5,13 +5,13 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 272
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 279
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
- * the 38 operations this Worker owns.
+ * the 40 operations this Worker owns.
  *
- * The inference (12 ops), asset (18 ops) and site (1 op) handlers arrive as
+ * The inference (14 ops), asset (18 ops) and site (1 op) handlers arrive as
  * `RouteModule`s from their own directories and are mounted in
  * `GATEWAY_ROUTE_MODULES` below; they need no change to the router, the guard,
  * or the contract table.
@@ -27,13 +27,14 @@ import {
   sweepAllOnlineEvalRegressions,
 } from "./evals/index.js";
 import type { OnlineEvalMessageBatch } from "./evals/index.js";
-import { residency } from "./residency/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
   dispatcherFromEnv,
   inferenceRouteModule,
   modelsFromEnv,
+  responseStateCommit,
+  sweepResponseConversations,
 } from "./inference/index.js";
 import {
   createMeteringUsageSink,
@@ -51,6 +52,7 @@ import {
   sweepRequestLogs,
 } from "./requestlog/index.js";
 import type { RequestLogMessageBatch } from "./requestlog/index.js";
+import { residency } from "./residency/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 import { siteRouteModule } from "./sites/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
@@ -401,7 +403,33 @@ export const GATEWAY_MIDDLEWARE = [
   // guardrail blocks answers 403, and this middleware then declines it as
   // not-evaluable and COUNTS the skip, so a deployment whose traffic is mostly
   // being blocked can see that in the sampler's own diagnostics.
+  //
+  // It sits ABOVE `responseStateCommit()` rather than below it because that is
+  // the only order satisfying BOTH adjacency claims — this one's "immediately
+  // after `residency()`" and the next one's "immediately above `guardrails()`,
+  // with nothing in between that touches a response body". Either order is
+  // safe for THIS middleware (it only clones a request, never rewrites a
+  // response), so the stricter claim wins the slot next to the screener.
   onlineEvaluation(onlineEvals),
+  // #689 — the `/v1/responses` conversation-state WRITE.
+  //
+  // IMMEDIATELY ABOVE `guardrails()`, and the position is the entire security
+  // argument rather than a preference. This middleware does its work on the way
+  // OUT, so sitting one layer further out than the screener is what makes the
+  // bytes it files the bytes the client receives: redacted where the policy
+  // redacted, and ABSENT where the policy refused. Mounted below `guardrails()`
+  // it would see the pre-screening body and `GET /v1/responses/{id}` would hand
+  // back content the operator's policy had already rejected — which is exactly
+  // the defect the first shape of #689 shipped, with every guardrail test green.
+  //
+  // Nothing between it and the screener may rewrite a response body; today
+  // nothing between here and `guardrails()` touches one at all — the list below
+  // this entry is `guardrails()` and nothing else.
+  //
+  // Inert for every request that is not a STORING `/v1/responses` call: one
+  // `WeakMap` lookup after `next()` and nothing else. See
+  // `src/inference/conversation-commit.ts`.
+  responseStateCommit(),
   // Provider-scoped policies need the model→provider join, and `/v1/messages`
   // must be screened over the same document `inference/handlers.ts` dispatches.
   // `guardrailDepsFromEnv` is ASYNC whenever `CONTROL_DB` is bound: the durable
@@ -482,6 +510,19 @@ export async function gatewayScheduled(
 ): Promise<void> {
   await usage.sweep({ env, ctx });
   await gatewayRequestLogRetention(env);
+  // #689 — expired `/v1/responses` conversation state, on the SAME tick.
+  //
+  // It is a SEPARATE call rather than a line inside `gatewayRequestLogRetention`
+  // because the two read different databases: the request log lives in
+  // `CONTROL_DB` and conversation state lives in the TENANT database (`DB`), so
+  // a deployment can bind one without the other and the sweep for either must
+  // still run.
+  //
+  // This call is the whole reason the storage decision went to D1 rather than a
+  // Durable Object per conversation: a DO namespace cannot be enumerated, so
+  // eviction there needs a per-object alarm — which is #765, where MCP sessions
+  // are never evicted because nothing walks the namespace. Never throws.
+  await sweepResponseConversations(env, Math.floor(Date.now() / 1000));
   // #692 — compare the last day of judge scores against the last week's
   // baseline and record the drops that clear each tenant's own threshold. On
   // the SAME tick as the other two sweeps and after them, because it is the

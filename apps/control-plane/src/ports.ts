@@ -223,7 +223,7 @@ export interface ListPage {
  * The narrow persistence surface every route module talks to.
  *
  * Deliberately generic over a collection name rather than one method per
- * resource: the 211 operations are overwhelmingly CRUD over ~60 named
+ * resource: the 214 operations are overwhelmingly CRUD over ~60 named
  * collections, and a per-resource method-per-operation interface would be the
  * hand-written-197-handlers problem moved down a layer.
  *
@@ -380,6 +380,29 @@ export interface RuntimeStatusPort {
   metrics(): Promise<string>;
 }
 
+/**
+ * The asset bucket, narrowed to DELETE (#743's force-delete).
+ *
+ * A method-by-method narrowing of `R2Bucket`, and the narrowing is the security
+ * decision rather than a typing convenience. `admin_asset.ts`'s whole read side
+ * is built on "metadata is not content": the inventory withholds `storage_uri`
+ * so this surface can never become the first half of an exfiltration path. A
+ * bare `R2Bucket` on {@link ControlPlaneDeps} would put `get()` — every tenant's
+ * asset bytes, including the ones the #366 screener is withholding — one line
+ * away from any handler on this Worker, and the next endpoint to reach for it
+ * would compile. This port cannot read; it can only reclaim.
+ *
+ * `null` (no `ASSETS` binding) is NOT a degraded posture here and must not be
+ * treated as one: the force-delete answers `503` and deletes NOTHING, because a
+ * metadata-only delete would report `deleted` while the bytes stayed in the
+ * bucket — a takedown that took nothing down, and the reason the verb was
+ * deferred in the first place.
+ */
+export interface AssetObjectReclaimer {
+  /** Delete these object keys. Idempotent: an absent key is not an error. */
+  delete(keys: readonly string[]): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Composition root
 // ---------------------------------------------------------------------------
@@ -444,6 +467,12 @@ export interface ControlPlaneDeps {
    * operator's next action is to stop looking.
    */
   readonly promptLabels: PromptLabelKv | null;
+  /**
+   * The delete-only handle on the asset bucket (`ASSETS`), or `null` when this
+   * deployment binds none — see {@link AssetObjectReclaimer} for why it is
+   * narrowed and why `null` is a refusal rather than a degradation.
+   */
+  readonly assetObjects: AssetObjectReclaimer | null;
   readonly runtime: RuntimeStatusPort;
   /**
    * The DNS seam `POST /admin/v1/site-domains/{hostname}/verify` resolves the
@@ -645,6 +674,20 @@ export interface ControlPlaneBindings {
    * does not move, so nothing is lost.
    */
   readonly SIEM_EXPORTS?: R2Bucket;
+  /**
+   * The ASSET bucket (`[[r2_buckets]] binding = "ASSETS"`) — the SAME bucket
+   * `apps/gateway` holds every hosted artifact's bytes in.
+   *
+   * Read through {@link AssetObjectReclaimer} and nothing else, so this Worker
+   * can delete an object and cannot fetch one; `src/adapters.ts` does the
+   * narrowing at the composition root. It exists for exactly one operation,
+   * `DELETE /admin/v1/assets/{asset_id}`, because a force-delete that leaves the
+   * bytes behind is not a takedown.
+   *
+   * ABSENT IS A REFUSAL, not a degraded mode: that operation answers `503` and
+   * writes nothing. Every other operation on this Worker is unaffected.
+   */
+  readonly ASSETS?: R2Bucket;
 }
 
 /** Per-request context values set by the middleware chain. */

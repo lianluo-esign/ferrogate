@@ -3097,6 +3097,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/responses/{response_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account. */
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Retrieve a stored response (Responses API conversation state).
+         * @description Returns the response body that was served for this id, tenant-fenced. Absent, expired and another tenant's ids all answer the same 404, so the endpoint is not an existence oracle over other tenants' conversation ids.
+         */
+        get: operations["getResponse"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a stored response (Responses API conversation state).
+         * @description Deletes exactly the named response, tenant-fenced. Descendants are NOT cascaded; a later `previous_response_id` whose chain crosses the deleted turn is refused with `conversation_chain_broken` rather than served as a silently shortened conversation.
+         */
+        delete: operations["deleteResponse"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/embeddings": {
         parameters: {
             query?: never;
@@ -5632,6 +5659,140 @@ export interface paths {
         /** Synthesize speech from text. The 2xx body is AUDIO BYTES, relayed byte-for-byte; an error is always the FerroGate envelope. */
         post: operations["createSpeech"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/assets": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fleet inventory of stored asset versions, filtered by tenant, asset type and visibility (metadata only; never bytes or an object key).
+         * @description Cross-tenant reads require the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it and being a platform operator does not grant it. A tenant credential is confined to its own tenant and naming another is a 403. The response carries `unreadable_tenants` so a partial fan-out is never mistaken for a complete inventory.
+         */
+        get: operations["listFleetAssets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/assets/quarantine": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The quarantine review queue: asset versions withheld by the #366 screener (metadata only).
+         * @description Cross-tenant reads require the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it and being a platform operator does not grant it. A tenant credential is confined to its own tenant and naming another is a 403. Only withheld versions appear here; `visibility=visible` is refused rather than silently ignored.
+         */
+        get: operations["listQuarantinedAssets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/assets/quarantine/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                /** @description stored_assets.id of the withheld version under review. */
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release or reject one withheld asset version, with a reason, writing an attributed audit event.
+         * @description OPERATOR ONLY, and that is a different fence from the one the two reads use. A tenant-scoped credential — including the owning tenant's own `admin.write` key — is refused `403 asset_fleet_write_operator_only` and the version does NOT move: `visibility` is the trust screener's verdict on that tenant's own content, so releasing it from a tenant credential would be the reviewed party overturning the review (the data plane refuses the same promotion by guarding its compare-and-set with `visibility = 'pending_scan'`). A tenant may still SEE its withheld versions on `GET /admin/v1/assets/quarantine`. A platform operator must additionally hold the DISTINCT `admin.assets.fleet` scope, held exactly: the admin wildcard does not grant it. `tenant_id` is therefore required — the only admitted caller owns no tenant to default it from. The decision record is written (and hash-chained into audit_events on the owning tenant's chain) BEFORE the version moves, so a crash between the two leaves an attributed decision that did not take effect rather than a release nobody can attribute. The applying write is a compare-and-set on the exact state that was reviewed; a live (non-withheld) version is a 409, because a takedown is a different verb.
+         */
+        post: operations["reviewQuarantinedAsset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                /** @description stored_assets.id of the exact version row to destroy. */
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Force-delete one asset version: the row, its bundle-file index and its stored objects.
+         * @description OPERATOR ONLY and irreversible. A tenant-scoped credential — including the owning tenant's own `admin.write` key — is refused `403 asset_fleet_write_operator_only` and NOTHING is deleted; a platform operator must additionally hold the DISTINCT `admin.assets.fleet` scope, held exactly. This is a different verb from a quarantine `reject`, which only moves `visibility` and keeps every byte: here the `stored_assets` row, the `asset_bundle_files` index and the R2 objects all go, and the tenant's storage quota is actually released.
+         *
+         *     WHICH OPERATION YOU JUST PERFORMED IS REPORTED BACK. A static site reaches the internet through a CHANNEL (`/sites/{slug}` binds a slug to a channel; a verified custom domain resolves to a site), so a channel pointing at the version is what 'live' means. With no channel pointing at it — or with another non-yanked variant of the same version surviving — this RETIRES an unreferenced version and answers `detached_channels: []`. When this row is the last resolvable variant of a channel-referenced version, the request is refused `409 asset_version_referenced` NAMING those channels, unless `force=true` is sent; with it, the stranded channels are deleted along with the version and listed in `detached_channels`, because a channel pointing at an absent version is a 404 that looks like a bug.
+         *
+         *     A `reason` is required, the decision record is written (and hash-chained into audit_events on the OWNING tenant's chain) BEFORE anything is destroyed, and the applying delete is a compare-and-set on the exact state that was read — a version that changed under the operator is `409 asset_delete_conflict`. On a deployment that binds no ASSETS bucket the operation answers `503 asset_bucket_not_configured` and writes nothing, rather than performing a metadata-only delete that would report a takedown while the bytes stayed in the bucket.
+         */
+        delete: operations["forceDeleteAssetVersion"];
         options?: never;
         head?: never;
         patch?: never;
@@ -10072,6 +10233,191 @@ export interface components {
             total: number;
             offset: number;
             limit: number;
+        };
+        /** @description One stored asset version, as the operator inventory renders it. Metadata only: the R2 object key (storage_uri) is deliberately absent and no download link is offered — listing an artifact and fetching it are different permissions, and this surface grants only the first. */
+        AdminFleetAsset: {
+            /** @constant */
+            object: "fleet_asset";
+            /** @description stored_assets.id — the version row identity. */
+            id: string;
+            tenant_id: string;
+            project_id?: string | null;
+            /** @description e.g. static_site, binary, dataset. */
+            asset_type: string;
+            name: string;
+            version: string;
+            /** @description Platform/arch variant; the empty string is the default artifact. */
+            variant: string;
+            content_type: string;
+            /** @description Digest of the stored bytes. A digest identifies bytes an investigator already holds; it is NOT a locator, which is why it is disclosed here while the object key is not. */
+            content_hash: string;
+            /** Format: int64 */
+            size_bytes: number;
+            /**
+             * @description #366 trust-screening state. Only `visible` is resolvable and downloadable; `pending_scan` and `quarantined` are excluded from every artifact read path.
+             * @enum {string}
+             */
+            visibility: "visible" | "pending_scan" | "quarantined";
+            yanked: boolean;
+            /** @description True only for `visible`. Stated explicitly so an operator triaging the queue does not have to know the mapping. */
+            downloadable: boolean;
+            /** Format: int64 */
+            created_at_unix: number;
+            /** Format: int64 */
+            updated_at_unix: number;
+        };
+        /** @description One WITHHELD asset version awaiting operator review. Same metadata-only projection as AdminFleetAsset; `visibility` is never `visible` on this surface. */
+        AdminQuarantinedAsset: {
+            /** @constant */
+            object: "quarantined_asset";
+            /** @description stored_assets.id — the version row identity. */
+            id: string;
+            tenant_id: string;
+            project_id?: string | null;
+            /** @description e.g. static_site, binary, dataset. */
+            asset_type: string;
+            name: string;
+            version: string;
+            /** @description Platform/arch variant; the empty string is the default artifact. */
+            variant: string;
+            content_type: string;
+            /** @description Digest of the stored bytes. A digest identifies bytes an investigator already holds; it is NOT a locator, which is why it is disclosed here while the object key is not. */
+            content_hash: string;
+            /** Format: int64 */
+            size_bytes: number;
+            /**
+             * @description #366 trust-screening state. Only `visible` is resolvable and downloadable; `pending_scan` and `quarantined` are excluded from every artifact read path.
+             * @enum {string}
+             */
+            visibility: "visible" | "pending_scan" | "quarantined";
+            yanked: boolean;
+            /** @description True only for `visible`. Stated explicitly so an operator triaging the queue does not have to know the mapping. */
+            downloadable: boolean;
+            /** Format: int64 */
+            created_at_unix: number;
+            /** Format: int64 */
+            updated_at_unix: number;
+        };
+        /** @description Fleet inventory page plus the tenants that could not be read. */
+        AdminFleetAssetList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminFleetAsset"][];
+            /** @description Present only when the request carried a query string (the paginated envelope). */
+            total?: number;
+            offset?: number;
+            limit?: number;
+            /** @description Tenants whose database this deployment could not reach on a fleet fan-out. ALWAYS present, empty array included: an absent field would be indistinguishable from 'nothing was missed', and a partial inventory read as complete is how an abuse response misses the abuse. A single-tenant request answers 503 instead. */
+            unreadable_tenants: string[];
+        };
+        /** @description Quarantine review queue page plus the tenants that could not be read. */
+        AdminQuarantinedAssetList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminQuarantinedAsset"][];
+            /** @description Present only when the request carried a query string (the paginated envelope). */
+            total?: number;
+            offset?: number;
+            limit?: number;
+            /** @description Tenants whose database this deployment could not reach on a fleet fan-out. ALWAYS present, empty array included: an absent field would be indistinguishable from 'nothing was missed', and a partial inventory read as complete is how an abuse response misses the abuse. A single-tenant request answers 503 instead. */
+            unreadable_tenants: string[];
+        };
+        /** @description An operator's decision about one withheld asset version. */
+        AdminAssetReviewRequest: {
+            /** @description Tenant that owns the version. REQUIRED: the only caller this verb admits is a platform operator, whose credential names no tenant, so there is nothing to default it from. A write names the database it acts on rather than searching for it. */
+            tenant_id: string;
+            /**
+             * @description `release` moves the version to `visible` through the same column every read path filters on. `reject` HARDENS it to `quarantined` so a reviewed row is distinguishable from an unscreened one; it deletes nothing.
+             * @enum {string}
+             */
+            decision: "release" | "reject";
+            /** @description WHY. Required and non-empty: an unattributed, unexplained quarantine release is worse than no surface at all. */
+            reason: string;
+        };
+        /** @description The durable decision record. It is written BEFORE the version moves and is hash-chained into audit_events on the owning tenant's chain, so a release is always attributable. */
+        AdminAssetReview: {
+            id: string;
+            tenant_id: string;
+            asset_id: string;
+            asset_type?: string;
+            name?: string;
+            version?: string;
+            variant?: string;
+            /** @enum {string} */
+            decision: "release" | "reject";
+            reason: string;
+            /**
+             * @description The state the operator actually reviewed. The applying UPDATE is a compare-and-set on exactly this value.
+             * @enum {string}
+             */
+            from_visibility: "pending_scan" | "quarantined";
+            /** @enum {string} */
+            to_visibility: "visible" | "pending_scan" | "quarantined";
+            /** @description False until the guarded UPDATE has committed, so 'recorded' never silently reads as 'done'. */
+            applied: boolean;
+            /** @enum {string} */
+            outcome?: "applied" | "conflict";
+            /** @enum {string} */
+            actor_scope: "platform_operator" | "tenant";
+            /** @description The credential that decided, when it carries an id. */
+            actor_key_id?: string | null;
+            actor_tenant_id?: string | null;
+            /** Format: int64 */
+            decided_at_unix: number;
+        } & {
+            [key: string]: unknown;
+        };
+        AdminAssetReviewResponse: {
+            /** @constant */
+            object: "asset_review";
+            asset_review: components["schemas"]["AdminAssetReview"];
+        };
+        /** @description The durable force-delete record. It is written BEFORE anything is destroyed and hash-chained into audit_events on the owning tenant's chain, and once the version is gone it is the ONLY remaining evidence of what was taken down — which is why it carries the digest and the size as well as the reason. */
+        AdminAssetDeletion: {
+            id: string;
+            tenant_id: string;
+            asset_id: string;
+            asset_type: string;
+            name: string;
+            version: string;
+            variant?: string;
+            /**
+             * @description The state the version was in when it was deleted. The applying DELETE is a compare-and-set on exactly this value plus updated_at_unix.
+             * @enum {string}
+             */
+            from_visibility?: "visible" | "pending_scan" | "quarantined";
+            /** @description Digest of the bytes that were destroyed. It identifies an artifact an investigator already holds; it is not a locator. */
+            content_hash?: string;
+            /** Format: int64 */
+            size_bytes?: number;
+            reason: string;
+            /** @description Whether the caller asked for a live takedown. False means the version was unreferenced (or another live variant survived) and nothing went dark. */
+            force: boolean;
+            /** @description Channels that pointed at this logical version when it was deleted. Non-empty with force=false means another variant kept them resolving. */
+            served_by_channels: string[];
+            /** @description Channels this delete REMOVED because the version they pointed at is gone. Empty unless the delete stranded them — this is the field that says a live site was taken down. */
+            detached_channels: string[];
+            /** @description Stored objects reclaimed from the bucket: the archive plus every bundle file. */
+            objects_deleted: number;
+            /** @description False until the guarded DELETE has committed, so 'recorded' never silently reads as 'done'. */
+            applied: boolean;
+            /** @enum {string} */
+            outcome?: "applied" | "conflict";
+            /** @constant */
+            deleted: true;
+            /** @enum {string} */
+            actor_scope: "platform_operator" | "tenant";
+            /** @description The credential that decided, when it carries an id. */
+            actor_key_id?: string | null;
+            /** Format: int64 */
+            decided_at_unix: number;
+        } & {
+            [key: string]: unknown;
+        };
+        AdminAssetDeletionResponse: {
+            /** @constant */
+            object: "asset_deletion";
+            asset_deletion: components["schemas"]["AdminAssetDeletion"];
         };
     };
     responses: {
@@ -15998,6 +16344,66 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    getResponse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account. */
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The stored response body, verbatim. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteResponse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The gateway-minted response id (`resp_<32 hex>`), as returned in the response body's `id` and in the `x-ferrogate-response-id` header. It is FerroGate's own identifier, not the upstream provider's, so it stays resolvable after a failover moved a later turn to another provider account. */
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deletion acknowledgement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id: string;
+                        object: string;
+                        deleted: boolean;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     createEmbedding: {
         parameters: {
             query?: never;
@@ -21320,6 +21726,198 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    listFleetAssets: {
+        parameters: {
+            query?: {
+                /** @description Confine the read to one tenant. Required in effect for a platform operator on a deployment with more provisioned tenants than the fan-out cap. */
+                tenant_id?: string;
+                /** @description Exact match on stored_assets.asset_type. */
+                asset_type?: string;
+                /** @description Exact match on stored_assets.name. */
+                name?: string;
+                /** @description Exact match on the #366 screening state. */
+                visibility?: "visible" | "pending_scan" | "quarantined";
+                /** @description Pagination offset. */
+                offset?: number;
+                /** @description Page size. */
+                limit?: number;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Asset inventory page. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminFleetAssetList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listQuarantinedAssets: {
+        parameters: {
+            query?: {
+                /** @description Confine the read to one tenant. */
+                tenant_id?: string;
+                /** @description Exact match on stored_assets.asset_type. */
+                asset_type?: string;
+                /** @description Exact match on stored_assets.name. */
+                name?: string;
+                /** @description Narrow the queue to one withheld state. */
+                visibility?: "pending_scan" | "quarantined";
+                /** @description Pagination offset. */
+                offset?: number;
+                /** @description Page size. */
+                limit?: number;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quarantine review queue page. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminQuarantinedAssetList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    reviewQuarantinedAsset: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                /** @description stored_assets.id of the withheld version under review. */
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAssetReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Decision recorded and applied. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAssetReviewResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    forceDeleteAssetVersion: {
+        parameters: {
+            query: {
+                /** @description Tenant that owns the version. Required: the only admitted caller is a platform operator, which owns no tenant to default it from, and a write names the database it acts on rather than searching every tenant for the id. */
+                tenant_id: string;
+                /** @description WHY. Required and non-empty (max 2000 characters). A force-delete cannot be undone by reading the row back, so the decision record is the only thing that survives it. */
+                reason: string;
+                /** @description Delete even when this row is the last resolvable variant of a channel-referenced version, removing those channels too. Strictly `true` or `false`; any other value is a 400 rather than a silent `false`. */
+                force?: boolean;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                /** @description stored_assets.id of the exact version row to destroy. */
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Version deleted; the record states what was taken down with it. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAssetDeletionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
 }

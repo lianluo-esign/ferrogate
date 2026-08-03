@@ -9,10 +9,12 @@
  * `@ferrogate/billing` are adapted onto the seams. Only the OUTBOUND provider
  * `fetch` is intercepted (see `provider-mock.ts`).
  */
+import { Hono } from "hono";
 import {
   InMemoryModelResolver,
   InMemoryUsageSink,
   createInferenceRouter,
+  responseStateCommit,
 } from "../../src/inference/index.js";
 import type {
   Caller,
@@ -97,7 +99,11 @@ export const ALL_ROUTES: readonly PhysicalRoute[] = [
 ];
 
 export interface TestHarness {
-  readonly router: ReturnType<typeof createInferenceRouter>;
+  /**
+   * The inference router as the gateway MOUNTS it: `responseStateCommit()`
+   * wrapping `createInferenceRouter(...)`. See {@link harness}.
+   */
+  readonly router: Hono<{ Bindings: Record<string, unknown> }>;
   readonly usage: InMemoryUsageSink;
   /** POST a JSON body to an inference path. */
   post(path: string, body: unknown, init?: RequestInit): Promise<Response>;
@@ -105,35 +111,70 @@ export interface TestHarness {
   get(path: string, init?: RequestInit): Promise<Response>;
 }
 
-/** Build a router over {@link ALL_ROUTES} (or a supplied catalog). */
+/**
+ * Build a router over {@link ALL_ROUTES} (or a supplied catalog).
+ *
+ * ## Why the inner router is WRAPPED rather than driven directly (issue #689)
+ *
+ * `/v1/responses` conversation state is written by `responseStateCommit()`, a
+ * middleware that sits ABOVE the guardrail response stage precisely so the bytes
+ * it files are the bytes the client receives (`src/inference/conversation-commit.ts`).
+ * A harness that called `createInferenceRouter(...)` alone would drive a request
+ * path from which the write is missing, so every storing test would either fail
+ * or — the worse outcome — be quietly rewritten to assert less.
+ *
+ * The wrapper is the production composition minus screening: the same
+ * middleware, in the same relative position, delegating into the same inner app
+ * through the same `inner.fetch(c.req.raw, …)` call `route-module.ts` makes. It
+ * is transparent to every operation that is not a storing `/v1/responses` call —
+ * one `WeakMap` lookup after `next()`.
+ *
+ * `env` reaches the inner app's `depsFor(c.env)`, which is what lets a test pin
+ * an env-configured policy (`GATEWAY_RESPONSES_STORE`,
+ * `GATEWAY_RESPONSES_RETENTION`) instead of injecting past it.
+ */
 export function harness(
   overrides: InferenceDeps = {},
   routes: readonly PhysicalRoute[] = ALL_ROUTES,
+  env: Record<string, unknown> = {},
 ): TestHarness {
   const usage = new InMemoryUsageSink();
-  const router = createInferenceRouter({
+  const inner = createInferenceRouter({
     models: new InMemoryModelResolver(routes),
     usage,
     requestIds: fixedRequestIds,
     ...overrides,
   });
+  const router = new Hono<{ Bindings: Record<string, unknown> }>();
+  router.use("*", responseStateCommit());
+  // The same delegation `src/inference/route-module.ts` performs, including the
+  // `c.req.raw` identity the pending-turn carrier is keyed by.
+  router.all("*", (c) => inner.fetch(c.req.raw, c.env as Parameters<typeof inner.fetch>[1]));
 
   return {
     router,
     usage,
     async post(path, body, init): Promise<Response> {
-      return await router.request(`https://gw.test${path}`, {
-        ...(init ?? {}),
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...((init?.headers as Record<string, string> | undefined) ?? {}),
+      return await router.request(
+        `https://gw.test${path}`,
+        {
+          ...(init ?? {}),
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...((init?.headers as Record<string, string> | undefined) ?? {}),
+          },
+          body: typeof body === "string" ? body : JSON.stringify(body),
         },
-        body: typeof body === "string" ? body : JSON.stringify(body),
-      });
+        env,
+      );
     },
     async get(path, init): Promise<Response> {
-      return await router.request(`https://gw.test${path}`, { method: "GET", ...(init ?? {}) });
+      return await router.request(
+        `https://gw.test${path}`,
+        { method: "GET", ...(init ?? {}) },
+        env,
+      );
     },
   };
 }

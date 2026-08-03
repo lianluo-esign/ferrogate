@@ -18,6 +18,7 @@ import { SELF, env } from "cloudflare:test";
 import { beforeAll, describe, expect, test } from "vitest";
 import { operationById } from "../../src/contract.js";
 import { GUARDRAIL_OPERATIONS } from "../../src/guardrails/index.js";
+import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
 import { INFERENCE_OPERATION_IDS } from "../../src/routes/index.js";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "./fixtures.js";
 
@@ -70,10 +71,75 @@ describe("guardrail operation bindings match the contract", () => {
     const unscreened = (INFERENCE_OPERATION_IDS as readonly string[]).filter(
       (id) => GUARDRAIL_OPERATIONS[id] === undefined,
     );
-    expect(unscreened.sort()).toEqual(["countMessageTokens", "getModel", "listModels"]);
+    //  - `deleteResponse` (issue #689) carries no content in EITHER direction:
+    //    no request body, and a `{id, object, deleted}` envelope — an id, a
+    //    literal type tag and a boolean — back. Nothing a detector can read at
+    //    either stage, which is the same reason `listModels` and `getModel` are
+    //    on this list and not the reason `countMessageTokens` is. The
+    //    justification is deliberately about THIS operation alone.
+    //
+    //    `getResponse` is NOT here, and the two attempts it took are worth
+    //    recording because the argument is subtle and both wrong versions were
+    //    green. Attempt one: "already screened and already delivered to this
+    //    same credential once" — false for the exactly two cases an exception
+    //    has to survive, since a REDACTED turn was stored un-redacted and a
+    //    DENIED turn was never delivered at all. That was fixed at the WRITE
+    //    (`src/inference/conversation-commit.ts` files the screened bytes), and
+    //    attempt two rested on the repaired half: "a byte the response stage
+    //    approved and this credential already holds". The first clause became
+    //    true; the second never was. Conversation state is fenced on
+    //    `(tenantId, projectId)` while policy scope is fenced per KEY
+    //    (`api_key_ids`, the narrowest selector `packages/guardrails/src/
+    //    policy.ts` ranks), so one project's two credentials share one store
+    //    under different policies and an UNGOVERNED key's turn was served to a
+    //    GOVERNED one, verbatim. So it is bound at the response stage, which is
+    //    O(1) — one stored document, one pass, on a request that infers
+    //    nothing. `test/inference/responses-cross-key-guardrail.test.ts` is the
+    //    measurement, both directions.
+    //
+    //    The write-side fix stays load-bearing and is asserted immediately
+    //    below: it is what keeps a DENIED turn off disk entirely, and what keeps
+    //    a continuation from replaying un-screened text upstream. The behaviour
+    //    is measured end to end in
+    //    `test/inference/responses-guardrail-bypass.test.ts`.
+    expect(unscreened.sort()).toEqual([
+      "countMessageTokens",
+      "deleteResponse",
+      "getModel",
+      "listModels",
+    ]);
   });
 
-  test("the RESPONSE stage runs for chat/responses/messages and the two transcripts", () => {
+  test("the #689 conversation WRITE is mounted above the response stage", () => {
+    // The half of #689's guardrail story that cannot be read off
+    // `GUARDRAIL_OPERATIONS` at all: WHERE the turn is written relative to the
+    // screener. Binding `getResponse` does not make this redundant — the two are
+    // complements. This mount is what keeps a DENIED turn off disk (there is no
+    // row for a read to screen) and what keeps a same-credential continuation
+    // from replaying un-redacted text upstream; the binding is what covers a
+    // read by a credential the writer's policy did not govern.
+    //
+    // Hono is an onion, so a middleware registered EARLIER wraps the ones after
+    // it and its post-`next()` work runs LAST. `responseStateCommit()` therefore
+    // has to sit at a SMALLER index than `guardrails()` to see the screened
+    // body. At a larger index it would file the pre-screening bytes and
+    // `getResponse` would hand back content the operator's policy redacted or
+    // refused — which is precisely the shape #689 first shipped, with this file
+    // green because it asserted the exception and not the reason for it.
+    //
+    // Reordering is the one defect no behavioural test can see (a correctly
+    // ordered and a merely present mount both serve the happy path identically),
+    // so it is asserted structurally, by runtime handler name, exactly as
+    // `test/metering/wiring.test.ts` pins the billing drain.
+    const names = GATEWAY_MIDDLEWARE.map((handler) => handler.name);
+    expect(names).toContain("responseStateCommitMiddleware");
+    expect(names).toContain("guardrailsMiddleware");
+    expect(names.indexOf("responseStateCommitMiddleware")).toBeLessThan(
+      names.indexOf("guardrailsMiddleware"),
+    );
+  });
+
+  test("the RESPONSE stage runs for chat/responses/messages, the transcripts and the stored read", () => {
     // `normalize_response` returns an empty envelope for
     // embeddings/rerank/images/speech (none has screenable text output — a
     // rerank answer is a list of indices and floats, a speech answer is an
@@ -81,6 +147,10 @@ describe("guardrail operation bindings match the contract", () => {
     // row. The two audio uploads are here because their answer IS text, and
     // `normalize (audio_transcription)` in `packages/guardrails/test/
     // envelope.test.ts` pins that it walks to a non-empty envelope.
+    //
+    // `getResponse` (#689) is here because its answer is a stored TURN — a real
+    // completion — and the credential reading it need not be the credential
+    // whose policy approved it. See the unscreened list above.
     const screened = Object.entries(GUARDRAIL_OPERATIONS)
       .filter(([, binding]) => binding.screensResponse)
       .map(([id]) => id)
@@ -91,21 +161,38 @@ describe("guardrail operation bindings match the contract", () => {
       "createResponse",
       "createTranscription",
       "createTranslation",
+      "getResponse",
     ]);
   });
 
-  test("the two audio uploads are the ONLY operations that skip the request stage", () => {
+  test("only bodiless requests skip the request stage", () => {
     // `screensRequest: false` is a real hole in input control and it must never
     // become the easy way to make a binding compile. The only justification this
-    // table accepts is "the request body is not text a detector can read", which
-    // is true of exactly one ingress here: `multipart/form-data` wrapping audio.
+    // table accepts is "there is no text here for a detector to read", and it is
+    // true of exactly three operations for two reasons: `multipart/form-data`
+    // wrapping opaque audio (#703), and a GET with no body at all (#689).
     // Anything else appearing in this list is an operation whose prompt stopped
     // being screened, which is the defect the whole file exists to catch.
+    //
+    // For `getResponse` the flag is also FORCED rather than chosen: with
+    // `screensRequest: true` the middleware's `readJsonBodyBounded` returns
+    // `undefined` for a null body and the branch answers with an early
+    // `return next()`, which would skip the RESPONSE stage too and leave the
+    // binding inert — a control that reads as present and enforces nothing.
     const unscreenedInput = Object.entries(GUARDRAIL_OPERATIONS)
       .filter(([, binding]) => !binding.screensRequest)
       .map(([id]) => id)
       .sort();
-    expect(unscreenedInput).toEqual(["createTranscription", "createTranslation"]);
+    expect(unscreenedInput).toEqual(["createTranscription", "createTranslation", "getResponse"]);
+
+    // And the forcing itself, so the paragraph above is an assertion rather
+    // than a claim: every request-skipping binding must screen the RESPONSE,
+    // because a binding that skips both stages is a no-op entry.
+    for (const [id, binding] of Object.entries(GUARDRAIL_OPERATIONS)) {
+      if (!binding.screensRequest) {
+        expect(binding.screensResponse, `${id} screens neither stage`).toBe(true);
+      }
+    }
   });
 
   test("no binding is a NO-OP: every stage a binding claims can produce content", () => {
