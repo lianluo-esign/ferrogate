@@ -33,10 +33,13 @@ The hard platform numbers (verified against Cloudflare docs, 2026-08-04):
 
 So `native_binding` and `proxy_service` cap the product at a few hundred tenants and
 make signup a deploy. `rest` scales, but `TenantDatabaseHandle.supportsAtomicBatch`
-goes `false`, and `requireAtomicBatch()` — 17 call sites across `wallet-d1.ts`,
-`workflow-budget-d1.ts`, `assets-d1.ts`, `agent-schedule-d1.ts`, `usage-d1.ts` —
-refuses to run. Those are the money paths. **Under `rest`, wallet reserve does not
-work at all.** Choosing `rest` was choosing to scale by giving up the ledger.
+goes `false`, and `requireAtomicBatch()` — **13** call sites (`grep -rn
+"requireAtomicBatch(this.handle"`: 5 in `wallet-d1.ts`, 3 in `workflow-budget-d1.ts`,
+3 in `assets-d1.ts`, 1 in `agent-schedule-d1.ts`, 1 in `usage-d1.ts`) — refuses to run.
+An earlier revision of this doc said 17; the number was never re-counted and is
+corrected here. Those 13 are the money paths, so the argument is unchanged: **under
+`rest`, wallet reserve does not work at all.** Choosing `rest` was choosing to scale by
+giving up the ledger.
 
 ## The resolution: one Durable Object per tenant
 
