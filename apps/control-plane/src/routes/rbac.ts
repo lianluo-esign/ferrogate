@@ -23,8 +23,14 @@
  *    are written against a composite key rather than the generic CRUD shapes.
  *    A tenant-scoped caller may only address its own tenant — checked here,
  *    because the tenant is a path parameter rather than a row attribute.
+ *  - **Reading RBAC is one authority; AUTHORING it is another (#791).** Every
+ *    write in this group is operator-only, mounted by {@link authorizeRbacWrite}
+ *    on every non-`GET` operation the contract declares. The reads are
+ *    untouched. See that function for the three questions #791 asks and the
+ *    answers this file gives.
  */
 import { z } from "zod";
+import type { ApiOperation } from "../contract.js";
 import { HttpError } from "../middleware/errors.js";
 import { type CallerScope, StoreConflictError } from "../ports.js";
 import { adminDeleted, listResponse, parseListQuery } from "../responses.js";
@@ -75,6 +81,14 @@ const TENANT_ROLES_COLLECTION = "tenant-roles";
  * must match, and a mismatch is `403 tenant_scope_denied` — a real
  * authorization failure, not a 404, because the caller named a tenant
  * explicitly rather than probing for a row.
+ *
+ * **This is the fence for the READ leg** (`GET /admin/v1/tenant-roles/{t}`), and
+ * as of #791 it is no longer the only fence on the writes: the question it asks
+ * is "is this tenant MINE?", and for a write the answer being "yes" is the
+ * escalation. See {@link authorizeRbacWrite}. It is still CALLED from bind and
+ * unbind, deliberately — those handlers must remain correct on their own if the
+ * write fence is ever narrowed, and a cross-tenant path parameter should not
+ * depend on a wrapper mounted somewhere else in the file.
  */
 function authorizeTenantPath(scope: CallerScope, tenantId: string): void {
   if (scope.kind === "platform_operator") return;
@@ -84,6 +98,103 @@ function authorizeTenantPath(scope: CallerScope, tenantId: string): void {
     "tenant_scope_denied",
     "API key is not authorized to access this tenant's resources",
   );
+}
+
+/**
+ * The fence on every WRITE in this group: **operator only** (#791).
+ *
+ * `authorizeTenantPath` above admits a tenant-scoped caller for its OWN tenant,
+ * which is the right question for a read and, for a write, is the escalation
+ * itself. A tenant-scoped `admin.write` key could
+ * `POST /admin/v1/roles {"permissions":["*"]}` — the store stamps the caller's
+ * `tenant_id`, so the role is the tenant's — and then
+ * `POST /admin/v1/tenant-roles/{its own id}`; `D1RbacAuthorizer` and its four
+ * siblings then allow on `granted.has("*")` and the tenant holds every
+ * RBAC-gated verb its operator withheld. Reproduced through the Worker in
+ * `test/rbac-self-grant.test.ts`.
+ *
+ * ## The three questions #791 asks, and the answers
+ *
+ * **May a tenant author roles at all? No.** **May a role it authors carry a
+ * permission its own grants do not contain (`"*"` in particular)? Not
+ * applicable — it may not author one.** **May it bind an operator-authored
+ * GLOBAL role? No.**
+ *
+ * That is the "operator only" answer, and it IS a trade: it removes
+ * tenant-self-service RBAC, which #791 correctly calls a plausible product
+ * intent. Here is why it is not a real capability on this surface today, and
+ * what would have to change for the subset rule to become the right answer.
+ *
+ * ### 1. A binding is a TENANT-WIDE grant. There is no per-subject binding.
+ *
+ * `tenantRoleBindingSchema` accepts `subject_kind` and `subject_id`, so the API
+ * looks like "bind this role to user `u1`". It is not.
+ * `sql/d1-ts/control/0001_init_control.sql` declares
+ * `tenant_role_bindings(id, tenant_id, role_id, created_at_unix)` — **there are
+ * no subject columns** — and all five authorizers in the fleet
+ * (`src/adapters.ts::D1RbacAuthorizer`, `apps/gateway/src/adapters.ts`,
+ * `apps/gateway/src/assets/entitlements.ts`, `apps/mcp/src/auth.ts`,
+ * `apps/agent-runtime/src/rbac.ts`) resolve
+ * `tenant_role_bindings ⋈ roles WHERE tenant_role_bindings.tenant_id = ?` and
+ * union the permission keys. The subject fields ride on the operator DOCUMENT
+ * and are read by nothing. So "a tenant admin delegating to its own users" does
+ * not exist here: every binding a tenant could make grants the whole tenant,
+ * i.e. grants the caller.
+ *
+ * ### 2. A subset rule cannot be sound against THIS authorizer.
+ *
+ * The obvious middle path is `delegationScopeSubset`
+ * (`packages/identity/src/delegation/sign.ts`) — let a tenant author and bind a
+ * role whose permissions are a subset of what it already holds, refuse anything
+ * wider, and `"*"` is only mintable by a holder that already has `"*"`. That
+ * predicate is right and would be reused rather than reinvented. What defeats
+ * it is not the predicate but the authorizer's shape: a tenant's authority is
+ * the UNION of the roles bound to it, so a subset binding is never an
+ * attenuation and never a delegation — it is a COPY the tenant controls.
+ * Concretely: the operator binds `role_ops = ["guardrails.policy.activate"]`;
+ * the tenant authors `role_mine` with the same subset and binds it (allowed —
+ * it is a subset, and it grants nothing new today); the operator later unbinds
+ * `role_ops` to revoke the verb, and the tenant keeps it via `role_mine`.
+ * Subset-at-write-time is a time-of-check rule guarding a permission set that
+ * is evaluated later, so it converts "the operator can revoke" into "the
+ * operator cannot revoke", which is a worse property to lose than the one it
+ * buys. Closing it means intersecting tenant-authored grants against
+ * operator-authored ones at READ time, in five authorizers across four apps —
+ * a different change, with a different blast radius, and not one to make while
+ * the hole is open.
+ *
+ * Deletes are fenced for the same reason in the other direction: `DELETE
+ * /admin/v1/roles/{id}` on an OPERATOR-authored role attributed to the tenant
+ * passes the store's `writableBy` (`record.tenant_id === scope.tenantId`), and
+ * dropping the `roles` row makes the join miss — the tenant editing the
+ * operator's RBAC configuration, even though the direction happens to be
+ * de-escalating for itself.
+ *
+ * ### 3. What would flip this decision
+ *
+ * If `tenant_role_bindings` grows real subject columns AND the authorizers
+ * evaluate them against the calling credential, a tenant binding a role to
+ * `user:u1` stops granting the caller, and the subset rule becomes the correct
+ * fence for exactly that leg. Until then the honest fence is the verb.
+ *
+ * ## Mounting
+ *
+ * Mounted on every non-`GET` operation the contract declares for this group
+ * rather than named one at a time, so an RBAC write ADDED later is fenced by
+ * default and has to be opened deliberately. That is the fail-closed direction,
+ * and it is why this is not simply four `authorizeRbacWrite(scope)` calls in
+ * four handlers — the defect class this repository keeps paying for is a fence
+ * wired onto one verb and forgotten on the next.
+ *
+ * It runs before the handler, therefore before any body parse and before any
+ * store resolution: a caller this verb will never admit is not told which
+ * fields its request was missing, and cannot use the refusal to probe which
+ * role ids exist.
+ */
+function authorizeRbacWrite(scope: CallerScope, operation: ApiOperation): void {
+  if (scope.kind === "platform_operator") return;
+  const detail = `${operation.method} ${operation.path} is an operator action: this credential is scoped to tenant ${scope.tenantId}, which may read the roles and permissions it is subject to but may not author them — a grant the governed party can write is not a grant`;
+  throw new HttpError(403, "rbac_write_operator_only", detail);
 }
 
 /** `(tenant_id, role_id)` composite key, flattened to the store's string id. */
@@ -109,7 +220,7 @@ function bindingId(tenantId: string, roleId: string): string {
  * from a bespoke handler so they cannot be wired on POST and forgotten on
  * PUT/DELETE — which is the shape of the original defect.
  */
-export const rbacRoutes: GroupModule = crudGroup(
+const rbacCrud: GroupModule = crudGroup(
   "rbac",
   [
     {
@@ -205,3 +316,43 @@ export const rbacRoutes: GroupModule = crudGroup(
     },
   },
 );
+
+/**
+ * The group, with {@link authorizeRbacWrite} in front of every write.
+ *
+ * Wrapping the built map rather than editing four handlers is what makes the
+ * fence TOTAL over the group: the set of fenced operations is derived from the
+ * contract, so `POST /admin/v1/permissions`, `DELETE /admin/v1/roles/{id}`,
+ * bind, unbind — and anything an author adds to the `rbac` group tomorrow — are
+ * all covered without anyone remembering to cover them.
+ *
+ * `GET` is the one method that passes through. That is the deliberate other
+ * half of #791: a tenant may still LIST and READ the roles, permissions and
+ * bindings it is subject to (`GET /admin/v1/tenant-roles/{its own id}` is still
+ * fenced to its own tenant by {@link authorizeTenantPath}), because a tenant
+ * that cannot see the grants it is held to cannot tell a `403` from a bug —
+ * the same split #782 made on quota policies.
+ */
+export const rbacRoutes: GroupModule = {
+  group: rbacCrud.group,
+  build(operations) {
+    const handlers = rbacCrud.build(operations);
+    for (const operation of operations) {
+      if (operation.method === "GET") continue;
+      const inner = handlers.get(operation.operationId);
+      if (inner === undefined) {
+        // Unreachable: `crudGroup` throws at module load for an operation it
+        // cannot serve. Fail the BUILD rather than mounting an unfenced write
+        // if that ever stops being true.
+        throw new Error(
+          `control-plane group rbac: no handler to fence for ${operation.operationId}`,
+        );
+      }
+      handlers.set(operation.operationId, (c) => {
+        authorizeRbacWrite(scopeOf(c), operation);
+        return inner(c);
+      });
+    }
+    return handlers;
+  },
+};
