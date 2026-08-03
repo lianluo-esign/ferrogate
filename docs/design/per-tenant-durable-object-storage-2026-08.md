@@ -163,6 +163,39 @@ already load-bearing here.
   `native_binding` stays for single-tenant/self-hosted deploys; `rest` and
   `proxy_service` are retired.
 
+## Deprovisioning: the data-retention decision (#820)
+
+Recorded here rather than left to whichever code path happens to handle a
+DELETE, because it is a **data-retention decision with legal weight** and not an
+implementation detail.
+
+**Decision: deleting a tenant RETAINS its object. Nothing calls `deleteAll()`.**
+`retireTenantStorage()` (`packages/storage/src/tenant-provisioning.ts`) removes
+the tenant's `tenant_databases` roster row and touches no tenant data.
+
+The three options that were on the table:
+
+| option | why not / why |
+|---|---|
+| `ctx.storage.deleteAll()` on delete | Irreversible, immediate, and taken by whatever path handled the request. A mis-scoped admin call, a replayed request or a `PATCH {"status":"deleted"}` would destroy a tenant's wallet settlements, ledger and audit rows with no undo — and PITR is per object and restores *from* a bookmark, so an emptied object has nothing to restore unless somebody took one first. It also races the money paths: a settlement in flight would land in an object being emptied. |
+| a tombstone inside the object that refuses reads | Plausible, and it is a **third** source of truth about whether a tenant exists, next to `tenants.status` and the lifecycle gate. `apps/control-plane/src/store/lifecycle.ts` already refuses a deleted tenancy's traffic on every admission, walking tenant → project → workspace, so a tombstone would duplicate a refusal that happens strictly earlier. |
+| **retain, and remove the roster row** | Chosen. Data stays where it is, the lifecycle gate stops the traffic, and the object drops out of `provisionedTenants()` so no fleet view fans out into it. |
+
+**The cost, stated rather than discovered later.** A retained object keeps billing
+for its storage ($0.20/GB-month past the free tier) and, once its roster row is
+gone, is no longer enumerable — a namespace cannot be listed in production. A
+fleet of deleted tenants is therefore an invisible, growing bill. That is why
+`retireTenantStorage()` returns the registration in its receipt instead of
+dropping it: after the roster row is gone, that receipt is the only thing that can
+tell an eventual erasure job what to erase. **Wire the receipt into an audit event
+or a retention queue before deleting tenants at volume.**
+
+**Deliberately NOT decided here: the retention WINDOW.** GDPR erasure requests,
+SOC 2 retention commitments and an operator's own contracts all bear on it, it
+differs per deployment, and a number guessed in a design doc would acquire the
+authority of an implementation. The erasure mechanism — an audited admin RPC on
+the object, per cost #4 above — is the slice that gets to choose it.
+
 ## Verdict
 
 Feasible, and it is the right topology. It removes the ~5,000-tenant ceiling, removes

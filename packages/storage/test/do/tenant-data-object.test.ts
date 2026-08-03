@@ -37,11 +37,11 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0007.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0008.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
- * derived from the thing under test cannot disagree with it. Twenty of these
+ * derived from the thing under test cannot disagree with it. Twenty-one of these
  * are the `TENANT_ONLY` set that file already pins against a real D1 tenant
  * database; `storage_schema_migrations` is shared with the control role and
  * `responses_conversations` post-dates that list.
@@ -53,6 +53,7 @@ const TENANT_TABLES = [
   "api_keys",
   "asset_bundle_files",
   "asset_channels",
+  "model_catalog",
   "observed_agent_presence",
   "payment_methods",
   "projects",
@@ -61,6 +62,7 @@ const TENANT_TABLES = [
   "storage_schema_migrations",
   "stored_assets",
   "tenant_contexts",
+  "tenant_provisioning_marks",
   "usage_aggregate_rollups",
   "usage_metadata_rollups",
   "usage_monthly_rollups",
@@ -157,7 +159,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(7);
+    expect(TENANT_MIGRATIONS.length).toBe(8);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -179,7 +181,7 @@ describe("a fresh tenant object", () => {
     // In D1 this ledger is vestigial: only `0001_init_tenant` writes a row, and
     // `wrangler`'s own `d1_migrations` table does the real bookkeeping. Inside a
     // DO there is no wrangler and no `d1_migrations`, so this table IS the
-    // ledger and versions 2..7 have to be in it — otherwise the version gate
+    // ledger and versions 2..8 have to be in it — otherwise the version gate
     // would replay the four ALTER-only migrations on the next wake and every
     // one of them would throw `duplicate column name`.
     const rows = await objectFor(ACME).query({
@@ -228,7 +230,7 @@ describe("a fresh tenant object", () => {
 describe("the second wake", () => {
   test("does a version read and NOTHING more", async () => {
     const first = await objectFor(ACME).schemaVersion();
-    expect(first.appliedThisWake.length).toBe(7);
+    expect(first.appliedThisWake.length).toBe(TENANT_MIGRATIONS.length);
 
     await evict(ACME);
 

@@ -40,6 +40,7 @@
  */
 import {
   type BindingEnvironment,
+  DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
@@ -723,6 +724,49 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
 }
 
 /**
+ * The router tenant STORAGE PROVISIONING runs through (#820) — the Durable
+ * Object namespace when this Worker binds one, otherwise whatever
+ * {@link resolveTenantDatabases} resolved.
+ *
+ * ## Why this is a second router and not a change to the first one
+ *
+ * It would be one router if this slice could afford the migration behind it, and
+ * the split is stated here rather than hidden so the next owner does not have to
+ * rediscover it.
+ *
+ * `apps/gateway` defaulted to `durable_object` in #819. This Worker still routes
+ * its tenant DATA paths — `store/tenancy.ts`'s `projects`/`workspaces`
+ * projection, `store/virtual_keys.ts`'s `api_keys` leg, `routes/wallets.ts`'s
+ * ledger — through {@link resolveTenantDatabases}, which is
+ * `EnvBindingTenantDatabaseRouter`. So the two Workers currently disagree about
+ * where a tenant's rows live, and closing THAT is a migration of every one of
+ * those call sites plus the ~70 assertions in this app's suite that read
+ * `TENANT_DB_A` directly. It is real work with a real risk of moving money to
+ * the wrong place, and it is not what #820 is.
+ *
+ * What #820 is, is that onboarding must put a tenant on the roster and seed its
+ * catalog IN THE OBJECT THE DATA PLANE WILL READ. That object is
+ * `env.TENANT_DATA.idFromName(tenantId)` — the gateway's namespace, bound
+ * cross-script — and provisioning it does not require moving any other write.
+ *
+ * The choice is made from the BINDING rather than from a routing var,
+ * deliberately: a var could name a topology this Worker has no binding for, and
+ * the failure would be a runtime `undefined` on the first tenant write instead
+ * of a deploy-time refusal. `apps/gateway` can afford the var because it DEFINES
+ * the class; this Worker only borrows it.
+ */
+export function resolveTenantStorage(env: ControlPlaneBindings): TenantDatabaseRouter {
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") {
+    return new UnprovisionedTenantDatabaseRouter();
+  }
+  if (env.DB === undefined || env.DB === null) return new UnprovisionedTenantDatabaseRouter();
+  if (env.TENANT_DATA !== undefined) {
+    return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+  }
+  return resolveTenantDatabases(env);
+}
+
+/**
  * The CONTROL database handle, for the surfaces that must write a TYPED table
  * another Worker reads by name (see {@link ControlPlaneDeps.controlDatabase}).
  *
@@ -823,6 +867,7 @@ export function resolveDeps(
     rbac: resolveRbac(env),
     store,
     tenantDatabases: resolveTenantDatabases(env),
+    tenantStorage: resolveTenantStorage(env),
     controlDatabase: resolveControlDatabase(env),
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.

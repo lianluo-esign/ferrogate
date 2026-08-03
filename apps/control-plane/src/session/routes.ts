@@ -57,6 +57,8 @@ import {
   TENANT_ACCOUNTS_COLLECTION,
   WORKSPACES_COLLECTION,
 } from "../store/lifecycle.js";
+import { projectTenantAccount } from "../store/quota_registry.js";
+import { provisionTenantStorageFor } from "../store/tenant_storage.js";
 import {
   generateRefreshTokenSecret,
   hashPassword,
@@ -354,7 +356,7 @@ async function handleRegister(c: Ctx): Promise<Response> {
   const userId = nextId("user");
 
   const store = console_.deps.store;
-  await store.create(TENANT_ACCOUNTS_COLLECTION, PLATFORM, {
+  const tenantAccount: StoreRecord = {
     id: tenantId,
     tenant_id: tenantId,
     name: organizationName,
@@ -363,7 +365,23 @@ async function handleRegister(c: Ctx): Promise<Response> {
     plan_id: "free",
     created_at: now,
     updated_at: now,
-  } satisfies StoreRecord);
+  };
+  await store.create(TENANT_ACCOUNTS_COLLECTION, PLATFORM, tenantAccount);
+  // The TYPED `tenants` row, and then the tenant's own storage (#820).
+  //
+  // This route bypasses `crudGroup` entirely — it writes the documents directly
+  // — so NEITHER spec hook runs for it, and both were missing. The consequence
+  // was not cosmetic: `tenants` is what the gateway's lifecycle read
+  // (`LIFECYCLE_TENANT_SQL`) and its `JOIN plans p ON t.plan_id = p.id`
+  // entitlement read both traverse, so a self-registered tenant resolved to no
+  // status and no plan floor, and its storage was never provisioned or seeded.
+  // This is the creation site that gets forgotten, which is why the call is here
+  // rather than left to the generic path this handler does not take.
+  const controlDb = console_.deps.controlDatabase;
+  if (controlDb !== null) {
+    await projectTenantAccount(controlDb, tenantAccount, now);
+  }
+  await provisionTenantStorageFor(console_.deps, tenantId);
   await store.create(PROJECTS_COLLECTION, PLATFORM, {
     id: projectId,
     tenant_id: tenantId,

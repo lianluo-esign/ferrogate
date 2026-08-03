@@ -441,3 +441,48 @@ invocation_logs = true
 
 [observability.traces]
 enabled = true
+
+# ---------------------------------------------------------------------------
+# TENANT_DATA — the gateway's `TenantDataObject` namespace, bound CROSS-SCRIPT
+# (#820, docs/design/per-tenant-durable-object-storage-2026-08.md)
+#
+# One Durable Object per tenant IS that tenant's database. This Worker MINTS
+# tenants — `POST /admin/v1/tenant-accounts`, `POST /v1/admin/register` — so it
+# is the Worker that has to record them on the roster and put the first rows in
+# their object. `src/store/tenant_storage.ts` is the one place that happens.
+#
+# It MUST be the gateway's namespace and not one of this Worker's own. A DO
+# namespace is identified by (script, class); a locally-defined
+# `TenantDataObject` here would be a DIFFERENT namespace, so `idFromName(t)`
+# would name one object from this Worker and another from the gateway, and the
+# tenant's data would split in two with no error anywhere. `script_name` is what
+# makes them the same object.
+#
+# Consequences of `script_name`, all three of which apply here — the same three
+# `apps/mcp/wrangler.toml` states for its borrowed RATE_LIMIT binding:
+#
+#   * NO `[[migrations]]` stanza belongs to this file. A migration INTRODUCES a
+#     class, and the class is introduced by the script that DEFINES it —
+#     `apps/gateway`, whose `tag = "v4"` `new_sqlite_classes = ["TenantDataObject"]`
+#     already exists. A second `new_sqlite_classes` here would claim to define a
+#     class this script does not export and `wrangler deploy` rejects it. (If the
+#     class is ever MOVED into this app, the stanza must be `new_sqlite_classes`,
+#     never `new_classes` — the latter deploys cleanly and silently swaps SQLite
+#     for the key-value backend, and the storage backend of a live namespace can
+#     never be changed afterwards.)
+#   * NO `src/worker.ts` re-export either. This Worker BINDS the class; it does
+#     not define it.
+#   * DEPLOY ORDER: `ferrogate-gateway` FIRST. A `script_name` binding to a
+#     script that does not exist yet FAILS THE DEPLOY, which is the point.
+#
+# Removing this stanza is a supported posture rather than a break:
+# `resolveTenantDatabases` falls back to `EnvBindingTenantDatabaseRouter`, which
+# is the correct router for a single-tenant / self-hosted `native_binding`
+# deployment — where onboarding genuinely still requires a `wrangler deploy` to
+# add the tenant's own `[[d1_databases]]` stanza, so there is nothing this Worker
+# could provision on its own.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
