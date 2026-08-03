@@ -61,7 +61,9 @@ async function balanceAsOperator(tenantId = "t1"): Promise<number> {
  * as one unit, but a fence placed in the wrong half of the handler could refuse
  * after the entry was claimed, leaving the operator an unexplained row.
  */
-async function ledgerAsOperator(tenantId = "t1"): Promise<{ kind: string; amount_cents: number }[]> {
+async function ledgerAsOperator(
+  tenantId = "t1",
+): Promise<{ kind: string; amount_cents: number }[]> {
   const response = await SELF.fetch(`${BASE}/admin/v1/wallets/${tenantId}/ledger`, {
     headers: bearer(OPERATOR),
   });
