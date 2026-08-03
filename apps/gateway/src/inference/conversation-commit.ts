@@ -68,16 +68,24 @@
  * chain is assembled inside the inner inference router. The router now closes
  * that leg at the assembly point:
  *
- *  - every row records the API-key id under which this delivered turn was
- *    screened;
+ *  - each row records the screening API-key id where known. The value is NULL
+ *    for rows predating the column and callers without an API-key id. A NULL is
+ *    foreign to a continuing caller with a known id, but compares as the same
+ *    credential when the continuing caller also has no id;
  *  - the guardrail middleware publishes its already-resolved engine as a
  *    request-scoped replay capability; and
  *  - `handlers.ts::prepareConversation` re-decides stored input and output under
  *    the continuing key only when that id differs.
  *
- * The cost is therefore O(foreign turns), and zero detector work for same-key
- * conversations. The stored row remains byte-for-byte what its writer received;
- * replay screening works on a clone and never rewrites shared state.
+ * That id pins the credential, NOT the policy. `GuardrailEngine` selects policy
+ * on every evaluation by organization/tenant, project, workspace, API key,
+ * service account, gateway config, model, provider and managed-action scope.
+ * Because replay is gated only on the API-key id, a same-key continuation whose
+ * other selection inputs differ skips replay screening; issue #808 tracks that
+ * gap. The current cost is O(foreign-credential turns), with zero detector work
+ * for same-credential turns. The stored row remains byte-for-byte what its
+ * writer received; replay screening works on a clone and never rewrites shared
+ * state.
  *
  * ============================================================================
  * THE SEAM
