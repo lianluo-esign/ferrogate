@@ -210,7 +210,9 @@ describe("static_site bundle expansion refuses hostile archives", () => {
 });
 
 describe("static_site bundle ceilings are real bounds, not comments", () => {
-  test("a high-ratio gzip bomb is abandoned at the decompressed ceiling", async () => {
+  test("a high-ratio gzip bomb is abandoned at the decompressed ceiling", async ({ task }) => {
+    expect(task.timeout).toBe(30_000);
+
     // 256 MiB of zeros inside a tar, gzipped down to well under a megabyte: the
     // archive sails past every size check that looks at the UPLOAD, which is
     // exactly what a bomb is for. The tenant's storage quota tightens the

@@ -27,7 +27,9 @@ const repoRoot = path.resolve(packageRoot, "..", "..");
 const checkCli = path.join(repoRoot, "tools", "generated-clients", "check.mjs");
 
 describe("generated types", () => {
-  it("are in sync with docs/openapi/admin-api.openapi.json", () => {
+  it("are in sync with docs/openapi/admin-api.openapi.json", ({ task }) => {
+    expect(task.timeout).toBe(30_000);
+
     // The CLI exits 1 and prints the fix instruction on drift, so a failure
     // here reads as the drift report rather than as a diff of two large files.
     let failure: string | null = null;

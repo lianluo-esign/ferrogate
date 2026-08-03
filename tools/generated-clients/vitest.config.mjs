@@ -8,5 +8,13 @@ import { defineConfig } from "vitest/config";
 // plain `node` from its npm scripts (its CI job installs no Bun and no TypeScript
 // runner), so the shared pipeline must be executable JavaScript, not TypeScript.
 export default defineConfig({
-  test: { include: ["test/**/*.test.mjs"] },
+  test: {
+    include: ["test/**/*.test.mjs"],
+    // The drift gate launches openapi-typescript twice and renders the complete
+    // 2 MiB client: once through checkArtifact(), once through the standalone
+    // CLI. That work exceeded Vitest's 5s default under CPU contention, and
+    // sampling artifacts would weaken the tree-wide drift proof. 30s keeps the
+    // complete gate viable while still failing a real hang.
+    testTimeout: 30_000,
+  },
 });

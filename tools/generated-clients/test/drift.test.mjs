@@ -56,6 +56,10 @@ function discoverGeneratedClients() {
 }
 
 describe("generated clients", () => {
+  it("allows enough time to render the complete contract", ({ task }) => {
+    expect(task.timeout).toBe(30_000);
+  });
+
   it.each(ARTIFACTS.map((artifact) => [artifact.slug, artifact]))(
     "%s is in sync with its contract",
     (_slug, artifact) => {
@@ -70,9 +74,7 @@ describe("generated clients", () => {
 
     expect(
       unregistered,
-      `these generated clients are not in tools/generated-clients/artifacts.mjs, so NOTHING ` +
-        `reachable from root \`bun run test\` checks them and nothing regenerates them with ` +
-        `\`${GENERATE_COMMAND}\`:\n${unregistered.map((f) => `  ${f}`).join("\n")}`,
+      `these generated clients are not in tools/generated-clients/artifacts.mjs, so NOTHING reachable from root \`bun run test\` checks them and nothing regenerates them with \`${GENERATE_COMMAND}\`:\n${unregistered.map((f) => `  ${f}`).join("\n")}`,
     ).toEqual([]);
   });
 
@@ -215,8 +217,7 @@ describe("generation is one command", () => {
     }
     expect(
       offenders,
-      "these scripts invoke the generator directly instead of tools/generated-clients/generate.mjs:\n" +
-        offenders.map((o) => `  ${o}`).join("\n"),
+      `these scripts invoke the generator directly instead of tools/generated-clients/generate.mjs:\n${offenders.map((o) => `  ${o}`).join("\n")}`,
     ).toEqual([]);
   });
 
