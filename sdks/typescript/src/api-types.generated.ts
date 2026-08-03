@@ -3865,7 +3865,10 @@ export interface paths {
         /** List quota policies. */
         get: operations["listQuotaPolicies"];
         put?: never;
-        /** Create a quota policy. */
+        /**
+         * Create a quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug.
+         */
         post: operations["createQuotaPolicy"];
         delete?: never;
         options?: never;
@@ -3893,14 +3896,23 @@ export interface paths {
         };
         /** Get a scoped quota policy. */
         get: operations["getQuotaPolicy"];
-        /** Replace a scoped quota policy. */
+        /**
+         * Replace a scoped quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug.
+         */
         put: operations["replaceQuotaPolicy"];
         post?: never;
-        /** Delete a scoped quota policy. */
+        /**
+         * Delete a scoped quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug. DELETE is the LARGEST raise available here rather than a self-imposed zero: an empty scope chain resolves to no rpm cap, no monthly budget and no model allowlist.
+         */
         delete: operations["deleteQuotaPolicy"];
         options?: never;
         head?: never;
-        /** Update a scoped quota policy. */
+        /**
+         * Update a scoped quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug.
+         */
         patch: operations["updateQuotaPolicy"];
         trace?: never;
     };

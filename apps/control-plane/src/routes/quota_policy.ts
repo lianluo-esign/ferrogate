@@ -12,14 +12,64 @@
  * enum is validated at the route so an unknown scope kind is a 404 rather than
  * a lookup against a collection that cannot exist.
  *
- * The authorization here is the one Rust factored into
- * `auth::authorize_scoped_resource` (issue #185): a scope that is not already a
- * bare tenant id must be RESOLVED to its owning tenant before a tenant-scoped
- * caller may touch it, and **resolution failure denies**. Both "the row is
- * absent" and "the store is unavailable" collapse to `None` in Rust, and `None`
- * can never equal the caller's tenant — so a storage blip denies rather than
- * granting. "Nonexistent means safe to touch" is explicitly the wrong default,
- * and that is reproduced exactly below.
+ * ## 0. Reading a quota is one authority; SETTING it is another (#782)
+ *
+ * The reads and the writes do NOT share a fence. {@link authorizeScopedResource}
+ * asks "does this scope resolve to MY tenant?", which is the right question for
+ * a read and, for a write, is the escalation itself: the answer being "yes"
+ * means the caller is the party the limit is imposed on. A quota the
+ * quota-holder can raise is not a quota. Every write leg therefore runs
+ * {@link authorizeScopedResourceWrite} — operator only, all four scope kinds,
+ * including `DELETE` and including a LOWERING edit; that function states why
+ * each of those is deliberate rather than a hammer.
+ *
+ * ## 1. Resolution failure denies (#185)
+ *
+ * The read authorization is the one Rust factored into
+ * `auth::authorize_scoped_resource`: a scope that is not already a bare tenant
+ * id must be RESOLVED to its owning tenant before a tenant-scoped caller may
+ * touch it, and **resolution failure denies**. Both "the row is absent" and
+ * "the store is unavailable" collapse to `None` in Rust, and `None` can never
+ * equal the caller's tenant — so a storage blip denies rather than granting.
+ * "Nonexistent means safe to touch" is explicitly the wrong default, and that is
+ * reproduced exactly below.
+ *
+ * ## 2. The sibling fences, swept — where the next reader should look
+ *
+ * #782 is the SECOND instance of "a read-shaped fence authorising a write"
+ * (#743's asset review verb was the first), so the whole family was probed
+ * rather than reasoned about. Recorded here because a sweep whose result lives
+ * only in a merged PR body is a sweep the next reader repeats:
+ *
+ *  - `wallets.ts::authorizeWalletTenant` — **the same defect, on money, filed as
+ *    #790.** `walletAdjustSchema.amount_cents` is SIGNED and the module calls
+ *    `adjust` an "operator movement", but the fence is the read's: a tenant
+ *    `admin.write` key `POST`ing `/admin/v1/wallets/{its own id}/adjust` with
+ *    `+10_000_000` answered `200` and took `balance_cents` 500 → 10_000_500,
+ *    projecting `balance_credits` the gateway spends. Not fixed here: this file
+ *    is the quota surface, and whether a NEGATIVE self-adjustment stays open is
+ *    a product decision that deserves its own argument. `PATCH /wallets/{id}`
+ *    is NOT affected — the balance-move guard already holds it.
+ *  - `rbac.ts::authorizeTenantPath` — **same shape, filed as #791.** A tenant
+ *    key can `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store
+ *    stamps its tenant) and bind it to itself, and `D1RbacAuthorizer` allows on
+ *    `granted.has("*")`. Blast radius is that tenant's own RBAC-gated verbs —
+ *    today the twelve guardrail operations, `activate` and `archive` among them.
+ *    Left open deliberately: tenant self-service RBAC may be intended, which
+ *    #782's fence cannot decide for it.
+ *  - `billing.ts::authorizeReportTenant` — **correct as-is.** Sharing is fine
+ *    here because replay moves nothing the caller can choose: it clears a
+ *    dead-letter mark so the gateway's sweeper retries, idempotently on the
+ *    report id, which pushes a charge TOWARDS landing. There is no field a
+ *    tenant can raise, and it already runs before the CAS.
+ *  - `admin_semantic_cache.ts`'s copy of `authorizeScopedResource` — **same
+ *    shape, left alone on purpose.** A tenant `PUT`/`DELETE` on its own policy
+ *    answers `200`, but every knob there governs only that tenant's own traffic
+ *    and its own spend, and caching lowers cost rather than escaping a cap. The
+ *    one question that would change this is whether an operator ever sets
+ *    `enabled: false` there as a COMPLIANCE decision (no cross-request reuse for
+ *    a regulated tenant) — if that is ever true, this becomes the same defect
+ *    and needs the same split.
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
@@ -147,9 +197,15 @@ function readScope(c: Parameters<Handler>[0]): { scopeType: QuotaScopeKind; scop
 }
 
 /**
- * Rust `authorize_scoped_resource`. Fails closed: a tenant-scoped caller is
- * denied both when the resolved tenant differs from its own AND when
- * resolution fails entirely.
+ * Rust `authorize_scoped_resource`, and the fence for the READ leg only.
+ *
+ * Fails closed: a tenant-scoped caller is denied both when the resolved tenant
+ * differs from its own AND when resolution fails entirely.
+ *
+ * It is deliberately NOT the fence for a write — see
+ * {@link authorizeScopedResourceWrite} and decision 0 in the module header.
+ * The question it asks is "is this row MINE?", and for a write the answer being
+ * "yes" is precisely the escalation.
  */
 async function authorizeScopedResource(
   store: ControlPlaneStore,
@@ -183,6 +239,61 @@ async function authorizeScopedResource(
   }
 }
 
+/**
+ * The fence for every WRITE leg of this group: **operator only** (#782).
+ *
+ * A tenant-scoped credential is refused outright, at every scope kind, before
+ * any resolution happens. The reasoning, since "all writes are operator-only"
+ * is a big hammer and an unnecessary fence is its own cost:
+ *
+ *  - **Raising is the whole defect.** For `scope_type=tenant` the read fence
+ *    resolves the owner as the scope id ITSELF, so a tenant-scoped `admin.write`
+ *    key passed it for its own row and could `PUT` itself a new `rpm_limit`,
+ *    `monthly_token_budget` or `asset_storage_quota_bytes`. The last is the
+ *    ceiling #736's bundle expansion and #737's egress accounting enforce
+ *    against, and `packages/policy/src/quota.ts` gives a tenant-scope policy
+ *    value PRECEDENCE over the plan default rather than a minimum with it — so
+ *    the tenant's own number simply replaced the plan's.
+ *  - **The other scope kinds are the same defect**, not a lesser one. The merge
+ *    is min-across-the-chain, so an inner rung only tightens *when an outer rung
+ *    exists*; against a plan-only tenant (no `tenant` policy row at all), a
+ *    `project`/`workspace`/`key` policy the tenant wrote for a scope it owns is
+ *    the only rung, and it overrides the plan default outright.
+ *  - **Deleting is the largest raise available**, not a self-imposed zero:
+ *    `resolveEffectiveQuota` over an empty chain is not "the defaults", it is no
+ *    rpm cap, no budget and no allowlist.
+ *  - **Lowering is refused too, and that is the judgement call.** "A tenant may
+ *    tighten its own limits" is only safe if tightening is DECIDABLE, and on
+ *    this document it is not. The same credential that lowered `rpm_limit` can
+ *    raise it back a request later, so a value-comparing fence would have to
+ *    re-derive the operator's intent on every field, forever: the schema already
+ *    carries fields with no monotone direction (`required_tags`,
+ *    `on_missing_tags`) and fields where LARGER is looser in the opposite
+ *    direction from `rpm_limit` (`spend_anomaly_ratio`,
+ *    `spend_anomaly_cooldown_secs`, `spend_anomaly_enabled: false`), and it
+ *    grew twelve of them in one slice (#697). A monotonicity table that a newly
+ *    added field defaults into the WRONG half of is a silent hole; refusing the
+ *    verb has no such failure mode. A tenant that wants to be held to less
+ *    belongs on its own self-service budget document the merge takes the
+ *    minimum with — a separate row, not the operator's ceiling.
+ *
+ * Refusing BEFORE resolution is also deliberate: the read fence's cross-scope
+ * lookup is a platform-scoped read, so answering `tenant_scope_denied` only for
+ * scopes the caller does not own would make the write leg an existence oracle
+ * for other tenants' projects and keys. One refusal, one code, no probe.
+ *
+ * A tenant may still READ its own policy — that read is how it tells a `429`
+ * from a bug, and {@link authorizeScopedResource} is unchanged for it.
+ */
+function authorizeScopedResourceWrite(scope: CallerScope, verb: string): void {
+  if (scope.kind === "platform_operator") return;
+  throw new HttpError(
+    403,
+    "quota_policy_write_operator_only",
+    `${verb} a quota policy is an operator action: this credential is scoped to tenant ${scope.tenantId}, which may read its own quota policy but may not change the limits it is held to`,
+  );
+}
+
 export const quotaPolicyRoutes: GroupModule = crudGroup(
   "quota_policy",
   [{ segment: QUOTA_POLICIES, object: "quota_policy", body: quotaPolicySchema }],
@@ -190,6 +301,9 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
     createQuotaPolicy: async (c) => {
       const deps = c.get("deps");
       const scope = scopeOf(c);
+      // Ahead of the body, on purpose: a caller this verb will never admit must
+      // not be told which fields its request was missing.
+      authorizeScopedResourceWrite(scope, "Creating");
       const body = await readJson(c, quotaPolicySchema);
       const parsedType = quotaScopeKindSchema.safeParse(body.scope_type);
       if (!parsedType.success || body.scope_id === undefined) {
@@ -199,7 +313,6 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
           "scope_type (tenant|project|workspace|key) and scope_id are required",
         );
       }
-      await authorizeScopedResource(deps.store, scope, parsedType.data, body.scope_id);
 
       const id = quotaPolicyId(parsedType.data, body.scope_id);
       try {
@@ -229,7 +342,7 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       const deps = c.get("deps");
       const scope = scopeOf(c);
       const { scopeType, scopeId } = readScope(c);
-      await authorizeScopedResource(deps.store, scope, scopeType, scopeId);
+      authorizeScopedResourceWrite(scope, "Replacing");
       const body = await readJson(c, quotaPolicySchema);
       const id = quotaPolicyId(scopeType, scopeId);
       const stored = await deps.store.replace(QUOTA_POLICIES, scope, id, {
@@ -246,7 +359,7 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       const deps = c.get("deps");
       const scope = scopeOf(c);
       const { scopeType, scopeId } = readScope(c);
-      await authorizeScopedResource(deps.store, scope, scopeType, scopeId);
+      authorizeScopedResourceWrite(scope, "Updating");
       const body = await readJson(c, quotaPolicySchema);
       const id = quotaPolicyId(scopeType, scopeId);
       const stored = await deps.store.merge(QUOTA_POLICIES, scope, id, body);
@@ -259,7 +372,7 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       const deps = c.get("deps");
       const scope = scopeOf(c);
       const { scopeType, scopeId } = readScope(c);
-      await authorizeScopedResource(deps.store, scope, scopeType, scopeId);
+      authorizeScopedResourceWrite(scope, "Deleting");
       const id = quotaPolicyId(scopeType, scopeId);
       if (!(await deps.store.remove(QUOTA_POLICIES, scope, id))) {
         throw new HttpError(404, "not_found", `quota policy ${id} not found`);
