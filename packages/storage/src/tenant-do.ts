@@ -78,7 +78,6 @@ import type {
 import {
   ControlDatabaseTenantRegistry,
   type TenantDatabaseHandle,
-  type TenantDatabaseRegistration,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
 
@@ -204,6 +203,53 @@ function toTenantDataValues(values: readonly unknown[], sql: string): TenantData
 // ---------------------------------------------------------------------------
 // Result shaping
 // ---------------------------------------------------------------------------
+
+/**
+ * The prefix every {@link TenantDataObject} refusal carries. Matched, not
+ * parsed: the object's messages are for humans, and this only decides whether a
+ * failure is the OBJECT refusing (a policy outcome) or SQLite failing (a
+ * statement outcome).
+ */
+const OBJECT_REFUSAL_PREFIX = "tenant_data_object:";
+
+/**
+ * Re-raise a failed RPC as a `StorageError`, naming the tenant and the reason.
+ *
+ * This is where deliverable 4 of #819 lands. Under `native_binding` an
+ * unreachable tenant was a RESOLUTION failure: the registry named a binding this
+ * Worker did not have, and `forTenant()` refused before a statement existed.
+ * With the registry read gone, resolution cannot fail that way — the address is
+ * a pure function — so the failure moves to the first RPC and takes a new shape:
+ * the object this tenant id names has ADOPTED A DIFFERENT TENANT and refuses.
+ * That is "provisioned but unreachable" in the DO topology, and it is a real
+ * possibility rather than a theoretical one, because `idFromName` is one-way and
+ * an object cannot check its own name.
+ *
+ * Three things this deliberately does NOT do, each of which would be the same
+ * class of bug the whole `tenant-router` module exists to prevent:
+ *
+ *  * **No retry.** A wrong-tenant refusal is deterministic — the object has
+ *    persisted the id it adopted — so a retry is a slower error at best, and at
+ *    worst it converts a routing bug into intermittent success.
+ *  * **No fallback.** There is no second database to try. Reaching for one would
+ *    be writing this tenant's ledger into somebody else's.
+ *  * **No swallowing.** The refusal propagates to the caller, which for the
+ *    wallet guard becomes `unavailable` → 503, never `insufficient` → 429: an
+ *    unreachable object has not proven the caller is overdrawn.
+ */
+function refuseObjectFailure(tenantId: string, operation: string, error: unknown): never {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (detail.includes(OBJECT_REFUSAL_PREFIX)) {
+    throw StorageError.runtime(
+      [
+        `tenant ${tenantId}'s Durable Object REFUSED ${operation}: ${detail}`,
+        "This is the object's own admission guard, not a transport failure: it is",
+        "deterministic, so it is neither retried nor served from another database.",
+      ].join(" "),
+    );
+  }
+  throw StorageError.runtime(`tenant ${tenantId}'s Durable Object failed ${operation}: ${detail}`);
+}
 
 /**
  * The `duration` refusal, extracted so the message is identical on every result
@@ -469,10 +515,15 @@ export class DurableObjectD1Database {
 
   /** One statement, one stub hop. Used by every statement method. */
   async runStatement(statement: TenantDataStatement): Promise<TenantDataResult> {
-    // `tenantId` LAST, so no future field on `TenantDataStatement` can shadow
-    // the cross-tenant guard by being named `tenantId`. The object re-checks it
-    // either way; this keeps the facade from being the thing that lies to it.
-    return this.#stub.query({ ...statement, tenantId: this.#tenantId });
+    try {
+      // `tenantId` LAST, so no future field on `TenantDataStatement` can shadow
+      // the cross-tenant guard by being named `tenantId`. The object re-checks
+      // it either way; this keeps the facade from being the thing that lies to
+      // it.
+      return await this.#stub.query({ ...statement, tenantId: this.#tenantId });
+    } catch (error) {
+      refuseObjectFailure(this.#tenantId, `[${statement.sql}]`, error);
+    }
   }
 
   /**
@@ -525,7 +576,11 @@ export class DurableObjectD1Database {
       }
       return candidate.plan();
     });
-    const results = await this.#stub.batch({ tenantId: this.#tenantId, statements: plans });
+    const results = await this.#stub
+      .batch({ tenantId: this.#tenantId, statements: plans })
+      .catch((error: unknown) => {
+        refuseObjectFailure(this.#tenantId, `a ${plans.length}-statement batch`, error);
+      });
     if (results.length !== plans.length) {
       throw StorageError.runtime(
         [
@@ -590,75 +645,82 @@ export class DurableObjectD1Database {
 // The router
 // ---------------------------------------------------------------------------
 
-export interface DurableObjectTenantRouterOptions {
-  /**
-   * How long a resolved registration is cached in-isolate, in ms. Default
-   * 30_000, `0` disables — the same knob and the same default as
-   * {@link EnvBindingTenantRouterOptions}, because it answers the same question.
-   *
-   * What is cached is the control-registry ROW, never the stub: a stub is a
-   * cheap local handle to an object addressed by a pure function of the tenant
-   * id, so there is nothing stale about it, while a registration can be created
-   * or revoked under a live isolate.
-   */
-  registrationTtlMs?: number;
-}
-
 /**
- * Routes tenants to their Durable Objects — the deploy-free, money-safe leg.
+ * Routes tenants to their Durable Objects — the deploy-free, money-safe leg,
+ * and the DEFAULT topology since #819.
  *
- * ## Why a control-registry lookup survives, when `idFromName` needs none
+ * ## Resolution reads NOTHING. That is the change.
  *
- * `idFromName` resolves EVERY string. That is the feature (no provisioning
- * round trip) and it is also the hazard: a typo, an unauthenticated id, or a
- * caller that lost its tenant would each address a real, empty, valid object
- * and start writing a ledger into it. Nothing would error, and the tenant would
- * exist. So this router keeps the `tenant_databases` row as the EXISTENCE GATE:
- * an unregistered tenant is `StorageError.notFound`, exactly as under
- * {@link EnvBindingTenantDatabaseRouter}, and there is still no default
- * database anywhere in this module.
+ * `forTenant()` performs no I/O: the address IS
+ * `idFromName(tenantId)`, a pure function of the tenant id, so a resolution is
+ * an object allocation and a stub handle. There is no control-database read on
+ * the request path and therefore no cache in front of one — an earlier revision
+ * of this class carried a 30 s registration cache copied from
+ * {@link EnvBindingTenantDatabaseRouter}, and #819 deleted it rather than leave
+ * a cache guarding a read that no longer happens. A cache in front of nothing is
+ * not free: it is a second source of truth with an expiry, and the next reader
+ * has to work out which of the two the code believes.
  *
- * The registry is also the only way to answer {@link provisionedTenants}. A
- * Durable Object namespace CANNOT be enumerated in production —
- * `listDurableObjectIds` is a `cloudflare:test` helper — and
+ * Why the registry read could go, when the binding router genuinely needed one:
+ * under `native_binding` the row carries the ANSWER (`binding_name`), so no
+ * lookup meant no route. Here the row carries no part of the answer. Reading it
+ * would only be a POLICY check — "is this tenant one we serve?" — and that
+ * question is already answered, strictly earlier and strictly better, by the
+ * credential: a tenant id reaches this router only because
+ * `apps/gateway/src/keys/` resolved an authenticated credential to it through
+ * the CONTROL `api_key_directory`. An id that no credential maps to cannot get
+ * here at all, so a second existence check would re-ask, per request, a question
+ * whose answer the caller already holds — and charge the inference hot path a
+ * control-database round trip for it.
+ *
+ * ## What is left standing in place of that check
+ *
+ * Three guards, none of them a registry read, and all three fail closed:
+ *
+ *  1. **A blank tenant id is refused here.** `idFromName("")` is a perfectly
+ *     valid id, so the unforgeable empty-string sentinel that
+ *     `apps/gateway/src/tenancy/middleware.ts` hands unclassified credentials
+ *     would otherwise name ONE shared object that every such caller lands in —
+ *     a fallback database by accident, which is the single outcome this whole
+ *     topology exists to prevent.
+ *  2. **The object re-checks the id it is addressed with.** `TenantDataObject`
+ *     adopts the first tenant id on its first RPC and refuses every later id
+ *     that differs. That is the wrong-tenant-stub refusal, and it is the failure
+ *     mode that REPLACES `native_binding`'s "provisioned but not yet
+ *     redeployed": a mis-addressed object is now the way a tenant becomes
+ *     unreachable, and {@link DurableObjectD1Database} surfaces it as an error,
+ *     never a retry and never a fallback.
+ *  3. **A tenant with no data is empty, not shared.** The worst outcome of an
+ *     id that should not exist is one empty 10 GB-capable object holding
+ *     nothing — not a write into another tenant's ledger. Under
+ *     `shared_development` the same mistake writes into everyone's database.
+ *
+ * ## The registry is still read — on ADMIN paths, never on a request
+ *
+ * {@link provisionedTenants} is the only method here that touches D1, and it
+ * has to: a Durable Object namespace CANNOT be enumerated in production
+ * (`listDurableObjectIds` is a `cloudflare:test` helper), and
  * `apps/control-plane/src/store/asset_fleet.ts:330` fans out over that list to
  * serve the fleet asset views. Returning `[]` would report an empty fleet:
- * green, and wrong.
+ * green, and wrong. `tenant_databases` therefore survives as the
+ * PROVISIONING/STATE record — who exists, where their data is homed, what the
+ * operator last did — and stops being a routing table.
  *
- * ## What the registry row means here, and what it no longer means
- *
- * `binding_name` is IGNORED, and a row without one resolves. Under
- * `native_binding` an absent binding is the "provisioned but not yet
- * redeployed" refusal — the tenant's database exists in the account but the
- * Worker has not been redeployed with its stanza. There is no such state here:
- * one `[[durable_objects.bindings]]` entry serves every tenant that will ever
- * exist, so there is nothing to redeploy and nothing to be missing. That
- * difference IS the architectural change; `test/d1/router.test.ts` pins the
- * refusal for the binding router and `test/do/tenant-do-facade.test.ts` pins
- * the acceptance for this one, so neither can drift into the other by accident.
- *
- * `database_uuid` and `schema_version` are likewise not carried onto the
- * handle: there is no D1 database and therefore no uuid, and the schema version
- * lives in the object's own `storage_schema_migrations` ledger, which the
- * object applies for itself on every cold start. A `schemaVersion` copied off a
- * control-plane row would be a second source of truth that no writer updates.
+ * `database_uuid` and `schema_version` are not carried onto the handle: there is
+ * no D1 database and therefore no uuid, and the schema version lives in the
+ * object's own `storage_schema_migrations` ledger, which the object applies for
+ * itself on every cold start. A `schemaVersion` copied off a control-plane row
+ * would be a second source of truth that no writer updates.
  */
 export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
   readonly #namespace: TenantDataNamespaceLike;
   readonly #controlDb: D1Database;
   readonly #registry: ControlDatabaseTenantRegistry;
-  readonly #ttlMs: number;
-  readonly #cache = new Map<string, { at: number; value: TenantDatabaseRegistration }>();
 
-  constructor(
-    namespace: TenantDataNamespaceLike,
-    controlDb: D1Database,
-    options: DurableObjectTenantRouterOptions = {},
-  ) {
+  constructor(namespace: TenantDataNamespaceLike, controlDb: D1Database) {
     this.#namespace = namespace;
     this.#controlDb = controlDb;
     this.#registry = new ControlDatabaseTenantRegistry(controlDb);
-    this.#ttlMs = options.registrationTtlMs ?? 30_000;
   }
 
   /** The account-global CONTROL database. Still D1, and deliberately so. */
@@ -666,16 +728,16 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
     return this.#controlDb;
   }
 
+  /**
+   * One tenant's handle. `async` only to satisfy the port — it awaits nothing.
+   *
+   * `apps/gateway/test/tenancy/durable-object.spec.ts` counts `prepare()` calls
+   * on the control database across a resolution and asserts ZERO. That is the
+   * assertion, rather than a comment claiming the read is gone: a future edit
+   * that reintroduces a registry lookup here turns it red instead of quietly
+   * putting a D1 round trip back on the inference path.
+   */
   async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
-    if (tenantId === "") {
-      throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
-    }
-    const registration = await this.#registration(tenantId);
-    if (!registration) {
-      throw StorageError.notFound(
-        `tenant ${tenantId} has no provisioned database in the control registry`,
-      );
-    }
     return {
       tenantId,
       db: this.databaseFor(tenantId),
@@ -693,38 +755,26 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
     return (await this.#registry.list()).map((row) => row.tenantId);
   }
 
-  /** Drop the in-isolate registration cache (call after a provisioning write). */
-  invalidate(tenantId?: string): void {
-    if (tenantId === undefined) this.#cache.clear();
-    else this.#cache.delete(tenantId);
-  }
-
   /**
-   * The `D1Database` view of one tenant's object, WITHOUT the registry gate.
+   * The `D1Database` view of one tenant's object.
    *
-   * Separate from {@link forTenant} because the gate is a policy about which
-   * tenants a deployment will serve, while this is the addressing. A test
-   * harness and the object's own maintenance paths need the second without the
-   * first; a request path must never take this door, which is why it returns a
-   * bare database rather than a {@link TenantDatabaseHandle} — there is no
-   * `supportsAtomicBatch` on it for `requireAtomicBatch` to read, so it cannot
-   * be mistaken for a routed handle.
+   * Kept as a separate entry point from {@link forTenant} because it returns a
+   * bare database rather than a {@link TenantDatabaseHandle}: there is no
+   * `supportsAtomicBatch` on it for `requireAtomicBatch` to read, so a
+   * maintenance or test path that wants only the addressing cannot accidentally
+   * pass it where a routed handle is expected.
    */
   databaseFor(tenantId: string): D1Database {
-    if (tenantId === "") {
-      throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime(
+        [
+          'tenant database routing requires a non-empty tenant id. idFromName("") is a valid',
+          "Durable Object id, so accepting a blank id here would give every unclassified",
+          "credential ONE shared object to write into — refusing instead.",
+        ].join(" "),
+      );
     }
     const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
     return new DurableObjectD1Database(tenantId, stub).asD1Database();
-  }
-
-  async #registration(tenantId: string): Promise<TenantDatabaseRegistration | undefined> {
-    if (this.#ttlMs > 0) {
-      const hit = this.#cache.get(tenantId);
-      if (hit && Date.now() - hit.at < this.#ttlMs) return hit.value;
-    }
-    const value = await this.#registry.get(tenantId);
-    if (value && this.#ttlMs > 0) this.#cache.set(tenantId, { at: Date.now(), value });
-    return value;
   }
 }

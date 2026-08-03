@@ -54,6 +54,36 @@ migrations_dir = "../../../../../sql/d1-ts/tenant"
 # registry and the deployed config disagreeing must be an error, never a
 # fallback to CONTROL_DB.
 
+# ---------------------------------------------------------------------------
+# TENANT_DATA — the DEFAULT topology (#819). One SQLite-backed Durable Object
+# per tenant, addressed `idFromName(tenant_id)`.
+#
+# Note what this stanza does NOT need, and compare it with the two
+# `[[d1_databases]]` blocks above: no per-tenant entry, no `database_id`, no
+# `migrations_dir`, and no equivalent of the `TENANT_DB_INITECH` omission,
+# because there is no per-tenant deploy-time state to omit. ONE binding serves
+# every tenant the suite invents, which is the entire scaling argument written
+# out in config.
+#
+# `new_sqlite_classes`, never `new_classes`: the latter deploys cleanly and
+# silently swaps in the key-value backend, at which point `ctx.storage.sql` does
+# not exist. Mirrors `apps/gateway/wrangler.toml` tag `v4`; the tag differs
+# because this config's namespace is a separate, throwaway one.
+#
+# `durable-object.spec.ts` drives this binding. It still proves the same
+# fail-closed property the `TENANT_DB_INITECH` omission proves for D1 — a
+# provisioned tenant that cannot be reached must ERROR — but the mechanism is
+# the object's own admission guard rather than a missing stanza, because a
+# missing stanza is no longer a state this topology can be in.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantDataObject"]
+
 [vars]
 
 # --- routing posture -------------------------------------------------------

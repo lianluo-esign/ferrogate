@@ -64,7 +64,12 @@ import {
   type StoredWorkflowRunBudget,
   preflightWorkflowBudget,
 } from "@ferrogate/policy";
-import { D1WorkflowBudgetStore, workflowRunBudgetId } from "@ferrogate/storage";
+import {
+  D1WorkflowBudgetStore,
+  type TenantDatabaseHandle,
+  workflowRunBudgetId,
+} from "@ferrogate/storage";
+import type { TenantDatabaseAccessor } from "../tenancy/ports.js";
 import { gatewayTenantHandle } from "./wallet.js";
 
 /**
@@ -186,10 +191,7 @@ export function workflowDeclarationFrom(headers: Headers): WorkflowDeclarationRe
   if (present.length < 3) {
     return {
       kind: "invalid",
-      detail:
-        `a workflow step must declare all three of ${WORKFLOW_ID_HEADER}, ` +
-        `${WORKFLOW_VERSION_HEADER} and ${WORKFLOW_RUN_ID_HEADER}; ` +
-        "a partial declaration would run outside the budget it names",
+      detail: `a workflow step must declare all three of ${WORKFLOW_ID_HEADER}, ${WORKFLOW_VERSION_HEADER} and ${WORKFLOW_RUN_ID_HEADER}; a partial declaration would run outside the budget it names`,
     };
   }
 
@@ -222,14 +224,61 @@ export const NO_WORKFLOW_BUDGETS: WorkflowBudgetSource = {
   },
 };
 
-/** The durable source: `D1WorkflowBudgetStore` on the tenant database. */
+/** The durable source: `D1WorkflowBudgetStore` on the shared `DB` — `"off"` mode. */
 export function d1WorkflowBudgetSource(db: D1Database): WorkflowBudgetSource {
+  return workflowBudgetSourceOverHandle(async (tenantId) => gatewayTenantHandle(db, tenantId));
+}
+
+/**
+ * The durable source over the handle the TENANCY RESOLVER produced — the
+ * tenant's own Durable Object under the `durable_object` default.
+ *
+ * The second production call site of `tenantDatabaseOf(c)` (#819), and it is
+ * here rather than left for later because the alternative is worse than being
+ * incomplete: admission step 3b would read the tenant's object for the wallet
+ * while step 5 read the shared `DB` for the workflow budget, in the same
+ * middleware, on the same request. Two storage topologies inside one admission
+ * decision is how a budget gets enforced against rows nothing writes.
+ *
+ * `openWorkflowRunBudget` / `debitWorkflowRunBudget` / `topupWorkflowRunBudget`
+ * are `requireAtomicBatch()` call sites #6, #7 and #8 of 13, so this moves
+ * three more of the money paths onto storage that can actually run them.
+ *
+ * A resolution failure is `unavailable`, never `unbudgeted`: "the store could
+ * not be reached" has not established that this run is uncapped, and answering
+ * `unbudgeted` would let an over-budget run through — the same
+ * outage-is-not-a-verdict split the wallet guard makes.
+ */
+export function routedWorkflowBudgetSource(accessor: TenantDatabaseAccessor): WorkflowBudgetSource {
+  return workflowBudgetSourceOverHandle(async (tenantId) => {
+    const handle = await accessor.handle();
+    if (handle.tenantId !== tenantId) {
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this workflow step is ` +
+          `tenant ${tenantId}'s; refusing rather than reading another tenant's budget`,
+      );
+    }
+    return handle;
+  });
+}
+
+/**
+ * The shared body of both sources. Extracted so the two differ ONLY in which
+ * handle they hand over — the id derivation, the cross-tenant check and the
+ * `unavailable` mapping are one implementation.
+ */
+function workflowBudgetSourceOverHandle(
+  resolveHandle: (tenantId: string) => Promise<TenantDatabaseHandle>,
+): WorkflowBudgetSource {
   return {
-    async forStep(
-      step: WorkflowStepDeclaration,
-      tenantId: string,
-    ): Promise<WorkflowBudgetLookup> {
-      const store = new D1WorkflowBudgetStore(gatewayTenantHandle(db, tenantId));
+    async forStep(step: WorkflowStepDeclaration, tenantId: string): Promise<WorkflowBudgetLookup> {
+      let store: D1WorkflowBudgetStore;
+      try {
+        store = new D1WorkflowBudgetStore(await resolveHandle(tenantId));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { kind: "unavailable", detail: `workflow budget lookup failed: ${detail}` };
+      }
       // The id is DERIVED by the storage package's own helper, never rebuilt
       // here: a second derivation that drifts by one separator would look up a
       // row that never matches, i.e. it would silently un-gate every run.
@@ -260,7 +309,15 @@ function workflowDatabase(env: WorkflowBudgetBindings): D1Database | undefined {
   return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
 }
 
-/** D1 whenever the tenant database is bound, {@link NO_WORKFLOW_BUDGETS} otherwise. */
+/**
+ * The `"off"`-mode source: D1 whenever the shared `DB` is bound,
+ * {@link NO_WORKFLOW_BUDGETS} otherwise.
+ *
+ * Since #819 this is the second choice, not the first: when the tenancy
+ * resolver is routing, `rateLimit()` builds {@link routedWorkflowBudgetSource}
+ * instead. Reaching for `env.DB` while a tenant handle exists is exactly the
+ * cross-tenant fallback `src/tenancy/` forbids.
+ */
 export function workflowBudgetSourceFromEnv(env: WorkflowBudgetBindings): WorkflowBudgetSource {
   const db = workflowDatabase(env);
   return db === undefined ? NO_WORKFLOW_BUDGETS : d1WorkflowBudgetSource(db);

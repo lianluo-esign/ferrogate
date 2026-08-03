@@ -50,11 +50,14 @@
  * would fail loudly with `no such table`, which is the split's whole point
  * (`src/tenancy/ports.ts`). Every method still takes `tenantId` and every
  * statement still filters on it: under `GATEWAY_TENANT_DB_ROUTING = "off"`
- * (the committed default) `DB` is one shared tenant database, so the
- * `tenant_id` predicate is the isolation, exactly as it is for `api_keys` in
- * `src/keys/store.ts`. When routing is switched on, `src/tenancy/` hands each
- * request its own physical database and the same predicate is then redundant
- * rather than wrong.
+ * `DB` is one shared tenant database, so the `tenant_id` predicate is the
+ * isolation, exactly as it is for `api_keys` in `src/keys/store.ts`. Under the
+ * `durable_object` default (#819) `src/tenancy/` hands each request its own
+ * physical object and the same predicate is redundant rather than wrong — but
+ * this store still reads `env.DB`, so it is a KNOWN GAP, not a completed port:
+ * a routed deployment writes assets to the shared database while its wallet
+ * lives in the object. Keeping the predicate on every statement is what makes
+ * that gap a correctness-preserving one rather than a leak.
  *
  * ## Relationship to `packages/storage`
  *
@@ -563,13 +566,12 @@ const BUNDLE_FILE_COLUMNS =
  * leave the index pointing at the FIRST attempt's object keys while the version
  * row and the reclamation pass both believe in the second attempt's.
  */
-export const BUNDLE_FILE_UPSERT_SQL =
-  `INSERT INTO asset_bundle_files (${BUNDLE_FILE_COLUMNS}) ` +
-  "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) " +
-  "ON CONFLICT (asset_id, path) DO UPDATE SET " +
-  "storage_uri = excluded.storage_uri, content_type = excluded.content_type, " +
-  "content_hash = excluded.content_hash, size_bytes = excluded.size_bytes, " +
-  "created_at_unix = excluded.created_at_unix";
+export const BUNDLE_FILE_UPSERT_SQL = `INSERT INTO asset_bundle_files (${BUNDLE_FILE_COLUMNS})
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT (asset_id, path) DO UPDATE SET
+storage_uri = excluded.storage_uri, content_type = excluded.content_type,
+content_hash = excluded.content_hash, size_bytes = excluded.size_bytes,
+created_at_unix = excluded.created_at_unix`;
 
 export const BUNDLE_FILE_SELECT_SQL = `SELECT ${BUNDLE_FILE_COLUMNS} FROM asset_bundle_files WHERE asset_id = ?1 AND path = ?2`;
 

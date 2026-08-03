@@ -144,21 +144,30 @@ const MOUNTED: [symbol: string, app: string][] = [
   // instead. Reached from `apps/gateway/src/tenancy/tenant-data.ts` as well,
   // which is where `env.TENANT_DATA.idFromName(tenantId)` is issued.
   ["TenantDataObject", "gateway"],
+  // #819 — MOVED UP FROM `DEAD`, which is the transition that entry was written
+  // to force. `apps/gateway/src/tenancy/resolver.ts` constructs one on the
+  // `durable_object` branch, and that branch is now the DEFAULT
+  // (`GATEWAY_TENANT_DB_ROUTING = "durable_object"` in the committed
+  // `wrangler.toml`), so unmounting it takes every tenant's storage with it.
+  //
+  // `DurableObjectD1Database` deliberately did NOT move: it is constructed
+  // INSIDE the router and named by no app, which is a transitive mount and a
+  // weaker claim — the same distinction this file already draws for
+  // `ControlDatabaseTenantRegistry`.
+  ["DurableObjectTenantDatabaseRouter", "gateway"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
 const DEAD = [
-  // #823 — the `D1Database` facade over `TenantDataObject` and its router. They
-  // are DEAD ON PURPOSE, for now: this slice ships the facade and proves it by
-  // running the whole of `test/d1/**` through it (`vitest.d1do.config.ts`), and
-  // the slice that adds a `durable_object` mode to
-  // `apps/gateway/src/tenancy/resolver.ts` is the one that mounts them.
+  // #823's `D1Database` facade over `TenantDataObject`. Its ROUTER moved to
+  // `MOUNTED` when #819 made `durable_object` the default; this class stayed
+  // here, and the split is the point: no app names it, because
+  // `DurableObjectTenantDatabaseRouter` constructs it. That is a transitive
+  // mount, which is a weaker claim than a direct one and is recorded as such —
+  // exactly as this file already does for `ControlDatabaseTenantRegistry`.
   //
-  // Listed rather than omitted because "neither claimed live nor claimed dead"
-  // is the state this file's header identifies as how five classes rotted. When
-  // the resolver slice lands, THIS list is what goes red, and moving the two
-  // entries into MOUNTED is how the wiring gets recorded.
-  "DurableObjectTenantDatabaseRouter",
+  // It is proved live by `vitest.d1do.config.ts`, which runs the whole of
+  // `test/d1/**` through the facade.
   "DurableObjectD1Database",
   "D1BillingEventLedger",
   "D1RetentionPolicyStore",

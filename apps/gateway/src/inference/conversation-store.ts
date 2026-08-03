@@ -293,9 +293,13 @@ function safeObject(json: string): Record<string, unknown> {
  * fence is repeated in BOTH the anchor and the recursive term — the recursive
  * term needs it independently, because without it the walk would follow a
  * `previous_response_id` out of the caller's tenant the moment two tenants share
- * a physical database (`GATEWAY_TENANT_DB_ROUTING = "off"`, the committed
- * default). `test/inference/conversation-tenancy.test.ts` mutates exactly that
- * clause.
+ * a physical database — which is what `GATEWAY_TENANT_DB_ROUTING = "off"` still
+ * means, and what this store still gets: `conversationStoreFromEnv` reads
+ * `env.DB` directly rather than the routed handle, so under the
+ * `durable_object` default (#819) it is a shared database holding no routed
+ * tenant's rows. Moving it onto `tenantDatabaseOf(c)` is its own slice; until
+ * then the fence is the only isolation this table has, and
+ * `test/inference/conversation-tenancy.test.ts` mutates exactly that clause.
  *
  * The depth guard inside the CTE is a second, independent bound: a corrupted
  * cycle in the rows must not become an unbounded query, whatever the write path

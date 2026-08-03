@@ -79,11 +79,10 @@ jobs:
 
       # NON-BLOCKING, AND THAT IS A DELIBERATE, TEMPORARY CHOICE.
       #
-      # `bun run lint` currently reports 2531 errors / 63 warnings (apps 1050,
-      # packages 838, admin-console 559, tools 37, sdks 5, docs 5) — biome has
-      # never been clean on this tree, including on the freshly written
-      # TypeScript. Making it blocking today would mean committing a gate that is
-      # red on a correct tree, which is exactly the failure mode the Rust
+      # `bun run lint` currently reports 2770 errors / 86 warnings over 1624
+      # files — biome has never been clean on this tree, including on the freshly
+      # written TypeScript. Making it blocking today would mean committing a gate
+      # that is red on a correct tree, which is exactly the failure mode the Rust
       # `rust-ci` check just demonstrated: a required status nobody can satisfy
       # teaches everyone to bypass the gate.
       #
@@ -91,10 +90,11 @@ jobs:
       # numbers nobody could reproduce (it claimed 2793/86 at a tip that measures
       # 2531/63, and named the wrong merge-base sha). Do NOT trust an in-place
       # `biome check .` from a dirty checkout as the number of record. Extract the
-      # commit and measure that:
+      # commit and measure that, and RAISE THE DIAGNOSTIC CAP:
       #
       #     git archive <sha> | tar -x -C /tmp/probe
-      #     cd /tmp/probe && <repo>/node_modules/.bin/biome check .
+      #     cd /tmp/probe && <repo>/node_modules/.bin/biome check . \
+      #       --max-diagnostics=20000
       #
       # `git archive` is read-only, needs no worktree, mutates no git state, and
       # yields TRACKED files only — so the count is a property of the commit
@@ -102,64 +102,100 @@ jobs:
       # agrees with the in-place run precisely because `biome.json` now sets
       # `vcs.useIgnoreFile`, which is what makes `dist/`, `.wrangler/` and
       # `.claude/worktrees/**` (other agents' transient checkouts of this same
-      # repo) invisible to the walker. Both read 1623 files at the tip.
+      # repo) invisible to the walker. Both read 1624 files at the tip.
+      #
+      # `--max-diagnostics` is the whole reason the earlier figures looked
+      # irreproducible, and it is why the step below tails the log rather than
+      # trusting the total. At biome's DEFAULT cap the same tip prints 2520 / 63
+      # and says "Diagnostics not shown: 2850" — the printed total is an
+      # UNDERCOUNT of a truncated list, not a count of the tree. Uncapped it is
+      # 2770 / 86. Both are "correct"; only one is comparable across commits. The
+      # figures in this block are all uncapped. If yours are ~250 lower you read
+      # the capped ones.
       #
       # "has never been clean" is measured, not asserted. At 40f8913f — the
-      # merge-base of the branch carrying this comment — the probe reports 2548
-      # errors / 63 warnings over 1609 files. At the tip: 2531 / 63 over 1623. A
-      # slice that ADDS 14 files and REMOVES 17 errors is not the reason this
+      # merge-base of the branch carrying this comment — the probe reports 2798
+      # errors / 86 warnings over 1609 files. At the tip: 2770 / 86 over 1624. A
+      # slice that ADDS 15 files and REMOVES 28 errors is not the reason this
       # step is red.
       #
-      # Re-measured independently at the tip of this branch by the third attempt
-      # at #823, because the two numbers above drifted by one when the last
-      # commit landed and a stale count is exactly what this block exists to
-      # prevent: the figures were written at c321511c, which really does probe
-      # 2532/63, and a414b597 then removed one more error. Anything that changes
-      # the tip must re-run the probe rather than copy these forward.
+      # Re-measured from scratch at the tip by the second attempt at #819, which
+      # was bounced for this step and re-ran every probe below rather than
+      # copying the numbers forward. That is the rule: anything that changes the
+      # tip must re-run the probe. A stale count here is exactly what this block
+      # exists to prevent.
       #
       # What reaching zero actually costs, re-measured on that probe at the tip,
       # because "just run --write" is the obvious wrong answer and someone will
       # try it:
       #
-      #   * `biome check . --write` (SAFE fixes only) fixes 617 files and takes
-      #     2531 errors to 1629 — and it is still wrong to run blind.
+      #   * `biome check . --write` (SAFE fixes only) fixes 612 files and takes
+      #     2770 errors to 1874 — and it is still wrong to run blind.
       #     organizeImports sorts the import block but leaves leading comments
       #     where they are, so a type-import that sorts to the front lands ABOVE
       #     the file's header docblock. Reproduced verbatim on
       #     packages/storage/src/d1/monotonic.ts, whose header — the one
       #     explaining why a monotonic upsert is not "just an upsert" — ends up
       #     under three `import type` lines. In a tree whose headers carry the
-      #     reasoning, that is a regression the linter cannot see. The 383
+      #     reasoning, that is a regression the linter cannot see. The 382
       #     organizeImports diagnostics need reading, not applying.
-      #   * `--write --unsafe` then fixes 272 more files and reaches 261 errors,
-      #     and buys it by rewriting `x!.y` to `x?.y` at ~205 sites
-      #     (noNonNullAssertion 402 -> 197). Biome ITSELF reports the result as
-      #     worse: warnings go UP 63 -> 77, noAssignInExpressions 33 -> 36, and a
-      #     new noUnsafeOptionalChaining lands at
-      #     admin-console/src/pages/site-domains.test.tsx:345, where spreading
-      #     the now-optional result would throw. Note WHERE those rewrites land:
-      #     they cluster in TESTS (apps/control-plane/test/spend-anomaly.test.ts
-      #     20, apps/gateway/test/streaming/sse.test.ts 15, ...), not in
-      #     packages/storage/src/d1/ — wallet-d1.ts, assets-d1.ts, credits.ts and
-      #     metering/d1.ts come back byte-identical. That is not reassuring, it is
+      #   * `--write --unsafe` then fixes 266 more files and reaches 284 errors,
+      #     and buys it by rewriting `x!.y` to `x?.y` across the WHOLE
+      #     noNonNullAssertion set (504 -> 0). Biome ITSELF reports the result as
+      #     worse: a brand-new correctness error, noUnsafeOptionalChaining, lands
+      #     at admin-console/src/pages/site-domains.test.tsx:345 where spreading
+      #     the now-optional result would throw; noAssignInExpressions goes 33 ->
+      #     36; noImplicitAnyLet 0 -> 3; and the a11y set does not improve, it
+      #     MOVES — noNoninteractiveTabindex 60 -> 0 only because the fix adds a
+      #     `role`, which then trips useSemanticElements 0 -> 298. (An earlier
+      #     revision of this bullet claimed "warnings go UP 63 -> 77". That was
+      #     two CAPPED totals compared against each other; uncapped, warnings sit
+      #     at 86 on both sides. The rule-level movement above is the real
+      #     signal.) Note WHERE those rewrites land: 266 files, led by
+      #     packages/providers/test/sigv4-golden.test.ts (65 lines),
+      #     apps/control-plane/test/quota-registry.test.ts (45),
+      #     apps/gateway/src/inference/handlers.ts (42),
+      #     packages/guardrails/src/jsonschema.ts (41) — so it is NOT confined to
+      #     tests, as an earlier revision of this bullet claimed; it edits the
+      #     inference request path. What it does leave alone is the money path:
+      #     packages/storage/src/d1/wallet-d1.ts, assets-d1.ts, credits.ts and
+      #     apps/gateway/src/metering/d1.ts come back byte-identical (verified
+      #     with `cmp` against the safe-fixed tree). That is not reassuring, it is
       #     the worst case: turning `x!.y` into `x?.y` inside an assertion
       #     converts a test that would FAIL on a missing value into one that
-      #     silently passes. Never run it repo-wide.
+      #     silently passes, and the assertions are exactly what it rewrote.
+      #     Never run it repo-wide.
       #
-      # The residual is dominated by four rules — useLiteralKeys 1192, format
-      # 511, noNonNullAssertion 402, organizeImports 383, then useTemplate 107 —
-      # against a tsconfig with `noUncheckedIndexedAccess`, which is what makes
-      # `!` idiomatic here in the first place. Driving that to zero is a repo-wide
-      # chore with its own issue, not a rider on whatever slice happens to notice.
-      # The small tail (useExhaustiveDependencies 6, noArrayIndexKey 4,
-      # noAssignInExpressions 33, the admin-console a11y set) is worth hand-fixing
+      # The residual is dominated by five rules — useLiteralKeys 1193, format
+      # 506, noNonNullAssertion 504 (419 errors + 85 warnings), organizeImports
+      # 382, then useTemplate 104 — against a tsconfig with
+      # `noUncheckedIndexedAccess`, which is what makes `!` idiomatic here in the
+      # first place. Driving that to zero is a repo-wide chore with its own issue,
+      # not a rider on whatever slice happens to notice. The small tail
+      # (useExhaustiveDependencies 9, noArrayIndexKey 8, noAssignInExpressions 33,
+      # useOptionalChain 9, the admin-console a11y set) is worth hand-fixing
       # first: those are the ones that can be bugs.
       #
       # What a slice IS expected to do: leave the files it touches clean. Lint the
       # diff, not the repo —
       #   git diff --name-only <base>...HEAD | grep -E '\.(ts|tsx|js|mjs|json)$' \
       #     | xargs node_modules/.bin/biome check
-      # — which reports 0 for this branch's 44 changed files.
+      # — which reports 0 for this branch's 62 changed lintable files (70 changed
+      # in total; the rest are .sql/.md/.toml, which biome does not read).
+      #
+      # Measure it from the OTHER SIDE too, because "lint the diff" only proves
+      # our files are clean and silently assumes the diff list is right. Take the
+      # set of files biome actually complains about and intersect it with the
+      # changed set:
+      #   node_modules/.bin/biome check . --max-diagnostics=20000 \
+      #     | grep -oE '^\./[A-Za-z0-9._/-]+\.(ts|tsx|js|mjs|json)' \
+      #     | sed 's|^\./||' | sort -u > /tmp/lintfiles.txt
+      #   git diff --name-only <base>...HEAD | sort -u > /tmp/changed.txt
+      #   comm -12 /tmp/lintfiles.txt /tmp/changed.txt
+      # At the tip that is 728 diagnostic-bearing files and an EMPTY
+      # intersection. Empty is the claim worth making: it does not depend on
+      # scoping the diff correctly, and it is what distinguishes "this slice is
+      # not the reason the step is red" from "this slice did not look".
       #
       # So it reports without failing the build, and the count is written into
       # the job summary so the number is visible and can be driven down. Flip
