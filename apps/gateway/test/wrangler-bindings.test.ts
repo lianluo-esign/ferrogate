@@ -33,9 +33,6 @@
  */
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { PROMPT_TEMPLATES_VAR } from "../src/routes/prompts.js";
-import { SKILL_PACKAGES_VAR } from "../src/routes/skills.js";
-import * as entry from "../src/worker.js";
 import { BuiltinEicarScreener } from "../src/assets/ports.js";
 import { withSignatureVerification } from "../src/assets/signature-screener.js";
 import {
@@ -49,7 +46,9 @@ import {
   CACHE_SEMANTIC_THRESHOLD_VAR,
   CACHE_TTL_VAR,
 } from "../src/cache/config.js";
-
+import { PROMPT_TEMPLATES_VAR } from "../src/routes/prompts.js";
+import { SKILL_PACKAGES_VAR } from "../src/routes/skills.js";
+import * as entry from "../src/worker.js";
 
 function wranglerToml(): string {
   const raw = (env as unknown as { TEST_WRANGLER_TOML?: string }).TEST_WRANGLER_TOML;
@@ -141,18 +140,20 @@ describe("the runtime contract at the top of the file", () => {
 describe("every Durable Object binding is deployable", () => {
   const bindings = stanzas("durable_objects.bindings");
 
-  it("declares at least the three classes this Worker exports", () => {
+  it("declares at least the four classes this Worker exports", () => {
     // A guard on the gate itself: if the parser ever stopped matching, every
     // assertion below would pass vacuously over an empty list.
-    expect(bindings.length).toBeGreaterThanOrEqual(3);
+    expect(bindings.length).toBeGreaterThanOrEqual(4);
   });
 
   it("introduces each bound class in a [[migrations]] new_sqlite_classes", () => {
     const { sqlite, legacy } = migratedClasses();
     for (const body of bindings) {
       const className = value(body, "class_name");
-      expect(className, `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`)
-        .toBeDefined();
+      expect(
+        className,
+        `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`,
+      ).toBeDefined();
       // `new_classes` is not an acceptable substitute: it deploys, and then the
       // object gets the key-value backend instead of the SQLite one every
       // counter/state class here assumes.
@@ -179,10 +180,45 @@ describe("every Durable Object binding is deployable", () => {
     // quieter form of the admission bypass wave 16 closed), the provider
     // circuit becomes a per-isolate `Map`, and the shadow budget stops being a
     // cross-isolate cap.
+    //
+    // TENANT_DATA (#822) is the fourth, and the one whose absence does NOT
+    // degrade: `src/tenancy/tenant-data.ts` reads it as
+    // `env.TENANT_DATA.idFromName(tenantId)` and REFUSES with a 503 when it is
+    // undefined, because a tenant's wallet has no per-isolate approximation.
     const names = bindings.map((body) => value(body, "name"));
-    for (const required of ["RATE_LIMIT", "PROVIDER_CIRCUIT", "SHADOW_BUDGET"]) {
+    for (const required of ["RATE_LIMIT", "PROVIDER_CIRCUIT", "SHADOW_BUDGET", "TENANT_DATA"]) {
       expect(names, `no [[durable_objects.bindings]] is named ${required}`).toContain(required);
     }
+  });
+
+  it("gives TENANT_DATA the SQLite backend, which is immutable after deploy", () => {
+    // #822. Named separately from the loops above rather than left to them,
+    // because this is the one binding on this Worker whose misconfiguration is
+    // UNRECOVERABLE. `new_classes` deploys cleanly and silently hands the
+    // object the key-value backend, at which point `ctx.storage.sql` does not
+    // exist and `TenantDataObject` has no database; the backend choice is then
+    // IMMUTABLE for the life of the namespace (`storage_type_mismatch`), and
+    // switching requires a `deleted` tombstone — i.e. every tenant's wallet,
+    // usage and asset rows. There is no second chance at deploy time, so the
+    // assertion is made here, before it.
+    const tenantData = stanzas("durable_objects.bindings").find(
+      (body) => value(body, "name") === "TENANT_DATA",
+    );
+    expect(tenantData, "no [[durable_objects.bindings]] is named TENANT_DATA").toBeDefined();
+    expect(value(tenantData as string[], "class_name")).toBe("TenantDataObject");
+
+    const { sqlite, legacy } = migratedClasses();
+    expect(sqlite).toContain("TenantDataObject");
+    expect(legacy).not.toContain("TenantDataObject");
+
+    // And the entry-module half of the pair. The generic loop below asserts
+    // this for every binding; it is repeated here so that deleting the
+    // `export { TenantDataObject }` line from `src/worker.ts` names the class
+    // in the failure message rather than reporting an anonymous `undefined`.
+    expect(
+      typeof (entry as unknown as Record<string, unknown>).TenantDataObject,
+      "src/worker.ts does not re-export TenantDataObject; workerd resolves class_name against the ENTRY module",
+    ).toBe("function");
   });
 
   it("resolves each bound class against the ENTRY module's exports", () => {
@@ -411,9 +447,7 @@ describe("the response-cache [vars] src/cache/config.ts reads", () => {
   it("commits the semantic threshold at the value the code falls back to", () => {
     // If these two ever diverge, an operator reading the deploy config would be
     // told a different default than an operator reading the code.
-    expect(wranglerToml()).toMatch(
-      new RegExp(`^${CACHE_SEMANTIC_THRESHOLD_VAR} = "0\\.92"$`, "m"),
-    );
+    expect(wranglerToml()).toMatch(new RegExp(`^${CACHE_SEMANTIC_THRESHOLD_VAR} = "0\\.92"$`, "m"));
     expect(CACHE_DISABLED_POLICY.semanticSimilarityThreshold).toBe(0.92);
   });
 

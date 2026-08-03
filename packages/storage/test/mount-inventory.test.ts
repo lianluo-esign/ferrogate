@@ -73,6 +73,26 @@ function importersOf(symbol: string): string[] {
     .sort();
 }
 
+/**
+ * The comment-stripped blob for one app, or a throw that names it.
+ *
+ * `SOURCES.find(...)` is `… | undefined`, and `expect(found).toBeDefined()` does
+ * not narrow it for the assertion on the next line — so the two rival-implementation
+ * tests below used to bridge the gap with `!`, which `lint/style/noNonNullAssertion`
+ * forbids. Narrowing here is the better shape anyway: if {@link appSources} ever
+ * stops producing an app (renamed directory, `src/` moved, the `catch` above
+ * swallowing a read error) the failure names the app and lists what WAS scanned,
+ * instead of reading as "cannot read properties of undefined".
+ */
+function sourcesFor(app: string): string {
+  const found = SOURCES.find((entry) => entry.app === app);
+  if (found === undefined) {
+    const scanned = SOURCES.map((entry) => entry.app).join(", ");
+    throw new Error(`the apps/ scan produced no blob for apps/${app} (scanned: ${scanned})`);
+  }
+  return found.text;
+}
+
 /** Exports the `src/index.ts` header claims are LIVE, with the app that mounts them. */
 const MOUNTED: [symbol: string, app: string][] = [
   ["EnvBindingTenantDatabaseRouter", "gateway"],
@@ -113,6 +133,17 @@ const MOUNTED: [symbol: string, app: string][] = [
   // hostname served nothing. Leaving the symbol in `DEAD` made THIS suite red on
   // the branch that mounted it, which is exactly the forcing function intended.
   ["D1SiteDomainVerificationStore", "control-plane"],
+  // #822 — `TenantDataObject`, and the only entry in this list whose unmount is
+  // not merely a dead export but an UNBOOTABLE WORKER. workerd resolves the
+  // `[[durable_objects.bindings]] class_name = "TenantDataObject"` stanza in
+  // `apps/gateway/wrangler.toml` against the ENTRY module's named exports, so
+  // deleting the re-export from `apps/gateway/src/worker.ts` stops the gateway
+  // starting — and `@cloudflare/vitest-pool-workers` does not run that check, so
+  // every gateway suite stays green. This gate and
+  // `apps/gateway/test/wrangler-bindings.test.ts` are the two places that fail
+  // instead. Reached from `apps/gateway/src/tenancy/tenant-data.ts` as well,
+  // which is where `env.TENANT_DATA.idFromName(tenantId)` is issued.
+  ["TenantDataObject", "gateway"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
@@ -144,16 +175,12 @@ describe("mount inventory (src/index.ts §1.7 marker)", () => {
   // finally deletes the duplicate and imports the engine here, this reddens and
   // the marker comes out with it.
   test("apps/control-plane still carries a rival schedule engine", () => {
-    const controlPlane = SOURCES.find(({ app }) => app === "control-plane");
-    expect(controlPlane).toBeDefined();
-    expect(controlPlane!.text).toContain("parseCronExpression");
+    expect(sourcesFor("control-plane")).toContain("parseCronExpression");
     expect(importersOf("D1AgentScheduleStore")).toEqual([]);
   });
 
   test("apps/gateway still carries an app-local asset metadata store", () => {
-    const gateway = SOURCES.find(({ app }) => app === "gateway");
-    expect(gateway).toBeDefined();
-    expect(gateway!.text).toContain("class D1AssetMetadataStore");
+    expect(sourcesFor("gateway")).toContain("class D1AssetMetadataStore");
     expect(importersOf("R2AssetBlobStore")).toEqual([]);
   });
 });

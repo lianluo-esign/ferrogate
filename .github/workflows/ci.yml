@@ -79,16 +79,62 @@ jobs:
 
       # NON-BLOCKING, AND THAT IS A DELIBERATE, TEMPORARY CHOICE.
       #
-      # `bun run lint` currently reports ~1954 errors (apps 711, packages 679,
-      # admin-console 564) — biome has never been clean on this tree, including
-      # on the freshly written TypeScript. Making it blocking today would mean
+      # `bun run lint` currently reports 2793 errors (apps 1176, packages 965,
+      # admin-console 559, tools 45, sdks 5, docs 5) — biome has never been clean
+      # on this tree, including on the freshly written TypeScript. The count is
+      # measured over TRACKED files only: `biome.json` sets `vcs.useIgnoreFile`,
+      # without which biome also walks `.claude/worktrees/**` — other agents'
+      # transient checkouts of this same repo — and the number stops being a
+      # property of the commit at all (it read 4597 on a machine with three
+      # worktrees open, and the extra 1800 pushed real diagnostics past biome's
+      # display cap). Making it blocking today would mean
       # committing a gate that is red on a correct tree, which is exactly the
       # failure mode the Rust `rust-ci` check just demonstrated: a required
       # status nobody can satisfy teaches everyone to bypass the gate.
       #
+      # "has never been clean" is measured, not asserted. At a9ae3e9e — the
+      # merge-base, before the first commit of the branch that carries this
+      # comment — `biome check .` reports 2798 errors / 86 warnings over 1609
+      # files. At the tip it reports 2793 / 86 over 1617. A slice that ADDS
+      # eight files and REMOVES five diagnostics is not the reason this step is
+      # red, and any future slice can prove the same thing the same way:
+      # `git worktree add --detach /tmp/probe <merge-base>` and run biome there.
+      # That is a read-only operation on a scratch directory; it is not a
+      # checkout of the working tree.
+      #
+      # What reaching zero actually costs, measured on that same probe, because
+      # "just run --write" is the obvious wrong answer and someone will try it:
+      #
+      #   * `biome check . --write` (SAFE fixes only) clears 916 of the 2879
+      #     diagnostics across 628 files — and it is still wrong to run blind.
+      #     organizeImports sorts the import block but leaves leading comments
+      #     where they are, so a type-import that sorts to the front lands ABOVE
+      #     the file's header docblock (reproduce: packages/storage/src/d1/
+      #     monotonic.ts, whose 40-line header ends up under three imports).
+      #     In a tree whose headers carry the reasoning, that is a regression the
+      #     linter cannot see. The ~389 organizeImports diagnostics need reading.
+      #   * `--write --unsafe` gets to 284 errors, and buys it by rewriting all
+      #     505 `noNonNullAssertion` sites from `x!.y` to `x?.y` — a semantic
+      #     change, on money paths, that biome ITSELF then reports as broken: the
+      #     run comes back with 2 NEW `noUnsafeOptionalChaining` errors (e.g.
+      #     admin-console/src/pages/site-domains.test.tsx:345, where spreading
+      #     the now-optional result would throw), 3 new `noImplicitAnyLet` and
+      #     298 `useSemanticElements`. Never run it repo-wide.
+      #
+      # So the residual is 1891 lint + 513 format + ~389 organizeImports, and it
+      # is dominated by three style rules — useLiteralKeys 1193, noNonNullAssertion
+      # 505, useTemplate 108 — against a tsconfig with `noUncheckedIndexedAccess`,
+      # which is what makes `!` idiomatic here in the first place. Driving that to
+      # zero is a repo-wide chore with its own issue, not a rider on whatever
+      # slice happens to notice. The remaining ~172 (useExhaustiveDependencies,
+      # noArrayIndexKey, noAssignInExpressions, the admin-console a11y set) are
+      # the ones worth hand-fixing first: they are the ones that can be bugs.
+      #
       # So it reports without failing the build, and the count is written into
       # the job summary so the number is visible and can be driven down. Flip
-      # `continue-on-error` to false in the same commit that reaches zero.
+      # `continue-on-error` to false in the same commit that reaches zero — and
+      # only then. A slice that turns rules OFF to make this green has removed
+      # the gate, not passed it.
       - name: Lint (non-blocking — see comment)
         id: lint
         continue-on-error: true

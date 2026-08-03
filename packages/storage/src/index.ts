@@ -194,3 +194,32 @@ export * from "./tenant-router.js";
  */
 export * from "./tenant-rest.js";
 export * from "./d1/index.js";
+
+/**
+ * `TenantDataObject` (#822) IS NOT EXPORTED HERE, AND THAT IS DELIBERATE.
+ *
+ * It reaches consumers through the `@ferrogate/storage/durable-objects` subpath
+ * in `package.json`, copying `@ferrogate/routing`'s `./durable-objects` →
+ * `./src/shadow-budget-do.ts` shape. Two independent reasons, both load-bearing:
+ *
+ *  1. `src/tenant-data-object.ts` imports the `DurableObject` base class from
+ *     `cloudflare:workers`, which resolves in `workerd` and NOWHERE ELSE. This
+ *     barrel is imported by plain-node vitest suites (`test/wallet.test.ts` and
+ *     nine others import `../src/index.js`) and by `apps/cli`; an `export *`
+ *     here would make every one of them fail to resolve a module they never use.
+ *  2. workerd resolves a `[[durable_objects.bindings]]` `class_name` against the
+ *     ENTRY module's named exports. Pulling the class into every importer's
+ *     graph is exactly how that resolution failure gets hidden — the class looks
+ *     reachable from everywhere while `apps/gateway/src/worker.ts` is the only
+ *     place the export actually counts.
+ *
+ * `./tenant-schema-sql.js` is likewise absent: it is a GENERATED module inlining
+ * ~66 KB of `sql/d1-ts/tenant/*.sql` bytes, and its only consumer is the object
+ * that applies them. Re-exporting it would put the whole tenant schema in the
+ * CLI's bundle to no purpose. `test/tenant-schema-sql.test.ts` reaches it by
+ * relative path and pins it byte-for-byte against the directory on disk.
+ *
+ * The mount claim for the class is therefore made where it can fail:
+ * `test/mount-inventory.test.ts` re-derives it from `apps/` on every run, so
+ * deleting the `src/worker.ts` re-export reddens this package.
+ */

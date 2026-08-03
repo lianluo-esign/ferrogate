@@ -74,9 +74,14 @@ export function tenantDataNamespace(env: TenantDataBindings): TenantDataNamespac
 /**
  * The Durable Object stub holding `tenantId`'s database.
  *
- * A blank tenant id is REFUSED, not addressed. `src/tenancy/middleware.ts`
- * returns `""` (never `null`) for a credential it could not confine to a
- * tenant, precisely so that it matches no registry row; `idFromName("")` is a
+ * A blank tenant id is REFUSED, not addressed. `routableTenantId`
+ * (`src/tenancy/middleware.ts`) returns `""` for an UNCLASSIFIED credential —
+ * `callerScope` classes it as a tenant carrying the empty-string id, which is
+ * unforgeable as a real tenant id and so matches no registry row. (It returns
+ * `null` only for a platform operator, which `tenantDatabase()` turns into a
+ * 403 `tenant_database_unscoped` before anything reaches here; an earlier
+ * revision of this note said `""` was the only value, which the `null` arm at
+ * `middleware.ts:110` falsifies.) `idFromName("")` is a
  * perfectly valid id, so without this check that unforgeable sentinel would
  * instead name one shared object that every unclassified caller lands in —
  * a fallback database by accident, which is the one thing this directory

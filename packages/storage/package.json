@@ -5,14 +5,16 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./provider": "./src/provider.ts"
+    "./provider": "./src/provider.ts",
+    "./durable-objects": "./src/tenant-data-object.ts"
   },
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run && vitest run --config vitest.d1.config.ts",
+    "test": "vitest run && vitest run --config vitest.d1.config.ts && vitest run --config vitest.do.config.ts",
     "test:pure": "vitest run",
-    "test:d1": "vitest run --config vitest.d1.config.ts"
+    "test:d1": "vitest run --config vitest.d1.config.ts",
+    "test:do": "vitest run --config vitest.do.config.ts"
   },
   "dependencies": {
     "@ferrogate/cloudflare": "workspace:*",

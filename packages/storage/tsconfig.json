@@ -1,11 +1,15 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    // `cloudflare:test` (used by the D1 suite) ships its types with the pool.
+    // `cloudflare:test` (the D1 and durable-object suites) ships its types with
+    // the pool; `cloudflare:workers` — the `DurableObject` base class
+    // `src/tenant-data-object.ts` extends — comes from `@cloudflare/workers-types`.
     "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"]
   },
-  // `test` is included so the D1 suite is type-checked too. A test file outside
-  // the program is a test that can drift from the API it exercises without
-  // `tsc --noEmit` ever noticing.
-  "include": ["src", "test", "vitest.config.ts", "vitest.d1.config.ts"]
+  // `test` is included so the D1 and durable-object suites are type-checked too.
+  // A test file outside the program is a test that can drift from the API it
+  // exercises without `tsc --noEmit` ever noticing — and `test/do/entry.ts` is
+  // not merely a test: it is the fixture whose named exports workerd resolves
+  // `class_name` against, so a rename there is a suite that cannot boot.
+  "include": ["src", "test", "vitest.config.ts", "vitest.d1.config.ts", "vitest.do.config.ts"]
 }
