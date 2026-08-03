@@ -141,20 +141,20 @@ export async function setupDatabases(): Promise<EnvBindingTenantDatabaseRouter> 
  * The router for the backend this run is exercising — the sibling factory.
  *
  * Both legs perform the SAME setup first: the migrations are applied to the D1
- * tenant databases and the registry rows are written either way. The registry
- * rows are not vestigial under `durable_object` — the DO router uses them as
- * its existence gate and as the only possible answer to `provisionedTenants()`,
- * since a Durable Object namespace cannot be enumerated in production. Applying
- * the tenant migrations to the (now unused) D1 databases is left in place so
- * that the two legs differ in exactly one thing: which database the handle
- * points at.
+ * tenant databases and the registry rows are written either way. Under
+ * `durable_object` the registry rows are NOT what routes — since #819 the DO
+ * router reads nothing on `forTenant()` — but they are still the only possible
+ * answer to `provisionedTenants()`, since a Durable Object namespace cannot be
+ * enumerated in production. Applying the tenant migrations to the (now unused)
+ * D1 databases is left in place so that the two legs differ in exactly one
+ * thing: which database the handle points at.
  */
 export async function setupTenantRouter(): Promise<TenantDatabaseRouter> {
   const binding = await setupDatabases();
   if (!IS_DURABLE_OBJECT_BACKEND) return binding;
-  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.CONTROL_DB, {
-    registrationTtlMs: 0,
-  });
+  // No options: the DO router has no registration cache to disable, because it
+  // performs no registration read.
+  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.CONTROL_DB);
 }
 
 /**

@@ -28,6 +28,15 @@ import { GATEWAY_ROUTE_MODULES } from "../../../src/index.js";
 import { createGatewayApp } from "../../../src/routes/index.js";
 import { tenantDatabase } from "../../../src/tenancy/index.js";
 
+/**
+ * workerd resolves a `[[durable_objects.bindings]]` `class_name` against the
+ * ENTRY module's named exports — a class merely reachable through the import
+ * graph is NOT found, and the isolate refuses to start. This line is the
+ * harness's copy of `apps/gateway/src/worker.ts:140`; deleting it makes every
+ * spec in this suite fail to boot, which is the correct (if blunt) signal.
+ */
+export { TenantDataObject } from "@ferrogate/storage/durable-objects";
+
 const { app } = createGatewayApp({
   modules: [...GATEWAY_ROUTE_MODULES],
   // THE MOUNT UNDER TEST. `harness/wrangler.toml` pins

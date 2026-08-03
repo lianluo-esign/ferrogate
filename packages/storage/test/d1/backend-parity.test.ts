@@ -191,15 +191,42 @@ describe("where the two topologies legitimately disagree", () => {
     }
   });
 
-  test("an UNREGISTERED tenant fails closed on BOTH backends", async () => {
-    // The difference above must not be read as "the durable router gates
-    // nothing". `idFromName` resolves every string, so a typo would otherwise
-    // address a real, empty, valid object and start a ledger in it — which is
-    // exactly why the durable router keeps the control-registry row as its
-    // existence gate. There is still no default database in either topology.
-    await expect(router.forTenant("tenant_never_provisioned")).rejects.toMatchObject({
-      kind: "not_found",
-    });
+  test("an UNREGISTERED tenant: refused on D1, resolved on a Durable Object", async () => {
+    // An earlier revision of this case asserted `not_found` on BOTH backends,
+    // because the durable router kept the `tenant_databases` row as an
+    // existence gate. #819 DELETED that read, and this is the honest record of
+    // what changed rather than a relaxed assertion.
+    //
+    // Why it was removed: under `native_binding` the row carries the ANSWER
+    // (`binding_name`), so no row meant no route. Here it carries no part of
+    // the answer — the address is `idFromName(tenantId)` — so reading it would
+    // only be a POLICY check, "is this a tenant we serve?", asked once per
+    // request on the inference hot path. That question is already answered
+    // strictly earlier and strictly better by the credential: a tenant id
+    // reaches a router only because `apps/gateway/src/keys/` resolved an
+    // authenticated credential to it through the CONTROL `api_key_directory`.
+    //
+    // What it costs, stated plainly: a resolver bug that computed a wrong id
+    // gets an empty object instead of an error. What it does NOT cost is
+    // isolation — the worst case is one empty object holding nothing, never a
+    // write into another tenant's ledger, which is what the same mistake does
+    // under `shared_development`. The wrong-object case is caught by the
+    // object's own admission guard (see `tenant-do-facade.test.ts`).
+    if (IS_DURABLE_OBJECT_BACKEND) {
+      const handle = await router.forTenant("tenant_never_provisioned");
+      expect(handle.source).toBe("durable_object");
+      const rows = await handle.db.prepare("SELECT id FROM projects").all();
+      expect(rows.results).toEqual([]);
+    } else {
+      await expect(router.forTenant("tenant_never_provisioned")).rejects.toMatchObject({
+        kind: "not_found",
+      });
+    }
+    // The one gate that survives on BOTH backends, and the one that matters
+    // most: `idFromName("")` is a perfectly valid id, so a blank tenant id
+    // would name ONE object that every unclassified caller lands in — a
+    // fallback database by accident. There is still no default database in
+    // either topology.
     await expect(router.forTenant("")).rejects.toThrow(/non-empty tenant id/);
   });
 

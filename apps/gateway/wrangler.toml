@@ -552,25 +552,46 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 # ---------------------------------------------------------------------------
 # [vars] — per-tenant D1 routing (ONE DATABASE PER TENANT)
 #
-# Read by `resolverForEnv` (src/tenancy/resolver.ts), mounted as the last entry
-# of `GATEWAY_MIDDLEWARE`. Modes:
+# Read by `resolverForEnv` (src/tenancy/resolver.ts), mounted ahead of
+# `rateLimit()` in `GATEWAY_MIDDLEWARE`. Modes:
 #
+#   durable_object      THE COMMITTED DEFAULT (#819). One SQLite-backed Durable
+#                       Object per tenant, addressed
+#                       `TENANT_DATA.idFromName(tenant_id)`. No deploy per
+#                       tenant, no binding ceiling, and `batch()` is one real
+#                       SQLite transaction, so the 13 `requireAtomicBatch()`
+#                       money paths RUN.
 #   off                 no routing; handlers that ask for a tenant handle are
-#                       refused. THE COMMITTED DEFAULT.
+#                       refused. For a deploy that binds no TENANT_DATA.
 #   binding             route on `tenant_databases.binding_name` → `env[name]`,
-#                       resolved lazily at first use.
+#                       resolved lazily at first use. Self-hosted/single-tenant.
 #   binding_strict      same, but resolved BEFORE the request is served, so an
 #                       un-provisioned tenant is refused at the door.
 #   rest                D1 REST API (no `batch()` atomicity — see ports.ts).
 #   shared_development  every tenant on `DB`. LOCAL ONLY.
 #
-# It NEVER falls back to the shared `DB`: a tenant with no registry row, or a
-# row whose `binding_name` is NULL or names an undeployed binding, is refused
-# `503 tenant_database_unavailable`. That is the whole point — a fallback is a
-# silent cross-tenant read.
+# WHY THE DEFAULT MOVED OFF `"off"`. Per-tenant storage that has to be switched
+# on is a setting every deployment forgets: this var sat at `"off"` while the
+# whole of `src/tenancy/` was mounted, and `tenantDatabaseOf(c)` had zero
+# production call sites, so the isolation was decoration. Under the D1 topology
+# that was defensible — turning it on meant a `wrangler d1 create` and a
+# redeploy PER TENANT. Under `durable_object` it costs nothing: the object
+# materialises on first address. So the safe posture is no longer the opt-in one.
 #
-# The registry lives in CONTROL_DB (`tenant_databases`, already migrated). Each
-# provisioned tenant additionally needs its own stanza, which is DEPLOY-TIME
+# It NEVER falls back to the shared `DB`. Under `durable_object` an unresolvable
+# tenant is a blank tenant id (refused here) or an object that refuses its own
+# admission — a stub that adopted a different tenant, or a schema that stopped
+# mid-migration. Both are `503 tenant_database_unavailable`, neither is retried,
+# and neither reaches for a second database. A fallback is a silent cross-tenant
+# read.
+#
+# CONTROL_DB is still required, and NOT as a routing table: `durable_object`
+# resolution reads nothing. It backs `control()` and `provisionedTenants()`,
+# which is the only way to enumerate the fleet — a Durable Object namespace
+# cannot be listed in production.
+#
+# The three `binding*`/`rest` modes DO route on CONTROL_DB's `tenant_databases`,
+# and each provisioned tenant then needs its own stanza, which is DEPLOY-TIME
 # state and therefore not committed with real ids:
 #
 #   [[d1_databases]]
@@ -583,7 +604,7 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 # `GATEWAY_TENANT_DB_API_TOKEN` is a SECRET (`wrangler secret put`) and is
 # deliberately absent from this file.
 # ---------------------------------------------------------------------------
-GATEWAY_TENANT_DB_ROUTING = "off"
+GATEWAY_TENANT_DB_ROUTING = "durable_object"
 GATEWAY_TENANT_DB_ACCOUNT_ID = "replace-at-deploy"
 
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —

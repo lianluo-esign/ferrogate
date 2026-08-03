@@ -3,24 +3,28 @@
  * a tenant's database (issue #822,
  * `docs/design/per-tenant-durable-object-storage-2026-08.md`).
  *
- * ## Why this module exists NOW, ahead of the router that will use it
+ * ## What this module is, now that the router exists
+ *
+ * It is the ONE place `env.TENANT_DATA` is read. `createTenantDatabaseResolver`
+ * calls {@link tenantDataNamespace} on its `durable_object` branch — the
+ * default since #819 — so the binding, its 503 refusal, and the `env.X` token
+ * `test/env-var-drift.test.ts` scans for all live here rather than being
+ * spread across the directory.
  *
  * `storage = "sqlite"` / `new_sqlite_classes` is **immutable once a namespace
  * exists** — changing it later is `storage_type_mismatch`, and converting
- * requires a `deleted` tombstone and total data loss. So the `TENANT_DATA`
- * stanza in `wrangler.toml` has to be right in the FIRST deploy, before the
- * `D1Database`-shaped facade and the `durable_object` routing mode land. This
- * file is the half of that pairing that lives in source: the one place the
- * binding is read, and the one place a blank tenant id is refused.
+ * requires a `deleted` tombstone and total data loss. That is why the
+ * `TENANT_DATA` stanza in `wrangler.toml` landed a slice AHEAD of the routing
+ * mode that now uses it, and why this file predates its own caller.
  *
- * It is deliberately NOT a {@link TenantDatabaseRouter}. `forTenant()` must
- * return a `TenantDatabaseHandle` carrying a `D1Database`, and that facade —
- * `prepare().bind().first()/all()/run()`, a synthesized `meta.changes`, and
- * `batch()` forwarded into `transactionSync` — is the next slice. Shipping a
- * half-router that some call site could reach would be worse than shipping
- * none: the fail-closed rule in `./ports.ts` is that an unresolvable tenant is
- * an error, never a fallback, and a partially-wired mode is exactly how a
- * fallback gets added "temporarily".
+ * It is still deliberately NOT a {@link TenantDatabaseRouter}.
+ * `DurableObjectTenantDatabaseRouter` in `@ferrogate/storage` is, because
+ * `forTenant()` has to return a `TenantDatabaseHandle` carrying a
+ * `D1Database`-shaped facade — `prepare().bind().first()/all()/run()`, a
+ * `meta.changes` measured as a `total_changes()` delta, and `batch()` forwarded
+ * into one `transactionSync`. {@link tenantDataObjectFor} hands back the RAW
+ * stub and is NOT what the request path takes; it exists for maintenance and
+ * test paths that want the object itself.
  *
  * ## Why the tenant id is passed to the object as well as used to address it
  *
@@ -38,9 +42,10 @@ import { TENANT_DATABASE_ROUTING_MISCONFIGURED, TENANT_DATABASE_UNAVAILABLE } fr
 /**
  * The binding this module reads.
  *
- * Optional, because the committed `GATEWAY_TENANT_DB_ROUTING = "off"` means no
- * request reaches here yet and a self-hosted single-tenant deploy may never
- * declare it. Absent is a NAMED refusal below, never a fallback to `env.DB`.
+ * Optional, because a self-hosted deployment on `"off"`, `"binding"` or
+ * `"shared_development"` legitimately declares no stanza. Absent while the mode
+ * IS `durable_object` — the committed default — is a NAMED 503 below, never a
+ * fallback to `env.DB`.
  */
 export interface TenantDataBindings {
   readonly TENANT_DATA?: TenantDataNamespace;

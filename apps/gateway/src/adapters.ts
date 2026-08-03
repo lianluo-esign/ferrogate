@@ -439,10 +439,7 @@ export function lifecycleRejectionCode(status: LifecycleStatusValue): string {
 
 /** Rust `LifecycleRejection::message` for the Request/Recovery seams. */
 export function lifecycleRejectionMessage(reference: LifecycleRef): string {
-  return (
-    `${reference.kind} ${reference.id} is ${reference.status}; ` +
-    "requests authenticated against this tenancy chain are refused"
-  );
+  return `${reference.kind} ${reference.id} is ${reference.status}; requests authenticated against this tenancy chain are refused`;
 }
 
 /**
@@ -712,15 +709,21 @@ export class D1LifecycleRowSource implements LifecycleRowSource {
  *    `lifecycle_status_unavailable`, and does NOT fall through to the config
  *    table. This is `LifecycleGateError::Unavailable`, and Rust names the
  *    reason: fail-open would hand every suspended tenant a trivial bypass;
- *  - the `projects` / `workspaces` reads go to the DEFAULT `DB` binding. Under
- *    `GATEWAY_TENANT_DB_ROUTING = "off"` (the shipped posture) that IS the
- *    tenant database and the walk is complete. Under per-tenant routing the
- *    rows live in the tenant's own database, which `src/tenancy/` resolves
- *    only AFTER this guard has run — deliberately, since the router refuses an
- *    unprovisioned tenant and running it inside the auth guard would turn "not
- *    yet provisioned" into an authentication failure. See
- *    {@link lifecycleRowSourceFromEnv} for the one line that changes when the
- *    order is revisited.
+ *  - the `projects` / `workspaces` reads go to the DEFAULT `DB` binding, and
+ *    since #819 that is A KNOWN GAP rather than the shipped posture. Under
+ *    `GATEWAY_TENANT_DB_ROUTING = "off"` `DB` IS the tenant database and this
+ *    walk is complete; under the `durable_object` default the rows live in the
+ *    tenant's own object, so this gate reads a `DB` that a routed deployment
+ *    never writes and every tenant looks un-suspended to it unless the
+ *    `TENANCY_LIFECYCLE` config table names them.
+ *
+ *    The ordering is what makes it a gap rather than a bug to fix here:
+ *    `src/tenancy/` resolves AFTER this guard, deliberately, because the router
+ *    can refuse a tenant and running it inside the auth guard would turn an
+ *    unresolvable tenant into an authentication failure. The lifecycle rows
+ *    have to be PROJECTED into the control plane next to `tenants`, which is
+ *    what `docs/design/tenant-data-classification-2026-08.md` classifies them
+ *    for. See {@link lifecycleRowSourceFromEnv} for the one line that changes.
  */
 export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
   readonly #source: LifecycleRowSource;

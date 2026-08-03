@@ -35,6 +35,7 @@ import {
 } from "../../src/metering/index.js";
 import { d1TokenBudgetSource, rateLimit } from "../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
+import { tenantDatabase } from "../../src/tenancy/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
 import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
@@ -195,8 +196,10 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
   test("with no tenant database bound nothing accumulates and nothing throws", async () => {
     const queue = new RecordingQueue();
     const sink = sinkFor(queue);
-    const withoutDb = { ...bindings(queue) };
-    delete withoutDb.DB;
+    // Destructured out rather than `delete`d: the point is that the key is
+    // ABSENT, not undefined — `env.DB` must not even be present for the
+    // aggregate leg's binding probe to skip.
+    const { DB: _unbound, ...withoutDb } = bindings(queue);
 
     sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
     await sink.flush({ env: withoutDb, attribution: ATTRIBUTION });
@@ -258,8 +261,11 @@ describe("the loop, closed: a served request moves the token budget's own readin
         }),
       ],
       // The deployed order: the drain is OUTERMOST so it sees the final
-      // response; the limiter is behind it.
-      middleware: [meteringDrain(sink), rateLimit()],
+      // response; `tenantDatabase()` next, because the limiter's wallet guard
+      // (admission step 3b) reads the accessor it parks; the limiter behind
+      // both. Omitting the middle entry is a 500 naming it rather than a quiet
+      // fall back to the shared `DB`, which is the point of that throw.
+      middleware: [meteringDrain(sink), tenantDatabase(), rateLimit()],
     });
 
     const bindings: Record<string, unknown> = {
@@ -287,7 +293,10 @@ describe("the loop, closed: a served request moves the token budget's own readin
         new Request(`${BASE}/v1/chat/completions`, {
           method: "POST",
           headers: { authorization: "Bearer fg_loop", "content-type": "application/json" },
-          body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] }),
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [{ role: "user", content: "hi" }],
+          }),
         }),
         bindings,
         ctx,

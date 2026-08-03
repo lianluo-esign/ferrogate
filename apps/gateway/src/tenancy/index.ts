@@ -1,93 +1,83 @@
 /**
- * `apps/gateway/src/tenancy` — request-path routing to **one D1 database per
- * tenant**.
+ * `apps/gateway/src/tenancy` — request-path routing to **one SQLite-backed
+ * Durable Object per tenant** (`durable_object`, the default since #819), with
+ * the D1-per-tenant modes kept for self-hosted single-tenant deploys.
  *
- * Start at `./ports.ts`: it carries the deploy-time-binding constraint, the
- * three strategies and their atomicity costs, the CONTROL/TENANT split, and the
- * fail-closed invariant. `./resolver.ts` builds the router; `./middleware.ts`
- * mounts it and exposes {@link tenantDatabaseOf} to handlers.
+ * Start at `./ports.ts`: it carries the deploy-time-binding constraint that
+ * ruled out D1-per-tenant, the strategies and their atomicity costs, the
+ * CONTROL/TENANT split, and the fail-closed invariant. `./resolver.ts` builds
+ * the router; `./middleware.ts` mounts it and exposes {@link tenantDatabaseOf}
+ * to handlers; `./tenant-data.ts` is the one place `env.TENANT_DATA` is read.
  *
  * Nothing in this directory re-implements routing. Every mode delegates to
- * `@ferrogate/storage` (`EnvBindingTenantDatabaseRouter`,
- * `NonAtomicD1RestTenantDatabaseRouter`, `SharedDatabaseTenantRouter`,
- * `ControlDatabaseTenantRegistry`, `requireAtomicBatch`), which was fully
- * implemented, 152-D1-test covered, and had ZERO importers under any app before
- * this slice.
+ * `@ferrogate/storage` (`DurableObjectTenantDatabaseRouter`,
+ * `EnvBindingTenantDatabaseRouter`, `NonAtomicD1RestTenantDatabaseRouter`,
+ * `SharedDatabaseTenantRouter`, `ControlDatabaseTenantRegistry`,
+ * `requireAtomicBatch`), and `packages/storage/test/mount-inventory.test.ts` is
+ * the gate that keeps that true.
  *
  * ===========================================================================
- * WIRING — the exact lines the integrate step must add
+ * WIRING — LANDED, and what each piece is
  * ===========================================================================
  *
- * The composition root (`src/index.ts`), the entry module (`src/worker.ts`) and
- * `wrangler.toml` all belong to the integrate step, so this slice may not edit
- * them. Three changes, none of which touches a route or a handler:
+ * An earlier revision of this block was a TODO list addressed to an "integrate
+ * step" that had not run, and it described a D1 topology this directory no
+ * longer defaults to. Both are now false. What is actually deployed:
  *
- * ### 1. `apps/gateway/src/index.ts` — ONE import + ONE array entry
+ * ### 1. `apps/gateway/src/index.ts` — `tenantDatabase()` in `GATEWAY_MIDDLEWARE`
  *
- * ```ts
- * import { tenantDatabase } from "./tenancy/index.js";
+ * Mounted IMMEDIATELY ABOVE `rateLimit()`. The position is load-bearing, not
+ * cosmetic: admission step 3b (the wallet no-oversell guard) calls
+ * {@link tenantDatabaseOf}, so the accessor has to be on the context before
+ * `rateLimit()` runs. It used to be last in the array, back when nothing read a
+ * tenant handle at all.
  *
- * export const GATEWAY_MIDDLEWARE = [
- *   meteringDrain(usage),
- *   rateLimit(),
- *   guardrails(...),
- *   // Per-tenant D1 (one database per tenant). AFTER contractAuth, because it
- *   // routes on the tenant the credential resolved to. Inert unless
- *   // GATEWAY_TENANT_DB_ROUTING is set; NEVER falls back to the shared DB.
- *   tenantDatabase(),
- * ] as const;
- * ```
- *
- * ### 2. `apps/gateway/wrangler.toml` — the routing var + one stanza per tenant
+ * ### 2. `apps/gateway/wrangler.toml`
  *
  * ```toml
  * [vars]
- * # off | binding | binding_strict | rest | shared_development
- * GATEWAY_TENANT_DB_ROUTING = "off"          # flip to "binding" once (3) exists
- * # "rest" mode only; the token is a SECRET (`wrangler secret put`).
- * # GATEWAY_TENANT_DB_ACCOUNT_ID = "<account>"
+ * # durable_object | off | binding | binding_strict | rest | shared_development
+ * GATEWAY_TENANT_DB_ROUTING = "durable_object"
  *
- * # CONTROL_DB is ALREADY declared and already holds `tenant_databases`.
+ * [[durable_objects.bindings]]
+ * name = "TENANT_DATA"
+ * class_name = "TenantDataObject"
  *
- * # One per provisioned tenant. `binding` is the string recorded in
- * # tenant_databases.binding_name; the router reads env[binding] at runtime.
- * [[d1_databases]]
- * binding = "TENANT_DB_ACME"
- * database_name = "ferrogate-tenant-acme"
- * database_id = "replace-at-deploy"
- * migrations_dir = "../../sql/d1-ts/tenant"
+ * [[migrations]]
+ * tag = "v4"
+ * new_sqlite_classes = ["TenantDataObject"]   # IMMUTABLE once deployed
  * ```
  *
- * No new Durable Object, no new Queue, no `[[services]]`, and no change to
- * `src/worker.ts` — this slice adds no exported class.
+ * `CONTROL_DB` is already declared. Under `durable_object` it is NOT a routing
+ * table — resolution reads nothing — but `control()` and
+ * `provisionedTenants()` still need it, and a DO namespace cannot be
+ * enumerated in production.
  *
- * ### 3. Provisioning (per tenant, once)
+ * ### 3. `apps/gateway/src/worker.ts`
  *
- * ```
- * wrangler d1 create ferrogate-tenant-acme
- * wrangler d1 migrations apply ferrogate-tenant-acme          # sql/d1-ts/tenant
- * # add the [[d1_databases]] stanza above, then:
- * wrangler deploy
- * # then record the mapping in the CONTROL database:
- * INSERT INTO tenant_databases
- *   (tenant_id, database_uuid, database_name, binding_name, schema_version,
- *    provisioned_at_unix, updated_at_unix)
- * VALUES ('tenant_acme', '<uuid>', 'ferrogate-tenant-acme', 'TENANT_DB_ACME', 1,
- *         unixepoch(), unixepoch());
- * ```
+ * `export { TenantDataObject } from "@ferrogate/storage/durable-objects";` —
+ * workerd resolves `class_name` against the ENTRY module's named exports, and
+ * `@cloudflare/vitest-pool-workers` does not perform that check, so deleting
+ * that line stops the Worker booting while every gateway suite stays green.
+ * `apps/gateway/test/wrangler-bindings.test.ts` and
+ * `packages/storage/test/mount-inventory.test.ts` are the two gates that fail
+ * instead.
  *
- * A row without `binding_name` is "provisioned but not yet routable" and is
- * REFUSED, not fallen back — that is deliberate; see `./ports.ts`.
+ * ### 4. Provisioning — THERE IS NONE
  *
- * ### The gate this wiring owes — LANDED
+ * This is the difference the topology bought. A tenant's object exists the
+ * moment it is addressed: no `wrangler d1 create`, no migration run, no
+ * registry INSERT, no redeploy. `TenantDataObject`'s constructor applies
+ * `sql/d1-ts/tenant/*.sql` under `blockConcurrencyWhile`, once, gated on its own
+ * `storage_schema_migrations` ledger. `tenant_databases` survives as the
+ * provisioning/STATE record — who exists, where their data is homed — and is
+ * read on admin paths only.
  *
- * Wiring (1) is in `src/index.ts` (`GATEWAY_MIDDLEWARE`, after `guardrails()`),
- * so the probe in `test/tenancy/mount.spec.ts` is a LIVE `test`, not the
- * `test.todo` an earlier revision of this note asked a future commit to flip:
- * it imports `GATEWAY_MIDDLEWARE` from `src/index.ts` and asserts an
- * unprovisioned tenant is refused rather than served from the shared database.
- * Steps (2) and (3) stay deploy-time work, because a `[[d1_databases]]` stanza
- * per tenant cannot be committed with real ids.
+ * The `binding` / `binding_strict` / `rest` modes still need the per-tenant D1
+ * work (`wrangler d1 create`, `migrations apply`, a `[[d1_databases]]` stanza
+ * whose `binding` matches `tenant_databases.binding_name`, a redeploy, then the
+ * registry row). A row without `binding_name` is "provisioned but not yet
+ * routable" and is REFUSED, not fallen back.
  * ===========================================================================
  */
 export {
@@ -119,15 +109,18 @@ export {
   tenantDatabaseOf,
 } from "./middleware.js";
 /**
- * `TenantDataObject` addressing (#822).
+ * `TenantDataObject` addressing (#822), now WIRED.
  *
- * Re-exported here, and NOT wired into {@link createTenantDatabaseResolver},
- * because the `durable_object` routing mode needs a `D1Database`-shaped facade
- * over the object's `query`/`batch` RPCs that does not exist yet — see the
- * docblock in `./tenant-data.ts` for why shipping half a router would be worse
- * than shipping none. What exists now is the addressing rule and the two
- * refusals around it, exported so the facade slice imports a reviewed seam
- * instead of writing a second `idFromName` call somewhere else.
+ * {@link createTenantDatabaseResolver} calls `tenantDataNamespace(env)` on the
+ * `durable_object` branch, which is what keeps `env.TENANT_DATA` read in
+ * exactly one place — along with its 503 refusal for an unbound namespace, and
+ * the `env.X` token `test/env-var-drift.test.ts` scans for.
+ *
+ * `tenantDataObjectFor` is the raw stub, and it is NOT what the request path
+ * takes: routing goes through the router, which wraps the stub in the
+ * `D1Database` facade so the eight tenant-plane modules under
+ * `packages/storage/src/d1/` work unchanged. It is exported for maintenance and
+ * test paths that want the object itself.
  */
 export {
   type TenantDataBindings,
