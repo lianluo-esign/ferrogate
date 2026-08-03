@@ -122,14 +122,6 @@ const INPUT_TOKEN_GOLDENS: readonly Golden[] = [
     // this row is the one that fails if the scalar count is ever regressed.
     derivation: "3 + 4",
   },
-  {
-    name: "no turns at all is refused",
-    body: { messages: [] },
-    // FIXED by #727: empty messages are now refused with 400 before dispatch.
-    // This test verifies the refusal rather than the zero count.
-    inputTokens: undefined as number | undefined,
-    derivation: "refused",
-  },
 ];
 
 /** The two provider families `/v1/messages` can be served by. */
@@ -145,17 +137,19 @@ async function countTokens(model: string, body: Record<string, unknown>): Promis
 describe("POST /v1/messages/count_tokens — golden arithmetic", () => {
   for (const { family, model } of FAMILIES) {
     for (const golden of INPUT_TOKEN_GOLDENS) {
-      it(`${family}: ${golden.name} => ${golden.inputTokens ?? "refused"} (${golden.derivation})`, async () => {
+      it(`${family}: ${golden.name} => ${golden.inputTokens} (${golden.derivation})`, async () => {
         const res = await countTokens(model, golden.body);
-        if (golden.inputTokens === undefined) {
-          // Empty messages are refused with 400 (issue #727).
-          expect(res.status).toBe(400);
-        } else {
-          expect(res.status).toBe(200);
-          expect(await res.json()).toEqual({ input_tokens: golden.inputTokens });
-        }
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ input_tokens: golden.inputTokens });
       });
     }
+  }
+
+  for (const { family, model } of FAMILIES) {
+    it(`${family}: empty messages are refused with 400 (issue #727)`, async () => {
+      const res = await countTokens(model, { messages: [] });
+      expect(res.status).toBe(400);
+    });
   }
 
   it("returns the Anthropic-native shape and nothing else", async () => {

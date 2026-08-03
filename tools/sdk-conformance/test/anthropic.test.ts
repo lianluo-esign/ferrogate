@@ -522,7 +522,7 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     const first = page.data[0] as unknown as Record<string, unknown>;
     expect(first?.["id"]).toEqual(expect.any(String));
     expect(first?.["type"]).toBe("model");
-    expect(first?.["display_name"]).toEqual(expect.any(String));
+    expect(first?.["display_name"]).toBe("gpt-4o-mini");
     expect(first?.["created_at"]).toEqual(expect.any(String));
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
     expect(first?.["object"]).toBeUndefined();

@@ -108,10 +108,11 @@ describe("openai SDK — error taxonomy", () => {
     // Read off the body by the SDK, which is what application code switches on.
     expect(error.code).toBe("invalid_api_key");
     expect(error.message).toContain("invalid API key");
-    // DIVERGENCE (apps/gateway/src/inference/errors.ts): OpenAI's own bodies
-    // carry `type: "invalid_request_error"`; every FerroGate error carries the
-    // single constant `ferrogate_error`. The SDK does not care — it classifies
-    // by STATUS — but code that switches on `err.type` will not match.
+    // DELIBERATE: OpenAI's own bodies carry `type: "invalid_request_error"`;
+    // FerroGate supplies its single constant `ferrogate_error` instead, so
+    // `err.type`-based handling never matches. The SDKs classify by STATUS,
+    // so `err.type`-based code is rare — this is the same design choice the
+    // Anthropic-side test documents.
     expect(error.type).toBe("ferrogate_error");
     // The correlation id the SDK exposes as `error.requestID`, taken from the
     // `x-request-id` response header, and the SAME id the body carries.

@@ -1962,8 +1962,9 @@ function isAnthropicIngress(c: InferenceContext): boolean {
  * Build an Anthropic-dialect model object from a `ModelDescriptor`.
  *
  * The Anthropic SDK's `ModelInfo` is `{id, type:"model", display_name,
- * created_at}`. `display_name` is derived from the model id when no better name
- * is available; `created_at` is the ISO-8601 string the SDK expects.
+ * created_at}`. `display_name` is set to the model id — the same fallback the
+ * Anthropic SDK uses when no human-readable label is available. `created_at` is
+ * the ISO-8601 string the SDK expects.
  */
 function anthropicModelFrom(descriptor: ModelDescriptor): {
   id: string;
@@ -1974,7 +1975,7 @@ function anthropicModelFrom(descriptor: ModelDescriptor): {
   return {
     id: descriptor.id,
     type: "model",
-    display_name: descriptor.owned_by !== "" ? `${descriptor.id} by ${descriptor.owned_by}` : descriptor.id,
+    display_name: descriptor.id,
     created_at: new Date(descriptor.created * 1000).toISOString(),
   };
 }
@@ -2026,11 +2027,7 @@ function handleModel(c: InferenceContext, deps: ResolvedInferenceDeps): Response
   if (entry === undefined) {
     return errorResponse(reject(404, "model_not_found", `unknown model ${requested}`), requestId);
   }
-  const descriptor = describeCatalogEntry(deps, entry);
-  if (isAnthropicIngress(c)) {
-    return jsonResponse(anthropicModelFrom(descriptor), requestId);
-  }
-  return jsonResponse(descriptor, requestId);
+  return jsonResponse(describeCatalogEntry(deps, entry), requestId);
 }
 
 // ---------------------------------------------------------------------------

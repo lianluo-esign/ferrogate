@@ -246,6 +246,7 @@ describe("GET /v1/models/{model}", () => {
   it("carries the gateway response headers", async () => {
     const res = await get("/v1/models/vision-chat");
     expect(res.headers.get("x-request-id")).toBe("fg-000000000000002a");
+    expect(res.headers.get("request-id")).toBe("fg-000000000000002a");
     expect(res.headers.get("x-ferrogate-runtime")).toBe("workers");
   });
 
