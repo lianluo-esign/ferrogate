@@ -26,9 +26,9 @@
  */
 import { describe, expect, test } from "vitest";
 import {
+  D1RestDatabase,
   D1_BINDING_STRATEGIES,
   D1_REST_API_BASE,
-  D1RestDatabase,
   StorageError,
 } from "../../src/index.js";
 

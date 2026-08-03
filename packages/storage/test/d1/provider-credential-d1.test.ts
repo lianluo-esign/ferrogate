@@ -76,12 +76,8 @@ describe("D1TenantProviderCredentialStore", () => {
   test("FENCE 1: two tenants may own the SAME alias name independently", async () => {
     await seed(TENANT_A, "openai-enterprise", "openai", "sealed-a");
     await seed(TENANT_B, "openai-enterprise", "openai", "sealed-b");
-    expect((await store.lookup(TENANT_A, "openai-enterprise"))?.ciphertext).toBe(
-      "sealed-a",
-    );
-    expect((await store.lookup(TENANT_B, "openai-enterprise"))?.ciphertext).toBe(
-      "sealed-b",
-    );
+    expect((await store.lookup(TENANT_A, "openai-enterprise"))?.ciphertext).toBe("sealed-a");
+    expect((await store.lookup(TENANT_B, "openai-enterprise"))?.ciphertext).toBe("sealed-b");
   });
 
   test("FENCE 2: a tenant cannot revoke another tenant's alias", async () => {
@@ -101,10 +97,7 @@ describe("D1TenantProviderCredentialStore", () => {
     await seed(TENANT_B, "azure-eu", "azure");
 
     const listed = await store.list(TENANT_A);
-    expect(listed.map((row) => row.alias)).toEqual([
-      "anthropic-negotiated",
-      "openai-enterprise",
-    ]);
+    expect(listed.map((row) => row.alias)).toEqual(["anthropic-negotiated", "openai-enterprise"]);
     for (const row of listed) {
       // The summary TYPE has no ciphertext field; assert the runtime object
       // agrees, so a future `SELECT *` regression is caught rather than merely
@@ -160,9 +153,7 @@ describe("rotation", () => {
     expect(await store.lookup(TENANT_A, "openai-enterprise")).toBeNull();
 
     await seed(TENANT_A, "openai-enterprise", "openai", "sealed-again");
-    expect((await store.lookup(TENANT_A, "openai-enterprise"))?.ciphertext).toBe(
-      "sealed-again",
-    );
+    expect((await store.lookup(TENANT_A, "openai-enterprise"))?.ciphertext).toBe("sealed-again");
   });
 
   test("revoking twice reports the second call as a no-op", async () => {

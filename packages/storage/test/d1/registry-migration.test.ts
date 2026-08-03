@@ -79,12 +79,12 @@ describe("parseTenantDatabaseRegistryDocument", () => {
   test("refuses malformed JSON, a non-object, and a non-string uuid", () => {
     expect(() => parseTenantDatabaseRegistryDocument("{oops")).toThrow(StorageError);
     expect(() => parseTenantDatabaseRegistryDocument("[]")).toThrow(StorageError);
-    expect(() =>
-      parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":42}}'),
-    ).toThrow(StorageError);
-    expect(() =>
-      parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":"  "}}'),
-    ).toThrow(StorageError);
+    expect(() => parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":42}}')).toThrow(
+      StorageError,
+    );
+    expect(() => parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":"  "}}')).toThrow(
+      StorageError,
+    );
   });
 });
 
@@ -181,9 +181,9 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
         tenant_databases: { alpha: "uuid-shared", beta: "uuid-shared" },
       }),
     );
-    await expect(
-      migrateTenantDatabaseRegistryDocument(env.CONTROL_DB, NOW),
-    ).rejects.toThrow(StorageError);
+    await expect(migrateTenantDatabaseRegistryDocument(env.CONTROL_DB, NOW)).rejects.toThrow(
+      StorageError,
+    );
     // `alpha` (sorted first) landed before `beta` was refused; the refusal is
     // the point — two tenants must never share one database.
     const rows = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).list();

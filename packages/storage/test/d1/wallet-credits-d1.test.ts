@@ -13,7 +13,7 @@
 import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { D1WalletStore, type TenantDatabaseHandle } from "../../src/index.js";
-import { TENANT_A, resetTenantData, seedWallet, setupDatabases } from "./harness.js";
+import { TENANT_A, resetTenantData, seedWallet, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_700_000_000;
 
@@ -26,19 +26,18 @@ const HUGE = 1_000_000_000_000_010_000n;
 let handleA: TenantDatabaseHandle;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
+  await resetTenantData(tenantDb(TENANT_A));
 });
 
 /** The column read exactly, without going through the store under test. */
 async function rawCredits(tenantId: string): Promise<string | null> {
-  const row = await env.TENANT_DB_A.prepare(
-    "SELECT CAST(balance_credits AS TEXT) AS c FROM wallets WHERE tenant_id = ?",
-  )
+  const row = await tenantDb(TENANT_A)
+    .prepare("SELECT CAST(balance_credits AS TEXT) AS c FROM wallets WHERE tenant_id = ?")
     .bind(tenantId)
     .first<{ c: string }>();
   return row === null ? null : row.c;

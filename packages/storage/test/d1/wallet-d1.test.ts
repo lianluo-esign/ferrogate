@@ -9,7 +9,14 @@
 import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { D1WalletStore, StorageError, type TenantDatabaseHandle } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, seedWallet, setupDatabases } from "./harness.js";
+import {
+  TENANT_A,
+  TENANT_B,
+  resetTenantData,
+  seedWallet,
+  setupTenantRouter,
+  tenantDb,
+} from "./harness.js";
 
 const NOW = 1_700_000_000;
 const LATER = NOW + 3_600;
@@ -18,14 +25,14 @@ let handleA: TenantDatabaseHandle;
 let handleB: TenantDatabaseHandle;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
 });
 
 describe("D1WalletStore — no-oversell reserve", () => {

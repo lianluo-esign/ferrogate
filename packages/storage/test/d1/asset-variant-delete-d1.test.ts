@@ -22,7 +22,7 @@ import {
   type TenantDatabaseHandle,
   assetVariantDeleteOutcomeFromReferences,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_700_000_000;
 
@@ -30,7 +30,7 @@ let handleA: TenantDatabaseHandle;
 let handleB: TenantDatabaseHandle;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
 });
@@ -43,8 +43,8 @@ async function clear(db: D1Database): Promise<void> {
 }
 
 beforeEach(async () => {
-  await clear(env.TENANT_DB_A);
-  await clear(env.TENANT_DB_B);
+  await clear(tenantDb(TENANT_A));
+  await clear(tenantDb(TENANT_B));
 });
 
 async function seedVariant(
@@ -121,27 +121,27 @@ describe("assetVariantDeleteOutcomeFromReferences — the decision rule", () => 
 
 describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
   test("deletes a variant no channel points at", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_free");
+    await seedVariant(tenantDb(TENANT_A), "as_free");
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteAssetVariantIfUnreferenced("as_free"),
     ).toEqual({ kind: "deleted" });
-    expect(await variantExists(env.TENANT_DB_A, "as_free")).toBe(false);
+    expect(await variantExists(tenantDb(TENANT_A), "as_free")).toBe(false);
   });
 
   test("refuses a variant `latest` still resolves to, and names the channel", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_held");
-    await seedChannel(env.TENANT_DB_A, "latest");
+    await seedVariant(tenantDb(TENANT_A), "as_held");
+    await seedChannel(tenantDb(TENANT_A), "latest");
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteAssetVariantIfUnreferenced("as_held"),
     ).toEqual({ kind: "referenced", channels: ["latest"] });
     // The refusal has to be REAL, not just a label on a completed delete.
-    expect(await variantExists(env.TENANT_DB_A, "as_held")).toBe(true);
+    expect(await variantExists(tenantDb(TENANT_A), "as_held")).toBe(true);
   });
 
   test("names every blocking channel, in a stable order", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_two");
-    await seedChannel(env.TENANT_DB_A, "stable");
-    await seedChannel(env.TENANT_DB_A, "latest");
+    await seedVariant(tenantDb(TENANT_A), "as_two");
+    await seedChannel(tenantDb(TENANT_A), "stable");
+    await seedChannel(tenantDb(TENANT_A), "latest");
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteAssetVariantIfUnreferenced("as_two"),
     ).toEqual({ kind: "referenced", channels: ["latest", "stable"] });
@@ -154,8 +154,8 @@ describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
   });
 
   test("a channel on a DIFFERENT version does not block this one", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_v1", { version: "1.0.0" });
-    await seedChannel(env.TENANT_DB_A, "latest", { version: "2.0.0" });
+    await seedVariant(tenantDb(TENANT_A), "as_v1", { version: "1.0.0" });
+    await seedChannel(tenantDb(TENANT_A), "latest", { version: "2.0.0" });
     // The control for the refusal above: same table, same asset name, and the
     // delete proceeds purely because the versions differ.
     expect(
@@ -164,17 +164,17 @@ describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
   });
 
   test("a channel on a different asset NAME does not block this one", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_deploy", { name: "deploy" });
-    await seedChannel(env.TENANT_DB_A, "latest", { name: "other" });
+    await seedVariant(tenantDb(TENANT_A), "as_deploy", { name: "deploy" });
+    await seedChannel(tenantDb(TENANT_A), "latest", { name: "other" });
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteAssetVariantIfUnreferenced("as_deploy"),
     ).toEqual({ kind: "deleted" });
   });
 
   test("a channel in ANOTHER tenant's database cannot block a delete", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_iso");
-    await seedVariant(env.TENANT_DB_B, "as_iso");
-    await seedChannel(env.TENANT_DB_B, "latest");
+    await seedVariant(tenantDb(TENANT_A), "as_iso");
+    await seedVariant(tenantDb(TENANT_B), "as_iso");
+    await seedChannel(tenantDb(TENANT_B), "latest");
     // Tenant B holds the pointer; tenant A's delete must not see it.
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteAssetVariantIfUnreferenced("as_iso"),
@@ -185,7 +185,7 @@ describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
   });
 
   test("a channel published mid-flight still blocks the delete", async () => {
-    await seedVariant(env.TENANT_DB_A, "as_race");
+    await seedVariant(tenantDb(TENANT_A), "as_race");
     let injected = false;
 
     // A handle whose `run()` publishes `latest` IMMEDIATELY BEFORE the guarded
@@ -194,7 +194,7 @@ describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
       ...handleA,
       db: {
         prepare(sql: string) {
-          const statement = env.TENANT_DB_A.prepare(sql);
+          const statement = tenantDb(TENANT_A).prepare(sql);
           return {
             bind(...values: unknown[]) {
               const bound = statement.bind(...values);
@@ -202,7 +202,7 @@ describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
                 async run() {
                   if (sql === DELETE_ASSET_VARIANT_IF_UNREFERENCED_SQL && !injected) {
                     injected = true;
-                    await seedChannel(env.TENANT_DB_A, "latest");
+                    await seedChannel(tenantDb(TENANT_A), "latest");
                   }
                   return bound.run();
                 },
@@ -222,6 +222,6 @@ describe("D1ReferenceGuardedDeletes.deleteAssetVariantIfUnreferenced", () => {
     expect(injected).toBe(true);
     expect(outcome).toEqual({ kind: "referenced", channels: ["latest"] });
     // Check-then-delete would have reported `deleted` and orphaned `latest`.
-    expect(await variantExists(env.TENANT_DB_A, "as_race")).toBe(true);
+    expect(await variantExists(tenantDb(TENANT_A), "as_race")).toBe(true);
   });
 });

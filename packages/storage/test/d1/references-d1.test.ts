@@ -16,7 +16,7 @@ import {
   MemoryReferenceGuardedDeletes,
   type TenantDatabaseHandle,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_700_000_000;
 
@@ -24,7 +24,7 @@ let handleA: TenantDatabaseHandle;
 let handleB: TenantDatabaseHandle;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
 });
@@ -38,8 +38,8 @@ async function clear(db: D1Database): Promise<void> {
 }
 
 beforeEach(async () => {
-  await clear(env.TENANT_DB_A);
-  await clear(env.TENANT_DB_B);
+  await clear(tenantDb(TENANT_A));
+  await clear(tenantDb(TENANT_B));
 });
 
 async function seedProject(db: D1Database, id: string, tenantId = TENANT_A): Promise<void> {
@@ -91,15 +91,15 @@ async function projectExists(db: D1Database, id: string): Promise<boolean> {
 
 describe("D1ReferenceGuardedDeletes — projects", () => {
   test("an unreferenced project is deleted, and the row is really gone", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_1");
+    await seedProject(tenantDb(TENANT_A), "proj_1");
     const deletes = new D1ReferenceGuardedDeletes(handleA);
     expect(await deletes.deleteProjectIfUnreferenced("proj_1")).toEqual({ kind: "deleted" });
-    expect(await projectExists(env.TENANT_DB_A, "proj_1")).toBe(false);
+    expect(await projectExists(tenantDb(TENANT_A), "proj_1")).toBe(false);
   });
 
   test("a workspace reference refuses AND the project survives", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_1");
-    await seedWorkspace(env.TENANT_DB_A, "ws_1", "proj_1");
+    await seedProject(tenantDb(TENANT_A), "proj_1");
+    await seedWorkspace(tenantDb(TENANT_A), "ws_1", "proj_1");
     const deletes = new D1ReferenceGuardedDeletes(handleA);
     expect(await deletes.deleteProjectIfUnreferenced("proj_1")).toEqual({
       kind: "referenced",
@@ -108,14 +108,14 @@ describe("D1ReferenceGuardedDeletes — projects", () => {
     });
     // A refusal that still removed the row would orphan the workspace, whose
     // api-keys would keep authenticating against a project that no longer is.
-    expect(await projectExists(env.TENANT_DB_A, "proj_1")).toBe(true);
+    expect(await projectExists(tenantDb(TENANT_A), "proj_1")).toBe(true);
   });
 
   test("a virtual key alone refuses, with both counts reported separately", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_1");
-    await seedWorkspace(env.TENANT_DB_A, "ws_1", "proj_1");
-    await seedApiKey(env.TENANT_DB_A, "key_1", "proj_1", "ws_1");
-    await seedApiKey(env.TENANT_DB_A, "key_2", "proj_1", "ws_1");
+    await seedProject(tenantDb(TENANT_A), "proj_1");
+    await seedWorkspace(tenantDb(TENANT_A), "ws_1", "proj_1");
+    await seedApiKey(tenantDb(TENANT_A), "key_1", "proj_1", "ws_1");
+    await seedApiKey(tenantDb(TENANT_A), "key_2", "proj_1", "ws_1");
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteProjectIfUnreferenced("proj_1"),
     ).toEqual({ kind: "referenced", workspaces: 1, virtualKeys: 2 });
@@ -130,17 +130,17 @@ describe("D1ReferenceGuardedDeletes — projects", () => {
   test("the delete is scoped to the tenant's OWN database", async () => {
     // Same project id in two tenant databases. Deleting through tenant A's
     // handle must not reach into B — the isolation the DB-per-tenant split buys.
-    await seedProject(env.TENANT_DB_A, "proj_shared");
-    await seedProject(env.TENANT_DB_B, "proj_shared", TENANT_B);
+    await seedProject(tenantDb(TENANT_A), "proj_shared");
+    await seedProject(tenantDb(TENANT_B), "proj_shared", TENANT_B);
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteProjectIfUnreferenced("proj_shared"),
     ).toEqual({ kind: "deleted" });
-    expect(await projectExists(env.TENANT_DB_B, "proj_shared")).toBe(true);
+    expect(await projectExists(tenantDb(TENANT_B), "proj_shared")).toBe(true);
   });
 
   test("a reference in ANOTHER tenant's database does not block", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_1");
-    await seedWorkspace(env.TENANT_DB_B, "ws_1", "proj_1", TENANT_B);
+    await seedProject(tenantDb(TENANT_A), "proj_1");
+    await seedWorkspace(tenantDb(TENANT_B), "ws_1", "proj_1", TENANT_B);
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteProjectIfUnreferenced("proj_1"),
     ).toEqual({ kind: "deleted" });
@@ -149,18 +149,18 @@ describe("D1ReferenceGuardedDeletes — projects", () => {
 
 describe("D1ReferenceGuardedDeletes — workspaces", () => {
   test("an unreferenced workspace is deleted", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_1");
-    await seedWorkspace(env.TENANT_DB_A, "ws_1", "proj_1");
+    await seedProject(tenantDb(TENANT_A), "proj_1");
+    await seedWorkspace(tenantDb(TENANT_A), "ws_1", "proj_1");
     expect(
       await new D1ReferenceGuardedDeletes(handleA).deleteWorkspaceIfUnreferenced("ws_1"),
     ).toEqual({ kind: "deleted" });
   });
 
   test("a key in the workspace refuses; a key in a SIBLING workspace does not", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_1");
-    await seedWorkspace(env.TENANT_DB_A, "ws_1", "proj_1");
-    await seedWorkspace(env.TENANT_DB_A, "ws_2", "proj_1");
-    await seedApiKey(env.TENANT_DB_A, "key_1", "proj_1", "ws_2");
+    await seedProject(tenantDb(TENANT_A), "proj_1");
+    await seedWorkspace(tenantDb(TENANT_A), "ws_1", "proj_1");
+    await seedWorkspace(tenantDb(TENANT_A), "ws_2", "proj_1");
+    await seedApiKey(tenantDb(TENANT_A), "key_1", "proj_1", "ws_2");
     const deletes = new D1ReferenceGuardedDeletes(handleA);
     expect(await deletes.deleteWorkspaceIfUnreferenced("ws_2")).toEqual({
       kind: "referenced",
@@ -192,7 +192,7 @@ describe("D1ReferenceGuardedDeletes — workspaces", () => {
  */
 describe("the check/use window the guard closes", () => {
   test("a reference committed just before the DELETE still blocks it", async () => {
-    await seedProject(env.TENANT_DB_A, "proj_race");
+    await seedProject(tenantDb(TENANT_A), "proj_race");
 
     let injected = false;
     // A handle whose `prepare` slips a committed workspace INSERT in front of
@@ -213,7 +213,7 @@ describe("the check/use window the guard closes", () => {
                 async run() {
                   if (!injected) {
                     injected = true;
-                    await seedWorkspace(env.TENANT_DB_A, "ws_late", "proj_race");
+                    await seedWorkspace(tenantDb(TENANT_A), "ws_late", "proj_race");
                   }
                   return bound.run();
                 },
@@ -233,7 +233,7 @@ describe("the check/use window the guard closes", () => {
     expect(injected).toBe(true);
     // Check-then-delete would report `deleted` here and orphan `ws_late`.
     expect(outcome).toEqual({ kind: "referenced", workspaces: 1, virtualKeys: 0 });
-    expect(await projectExists(env.TENANT_DB_A, "proj_race")).toBe(true);
+    expect(await projectExists(tenantDb(TENANT_A), "proj_race")).toBe(true);
   });
 
   test("the durable backend and the in-memory baseline agree on every outcome", async () => {
@@ -243,9 +243,9 @@ describe("the check/use window the guard closes", () => {
     memory.addProject({ id: "p_free" });
     memory.addProject({ id: "p_held" });
     memory.addWorkspace({ id: "w_held", projectId: "p_held" });
-    await seedProject(env.TENANT_DB_A, "p_free");
-    await seedProject(env.TENANT_DB_A, "p_held");
-    await seedWorkspace(env.TENANT_DB_A, "w_held", "p_held");
+    await seedProject(tenantDb(TENANT_A), "p_free");
+    await seedProject(tenantDb(TENANT_A), "p_held");
+    await seedWorkspace(tenantDb(TENANT_A), "w_held", "p_held");
 
     for (const id of ["p_free", "p_held", "p_missing"]) {
       expect(await durable.deleteProjectIfUnreferenced(id)).toEqual(

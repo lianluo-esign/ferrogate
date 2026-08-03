@@ -9,7 +9,7 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { D1BillingEventLedger, StorageError, type BillingEventRecord } from "../../src/index.js";
+import { type BillingEventRecord, D1BillingEventLedger, StorageError } from "../../src/index.js";
 import "./harness.js";
 
 const NOW = 1_784_073_600;
@@ -97,9 +97,7 @@ describe("D1BillingEventLedger — the claim", () => {
         ledger.appendBillingEventWithOutboxEnqueue(event(), "led_1", NOW + 1),
       ),
     );
-    const won = results.filter(
-      (r) => r.status === "fulfilled" && r.value.recorded === true,
-    ).length;
+    const won = results.filter((r) => r.status === "fulfilled" && r.value.recorded === true).length;
     expect(won).toBe(1);
     expect(await rowCount("billing_events")).toBe(1);
   });
@@ -213,23 +211,19 @@ describe("D1BillingEventLedger — atomicity", () => {
   test("a failure in the enqueue statement rolls the claim back", async () => {
     await expect(
       env.CONTROL_DB.batch([
-        env.CONTROL_DB
-          .prepare(
-            "INSERT INTO billing_events (billing_event_id, request_id, provider_attempt_index, " +
-              "occurred_at_unix, event_json) VALUES (?, ?, ?, ?, ?) " +
-              "ON CONFLICT (billing_event_id) DO NOTHING RETURNING billing_event_id",
-          )
-          .bind("led_atomic", "req_atomic", 0, NOW, "{}"),
+        env.CONTROL_DB.prepare(
+          "INSERT INTO billing_events (billing_event_id, request_id, provider_attempt_index, " +
+            "occurred_at_unix, event_json) VALUES (?, ?, ?, ?, ?) " +
+            "ON CONFLICT (billing_event_id) DO NOTHING RETURNING billing_event_id",
+        ).bind("led_atomic", "req_atomic", 0, NOW, "{}"),
         // `next_attempt_unix` is `INTEGER NOT NULL`; binding NULL fails the
         // statement. (A NULL `id` would NOT: SQLite's long-standing quirk is
         // that a TEXT PRIMARY KEY without an explicit NOT NULL accepts NULL.)
-        env.CONTROL_DB
-          .prepare(
-            "INSERT INTO billing_report_outbox (id, attempts, next_attempt_unix, " +
-              "dead_lettered_at_unix, created_at_unix, updated_at_unix, event_json) " +
-              "VALUES (?, 0, ?, NULL, unixepoch(), unixepoch(), ?)",
-          )
-          .bind("led_atomic", null, "{}"),
+        env.CONTROL_DB.prepare(
+          "INSERT INTO billing_report_outbox (id, attempts, next_attempt_unix, " +
+            "dead_lettered_at_unix, created_at_unix, updated_at_unix, event_json) " +
+            "VALUES (?, 0, ?, NULL, unixepoch(), unixepoch(), ?)",
+        ).bind("led_atomic", null, "{}"),
       ]),
     ).rejects.toThrow();
     // If D1's batch were NOT one transaction, this would be 1.

@@ -21,7 +21,7 @@ import {
   assetChannelId,
   storedAssetVariantId,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_784_073_600;
 
@@ -31,7 +31,7 @@ let storeA: D1AssetMetadataStore;
 let storeB: D1AssetMetadataStore;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
   storeA = new D1AssetMetadataStore(handleA);
@@ -39,8 +39,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
 });
 
 function asset(overrides: Partial<StoredAsset> = {}): StoredAsset {
@@ -98,7 +98,8 @@ describe("D1AssetMetadataStore — rows persist at all", () => {
   test("an unrecognized visibility token reads back as quarantined, never visible", async () => {
     const a = asset();
     await storeA.upsertAsset(a);
-    await env.TENANT_DB_A.prepare("UPDATE stored_assets SET visibility = 'weird' WHERE id = ?")
+    await tenantDb(TENANT_A)
+      .prepare("UPDATE stored_assets SET visibility = 'weird' WHERE id = ?")
       .bind(a.id)
       .run();
     // Fail CLOSED (#366): an unknown/poisoned row must never be servable.
@@ -355,9 +356,9 @@ describe("D1AssetMetadataStore — withheld listing (#366)", () => {
     await storeA.upsertAsset(asset({ version: "2.0.0", visibility: "pending_scan" }));
     await storeA.upsertAsset(asset({ version: "3.0.0", visibility: "quarantined" }));
     await storeA.upsertAsset(asset({ version: "4.0.0" }));
-    await env.TENANT_DB_A.prepare(
-      "UPDATE stored_assets SET visibility = 'weird' WHERE version = '4.0.0'",
-    ).run();
+    await tenantDb(TENANT_A)
+      .prepare("UPDATE stored_assets SET visibility = 'weird' WHERE version = '4.0.0'")
+      .run();
     // The predicate is `<> 'visible'` and not an enumeration, so the poisoned
     // row an operator most needs to see is not the one that hides.
     expect((await storeA.listWithheldAssets(TENANT_A)).map((row) => row.version)).toEqual([
