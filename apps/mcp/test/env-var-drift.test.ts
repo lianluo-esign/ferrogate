@@ -368,6 +368,7 @@ describe("the env-var drift gate itself", () => {
       "FG_DEV_MCP_GUARDRAILS",
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
+      "ASSETS",
       "DB",
       // #687's unified CLIENT session, the other axis from MCP_SESSION below.
       "MCP_CLIENT_SESSION",
@@ -377,6 +378,7 @@ describe("the env-var drift gate itself", () => {
       // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
       // because it is LIVE; while it was commented out it was not.
       "RATE_LIMIT",
+      "TENANT_DB",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(7);
     expect(READS.named.has("MCP_SESSION")).toBe(true);

@@ -231,6 +231,62 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 # databases are resolved at runtime through `tenant_databases`, never bound here.
 migrations_dir = "../../sql/d1-ts/control"
 
+# ---------------------------------------------------------------------------
+# R2 — asset object storage
+#
+# Read as `env.ASSETS`, the production `AssetObjectStore` — the same binding
+# name and the same bucket `apps/gateway/wrangler.toml` declares. It holds the
+# bytes of every hosted asset, and the MCP `resources/read` / `fetch_asset`
+# surfaces fetch the object at `storage_uri` from this bucket.
+#
+# What breaks without it: `resolvePorts` falls back to `InMemoryAssets`, whose
+# contents vanish with the isolate, so `resources/list` returns empty and
+# `resources/read` / `fetch_asset` 404 for every published asset.
+#
+# WIRING STATE — LIVE. `resolvePorts` selects `D1R2AssetReader` when both
+# `env.ASSETS` and `env.TENANT_DB` are present, and falls back to
+# `InMemoryAssets` only when either is absent (offline / tests).
+#
+# `bucket_name` / `preview_bucket_name` are PLACEHOLDERS; the deploy step
+# substitutes the account's real buckets. R2 names are lowercase alphanumerics
+# and hyphens, 3–63 chars.
+#
+# NOTE: the live account (ferrogate) has R2 unactivated. A deploy with this
+# stanza against an account without the R2 plan fails with error 10042, not
+# 10000. Activate R2 on the account before deploying this Worker.
+# ---------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "replace-at-deploy-ferrogate-assets"
+preview_bucket_name = "replace-at-deploy-ferrogate-assets-preview"
+
+# ---------------------------------------------------------------------------
+# D1 — the TENANT database holding `stored_assets` / `asset_channels`
+#
+# Read as `env.TENANT_DB` by `resolvePorts` (src/ports.ts). The tenant database
+# is where `stored_assets` rows live (`sql/d1-ts/tenant/0001_init_tenant.sql`),
+# and the MCP asset reader queries this database for asset metadata before
+# fetching the object body from `env.ASSETS`.
+#
+# This is a SEPARATE binding from `env.DB` (the CONTROL database), because the
+# MCP Worker already binds `DB` for the control-plane tables (identity grants,
+# server catalog, lifecycle, RBAC). The tenant database is resolved per-tenant
+# at runtime through `EnvBindingTenantDatabaseRouter`, exactly as
+# `apps/gateway` resolves its tenant databases.
+#
+# What breaks without it: `resolvePorts` falls back to `InMemoryAssets`, so
+# every asset read returns empty / 404.
+#
+# `database_name` / `database_id` are PLACEHOLDERS; the deploy step substitutes
+# the real ids. The migration must be applied first (`wrangler d1 migrations
+# apply ferrogate-tenant --local`).
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "TENANT_DB"
+database_name = "ferrogate-tenant"
+database_id = "replace-at-deploy"
+migrations_dir = "../../sql/d1-ts/tenant"
+
 # ===========================================================================
 # NOT DECLARED — and why
 #

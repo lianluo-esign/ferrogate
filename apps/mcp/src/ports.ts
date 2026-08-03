@@ -25,7 +25,7 @@
  * | `admission`   | `McpAdmissionGate` (`src/admission/`) — BOUND              |
  * | `approvals`   | `D1ToolApprovals` over the CONTROL database — BOUND        |
  * | `oauth`       | {@link unboundOauthProvider} — NOT BOUND, fails closed     |
- * | `assets`      | {@link InMemoryAssets} — isolate-local (see below)         |
+ * | `assets`      | {@link D1R2AssetReader} (D1 + R2) — BOUND (see below)      |
  * | `audit`       | {@link InMemoryAuditSink} — isolate-local (see wrangler)   |
  *
  * `guardrails`, `secrets`, `auth` and `approvals` are each bound in EVERY
@@ -826,6 +826,158 @@ function assetKey(tenantId: string, assetType: string, name: string, version: st
 }
 
 // ---------------------------------------------------------------------------
+// D1 + R2 asset reader — the production AssetReaderPort
+// ---------------------------------------------------------------------------
+
+/**
+ * The D1+R2-backed {@link AssetReaderPort}.
+ *
+ * Queries `stored_assets` from the TENANT database (`env.TENANT_DB`) for
+ * asset metadata, then fetches the object body from `env.ASSETS` (R2) using
+ * the `storage_uri` column as the object key.
+ *
+ * Selected by {@link resolvePorts} when BOTH `env.ASSETS` and `env.TENANT_DB`
+ * are present. Falls back to {@link InMemoryAssets} when either is absent
+ * (offline / tests).
+ *
+ * ## #366 withholding
+ *
+ * An asset whose `visibility` is not `'visible'` or whose `yanked` flag is
+ * `true` is indistinguishable from a missing one — on the listing AND on the
+ * read. This matches the behaviour of {@link InMemoryAssets} and the REST
+ * asset surface.
+ *
+ * ## Integrity verification
+ *
+ * The `content_hash` column (sha256 hex) is verified against the fetched R2
+ * object body. A mismatch returns `{ kind: "integrity" }` — the same error
+ * the REST asset pull returns.
+ */
+export class D1R2AssetReader implements AssetReaderPort {
+  readonly #db: D1Database;
+  readonly #bucket: R2Bucket;
+
+  constructor(db: D1Database, bucket: R2Bucket) {
+    this.#db = db;
+    this.#bucket = bucket;
+  }
+
+  async list(tenantId: string): Promise<readonly StoredAsset[]> {
+    const rows = await this.#db
+      .prepare(
+        "SELECT asset_type, name, version, content_type, content_hash, size_bytes, " +
+          "yanked, visibility FROM stored_assets WHERE tenant_id = ?1",
+      )
+      .bind(tenantId)
+      .all<Row>();
+    return (rows.results ?? []).map((row) => rowToStoredAsset(row));
+  }
+
+  async read(
+    tenantId: string,
+    assetType: string,
+    name: string,
+    version: string,
+  ): Promise<
+    { ok: true; asset: StoredAsset; content: Uint8Array } | { ok: false; error: AssetReadFailure }
+  > {
+    const rows = await this.#db
+      .prepare(
+        "SELECT asset_type, name, version, content_type, content_hash, size_bytes, " +
+          "storage_uri, yanked, visibility FROM stored_assets " +
+          "WHERE tenant_id = ?1 AND asset_type = ?2 AND name = ?3 AND version = ?4",
+      )
+      .bind(tenantId, assetType, name, version)
+      .all<Row>();
+    const row = (rows.results ?? [])[0];
+    if (row === undefined) return { ok: false, error: { kind: "not_found" } };
+
+    // #366: an undownloadable (pending / quarantined / yanked) asset is
+    // indistinguishable from a missing one at the read chokepoint.
+    const downloadable = isDownloadable(row);
+    if (!downloadable) return { ok: false, error: { kind: "not_found" } };
+
+    const storageUri = text(row.storage_uri);
+    if (storageUri === "") {
+      return { ok: false, error: { kind: "storage", message: "asset has no storage URI" } };
+    }
+
+    let object: R2ObjectBody | null;
+    try {
+      object = await this.#bucket.get(storageUri);
+    } catch (cause) {
+      return {
+        ok: false,
+        error: {
+          kind: "bucket_unavailable",
+          message: `R2 get failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      };
+    }
+    if (object === null) {
+      return { ok: false, error: { kind: "not_found" } };
+    }
+
+    const content = new Uint8Array(await object.arrayBuffer());
+
+    // Integrity check: sha256 of the fetched body must match the recorded hash.
+    const recordedHash = text(row.content_hash);
+    if (recordedHash !== "") {
+      const digest = await crypto.subtle.digest("SHA-256", content);
+      const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      if (hex !== recordedHash) {
+        return { ok: false, error: { kind: "integrity" } };
+      }
+    }
+
+    return {
+      ok: true,
+      asset: rowToStoredAsset(row),
+      content,
+    };
+  }
+}
+
+/** A raw D1 result row. */
+interface Row {
+  [column: string]: unknown;
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : String(value ?? "");
+}
+
+function integer(value: unknown): number {
+  return typeof value === "number" ? value : Number(value ?? 0);
+}
+
+function boolFromSqlite(value: unknown): boolean {
+  return value === 1 || value === true || value === "1";
+}
+
+/**
+ * SQLite stores `visibility` as TEXT. `'visible'` is the only value that
+ * makes an asset downloadable; anything else (including `NULL`, `'pending_scan'`
+ * and `'quarantined'`) is withheld.
+ */
+function isDownloadable(row: Row): boolean {
+  return text(row.visibility) === "visible" && !boolFromSqlite(row.yanked);
+}
+
+/** Map a D1 row to the MCP's {@link StoredAsset}. */
+function rowToStoredAsset(row: Row): StoredAsset {
+  return {
+    assetType: text(row.asset_type),
+    name: text(row.name),
+    version: text(row.version),
+    contentType: text(row.content_type),
+    sizeBytes: integer(row.size_bytes),
+    sha256: text(row.content_hash),
+    downloadable: isDownloadable(row),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Per-user MCP identity storage (port of `ferrogate-storage::McpCredentialRepository`)
 // ---------------------------------------------------------------------------
 
@@ -1498,6 +1650,42 @@ export interface McpEnv {
   DB?: D1Database;
 
   /**
+   * R2 bucket holding the bytes of every hosted asset. Read as `env.ASSETS`
+   * by {@link resolvePorts} — the same binding name and the same bucket
+   * `apps/gateway/wrangler.toml` declares. {@link D1R2AssetReader} fetches
+   * the object at `storage_uri` from this bucket.
+   *
+   * OPTIONAL, and its absence is a graceful degradation: {@link resolvePorts}
+   * falls back to {@link InMemoryAssets} when either this or {@link TENANT_DB}
+   * is absent, so offline / test environments continue to work with the
+   * in-memory store.
+   *
+   * NOTE: the live account (ferrogate) has R2 unactivated. A deploy with this
+   * binding against an account without the R2 plan fails with error 10042.
+   * Activate R2 on the account before deploying this Worker.
+   */
+  ASSETS?: R2Bucket;
+
+  /**
+   * D1 database holding the tenant-scoped `stored_assets` /
+   * `asset_channels` tables (`sql/d1-ts/tenant/0001_init_tenant.sql`).
+   * Read as `env.TENANT_DB` by {@link resolvePorts} — a SEPARATE binding
+   * from `env.DB` (the CONTROL database), because this Worker already binds
+   * `DB` for the control-plane tables.
+   *
+   * {@link D1R2AssetReader} queries this database for asset metadata before
+   * fetching the object body from {@link ASSETS}. The tenant database is
+   * resolved per-tenant at runtime through `EnvBindingTenantDatabaseRouter`,
+   * exactly as `apps/gateway` resolves its tenant databases.
+   *
+   * OPTIONAL, and its absence is a graceful degradation: {@link resolvePorts}
+   * falls back to {@link InMemoryAssets} when either this or {@link ASSETS}
+   * is absent, so offline / test environments continue to work with the
+   * in-memory store.
+   */
+  TENANT_DB?: D1Database;
+
+  /**
    * The SHARED rate-limit counter namespace — `apps/gateway`'s
    * `RateLimiterDurableObject`, bound here CROSS-SCRIPT.
    *
@@ -1990,6 +2178,15 @@ export function resolvePorts(env: McpEnv): McpPorts {
   // enforced on `apps/gateway` and silently ignored here.
   const rbac = rbacAuthorizerFromEnv(env);
   const entitlements = durableEntitlements(env);
+  // Asset reader: D1+R2 when both bindings are present, InMemoryAssets otherwise.
+  // Bound in the dev posture too, for the same provability reason the auth port
+  // is: the offline suite can only drive the deployed app end to end there, so a
+  // gate mounted anywhere else would be untestable over `SELF`. Deleting the
+  // `assets` line below turns `test/d1-r2-asset-reader.test.ts` red.
+  const assets: AssetReaderPort =
+    env.ASSETS !== undefined && env.TENANT_DB !== undefined
+      ? new D1R2AssetReader(env.TENANT_DB, env.ASSETS)
+      : inMemoryPorts().assets;
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
     return {
       ...inMemoryPorts(),
@@ -2012,6 +2209,7 @@ export function resolvePorts(env: McpEnv): McpPorts {
     lifecycle,
     rbac,
     entitlements,
+    assets,
   };
   if (durableIdentityBound(env)) {
     return {
