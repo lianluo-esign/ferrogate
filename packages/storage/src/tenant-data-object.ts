@@ -168,8 +168,10 @@ const REFUSAL = "tenant_data_object";
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose; splitting before stripping cuts
- *    statements in half at those points.
+ *    comment lines containing a `;` mid-prose, and the seven files have 24
+ *    between them (18 in 0001, 1 in 0003, 5 in 0005) — 24, not 18, is the
+ *    number that bounds this function's exposure. Splitting before stripping
+ *    cuts statements in half at every one of them.
  *  * The filter is line-granular after `trimStart()`, which is what makes it
  *    lossless over `0005_responses_conversations.sql` — that file indents `--`
  *    comments BETWEEN columns, and a filter anchored at column 0 would corrupt
@@ -387,7 +389,12 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running 22 `CREATE TABLE IF NOT EXISTS` and 26 `CREATE INDEX`.
+   * re-running the 62 statements of the seven files — 22 `CREATE TABLE IF NOT
+   * EXISTS`, 29 `CREATE INDEX`, 1 `CREATE UNIQUE INDEX`, 9 `ALTER TABLE … ADD
+   * COLUMN` and the ledger `INSERT`. (Counted, not estimated: an earlier draft
+   * of this comment said "26 `CREATE INDEX`". The nine ALTERs are the half that
+   * matters — the CREATEs are idempotent by construction and the ALTERs are not,
+   * so the gate is load-bearing rather than an optimisation.)
    */
   #migrate(): void {
     const applied = this.#appliedVersion();

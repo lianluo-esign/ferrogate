@@ -118,3 +118,19 @@ export {
   tenantDatabase,
   tenantDatabaseOf,
 } from "./middleware.js";
+/**
+ * `TenantDataObject` addressing (#822).
+ *
+ * Re-exported here, and NOT wired into {@link createTenantDatabaseResolver},
+ * because the `durable_object` routing mode needs a `D1Database`-shaped facade
+ * over the object's `query`/`batch` RPCs that does not exist yet — see the
+ * docblock in `./tenant-data.ts` for why shipping half a router would be worse
+ * than shipping none. What exists now is the addressing rule and the two
+ * refusals around it, exported so the facade slice imports a reviewed seam
+ * instead of writing a second `idFromName` call somewhere else.
+ */
+export {
+  type TenantDataBindings,
+  tenantDataNamespace,
+  tenantDataObjectFor,
+} from "./tenant-data.js";

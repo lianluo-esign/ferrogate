@@ -1346,6 +1346,56 @@ tag = "v3"
 new_sqlite_classes = ["ShadowBudgetDurableObject"]
 
 # ---------------------------------------------------------------------------
+# TENANT_DATA — one SQLite-backed Durable Object per tenant, which IS that
+# tenant's database (#822, docs/design/per-tenant-durable-object-storage-2026-08.md)
+#
+# Read by `src/tenancy/tenant-data.ts` as
+# `env.TENANT_DATA.idFromName(tenantId)`; the class is `TenantDataObject` from
+# `@ferrogate/storage/durable-objects`, re-exported from `src/worker.ts` because
+# workerd resolves `class_name` against the ENTRY module (same startup rule, and
+# the same vitest blind spot, as the three classes above).
+#
+# WHY THIS REPLACES ONE D1 DATABASE PER TENANT. D1 bindings resolve at DEPLOY
+# time, so `native_binding` makes tenant signup a `wrangler deploy` and caps the
+# product at the ~5,000-bindings-per-script ceiling; the REST escape hatch has no
+# transaction envelope, so it reports `supportsAtomicBatch: false` and
+# `requireAtomicBatch()` refuses all 13 money paths. `idFromName` addresses an
+# object at RUNTIME — unlimited instances, no deploy, 10 GB each — and
+# `ctx.storage.transactionSync()` is a real SQLite transaction that rolls back on
+# throw, which is what restores the wallet reserve, the workflow-budget debit and
+# the asset quota admission.
+#
+# `new_sqlite_classes` IS NOT A STYLE CHOICE HERE, AND IT IS IRREVERSIBLE.
+# `new_classes` deploys cleanly and silently gives the object the key-value
+# backend, at which point `ctx.storage.sql` does not exist and this object has no
+# database at all. The storage backend is IMMUTABLE once a namespace exists
+# (`storage_type_mismatch`); switching later requires a `deleted` tombstone and
+# total data loss, per tenant. So this line has to be right in the FIRST deploy,
+# which is why the stanza lands ahead of the routing mode that will use it.
+#
+# A SHIPPED MIGRATION IS IMMUTABLE, so this is a NEW tag `v4`, never an edit to
+# `v1`/`v2`/`v3` above.
+#
+# NO OTHER WORKER DECLARES A MIGRATION FOR THIS CLASS. A migration INTRODUCES a
+# class and the class is introduced by the script that DEFINES it — this one. An
+# app that later wants tenant storage binds it cross-script with
+# `script_name = "ferrogate-gateway"` and adds neither a `[[migrations]]` stanza
+# nor a `src/worker.ts` re-export, exactly as `apps/mcp` does for RATE_LIMIT.
+#
+# Unbound, `tenantDataNamespace()` raises a 503
+# `tenant_database_routing_misconfigured`. It never falls back to `env.DB`:
+# every unresolvable tenant is an error, and there is deliberately no default
+# database anywhere in this directory.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["TenantDataObject"]
+
+# ---------------------------------------------------------------------------
 # TELEMETRY_COLLECTOR — the OTLP egress to `apps/telemetry`
 #
 # Read by `src/telemetry/emit.ts` (`telemetryFromEnv`), which is mounted twice:

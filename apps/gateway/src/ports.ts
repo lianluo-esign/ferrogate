@@ -12,6 +12,10 @@
  * `AuthError`) and `crates/ferrogate-storage/src/lifecycle_gate.rs`.
  */
 import type { VerifiedDelegationChain } from "@ferrogate/identity";
+// TYPE-only, and it must stay that way: the module behind this subpath extends
+// `DurableObject` from `cloudflare:workers`, so a value import would pull a
+// workerd-only module into every consumer of this file's types.
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -465,6 +469,24 @@ export interface GatewayBindings {
    * `class_name` against the ENTRY module.
    */
   readonly SHADOW_BUDGET?: DurableObjectNamespace;
+
+  /**
+   * `TenantDataObject` namespace — one SQLite-backed object per tenant, which
+   * IS that tenant's database (#822). Read by `src/tenancy/tenant-data.ts`
+   * (`tenantDataNamespace`), addressed `idFromName(tenantId)`.
+   *
+   * THE ONLY DO BINDING ON THIS WORKER WITH NO DEGRADED MODE. The three above
+   * each fall back to a per-isolate approximation; this one holds the tenant's
+   * wallet, usage and asset rows, so absent means REFUSE — a 503
+   * `tenant_database_routing_misconfigured`, never a fallback to `env.DB`.
+   *
+   * Declared here as well as in `./tenancy/ports.ts`'s `TenancyBindings`
+   * because this file is what a reader consults for "what does this Worker
+   * bind", and `wrangler.toml` declares four DO namespaces. The class is
+   * re-exported from `src/worker.ts`: workerd resolves a binding's `class_name`
+   * against the ENTRY module.
+   */
+  readonly TENANT_DATA?: TenantDataNamespace;
 
   /**
    * `[[services]] TELEMETRY_COLLECTOR` → the `ferrogate-telemetry` Worker's
