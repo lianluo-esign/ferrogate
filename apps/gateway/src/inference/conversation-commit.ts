@@ -61,28 +61,31 @@
  * binding above re-decides under that reader's own live policy.
  *
  * ============================================================================
- * THE RESIDUAL: A CROSS-KEY CONTINUATION
+ * CROSS-KEY CONTINUATIONS (#779)
  * ============================================================================
  *
- * One leg is open and is deliberately not closed here. A GOVERNED credential
- * that continues an UNGOVERNED credential's chain replays that turn's stored
- * text UPSTREAM as `input`. Neither fix reaches it:
+ * This module still does not screen a continuation: it cannot, because the
+ * chain is assembled inside the inner inference router. The router now closes
+ * that leg at the assembly point:
  *
- *  - this module writes what the WRITER's policy approved, which for an
- *    ungoverned writer is the verbatim text, and that is correct for the writer;
- *  - the `getResponse` binding screens a READ, and a continuation is not a read.
+ *  - each row records the screening API-key id where known. The value is NULL
+ *    for rows predating the column and callers without an API-key id. A NULL is
+ *    foreign to a continuing caller with a known id, but compares as the same
+ *    credential when the continuing caller also has no id;
+ *  - the guardrail middleware publishes its already-resolved engine as a
+ *    request-scoped replay capability; and
+ *  - `handlers.ts::prepareConversation` re-decides stored input and output under
+ *    the continuing key only when that id differs.
  *
- * It cannot be closed from the guardrail middleware at any position: the chain
- * is assembled INSIDE the inner inference router, after the middleware's request
- * stage has already run over the client's own body (which carries only
- * `previous_response_id` and the new input), so the assembled document does not
- * exist at any point the screener can observe before dispatch. Closing it means
- * screening at the point of assembly, under a cost argument of its own —
- * O(foreign turns), zero for the same-credential conversations that are the
- * common case. That is a change inside the router, and it needs each stored turn
- * to record the credential its screening was decided under, so it is tracked as
- * #779 — with the measured upstream body in it — rather than smuggled into this
- * one.
+ * That id pins the credential, NOT the policy. `GuardrailEngine` selects policy
+ * on every evaluation by organization/tenant, project, workspace, API key,
+ * service account, gateway config, model, provider and managed-action scope.
+ * Because replay is gated only on the API-key id, a same-key continuation whose
+ * other selection inputs differ skips replay screening; issue #808 tracks that
+ * gap. The current cost is O(foreign-credential turns), with zero detector work
+ * for same-credential turns. The stored row remains byte-for-byte what its
+ * writer received; replay screening works on a clone and never rewrites shared
+ * state.
  *
  * ============================================================================
  * THE SEAM
