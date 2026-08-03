@@ -516,34 +516,45 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
 
     // FIXED by #727: the gateway now detects the Anthropic ingress (via the
     // `anthropic-version` header) and serves the Anthropic-dialect model object
-    // (`{id, type:"model", display_name, created_at}`) on that ingress, while
-    // the OpenAI ingress keeps the OpenAI dialect (`{id, object:"model",
-    // created, owned_by}`).
+    // (seven-field `ModelInfo` shape) on that ingress, while the OpenAI ingress
+    // keeps the OpenAI dialect (`{id, object:"model", created, owned_by}`).
     const first = page.data[0] as unknown as Record<string, unknown>;
     expect(first?.["id"]).toEqual(expect.any(String));
     expect(first?.["type"]).toBe("model");
     expect(first?.["display_name"]).toBe("gpt-4o-mini");
     expect(first?.["created_at"]).toEqual(expect.any(String));
+    // Three fields are emitted as null because FerroGate does not track the
+    // Anthropic capability model or per-model max_tokens limits. These
+    // assertions pin the omission as a recorded contract rather than an accident.
+    expect(first?.["capabilities"]).toBeNull();
+    // max_input_tokens is mapped from context_window, which may be null.
+    expect(first?.["max_input_tokens"]).toBeNull();
+    expect(first?.["max_tokens"]).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
     expect(first?.["object"]).toBeUndefined();
   });
 
-  it("models.retrieve() returns the OpenAI dialect on the Anthropic ingress (deliberate asymmetry, issue #727)", async () => {
-    // Unlike models.list(), models.retrieve() has NO dialect branch — it always
-    // answers in the OpenAI dialect ({id, object, created, owned_by}) regardless
-    // of ingress. The Anthropic SDK does not call this endpoint, so the
-    // asymmetry has no practical impact on Anthropic clients. Documented at
-    // handleModel in handlers.ts.
+  it("models.retrieve() returns the Anthropic dialect on the Anthropic ingress", async () => {
+    // FIXED by #727: the gateway now detects the Anthropic ingress and serves
+    // the Anthropic-dialect model object on `GET /v1/models/{model}`, just as
+    // it does for `models.list()`.
     const model = await anthropicClient().models.retrieve("gpt-4o-mini");
 
     expect(model.id).toBe("gpt-4o-mini");
-    // The Anthropic SDK's ModelInfo type has `type: "model"`, but the actual
-    // response from this endpoint is the OpenAI shape with `object: "model"`.
-    expect((model as unknown as Record<string, unknown>)?.["object"]).toBe("model");
-    expect((model as unknown as Record<string, unknown>)?.["created"]).toEqual(expect.any(Number));
-    expect((model as unknown as Record<string, unknown>)?.["owned_by"]).toEqual(expect.any(String));
-    // The Anthropic-dialect fields should NOT be present.
-    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toBeUndefined();
-    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toBeUndefined();
+    // The Anthropic SDK's ModelInfo type has `type: "model"`.
+    expect((model as unknown as Record<string, unknown>)?.["type"]).toBe("model");
+    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toEqual(expect.any(String));
+    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toEqual(expect.any(String));
+    // Three fields are emitted as null because FerroGate does not track the
+    // Anthropic capability model or per-model max_tokens limits. These
+    // assertions pin the omission as a recorded contract rather than an accident.
+    expect((model as unknown as Record<string, unknown>)?.["capabilities"]).toBeNull();
+    // max_input_tokens is mapped from context_window, which may be null.
+    expect((model as unknown as Record<string, unknown>)?.["max_input_tokens"]).toBeNull();
+    expect((model as unknown as Record<string, unknown>)?.["max_tokens"]).toBeNull();
+    // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
+    expect((model as unknown as Record<string, unknown>)?.["object"]).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.["created"]).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.["owned_by"]).toBeUndefined();
   });
 });

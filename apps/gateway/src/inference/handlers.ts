@@ -1951,8 +1951,8 @@ function describeCatalogEntry(deps: ResolvedInferenceDeps, entry: PhysicalRoute)
  * True when the request arrived on the Anthropic ingress.
  *
  * The Anthropic SDK always sends `anthropic-version`; the OpenAI SDK never does.
- * This is the only reliable way to distinguish the two ingresses for shared
- * endpoints like `GET /v1/models`.
+ * (The Anthropic SDK also sends `x-api-key` where the OpenAI SDK sends
+ * `Authorization: Bearer`, but the version header is the simpler discriminator.)
  */
 function isAnthropicIngress(c: InferenceContext): boolean {
   return c.req.header("anthropic-version") !== undefined;
@@ -1961,22 +1961,37 @@ function isAnthropicIngress(c: InferenceContext): boolean {
 /**
  * Build an Anthropic-dialect model object from a `ModelDescriptor`.
  *
- * The Anthropic SDK's `ModelInfo` is `{id, type:"model", display_name,
- * created_at}`. `display_name` is set to the model id — FerroGate's own choice,
- * because the upstream model descriptors carry no human-readable label, so the
- * id is used verbatim. `created_at` is the ISO-8601 string the SDK expects.
+ * The Anthropic SDK's `ModelInfo` has seven fields: `id`, `type: "model"`,
+ * `display_name`, `created_at`, `capabilities`, `max_input_tokens`,
+ * `max_tokens`. Three of these are emitted as `null` because FerroGate does not
+ * track the Anthropic capability model or per-model `max_tokens` limits:
+ *
+ *  - `capabilities` → `null` (FerroGate's own capability model is
+ *    `ModelCapability[]`, not the Anthropic `ModelCapabilities` shape);
+ *  - `max_tokens` → `null` (not tracked per model);
+ *  - `max_input_tokens` → `descriptor.context_window` (same concept).
+ *
+ * `display_name` is set to the model id — FerroGate's own choice, because the
+ * upstream model descriptors carry no human-readable label, so the id is used
+ * verbatim. `created_at` is the ISO-8601 string the SDK expects.
  */
 function anthropicModelFrom(descriptor: ModelDescriptor): {
   id: string;
   type: "model";
   display_name: string;
   created_at: string;
+  capabilities: null;
+  max_input_tokens: number | null;
+  max_tokens: null;
 } {
   return {
     id: descriptor.id,
     type: "model",
     display_name: descriptor.id,
     created_at: new Date(descriptor.created * 1000).toISOString(),
+    capabilities: null,
+    max_input_tokens: descriptor.context_window,
+    max_tokens: null,
   };
 }
 
@@ -2000,21 +2015,9 @@ function handleModels(c: InferenceContext, deps: ResolvedInferenceDeps): Respons
 /**
  * `GET /v1/models/{model}` — the single-model read.
  *
- * ## Dialect asymmetry (deliberate, issue #727)
- *
- * Unlike `handleModels` (the listing endpoint), this handler does NOT branch on
- * `isAnthropicIngress`. It always returns the OpenAI dialect (`{id, object,
- * created, owned_by}`) via `describeCatalogEntry`, even when the request
- * arrives on the Anthropic ingress. This is a deliberate contract split:
- *
- * - `models.list()` answers in the caller's dialect (Anthropic shape on the
- *   Anthropic ingress, OpenAI shape on the OpenAI ingress).
- * - `models.retrieve()` always answers in the OpenAI dialect, regardless of
- *   ingress. The Anthropic SDK does not call this endpoint, so the asymmetry
- *   has no practical impact on Anthropic clients.
- *
- * If a future Anthropic SDK version starts calling `GET /v1/models/{id}`, this
- * handler will need a dialect branch matching `handleModels`.
+ * Branches on `isAnthropicIngress` like `handleModels` does, so
+ * `models.retrieve()` answers in the caller's dialect (Anthropic shape on the
+ * Anthropic ingress, OpenAI shape on the OpenAI ingress).
  *
  * ## Why 404, when invocation answers 400 `model_not_found`
  *
@@ -2043,7 +2046,12 @@ function handleModel(c: InferenceContext, deps: ResolvedInferenceDeps): Response
   if (entry === undefined) {
     return errorResponse(reject(404, "model_not_found", `unknown model ${requested}`), requestId);
   }
-  return jsonResponse(describeCatalogEntry(deps, entry), requestId);
+
+  const descriptor = describeCatalogEntry(deps, entry);
+  if (isAnthropicIngress(c)) {
+    return jsonResponse(anthropicModelFrom(descriptor), requestId);
+  }
+  return jsonResponse(descriptor, requestId);
 }
 
 // ---------------------------------------------------------------------------

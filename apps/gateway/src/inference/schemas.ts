@@ -604,7 +604,18 @@ export type OpenAiModelList = z.infer<typeof openAiModelListSchema>;
 /**
  * `AnthropicModel` — the Anthropic SDK's `ModelInfo` shape.
  *
- * The Anthropic SDK expects `{id, type:"model", display_name, created_at}` where
+ * The Anthropic SDK's `ModelInfo` has seven fields: `id`, `type: "model"`,
+ * `display_name`, `created_at`, `capabilities`, `max_input_tokens`,
+ * `max_tokens`. Three of these are emitted as `null` because FerroGate does not
+ * track the Anthropic capability model or per-model `max_tokens` limits:
+ *
+ *  - `capabilities` → `null` (FerroGate's own capability model is
+ *    `ModelCapability[]`, not the Anthropic `ModelCapabilities` shape);
+ *  - `max_tokens` → `null` (not tracked per model);
+ *  - `max_input_tokens` → `descriptor.context_window` (same concept).
+ *
+ * `display_name` is the model id (FerroGate's own choice — the upstream model
+ * descriptors carry no human-readable label, so the id is used verbatim).
  * `created_at` is an ISO-8601 string. This is served on the Anthropic ingress
  * (requests carrying `anthropic-version`), while the OpenAI ingress keeps the
  * OpenAI dialect (`{id, object:"model", created, owned_by}`).
@@ -614,6 +625,9 @@ export const anthropicModelSchema = z.object({
   type: z.literal("model"),
   display_name: z.string(),
   created_at: z.string(),
+  capabilities: z.null(),
+  max_input_tokens: z.number().nullable(),
+  max_tokens: z.null(),
 });
 export type AnthropicModel = z.infer<typeof anthropicModelSchema>;
 
