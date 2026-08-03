@@ -43,14 +43,25 @@ function status(secret: string): Promise<Response> {
 /**
  * An `admin.write` operation, for proving what a minted key may and may not do.
  *
- * `POST /admin/v1/roles` is chosen because a minimal body is VALID there, so a
- * refusal can only be the scope gate — an operation that 400s on the body would
- * make "not 403" unreadable as "authorized".
+ * The probe must be an operation where a minimal body is VALID, so a refusal
+ * can only be the scope gate — one that 400s on the body would make "not 403"
+ * unreadable as "authorized".
+ *
+ * It was `POST /admin/v1/roles` until #791, which made every write in the
+ * `rbac` group operator-only. The keys minted below are TENANT-scoped, so that
+ * probe now answers `403 rbac_write_operator_only` for a reason that has
+ * nothing to do with this file's subject (the scope clamp), and the case that
+ * asserted `201` went red. Changed deliberately rather than weakened:
+ * `POST /admin/v1/agent-workflows` is a plain `crudGroup` collection
+ * (`routes/admin_agent_workflow.ts:43`) whose fields are all optional and which
+ * a tenant-scoped `admin.write` key is entitled to — so `403` here still means
+ * "the minted credential lacks `admin.write`", which is the only thing these
+ * cases are allowed to be reading.
  */
 function write(secret: string): Promise<Response> {
   return SELF.fetch(
-    `${BASE}/admin/v1/roles`,
-    jsonRequest(secret, "POST", { id: `role_${crypto.randomUUID()}`, name: "probe" }),
+    `${BASE}/admin/v1/agent-workflows`,
+    jsonRequest(secret, "POST", { id: `wf_${crypto.randomUUID()}`, name: "probe" }),
   );
 }
 
