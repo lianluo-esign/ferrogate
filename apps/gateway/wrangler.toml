@@ -890,6 +890,44 @@ ASSET_S3_BUCKET = ""
 ASSET_SCANNER = ""
 ASSET_SCANNER_ENDPOINT = ""
 
+# ---------------------------------------------------------------------------
+# Guardrail screening of PUBLISHED assets (src/assets/guardrail-screener.ts,
+# issue #740)
+#
+# The stage runs only when this deployment HAS guardrail policies — either
+# `GATEWAY_GUARDRAIL_POLICIES` above or the durable revisions in `CONTROL_DB`.
+# With neither, the asset screener chain is byte-for-byte what it was.
+#
+#   ASSET_GUARDRAIL_MODES             per-asset-type enforcement. JSON:
+#                                       { "default": { "static_site": "block" },
+#                                         "tenants": { "t_1": { "config_file": "off" } } }
+#                                     Values: "off" | "flag" | "block".
+#                                     `block` QUARANTINES — the version is
+#                                     stored, withheld from every read surface
+#                                     and listed on GET /v1/assets/withheld with
+#                                     the evidence; it is not a 422.
+#                                     MERGED over the shipped defaults, which are
+#                                     `block` for `mcp_manifest` and
+#                                     `skill_bundle` (both EXECUTE on the
+#                                     consumer), `flag` for `config_file` and
+#                                     `static_site`, and `off` for everything
+#                                     else. A malformed value is a HARD boot
+#                                     error, never a silently skipped policy.
+#   ASSET_GUARDRAIL_MAX_SCREEN_BYTES  how much text one evaluation will decode
+#                                     and hand a detector; default 1048576, the
+#                                     same figure the inference request stage
+#                                     uses. ABOVE it nothing is read and the
+#                                     outcome is `undecidable`, which under
+#                                     `block` withholds — "too big to check"
+#                                     must not become "checked".
+#
+# Both empty ⇒ the documented defaults. Which asset types have a readable text
+# surface at all (and which honestly do not) is stated in the module header of
+# `src/assets/guardrail-screener.ts`.
+# ---------------------------------------------------------------------------
+ASSET_GUARDRAIL_MODES = ""
+ASSET_GUARDRAIL_MAX_SCREEN_BYTES = ""
+
 # Telemetry egress (`src/telemetry/`). The TRANSPORT is the
 # `[[services]] TELEMETRY_COLLECTOR` binding declared further down; these two
 # are the knobs that ride with it. `TELEMETRY_TOKEN` is deliberately ABSENT —
