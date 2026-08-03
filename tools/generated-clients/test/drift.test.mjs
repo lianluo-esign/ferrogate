@@ -62,8 +62,8 @@ describe("generated clients", () => {
       const result = checkArtifact(artifact);
       expect(result.ok, result.reason).toBe(true);
     },
-    // 30s is sized against 518ms unloaded; the two complete generator runs in
-    // this suite took 7.46s together in the loaded root gate.
+    // 30s is sized against 518ms in an otherwise-idle sweep and 7.46s for both
+    // generator runs during a 29-way concurrent root sweep.
     30_000,
   );
 
@@ -246,7 +246,7 @@ describe("generation is one command", () => {
       cwd: REPO_ROOT,
       stdio: ["ignore", "ignore", "inherit"],
     });
-    // 30s is sized against 549ms unloaded; the two complete generator runs in
-    // this suite took 7.46s together in the loaded root gate.
+    // 30s is sized against 549ms in an otherwise-idle sweep and 7.46s for both
+    // generator runs during a 29-way concurrent root sweep.
   }, 30_000);
 });

@@ -219,6 +219,10 @@ describe("config validation", () => {
    *     `[0, 0)`, which no positive-width patch can ever cover, so a downstream
    *     `has_unredactable_findings` check forces Deny. A truncated scan can
    *     never be fully scrubbed, so it must never be treated as scrubbable.
+   *
+   * The cap bounds memory, not the current quadratic CPU cost on repetitive
+   * attacker-controlled input. Issue #817 tracks that production defect; a
+   * longer test timeout here would only hide its signal.
    */
   test("bounded evidence: >10k matches emit one detector.truncated marker", async () => {
     const detector = DeterministicDetector.new({
@@ -278,9 +282,7 @@ describe("config validation", () => {
           (ordinary?.byte_start as number) < p.byte_end,
       ),
     ).toBe(true);
-    // 30s is sized against 745ms unloaded and a reproduced 7.983s at load >9;
-    // the >10k-match flood is the proof that evidence remains bounded.
-  }, 30_000);
+  });
 
   test("under the cap, no truncation marker is emitted", async () => {
     // The other half: the cap must not fire on ordinary traffic, or every

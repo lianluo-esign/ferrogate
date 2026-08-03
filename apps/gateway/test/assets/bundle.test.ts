@@ -233,8 +233,9 @@ describe("static_site bundle ceilings are real bounds, not comments", () => {
     // And nothing durable survived the attempt.
     expect(await h.metadata.getAsset(assetId("1.0.0"))).toBeNull();
     expect(h.objects.objects.size).toBe(0);
-    // 30s is sized against 719ms unloaded and 2.744s at load 15-27; shrinking
-    // the 256 MiB bomb would stop proving that expansion aborts mid-stream.
+    // 30s is sized against 719ms in an otherwise-idle sweep and 2.744s in a
+    // focused run at system load average 15-27; shrinking the 256 MiB bomb
+    // would stop proving that expansion aborts mid-stream.
   }, 30_000);
 
   test("the file-count ceiling refuses an archive of many tiny files", async () => {
