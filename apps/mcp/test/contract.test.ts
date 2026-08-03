@@ -80,7 +80,7 @@ describe("contract slice", () => {
   });
 
   it("owns EVERY /v1/mcp operation in the contract — no seventh may appear unclaimed", () => {
-    // Read the whole 278-operation document, not this app's slice: if a
+    // Read the whole 279-operation document, not this app's slice: if a
     // contract change adds a `/v1/mcp*` operation, ROUTE-MAP's split says it is
     // ours, and this fails until it is claimed and mounted.
     const mcpIds = RAW_OPERATIONS.filter(
@@ -418,7 +418,7 @@ describe("the deployed Worker serves every operation it owns", () => {
     // The control for every probe above: `not 404` / a specific code is only a
     // mount proof because a contracted-but-unmounted path really does 404 here.
     for (const path of ["/v1/chat/completions", "/admin/v1/status", "/v1/assets"]) {
-      // ...and each control path IS in the 278-operation contract, just not ours.
+      // ...and each control path IS in the 279-operation contract, just not ours.
       expect(
         RAW_OPERATIONS.some((operation) => operation.path === path),
         path,

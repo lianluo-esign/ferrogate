@@ -46,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 278 operations", () => {
+  it("carries exactly 279 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 278 unique operation ids", () => {
+  it("has 279 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -99,7 +99,11 @@ describe("contract table", () => {
     // `Counter(o["auth"]["kind"] for o in operations)` over the merged
     // `docs/openapi/runtime-api-contract.json`, never summed.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 264,
+      // #697's `GET /admin/v1/spend-anomalies` then takes it to 265 — bearer,
+      // because a burn-rate episode ledger is an operator read behind the same
+      // admin bearer as the rest of `/admin/v1`. RE-COUNTED off the merged
+      // document (`Counter(o["auth"]["kind"] ...)`), not added to the 264.
+      bearer: 265,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -118,8 +122,10 @@ describe("contract table", () => {
       // record is the most identity-dense report in the product. #743's four
       // asset-fleet operations then take it to 211 — admin because a fleet
       // inventory, a quarantine verdict and an operator takedown are operator
-      // surfaces, never caller-facing ones. COUNTED off the merged document.
-      admin: 211,
+      // surfaces, never caller-facing ones. #697's spend-anomaly episode ledger
+      // takes it to 212, admin for the same reason. COUNTED off the merged
+      // document.
+      admin: 212,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -167,9 +173,12 @@ describe("contract table", () => {
       // `DELETE /admin/v1/assets/{asset_id}`, the operator force-delete (that
       // branch wrote GET 126 / DELETE 28). BOTH branches wrote `DELETE: 28`, so
       // git merged that line with NO conflict marker and it was WRONG: the
-      // merged truth is GET 127 / DELETE 29, counted off
-      // `docs/openapi/runtime-api-contract.json`, not summed.
-      GET: 127,
+      // merged truth was GET 127 / DELETE 29, counted off
+      // `docs/openapi/runtime-api-contract.json`, not summed. #697's
+      // `GET /admin/v1/spend-anomalies` then takes GET to 128 — counted off the
+      // merged document again, never added to the 125 this branch first wrote
+      // against a 124 base that had already moved.
+      GET: 128,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with

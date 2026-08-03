@@ -150,12 +150,25 @@ export const PLAN_TABLE = "plans";
 export const TENANT_TABLE = "tenants";
 /** The per-tenant database registry the SPEND half must go through. */
 export const TENANT_DATABASE_TABLE = "tenant_databases";
+/**
+ * The spend-anomaly auto-throttle (#697), written by the control plane's
+ * detector and overlaid onto the resolved quota here.
+ *
+ * It rides the SAME probe as the tables above rather than being read
+ * unconditionally, because D1 fails a whole `batch()` when any statement in it
+ * errors: an unconditional read would make every authenticated MCP call answer
+ * `503` on a deployment whose control database has not had
+ * `0010_spend_anomaly.sql` applied. Absent ⇒ no throttle row can exist, so
+ * skipping it cannot drop a brake that was applied.
+ */
+export const SPEND_THROTTLE_TABLE = "spend_throttles";
 
 const PROBED_TABLES = [
   QUOTA_POLICY_TABLE,
   PLAN_TABLE,
   TENANT_TABLE,
   TENANT_DATABASE_TABLE,
+  SPEND_THROTTLE_TABLE,
 ] as const;
 
 /**
@@ -201,6 +214,74 @@ async function quotaTables(db: D1Database): Promise<ReadonlySet<string>> {
 /** Test seam: forget the probe for one database (an isolate recycle, simulated). */
 export function forgetQuotaTableProbe(db: D1Database): void {
   quotaTableCache.delete(db);
+}
+
+interface ThrottleRow {
+  readonly scope_type: string;
+  readonly scope_id: string;
+  readonly rpm_limit: number;
+}
+
+/**
+ * Overlay unexpired spend auto-throttles onto the policy index (#697).
+ *
+ * Written here as well as in `apps/gateway/src/ratelimit/quota.ts` and
+ * `apps/agent-runtime/src/admission/quota.ts` because these three modules are
+ * deliberate CLONES — three Workers, three `wrangler.toml`s, no shared module
+ * graph — and `apps/gateway/test/fleet-control-matrix.test.ts` §3.4b is what
+ * forces the three to move together: a control whose authority table is read by
+ * only some of its enforcers is a control a caller can route around by using a
+ * different surface. That test failed on exactly this and is why this copy
+ * exists.
+ *
+ * ## The one property that matters: it can only ever NARROW
+ *
+ * A throttle contributes one field, `rpmLimit`, as a `min` against whatever the
+ * operator configured. It cannot raise a limit, enable a disabled scope, widen
+ * a model allowlist or grant a budget — which is what makes it safe for an
+ * automated writer (the detector) to touch a table the admission path reads:
+ * the worst a detector bug can do is refuse traffic, which is loud and expires
+ * by itself.
+ */
+function applySpendThrottles(
+  index: Map<string, StoredQuotaPolicy>,
+  rows: readonly ThrottleRow[],
+): void {
+  for (const row of rows) {
+    const scopeType = row.scope_type;
+    if (
+      scopeType !== "tenant" &&
+      scopeType !== "project" &&
+      scopeType !== "workspace" &&
+      scopeType !== "key"
+    ) {
+      continue;
+    }
+    const rpm = row.rpm_limit;
+    if (!Number.isFinite(rpm) || rpm < 0) continue;
+    const key = `${scopeType}:${row.scope_id}`;
+    const existing = index.get(key);
+    if (existing === undefined) {
+      index.set(key, {
+        id: `spend-throttle:${key}`,
+        scopeType,
+        scopeId: row.scope_id,
+        modelAllowlist: [],
+        rpmLimit: rpm,
+        alertThresholdPcts: [],
+        // `true`, never `false`: a throttle must narrow an rpm ceiling, never
+        // become a 403 `quota_scope_disabled`.
+        enabled: true,
+        createdAtUnix: 0,
+        updatedAtUnix: 0,
+      });
+      continue;
+    }
+    index.set(key, {
+      ...existing,
+      rpmLimit: existing.rpmLimit === undefined ? rpm : Math.min(existing.rpmLimit, rpm),
+    });
+  }
 }
 
 /** The `quota_policies` columns this module reads, in one place. */
@@ -325,7 +406,15 @@ function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
  * leg is ONE statement with an OR-ed `(scope_type, scope_id)` predicate because
  * that pair is `UNIQUE` and indexed.
  */
-export function d1QuotaPolicySource(db: D1Database): QuotaPolicySource {
+export function d1QuotaPolicySource(
+  db: D1Database,
+  /**
+   * The clock the #697 throttle expiry is compared against. Injectable ONLY so
+   * a test can state "this throttle expired an hour ago" without sleeping;
+   * production reads the real clock at call time, never at module load.
+   */
+  nowSeconds: () => number = () => Math.floor(Date.now() / 1000),
+): QuotaPolicySource {
   return {
     async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
       let tables: ReadonlySet<string>;
@@ -360,11 +449,32 @@ export function d1QuotaPolicySource(db: D1Database): QuotaPolicySource {
       ];
       // The plan FLOOR is only reachable when both of its tables exist; a
       // deployment with `quota_policies` but no `plans` simply has no floor.
-      if (tenantId !== undefined && tables.has(PLAN_TABLE) && tables.has(TENANT_TABLE)) {
+      //
+      // Indices are COMPUTED rather than written as literals below, because
+      // this leg is conditional: a hard-coded `results[2]` would read the PLAN
+      // row as a throttle for a credential with no tenant, and a mis-indexed
+      // read there does not fail — it applies the wrong rpm cap to live traffic.
+      const planIndex = tenantId !== undefined && tables.has(PLAN_TABLE) && tables.has(TENANT_TABLE)
+        ? statements.length
+        : -1;
+      if (planIndex >= 0) {
         statements.push(
           db
             .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
-            .bind(tenantId),
+            .bind(tenantId as string),
+        );
+      }
+      // #697 — the auto-throttle overlay, in the same batch as everything else.
+      const throttleIndex = tables.has(SPEND_THROTTLE_TABLE) ? statements.length : -1;
+      if (throttleIndex >= 0) {
+        statements.push(
+          db
+            .prepare(
+              `SELECT scope_type, scope_id, rpm_limit
+                 FROM ${SPEND_THROTTLE_TABLE}
+                WHERE expires_at_unix > ? AND (${predicate})`,
+            )
+            .bind(nowSeconds(), ...scopes.flat()),
         );
       }
 
@@ -385,8 +495,15 @@ export function d1QuotaPolicySource(db: D1Database): QuotaPolicySource {
           const policy = rowToStoredPolicy(row);
           index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
         }
-        const planRow = (results[1]?.results ?? [])[0] as Record<string, unknown> | undefined;
-        if (planRow !== undefined) plan = rowToStoredPlan(planRow);
+        if (planIndex >= 0) {
+          const planRow = (results[planIndex]?.results ?? [])[0] as
+            | Record<string, unknown>
+            | undefined;
+          if (planRow !== undefined) plan = rowToStoredPlan(planRow);
+        }
+        if (throttleIndex >= 0) {
+          applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
+        }
       } catch (error) {
         if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
         throw error;

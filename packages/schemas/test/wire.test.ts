@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 278.
+ * ANTI-DRIFT GATE for the third copy of 279.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(278);
+    expect(OPENAPI_OPERATION_COUNT).toBe(279);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -293,7 +293,11 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // no wire schema either: its response is BYTES out of an R2 object, not a
     // Zod shape. #703 and #737 landed in PARALLEL, so neither branch's own
     // arithmetic (258 + 3 = 261 on one side, 258 + 1 = 259 on the other) is the
-    // merged truth: it is 258 + 3 + 1 = 262.
+    // merged truth: it is 258 + 3 + 1 = 262. #697's `listAdminSpendAnomalies`
+    // takes it to 263, and carries no wire schema for the same reason every
+    // other admin READ does not: its response is the paginated admin envelope
+    // described in `docs/openapi/admin-api.openapi.json`, not a cross-plane
+    // shape two Workers have to agree on.
     //
     // #743's four asset-fleet operations (`listFleetAssets`,
     // `listQuarantinedAssets`, `reviewQuarantinedAsset`,
@@ -311,9 +315,9 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 278 - 10 = 268. The running sum is narrative, and #703/#737
-    // and then #743/#689 landing in parallel is exactly why it must not be the
-    // source.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(268);
+    // `seeded`, i.e. 279 - 10 = 269. The running sum is narrative, and #703/#737,
+    // then #743/#689, and then #697 landing on top of all of them is exactly why
+    // it must not be the source.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(269);
   });
 });

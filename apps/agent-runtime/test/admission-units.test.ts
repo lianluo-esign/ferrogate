@@ -564,7 +564,21 @@ describe("the D1 sources report an outage rather than 'nothing configured'", () 
       chain: { tenantId: "t1", keyId: "k1" },
     });
     expect(snapshot.ok).toBe(false);
-    if (!snapshot.ok) expect(snapshot.detail).toContain("quota policy lookup failed");
+    // CHANGED DELIBERATELY (#697). This used to assert the exact string
+    // "quota policy lookup failed", which is the detail of the BATCH leg. The
+    // auto-throttle overlay probes `sqlite_master` for `spend_throttles`
+    // BEFORE the batch, so a database that fails everything now fails at the
+    // probe and reports that leg instead.
+    //
+    // The INVARIANT this test exists for is untouched and is the first
+    // assertion above: a broken control database is `{ ok: false }` — a 503 —
+    // and never `{ ok: true, lookup: () => undefined }`, which would turn an
+    // outage into unlimited traffic. Both legs are named rather than the
+    // assertion being dropped to `snapshot.ok === false`, so a future leg that
+    // fails with some third message still fails this test.
+    if (!snapshot.ok) {
+      expect(snapshot.detail).toMatch(/quota policy lookup failed|spend throttle probe failed/);
+    }
   });
 
   it("d1SpendSource → { ok: false } on both legs, never 0 spent / no wallet", async () => {

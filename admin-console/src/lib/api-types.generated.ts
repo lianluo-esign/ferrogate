@@ -5332,6 +5332,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/spend-anomalies": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List spend burn-rate anomaly and forecast-overrun episodes.
+         * @description The episode ledger written by the control plane's spend-anomaly detector (#697), which runs on the Cron Trigger tick over #677's per-request cost substrate. ONE ROW PER EPISODE, not per detection: an episode opens on the first window that detects, absorbs every consecutive window that keeps detecting, and closes on the first that does not -- so windows_seen and notified_count are different numbers and both are published. WHAT AN EPISODE MEANS: a burn_rate_spike says the scope spent, in one closed window, more than a threshold derived from its OWN preceding baseline (median + MAD, never mean + stddev); it does NOT say the spend is wrong, wasteful or unauthorised. A forecast_overrun says that AT THE RATE OBSERVED IN THAT WINDOW month-to-date spend passes the configured monthly budget before the period ends; it is a linear extrapolation of one window, not a prediction. WHAT NEITHER CATCHES: a runaway that was already running when the baseline was collected (it becomes the baseline), a slow multi-day creep, a burst shorter than the window, and anything at all for a scope below the cold-start and sparsity gates -- where the answer is deliberate silence rather than a guess. Tenant-isolated: a tenant-scoped admin sees only its own tenant's episodes; the platform operator sees all. Tuning lives on the scope's quota policy (the spend_anomaly_* fields of PUT /admin/v1/quota-policies/tenant/{scope_id}).
+         */
+        get: operations["listAdminSpendAnomalies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/cost-records": {
         parameters: {
             query?: never;
@@ -10083,6 +10114,125 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+        };
+        /** @description One spend-anomaly EPISODE: a (scope, signal) occurrence, opened by the first window that detected it, absorbing every consecutive window that kept detecting, and closed by the first that did not. It is not one row per detection -- see windows_seen against notified_count. */
+        AdminSpendAnomaly: {
+            /** @constant */
+            object: "spend_anomaly";
+            /** @description {scope_type}:{scope_id}:{signal}:{opened_window_start} -- deterministic, so a re-run of the same window cannot fork a second episode for one incident. */
+            id: string;
+            /**
+             * @description Derived from resolved_at_unix, never stored twice: a second column asserting the same fact is a column that can disagree with it.
+             * @enum {string}
+             */
+            status: "open" | "resolved";
+            /**
+             * @description Only tenant scope is watched. A per-key baseline is thinner than a per-tenant one by exactly the factor that turns a distribution into noise.
+             * @enum {string}
+             */
+            scope_type: "tenant";
+            /** @description The tenant. A tenant-scoped admin only ever sees its own. */
+            scope_id: string;
+            /**
+             * @description burn_rate_spike: in the closed window the scope's PRICED spend exceeded a threshold derived from its OWN preceding baseline. It says the scope is spending unlike its own recent self; it does NOT say the spend is wrong, wasteful or unauthorised. forecast_overrun: at the rate observed in that window, month-to-date spend passes the configured monthly budget before the period ends. It is a linear extrapolation of ONE window, not a prediction of actual spend.
+             * @enum {string}
+             */
+            signal: "burn_rate_spike" | "forecast_overrun";
+            /**
+             * @description Severity as of last_seen_unix.
+             * @enum {string}
+             */
+            severity: "warning" | "critical";
+            /**
+             * @description The worst severity this episode ever reached. Escalation is measured against this, so a flapping incident does not page on every window.
+             * @enum {string}
+             */
+            peak_severity: "warning" | "critical";
+            /**
+             * Format: int64
+             * @description Start of the most recent closed window this episode was detected in.
+             */
+            window_start_unix: number;
+            /**
+             * Format: int64
+             * @description Width of that window in seconds.
+             */
+            window_secs: number;
+            /**
+             * Format: int64
+             * @description When the first window detected this episode.
+             */
+            opened_at_unix: number;
+            /**
+             * Format: int64
+             * @description When the most recent window detected it.
+             */
+            last_seen_unix: number;
+            /**
+             * Format: int64
+             * @description When a window first did NOT detect it; null while the episode is open.
+             */
+            resolved_at_unix?: number | null;
+            /** @description Consecutive windows this has been true for. */
+            windows_seen: number;
+            /** @description Webhooks actually DELIVERED for this episode. A 0 on an episode with windows_seen > 0 is exactly an alert the configured receiver dropped -- there is no retry, so this surface is how those are found. */
+            notified_count: number;
+            /**
+             * Format: int64
+             * @description When the last webhook was delivered; null when none ever was.
+             */
+            last_notified_unix?: number | null;
+            /**
+             * Format: double
+             * @description Priced spend in the evaluated window.
+             */
+            observed_usd: number;
+            /**
+             * Format: double
+             * @description MEDIAN of the scope's own preceding windows. Null on a forecast_overrun episode, which is not baseline-derived.
+             */
+            baseline_usd?: number | null;
+            /**
+             * Format: double
+             * @description The bar observed_usd had to clear (burn_rate_spike), or the monthly budget (forecast_overrun).
+             */
+            threshold_usd?: number | null;
+            /** @description WHICH bar bound: ratio (the operator's own multiple of the median), robust (median + 3 scaled MADs), floor (the absolute dollar minimum), or forecast. The answer to a complaint about a false positive is a different knob for each, which is why the row says which one it was. */
+            bound_by?: string | null;
+            /**
+             * Format: int64
+             * @description How many preceding windows were observed. Below the configured minimum the detector is silent (insufficient_baseline).
+             */
+            baseline_windows?: number | null;
+            /**
+             * Format: int64
+             * @description How many of those had non-zero spend. Below the configured minimum the detector is silent (too_sparse) -- a tenant with three requests a day has no distribution.
+             */
+            active_windows?: number | null;
+            /**
+             * Format: double
+             * @description Month-to-date spend projected to period end at the observed rate. forecast_overrun only.
+             */
+            projected_usd?: number | null;
+            /**
+             * Format: double
+             * @description quota_policies.monthly_budget_usd for the scope, when one is set.
+             */
+            budget_usd?: number | null;
+            /** @description Billing window as YYYY-MM (UTC). */
+            period_month?: string | null;
+            /** @description Signal-specific evidence: the observed ratio for a burn_rate_spike, the hours-to-exhaustion and month-to-date spend for a forecast_overrun. */
+            detail?: {
+                [key: string]: unknown;
+            };
+        };
+        AdminSpendAnomalyList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminSpendAnomaly"][];
+            total: number;
+            offset: number;
+            limit: number;
         };
         /** @description One stored asset version, as the operator inventory renders it. Metadata only: the R2 object key (storage_uri) is deliberately absent and no download link is offered — listing an artifact and fetching it are different permissions, and this surface grants only the first. */
         AdminFleetAsset: {
@@ -21030,6 +21180,54 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listAdminSpendAnomalies: {
+        parameters: {
+            query?: {
+                /** @description Restrict to one tenant. A NARROWING, never a replacement for the tenant fence: a tenant-scoped caller asking for another tenant gets the empty set. */
+                scope_id?: string;
+                /** @description open (the incident view) or resolved (the history). Any other value is ignored rather than refused: a report that errors on a typo is a report an operator stops using. */
+                status?: "open" | "resolved";
+                /** @description Restrict to one signal. */
+                signal?: "burn_rate_spike" | "forecast_overrun";
+                /** @description Restrict to episodes whose CURRENT severity is this. */
+                severity?: "warning" | "critical";
+                /** @description Unix seconds, INCLUSIVE, on last_seen_unix. */
+                since?: number;
+                offset?: components["parameters"]["Offset"];
+                /** @description Clamped by storage.admin_list_max_limit. */
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated spend-anomaly episodes, most recently seen first. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSpendAnomalyList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     listAdminCostRecords: {

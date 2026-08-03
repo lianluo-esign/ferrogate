@@ -51,6 +51,7 @@
     "apps/control-plane": {
       "name": "@ferrogate/app-control-plane",
       "dependencies": {
+        "@ferrogate/billing": "workspace:*",
         "@ferrogate/cloudflare": "workspace:*",
         "@ferrogate/config": "workspace:*",
         "@ferrogate/core": "workspace:*",

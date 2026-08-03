@@ -18292,6 +18292,131 @@
         }
       }
     },
+    "/admin/v1/spend-anomalies": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listAdminSpendAnomalies",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List spend burn-rate anomaly and forecast-overrun episodes.",
+        "description": "The episode ledger written by the control plane's spend-anomaly detector (#697), which runs on the Cron Trigger tick over #677's per-request cost substrate. ONE ROW PER EPISODE, not per detection: an episode opens on the first window that detects, absorbs every consecutive window that keeps detecting, and closes on the first that does not -- so windows_seen and notified_count are different numbers and both are published. WHAT AN EPISODE MEANS: a burn_rate_spike says the scope spent, in one closed window, more than a threshold derived from its OWN preceding baseline (median + MAD, never mean + stddev); it does NOT say the spend is wrong, wasteful or unauthorised. A forecast_overrun says that AT THE RATE OBSERVED IN THAT WINDOW month-to-date spend passes the configured monthly budget before the period ends; it is a linear extrapolation of one window, not a prediction. WHAT NEITHER CATCHES: a runaway that was already running when the baseline was collected (it becomes the baseline), a slow multi-day creep, a burst shorter than the window, and anything at all for a scope below the cold-start and sparsity gates -- where the answer is deliberate silence rather than a guess. Tenant-isolated: a tenant-scoped admin sees only its own tenant's episodes; the platform operator sees all. Tuning lives on the scope's quota policy (the spend_anomaly_* fields of PUT /admin/v1/quota-policies/tenant/{scope_id}).",
+        "parameters": [
+          {
+            "name": "scope_id",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to one tenant. A NARROWING, never a replacement for the tenant fence: a tenant-scoped caller asking for another tenant gets the empty set.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "open (the incident view) or resolved (the history). Any other value is ignored rather than refused: a report that errors on a typo is a report an operator stops using.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "resolved"
+              ]
+            }
+          },
+          {
+            "name": "signal",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to one signal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "burn_rate_spike",
+                "forecast_overrun"
+              ]
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to episodes whose CURRENT severity is this.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "warning",
+                "critical"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Unix seconds, INCLUSIVE, on last_seen_unix.",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated spend-anomaly episodes, most recently seen first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSpendAnomalyList"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/cost-records": {
       "parameters": [
         {
@@ -36964,6 +37089,234 @@
           "model",
           "input"
         ],
+        "additionalProperties": false
+      },
+      "AdminSpendAnomaly": {
+        "type": "object",
+        "description": "One spend-anomaly EPISODE: a (scope, signal) occurrence, opened by the first window that detected it, absorbing every consecutive window that kept detecting, and closed by the first that did not. It is not one row per detection -- see windows_seen against notified_count.",
+        "required": [
+          "object",
+          "id",
+          "status",
+          "scope_type",
+          "scope_id",
+          "signal",
+          "severity",
+          "peak_severity",
+          "window_start_unix",
+          "window_secs",
+          "opened_at_unix",
+          "last_seen_unix",
+          "windows_seen",
+          "notified_count",
+          "observed_usd"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "spend_anomaly"
+          },
+          "id": {
+            "type": "string",
+            "description": "{scope_type}:{scope_id}:{signal}:{opened_window_start} -- deterministic, so a re-run of the same window cannot fork a second episode for one incident."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "resolved"
+            ],
+            "description": "Derived from resolved_at_unix, never stored twice: a second column asserting the same fact is a column that can disagree with it."
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "tenant"
+            ],
+            "description": "Only tenant scope is watched. A per-key baseline is thinner than a per-tenant one by exactly the factor that turns a distribution into noise."
+          },
+          "scope_id": {
+            "type": "string",
+            "description": "The tenant. A tenant-scoped admin only ever sees its own."
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "burn_rate_spike",
+              "forecast_overrun"
+            ],
+            "description": "burn_rate_spike: in the closed window the scope's PRICED spend exceeded a threshold derived from its OWN preceding baseline. It says the scope is spending unlike its own recent self; it does NOT say the spend is wrong, wasteful or unauthorised. forecast_overrun: at the rate observed in that window, month-to-date spend passes the configured monthly budget before the period ends. It is a linear extrapolation of ONE window, not a prediction of actual spend."
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "warning",
+              "critical"
+            ],
+            "description": "Severity as of last_seen_unix."
+          },
+          "peak_severity": {
+            "type": "string",
+            "enum": [
+              "warning",
+              "critical"
+            ],
+            "description": "The worst severity this episode ever reached. Escalation is measured against this, so a flapping incident does not page on every window."
+          },
+          "window_start_unix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Start of the most recent closed window this episode was detected in."
+          },
+          "window_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Width of that window in seconds."
+          },
+          "opened_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the first window detected this episode."
+          },
+          "last_seen_unix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the most recent window detected it."
+          },
+          "resolved_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a window first did NOT detect it; null while the episode is open."
+          },
+          "windows_seen": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Consecutive windows this has been true for."
+          },
+          "notified_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Webhooks actually DELIVERED for this episode. A 0 on an episode with windows_seen > 0 is exactly an alert the configured receiver dropped -- there is no retry, so this surface is how those are found."
+          },
+          "last_notified_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the last webhook was delivered; null when none ever was."
+          },
+          "observed_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Priced spend in the evaluated window."
+          },
+          "baseline_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "MEDIAN of the scope's own preceding windows. Null on a forecast_overrun episode, which is not baseline-derived."
+          },
+          "threshold_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The bar observed_usd had to clear (burn_rate_spike), or the monthly budget (forecast_overrun)."
+          },
+          "bound_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "WHICH bar bound: ratio (the operator's own multiple of the median), robust (median + 3 scaled MADs), floor (the absolute dollar minimum), or forecast. The answer to a complaint about a false positive is a different knob for each, which is why the row says which one it was."
+          },
+          "baseline_windows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many preceding windows were observed. Below the configured minimum the detector is silent (insufficient_baseline)."
+          },
+          "active_windows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many of those had non-zero spend. Below the configured minimum the detector is silent (too_sparse) -- a tenant with three requests a day has no distribution."
+          },
+          "projected_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Month-to-date spend projected to period end at the observed rate. forecast_overrun only."
+          },
+          "budget_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "quota_policies.monthly_budget_usd for the scope, when one is set."
+          },
+          "period_month": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Billing window as YYYY-MM (UTC)."
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Signal-specific evidence: the observed ratio for a burn_rate_spike, the hours-to-exhaustion and month-to-date spend for a forecast_overrun."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSpendAnomalyList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSpendAnomaly"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
         "additionalProperties": false
       },
       "AdminFleetAsset": {
