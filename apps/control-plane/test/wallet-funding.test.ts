@@ -40,7 +40,7 @@ import { SELF } from "cloudflare:test";
 import { D1WalletStore, type TenantDatabaseHandle } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
-import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
+import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 import {
   TENANT_A,
   TENANT_B,
@@ -409,6 +409,78 @@ describe("payment methods reach the tenant database too", () => {
       .bind("pm-1")
       .first<Record<string, unknown>>();
     expect(row).toBe(null);
+  });
+});
+
+describe("#790: a refused self-credit moves no money in the TENANT database", () => {
+  /**
+   * The route fence is held by `wallet-self-credit.test.ts` against the
+   * in-memory store. This case is the same refusal against the REAL tenant
+   * database, because that is the leg the issue asked about: the balance the
+   * gateway spends lives in `wallets.balance_credits` there, written by
+   * `store/wallet_projection.ts`'s `projectWalletMovement`, and a fence that
+   * refused at the route while the outbox still settled would be the worst of
+   * both — a 403 in the operator's log and the money moved anyway.
+   *
+   * Reading `balance_credits` with raw SQL rather than through the admin
+   * surface is what makes the assertion bite: the document is a mirror, and a
+   * mirror can be right while the truth moved.
+   */
+  const TENANT_A_KEY = "k-tenant-a";
+
+  async function armWithTenantKey(): Promise<void> {
+    arm({
+      store: "d1",
+      staticKeys: [operatorKey],
+      nativeKeys: [tenantKey(TENANT_A_KEY, TENANT_A)],
+      rbac: { [TENANT_A]: ["*"] },
+    });
+  }
+
+  it("refuses the tenant's own credit and leaves `balance_credits` where it was", async () => {
+    await seedExhaustedWallet(tenantDbA(), TENANT_A, String(100n * CREDITS_PER_CENT));
+    expect((await createWalletDocument(TENANT_A, 100)).status).toBe(201);
+    await armWithTenantKey();
+
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/wallets/${TENANT_A}/adjust`,
+      jsonRequest(TENANT_A_KEY, "POST", { amount_cents: 10_000_000, reason: "self-credit" }),
+    );
+    expect(response.status).toBe(403);
+
+    // The money the gateway spends, read exactly. Unmoved.
+    expect(await balanceCreditsExact(tenantDbA(), TENANT_A)).toBe(100n * CREDITS_PER_CENT);
+    // And the settlement outbox has no row claiming it happened.
+    const settlements = await tenantDbA()
+      .prepare("SELECT COUNT(*) AS n FROM wallet_settlements")
+      .first<{ n: number }>();
+    expect(settlements?.n).toBe(0);
+    // Nor is there a ledger entry to explain a movement that did not happen.
+    expect(await ledgerEntries(TENANT_A)).toEqual([]);
+  });
+
+  it("refuses the tenant's own charge on the same leg", async () => {
+    await seedExhaustedWallet(tenantDbA(), TENANT_A, String(100n * CREDITS_PER_CENT));
+    expect((await createWalletDocument(TENANT_A, 100)).status).toBe(201);
+    await armWithTenantKey();
+
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/wallets/${TENANT_A}/charge`,
+      jsonRequest(TENANT_A_KEY, "POST", { amount_cents: 50, reason: "self-charge" }),
+    );
+    expect(response.status).toBe(403);
+    expect(await balanceCreditsExact(tenantDbA(), TENANT_A)).toBe(100n * CREDITS_PER_CENT);
+  });
+
+  it("still lets the tenant READ the balance it is billed against", async () => {
+    await seedExhaustedWallet(tenantDbA(), TENANT_A, String(100n * CREDITS_PER_CENT));
+    expect((await createWalletDocument(TENANT_A, 100)).status).toBe(201);
+    await armWithTenantKey();
+
+    const response = await SELF.fetch(`${BASE}/admin/v1/wallets/${TENANT_A}`, {
+      headers: bearer(TENANT_A_KEY),
+    });
+    expect(response.status).toBe(200);
   });
 });
 
