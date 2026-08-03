@@ -47,8 +47,8 @@
  *
  * It contains, per control, only TOKENS: the durable authority (a table name or
  * a `resource_kind`), the deploy-time var, the in-memory fallback, the
- * enforcement point (a quoted refusal code or an engine call), and WHICH ROLE
- * SET must enforce it — where the role set itself is computed in §2. It
+ * enforcement point (a refusal token or a call on the decision path), and WHICH
+ * ROLE SET must enforce it — where the role set itself is computed in §2. It
  * contains no list of Workers, no expected verdict and no recorded matrix.
  * Every assertion in §3 is uniform across all rows: the same five properties
  * are demanded of every control, so a new control gets a real gate by adding
@@ -234,19 +234,35 @@ function constantTable(app: string): ReadonlyMap<string, string> {
 /**
  * The set of TABLES a Worker reads or writes, resolved through its constants.
  *
- * Extracted from SQL STRING LITERALS only — a backtick or double-quoted literal
- * that contains `SELECT` / `INSERT INTO` / `UPDATE` / `DELETE FROM` — and never
- * from prose. Scanning free text for `FROM x` picks up English ("the answer
- * FROM here"), and a table set polluted with `here`, `of` and `its` makes §4's
+ * Extracted from SQL STRING LITERALS only: a backtick literal containing a SQL
+ * verb, or a double-quoted literal that STARTS with one. A double-quoted seed
+ * also folds directly adjacent `+ "..."` continuation fragments. Seed matching
+ * starts at every quote independently, so one unmatched quote cannot shift the
+ * rest of the scan. Free-text scanning would pick up English ("the answer FROM
+ * here"), and a table set polluted with `here`, `of` and `its` makes §4's
  * ratchet unreadable and therefore ignorable.
  */
 /** The SQL statements one module contains, as text. */
 function sqlLiteralsOf(code: string): readonly string[] {
+  const strings = [
+    ...code.matchAll(/"((?:SELECT|INSERT INTO|UPDATE|DELETE FROM)[^"]*)"/gi),
+  ];
+  const joined: string[] = [];
+  for (const first of strings) {
+    let literal = first[1] as string;
+    let end = (first.index as number) + first[0].length;
+    while (true) {
+      const next = code.slice(end).match(/^\s*\+\s*"([^"]*)"/);
+      if (next === null) break;
+      literal += next[1] as string;
+      end += next[0].length;
+    }
+    joined.push(literal);
+  }
+
   return [
     ...[...code.matchAll(/`([^`]*)`/g)].map((m) => m[1] as string),
-    ...[...code.matchAll(/"((?:SELECT|INSERT INTO|UPDATE|DELETE FROM)[^"]*)"/gi)].map(
-      (m) => m[1] as string,
-    ),
+    ...joined,
   ].filter((literal) => /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(literal));
 }
 
@@ -532,6 +548,48 @@ describe("§1 the scan is real", () => {
       "constant-interpolated table names stopped resolving",
     ).toBeGreaterThan(2);
   });
+
+  it("attributes a table named in a joined SQL continuation fragment", () => {
+    const literals = sqlLiteralsOf(`
+      const statement =
+        "SELECT asset_type, name, version, content_type, content_hash, size_bytes, " +
+        "yanked, visibility FROM stored_assets WHERE tenant_id = ?1";
+    `);
+    const tables = literals.flatMap((literal) =>
+      [...literal.matchAll(/\bFROM\s+([a-z_][a-z0-9_]*)/gi)].map(
+        (match) => (match[1] as string).toLowerCase(),
+      ),
+    );
+
+    expect(tables).toEqual(["stored_assets"]);
+  });
+
+  it("keeps the verb-prefix SQL heuristic when folding continuations", () => {
+    const literals = sqlLiteralsOf(`
+      const label = "UPDATE " + "the row FROM config";
+    `);
+    const tables = literals.flatMap((literal) =>
+      [...literal.matchAll(/\b(?:FROM|UPDATE)\s+([a-z_][a-z0-9_]*)/gi)].map(
+        (match) => (match[1] as string).toLowerCase(),
+      ),
+    );
+
+    expect(tables).toEqual(["the", "config"]);
+  });
+
+  it("finds verb-prefixed SQL after an unmatched double quote", () => {
+    const literals = sqlLiteralsOf(`
+      const msg = 'he said "hi';
+      const statement = "SELECT a FROM real_table";
+    `);
+    const tables = literals.flatMap((literal) =>
+      [...literal.matchAll(/\bFROM\s+([a-z_][a-z0-9_]*)/gi)].map(
+        (match) => (match[1] as string).toLowerCase(),
+      ),
+    );
+
+    expect(tables).toEqual(["real_table"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -629,7 +687,10 @@ interface FleetControl {
    * upstream, and both must reach the same rows).
    */
   readonly required: keyof typeof ROLES | "self";
-  /** Where the control is ENFORCED — a quoted refusal code or an engine call. */
+  /**
+   * Source token on the control's enforcement path: a refusal, decision, or
+   * transition call.
+   */
   readonly enforcement: RegExp;
   /** Durable authority: table names, resolved through each Worker's constants. */
   readonly authorityTables: readonly string[];
@@ -646,7 +707,7 @@ interface FleetControl {
 }
 
 /**
- * The eight controls an operator applies.
+ * The controls an operator applies.
  *
  * Every field is a TOKEN. There is no Worker named anywhere in this table and
  * no expected verdict: §3.1-§3.5 compute both. Adding a control is five tokens;
@@ -790,6 +851,71 @@ const CONTROLS: readonly FleetControl[] = [
     authorityTables: [],
     authorityText: /BasicPolicyEngine/,
     deployVar: /GATEWAY_POLICIES|\bpolicies\b/,
+  },
+  {
+    /**
+     * The durable per-tenant cache policy and invalidation epoch (#695).
+     *
+     * `apps/control-plane` projects operator changes into the typed row, bumps
+     * the purge epoch, and removes the row on delete. `apps/gateway` merges that
+     * row into the live cache policy and folds it into the cache key, so an
+     * operator change alters both admission to the cache and which old entries
+     * remain addressable. Those are two halves of one control, and both Workers
+     * must therefore resolve them from the same durable table.
+     *
+     * No `refusalCode`: disabling or invalidating caching is observed as a cache
+     * bypass/miss, not as an HTTP refusal, and inventing a wire code here would
+     * describe behaviour the product does not have.
+     */
+    id: "semantic-cache-governance",
+    title: "an operator's per-tenant semantic cache policy and invalidation epoch (#695)",
+    required: "self",
+    enforcement:
+      /await (?:projectSemanticCachePolicy|bumpSemanticCacheEpoch|deleteSemanticCachePolicyRow)\(|mergeCacheGovernance\(|governanceFingerprint: cacheGovernanceFingerprint\(/,
+    authorityTables: ["semantic_cache_policies"],
+  },
+  {
+    /**
+     * The exclusive serving claim for one custom hostname (#738).
+     *
+     * `apps/control-plane` takes the claim through `claimSiteDomain`'s
+     * tenant-fenced upsert. `releaseSiteDomain` fences a tenant-owned document by
+     * tenant, while a platform-scope document is authorized by
+     * `ControlPlaneStore` and deletes by hostname alone. `apps/gateway` resolves
+     * that same row through `decideSiteDomain` before it may route the host. Its 60s
+     * per-isolate site-domain cache is the stated staleness window in which an
+     * operator's release may not yet be observed. A delete that reached only the
+     * writer, or a claim read from a private source on the gateway, would leave
+     * an operator-visible unbind or reassignment unapplied on live traffic.
+     */
+    id: "site-domain-claim",
+    title: "an operator's exclusive custom-hostname serving claim (#738)",
+    required: "self",
+    enforcement: /await (?:claimSiteDomain|releaseSiteDomain)\(|decideSiteDomain\(/,
+    authorityTables: ["site_domains"],
+  },
+  {
+    /**
+     * The DNS ownership proof that makes a custom hostname servable (#738).
+     *
+     * In `apps/control-plane`, `markVerified` / `markCheckFailed` are in-memory
+     * state transitions; `upsertVerification` writes their result to the durable
+     * authority one step later. Both Workers call
+     * `effectiveSiteDomainVerificationState` on the enforcement path, and
+     * `apps/gateway` then admits only the shared serving states after recomputing
+     * expiry at read time. Revocation, expiry, and failed re-verification
+     * therefore have to be observed from the same evidence rows on both Workers.
+     *
+     * No `refusalCode`: the gateway intentionally collapses every inactive
+     * reason into its uniform custom-domain response, while the control plane's
+     * verification endpoint reports the DNS operation's own result.
+     */
+    id: "site-domain-verification",
+    title: "the DNS ownership proof that authorizes a custom hostname (#738)",
+    required: "self",
+    enforcement:
+      /markVerified\(|markCheckFailed\(|effectiveSiteDomainVerificationState\(|siteDomainVerificationStateServes\(/,
+    authorityTables: ["site_domain_verifications"],
   },
   {
     /**
