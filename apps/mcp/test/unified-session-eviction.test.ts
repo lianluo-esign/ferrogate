@@ -128,15 +128,20 @@ describe("a session that goes quiet is evicted", () => {
    * call site — pinning `close()`'s call site would repeat #764's mistake one
    * level up.
    *
-   * Three different deletions each turn a different line of this test red:
+   * Measured, not asserted — each of these was applied and the RED observed:
    *
-   *  - delete the `#arm` call that sets the idle alarm ⇒ `fireAlarm` returns
-   *    `false`, because no alarm was ever scheduled;
-   *  - delete the `close()` inside `alarm()` ⇒ the alarm runs but the session
-   *    survives, so the resume is served 200 with a replay;
-   *  - delete the ingress's eviction branch ⇒ the reconnect is answered with
-   *    the generic `mcp_session_not_found`, which tells the operator on the
-   *    other end of the support call nothing about what happened.
+   *  - neutralise the five `#arm` calls ⇒ **7 RED of 7**, every one of them at
+   *    `fireAlarm` returning `false`: no alarm is ever scheduled, which is
+   *    exactly the pre-#765 tree;
+   *  - delete the `close()` inside `alarm()` ⇒ **5 RED**, this test at
+   *    `expected 200 to be 400` — the alarm runs, the session survives, and the
+   *    resume is served as if nothing had happened;
+   *  - delete the ingress's eviction branch ⇒ **1 RED**, the bare-reconnect test
+   *    below at `expected 200 to be 404`. This test stays GREEN, because the
+   *    refusal is TWO layers: the ingress answers off `status`, and the object's
+   *    own `replay` refuses a cursor with the same reason. Removing BOTH ⇒
+   *    **2 RED**, this one at `expected … to contain 'evicted'`. The lower layer
+   *    has its own gate below, so neither layer is load-free.
    */
   it("evicts it and REFUSES a cursor into it, naming the eviction", async () => {
     const sessionId = await openSession();
@@ -184,6 +189,28 @@ describe("a session that goes quiet is evicted", () => {
     expect(body).toContain("evicted");
   });
 
+  /**
+   * The LOWER layer of the same refusal, gated on its own.
+   *
+   * The ingress answers an evicted session off `status` and never reaches
+   * `replay`, so deleting `replay`'s tombstone branch alone left all seven wire
+   * tests green — an ungated seam, which by this tree's rules is either a gate
+   * to write or a defect to report. It is the first: the store is a public seam
+   * and a caller that reaches it directly must get the same named refusal, not
+   * the generic "session is not open" that reads like a client mistake.
+   */
+  it("refuses a replay off the store itself with the SAME named reason", async () => {
+    const store = new UnifiedSessionStore(NAMESPACE, TENANT);
+    const sessionId = await openSession();
+    expect(await fireAlarm(sessionId)).toBe(true);
+
+    const answer = await store.replay(sessionId, 1);
+    expect(answer.kind).toBe("refused");
+    const reason = answer.kind === "refused" ? answer.reason : "";
+    expect(reason).toContain("evicted");
+    expect(reason).toContain(String(SESSION_IDLE_TTL_SECS));
+  });
+
   it("does not resurrect on the next request — eviction really deleted the state", async () => {
     const sessionId = await openSession();
     expect(await fireAlarm(sessionId)).toBe(true);
@@ -202,6 +229,27 @@ describe("a session that goes quiet is evicted", () => {
 // ---------------------------------------------------------------------------
 
 describe("the idle interval is a stated policy", () => {
+  /**
+   * The LITERAL numbers, deliberately.
+   *
+   * Every other assertion in this file compares the armed alarm against the
+   * imported constant, which means changing the constant moves both sides and
+   * proves nothing — measured: setting the interval to five minutes left all
+   * eight tests green. A policy is only stated if changing it forces someone to
+   * come here and change the stated reasoning too, so the numbers are written
+   * out once, next to the sentence that justifies them.
+   */
+  it("is thirty minutes idle, with a twenty-four-hour tombstone", () => {
+    expect(
+      SESSION_IDLE_TTL_SECS,
+      "30 minutes: longer than any live client's reconnect, shorter than the interval over which an abandoned session stops being noticed (src/unified.ts)",
+    ).toBe(30 * 60);
+    expect(
+      SESSION_TOMBSTONE_TTL_SECS,
+      "24 hours: long enough that the support call an eviction causes gets an answer, short enough that the record is not itself unbounded growth",
+    ).toBe(24 * 60 * 60);
+  });
+
   it("arms the alarm exactly one idle interval out", async () => {
     const before = Date.now();
     const sessionId = await openSession();
