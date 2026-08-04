@@ -27,10 +27,10 @@ import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
  * `#count("providers")` and is therefore pinned at 0 on
  * `GET /admin/v1/status`.
  *
- * The TS equivalent of "the running configuration" on this platform is the
- * gateway's `GATEWAY_PROVIDERS`/`GATEWAY_MODELS` vars (or the `gateway_providers`
- * control table, which also has no writer). Closing this means naming ONE of
- * those as the source and projecting it here, not seeding documents.
+ * The TS equivalent of "the running configuration" is still the gateway's
+ * `GATEWAY_PROVIDERS`/`GATEWAY_MODELS` vars. The retired control tables are not
+ * a fallback; #812 will make the tenant catalog the runtime source before this
+ * read-only projection is given a writer.
  */
 export const adminProviderRoutes: GroupModule = crudGroup("admin_provider", [
   readOnlyCollection("providers", "provider"),

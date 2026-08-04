@@ -85,7 +85,11 @@ beforeEach(async () => {
   for (const tenantId of [TENANT_A, TENANT_B, TENANT_C]) {
     const db = tenantDb(tenantId);
     await db.batch([
-      db.prepare("DELETE FROM model_catalog"),
+      db.prepare("DELETE FROM catalog_model_offerings"),
+      db.prepare("DELETE FROM catalog_models"),
+      db.prepare("DELETE FROM provider_channels"),
+      db.prepare("DELETE FROM catalog_revisions"),
+      db.prepare("DELETE FROM tenant_database_identity"),
       db.prepare("DELETE FROM tenant_provisioning_marks"),
     ]);
   }
@@ -268,7 +272,7 @@ describe("catalog seeding is best effort", () => {
     expect(recovered.catalogEntries).toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
     expect(
       await handle.db
-        .prepare("SELECT COUNT(*) AS count FROM model_catalog WHERE tenant_id = ?")
+        .prepare("SELECT COUNT(*) AS count FROM catalog_models WHERE tenant_id = ?")
         .bind(TENANT_A)
         .first<{ count: number }>(),
     ).toEqual({ count: DEFAULT_TENANT_MODEL_CATALOG.length });
@@ -279,7 +283,7 @@ describe("catalog seeding is best effort", () => {
     await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW });
 
     const handle = await router.forTenant(TENANT_A);
-    await handle.db.prepare("DELETE FROM model_catalog WHERE tenant_id = ?").bind(TENANT_A).run();
+    await handle.db.prepare("DELETE FROM catalog_models WHERE tenant_id = ?").bind(TENANT_A).run();
 
     const rerun = await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW + 60 });
 
@@ -316,9 +320,10 @@ describe("two tenants, two independent stores", () => {
     // assertion is the same in all three, which is why it is worth making.
     await a.db
       .prepare(
-        "UPDATE model_catalog SET input_price_per_1m = 999.0 WHERE tenant_id = ? AND model = ?",
+        "UPDATE catalog_model_offerings SET input_price_per_1m = 999.0 " +
+          "WHERE tenant_id = ? AND model_id = ?",
       )
-      .bind(TENANT_A, "gpt-4o")
+      .bind(TENANT_A, `${TENANT_A}:model:gpt-4o`)
       .run();
 
     expect((await resolveTenantModel(a.db, TENANT_A, "gpt-4o"))?.inputPricePer1m).toBe(999.0);
@@ -328,7 +333,7 @@ describe("two tenants, two independent stores", () => {
     // rows. Without this, a store that ignored its tenant argument and wrote
     // everything into one place would pass the assertion above by luck.
     const bRows = await b.db
-      .prepare("SELECT DISTINCT tenant_id FROM model_catalog")
+      .prepare("SELECT DISTINCT tenant_id FROM catalog_models")
       .all<{ tenant_id: string }>();
     expect(bRows.results.map((row) => row.tenant_id)).toEqual([TENANT_B]);
   });
@@ -345,16 +350,17 @@ describe("re-running provisioning", () => {
     // the seed mark is for), and a disable must not be reverted either.
     await handle.db
       .prepare(
-        "UPDATE model_catalog SET input_price_per_1m = 1.0 WHERE tenant_id = ? AND model = ?",
+        "UPDATE catalog_model_offerings SET input_price_per_1m = 1.0 " +
+          "WHERE tenant_id = ? AND model_id = ?",
       )
-      .bind(TENANT_A, "gpt-4o")
+      .bind(TENANT_A, `${TENANT_A}:model:gpt-4o`)
       .run();
     await handle.db
-      .prepare("DELETE FROM model_catalog WHERE tenant_id = ? AND model = ?")
+      .prepare("DELETE FROM catalog_models WHERE tenant_id = ? AND name = ?")
       .bind(TENANT_A, "claude-opus-4")
       .run();
     await handle.db
-      .prepare("UPDATE model_catalog SET enabled = 0 WHERE tenant_id = ? AND model = ?")
+      .prepare("UPDATE catalog_models SET enabled = 0 WHERE tenant_id = ? AND name = ?")
       .bind(TENANT_A, "gpt-5")
       .run();
 

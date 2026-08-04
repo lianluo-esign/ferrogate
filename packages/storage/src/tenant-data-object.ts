@@ -201,22 +201,22 @@ const REFUSAL = "tenant_data_object";
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the EIGHT files have 27
- *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008) — 27, not 18,
+ *    comment lines containing a `;` mid-prose, and the NINE files have 29
+ *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009) —
+ *    29, not 18,
  *    is the number that bounds this function's exposure. Splitting before
  *    stripping cuts statements in half at every one of them.
  *
- *    These numbers are a MEASUREMENT and they went stale once already: 0008
- *    arrived in the same diff that re-measured them over seven files, and the
- *    census was not re-run. `test/do/tenant-data-object.test.ts` now recomputes
- *    every count in this docblock from the real files and asserts them, so the
- *    next migration reddens a test instead of quietly falsifying a safety
- *    argument.
+ *    These numbers are a MEASUREMENT and they have gone stale before: the
+ *    census was not always re-run when a migration landed. `test/do/tenant-
+ *    data-object.test.ts` now recomputes every count in this docblock from the
+ *    real files and asserts them, so the next migration reddens a test instead
+ *    of quietly falsifying a safety argument.
  *  * The filter is line-granular after `trimStart()`, which is what makes it
  *    lossless over `0005_responses_conversations.sql` — that file indents `--`
  *    comments BETWEEN columns, and a filter anchored at column 0 would corrupt
  *    the table.
- *  * It is safe today because, measured over all EIGHT files, every non-comment
+ *  * It is safe today because, measured over all NINE files, every non-comment
  *    `;` is at end-of-line, there is no `;` inside any string literal in a live
  *    statement, and there are no trailing inline comments. **A migration that
  *    introduces a `CREATE TRIGGER`, or a `;` inside a quoted literal, breaks
@@ -258,7 +258,7 @@ export class TenantDataObject extends DurableObject {
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 65 statements
+    // gate inside `#migrate` is what keeps that from re-applying 84 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -442,11 +442,11 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 65 statements of the eight files — 24 `CREATE TABLE IF NOT
-   * EXISTS`, 30 `CREATE INDEX`, 1 `CREATE UNIQUE INDEX`, 9 `ALTER TABLE … ADD
+   * re-running the 84 statements of the nine files — 30 `CREATE TABLE IF NOT
+   * EXISTS`, 33 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 9 `ALTER TABLE … ADD
    * COLUMN` and the ledger `INSERT`. (Counted, not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
-   * whole census then went stale again the moment `0008_model_catalog.sql`
+   * whole census then went stale again the moment `0009_model_catalog.sql`
    * landed. `test/do/tenant-data-object.test.ts` re-derives these five numbers
    * from `sql/d1-ts/tenant/` and asserts them. The nine ALTERs are the half that
    * matters — the CREATEs are idempotent by construction and the ALTERs are not,

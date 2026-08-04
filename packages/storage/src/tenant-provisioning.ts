@@ -26,7 +26,7 @@
  *     `provisionedTenants()` — which `apps/control-plane/src/store/asset_fleet.ts`
  *     fans out over — reads it. Nothing wrote it. A tenant created today would
  *     be invisible to every fleet view.
- *  3. **Seeding.** The tenant's own `model_catalog`, so per-tenant visibility
+ *  3. **Seeding.** The tenant's own `catalog_models` and priced offerings, so per-tenant visibility
  *     and per-tenant pricing have rows to read when the reader lands, rather
  *     than needing a backfill over objects a namespace cannot enumerate. This
  *     list used to say an unseeded tenant answers `400 model_not_found` on

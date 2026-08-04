@@ -56,8 +56,6 @@ const CONTROL_ONLY = [
   "control_plane_resources",
   "api_key_directory",
   "static_api_keys",
-  "gateway_providers",
-  "gateway_models",
   "billing_ledger",
   "billing_report_outbox",
   "billing_events",
@@ -103,14 +101,14 @@ const TENANT_ONLY = [
   // bundle's file index holds one tenant's paths and R2 keys, so landing it in
   // the control database would be the cross-tenant leak the split prevents.
   "asset_bundle_files", // 0004 (#736)
-  // 0008 (#820). The tenant's OWN copy of the model catalog, seeded once at
-  // onboarding. It belongs on THIS side of the split even though the platform
-  // also has a `gateway_models` table in the control database, and the two are
-  // not duplicates: `gateway_models` is what the OPERATOR has deployed fleet-
-  // wide, this is what one tenant may use and what it costs THAT tenant. Landing
-  // it in the control database would make one tenant's negotiated price visible
-  // to every other tenant's read.
-  "model_catalog",
+  // 0008/0009. The legacy one-row model catalog is converted by 0009 into the
+  // tenant-qualified logical-model/channel/offering graph. The old table is
+  // deliberately absent after the migration; the new graph is what #812 reads.
+  "tenant_database_identity",
+  "provider_channels",
+  "catalog_models",
+  "catalog_model_offerings",
+  "catalog_revisions",
   "tenant_provisioning_marks",
 ] as const;
 
@@ -130,6 +128,15 @@ describe("control / tenant split", () => {
     for (const table of TENANT_ONLY) {
       expect(tenant, `${table} must exist in a tenant database`).toContain(table);
       expect(control, `${table} must NOT exist in the control database`).not.toContain(table);
+    }
+  });
+
+  test("retired registries and the legacy catalog are absent from both roles", async () => {
+    const control = await tableNames(env.CONTROL_DB);
+    const tenant = await tableNames(env.TENANT_DB_A);
+    for (const table of ["gateway_providers", "gateway_models", "model_catalog"]) {
+      expect(control, `${table} must be retired from the control database`).not.toContain(table);
+      expect(tenant, `${table} must be retired from the tenant database`).not.toContain(table);
     }
   });
 
@@ -401,51 +408,5 @@ describe("constraints that are load-bearing, not decorative", () => {
       "SELECT COUNT(*) AS n FROM agent_schedule_fires WHERE schedule_id = 'sched_1'",
     ).first<{ n: number }>();
     expect(count?.n).toBe(1);
-  });
-
-  test("gateway_models.provider is a REAL foreign key to gateway_providers", async () => {
-    await env.CONTROL_DB.prepare(
-      "INSERT INTO gateway_providers (name, kind, base_url, api_key_var) " +
-        "VALUES ('anthropic', 'anthropic', 'https://api.anthropic.com/v1', 'ANTHROPIC_AUTH_TOKEN') " +
-        "ON CONFLICT (name) DO NOTHING",
-    ).run();
-    await expect(
-      env.CONTROL_DB.prepare(
-        "INSERT INTO gateway_models (name, provider, provider_model) " +
-          "VALUES ('best-reasoning', 'anthropic', 'claude-3-5-sonnet-latest')",
-      ).run(),
-    ).resolves.toBeDefined();
-    // An unknown provider reference is what the Rust loader refuses to boot on.
-    await expect(
-      env.CONTROL_DB.prepare(
-        "INSERT INTO gateway_models (name, provider, provider_model) " +
-          "VALUES ('ghost', 'nosuchprovider', 'x')",
-      ).run(),
-    ).rejects.toThrow();
-  });
-
-  test("gateway_models.name is UNIQUE — the Rust DuplicateModel refusal", async () => {
-    await env.CONTROL_DB.prepare(
-      "INSERT INTO gateway_providers (name, kind, base_url) VALUES ('p2', 'openai', 'https://x/v1') " +
-        "ON CONFLICT (name) DO NOTHING",
-    ).run();
-    await env.CONTROL_DB.prepare(
-      "INSERT INTO gateway_models (name, provider, provider_model) VALUES ('dup', 'p2', 'a') " +
-        "ON CONFLICT (name) DO NOTHING",
-    ).run();
-    await expect(
-      env.CONTROL_DB.prepare(
-        "INSERT INTO gateway_models (name, provider, provider_model) VALUES ('dup', 'p2', 'b')",
-      ).run(),
-    ).rejects.toThrow();
-  });
-
-  test("the registry never stores a credential, only the binding NAME", async () => {
-    const columns = await columnNames(env.CONTROL_DB, "gateway_providers");
-    expect(columns).toContain("api_key_var");
-    // A column that could hold the secret itself would be a regression against
-    // the Rust config, which only ever named an environment variable.
-    expect(columns).not.toContain("api_key");
-    expect(columns).not.toContain("api_key_value");
   });
 });

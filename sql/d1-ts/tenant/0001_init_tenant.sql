@@ -35,7 +35,7 @@
 -- WHAT IS *NOT* HERE, AND WHY (so the absence is deliberate, not forgotten)
 -- ---------------------------------------------------------------------------
 --   * `tenants`, `plans`, RBAC, admin users, SSO, `quota_policies`,
---     `site_domains`, the model/provider registry, `api_key_directory`,
+--     `site_domains`, the control-plane registry, `api_key_directory`,
 --     `static_api_keys` -> CONTROL (split rules (a)/(b)/(c)).
 --   * observability, billing ledger/outbox/events, guardrail policies, managed
 --     and self-hosted worker stores -> CONTROL (split rule (d): whole-table

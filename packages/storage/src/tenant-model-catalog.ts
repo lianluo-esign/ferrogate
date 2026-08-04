@@ -1,6 +1,7 @@
 /**
- * The tenant's OWN model catalog — the `model_catalog` table in one tenant's
- * database, and the platform default card it is seeded from (#820).
+ * The tenant's OWN model catalog — the `catalog_models` /
+ * `catalog_model_offerings` graph in one tenant database, and the platform
+ * default card it is seeded from (#820/#811).
  *
  * ## Why a tenant needs one — stated honestly, because it was not
  *
@@ -12,9 +13,8 @@
  * `(providers, models, secrets, cloudflare)` parsed from the `GATEWAY_PROVIDERS`
  * / `GATEWAY_MODELS` / `GATEWAY_CLOUDFLARE` **config vars** by
  * `modelCatalogFromEnv`; it never opens a database. Its fail-closed posture is
- * real, and it is about the env registry. Nothing in `apps/<app>/src` reads THIS
- * table: `grep "FROM model_catalog"` finds this file and nothing else, and the
- * only non-test callers of {@link listTenantModelCatalog} /
+ * real, and it is about the env registry. Nothing in `apps/<app>/src` reads
+ * THIS catalog yet; the only non-test callers of {@link listTenantModelCatalog} /
  * {@link resolveTenantModel} are `./tenant-provisioning.ts`'s own seed check and
  * health report. An unseeded tenant serves inference exactly like a seeded one.
  *
@@ -80,7 +80,7 @@ import { StorageError } from "./errors.js";
 
 /** One seeded catalog row: a model this tenant may use, and what it costs. */
 export interface TenantModelCatalogEntry {
-  /** The LOGICAL name a client sends. Primary key of `model_catalog`. */
+  /** The LOGICAL name a client sends. Unique within `catalog_models`. */
   readonly model: string;
   /**
    * The serving provider, or `"*"` for "whatever the platform routes this model
@@ -204,22 +204,79 @@ function audioCharacters(model: string, pricePer1mCharacters: number): TenantMod
 /** The `tenant_provisioning_marks.mark` that records the seed has run. */
 export const MODEL_CATALOG_SEED_MARK = "model_catalog_seed";
 
-/** `model_catalog.source` for a row this tenant has never touched. */
+/** `catalog_model_offerings.source` for a row this tenant has never touched. */
 export const CATALOG_SOURCE_PLATFORM_SEED = "platform_seed";
 
-/** Columns read back by {@link listTenantModelCatalog}, in a single list. */
+const PLATFORM_PROVIDER = "*";
+const PLATFORM_CHANNEL_NAME = "platform-default";
+const PLATFORM_CHANNEL_KIND = "platform";
+const PLATFORM_CHANNEL_BASE_URL = "platform://default";
+
+function providerChannelId(tenantId: string, provider: string): string {
+  return `${tenantId}:${provider}`;
+}
+
+function catalogModelId(tenantId: string, model: string): string {
+  return `${tenantId}:model:${model}`;
+}
+
+function catalogOfferingId(tenantId: string, model: string): string {
+  return `${tenantId}:offering:${model}`;
+}
+
+function absoluteCachePrice(
+  inputPricePer1m: number,
+  multiplier: number | undefined,
+): number | null {
+  return multiplier === undefined ? null : inputPricePer1m * multiplier;
+}
+
+/** The compatibility-shaped projection used by the provisioning health API. */
 const CATALOG_COLUMNS =
-  "model, provider, provider_model, enabled, input_price_per_1m, output_price_per_1m, " +
-  "cached_input_multiplier, cache_write_multiplier, audio_second_price_per_1m, " +
-  "audio_character_price_per_1m, source";
+  "m.name AS model, " +
+  "CASE WHEN p.kind = 'platform' THEN '*' ELSE p.name END AS provider, " +
+  "o.upstream_model_id AS provider_model, " +
+  "CASE WHEN m.enabled = 1 AND o.enabled = 1 AND p.enabled = 1 THEN 1 ELSE 0 END AS enabled, " +
+  "o.input_price_per_1m, o.output_price_per_1m, " +
+  "CASE WHEN o.cached_input_price_per_1m IS NULL OR o.input_price_per_1m <= 0 " +
+  "THEN NULL ELSE o.cached_input_price_per_1m / o.input_price_per_1m END " +
+  "AS cached_input_multiplier, " +
+  "CASE WHEN o.cache_write_price_per_1m IS NULL OR o.input_price_per_1m <= 0 " +
+  "THEN NULL ELSE o.cache_write_price_per_1m / o.input_price_per_1m END " +
+  "AS cache_write_multiplier, " +
+  "o.audio_second_price_per_1m, o.audio_character_price_per_1m, o.source";
+
+/**
+ * The pre-#811 compatibility API returns one route per logical model. Prefer
+ * its primary offering, and use the deterministic best fallback only for a
+ * model that has no primary yet. The #812 loader will read the full offering
+ * ladder, including every fallback, canary, and shadow row.
+ */
+const COMPATIBILITY_OFFERING_PREDICATE =
+  "(o.role = 'primary' OR (" +
+  "o.role = 'fallback' AND NOT EXISTS (" +
+  "SELECT 1 FROM catalog_model_offerings primary_o " +
+  "WHERE primary_o.tenant_id = o.tenant_id AND primary_o.model_id = o.model_id " +
+  "AND primary_o.role = 'primary'" +
+  ") AND NOT EXISTS (" +
+  "SELECT 1 FROM catalog_model_offerings better_fallback " +
+  "WHERE better_fallback.tenant_id = o.tenant_id " +
+  "AND better_fallback.model_id = o.model_id " +
+  "AND better_fallback.role = 'fallback' " +
+  "AND (better_fallback.priority < o.priority " +
+  "OR (better_fallback.priority = o.priority AND better_fallback.weight > o.weight) " +
+  "OR (better_fallback.priority = o.priority AND better_fallback.weight = o.weight " +
+  "AND better_fallback.id < o.id))" +
+  ")" +
+  "))";
 
 interface CatalogRow {
   model: string;
   provider: string;
   provider_model: string;
   enabled: number;
-  input_price_per_1m: number;
-  output_price_per_1m: number;
+  input_price_per_1m: number | null;
+  output_price_per_1m: number | null;
   cached_input_multiplier: number | null;
   cache_write_multiplier: number | null;
   audio_second_price_per_1m: number | null;
@@ -227,13 +284,20 @@ interface CatalogRow {
   source: string;
 }
 
-/** One row as stored, including the two columns the seed does not set. */
-export interface StoredTenantModelCatalogEntry extends TenantModelCatalogEntry {
+/** One row as stored, including nullable prices and the two seed does not set. */
+export type StoredTenantModelCatalogEntry = Omit<
+  TenantModelCatalogEntry,
+  "inputPricePer1m" | "outputPricePer1m"
+> & {
+  /** `NULL` means unpriced; `0` means free. */
+  readonly inputPricePer1m: number | null;
+  /** `NULL` means unpriced; `0` means free. */
+  readonly outputPricePer1m: number | null;
   /** `false` disables the model WITHOUT deleting the price the tenant negotiated. */
   readonly enabled: boolean;
   /** `platform_seed` until an operator writes the row. Descriptive, not enforced. */
   readonly source: string;
-}
+};
 
 /** What {@link seedTenantModelCatalog} did. */
 export interface TenantModelCatalogSeedOutcome {
@@ -331,42 +395,89 @@ export async function seedTenantModelCatalog(
     )
     .bind(tenantId, MODEL_CATALOG_SEED_MARK, `entries=${entries.length}`, nowUnix);
 
-  const insert = db.prepare(
-    "INSERT OR IGNORE INTO model_catalog " +
-      "(tenant_id, model, provider, provider_model, enabled, input_price_per_1m, " +
-      " output_price_per_1m, cached_input_multiplier, cache_write_multiplier, " +
-      " audio_second_price_per_1m, audio_character_price_per_1m, source, " +
-      " created_at_unix, updated_at_unix) " +
-      "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  const providers = new Map<string, string>();
+  for (const entry of entries) {
+    providers.set(entry.provider, providerChannelId(tenantId, entry.provider));
+  }
+
+  const ensureRevision = db
+    .prepare(
+      "INSERT OR IGNORE INTO catalog_revisions " +
+        "(tenant_id, id, revision, updated_at_unix) VALUES (?, 1, 1, ?)",
+    )
+    .bind(tenantId, nowUnix);
+  const ensureChannel = db.prepare(
+    "INSERT OR IGNORE INTO provider_channels " +
+      "(id, tenant_id, name, kind, base_url, created_at_unix, updated_at_unix) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  const ensureModel = db.prepare(
+    "INSERT OR IGNORE INTO catalog_models " +
+      "(id, tenant_id, name, enabled, created_at_unix, updated_at_unix) " +
+      "VALUES (?, ?, ?, 1, ?, ?)",
+  );
+  const ensureOffering = db.prepare(
+    "INSERT OR IGNORE INTO catalog_model_offerings " +
+      "(id, tenant_id, model_id, provider_id, upstream_model_id, role, priority, weight, " +
+      "input_price_per_1m, output_price_per_1m, cached_input_price_per_1m, " +
+      "cache_write_price_per_1m, audio_second_price_per_1m, audio_character_price_per_1m, " +
+      "currency, source, enabled, created_at_unix, updated_at_unix) " +
+      "VALUES (?, ?, ?, ?, ?, 'primary', 0, 1, ?, ?, ?, ?, ?, ?, 'USD', ?, 1, ?, ?)",
+  );
+
+  const channelStatements = [...providers.entries()].map(([provider, id]) => {
+    const isPlatform = provider === PLATFORM_PROVIDER;
+    return ensureChannel.bind(
+      id,
+      tenantId,
+      isPlatform ? PLATFORM_CHANNEL_NAME : provider,
+      isPlatform ? PLATFORM_CHANNEL_KIND : provider,
+      isPlatform ? PLATFORM_CHANNEL_BASE_URL : "platform://legacy",
+      nowUnix,
+      nowUnix,
+    );
+  });
+  const modelStatements = entries.map((entry) =>
+    ensureModel.bind(
+      catalogModelId(tenantId, entry.model),
+      tenantId,
+      entry.model,
+      nowUnix,
+      nowUnix,
+    ),
+  );
+  const offeringStatements = entries.map((entry) =>
+    ensureOffering.bind(
+      catalogOfferingId(tenantId, entry.model),
+      tenantId,
+      catalogModelId(tenantId, entry.model),
+      providerChannelId(tenantId, entry.provider),
+      entry.providerModel,
+      entry.inputPricePer1m,
+      entry.outputPricePer1m,
+      absoluteCachePrice(entry.inputPricePer1m, entry.cachedInputMultiplier),
+      absoluteCachePrice(entry.inputPricePer1m, entry.cacheWriteMultiplier),
+      entry.audioSecondPricePer1m ?? null,
+      entry.audioCharacterPricePer1m ?? null,
+      CATALOG_SOURCE_PLATFORM_SEED,
+      nowUnix,
+      nowUnix,
+    ),
   );
 
   const results = await db.batch([
     claim,
-    ...entries.map((entry) =>
-      // `bind()` must return a FRESH statement for this to be N rows rather than
-      // the last row N times; every backend in this repo honours that, and
-      // `packages/storage/test/d1/` proves it on both.
-      insert.bind(
-        tenantId,
-        entry.model,
-        entry.provider,
-        entry.providerModel,
-        entry.inputPricePer1m,
-        entry.outputPricePer1m,
-        entry.cachedInputMultiplier ?? null,
-        entry.cacheWriteMultiplier ?? null,
-        entry.audioSecondPricePer1m ?? null,
-        entry.audioCharacterPricePer1m ?? null,
-        CATALOG_SOURCE_PLATFORM_SEED,
-        nowUnix,
-        nowUnix,
-      ),
-    ),
+    ensureRevision,
+    ...channelStatements,
+    ...modelStatements,
+    ...offeringStatements,
   ]);
 
-  if (results.length !== entries.length + 1) {
+  const expectedResults =
+    2 + channelStatements.length + modelStatements.length + offeringStatements.length;
+  if (results.length !== expectedResults) {
     throw StorageError.runtime(
-      `seeding the tenant model catalog expected ${entries.length + 1} statement results and ` +
+      `seeding the tenant model catalog expected ${expectedResults} statement results and ` +
         `got ${results.length}; refusing to report a seed whose outcome cannot be read`,
     );
   }
@@ -383,7 +494,7 @@ export async function seedTenantModelCatalog(
     };
   }
   const inserted = results
-    .slice(1)
+    .slice(2 + channelStatements.length + modelStatements.length)
     .reduce((total, result) => total + (result.meta?.changes ?? 0), 0);
   return { seeded: true, inserted, seededAtUnix: nowUnix };
 }
@@ -416,7 +527,7 @@ async function clearEmptySeedMark(db: D1Database, tenantId: string): Promise<boo
         "DELETE FROM tenant_provisioning_marks " +
           "WHERE tenant_id = ? AND mark = ? " +
           "AND detail = 'entries=0' " +
-          "AND NOT EXISTS (SELECT 1 FROM model_catalog WHERE tenant_id = ?) RETURNING mark",
+          "AND NOT EXISTS (SELECT 1 FROM catalog_models WHERE tenant_id = ?) RETURNING mark",
       )
       .bind(tenantId, MODEL_CATALOG_SEED_MARK, tenantId),
   ]);
@@ -429,7 +540,12 @@ export async function listTenantModelCatalog(
   tenantId: string,
 ): Promise<StoredTenantModelCatalogEntry[]> {
   const result = await db
-    .prepare(`SELECT ${CATALOG_COLUMNS} FROM model_catalog WHERE tenant_id = ? ORDER BY model`)
+    .prepare(
+      `SELECT ${CATALOG_COLUMNS} FROM catalog_models m
+       JOIN catalog_model_offerings o ON o.tenant_id = m.tenant_id AND o.model_id = m.id
+       JOIN provider_channels p ON p.tenant_id = o.tenant_id AND p.id = o.provider_id
+       WHERE m.tenant_id = ? AND ${COMPATIBILITY_OFFERING_PREDICATE} ORDER BY m.name`,
+    )
     .bind(tenantId)
     .all<CatalogRow>();
   return result.results.map(catalogEntryFromRow);
@@ -450,7 +566,11 @@ export async function resolveTenantModel(
 ): Promise<StoredTenantModelCatalogEntry | undefined> {
   const row = await db
     .prepare(
-      `SELECT ${CATALOG_COLUMNS} FROM model_catalog WHERE tenant_id = ? AND model = ? AND enabled = 1`,
+      `SELECT ${CATALOG_COLUMNS} FROM catalog_models m
+       JOIN catalog_model_offerings o ON o.tenant_id = m.tenant_id AND o.model_id = m.id
+       JOIN provider_channels p ON p.tenant_id = o.tenant_id AND p.id = o.provider_id
+       WHERE m.tenant_id = ? AND m.name = ? AND ${COMPATIBILITY_OFFERING_PREDICATE}
+       AND m.enabled = 1 AND o.enabled = 1 AND p.enabled = 1`,
     )
     .bind(tenantId, model)
     .first<CatalogRow>();

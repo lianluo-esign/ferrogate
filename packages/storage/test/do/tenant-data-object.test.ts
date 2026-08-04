@@ -10,9 +10,9 @@
  *    choice, never as a SQL surface);
  *  * that `transactionSync` really rolls back, so `batch()` is genuinely atomic
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
- *  * that the version gate really stops the 62-statement apply re-running on
+ *  * that the version gate really stops the 84-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
- *    seven tenant migrations are ALTER-only;
+ *    nine tenant migrations are ALTER-only;
  *  * that two `idFromName` objects really hold physically different databases.
  *
  * A fake namespace would agree with all four because the fake was written to
@@ -37,7 +37,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0008.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0009.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -53,15 +53,19 @@ const TENANT_TABLES = [
   "api_keys",
   "asset_bundle_files",
   "asset_channels",
-  "model_catalog",
+  "catalog_model_offerings",
+  "catalog_models",
+  "catalog_revisions",
   "observed_agent_presence",
   "payment_methods",
   "projects",
+  "provider_channels",
   "responses_conversations",
   "retention_policies",
   "storage_schema_migrations",
   "stored_assets",
   "tenant_contexts",
+  "tenant_database_identity",
   "tenant_provisioning_marks",
   "usage_aggregate_rollups",
   "usage_metadata_rollups",
@@ -150,19 +154,19 @@ describe("the statement splitter", () => {
 
   test("the census `sqlStatements`' own docblock states is still the census", () => {
     // WHY A TEST AND NOT A COMMENT. `sqlStatements`' header carries a safety
-    // ARGUMENT ("measured over all eight files, every non-comment `;` is at
+    // ARGUMENT ("measured over all nine files, every non-comment `;` is at
     // end-of-line…") and `#migrate`'s header carries the statement breakdown
     // that justifies the version gate. Both are measurements, and a measurement
-    // in a comment rots: 0008 landed in the SAME commit that re-measured them
-    // over seven files, silently falsifying four separate numbers in the file's
-    // most load-bearing safety argument. Re-deriving them here means the next
-    // migration turns this red and the docblock is corrected in the same commit
-    // — the forcing function `test/mount-inventory.test.ts` is for the mount
-    // markers, applied to the schema census.
+    // in a comment rots: a migration can land after the last census and
+    // silently falsify four separate numbers in the file's most load-bearing
+    // safety argument. Re-deriving them here means the next migration turns
+    // this red and the docblock is corrected in the same commit — the forcing
+    // function `test/mount-inventory.test.ts` is for the mount markers, applied
+    // to the schema census.
     //
     // If this fails, do NOT change the numbers here alone. Update the four
     // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
-    // count and "all EIGHT files" in the `sqlStatements` docblock, the
+    // count and "all NINE files" in the `sqlStatements` docblock, the
     // "N statements" in the constructor comment, and the breakdown in
     // `#migrate`'s docblock.
     const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
@@ -176,13 +180,13 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 8,
-      statements: 65,
-      createTable: 24,
-      createIndex: 30,
-      createUniqueIndex: 1,
+      files: 9,
+      statements: 84,
+      createTable: 30,
+      createIndex: 33,
+      createUniqueIndex: 5,
       alterTable: 9,
-      insert: 1,
+      insert: 6,
     });
 
     // The other half of the argument: the comment lines that carry a `;`, which
@@ -201,8 +205,9 @@ describe("the statement splitter", () => {
       "0003_api_key_attribution_tags": 1,
       "0005_responses_conversations": 5,
       "0008_model_catalog": 3,
+      "0009_model_catalog": 2,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(27);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(29);
 
     // The claim those two counts exist to support, asserted rather than
     // restated: NO statement the splitter produces still carries a `;`, i.e.
@@ -225,7 +230,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(8);
+    expect(TENANT_MIGRATIONS.length).toBe(9);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -303,14 +308,14 @@ describe("the second wake", () => {
     const second = await objectFor(ACME).schemaVersion();
     // The assertion is on what the applier DID, not on how long it took: a
     // wall-time test would be a timing guess, and a test that only checked the
-    // version would pass against an applier that re-ran all 62 statements.
+    // version would pass against an applier that re-ran all 84 statements.
     expect(second.appliedThisWake).toEqual([]);
     expect(second.version).toBe(TENANT_SCHEMA_VERSION);
     expect(second.failure).toBeNull();
   });
 
   test("survives at all, which is itself the ALTER-idempotence proof", async () => {
-    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the seven tenant
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the nine tenant
     // migrations are ALTER-only, so an applier that re-ran them would throw
     // `duplicate column name` and this object would come back refusing.
     await evict(ACME);
