@@ -288,7 +288,7 @@ describe("an upstream that drops mid-conversation reaches the session", () => {
     // The listing itself already reported the degradation (the leg PR #754
     // landed); what is new is that the SESSION now learns about it too.
     const result = response.result as Record<string, unknown>;
-    const meta = result["_meta"] as Record<string, unknown>;
+    const meta = result._meta as Record<string, unknown>;
     expect(meta[MULTIPLEX_DEGRADED_META]).toBeDefined();
 
     expect(sink.servers).toEqual(["alpha"]);
