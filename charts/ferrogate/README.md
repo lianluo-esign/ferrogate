@@ -50,6 +50,6 @@ helm upgrade --install ferrogate charts/ferrogate \
 
 It has no secrets, PVCs, or `/metrics` — just a stateless Deployment/Service
 health-checked at `/healthz`, and its own optional Ingress
-(`adminConsole.ingress.*`) on a distinct host. Control-plane mutations must be
-served same-origin through the configured control-plane proxy, while gateway
-data-plane paths use `gatewayBaseUrl` and need their own CORS configuration.
+(`adminConsole.ingress.*`) on a distinct host. The image's nginx entrypoint
+proxies control-plane and gateway paths through that host, using
+`controlPlaneBaseUrl` and `gatewayBaseUrl` as upstreams.

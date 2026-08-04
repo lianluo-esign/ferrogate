@@ -34,8 +34,9 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            # New names: admin/control-plane paths and gateway data-plane paths
-            # are separate backend origins.
+            # Nginx upstreams: browser requests remain on the console origin,
+            # while admin/control-plane and gateway data-plane paths use
+            # separate backends.
             - name: CONTROL_PLANE_BASE_URL
               value: {{ default .Values.adminConsole.env.adminApiBaseUrl .Values.adminConsole.env.controlPlaneBaseUrl | quote }}
             - name: GATEWAY_BASE_URL

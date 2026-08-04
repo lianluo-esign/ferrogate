@@ -41,11 +41,11 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            # The control-plane proxy owns /admin/v1/* and /v1/admin/*.
+            # Nginx upstream for control-plane/admin API paths; browser
+            # requests remain on the console origin.
             - name: CONTROL_PLANE_BASE_URL
               value: https://admin-api.ferrogate.example.com
-            # The gateway owns /v1/assets/*, /v1/agent-jobs/*, /v1/mcp/* and
-            # /sites/*; keep this separate from the control-plane origin.
+            # Nginx upstream for gateway-owned /v1/* and /sites/* paths.
             - name: GATEWAY_BASE_URL
               value: https://ferrogate.example.com
             # Legacy names remain for older images during the migration.

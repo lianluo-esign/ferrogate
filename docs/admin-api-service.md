@@ -150,8 +150,9 @@ processes.
 
 ## Console wiring
 
-The console reads `CONTROL_PLANE_BASE_URL` and `GATEWAY_BASE_URL` (rendered
-into `env-config.js` by `admin-console/render-env-config.sh`). The legacy
+The container console uses `CONTROL_PLANE_BASE_URL` and `GATEWAY_BASE_URL` as
+nginx upstreams; `admin-console/render-env-config.sh` keeps the browser on the
+console origin while proxying the path-owned requests. The legacy
 `ADMIN_API_BASE_URL` and `GATEWAY_ADMIN_BASE_URL` names remain renderer
 fallbacks for older images. Kubernetes manifests:
 `deploy/kubernetes/admin-api.yaml` runs the service against the shared

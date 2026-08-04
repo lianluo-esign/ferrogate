@@ -155,15 +155,17 @@ failing threshold by #334 after those defects are fixed.
 ### The supported shape: same origin as the control plane
 
 ```bash
-scripts/build-admin-console.sh          # from the repo root
+VITE_GATEWAY_BASE_URL=https://gateway.example.com \
+  scripts/build-admin-console.sh        # from the repo root
 cd apps/control-plane && wrangler deploy
 ```
 
 `scripts/build-admin-console.sh` builds this app into
 `apps/control-plane/public/`, which that Worker serves as Workers Static
-Assets. The control plane remains the console's own origin. Set
-`VITE_GATEWAY_BASE_URL` while building when the gateway is deployed at a
-separate origin; otherwise gateway paths use the same-origin reverse proxy.
+Assets. `VITE_GATEWAY_BASE_URL` is required for this deployment shape because
+the control-plane Worker does not serve gateway data-plane paths. The console
+still uses the control-plane origin for browser mutations; the gateway URL is
+only baked into data-plane request routing.
 
 That is a **correctness requirement**, not a packaging choice. The control
 plane answers `403 cross_site_admin_denied` to any state-changing request
@@ -176,20 +178,22 @@ log in (`OPTIONS /v1/admin/login` 404s, so the browser never sends the POST).
 
 ```bash
 docker build -t ferrogate-admin-console .
-docker run --rm -p 8081:8080 ferrogate-admin-console
+docker run --rm -p 8081:8080 \
+  -e CONTROL_PLANE_BASE_URL=https://control-plane.example.com \
+  -e GATEWAY_BASE_URL=https://gateway.example.com \
+  ferrogate-admin-console
 ```
 
-The image serves the built SPA from nginx. To be usable it must be fronted by
-something that puts the console and the control plane on ONE origin -- an
-nginx/ingress rule proxying `/admin/v1`, `/control/v1`, `/v1/admin` and
-`/scim/v2` to the control-plane Worker. Proxy `/v1/*` and `/sites/*` to the
-gateway, or set `GATEWAY_BASE_URL` to the gateway origin.
+The image serves the built SPA from nginx. Set `CONTROL_PLANE_BASE_URL` and
+`GATEWAY_BASE_URL` to absolute upstream origins. The entrypoint generates
+same-origin nginx proxy locations for `/admin/v1`, `/control/v1`, `/v1/admin`,
+`/scim/v2`, `/v1/*` and `/sites/*`, so the browser never sends a control-plane
+mutation cross-origin.
 
 `CONTROL_PLANE_BASE_URL` and `GATEWAY_BASE_URL` are available as container env
-vars and are rendered into `/env-config.js` at container start
-(`render-env-config.sh`, installed as an nginx `docker-entrypoint.d/` hook).
-Keep control-plane API paths same-origin through the ingress, and set the
-gateway value to the gateway origin when data-plane paths are not proxied.
+vars and are used by `render-env-config.sh` at container start
+(`docker-entrypoint.d/` hook) to generate the nginx upstreams. The generated
+`env-config.js` points both client origins at the console itself.
 `ADMIN_API_BASE_URL` and `GATEWAY_ADMIN_BASE_URL` remain renderer fallbacks for
 older Kubernetes images.
 

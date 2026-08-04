@@ -38,6 +38,15 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+case "${VITE_GATEWAY_BASE_URL:-}" in
+  http://*|https://*) ;;
+  *)
+    echo "admin-console build did NOT run: VITE_GATEWAY_BASE_URL must be an absolute gateway origin" >&2
+    echo "  example: VITE_GATEWAY_BASE_URL=https://gateway.example.com scripts/build-admin-console.sh" >&2
+    exit 1
+    ;;
+esac
+
 if [[ ! -d "$console_dir/node_modules" ]]; then
   echo "==> npm ci (admin-console/node_modules missing)"
   (cd "$console_dir" && npm ci --no-audit --no-fund)
