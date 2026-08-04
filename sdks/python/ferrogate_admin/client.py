@@ -75,6 +75,7 @@ __all__ = [
 ]
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
+_VALID_HTTP_METHODS = frozenset({"DELETE", "GET", "PATCH", "POST", "PUT"})
 
 #: The two URI prefixes the same stable surface is served under (issue #453).
 CONTROL_PLANE_PREFIXES = ("/admin/v1", "/control/v1")
@@ -108,6 +109,33 @@ Transport = Callable[[HttpRequest], HttpResponse]
 def _lowercase(headers: Mapping[str, str]) -> dict[str, str]:
     """HTTP header names are case-insensitive; the rest of this module is not."""
     return {key.lower(): value for key, value in headers.items()}
+
+
+def _validate_credential_headers(
+    headers: Mapping[str, str] | None,
+    configured: Mapping[str, str],
+) -> None:
+    """Reject a caller header that would add or replace an SDK credential."""
+    normalized = _lowercase(headers or {})
+    authorization = normalized.get("authorization")
+    api_key = normalized.get("x-api-key")
+
+    if authorization is not None and api_key is not None:
+        raise ValueError("caller headers cannot contain both authorization and x-api-key")
+
+    for name, expected in configured.items():
+        received = normalized.get(name)
+        if received is not None and received != expected:
+            raise ValueError(f"caller header {name!r} conflicts with the configured SDK credential")
+
+    if "authorization" in configured and api_key is not None:
+        raise ValueError("caller header 'x-api-key' conflicts with the configured bearer credential")
+    if "x-api-key" in configured and authorization is not None:
+        raise ValueError("caller header 'authorization' conflicts with the configured API key")
+
+
+def _has_path_segment_prefix(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def urllib_transport(request: HttpRequest) -> HttpResponse:
@@ -177,11 +205,15 @@ class AdminClient:
         self.timeout = timeout
         self._transport: Transport = transport or urllib_transport
 
-        self._headers: dict[str, str] = {"accept": "application/json"}
+        self._credential_headers: dict[str, str] = {}
         if token is not None:
-            self._headers["authorization"] = f"Bearer {token}"
+            self._credential_headers["authorization"] = f"Bearer {token}"
         if api_key is not None:
-            self._headers["x-api-key"] = api_key
+            self._credential_headers["x-api-key"] = api_key
+        _validate_credential_headers(headers, self._credential_headers)
+
+        self._headers: dict[str, str] = {"accept": "application/json"}
+        self._headers.update(self._credential_headers)
         if tenant is not None:
             self._headers["x-ferrogate-tenant"] = tenant
         self._headers.update(_lowercase(headers or {}))
@@ -212,7 +244,7 @@ class AdminClient:
         if "{" in rendered:
             raise ValueError(f"unfilled path parameter in {rendered!r}")
 
-        if self.prefix != "/admin/v1" and rendered.startswith("/admin/v1"):
+        if self.prefix != "/admin/v1" and _has_path_segment_prefix(rendered, "/admin/v1"):
             rendered = self.prefix + rendered[len("/admin/v1") :]
 
         url = f"{self.base_url}{rendered}"
@@ -242,6 +274,7 @@ class AdminClient:
         ``list``, NOT a generated model. See this module's docstring for why
         Python has no generated models in this tree.
         """
+        _validate_credential_headers(headers, self._credential_headers)
         request_headers: MutableMapping[str, str] = dict(self._headers)
         request_headers.update(_lowercase(headers or {}))
 
@@ -294,9 +327,13 @@ class AdminClient:
         operation = OPERATIONS.get(operation_id)
         if operation is None:
             raise ValueError(f"unknown OpenAPI operationId: {operation_id}")
+        method = operation.get("method")
+        path = operation.get("path")
+        if method not in _VALID_HTTP_METHODS or not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(f"invalid generated metadata for OpenAPI operationId: {operation_id}")
         return self.request(
-            operation["method"],
-            operation["path"],
+            method,
+            path,
             path_params=path_params,
             query=query,
             body=body,
