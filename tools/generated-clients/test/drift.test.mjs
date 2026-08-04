@@ -84,6 +84,16 @@ describe("generated clients", () => {
     ).toEqual([]);
   });
 
+  it("has no duplicate manifest slugs or generated outputs", () => {
+    const slugs = ARTIFACTS.map((artifact) => artifact.slug);
+    const outputs = ARTIFACTS.map((artifact) => artifact.output);
+
+    expect(new Set(slugs).size, "duplicate generated-client manifest slug").toBe(slugs.length);
+    expect(new Set(outputs).size, "duplicate generated-client manifest output").toBe(
+      outputs.length,
+    );
+  });
+
   it("detects a client that drifted from the contract", () => {
     // Anti-vacuity. The gate above is green on a healthy tree by construction,
     // so on its own it cannot distinguish "comparison works" from "comparison
