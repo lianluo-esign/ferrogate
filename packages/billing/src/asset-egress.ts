@@ -632,7 +632,7 @@ export function assetEgressTargetId(
   tenantId: string,
 ): string {
   void tenantId;
-  if (asset.id === undefined || asset.id === "") {
+  if (typeof asset.id !== "string" || asset.id.trim() === "") {
     throw new Error("stored_assets.id is required for asset egress audit");
   }
   return asset.id;

@@ -61,6 +61,7 @@ import {
   assetEgressCountersFromEnv,
   assetEgressMeterFromEnv,
   assetEgressPricePerGb,
+  assetEgressTargetId,
   InMemoryAssetEgressCounters,
   InMemoryAssetEgressMeter,
   NO_ASSET_EGRESS_METER,
@@ -519,7 +520,7 @@ export interface ApprovalPort {
 /** A hosted asset exposed as an MCP resource (`asset://{type}/{name}/{version}`). */
 export interface StoredAsset {
   /** The durable `stored_assets.id`, shared with gateway audit targets. */
-  id?: string;
+  id: string;
   assetType: string;
   name: string;
   version: string;
@@ -783,10 +784,8 @@ export class InMemoryAssets implements AssetReaderPort {
   readonly #assets = new Map<string, { asset: StoredAsset; content: Uint8Array }>();
 
   seed(tenantId: string, asset: StoredAsset, content: Uint8Array): this {
-    const normalized = {
-      ...asset,
-      id: asset.id ?? `${tenantId}:${asset.assetType}:${asset.name}:${asset.version}`,
-    };
+    const id = assetEgressTargetId(asset, tenantId);
+    const normalized = { ...asset, id };
     this.#assets.set(assetKey(tenantId, asset.assetType, asset.name, asset.version), {
       asset: normalized,
       content,
