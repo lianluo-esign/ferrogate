@@ -207,6 +207,18 @@ export * from "./tenant-rest.js";
  */
 export * from "./tenant-do.js";
 /**
+ * The router that picks between the two legs above PER TENANT, from
+ * `tenant_databases.storage_backend`.
+ *
+ * `apps/control-plane` mounts it. Its tenant-data paths cannot simply switch to
+ * `durable_object` — a `native_binding` tenant's rows really are in a D1
+ * database — and they cannot stay on the binding router either, because since
+ * #820 every newly onboarded tenant is on an object the binding router cannot
+ * reach, which made an admin wallet credit write nothing and the fleet asset
+ * view report an empty fleet.
+ */
+export * from "./tenant-dispatch.js";
+/**
  * TENANT ONBOARDING (#820): the tenant's own model catalog and the seeder that
  * fills it once, plus the provisioner that refuses an unregistered tenant BEFORE
  * addressing its object, records resumable state on `tenant_databases`, and
