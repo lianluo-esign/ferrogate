@@ -128,7 +128,7 @@ export async function runScheduledTick(
 }
 
 async function catalogAuditPass(
-  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases" | "tenantStorage">,
+  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases">,
 ): Promise<TenantCatalogAuditSweepReport> {
   if (deps.controlDatabase === null) {
     return {
@@ -138,10 +138,7 @@ async function catalogAuditPass(
       skipped: "control_database_unavailable",
     };
   }
-  return reconcileProvisionedTenantCatalogAudits(
-    deps.tenantStorage ?? deps.tenantDatabases,
-    deps.controlDatabase,
-  );
+  return reconcileProvisionedTenantCatalogAudits(deps.tenantDatabases, deps.controlDatabase);
 }
 
 /**

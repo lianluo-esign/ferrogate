@@ -17,6 +17,7 @@ import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import { applyTenantSchema, tenantDbA } from "./tenant-db.js";
 import {
   TenantCatalogConflictError,
   TenantModelCatalogStore,
@@ -144,7 +145,10 @@ async function createOffering(
   expect(response.status).toBe(201);
 }
 
-beforeAll(applySchema);
+beforeAll(async () => {
+  await applySchema();
+  await applyTenantSchema();
+});
 
 beforeEach(async () => {
   await resetD1();
@@ -569,6 +573,64 @@ describe("tenant model catalog CRUD", () => {
       .bind(tenantId)
       .all<{ audit_json: string }>();
     expect(auditRows.results).toHaveLength(1);
+  });
+
+  it("uses the dispatch router for native-binding tenant audit outboxes", async () => {
+    const tenantId = freshTenantId("native-audit-outbox");
+    const now = Math.floor(Date.now() / 1000);
+    const nativeDb = tenantDbA();
+    await db()
+      .prepare(
+        `INSERT INTO tenant_databases
+           (tenant_id, storage_backend, provisioning_status, schema_version,
+            database_uuid, database_name, binding_name, provisioned_at_unix, updated_at_unix)
+         VALUES (?, 'native_binding', 'ready', 10, ?, ?, 'TENANT_DB_A', ?, ?)`,
+      )
+      .bind(tenantId, `uuid-${tenantId}`, `database-${tenantId}`, now, now)
+      .run();
+    await nativeDb
+      .prepare(
+        `INSERT INTO catalog_audit_outbox
+           (id, tenant_id, revision, action, collection, record_json, audit_json,
+            request_id, actor_scope, actor_tenant_id)
+         VALUES (?, ?, 1, 'create', 'providers', ?, ?, ?, 'platform_operator', NULL)`,
+      )
+      .bind(
+        `audit-${tenantId}`,
+        tenantId,
+        JSON.stringify({ id: "provider_native", tenant_id: tenantId }),
+        JSON.stringify({
+          object: "audit_event",
+          action: "create",
+          collection: "providers",
+          resource_id: "provider_native",
+          revision: 1,
+          actor_scope: "platform_operator",
+          actor_tenant_id: null,
+          resource_tenant_id: tenantId,
+        }),
+        "native-audit-request",
+      )
+      .run();
+
+    const report = await runScheduledTick(env as unknown as ControlPlaneBindings, now);
+    expect(report.tenantCatalogAudit).toMatchObject({
+      scanned: 1,
+      reconciled: 1,
+      failed: 0,
+    });
+    expect(
+      (
+        await nativeDb
+          .prepare("SELECT id FROM catalog_audit_outbox WHERE tenant_id = ?")
+          .bind(tenantId)
+          .all()
+      ).results,
+    ).toHaveLength(0);
+    expect(
+      (await db().prepare("SELECT id FROM audit_events WHERE tenant = ?").bind(tenantId).all())
+        .results,
+    ).toHaveLength(1);
   });
 
   it("maps a guarded provider-delete race to a conflict", async () => {
