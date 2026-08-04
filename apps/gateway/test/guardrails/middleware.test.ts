@@ -23,6 +23,7 @@ import { depsFromEnv } from "../../src/adapters.js";
 import {
   type GuardrailAuditEvent,
   InMemoryGuardrailEvidenceSink,
+  conversationReplayScreenerFor,
   guardrails,
 } from "../../src/guardrails/index.js";
 import { contractAuth } from "../../src/middleware/auth.js";
@@ -92,12 +93,34 @@ function harness(options: {
   return { app, evidence, audit };
 }
 
-function post(body: unknown, path = "/v1/chat/completions"): Request {
+function post(
+  body: unknown,
+  path = "/v1/chat/completions",
+  extraHeaders: Record<string, string> = {},
+): Request {
   return new Request(`https://gateway.test${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+    headers: {
+      authorization: `Bearer ${KEY}`,
+      "content-type": "application/json",
+      ...extraHeaders,
+    },
     body: JSON.stringify(body),
   });
+}
+
+function responsesBodyWithProbeSecret(): Record<string, unknown> {
+  return {
+    id: "resp_1",
+    object: "response",
+    output: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: `answer ${PROBE_SECRET}` }],
+      },
+    ],
+  };
 }
 
 describe("input screening through the middleware", () => {
@@ -145,6 +168,167 @@ describe("input screening through the middleware", () => {
     const response = await app.fetch(post(cleanBody()), env);
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("all good");
+  });
+
+  test("a gateway-config scoped policy blocks the selected profile", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-scoped",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    const response = await app.fetch(
+      post(bodyWithProbeSecret(), "/v1/chat/completions", {
+        "x-ferrogate-config": "sensitive-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "guardrail_blocked",
+    );
+  });
+
+  test("a gateway-config scoped policy does not match another profile", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-scoped-negative",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    const response = await app.fetch(
+      post(bodyWithProbeSecret(), "/v1/chat/completions", {
+        "x-ferrogate-config": "ordinary-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  test("a gateway-config scoped policy does not match a missing profile header", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-scoped-missing",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    const response = await app.fetch(post(bodyWithProbeSecret()), env);
+
+    expect(response.status).toBe(200);
+  });
+
+  test("a gateway-config scoped policy does not match an unknown profile header", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-scoped-unknown",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    const response = await app.fetch(
+      post(bodyWithProbeSecret(), "/v1/chat/completions", {
+        "x-ferrogate-config": "unknown-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  test("a gateway-config scoped policy reaches the ordinary response stage", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-response",
+        stage: "response",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+      upstream: () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ index: 0, message: { role: "assistant", content: PROBE_SECRET } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const response = await app.fetch(
+      post(cleanBody(), "/v1/chat/completions", {
+        "x-ferrogate-config": "sensitive-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "guardrail_blocked",
+    );
+  });
+
+  test("a gateway-config scoped policy reaches the no-body getResponse stage", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-get-response",
+        stage: "response",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    new GatewayRouter(app).register(
+      "getResponse",
+      () =>
+        new Response(JSON.stringify(responsesBodyWithProbeSecret()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    const response = await app.fetch(
+      new Request("https://gateway.test/v1/responses/resp_1", {
+        headers: {
+          authorization: `Bearer ${KEY}`,
+          "x-ferrogate-config": "sensitive-profile",
+        },
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "guardrail_blocked",
+    );
+  });
+
+  test("a gateway-config scoped policy reaches conversation replay screening", async () => {
+    let replayBlocked = false;
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-replay",
+        stage: "response",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    new GatewayRouter(app).register("createResponse", async (c) => {
+      const screener = conversationReplayScreenerFor(c.req.raw);
+      const result = await screener?.screen({
+        requestId: "replay-test",
+        input: [],
+        response: responsesBodyWithProbeSecret(),
+      });
+      replayBlocked = result?.ok === false;
+      return new Response(JSON.stringify({ replayBlocked }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const response = await app.fetch(
+      post({ model: "gpt-4o", input: "hello" }, "/v1/responses", {
+        "x-ferrogate-config": "sensitive-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(replayBlocked).toBe(true);
   });
 
   test("the middleware does NOT consume the body the route still needs", async () => {

@@ -53,6 +53,7 @@ import { type GuardrailProtocol, normalizeRequest, normalizeResponse } from "@fe
  *   evaluates once at the end (`not_enforced`).
  */
 import type { Context, MiddlewareHandler, Next } from "hono";
+import { GATEWAY_CONFIG_HEADER } from "../middleware/response-cache.js";
 import { contributeRequestLogFacts, requestLogFactsFor } from "../requestlog/facts.js";
 import type { GuardrailVerdict } from "../requestlog/record.js";
 import { publishConversationReplayScreener } from "./conversation-replay.js";
@@ -489,6 +490,7 @@ export function guardrails(
     const requestId = (c.get("requestId") as string | undefined) ?? "";
     try {
       const tenant = tenantFrom(c);
+      const gatewayConfigId = gatewayConfigIdFrom(c);
 
       let context: GuardrailEvaluationContext;
       let plan: ReturnType<GuardrailEngine["streamingGuardrailPlan"]>;
@@ -518,6 +520,7 @@ export function guardrails(
           requestId,
           tenant,
           ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
+          ...(gatewayConfigId !== undefined ? { gatewayConfigId } : {}),
           ...(model !== undefined ? { model } : {}),
           ...(provider !== undefined ? { provider } : {}),
           streaming,
@@ -649,6 +652,7 @@ export function guardrails(
           ...(tenant.apiKeyId !== undefined ? { actorApiKeyId: tenant.apiKeyId } : {}),
           ...(facts.logicalModel !== undefined ? { model: facts.logicalModel } : {}),
           ...(facts.provider !== undefined ? { provider: facts.provider } : {}),
+          ...(gatewayConfigId !== undefined ? { gatewayConfigId } : {}),
           streaming: false,
           // Empty by construction — `normalizeRequest` extracts nothing from
           // `{}` for `audio_transcription` or for `responses`. It is here only
@@ -864,6 +868,12 @@ export function tenantFrom(c: Context): GuardrailTenant {
     ...(tenancy.userId ? { userId: tenancy.userId } : {}),
     ...(auth.subject ? { apiKeyId: auth.subject } : {}),
   };
+}
+
+/** The authenticated request's gateway profile, when one was selected. */
+export function gatewayConfigIdFrom(c: Context): string | undefined {
+  const value = c.req.header(GATEWAY_CONFIG_HEADER)?.trim();
+  return value === undefined || value === "" ? undefined : value;
 }
 
 /**

@@ -31748,13 +31748,6 @@
             },
             "default": []
           },
-          "service_account_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "default": []
-          },
           "gateway_config_ids": {
             "type": "array",
             "items": {
@@ -32502,12 +32495,6 @@
             ]
           },
           "api_key_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "service_account_id": {
             "type": [
               "string",
               "null"

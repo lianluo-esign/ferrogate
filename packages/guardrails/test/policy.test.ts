@@ -1,16 +1,17 @@
 import { describe, expect, test } from "vitest";
 import {
-  aggregateCheckOutcomes,
+  type CheckBinding,
+  type PolicyRevision,
+  type PolicyScopeSelector,
   administrativeRank,
+  admitPolicyRevision,
+  aggregateCheckOutcomes,
   immutableId,
   localDetectorDefinition,
   policyActions,
   scopeMatches,
   selectPolicyRevisions,
   validatePolicyRevision,
-  type CheckBinding,
-  type PolicyRevision,
-  type PolicyScopeSelector,
 } from "../src/index.js";
 
 function emptyScope(overrides: Partial<PolicyScopeSelector> = {}): PolicyScopeSelector {
@@ -20,7 +21,6 @@ function emptyScope(overrides: Partial<PolicyScopeSelector> = {}): PolicyScopeSe
     project_ids: [],
     workspace_ids: [],
     api_key_ids: [],
-    service_account_ids: [],
     gateway_config_ids: [],
     models: [],
     providers: [],
@@ -85,6 +85,19 @@ describe("aggregateCheckOutcomes", () => {
 });
 
 describe("scope matching + administrative rank", () => {
+  test("rejects a service-account scope with no data-plane identity source", () => {
+    const candidate: unknown = {
+      ...revision(),
+      scope: { ...emptyScope(), service_account_ids: ["service-account-1"] },
+    };
+
+    const result = admitPolicyRevision(candidate);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("service-account scopes must not be admitted");
+    expect(result.error.field).toBe("scope");
+  });
+
   test("model-content policy only matches model content (not managed actions)", () => {
     const scope = emptyScope({ tenant_ids: ["t1"] });
     expect(scopeMatches(scope, { organization_id: "t1" })).toBe(true);

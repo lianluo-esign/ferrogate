@@ -1,3 +1,4 @@
+import { env } from "cloudflare:test";
 /**
  * The READ side of the `guardrail_policy` write half — and the boot-resilience
  * guard that made closing it safe.
@@ -39,7 +40,6 @@ import {
   envelopeFromText,
   policyRevisionSchema,
 } from "@ferrogate/guardrails";
-import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
@@ -107,7 +107,14 @@ async function insertRevisionRow(
         "(policy_id, revision, immutable_id, created_at_unix, created_by, revision_json) " +
         "VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
-    .bind(policyId, revision, `${policyId}@${revision}`, 1, "static_operator", JSON.stringify(document))
+    .bind(
+      policyId,
+      revision,
+      `${policyId}@${revision}`,
+      1,
+      "static_operator",
+      JSON.stringify(document),
+    )
     .run();
 }
 
@@ -231,6 +238,29 @@ describe("a malformed pre-existing row fails ONE policy, never the boot", () => 
     expect(selected.map((runtime) => runtime.revision.policy_id)).toEqual(["gp_projected"]);
   });
 
+  test("a legacy service-account scope is quarantined instead of becoming broad", async () => {
+    const legacy = projectedRevision({ policy_id: "gp_retired_scope" });
+    await insertRevisionRow("gp_retired_scope", 1, {
+      ...legacy,
+      scope: {
+        tenant_ids: [],
+        organization_ids: [],
+        project_ids: [],
+        workspace_ids: [],
+        api_key_ids: [],
+        service_account_ids: ["service-account-1"],
+        gateway_config_ids: [],
+        models: [],
+        providers: [],
+      },
+    });
+    await insertBindingRow("gp_retired_scope", 1);
+
+    const source = await bootSource();
+
+    expect(source.policiesFor({ organization_id: "tenant_a" })).toHaveLength(0);
+  });
+
   test("a revision whose secret ref does not resolve HERE fails that policy CLOSED", async () => {
     // Validates fine (the ref is non-empty), cannot BUILD (nothing resolves it
     // in this Worker's env). Admission in the control plane cannot see the
@@ -272,10 +302,9 @@ describe("a malformed pre-existing row fails ONE policy, never the boot", () => 
 
     // The healthy one still works.
     const healthy = selected.find((runtime) => runtime.revision.policy_id === "gp_projected");
-    const healthyResult = await (healthy as NonNullable<typeof healthy>).checks[0]?.detector.evaluate(
-      detectorInput(OFFENDING_TEXT),
-      Date.now() + 2000,
-    );
+    const healthyResult = await (
+      healthy as NonNullable<typeof healthy>
+    ).checks[0]?.detector.evaluate(detectorInput(OFFENDING_TEXT), Date.now() + 2000);
     expect(healthyResult?.verdict).toBe("fail");
 
     // The broken one refuses to evaluate, so the engine takes `on_error`
@@ -353,10 +382,9 @@ describe("a malformed pre-existing row fails ONE policy, never the boot", () => 
     const source = await bootSource();
     const selected = source.policiesFor({ organization_id: "tenant_a" });
     expect(selected).toHaveLength(1);
-    const result = await (selected[0] as NonNullable<(typeof selected)[0]>).checks[0]?.detector.evaluate(
-      detectorInput(OFFENDING_TEXT),
-      Date.now() + 2000,
-    );
+    const result = await (
+      selected[0] as NonNullable<(typeof selected)[0]>
+    ).checks[0]?.detector.evaluate(detectorInput(OFFENDING_TEXT), Date.now() + 2000);
     expect(result?.verdict).toBe("fail");
   });
 });
