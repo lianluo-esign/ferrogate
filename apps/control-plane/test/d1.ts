@@ -87,6 +87,18 @@ export async function resetD1(): Promise<void> {
     // Tuning rides `quota_policies`, so a policy row left behind would silently
     // re-tune the next test's detector.
     db().prepare("DELETE FROM quota_policies"),
+    // THE ROSTER. It decides which BACKEND a tenant routes to
+    // (`BackendDispatchingTenantDatabaseRouter`), so a row left behind by a test
+    // that created a tenant-account silently re-points every later test's tenant
+    // writes into that tenant's Durable Object — where the document-only
+    // assertions cannot see them, and where the previous test's balance is still
+    // sitting. Before the dispatcher existed this leak was invisible, because
+    // the binding router refused a `durable_object` row and every caller fell
+    // back to the document. `tenants` goes with it: it is the row provisioning
+    // admits on, so keeping one without its roster row is a state no request
+    // produces.
+    db().prepare("DELETE FROM tenant_databases"),
+    db().prepare("DELETE FROM tenants"),
   ]);
 }
 

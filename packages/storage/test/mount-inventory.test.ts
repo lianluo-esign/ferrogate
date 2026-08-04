@@ -155,6 +155,14 @@ const MOUNTED: [symbol: string, app: string][] = [
   // weaker claim — the same distinction this file already draws for
   // `ControlDatabaseTenantRegistry`.
   ["DurableObjectTenantDatabaseRouter", "gateway"],
+  // #820's follow-up: `apps/control-plane` provisions every new tenant onto a
+  // Durable Object but resolved its own tenant-DATA paths through
+  // `EnvBindingTenantDatabaseRouter`, which cannot reach one. Unmounting this
+  // puts that back — an admin wallet credit that writes no `wallets` row and a
+  // fleet asset view that reports an empty fleet, both with every test green,
+  // which is precisely the failure class this file exists for.
+  ["BackendDispatchingTenantDatabaseRouter", "control-plane"],
+  ["DurableObjectTenantDatabaseRouter", "control-plane"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */

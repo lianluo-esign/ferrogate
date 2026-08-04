@@ -53,6 +53,7 @@ import { BASE, arm } from "./harness.js";
 import { applyTenantSchema, resetTenantD1 } from "./tenant-db.js";
 
 const OPERATOR = "onboarding-operator-key";
+const FLEET_OPERATOR = "onboarding-fleet-operator-key";
 const JWT_SECRET = "onboarding-signing-secret-for-tests";
 
 /**
@@ -104,7 +105,20 @@ beforeEach(async () => {
   // hook are both gated on `controlDatabase`, which is `null` under
   // `CONTROL_PLANE_STORE = "memory"`. A memory-store run would pass every
   // assertion below vacuously by never reaching the code under test.
-  arm({ store: "d1", staticKeys: [{ secret: OPERATOR, platform_operator: true }] });
+  arm({
+    store: "d1",
+    staticKeys: [
+      { secret: OPERATOR, platform_operator: true },
+      // `admin.assets.fleet` must be held EXACTLY — `hasScope`'s wildcard does
+      // not reach it (see `ASSET_FLEET_SCOPE`), so the platform-operator key
+      // above cannot open the fleet view and a second key is not redundant.
+      {
+        secret: FLEET_OPERATOR,
+        platform_operator: true,
+        scopes: ["admin.read", "admin.write", "admin.assets.fleet"],
+      },
+    ],
+  });
   (env as unknown as Record<string, string | undefined>).ADMIN_CONSOLE_JWT_SECRET = JWT_SECRET;
 });
 
@@ -297,5 +311,142 @@ describe("junk objects", () => {
     );
     expect(await registry().get("tenant_never_registered")).toBeUndefined();
     expect(await router().provisionedTenants()).not.toContain("tenant_never_registered");
+  });
+});
+
+/**
+ * The follow-up defect #820 left behind: a tenant was PROVISIONED onto a Durable
+ * Object and every tenant-DATA path on this Worker still resolved through
+ * `EnvBindingTenantDatabaseRouter`, which serves `[[d1_databases]]` bindings and
+ * answers `not_found` for a `durable_object` roster row. Every caller reads
+ * `not_found` as "no tenant database, act on the document only", so the two
+ * halves failed silently and in opposite directions:
+ *
+ *  - an admin wallet credit answered 200 having written no `wallets` row
+ *    anywhere, so the gateway's no-oversell reserve found no wallet and the
+ *    tenant was never denied on a prepaid balance;
+ *  - the fleet asset view enumerated the roster, dropped every tenant on it, and
+ *    answered an empty page with an EMPTY `unreadable_tenants` — the "green, and
+ *    wrong" outcome `tenant-do.ts` says the roster survives to prevent.
+ *
+ * `BackendDispatchingTenantDatabaseRouter` reads `storage_backend` and sends
+ * each tenant to the backend its own row names. These tests assert the money and
+ * the inventory land in the object the DATA PLANE reads, addressed through the
+ * provisioning router so a wrong address cannot pass.
+ */
+describe("the control plane writes into the object the data plane reads", () => {
+  async function createTenant(tenantId: string): Promise<void> {
+    const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: tenantId, name: "Routed", slug: `routed-${tenantId}` }),
+    });
+    expect(created.status).toBe(201);
+  }
+
+  it("an admin wallet credit lands in the tenant's DURABLE OBJECT, not only the document", async () => {
+    const tenantId = freshTenantId("wallet");
+    await createTenant(tenantId);
+
+    const wallet = await SELF.fetch(`${BASE}/admin/v1/wallets`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ tenant_id: tenantId, balance_cents: 0 }),
+    });
+    expect(wallet.status).toBe(201);
+
+    const credited = await SELF.fetch(`${BASE}/admin/v1/wallets/${tenantId}/adjust`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ amount_cents: 50_000, reason: "prepaid top-up" }),
+    });
+    expect(credited.status).toBe(200);
+
+    // THE ASSERTION. `wallets.balance_credits` inside the tenant's own object is
+    // the row `D1WalletStore.reserveWalletCredits` guards on the inference path.
+    // Before the dispatcher this read `null` — the operator saw $500 credited
+    // and the gateway had nothing to enforce.
+    const handle = await router().forTenant(tenantId);
+    const row = await handle.db
+      .prepare("SELECT balance_credits FROM wallets WHERE tenant_id = ?")
+      .bind(tenantId)
+      .first<{ balance_credits: string | number }>();
+    // 50,000 cents at 10,000 credits per cent. Compared as a string because the
+    // column crosses the RPC boundary as one — credits can exceed 2^53.
+    expect(String(row?.balance_credits)).toBe("500000000");
+
+    // And a charge is now decided against THAT balance rather than the document's
+    // running total: 6,000 cents is affordable, so this is 200 and not a 409.
+    const charged = await SELF.fetch(`${BASE}/admin/v1/wallets/${tenantId}/charge`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ amount_cents: 6_000, reason: "usage" }),
+    });
+    expect(charged.status).toBe(200);
+    const after = await handle.db
+      .prepare("SELECT balance_credits FROM wallets WHERE tenant_id = ?")
+      .bind(tenantId)
+      .first<{ balance_credits: string | number }>();
+    expect(String(after?.balance_credits)).toBe("440000000");
+  });
+
+  it("the fleet asset view reaches a durable_object tenant instead of skipping it", async () => {
+    const tenantId = freshTenantId("fleet");
+    await createTenant(tenantId);
+
+    // Seeded straight into the tenant's object, because the point is that the
+    // FLEET READ finds rows the admin surface did not put there. `stored_assets`
+    // is part of the tenant schema the object applies to itself.
+    const handle = await router().forTenant(tenantId);
+    await handle.db
+      .prepare(
+        "INSERT INTO stored_assets (id, tenant_id, asset_type, name, version, variant, " +
+          "content_type, content_hash, size_bytes, created_at_unix, updated_at_unix) " +
+          "VALUES (?, ?, 'binary', 'agentctl', '1.0.0', 'linux-amd64', " +
+          "'application/octet-stream', 'sha256:seed', 12, 1, 1)",
+      )
+      .bind(`asset_${tenantId}`, tenantId)
+      .run();
+
+    const page = await SELF.fetch(`${BASE}/admin/v1/assets`, {
+      headers: { authorization: `Bearer ${FLEET_OPERATOR}` },
+    });
+    expect(page.status).toBe(200);
+    const body = (await page.json()) as {
+      data: { id: string; tenant_id: string }[];
+      unreadable_tenants?: string[];
+    };
+    // Before the dispatcher this was `{data: [], unreadable_tenants: []}` — an
+    // answer indistinguishable from "the fleet has no assets", which is the one
+    // failure mode a fleet inventory must never have.
+    expect(body.data.map((row) => row.id)).toContain(`asset_${tenantId}`);
+    expect(body.unreadable_tenants ?? []).toEqual([]);
+  });
+
+  it("deleting a tenant does NOT provision it — no object is manufactured", async () => {
+    // The only teardown the contract has is `PATCH {"status":"deleted"}`, and
+    // `mergeHandler` runs the `provision` hook unconditionally. So a tenant that
+    // has no storage yet used to have its object CREATED, seeded and marked
+    // `ready` by the request that deleted it — permanently billable, never
+    // usable. `assertTenantRegistered` refuses `deleted`, and the delete still
+    // succeeds because the refusal is recorded rather than raised.
+    const tenantId = freshTenantId("deleted");
+    await createTenant(tenantId);
+    // Drop the roster row so this asserts about PROVISIONING rather than about
+    // idempotence: a tenant created a moment ago is already `ready`, and a
+    // no-op resume would pass whatever the guard did.
+    await db().prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(tenantId).run();
+
+    const deleted = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts/${tenantId}`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ status: "deleted" }),
+    });
+    expect(deleted.status).toBe(200);
+
+    // No roster row means nothing was provisioned: the provisioner writes
+    // `pending` BEFORE it touches storage, so its absence is the evidence.
+    expect(await registry().get(tenantId)).toBeUndefined();
+    expect(await router().provisionedTenants()).not.toContain(tenantId);
   });
 });

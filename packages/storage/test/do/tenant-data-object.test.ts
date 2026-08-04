@@ -188,8 +188,8 @@ describe("the statement splitter", () => {
     // The other half of the argument: the comment lines that carry a `;`, which
     // is what makes comment-stripping-before-splitting mandatory rather than
     // tidy. Per file, so a failure names the migration that moved the number.
-    const commentSemicolons = Object.fromEntries(
-      TENANT_MIGRATIONS.map((migration) => [
+    const commentSemicolons: Record<string, number> = Object.fromEntries(
+      TENANT_MIGRATIONS.map((migration): [string, number] => [
         migration.name,
         migration.sql
           .split("\n")

@@ -204,9 +204,10 @@ describe("a request-path resolution performs NO control-database read", () => {
       // Reading the handle's own database must not touch the control plane
       // either; the object is addressed, not looked up. A real statement, so
       // the tally covers the first RPC into the object and not just resolution.
-      await handle.db.prepare("SELECT tenant_id FROM wallets WHERE tenant_id = ?").bind(
-        handle.tenantId,
-      ).all();
+      await handle.db
+        .prepare("SELECT tenant_id FROM wallets WHERE tenant_id = ?")
+        .bind(handle.tenantId)
+        .all();
       return c.json({ tenantId: handle.tenantId, source: handle.source });
     });
 

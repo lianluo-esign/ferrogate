@@ -555,7 +555,9 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
         ? deps.quotas(env)
         : (deps.quotas ?? quotaPolicySourceFromEnv(env));
     const spend =
-      typeof deps.spend === "function" ? deps.spend(env) : (deps.spend ?? defaultSpendSource(c, env));
+      typeof deps.spend === "function"
+        ? deps.spend(env)
+        : (deps.spend ?? defaultSpendSource(c, env));
     const wallet =
       typeof deps.wallet === "function"
         ? deps.wallet(env)

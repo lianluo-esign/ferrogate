@@ -288,7 +288,24 @@ describe("createAdminClient — the errors it raises", () => {
     expect(error.message).toContain("fetch failed");
   });
 
-  it("aborts at the deadline rather than hanging forever", async () => {
+  /**
+   * The per-test timeout is raised, and the number under test is NOT.
+   *
+   * This is the only test in the file whose subject is a WALL-CLOCK deadline: it
+   * hands the client a `fetch` that never settles and asserts the client aborts
+   * itself. Everything else here resolves synchronously. Run alone it finishes in
+   * ~240 ms, but `bun run test` fans 24 workspace packages out at once, and on a
+   * loaded machine the 20 ms timer can be delivered late enough to eat vitest's
+   * 5 s default — a green suite locally and a red one under load, which is the
+   * worst signal a gate can give.
+   *
+   * Raising the BUDGET is not the same as loosening the ASSERTION: the client
+   * still gets `timeoutMs: 20`, still has to abort, and still has to report
+   * "timed out after 20ms". A client that genuinely hangs fails here exactly as
+   * before, 30 s later instead of 5 s later. Raising `timeoutMs` instead would
+   * have been the loosening, because it would move the number being tested.
+   */
+  it("aborts at the deadline rather than hanging forever", { timeout: 30_000 }, async () => {
     const client = createAdminClient({
       baseUrl: "https://gateway.example.com",
       token: "t",
