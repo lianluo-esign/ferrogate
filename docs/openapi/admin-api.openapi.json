@@ -32054,6 +32054,43 @@
         "type": "object",
         "additionalProperties": true
       },
+      "ModelPriceRange": {
+        "type": "object",
+        "description": "The per-1M-token price range across physical legs when configured prices differ. A null min means at least one leg is unpriced; max is the maximum known numeric price.",
+        "properties": {
+          "min": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "min",
+          "max"
+        ]
+      },
+      "ModelPrice": {
+        "description": "One advertised per-1M-token price. Equal leg prices stay scalar; differing prices use ModelPriceRange. Null means unpriced and remains distinct from a genuinely free zero price.",
+        "oneOf": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "$ref": "#/components/schemas/ModelPriceRange"
+          }
+        ]
+      },
       "OpenAiModel": {
         "type": "object",
         "properties": {
@@ -32132,12 +32169,10 @@
                 "const": "per_1m_tokens"
               },
               "input": {
-                "type": "number",
-                "nullable": true
+                "$ref": "#/components/schemas/ModelPrice"
               },
               "output": {
-                "type": "number",
-                "nullable": true
+                "$ref": "#/components/schemas/ModelPrice"
               }
             },
             "additionalProperties": false,

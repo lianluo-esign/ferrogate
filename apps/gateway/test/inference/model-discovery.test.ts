@@ -30,10 +30,11 @@ import {
   createInferenceRouter,
 } from "../../src/inference/index.js";
 import type { Caller, PhysicalRoute } from "../../src/inference/index.js";
+import { anthropicModelSchema, openAiModelSchema } from "../../src/inference/schemas.js";
 import type { AuthContext } from "../../src/ports.js";
 import { errorBody, fixedRequestIds } from "./fixtures.js";
 
-/** The primary leg of `vision-chat`: the one that serves and the one priced. */
+/** The primary leg of `vision-chat`: first under the default priority strategy. */
 const VISION_PRIMARY: PhysicalRoute = {
   logicalModel: "vision-chat",
   provider: "anthropic-main",
@@ -53,9 +54,8 @@ const VISION_PRIMARY: PhysicalRoute = {
 
 /**
  * A FALLBACK leg of the same logical model: cheaper, smaller, and the only leg
- * that declares `structured_output`. It is what makes the aggregation
- * observable — a describe-the-primary-only implementation reports neither the
- * extra capability nor the larger window.
+ * that declares `structured_output`. It makes both conservative capability
+ * intersection and the differing-price range observable on the wire.
  */
 const VISION_FALLBACK: PhysicalRoute = {
   ...VISION_PRIMARY,
@@ -126,23 +126,35 @@ interface ModelBody {
   capabilities: string[];
   context_window: number | null;
   modalities: { input: string[]; output: string[] };
-  pricing: { currency: string; unit: string; input: number | null; output: number | null };
+  pricing: {
+    currency: string;
+    unit: string;
+    input: number | null | { min: number | null; max: number | null };
+    output: number | null | { min: number | null; max: number | null };
+  };
 }
 
-function router(caller?: () => Caller) {
+function router(caller?: () => Caller, catalog: readonly PhysicalRoute[] = CATALOG) {
   return createInferenceRouter({
-    models: new InMemoryModelResolver(CATALOG),
+    models: new InMemoryModelResolver(catalog),
     requestIds: fixedRequestIds,
     ...(caller === undefined ? {} : { caller }),
   });
 }
 
-async function get(path: string, caller?: () => Caller): Promise<Response> {
-  return await router(caller).request(`https://gw.test${path}`, { method: "GET" });
+async function get(
+  path: string,
+  caller?: () => Caller,
+  catalog: readonly PhysicalRoute[] = CATALOG,
+): Promise<Response> {
+  return await router(caller, catalog).request(`https://gw.test${path}`, { method: "GET" });
 }
 
-async function listing(caller?: () => Caller): Promise<ModelBody[]> {
-  const res = await get("/v1/models", caller);
+async function listing(
+  caller?: () => Caller,
+  catalog: readonly PhysicalRoute[] = CATALOG,
+): Promise<ModelBody[]> {
+  const res = await get("/v1/models", caller, catalog);
   expect(res.status).toBe(200);
   return ((await res.json()) as { data: ModelBody[] }).data;
 }
@@ -170,24 +182,60 @@ function durableKey(allowedModels: readonly string[]): AuthContext {
 // ---------------------------------------------------------------------------
 
 describe("GET /v1/models carries capabilities, context, modality and price", () => {
-  it("describes a vision+tools model from its declared config", async () => {
+  it("advertises only capabilities that every leg can serve", async () => {
     const model = (await listing()).find((entry) => entry.id === "vision-chat");
     expect(model).toBeDefined();
-    expect(model?.capabilities).toEqual([
-      "chat",
-      "streaming",
-      "vision",
-      "tools",
-      "structured_output",
-    ]);
+    expect(model?.capabilities).toEqual(["chat"]);
     expect(model?.context_window).toBe(200_000);
-    expect(model?.modalities).toEqual({ input: ["text", "image"], output: ["text"] });
+    expect(model?.modalities).toEqual({ input: ["text"], output: ["text"] });
+  });
+
+  it("advertises both ends when leg prices differ", async () => {
+    const model = (await listing()).find((entry) => entry.id === "vision-chat");
+    expect(model?.pricing).toEqual({
+      currency: "USD",
+      unit: "per_1m_tokens",
+      input: { min: 2.5, max: 3 },
+      output: { min: 10, max: 15 },
+    });
+    expect(openAiModelSchema.parse(model)).toEqual(model);
+  });
+
+  it("collapses prices shared by every leg back to scalars", async () => {
+    const samePriceFallback: PhysicalRoute = {
+      ...VISION_FALLBACK,
+      inputPricePer1m: VISION_PRIMARY.inputPricePer1m,
+      outputPricePer1m: VISION_PRIMARY.outputPricePer1m,
+    };
+    const model = (await listing(undefined, [VISION_PRIMARY, samePriceFallback])).find(
+      (entry) => entry.id === "vision-chat",
+    );
+
     expect(model?.pricing).toEqual({
       currency: "USD",
       unit: "per_1m_tokens",
       input: 3,
       output: 15,
     });
+  });
+
+  it("keeps an unpriced leg distinct from a genuinely free leg", async () => {
+    const unpricedPrimary: PhysicalRoute = {
+      ...VISION_PRIMARY,
+      inputPricePer1m: undefined,
+      outputPricePer1m: undefined,
+    };
+    const freeFallback: PhysicalRoute = {
+      ...VISION_FALLBACK,
+      inputPricePer1m: 0,
+      outputPricePer1m: 0,
+    };
+    const model = (await listing(undefined, [unpricedPrimary, freeFallback])).find(
+      (entry) => entry.id === "vision-chat",
+    );
+
+    expect(model?.pricing.input).toEqual({ min: null, max: 0 });
+    expect(model?.pricing.output).toEqual({ min: null, max: 0 });
   });
 
   it("keeps the OpenAI quartet exactly as it was", async () => {
@@ -248,6 +296,18 @@ describe("GET /v1/models/{model}", () => {
     expect(res.headers.get("x-request-id")).toBe("fg-000000000000002a");
     expect(res.headers.get("request-id")).toBe("fg-000000000000002a");
     expect(res.headers.get("x-ferrogate-runtime")).toBe("workers");
+  });
+
+  it("keeps the official Anthropic ModelInfo dialect free of FerroGate extensions", async () => {
+    const res = await router().request("https://gw.test/v1/models/vision-chat", {
+      headers: { "anthropic-version": "2023-06-01" },
+    });
+    expect(res.status).toBe(200);
+    const model = await res.json();
+
+    expect(anthropicModelSchema.parse(model)).toEqual(model);
+    expect(model).not.toHaveProperty("pricing");
+    expect(model).not.toHaveProperty("modalities");
   });
 
   it("404s an unknown model", async () => {
