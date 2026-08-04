@@ -299,6 +299,73 @@ describe("a fresh tenant object", () => {
   });
 });
 
+describe("tenant-private request evidence", () => {
+  test("keeps request logs and ordered agent evidence inside each object", async () => {
+    const tenantA = "tenant_evidence_red_a";
+    const tenantB = "tenant_evidence_red_b";
+
+    await objectFor(tenantA).batch({
+      tenantId: tenantA,
+      statements: [
+        {
+          sql:
+            "INSERT INTO request_logs (request_id, tenant, started_at_unix, request_json) " +
+            "VALUES (?, ?, ?, ?)",
+          params: ["req_a", tenantA, 100, '{"tenant":"a"}'],
+        },
+        {
+          sql:
+            "INSERT INTO agent_runs (id, request_id, tenant, started_at_unix, run_json) " +
+            "VALUES (?, ?, ?, ?, ?)",
+          params: ["run_a", "req_a", tenantA, 100, '{"run":"a"}'],
+        },
+        {
+          sql:
+            "INSERT INTO agent_run_events " +
+            "(id, run_id, request_id, tenant, occurred_at_unix, event_json) " +
+            "VALUES (?, ?, ?, ?, ?, ?)",
+          params: ["event_a_2", "run_a", "req_a", tenantA, 102, '{"seq":2}'],
+        },
+        {
+          sql:
+            "INSERT INTO agent_run_events " +
+            "(id, run_id, request_id, tenant, occurred_at_unix, event_json) " +
+            "VALUES (?, ?, ?, ?, ?, ?)",
+          params: ["event_a_1", "run_a", "req_a", tenantA, 101, '{"seq":1}'],
+        },
+      ],
+    });
+
+    await objectFor(tenantB).query({
+      tenantId: tenantB,
+      sql:
+        "INSERT INTO request_logs (request_id, tenant, started_at_unix, request_json) " +
+        "VALUES (?, ?, ?, ?)",
+      params: ["req_b", tenantB, 200, '{"tenant":"b"}'],
+    });
+
+    const logsA = await objectFor(tenantA).query({
+      tenantId: tenantA,
+      sql: "SELECT request_id, tenant FROM request_logs ORDER BY started_at_unix",
+    });
+    const eventsA = await objectFor(tenantA).query({
+      tenantId: tenantA,
+      sql:
+        "SELECT id FROM agent_run_events WHERE run_id = ? " +
+        "ORDER BY occurred_at_unix, id",
+      params: ["run_a"],
+    });
+    const logsB = await objectFor(tenantB).query({
+      tenantId: tenantB,
+      sql: "SELECT request_id, tenant FROM request_logs ORDER BY started_at_unix",
+    });
+
+    expect(logsA.results).toEqual([{ request_id: "req_a", tenant: tenantA }]);
+    expect(eventsA.results).toEqual([{ id: "event_a_1" }, { id: "event_a_2" }]);
+    expect(logsB.results).toEqual([{ request_id: "req_b", tenant: tenantB }]);
+  });
+});
+
 describe("the second wake", () => {
   test("does a version read and NOTHING more", async () => {
     const first = await objectFor(ACME).schemaVersion();
