@@ -81,6 +81,16 @@ export interface BundleLimits {
   readonly maxFileBytes?: number | undefined;
 }
 
+/** Optional file projection used by guardrail-only archive screening. */
+export interface BundleExpansionOptions {
+  /** Resolve a member's content type, or `undefined` for an opaque member. */
+  readonly fileContentType?:
+    | ((path: string, content: Uint8Array) => string | undefined)
+    | undefined;
+  /** Skip opaque members instead of rejecting them after they pass the bounds. */
+  readonly skipUnknownFileTypes?: boolean | undefined;
+}
+
 interface ResolvedBundleLimits {
   readonly maxTotalBytes: number;
   readonly maxFiles: number;
@@ -188,6 +198,50 @@ export function bundleFileContentType(path: string): string | undefined {
   return STATIC_SITE_BUNDLE_FILE_CONTENT_TYPES.includes(contentType) ? contentType : undefined;
 }
 
+/** Text members a skill archive can hand to a guardrail detector. */
+const TEXT_BUNDLE_EXTENSION_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  html: "text/html",
+  htm: "text/html",
+  css: "text/css",
+  js: "text/javascript",
+  mjs: "text/javascript",
+  cjs: "text/javascript",
+  ts: "text/javascript",
+  tsx: "text/javascript",
+  jsx: "text/javascript",
+  json: "application/json",
+  webmanifest: "application/manifest+json",
+  txt: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  xml: "application/xml",
+  svg: "image/svg+xml",
+  yaml: "application/yaml",
+  yml: "application/yaml",
+  toml: "application/toml",
+  sh: "application/x-sh",
+  bash: "application/x-shellscript",
+};
+
+/** Resolve only text-bearing members for guardrail-only skill screening. */
+export function textBundleFileContentType(path: string, content: Uint8Array): string | undefined {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot > 0) {
+    const contentType = TEXT_BUNDLE_EXTENSION_CONTENT_TYPES[base.slice(dot + 1).toLowerCase()];
+    if (contentType !== undefined) return contentType;
+  }
+  // Skill files often include extensionless instruction documents. A valid
+  // UTF-8 body is a text surface; malformed bytes remain opaque so a binary
+  // payload does not become a replacement-character evidence record.
+  try {
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(content);
+    return "text/plain";
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Path grammar
 // ---------------------------------------------------------------------------
@@ -270,6 +324,11 @@ export const BUNDLE_ARCHIVE_CONTENT_TYPES: readonly string[] = [
 /** True when this `(asset_type, content_type)` pair is a bundle publish. */
 export function isBundlePush(assetType: string, contentType: string): boolean {
   if (assetType !== "static_site") return false;
+  return isBundleArchiveContentType(contentType);
+}
+
+/** Whether the declared content type is one of the supported archive types. */
+export function isBundleArchiveContentType(contentType: string): boolean {
   const base = (contentType.split(";")[0] ?? contentType).trim().toLowerCase();
   return BUNDLE_ARCHIVE_CONTENT_TYPES.includes(base);
 }
@@ -310,8 +369,12 @@ export function detectArchiveFormat(bytes: Uint8Array): BundleArchiveFormat | un
 export async function expandBundle(
   archive: Uint8Array,
   limits?: BundleLimits,
+  options?: BundleExpansionOptions,
 ): Promise<BundleExpansion> {
   const resolved = resolveLimits(limits);
+  const contentTypeFor =
+    options?.fileContentType ?? ((path: string) => bundleFileContentType(path));
+  const skipUnknownFileTypes = options?.skipUnknownFileTypes ?? false;
   const format = detectArchiveFormat(archive);
   if (format === undefined) {
     return refuse(
@@ -319,7 +382,9 @@ export async function expandBundle(
     );
   }
   try {
-    if (format === "zip") return await expandZip(archive, resolved);
+    if (format === "zip") {
+      return await expandZip(archive, resolved, contentTypeFor, skipUnknownFileTypes);
+    }
     const tar =
       format === "tar" ? archive : await inflateBounded(archive, "gzip", resolved.maxTotalBytes);
     if (tar === null) {
@@ -332,7 +397,7 @@ export async function expandBundle(
         `the static_site bundle expands beyond the ${resolved.maxTotalBytes}-byte decompressed ceiling: abandoned while decompressing`,
       );
     }
-    return await expandTar(tar, resolved);
+    return await expandTar(tar, resolved, contentTypeFor, skipUnknownFileTypes);
   } catch (error) {
     // A malformed stream is the publisher's problem, not a 500: a truncated
     // gzip member or a corrupt deflate stream throws out of the platform
@@ -387,8 +452,14 @@ async function inflateBounded(
 class BundleAccumulator {
   readonly files: BundleFile[] = [];
   #totalBytes = 0;
+  #fileCount = 0;
+  readonly #paths = new Set<string>();
 
-  constructor(private readonly limits: ResolvedBundleLimits) {}
+  constructor(
+    private readonly limits: ResolvedBundleLimits,
+    private readonly contentTypeFor: (path: string, content: Uint8Array) => string | undefined,
+    private readonly skipUnknownFileTypes: boolean,
+  ) {}
 
   get totalBytes(): number {
     return this.#totalBytes;
@@ -401,14 +472,17 @@ class BundleAccumulator {
       return `bundle entry ${JSON.stringify(rawPath)} is refused: ${pathRejection}`;
     }
     const path = normalizeBundlePath(rawPath);
-    if (this.files.some((file) => file.path === path)) {
+    if (this.#paths.has(path)) {
       // Two members with one path is the classic "which one wins" ambiguity —
       // and a zip whose second entry quietly replaces the first is a real
       // smuggling technique against scanners that read only the first.
       return `bundle entry ${JSON.stringify(path)} is refused: duplicate path in archive`;
     }
-    const contentType = bundleFileContentType(path);
+    const contentType = this.contentTypeFor(path, content);
     if (contentType === undefined) {
+      if (this.skipUnknownFileTypes) {
+        return this.addOpaque(path, content);
+      }
       return (
         `bundle entry ${JSON.stringify(path)} is refused: its file type is not allowed inside a ` +
         `static_site bundle (allowed: ${STATIC_SITE_BUNDLE_FILE_CONTENT_TYPES.join(", ")})`
@@ -417,14 +491,32 @@ class BundleAccumulator {
     if (content.byteLength > this.limits.maxFileBytes) {
       return `bundle entry ${JSON.stringify(path)} is refused: ${content.byteLength} bytes exceeds the ${this.limits.maxFileBytes}-byte per-file ceiling`;
     }
-    if (this.files.length >= this.limits.maxFiles) {
+    if (this.#fileCount >= this.limits.maxFiles) {
       return `the static_site bundle contains more than the ${this.limits.maxFiles}-file ceiling`;
     }
+    this.#paths.add(path);
+    this.#fileCount += 1;
     this.#totalBytes += content.byteLength;
     if (this.#totalBytes > this.limits.maxTotalBytes) {
       return `the static_site bundle expands beyond the ${this.limits.maxTotalBytes}-byte decompressed ceiling`;
     }
     this.files.push({ path, contentType, content, sha256: await sha256Hex(content) });
+    return undefined;
+  }
+
+  private addOpaque(path: string, content: Uint8Array): string | undefined {
+    if (content.byteLength > this.limits.maxFileBytes) {
+      return `bundle entry ${JSON.stringify(path)} is refused: ${content.byteLength} bytes exceeds the ${this.limits.maxFileBytes}-byte per-file ceiling`;
+    }
+    if (this.#fileCount >= this.limits.maxFiles) {
+      return `the static_site bundle contains more than the ${this.limits.maxFiles}-file ceiling`;
+    }
+    this.#paths.add(path);
+    this.#fileCount += 1;
+    this.#totalBytes += content.byteLength;
+    if (this.#totalBytes > this.limits.maxTotalBytes) {
+      return `the static_site bundle expands beyond the ${this.limits.maxTotalBytes}-byte decompressed ceiling`;
+    }
     return undefined;
   }
 }
@@ -482,8 +574,13 @@ function paxPath(body: Uint8Array): string | undefined {
   return undefined;
 }
 
-async function expandTar(tar: Uint8Array, limits: ResolvedBundleLimits): Promise<BundleExpansion> {
-  const accumulator = new BundleAccumulator(limits);
+async function expandTar(
+  tar: Uint8Array,
+  limits: ResolvedBundleLimits,
+  contentTypeFor: (path: string, content: Uint8Array) => string | undefined,
+  skipUnknownFileTypes: boolean,
+): Promise<BundleExpansion> {
+  const accumulator = new BundleAccumulator(limits, contentTypeFor, skipUnknownFileTypes);
   let offset = 0;
   /** A pending pax/GNU long-name override for the NEXT ustar record. */
   let overridePath: string | undefined;
@@ -586,7 +683,12 @@ const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_SIGNATURE = 0x02014b50;
 const LOCAL_SIGNATURE = 0x04034b50;
 
-async function expandZip(zip: Uint8Array, limits: ResolvedBundleLimits): Promise<BundleExpansion> {
+async function expandZip(
+  zip: Uint8Array,
+  limits: ResolvedBundleLimits,
+  contentTypeFor: (path: string, content: Uint8Array) => string | undefined,
+  skipUnknownFileTypes: boolean,
+): Promise<BundleExpansion> {
   const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
   // The EOCD is at the end, after a comment of unknown length, so it is found
   // by scanning backwards over the maximum comment size.
@@ -605,7 +707,7 @@ async function expandZip(zip: Uint8Array, limits: ResolvedBundleLimits): Promise
     return refuse(`the static_site bundle contains more than the ${limits.maxFiles}-file ceiling`);
   }
   let cursor = view.getUint32(eocd + 16, true);
-  const accumulator = new BundleAccumulator(limits);
+  const accumulator = new BundleAccumulator(limits, contentTypeFor, skipUnknownFileTypes);
 
   for (let index = 0; index < entryCount; index += 1) {
     if (cursor + 46 > zip.length || view.getUint32(cursor, true) !== CENTRAL_SIGNATURE) {

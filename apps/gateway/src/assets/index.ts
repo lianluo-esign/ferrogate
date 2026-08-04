@@ -50,6 +50,7 @@ export * from "./ports.js";
 export * from "./scan.js";
 export * from "./signature.js";
 export * from "./signature-screener.js";
+export * from "./guardrail-screener.js";
 export * from "./keys.js";
 export * from "./registry.js";
 export * from "./schemas.js";

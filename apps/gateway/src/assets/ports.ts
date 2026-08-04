@@ -660,6 +660,17 @@ export interface AssetScreeningRequest {
   readonly contentSha256: string;
   readonly nowUnix: number;
   /**
+   * The request id the caller was told (#740).
+   *
+   * Carried so a screening stage that writes to the SHARED guardrail evidence
+   * tables produces rows an operator can join to the push:
+   * `GET /admin/v1/investigations?request_id=…` then finds the asset
+   * evaluation exactly as it finds an inference one. Optional because the two
+   * screeners that predate it (`scan.ts`, `signature-screener.ts`) record their
+   * evidence on the asset audit line instead and need no join key.
+   */
+  readonly requestId?: string | undefined;
+  /**
    * The detached publisher signature presented with the push, if any — Rust
    * `AssetPushScreeningRequest.signature`.
    *
@@ -726,6 +737,83 @@ export interface AssetScreeningRequest {
  */
 export interface AssetScreener {
   screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict | AssetScreeningRejection>;
+  /**
+   * Screen the FILES of an expanded `static_site` bundle (#740), if this
+   * screener has an opinion about them.
+   *
+   * OPTIONAL, and the optionality is the seam: every screener that predates
+   * bundles ({@link BuiltinEicarScreener}, `ScannerBackedScreener`,
+   * `SignatureVerifyingScreener`) screens the ARCHIVE, and #736 already
+   * established that screening an archive is not screening its contents — a
+   * gzip stream tells a keyword detector nothing. A screener that does not
+   * implement this method therefore says "I have no verdict on the files",
+   * which is honest, rather than having a verdict synthesized for it.
+   *
+   * Called by `AssetService` on the expanded files, while the version row is
+   * still `pending_scan` and BEFORE the CAS promotion — so the returned
+   * visibility flows through the one existing `promotePendingAssetVisibility`
+   * guard and adds no second way to reach `visible`.
+   */
+  screenBundleFiles?(request: AssetBundleScreeningRequest): Promise<AssetBundleScreeningVerdict>;
+}
+
+/** One expanded bundle file, as {@link AssetScreener.screenBundleFiles} reads it. */
+export interface AssetBundleFileContent {
+  readonly path: string;
+  readonly contentType: string;
+  readonly content: Uint8Array;
+  readonly sha256: string;
+}
+
+/** The whole expanded bundle, handed to the file screener in one call. */
+export interface AssetBundleScreeningRequest {
+  readonly assetId: string;
+  readonly tenantId: string;
+  readonly assetType: string;
+  readonly nowUnix: number;
+  readonly requestId?: string | undefined;
+  readonly files: readonly AssetBundleFileContent[];
+}
+
+/**
+ * What the file screener decided about the bundle AS A VERSION.
+ *
+ * There is deliberately no per-file visibility here, because there is no
+ * per-file lifecycle to carry it: `stored_bundle_files` has no `visibility`
+ * column and #736's whole design is that a bundle resolves as ONE version row
+ * (channels, semver ranges, variants, yank and the manifest all address the
+ * version, and the file index is only consulted afterwards). A verdict that
+ * refused one file would therefore have to invent a second lifecycle, and the
+ * product it would ship — a site served with one page silently 404ing — is
+ * worse than the one it replaces. One bad file withholds the VERSION, and
+ * {@link auditDetail} names the file so the operator can fix it.
+ */
+export interface AssetBundleScreeningVerdict {
+  readonly visibility: AssetVisibility;
+  readonly auditDetail: string;
+}
+
+/** Severity order for {@link AssetVisibility}: a screening stage may only tighten. */
+const VISIBILITY_RANK: Readonly<Record<AssetVisibility, number>> = {
+  visible: 0,
+  pending_scan: 1,
+  quarantined: 2,
+};
+
+/**
+ * The STRICTER of two verdicts.
+ *
+ * Every screening stage composes by tightening: a stage may add a withholding
+ * but never lift one (the same rule `SignatureVerifyingScreener` states for
+ * rejections). Folding the archive verdict and the per-file verdict through
+ * this function is what keeps "the scanner quarantined it" from being undone
+ * by "the guardrail was happy with the text".
+ */
+export function strictestVisibility(
+  left: AssetVisibility,
+  right: AssetVisibility,
+): AssetVisibility {
+  return VISIBILITY_RANK[left] >= VISIBILITY_RANK[right] ? left : right;
 }
 
 export function isScreeningRejection(

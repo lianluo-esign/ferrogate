@@ -445,8 +445,13 @@ describe("the env-var drift gate itself", () => {
     // is NEITHER, and taking either side would have shipped a green test
     // asserting a wrong count. Re-derived here by counting the MERGED file with
     // the same grep (`grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml`
-    // ⇒ 63), which is the whole point of this comment block.
-    expect(DECLARED.vars.size).toBe(63);
+    // ⇒ 65), which is the whole point of this comment block.
+    //
+    // #740 added two (`ASSET_GUARDRAIL_MODES`,
+    // `ASSET_GUARDRAIL_MAX_SCREEN_BYTES`) and this figure was RE-DERIVED with
+    // that grep off the merged file rather than incremented — the arithmetic
+    // is what goes wrong when two branches each add one.
+    expect(DECLARED.vars.size).toBe(65);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -683,7 +688,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // (`GATEWAY_ONLINE_EVAL_POLICIES`) both branched off 60 and wrote 62 and 61
     // respectively; the merged file holds all three, so 63. Counted off the
     // merged file, not summed and not inherited from either parent.
-    expect(rows.length).toBe(63);
+    // #740: + `ASSET_GUARDRAIL_MODES`, `ASSET_GUARDRAIL_MAX_SCREEN_BYTES`,
+    // re-counted off the merged file with the same grep ⇒ 65.
+    expect(rows.length).toBe(65);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -770,9 +777,11 @@ describe("which committed [vars] values this runner can actually observe", () =>
     //
     // 54 + 1 (#737) + 2 (#689) + 1 (#692) = 58, and the same parallel-branch
     // hazard applies: one parent wrote 57 and the other 56. Re-derived as
-    // `rows.length - overridden` off the MERGED file (63 - 5).
+    // `rows.length - overridden` off the MERGED file (65 - 5) — #740's two
+    // asset-guardrail knobs are committed BLANK and are not overridden by the
+    // test runner, so both are observable.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(58);
+    expect(observable.length).toBe(60);
     expect(rows.length - observable.length).toBe(5);
   });
 });
