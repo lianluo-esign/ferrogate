@@ -68,6 +68,7 @@ import type {
   AssetScreeningRejection,
   AssetScreeningRequest,
   AssetScreeningVerdict,
+  AssetStreamScreeningRequest,
 } from "./ports.js";
 import { BuiltinEicarScreener } from "./ports.js";
 
@@ -290,6 +291,10 @@ export class ScannerBackedScreener implements AssetScreener {
       manifest: manifestOf(request, backend, "clean"),
     };
   }
+
+  async streamedScreen(request: AssetStreamScreeningRequest): Promise<AssetScreeningVerdict> {
+    return streamedPendingScanVerdict(request, this.#scanner.backendName, "scanner_requires_buffering");
+  }
 }
 
 /**
@@ -335,6 +340,41 @@ export class DeferringScreener implements AssetScreener {
     }
     return this.#inner.screen(request);
   }
+
+  async streamedScreen(
+    request: AssetStreamScreeningRequest,
+  ): Promise<AssetScreeningVerdict | AssetScreeningRejection> {
+    if (request.sizeBytes > this.#thresholdBytes) {
+      return streamedPendingScanVerdict(
+        request,
+        this.#backendName,
+        `deferred_async_threshold_bytes=${this.#thresholdBytes}`,
+      );
+    }
+    if (this.#inner.streamedScreen !== undefined) {
+      return this.#inner.streamedScreen(request);
+    }
+    return streamedPendingScanVerdict(request, this.#backendName, "scanner_requires_buffering");
+  }
+}
+
+function streamedPendingScanVerdict(
+  request: AssetStreamScreeningRequest,
+  backend: string,
+  reason: string,
+): AssetScreeningVerdict {
+  return {
+    visibility: "pending_scan",
+    auditDetail: `scan=pending_scan backend=${backend} reason=${reason} signature=absent approval=not_required`,
+    manifest: {
+      scanner: backend,
+      outcome: "pending_scan",
+      reason,
+      sha256: request.contentSha256,
+      size_bytes: request.sizeBytes,
+      screened_at_unix: request.nowUnix,
+    },
+  };
 }
 
 /** The manifest shape {@link BuiltinEicarScreener} already records, plus the backend. */

@@ -108,6 +108,10 @@ export const MCP_MANIFEST_STDIO_MESSAGE =
 /** Rust: the EICAR refusal message, verbatim (`asset_security.rs:52`). */
 export const MALWARE_SIGNATURE_MESSAGE = "content matched a known malware test signature";
 
+/** The byte signature the bounded streamed gate can detect across chunks. */
+export const EICAR_SIGNATURE =
+  "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+
 /** Rust: the unbufferable-manifest refusal, verbatim (`asset_security.rs:93-100`). */
 export const MCP_MANIFEST_UNBUFFERABLE_MESSAGE =
   "mcp_manifest assets larger than the gateway's in-memory screening budget " +
