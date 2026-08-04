@@ -14,12 +14,13 @@
  *    non-overlapping per segment.
  *  - Bounded evidence: after `MAX_FINDINGS_PER_EVALUATION` findings, stop and
  *    emit ONE zero-width `detector.truncated` (Critical) finding with no covering
- *    patch → forces fail-closed (unredactable).
+ *    patch → forces fail-closed (unredactable). The cap bounds finding/evidence
+ *    memory, not raw input size or detector CPU.
  *  - Secrets are Critical (conf 0.99); keyword/regex are High (conf 1.0);
  *    fingerprints are keyed `hmac-sha256:<hex>`; `matched_text` is never set.
  */
 import { z } from "zod";
-import { byteLen, byteMatchIndices, byteOffsetMap, byteSlice } from "./bytes.js";
+import { byteLen, byteMatchIndices, byteOffsetMap, decodeUtf8, encodeUtf8 } from "./bytes.js";
 import { hmacSha256, toHex } from "./hash.js";
 import { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "./jsonschema.js";
 import {
@@ -44,7 +45,7 @@ import {
 const DETERMINISTIC_VERSION = "deterministic/1";
 const REDACTION = "[REDACTED]";
 
-/** Hard cap on findings per evaluate; overflow emits one truncation marker. */
+/** Hard cap on findings/evidence per evaluate; it is not a raw-input or CPU cap. */
 export const MAX_FINDINGS_PER_EVALUATION = 10_000;
 
 export const jsonConstraintsSchema = z
@@ -267,7 +268,8 @@ class TextMatchSink {
   findings: Finding[] = [];
   patches: ContentPatch[] = [];
   seenFindings = new Set<string>();
-  patchedIntervals = new Map<string, Array<[number, number]>>();
+  encodedSegments = new Map<string, Uint8Array>();
+  patchedIntervals = new Map<string, PatchedIntervalIndex>();
   truncated = false;
 }
 
@@ -300,6 +302,104 @@ export function regexByteMatches(
     }
   }
   return out;
+}
+
+interface IntervalNode {
+  start: number;
+  end: number;
+  height: number;
+  left?: IntervalNode;
+  right?: IntervalNode;
+}
+
+function intervalHeight(node: IntervalNode | undefined): number {
+  return node?.height ?? 0;
+}
+
+function updateIntervalHeight(node: IntervalNode): void {
+  node.height = 1 + Math.max(intervalHeight(node.left), intervalHeight(node.right));
+}
+
+function rotateIntervalRight(node: IntervalNode): IntervalNode {
+  const pivot = node.left as IntervalNode;
+  node.left = pivot.right;
+  pivot.right = node;
+  updateIntervalHeight(node);
+  updateIntervalHeight(pivot);
+  return pivot;
+}
+
+function rotateIntervalLeft(node: IntervalNode): IntervalNode {
+  const pivot = node.right as IntervalNode;
+  node.right = pivot.left;
+  pivot.left = node;
+  updateIntervalHeight(node);
+  updateIntervalHeight(pivot);
+  return pivot;
+}
+
+function insertInterval(node: IntervalNode | undefined, start: number, end: number): IntervalNode {
+  if (node === undefined) {
+    return { start, end, height: 1 };
+  }
+  if (start < node.start) {
+    node.left = insertInterval(node.left, start, end);
+  } else {
+    node.right = insertInterval(node.right, start, end);
+  }
+  updateIntervalHeight(node);
+
+  const balance = intervalHeight(node.left) - intervalHeight(node.right);
+  if (balance > 1 && node.left !== undefined) {
+    if (start > node.left.start) {
+      node.left = rotateIntervalLeft(node.left);
+    }
+    return rotateIntervalRight(node);
+  }
+  if (balance < -1 && node.right !== undefined) {
+    if (start < node.right.start) {
+      node.right = rotateIntervalRight(node.right);
+    }
+    return rotateIntervalLeft(node);
+  }
+  return node;
+}
+
+/**
+ * Accepted positive-width patches are disjoint. An AVL index can therefore
+ * answer overlap by checking only the predecessor and successor of a match,
+ * even when different matcher rules emit matches in different orders.
+ */
+class PatchedIntervalIndex {
+  #root: IntervalNode | undefined;
+
+  hasOverlap(start: number, end: number): boolean {
+    if (start >= end) {
+      return false;
+    }
+    let node = this.#root;
+    let predecessor: IntervalNode | undefined;
+    let successor: IntervalNode | undefined;
+    while (node !== undefined) {
+      if (start < node.start) {
+        successor = node;
+        node = node.left;
+      } else {
+        predecessor = node;
+        node = node.right;
+      }
+    }
+    return (
+      (predecessor !== undefined && start < predecessor.end) ||
+      (successor !== undefined && successor.start < end && start < successor.end)
+    );
+  }
+
+  add(start: number, end: number): void {
+    if (start < end) {
+      this.#root = insertInterval(this.#root, start, end);
+    }
+  }
 }
 
 export class DeterministicDetector implements GuardrailDetector {
@@ -397,17 +497,22 @@ export class DeterministicDetector implements GuardrailDetector {
       return;
     }
     const { category, severity, confidence, start, end } = detected;
-    const matched = byteSlice(segment.text, start, end);
+    let encoded = sink.encodedSegments.get(segment.segment_id);
+    if (encoded === undefined) {
+      encoded = encodeUtf8(segment.text);
+      sink.encodedSegments.set(segment.segment_id, encoded);
+    }
+    const matched = decodeUtf8(encoded.subarray(start, end));
     const key = `${category}\u0000${segment.segment_id}\u0000${start}\u0000${end}`;
     if (!sink.seenFindings.has(key)) {
       sink.seenFindings.add(key);
       sink.findings.push(this.finding(category, severity, confidence, segment, [start, end], matched));
     }
     if (isMutableTextSegment(segment)) {
-      const intervals = sink.patchedIntervals.get(segment.segment_id) ?? [];
-      const overlaps = intervals.some(([s, e]) => start < e && s < end);
+      const intervals = sink.patchedIntervals.get(segment.segment_id) ?? new PatchedIntervalIndex();
+      const overlaps = intervals.hasOverlap(start, end);
       if (!overlaps) {
-        intervals.push([start, end]);
+        intervals.add(start, end);
         sink.patchedIntervals.set(segment.segment_id, intervals);
         sink.patches.push({
           segment_id: segment.segment_id,

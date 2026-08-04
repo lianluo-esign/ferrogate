@@ -36,12 +36,12 @@ async function measureRepetitiveInput(detector: DeterministicDetector, size: num
   let encodeCalls = 0;
   let overlapChecks = 0;
   const originalEncode = TextEncoder.prototype.encode;
-  const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode").mockImplementation(function (value) {
+  const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode").mockImplementation(function (this: TextEncoder, value) {
     encodeCalls += 1;
     return originalEncode.call(this, value);
   });
   const originalSome = Array.prototype.some;
-  const someSpy = vi.spyOn(Array.prototype, "some").mockImplementation(function (callback, thisArg) {
+    const someSpy = vi.spyOn(Array.prototype, "some").mockImplementation(function (this: unknown[], callback, thisArg) {
     return originalSome.call(
       this,
       (value, index, array) => {
@@ -158,6 +158,23 @@ describe("coalesced + per-segment scanning", () => {
     const result = await detector.evaluate(input, DEADLINE());
     expect(result.findings.some((f) => f.category === "secret.aws_access_key_id")).toBe(true);
   });
+
+  test("keeps non-overlapping patches when matcher rules emit positions out of order", async () => {
+    const detector = DeterministicDetector.new({
+      id: "ordered-patches",
+      supported_sources: ["user"],
+      keywords: ["later", "earlier"],
+      regex: [],
+      secret_patterns: [],
+    });
+    const result = await detector.evaluate(inputFrom({ messages: [{ role: "user", content: "earlier later" }] }), DEADLINE());
+
+    expect(result.findings).toHaveLength(2);
+    expect(result.patches.map((patch) => [patch.byte_start, patch.byte_end])).toEqual([
+      [8, 13],
+      [0, 7],
+    ]);
+  });
 });
 
 describe("size + json + request constraints", () => {
@@ -259,16 +276,17 @@ describe("config validation", () => {
    * Bounded evidence (`MAX_FINDINGS_PER_EVALUATION`). Two properties, both
    * load-bearing:
    *
-   *  1. per-request memory is CAPPED regardless of input size — an unbounded
-   *     findings array is an O(N) memory amplifier a repetitive flood can open;
+   *  1. per-request finding/evidence memory is CAPPED regardless of input size
+   *     — an unbounded findings array is an O(N) memory amplifier a repetitive
+   *     flood can open;
    *  2. truncation FAILS CLOSED. The marker is a zero-width located finding at
    *     `[0, 0)`, which no positive-width patch can ever cover, so a downstream
    *     `has_unredactable_findings` check forces Deny. A truncated scan can
    *     never be fully scrubbed, so it must never be treated as scrubbable.
    *
-   * The cap bounds memory, not the current quadratic CPU cost on repetitive
-   * attacker-controlled input. Issue #817 tracks that production defect; a
-   * longer test timeout here would only hide its signal.
+   * The cap is not a raw-input or CPU cap. Repetitive keyword matching and
+   * patch bookkeeping stay linear after #817; regex engine runtime and raw
+   * input processing remain separate controls.
    */
   test("bounded evidence: >10k matches emit one detector.truncated marker", async () => {
     const detector = DeterministicDetector.new({
