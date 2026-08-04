@@ -22132,6 +22132,21 @@
           }
         }
       },
+      "RangeNotSatisfiable": {
+        "description": "The requested byte range cannot be served for this resource.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "headers": {
+          "x-ferrogate-time-token": {
+            "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+          }
+        }
+      },
       "ServiceUnavailable": {
         "description": "Identity provider, credential storage, secret resolution, or encryption key is unavailable.",
         "content": {
@@ -35729,6 +35744,114 @@
         "required": [
           "object",
           "payment_method"
+        ]
+      },
+      "FileObject": {
+        "type": "object",
+        "description": "An OpenAI-compatible file projected from a tenant-scoped asset row.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^file-[A-Za-z0-9_-]+$"
+          },
+          "object": {
+            "type": "string",
+            "const": "file"
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "uploaded",
+              "processed",
+              "error"
+            ]
+          },
+          "status_details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "bytes",
+          "created_at",
+          "filename",
+          "purpose",
+          "status",
+          "status_details"
+        ]
+      },
+      "FileListResponse": {
+        "type": "object",
+        "description": "A paginated OpenAI-compatible file listing.",
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileObject"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ]
+      },
+      "FileDeleteResponse": {
+        "type": "object",
+        "description": "The deletion acknowledgement for an OpenAI-compatible file.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^file-[A-Za-z0-9_-]+$"
+          },
+          "object": {
+            "type": "string",
+            "const": "file"
+          },
+          "deleted": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "deleted"
         ]
       },
       "AssetSummary": {

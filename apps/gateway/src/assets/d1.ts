@@ -336,6 +336,7 @@ function visibilityFromSqlite(value: unknown): AssetVisibility {
 
 function assetFromRow(row: Row): StoredAsset {
   const projectId = row.project_id;
+  const metadata = metadataFromSqlite(row.metadata_json);
   return {
     id: text(row.id),
     tenant_id: text(row.tenant_id),
@@ -345,9 +346,7 @@ function assetFromRow(row: Row): StoredAsset {
     version: text(row.version),
     content_type: text(row.content_type),
     content_hash: text(row.content_hash),
-    ...(metadataFromSqlite(row.metadata_json) === undefined
-      ? {}
-      : { metadata: metadataFromSqlite(row.metadata_json) }),
+    ...(metadata === undefined ? {} : { metadata }),
     size_bytes: integer(row.size_bytes),
     storage_uri: text(row.storage_uri),
     variant: text(row.variant),

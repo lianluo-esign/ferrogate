@@ -111,6 +111,20 @@ describe.each(IMPLEMENTATIONS)("%s — AssetMetadataStore conformance", (_name, 
     expect(await store.getAsset(row.id)).toEqual(row);
   });
 
+  test("OpenAI file metadata survives the durable row round trip", async () => {
+    const row = asset({
+      asset_type: "openai_file",
+      name: "file-test123",
+      version: "1",
+      metadata: { filename: "notes.txt", purpose: "assistants" },
+    });
+    expect(await store.createAssetWithinQuota(row, undefined)).toEqual({ kind: "admitted" });
+    expect((await store.getAsset(row.id))?.metadata).toEqual({
+      filename: "notes.txt",
+      purpose: "assistants",
+    });
+  });
+
   test("an absent id is null, not a throw", async () => {
     expect(await store.getAsset("tenant_assets_d1:binaries:nope:9.9.9")).toBeNull();
   });

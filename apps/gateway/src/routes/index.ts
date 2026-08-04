@@ -182,7 +182,7 @@ export const TOOLING_OPERATION_IDS = [
  */
 export const SITE_OPERATION_IDS = ["serveSite"] as const;
 
-/** All 40 operations `apps/gateway` owns per ROUTE-MAP.md. */
+/** All 45 operations `apps/gateway` owns per ROUTE-MAP.md. */
 export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
