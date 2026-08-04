@@ -203,9 +203,9 @@ FG_DEV_A2A_GUARDRAILS = ""
 # handing this Worker its own full RPM quota: a quieter version of the very
 # bypass wave 16 closed.
 #
-# NO `[[migrations]]` entry belongs to it. A migration INTRODUCES a class; this
-# class is introduced by `apps/gateway/wrangler.toml` (`new_sqlite_classes =
-# ["RateLimiterDurableObject"]`). Claiming to define a class this script does
+# NO lifecycle declaration belongs to it. The class is introduced by
+# `apps/gateway/wrangler.toml`'s `[exports.RateLimiterDurableObject]` entry.
+# Claiming to define a class this script does
 # not export is rejected at deploy. Same reason there is no `src/worker.ts`
 # re-export line. DEPLOY `ferrogate-gateway` FIRST — a `script_name` binding to
 # a script that does not exist yet FAILS THE DEPLOY, which is the point: that

@@ -1194,18 +1194,18 @@ describe("§3.6 the shared RPM counter stays ONE namespace", () => {
 
   it("exactly one Worker DEFINES the limiter class", () => {
     const definers = FLEET.filter((app) =>
-      new RegExp(`new_(?:sqlite_)?classes\\s*=\\s*\\[[^\\]]*"${CLASS}"`).test(
-        TOML[app]?.live ?? "",
-      ),
+      new RegExp(
+        `(?:\\[exports\\.${CLASS}\\]|new_(?:sqlite_)?classes\\s*=\\s*\\[[^\\]]*"${CLASS}")`,
+      ).test(TOML[app]?.live ?? ""),
     );
     expect(definers.length, `definers: ${definers.join(", ")}`).toBe(1);
   });
 
   it("every OTHER spend Worker borrows it rather than declaring it", () => {
     const definers = FLEET.filter((app) =>
-      new RegExp(`new_(?:sqlite_)?classes\\s*=\\s*\\[[^\\]]*"${CLASS}"`).test(
-        TOML[app]?.live ?? "",
-      ),
+      new RegExp(
+        `(?:\\[exports\\.${CLASS}\\]|new_(?:sqlite_)?classes\\s*=\\s*\\[[^\\]]*"${CLASS}")`,
+      ).test(TOML[app]?.live ?? ""),
     );
     for (const app of SPEND.filter((a) => !definers.includes(a))) {
       // The borrowed stanza must be LIVE and must name the one definer's

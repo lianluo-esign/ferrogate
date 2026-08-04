@@ -32,7 +32,7 @@ const SUITE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  *
  * HALF of the precondition this harness was written around has now landed:
  * `apps/gateway/wrangler.toml` carries the `[[durable_objects.bindings]]
- * RATE_LIMIT` + `[[migrations]] new_sqlite_classes` blocks, and
+ * RATE_LIMIT` + `[exports.RateLimiterDurableObject]` blocks, and
  * `apps/gateway/src/worker.ts` carries `export { RateLimiterDurableObject }`.
  * The deployed Worker therefore has the namespace this harness once existed to
  * supply, and `src/index.ts` mounts `rateLimit()` in `GATEWAY_MIDDLEWARE`.

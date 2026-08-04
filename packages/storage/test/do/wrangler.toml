@@ -2,7 +2,8 @@
 # This exists so `vitest.do.config.ts` can boot a real `workerd` with real
 # SQLite-backed Durable Object namespaces.
 #
-# THE PRODUCTION STANZA IS `apps/gateway/wrangler.toml` (tag `v4`), and
+# THE PRODUCTION STANZA IS `[exports.TenantDataObject]` in
+# `apps/gateway/wrangler.toml`, and
 # `apps/gateway/test/wrangler-bindings.test.ts` is what gates it. This file
 # proves NOTHING about the deployed config: a harness toml is a different file,
 # and renaming `TENANT_DATA` there while leaving this alone would leave this

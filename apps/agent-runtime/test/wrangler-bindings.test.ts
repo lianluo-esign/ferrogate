@@ -96,7 +96,7 @@ function migratedClasses(): { sqlite: string[]; legacy: string[] } {
 
 /**
  * A binding that names `script_name` borrows a class ANOTHER Worker defines,
- * migrates and exports — `RATE_LIMIT` → `apps/gateway`'s
+ * declares its lifecycle and exports — `RATE_LIMIT` → `apps/gateway`'s
  * `RateLimiterDurableObject` (#666). Every rule below about migrations and
  * entry-module exports therefore applies to the LOCAL bindings only, and the
  * borrowed ones get the opposite rules in their own describe block.

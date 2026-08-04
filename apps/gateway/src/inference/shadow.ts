@@ -288,10 +288,10 @@ const isolateShadowBudget: AsyncShadowBudgetLedger = {
  *     `@cloudflare/vitest-pool-workers` does NOT run that check, so the unit
  *     suite would stay green on an unbootable Worker —
  *     `test/wrangler-bindings.test.ts` is what actually holds it.
- *  2. `apps/gateway/wrangler.toml:794-799` — the binding plus migration
- *     `tag = "v3"` with **`new_sqlite_classes`** (NOT `new_classes`: the
- *     `new_classes` variant deploys fine and then gives the counter the wrong
- *     storage backend). vitest never reads migrations at all;
+ *  2. `apps/gateway/wrangler.toml` — the binding plus
+ *     `[exports.ShadowBudgetDurableObject]` with `storage = "sqlite"`.
+ *     `storage = "legacy-kv"` would deploy with the wrong backend. Vitest
+ *     does not validate this lifecycle map;
  *     `test/wrangler-bindings.test.ts` parses the TOML and asserts the variant.
  *  3. `apps/gateway/src/ports.ts:437` —
  *     `readonly SHADOW_BUDGET?: DurableObjectNamespace;` on `GatewayBindings`.

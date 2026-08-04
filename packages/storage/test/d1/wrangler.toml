@@ -9,7 +9,8 @@
 # staying in the vitest configs, where the migration ARRAYS (JS objects read by
 # `readD1Migrations`) can be passed at all.
 #
-# THE PRODUCTION STANZA IS `apps/gateway/wrangler.toml` (tag `v4`). This file
+# THE PRODUCTION STANZA IS `[exports.TenantDataObject]` in
+# `apps/gateway/wrangler.toml`. This file
 # proves nothing about it: a harness toml is a different file, and renaming
 # `TENANT_DATA` there while leaving this alone would leave both suites green.
 #

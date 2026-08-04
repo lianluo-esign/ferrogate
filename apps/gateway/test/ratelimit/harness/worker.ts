@@ -4,12 +4,12 @@
  * ## Why this exists rather than testing `src/worker.ts` directly
  *
  * A REAL Durable Object binding needs two things this slice is not allowed to
- * touch: a `[[durable_objects.bindings]]` + `[[migrations]]` block in
+ * touch: a `[[durable_objects.bindings]]` + `[exports.RateLimiterDurableObject]`
+ * block in
  * `apps/gateway/wrangler.toml`, and `export { RateLimiterDurableObject }` on
- * `apps/gateway/src/worker.ts`. Both belong to the integrate step (see the
- * WIRING block in `src/ratelimit/index.ts`). Until they land, the app the
- * deployed Worker exports has no `RATE_LIMIT` namespace and cannot exercise the
- * DO at all.
+ * `apps/gateway/src/worker.ts`. Both are also present in the deployed Worker;
+ * this harness keeps a separate entry point so the suite can provide its own
+ * data and options without changing production configuration.
  *
  * So this module is a SECOND ENTRY POINT over the SAME composition root, not a
  * second app:

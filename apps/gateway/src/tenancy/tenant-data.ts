@@ -11,9 +11,9 @@
  * `test/env-var-drift.test.ts` scans for all live here rather than being
  * spread across the directory.
  *
- * `storage = "sqlite"` / `new_sqlite_classes` is **immutable once a namespace
- * exists** — changing it later is `storage_type_mismatch`, and converting
- * requires a `deleted` tombstone and total data loss. That is why the
+ * `storage = "sqlite"` in `[exports.TenantDataObject]` is **immutable once a
+ * namespace exists** — changing it later is `storage_type_mismatch`, and
+ * converting requires a `deleted` tombstone and total data loss. That is why the
  * `TENANT_DATA` stanza in `wrangler.toml` landed a slice AHEAD of the routing
  * mode that now uses it, and why this file predates its own caller.
  *

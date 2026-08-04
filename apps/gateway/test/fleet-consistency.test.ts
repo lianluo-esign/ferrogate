@@ -711,7 +711,9 @@ describe("FC-5 the RPM window is ONE counter across the three spend Workers", ()
 
   it("only apps/gateway DEFINES the limiter class", () => {
     const definers = (["gateway", "mcp", "agent-runtime"] as const).filter((app) =>
-      /new_(?:sqlite_)?classes\s*=\s*\[[^\]]*"RateLimiterDurableObject"/.test(tomlOf(app).live),
+      /(?:\[exports\.RateLimiterDurableObject\]|new_(?:sqlite_)?classes\s*=\s*\[[^\]]*"RateLimiterDurableObject")/.test(
+        tomlOf(app).live,
+      ),
     );
     expect(definers, "a second definer is a second, private counter namespace").toEqual([
       "gateway",

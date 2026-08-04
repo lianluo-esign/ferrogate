@@ -67,8 +67,9 @@ migrations_dir = "../../../../../sql/d1-ts/tenant"
 #
 # `new_sqlite_classes`, never `new_classes`: the latter deploys cleanly and
 # silently swaps in the key-value backend, at which point `ctx.storage.sql` does
-# not exist. Mirrors `apps/gateway/wrangler.toml` tag `v4`; the tag differs
-# because this config's namespace is a separate, throwaway one.
+# not exist. Production uses `[exports.TenantDataObject]`; this standalone
+# harness retains a legacy migration because its namespace is separate and
+# throwaway, and the pool only needs the SQLite backend here.
 #
 # `durable-object.spec.ts` drives this binding. It still proves the same
 # fail-closed property the `TENANT_DB_INITECH` omission proves for D1 — a

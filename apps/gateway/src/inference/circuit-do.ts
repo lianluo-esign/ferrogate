@@ -44,11 +44,11 @@
  *     `@cloudflare/vitest-pool-workers` does NOT reproduce that check — the
  *     whole unit suite stays green on an unbootable Worker, which is exactly
  *     how the same mistake shipped once already.
- *  2. `apps/gateway/wrangler.toml:768-773` — the binding plus migration
- *     `tag = "v2"` with **`new_sqlite_classes`**. Not `new_classes`: that
- *     variant deploys cleanly and then hands the breaker the wrong storage
- *     backend. vitest never reads `[[migrations]]`, so the assertion that holds
- *     this lives in `test/wrangler-bindings.test.ts`, which parses the TOML.
+ *  2. `apps/gateway/wrangler.toml` — the binding plus
+ *     `[exports.ProviderCircuitDurableObject]` with `storage = "sqlite"`.
+ *     `storage = "legacy-kv"` would deploy with the wrong backend. Vitest
+ *     does not validate this lifecycle map, so the assertion that holds it
+ *     lives in `test/wrangler-bindings.test.ts`, which parses the TOML.
  *  3. `apps/gateway/src/ports.ts:383` —
  *     `readonly PROVIDER_CIRCUIT?: DurableObjectNamespace;` on `GatewayBindings`
  *     (and `GATEWAY_RELIABILITY?: string` at `:399`).

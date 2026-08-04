@@ -43,9 +43,9 @@
  * name = "TENANT_DATA"
  * class_name = "TenantDataObject"
  *
- * [[migrations]]
- * tag = "v4"
- * new_sqlite_classes = ["TenantDataObject"]   # IMMUTABLE once deployed
+ * [exports.TenantDataObject]
+ * type = "durable-object"
+ * storage = "sqlite"                       # IMMUTABLE once deployed
  * ```
  *
  * `CONTROL_DB` is already declared. Under `durable_object` it is NOT a routing

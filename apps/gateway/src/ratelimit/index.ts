@@ -18,10 +18,11 @@
  * ```
  *
  * ===========================================================================
- * WIRING — what the integrate step must add. Three edits, none in this dir.
+ * WIRING — LANDED. The entry export, SQLite lifecycle declaration, and
+ * middleware mount are all in the tree.
  * ===========================================================================
  *
- * **1. `apps/gateway/src/worker.ts`** — add this line. workerd resolves a DO
+ * **1. `apps/gateway/src/worker.ts`** — this line is present. workerd resolves a DO
  * binding's `class_name` against the ENTRY module, so without it the Worker
  * fails at startup with "Durable Object class RateLimiterDurableObject not
  * found". `@cloudflare/vitest-pool-workers` does NOT reproduce that check, so
@@ -34,18 +35,16 @@
  * (A DO class IS a legal named export of the entry module — the restriction
  * documented in `worker.ts` is on non-handler, non-class values.)
  *
- * **2. `apps/gateway/wrangler.toml`** — the binding plus its migration. The
- * file's "NOT DECLARED — and why" block already reserves `RATE_LIMIT` for this
- * slice; replace that bullet with:
+ * **2. `apps/gateway/wrangler.toml`** — the binding plus its SQLite export:
  *
  * ```toml
  * [[durable_objects.bindings]]
  * name = "RATE_LIMIT"
  * class_name = "RateLimiterDurableObject"
  *
- * [[migrations]]
- * tag = "v1"
- * new_sqlite_classes = ["RateLimiterDurableObject"]
+ * [exports.RateLimiterDurableObject]
+ * type = "durable-object"
+ * storage = "sqlite"
  * ```
  *
  * Also declare the quota tables `quota.ts` reads (both fail closed when empty):

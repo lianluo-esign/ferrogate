@@ -535,15 +535,14 @@ enabled = true
 # Consequences of `script_name`, all three of which apply here — the same three
 # `apps/mcp/wrangler.toml` states for its borrowed RATE_LIMIT binding:
 #
-#   * NO `[[migrations]]` stanza belongs to this file. A migration INTRODUCES a
-#     class, and the class is introduced by the script that DEFINES it —
-#     `apps/gateway`, whose `tag = "v4"` `new_sqlite_classes = ["TenantDataObject"]`
-#     already exists. A second `new_sqlite_classes` here would claim to define a
+#   * NO `exports` stanza belongs to this file. A lifecycle declaration belongs
+#     to the script that DEFINES the class — `apps/gateway`, whose
+#     `[exports.TenantDataObject]` SQLite declaration already exists. A second
+#     lifecycle declaration here would claim to define a
 #     class this script does not export and `wrangler deploy` rejects it. (If the
-#     class is ever MOVED into this app, the stanza must be `new_sqlite_classes`,
-#     never `new_classes` — the latter deploys cleanly and silently swaps SQLite
-#     for the key-value backend, and the storage backend of a live namespace can
-#     never be changed afterwards.)
+#     class is ever MOVED into this app, the stanza must be an SQLite `exports`
+#     declaration, never a legacy key-value declaration; the storage backend of
+#     a live namespace can never be changed afterwards.)
 #   * NO `src/worker.ts` re-export either. This Worker BINDS the class; it does
 #     not define it.
 #   * DEPLOY ORDER: `ferrogate-gateway` FIRST. A `script_name` binding to a
