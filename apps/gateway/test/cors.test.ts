@@ -98,6 +98,13 @@ describe("gateway CORS", () => {
 });
 
 describe("applyCorsHeaders", () => {
+  it("merges Origin into an existing cache variation contract", () => {
+    const headers = new Headers({ vary: "authorization, x-api-key" });
+    applyCorsHeaders(headers, CONSOLE_ORIGIN, CONSOLE_ORIGIN);
+    expect(headers.get("vary")).toBe("authorization, x-api-key, origin");
+    expect(headers.get("access-control-allow-origin")).toBe(CONSOLE_ORIGIN);
+  });
+
   it("does nothing when CORS is disabled and withholds access for a mismatch", () => {
     const headers = new Headers();
     applyCorsHeaders(headers, null, CONSOLE_ORIGIN);

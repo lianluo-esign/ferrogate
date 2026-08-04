@@ -27,7 +27,14 @@ export function applyCorsHeaders(
   requestOrigin: string | null,
 ): void {
   if (allowedOrigin === null) return;
-  headers.set("vary", "origin");
+  const vary = (headers.get("vary") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  if (!vary.some((value) => value === "*" || value.toLowerCase() === "origin")) {
+    vary.push("origin");
+  }
+  headers.set("vary", vary.join(", "));
   if (requestOrigin === allowedOrigin) {
     headers.set("access-control-allow-origin", allowedOrigin);
   }
