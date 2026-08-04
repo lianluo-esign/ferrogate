@@ -1,4 +1,5 @@
 import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.js";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { type AuditAction, appendControlPlaneAudit, controlPlaneAuditJson } from "./d1.js";
 
@@ -138,6 +139,13 @@ interface CatalogAuditOutboxRow {
   readonly actor_tenant_id: string | null;
 }
 
+export interface TenantCatalogAuditSweepReport {
+  readonly scanned: number;
+  readonly reconciled: number;
+  readonly failed: number;
+  readonly skipped: "control_database_unavailable" | null;
+}
+
 export interface TenantModelCatalogStoreOptions {
   readonly db: D1Database;
   readonly controlDatabase: D1Database;
@@ -220,6 +228,37 @@ export async function reconcileTenantCatalogAudit(
       throw error;
     }
   }
+}
+
+/** Reconcile every provisioned tenant so delivery does not depend on a write. */
+export async function reconcileProvisionedTenantCatalogAudits(
+  router: TenantDatabaseRouter,
+  controlDatabase: D1Database,
+): Promise<TenantCatalogAuditSweepReport> {
+  let tenantIds: readonly string[];
+  try {
+    tenantIds = await router.provisionedTenants();
+  } catch (error) {
+    console.warn("control-plane: tenant catalog audit roster lookup failed", error);
+    return { scanned: 0, reconciled: 0, failed: 1, skipped: null };
+  }
+
+  let reconciled = 0;
+  let failed = 0;
+  for (const tenantId of tenantIds) {
+    try {
+      const handle = await router.forTenant(tenantId);
+      await reconcileTenantCatalogAudit(handle.db, controlDatabase, tenantId);
+      reconciled += 1;
+    } catch (error) {
+      failed += 1;
+      console.warn(
+        `control-plane: tenant catalog audit reconciliation failed for ${tenantId}`,
+        error,
+      );
+    }
+  }
+  return { scanned: tenantIds.length, reconciled, failed, skipped: null };
 }
 
 function hasOwn(input: object, key: string): boolean {

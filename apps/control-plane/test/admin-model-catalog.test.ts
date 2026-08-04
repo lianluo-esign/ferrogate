@@ -14,6 +14,7 @@ import type { InferenceBindings } from "../../gateway/src/inference/ports.js";
 import { tenantModelCatalogFromD1 } from "../../gateway/src/inference/tenant-catalog.js";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
+import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 import {
@@ -514,6 +515,60 @@ describe("tenant model catalog CRUD", () => {
       revision: beforeRevision + 1,
     });
     expect(Number(outboxRows.results[0]?.revision)).toBe(beforeRevision + 1);
+  });
+
+  it("reconciles a pending audit outbox on the scheduled tick without another catalog write", async () => {
+    const tenantId = freshTenantId("scheduled-audit-outbox");
+    await provisionTenant(tenantId);
+    const handle = await tenantDb(tenantId);
+    const failingControlDb = new Proxy(db(), {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return () => {
+            throw new Error("control audit unavailable");
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database;
+    const store = new TenantModelCatalogStore({
+      db: handle.db,
+      controlDatabase: failingControlDb,
+      requestId: "scheduled-audit-outbox-request",
+    });
+
+    await expect(
+      store.createProvider(
+        tenantId,
+        { kind: "tenant", tenantId },
+        {
+          id: "channel_scheduled_audit_outbox",
+          name: "channel_scheduled_audit_outbox",
+          kind: "openai-compatible",
+          base_url: "https://scheduled-audit-outbox.example.test/v1",
+        },
+      ),
+    ).rejects.toThrow("audit append failed");
+
+    const report = await runScheduledTick(
+      env as unknown as ControlPlaneBindings,
+      Math.floor(Date.now() / 1000),
+    );
+    expect(report.tenantCatalogAudit).toMatchObject({
+      scanned: 1,
+      reconciled: 1,
+      failed: 0,
+    });
+    const outboxRows = await handle.db
+      .prepare("SELECT id FROM catalog_audit_outbox WHERE tenant_id = ?")
+      .bind(tenantId)
+      .all<{ id: string }>();
+    expect(outboxRows.results).toHaveLength(0);
+    const auditRows = await db()
+      .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?")
+      .bind(tenantId)
+      .all<{ audit_json: string }>();
+    expect(auditRows.results).toHaveLength(1);
   });
 
   it("maps a guarded provider-delete race to a conflict", async () => {
