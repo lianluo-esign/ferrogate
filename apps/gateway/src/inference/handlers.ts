@@ -1706,7 +1706,10 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // Read BEFORE `readInferenceBody()` swaps `c.req.raw` for a re-presented
     // Request — the scope is keyed by the object `route-module.ts` published.
     const scope = inferenceRequestScope(c.req.raw);
-    c.set("inferenceDeps", resolved);
+    const requestModels = scope?.models ?? resolved.models;
+    const requestDeps =
+      requestModels === resolved.models ? resolved : { ...resolved, models: requestModels };
+    c.set("inferenceDeps", requestDeps);
     c.set("inferenceClientSignal", inboundSignal(c.req.raw));
     // Same "before the body reader swaps it" rule as the signal above — see
     // the field's doc on `InferenceEnv`.
@@ -1739,12 +1742,12 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // Returning the rejection here rather than degrading to the platform
     // credential is the fail-closed half: a tenant that asked to be billed on
     // its own agreement must never be silently served on FerroGate's key.
-    const models = await byokScopedModels(resolved.models, resolved.byok, caller, c.req.raw);
+    const models = await byokScopedModels(requestDeps.models, requestDeps.byok, caller, c.req.raw);
     if (isRejection(models)) {
       return errorResponse(models, c.get("requestId"));
     }
-    if (models !== resolved.models) {
-      c.set("inferenceDeps", { ...resolved, models });
+    if (models !== requestDeps.models) {
+      c.set("inferenceDeps", { ...requestDeps, models });
     }
 
     await next();

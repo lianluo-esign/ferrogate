@@ -32,6 +32,7 @@
 import type { Context, Hono } from "hono";
 import { attributionDefaultsFor } from "../attribution/index.js";
 import { publishShadowEvalLeg, shadowEvalRetentionRequested } from "../evals/shadow-leg.js";
+import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
 import {
   admitTokensPerMinute,
@@ -39,14 +40,14 @@ import {
   settleTokenUsage,
 } from "../ratelimit/middleware.js";
 import type { TokenAdmission } from "../ratelimit/ports.js";
-import { residencyPolicyFor } from "../residency/carrier.js";
 import { contributeRequestLogFacts } from "../requestlog/facts.js";
-import {
-  GatewayRouter,
-  INFERENCE_OPERATION_IDS,
-  type RouteModule,
-} from "../routes/index.js";
+import { residencyPolicyFor } from "../residency/carrier.js";
+import { GatewayRouter, INFERENCE_OPERATION_IDS, type RouteModule } from "../routes/index.js";
 import { emitRequestTelemetry, genAiInvocationFor } from "../telemetry/index.js";
+import { tenantDatabaseOf } from "../tenancy/middleware.js";
+import { parseTenantDatabaseRoutingMode } from "../tenancy/resolver.js";
+import { emptyModelResolver } from "./defaults.js";
+import { errorResponse, reject } from "./errors.js";
 import { createInferenceRouter } from "./handlers.js";
 import type { InferenceEnv } from "./handlers.js";
 import {
@@ -55,7 +56,12 @@ import {
   callerFromAuth,
   setInferenceRequestScope,
 } from "./identity.js";
-import type { InferenceDeps } from "./ports.js";
+import type {
+  InferenceBindings,
+  InferenceDeps,
+  ModelResolver,
+  TenantModelCatalogLoadResult,
+} from "./ports.js";
 
 /**
  * `c.executionCtx` THROWS when the context was not created with one — which is
@@ -99,9 +105,10 @@ function assertInnerRouteExists(inner: Hono<InferenceEnv>, operationId: string):
  * With no arguments every port falls back to the in-memory default in
  * `defaults.ts` — enough to boot, but it resolves no models, so every
  * invocation answers `model_not_found`. The deployed Worker passes
- * `{ models: modelsFromEnv, dispatcher: fetchDispatcher }` (see
- * `apps/gateway/src/index.ts`); `models` is a factory precisely because the
- * inner app is built ONCE here while Worker bindings are per request.
+ * `{ models: modelsFromEnv, tenantCatalog, dispatcher: fetchDispatcher }` (see
+ * `apps/gateway/src/index.ts`). The outer module loads tenant-scoped models
+ * before delegation; `models` remains the env fallback and is a factory because
+ * the inner app is built ONCE here while Worker bindings are per request.
  */
 export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
   const inner = createInferenceRouter(deps);
@@ -114,7 +121,14 @@ export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
     register(router: GatewayRouter): void {
       for (const operationId of INFERENCE_OPERATION_IDS) {
         router.register(operationId, async (c) => {
-          publishRequestScope(c);
+          const models = await tenantModelsForRequest(c, deps);
+          if (!models.ok) {
+            return errorResponse(
+              reject(503, models.code ?? "model_catalog_unavailable", models.reason),
+              c.get("requestId"),
+            );
+          }
+          publishRequestScope(c, models.models);
           const startedAtMs = Date.now();
           // `await` costs nothing here: Hono resolves as soon as the RESPONSE
           // OBJECT exists, and a streaming branch hands back the provider's
@@ -212,10 +226,11 @@ function emitInferenceTelemetry(
  * The scope is keyed by `c.req.raw` — the exact `Request` passed to
  * `inner.fetch` on the next line.
  */
-function publishRequestScope(c: Context<GatewayEnv>): void {
+function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): void {
   const auth = c.get("auth");
   const request = c.req.raw;
   setInferenceRequestScope(request, {
+    ...(models === undefined ? {} : { models }),
     // `auth` is absent only for a contract-`anonymous` operation, which none of
     // the fourteen inference operations is; leaving it undefined keeps the injected
     // `deps.caller` in charge rather than fabricating an identity.
@@ -253,6 +268,78 @@ function publishRequestScope(c: Context<GatewayEnv>): void {
       ? { scoreShadowLeg: (leg) => publishShadowEvalLeg(request, leg) }
       : {}),
   });
+}
+
+type TenantModelsForRequest =
+  | { readonly ok: true; readonly models?: ModelResolver }
+  | { readonly ok: false; readonly reason: string; readonly code?: string };
+
+/** Resolve the tenant catalog before entering the inner Hono context. */
+async function tenantModelsForRequest(
+  c: Context<GatewayEnv>,
+  deps: InferenceDeps,
+): Promise<TenantModelsForRequest> {
+  const source = deps.tenantCatalog;
+  if (source === undefined) return { ok: true };
+
+  const accessor = tenantDatabaseOf(c);
+  const rawMode = String(
+    (c.env as unknown as { GATEWAY_TENANT_DB_ROUTING?: string }).GATEWAY_TENANT_DB_ROUTING ?? "",
+  ).trim();
+  const parsedMode = parseTenantDatabaseRoutingMode(rawMode === "" ? undefined : rawMode);
+
+  if (parsedMode === undefined) {
+    return {
+      ok: false,
+      code: "tenant_database_routing_misconfigured",
+      reason: `invalid GATEWAY_TENANT_DB_ROUTING value '${rawMode}'`,
+    };
+  }
+  if (accessor.tenantId === null || parsedMode === "off") {
+    return { ok: true, models: fallbackModels(deps, c.env) };
+  }
+
+  let db: D1Database;
+  try {
+    db = await accessor.db();
+  } catch (error) {
+    return {
+      ok: false,
+      code: error instanceof HttpError ? error.code : "tenant_database_unavailable",
+      reason:
+        error instanceof Error
+          ? error.message
+          : `tenant ${accessor.tenantId} database resolution failed: ${String(error)}`,
+    };
+  }
+
+  let loaded: TenantModelCatalogLoadResult;
+  try {
+    loaded = await source.load({
+      tenantId: accessor.tenantId,
+      db,
+      env: c.env as unknown as InferenceBindings,
+      fallback: fallbackModels(deps, c.env),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      code: "model_catalog_unavailable",
+      reason: `tenant ${accessor.tenantId} catalog source failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  return loaded.ok
+    ? loaded
+    : { ok: false, code: "model_catalog_unavailable", reason: loaded.reason };
+}
+
+function fallbackModels(deps: InferenceDeps, env: unknown): ModelResolver {
+  if (typeof deps.models === "function") {
+    return deps.models(env as InferenceBindings);
+  }
+  return deps.models ?? emptyModelResolver;
 }
 
 /**

@@ -11,9 +11,17 @@
  * intercepted outbound `fetch`); the router, the guard, and the error envelope
  * are the real ones.
  */
+import type { MiddlewareHandler } from "hono";
 import { describe, expect, it } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
+import type { TenantModelCatalogSource } from "../../src/inference/index.js";
+import type { GatewayEnv } from "../../src/ports.js";
 import { INFERENCE_OPERATION_IDS, createGatewayApp } from "../../src/routes/index.js";
+import {
+  TENANT_DATABASE_VAR,
+  type TenancyContext,
+  type TenantDatabaseAccessor,
+} from "../../src/tenancy/index.js";
 import { ALL_ROUTES, errorBody, fixedRequestIds } from "./fixtures.js";
 import {
   OPENAI_CHAT_STREAM_FRAMES,
@@ -50,7 +58,64 @@ function gateway(limits?: { inferenceBodyMaxBytes?: number }) {
   };
 }
 
+function tenantCatalogGateway() {
+  const route = {
+    logicalModel: "tenant-model",
+    provider: "tenant-provider",
+    providerModel: "tenant-upstream",
+    providerKind: "openai",
+    baseUrl: "https://tenant.test/v1",
+    enabled: true,
+  } as const;
+  const database = {} as D1Database;
+  const accessor: TenantDatabaseAccessor = {
+    tenantId: "tenant_a",
+    mode: "shared_development",
+    handle: async () => ({
+      tenantId: "tenant_a",
+      db: database,
+      source: "shared_development",
+      supportsAtomicBatch: true,
+    }),
+    db: async () => database,
+    control: () => database,
+  };
+  const mount: MiddlewareHandler<GatewayEnv> = async (c, next) => {
+    (c as unknown as TenancyContext).set(TENANT_DATABASE_VAR, accessor);
+    await next();
+  };
+  const source: TenantModelCatalogSource = {
+    async load(input) {
+      expect(input.tenantId).toBe("tenant_a");
+      expect(input.db).toBe(database);
+      return { ok: true, models: new InMemoryModelResolver([route]) };
+    },
+  };
+  const { app } = createGatewayApp({
+    modules: [inferenceRouteModule({ tenantCatalog: source })],
+    middleware: [mount],
+  });
+  return (path: string, init?: RequestInit) =>
+    app.request(`https://gw.test${path}`, init, {
+      GATEWAY_STATIC_API_KEYS: JSON.stringify([
+        { key: "fg_tenant", id: "key_tenant", tenant_id: "tenant_a", scopes: [] },
+      ]),
+      GATEWAY_TENANT_DB_ROUTING: "shared_development",
+    });
+}
+
 describe("inferenceRouteModule", () => {
+  it("loads the tenant resolver before delegating into the inner app", async () => {
+    const call = tenantCatalogGateway();
+    const response = await call("/v1/models", {
+      headers: { authorization: "Bearer fg_tenant" },
+    });
+
+    expect(response.status).toBe(200);
+    const listing = (await response.json()) as { data: { id: string }[] };
+    expect(listing.data.map((model) => model.id)).toContain("tenant-model");
+  });
+
   it("claims exactly the 14 contract inference operation ids", () => {
     expect(new Set(inferenceRouteModule().operationIds)).toEqual(new Set(INFERENCE_OPERATION_IDS));
     // 6 -> 7 with `countMessageTokens` (issue #671), 7 -> 8 with `getModel`

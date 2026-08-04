@@ -157,8 +157,8 @@ CREATE TABLE IF NOT EXISTS catalog_revisions (
 -- ---------------------------------------------------------------------------
 -- Convert rows written by the 0008 provisioning seed before retiring its table.
 -- A `*` provider is a deliberate platform-routing channel: it carries no
--- credential and is resolved against the env fallback until #812 supplies the
--- tenant catalog loader. Non-wildcard legacy values are preserved as named
+-- credential and is resolved against env provider metadata by the #812 tenant
+-- catalog loader. Non-wildcard legacy values are preserved as named
 -- legacy channels because 0008 did not have endpoint metadata to recover.
 -- ---------------------------------------------------------------------------
 INSERT OR IGNORE INTO provider_channels
