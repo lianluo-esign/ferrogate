@@ -305,6 +305,7 @@ export async function assetEgressQuotaDenial(
 
 /** Rust `BillingEvent.provider` for an egress charge. */
 export const ASSET_EGRESS_PROVIDER = "asset_egress";
+export const ASSET_EGRESS_IDENTITY_ERROR = "stored_assets.id is required for asset egress audit";
 /** Rust `logical_model` = `asset_egress:{asset_type}/{name}`. */
 export const ASSET_EGRESS_LOGICAL_MODEL_PREFIX = "asset_egress:";
 /** Rust `metadata["asset_egress_bytes"]`. */
@@ -590,6 +591,7 @@ export async function readAssetWithEgress<
 >(
   input: ReadAssetWithEgressInput<TAsset, TFailure>,
 ): Promise<ReadAssetWithEgressResult<TAsset, TFailure>> {
+  assetEgressTargetId(input.asset, input.tenantId);
   const denial = await assetEgressQuotaDenial({
     quota: input.quota,
     apiKeyId: input.apiKeyId,
@@ -601,6 +603,7 @@ export async function readAssetWithEgress<
 
   const read = await input.read();
   if (!read.ok) return { ok: false, kind: "read", error: read.error };
+  assetEgressTargetId(read.asset, input.tenantId);
 
   const charge = await recordAssetEgress({
     quota: input.quota,
@@ -633,7 +636,7 @@ export function assetEgressTargetId(
 ): string {
   void tenantId;
   if (typeof asset.id !== "string" || asset.id.trim() === "") {
-    throw new Error("stored_assets.id is required for asset egress audit");
+    throw new Error(ASSET_EGRESS_IDENTITY_ERROR);
   }
   return asset.id;
 }

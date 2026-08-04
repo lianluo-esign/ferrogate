@@ -20,6 +20,7 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 import {
+  ASSET_EGRESS_IDENTITY_ERROR,
   assetEgressTargetId,
   assetPullAuditMessage,
   readAssetWithEgress,
@@ -706,23 +707,49 @@ export async function readAssetForMcp(
     return { ok: false, kind: "read", error: { kind: "not_found" } };
   }
 
-  const result = await readAssetWithEgress<StoredAsset, AssetReadFailure>({
-    quota: ports.assetEgress.quota ?? context.egressQuota ?? {},
-    apiKeyId: context.auth.apiKeyId ?? "",
-    tenantId,
-    projectId: context.auth.projectId,
-    requestId: context.requestId,
-    agentRunId: context.agentRunId,
-    asset,
-    read: () => ports.assets.read(tenantId, assetType, name, version),
-    pricePerGb: ports.assetEgress.pricePerGb,
-    counters: ports.assetEgress.counters,
-    meter: ports.assetEgress.meter,
-    nowUnix: ports.now(),
-  });
+  let target: string;
+  try {
+    target = assetEgressTargetId(asset, tenantId);
+  } catch (error) {
+    if (error instanceof Error && error.message === ASSET_EGRESS_IDENTITY_ERROR) {
+      return {
+        ok: false,
+        kind: "read",
+        error: { kind: "storage", message: "stored asset has no valid durable ID" },
+      };
+    }
+    throw error;
+  }
+
+  let result: McpAssetReadResult;
+  try {
+    result = await readAssetWithEgress<StoredAsset, AssetReadFailure>({
+      quota: ports.assetEgress.quota ?? context.egressQuota ?? {},
+      apiKeyId: context.auth.apiKeyId ?? "",
+      tenantId,
+      projectId: context.auth.projectId,
+      requestId: context.requestId,
+      agentRunId: context.agentRunId,
+      asset,
+      read: () => ports.assets.read(tenantId, assetType, name, version),
+      pricePerGb: ports.assetEgress.pricePerGb,
+      counters: ports.assetEgress.counters,
+      meter: ports.assetEgress.meter,
+      nowUnix: ports.now(),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === ASSET_EGRESS_IDENTITY_ERROR) {
+      return {
+        ok: false,
+        kind: "read",
+        error: { kind: "storage", message: "stored asset has no valid durable ID" },
+      };
+    }
+    throw error;
+  }
   if (!result.ok) return result;
   if (result.charge !== null) {
-    const target = assetEgressTargetId(result.asset, tenantId);
+    target = assetEgressTargetId(result.asset, tenantId);
     ports.audit.record(
       auditEvent(
         context,
