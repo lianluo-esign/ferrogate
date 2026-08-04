@@ -42,6 +42,7 @@ import {
   db,
   resetD1,
   seedAuditEvents,
+  seedBillingEvents,
   seedGuardrailEvaluations,
   seedRequestLogs,
 } from "./d1.js";
@@ -383,6 +384,39 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
     // WHY / TARGET / ACTION, from the one response — `docs/guardrails/investigation-view.md`.
     expect(body.final_outcome).toBe("blocked");
     expect(body.total_cost_usd).toBe(0);
+  });
+
+  it("joins unscoped request ids into the control-owned billing leg", async () => {
+    await seedRequestLogs([
+      {
+        requestId: "fg-platform-request",
+        tenant: null,
+        startedAtUnix: 1_700_000_200,
+        statusCode: 200,
+        route: "platform.route",
+      },
+    ]);
+    await seedBillingEvents([
+      {
+        id: "billing-platform-request",
+        requestId: "fg-platform-request",
+        occurredAtUnix: 1_700_000_201,
+        event: { cost_usd: 1.25 },
+      },
+    ]);
+
+    const { status, body } = await investigate(
+      operatorKey.secret,
+      "?request_id=fg-platform-request",
+    );
+    expect(status).toBe(200);
+    expect(body.requests).toEqual([
+      expect.objectContaining({ request_id: "fg-platform-request", tenant_id: null }),
+    ]);
+    expect(body.billing_events).toEqual([
+      expect.objectContaining({ request_id: "fg-platform-request", cost_usd: 1.25 }),
+    ]);
+    expect(body.total_cost_usd).toBe(1.25);
   });
 
   it("finds the same request by trace_id", async () => {

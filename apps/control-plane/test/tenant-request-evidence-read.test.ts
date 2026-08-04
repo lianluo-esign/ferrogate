@@ -10,7 +10,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { applySchema, db, resetD1, seedRequestLogs } from "./d1.js";
-import { BASE, arm, bearer, tenantKey } from "./harness.js";
+import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 const TENANT = "evidence-tenant";
 const OTHER_TENANT = "evidence-other";
@@ -48,48 +48,7 @@ async function resetTenantEvidence(): Promise<void> {
 }
 
 async function seedAuthoritativeEvidence(): Promise<void> {
-  const tenant = await routeTenant(TENANT);
-  await tenant.batch([
-    tenant
-      .prepare(
-        `INSERT INTO request_logs
-           (request_id, trace_id, agent_run_id, tenant, route, status_code,
-            guardrail_verdict, started_at_unix, request_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        REQUEST_ID,
-        "trace-object",
-        RUN_ID,
-        TENANT,
-        "object-route",
-        201,
-        "allowed",
-        100,
-        JSON.stringify({ source: "tenant-object" }),
-      ),
-    tenant
-      .prepare(
-        `INSERT INTO agent_runs
-           (id, request_id, tenant, started_at_unix, completed_at_unix, run_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(RUN_ID, REQUEST_ID, TENANT, 100, 103, JSON.stringify({ source: "tenant-object" })),
-    tenant
-      .prepare(
-        `INSERT INTO agent_run_events
-           (id, run_id, request_id, tenant, occurred_at_unix, event_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        "evidence-event-1",
-        RUN_ID,
-        REQUEST_ID,
-        TENANT,
-        101,
-        JSON.stringify({ source: "tenant-object", sequence: 1 }),
-      ),
-  ]);
+  await seedObjectEvidence(TENANT, "tenant-object", "object-route");
 
   await seedRequestLogs([
     {
@@ -142,13 +101,59 @@ async function seedAuthoritativeEvidence(): Promise<void> {
   ]);
 }
 
+async function seedObjectEvidence(tenantId: string, source: string, route: string): Promise<void> {
+  const tenant = await routeTenant(tenantId);
+  await tenant.batch([
+    tenant
+      .prepare(
+        `INSERT INTO request_logs
+           (request_id, trace_id, agent_run_id, tenant, route, status_code,
+            guardrail_verdict, started_at_unix, request_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        REQUEST_ID,
+        "trace-object",
+        RUN_ID,
+        tenantId,
+        route,
+        201,
+        "allowed",
+        100,
+        JSON.stringify({ source }),
+      ),
+    tenant
+      .prepare(
+        `INSERT INTO agent_runs
+           (id, request_id, tenant, started_at_unix, completed_at_unix, run_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(RUN_ID, REQUEST_ID, tenantId, 100, 103, JSON.stringify({ source })),
+    tenant
+      .prepare(
+        `INSERT INTO agent_run_events
+           (id, run_id, request_id, tenant, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        "evidence-event-1",
+        RUN_ID,
+        REQUEST_ID,
+        tenantId,
+        101,
+        JSON.stringify({ source, sequence: 1 }),
+      ),
+  ]);
+}
+
 beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
   arm({
     store: "d1",
-    nativeKeys: [tenantKey("evidence-key", TENANT)],
+    staticKeys: [operatorKey],
+    nativeKeys: [tenantKey("evidence-key", TENANT), tenantKey("other-evidence-key", OTHER_TENANT)],
     rbac: { [TENANT]: ["guardrails.evidence.read"] },
   });
   await db().batch([
@@ -221,5 +226,71 @@ describe("tenant-authoritative request evidence reads", () => {
         expect.objectContaining({ id: "evidence-event-1", source: "tenant-object" }),
       ]),
     );
+  });
+
+  it("keeps identical request and run ids isolated across two tenant objects", async () => {
+    await seedAuthoritativeEvidence();
+    await seedObjectEvidence(OTHER_TENANT, "other-tenant-object", "other-object-route");
+
+    const tenantRequest = await SELF.fetch(`${BASE}/admin/v1/request-logs`, {
+      headers: bearer("evidence-key"),
+    });
+    expect(tenantRequest.status, await tenantRequest.clone().text()).toBe(200);
+    const tenantRequestBody = (await tenantRequest.json()) as {
+      data: Record<string, unknown>[];
+    };
+    expect(tenantRequestBody.data).toEqual([
+      expect.objectContaining({
+        request_id: REQUEST_ID,
+        tenant_id: TENANT,
+        route: "object-route",
+        source: "tenant-object",
+      }),
+    ]);
+
+    const otherRequest = await SELF.fetch(`${BASE}/admin/v1/request-logs`, {
+      headers: bearer("other-evidence-key"),
+    });
+    expect(otherRequest.status, await otherRequest.clone().text()).toBe(200);
+    const otherRequestBody = (await otherRequest.json()) as {
+      data: Record<string, unknown>[];
+    };
+    expect(otherRequestBody.data).toEqual([
+      expect.objectContaining({
+        request_id: REQUEST_ID,
+        tenant_id: OTHER_TENANT,
+        route: "other-object-route",
+        source: "other-tenant-object",
+      }),
+    ]);
+
+    const otherTimeline = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
+      headers: bearer("other-evidence-key"),
+    });
+    expect(otherTimeline.status, await otherTimeline.clone().text()).toBe(200);
+    const otherTimelineBody = (await otherTimeline.json()) as {
+      data: Record<string, unknown>[];
+    };
+    expect(otherTimelineBody.data).toEqual([
+      expect.objectContaining({ id: "evidence-event-1", source: "other-tenant-object" }),
+    ]);
+  });
+
+  it("labels platform projection-backed agent responses with source and as-of time", async () => {
+    await seedAuthoritativeEvidence();
+
+    const list = await SELF.fetch(`${BASE}/admin/v1/agent-runs`, {
+      headers: bearer(operatorKey.secret),
+    });
+    const listBody = (await list.json()) as Record<string, unknown>;
+    expect(listBody.source).toBe("derived_control_projection");
+    expect(listBody.as_of_unix).toEqual(expect.any(Number));
+
+    const timeline = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
+      headers: bearer(operatorKey.secret),
+    });
+    const timelineBody = (await timeline.json()) as Record<string, unknown>;
+    expect(timelineBody.source).toBe("derived_control_projection");
+    expect(timelineBody.as_of_unix).toEqual(expect.any(Number));
   });
 });

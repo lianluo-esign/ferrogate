@@ -47,6 +47,8 @@ interface ListBody {
   total?: number;
   offset?: number;
   limit?: number;
+  source?: string;
+  as_of_unix?: number;
 }
 
 async function readLogs(secret: string, query = ""): Promise<ListBody> {
@@ -60,7 +62,12 @@ async function readLogs(secret: string, query = ""): Promise<ListBody> {
 async function exportLogs(
   secret: string,
   query = "",
-): Promise<{ contentType: string; lines: Record<string, unknown>[] }> {
+): Promise<{
+  contentType: string;
+  source: string;
+  asOfUnix: number;
+  lines: Record<string, unknown>[];
+}> {
   const response = await SELF.fetch(`${BASE}/admin/v1/request-log-exports${query}`, {
     headers: bearer(secret),
   });
@@ -68,6 +75,8 @@ async function exportLogs(
   const text = await response.text();
   return {
     contentType: response.headers.get("content-type") ?? "",
+    source: response.headers.get("x-ferrogate-evidence-source") ?? "",
+    asOfUnix: Number(response.headers.get("x-ferrogate-evidence-as-of-unix") ?? "NaN"),
     lines: text
       .split("\n")
       .filter((line) => line.trim() !== "")
@@ -174,6 +183,8 @@ describe("GET /admin/v1/request-logs returns the evidence the table holds", () =
       started_at_unix: FULL_ROW.startedAtUnix,
       completed_at_unix: FULL_ROW.completedAtUnix,
     });
+    expect(page.source).toBe("derived_control_projection");
+    expect(page.as_of_unix).toEqual(expect.any(Number));
   });
 
   /**
@@ -283,6 +294,8 @@ describe("GET /admin/v1/request-log-exports streams JSONL", () => {
     ]);
     const exported = await exportLogs(operatorKey.secret);
     expect(exported.contentType).toContain("application/x-ndjson");
+    expect(exported.source).toBe("derived_control_projection");
+    expect(exported.asOfUnix).toBeGreaterThan(1_700_000_000);
     expect(exported.lines.map((row) => row["request_id"])).toEqual(["fg-2", "fg-1"]);
     expect(exported.lines[0]).toMatchObject({
       object: "request_log",

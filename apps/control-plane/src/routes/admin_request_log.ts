@@ -25,7 +25,13 @@
 import { HttpError } from "../middleware/errors.js";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import { adminListPaginated, parseListQuery } from "../responses.js";
+import {
+  adminListPaginated,
+  adminListPaginatedWithMetadata,
+  derivedControlProjectionMetadata,
+  evidenceResponseHeaders,
+  parseListQuery,
+} from "../responses.js";
 import {
   AUDIT_TABLE,
   GUARDRAIL_CHECK_TABLE,
@@ -440,11 +446,22 @@ function listRequestLogsHandler(): Handler {
             query.offset,
           )
         : await requestLogPage(db as D1Database, scope, query.limit, query.offset);
-    return json(
-      c,
-      200,
-      adminListPaginated(page.rows.map(requestLogDocument), page.total, query.offset, query.limit),
-    );
+    const body =
+      scope.kind === "platform_operator"
+        ? adminListPaginatedWithMetadata(
+            page.rows.map(requestLogDocument),
+            page.total,
+            query.offset,
+            query.limit,
+            derivedControlProjectionMetadata(),
+          )
+        : adminListPaginated(
+            page.rows.map(requestLogDocument),
+            page.total,
+            query.offset,
+            query.limit,
+          );
+    return json(c, 200, body);
   };
 }
 
@@ -486,6 +503,11 @@ function exportRequestLogsHandler(): Handler {
     );
     const db = deps.controlDatabase;
 
+    const metadata =
+      db !== null && scope.kind === "platform_operator"
+        ? derivedControlProjectionMetadata()
+        : null;
+
     const records =
       db === null && scope.kind === "platform_operator"
         ? (await deps.store.list("request-log-exports", scope, query)).items
@@ -512,6 +534,7 @@ function exportRequestLogsHandler(): Handler {
       // A trailing newline only when there IS a line: JSONL readers treat a
       // blank line as an error, and an empty export must be zero bytes.
       body === "" ? "" : `${body}\n`,
+      metadata === null ? {} : evidenceResponseHeaders(metadata),
     );
   };
 }
@@ -930,6 +953,7 @@ function getGuardrailInvestigationHandler(): Handler {
       ...new Set([
         ...evaluationRows.results.map((row) => row.request_id),
         ...authoritativeRequestRows.map((row) => row.request_id),
+        ...unscopedRequestRows.map((row) => row.request_id),
       ]),
     ];
 

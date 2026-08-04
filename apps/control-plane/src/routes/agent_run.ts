@@ -20,7 +20,12 @@
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import { adminListPaginated, parseListQuery } from "../responses.js";
+import {
+  adminListPaginated,
+  adminListPaginatedWithMetadata,
+  derivedControlProjectionMetadata,
+  parseListQuery,
+} from "../responses.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
@@ -147,11 +152,17 @@ function listAgentRunsHandler(): Handler {
             query.limit,
             query.offset,
           );
-    return json(
-      c,
-      200,
-      adminListPaginated(page.rows.map(runDocument), page.total, query.offset, query.limit),
-    );
+    const body =
+      scope.kind === "platform_operator"
+        ? adminListPaginatedWithMetadata(
+            page.rows.map(runDocument),
+            page.total,
+            query.offset,
+            query.limit,
+            derivedControlProjectionMetadata(),
+          )
+        : adminListPaginated(page.rows.map(runDocument), page.total, query.offset, query.limit);
+    return json(c, 200, body);
   };
 }
 
@@ -189,16 +200,22 @@ function agentRunTimelineHandler(): Handler {
       )
       .bind(...eventParams, query.limit, query.offset)
       .all<Record<string, unknown> & { total?: number }>();
-    return json(
-      c,
-      200,
-      adminListPaginated(
-        events.results.map(eventDocument),
-        events.results[0]?.total ?? 0,
-        query.offset,
-        query.limit,
-      ),
-    );
+    const body =
+      scope.kind === "platform_operator"
+        ? adminListPaginatedWithMetadata(
+            events.results.map(eventDocument),
+            events.results[0]?.total ?? 0,
+            query.offset,
+            query.limit,
+            derivedControlProjectionMetadata(),
+          )
+        : adminListPaginated(
+            events.results.map(eventDocument),
+            events.results[0]?.total ?? 0,
+            query.offset,
+            query.limit,
+          );
+    return json(c, 200, body);
   };
 }
 
