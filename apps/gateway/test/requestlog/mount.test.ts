@@ -274,6 +274,16 @@ describe("policy-driven retention", () => {
     expect(await storedRequestLogs()).toHaveLength(1);
   });
 
+  it("keeps the scheduled sweep alive when a tenant object binding is missing", async () => {
+    await expect(
+      sweepRequestLogs(
+        controlDb(),
+        { [REQUEST_LOG_RETENTION_POLICIES_VAR]: JSON.stringify({ ghost: { days: 1 } }) },
+        NOW,
+      ),
+    ).resolves.toEqual({ scanned: 0, pruned: 0 });
+  });
+
   it("deletes the tenant object before its control projection", async () => {
     const tenantId = "retention-order-tenant";
     const old = record("retention-order-old", NOW - 10 * DAY, tenantId);

@@ -7,12 +7,12 @@ import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
  *
  * `[[queues.producers]] BILLING` is producer-only on this Worker, and its
  * stanza says why: the consumer belongs to whoever settles wallets downstream.
- * Request logs are the opposite case. The only thing that has to happen to a
- * request-log message is an insert into the CONTROL database, and this Worker
- * already binds it (`CONTROL_DB`) because the guardrail policy source reads
- * from it. Routing the message to a second Worker would add a deploy unit, a
- * second `wrangler.toml` and a second set of credentials to be able to do
- * exactly the same statement.
+ * Request logs are the opposite case. A message is written to the tenant's
+ * authoritative object and then to the CONTROL database compatibility
+ * projection; this Worker already binds both because the guardrail policy
+ * source reads from the control database. Routing the message to a second
+ * Worker would add a deploy unit, a second `wrangler.toml` and a second set of
+ * credentials to be able to do exactly the same writes.
  *
  * A Worker consuming a queue it produces is a supported Cloudflare topology; it
  * is a separate invocation with its own `env`, not a re-entrant call.
@@ -29,9 +29,10 @@ import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
  * permanently-bad message in front of good evidence until it dead-lettered.
  * `requestLogFromWire` is total and returns `undefined` for exactly that case.
  *
- * The batch is written in ONE `db.batch`, so either the whole delivery lands or
- * none of it does. On failure the batch is retried whole — with the upsert, the
- * messages that had already landed are simply re-applied.
+ * Each tenant group is written in ONE object batch, and the compatibility rows
+ * plus control-owned guardrail evidence are written in ONE projection batch.
+ * On failure the delivery is retried whole — with the upsert, rows that had
+ * already landed are simply re-applied.
  */
 import {
   type GuardrailEvidenceEnvelope,
@@ -63,7 +64,8 @@ export interface RequestLogConsumeResult {
 }
 
 /**
- * Apply one queue delivery to `request_logs`.
+ * Apply one queue delivery to tenant-authoritative `request_logs` and its
+ * derived control projection.
  *
  * NEVER throws: a consumer that throws gets its batch redelivered by the
  * platform anyway, so throwing would only lose the ability to say what

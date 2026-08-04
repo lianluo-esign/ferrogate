@@ -180,6 +180,20 @@ function placeholders(count: number): string {
   return new Array(count).fill("?").join(", ");
 }
 
+/** Resolve an authoritative object without letting a Cron binding fault escape. */
+function tenantDatabaseForSweep(
+  env: unknown,
+  tenantId: string,
+): RequestLogDatabase | undefined {
+  try {
+    return requestLogTenantDatabaseFromEnv(env, tenantId);
+  } catch {
+    // A missing/unreachable object leaves its evidence in place. The next tick
+    // can retry after the binding or object becomes available.
+    return undefined;
+  }
+}
+
 /**
  * Plan and delete one bounded candidate window.
  *
@@ -332,7 +346,7 @@ export async function sweepRequestLogs(
   }
 
   for (const [tenantId, policy] of overrides) {
-    const authoritative = requestLogTenantDatabaseFromEnv(env, tenantId);
+    const authoritative = tenantDatabaseForSweep(env, tenantId);
     if (authoritative === undefined) continue;
     const result = await sweepRequestLogRetention(
       authoritative,
@@ -357,7 +371,7 @@ export async function sweepRequestLogs(
       [...overrides.keys()],
     );
     for (const tenantId of tenantIds) {
-      const authoritative = requestLogTenantDatabaseFromEnv(env, tenantId);
+      const authoritative = tenantDatabaseForSweep(env, tenantId);
       if (authoritative === undefined) continue;
       const result = await sweepRequestLogRetention(
         authoritative,

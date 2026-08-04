@@ -9,17 +9,17 @@
  *     └── ctx.waitUntil(sink.write(record, { env, ctx }))
  *            ├── env.REQUEST_LOG bound?  → Queue.send(wire)       ← preferred
  *            │      … later, on the consumer:
- *            │      queue(batch) → requestLogFromWire → writeRequestLogs(CONTROL_DB)
- *            └── else CONTROL_DB bound?  → writeRequestLogs(CONTROL_DB) inline
+ *            │      queue(batch) → object batch → CONTROL_DB projection
+ *            └── else bindings bound?   → object batch → projection inline
  * ```
  *
  * The Queue is preferred because it is the shape that survives volume: a
- * hundred decisions arriving together become ONE D1 batch instead of a hundred
+ * hundred decisions arriving together become one object batch instead of a hundred
  * round trips, and a D1 that is briefly unavailable becomes a redelivery with
  * backoff instead of a lost row. The direct-D1 arm is not a stand-in for it —
  * it is the correct behaviour for `wrangler dev --local` and for a deployment
- * that has not provisioned a queue, and it writes through exactly the same
- * `writeRequestLogs`, so the two arms cannot drift into storing different rows.
+ * that has not provisioned a queue, and it uses the same object/projection
+ * writer, so the two arms cannot drift into storing different rows.
  *
  * With NEITHER bound the sink counts a `dropped` and returns. That is the
  * degradation, and it is deliberately COUNTED rather than silent: a gateway
@@ -63,7 +63,7 @@ export interface RequestLogQueue {
 export interface RequestLogStats {
   /** Records handed to the Queue producer. */
   readonly queued: number;
-  /** Records written straight to D1 (no queue bound). */
+  /** Records written straight to the object/projection path (no queue bound). */
   readonly written: number;
   /** Records with nowhere to go — no queue AND no control database. */
   readonly dropped: number;
