@@ -2,16 +2,32 @@
  * The tenant's OWN model catalog — the `model_catalog` table in one tenant's
  * database, and the platform default card it is seeded from (#820).
  *
- * ## Why a tenant needs one
+ * ## Why a tenant needs one — stated honestly, because it was not
  *
- * `buildModelCatalog` (`apps/gateway/src/inference/catalog.ts`) fails closed:
- * an absent or invalid catalog yields the EMPTY catalog, and every model then
- * answers `400 model_not_found`. Under the D1-per-tenant topology that was
- * nobody's problem, because onboarding a tenant WAS a `wrangler deploy` and an
- * operator was already in the loop. Under `durable_object` an object exists the
- * moment anyone addresses it and no human is involved anywhere, so a tenant that
- * is not seeded is a tenant that 400s on its first request forever, with no
- * error naming the cause.
+ * This header used to say that `buildModelCatalog`
+ * (`apps/gateway/src/inference/catalog.ts`) fails closed on an absent or invalid
+ * `model_catalog`, so an unseeded tenant "400s on its first request forever".
+ * **That is false and it was load-bearing** — the same claim was restated in five
+ * other places, including operator-visible error text. `buildModelCatalog` takes
+ * `(providers, models, secrets, cloudflare)` parsed from the `GATEWAY_PROVIDERS`
+ * / `GATEWAY_MODELS` / `GATEWAY_CLOUDFLARE` **config vars** by
+ * `modelCatalogFromEnv`; it never opens a database. Its fail-closed posture is
+ * real, and it is about the env registry. Nothing in `apps/<app>/src` reads THIS
+ * table: `grep "FROM model_catalog"` finds this file and nothing else, and the
+ * only non-test callers of {@link listTenantModelCatalog} /
+ * {@link resolveTenantModel} are `./tenant-provisioning.ts`'s own seed check and
+ * health report. An unseeded tenant serves inference exactly like a seeded one.
+ *
+ * So the real reason to seed is FORWARD-LOOKING, and saying so is the point:
+ * per-tenant model visibility and per-tenant pricing need a per-tenant row, and
+ * `docs/design/per-tenant-durable-object-storage-2026-08.md` names the catalog
+ * as something the object can cache in memory across requests once the resolver
+ * reads it. Seeding at provisioning time is cheap (16 rows, once) and means the
+ * table is populated before the first reader exists, rather than needing a
+ * fleet-wide backfill afterwards. That is a good reason. It is not the reason
+ * that was written down, and the difference matters: a false premise in a
+ * comment gets repeated, and this one got repeated into an error string an
+ * operator would have been paged by.
  *
  * ## Seeded once. Then it is the tenant's.
  *

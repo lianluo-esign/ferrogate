@@ -147,6 +147,72 @@ describe("the statement splitter", () => {
     // a migration that grows past the platform limit is caught before deploy.
     expect(Math.max(...statements.map((s) => s.length))).toBeLessThan(100_000);
   });
+
+  test("the census `sqlStatements`' own docblock states is still the census", () => {
+    // WHY A TEST AND NOT A COMMENT. `sqlStatements`' header carries a safety
+    // ARGUMENT ("measured over all eight files, every non-comment `;` is at
+    // end-of-line…") and `#migrate`'s header carries the statement breakdown
+    // that justifies the version gate. Both are measurements, and a measurement
+    // in a comment rots: 0008 landed in the SAME commit that re-measured them
+    // over seven files, silently falsifying four separate numbers in the file's
+    // most load-bearing safety argument. Re-deriving them here means the next
+    // migration turns this red and the docblock is corrected in the same commit
+    // — the forcing function `test/mount-inventory.test.ts` is for the mount
+    // markers, applied to the schema census.
+    //
+    // If this fails, do NOT change the numbers here alone. Update the four
+    // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
+    // count and "all EIGHT files" in the `sqlStatements` docblock, the
+    // "N statements" in the constructor comment, and the breakdown in
+    // `#migrate`'s docblock.
+    const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
+    const count = (pattern: RegExp): number => all.filter((s) => pattern.test(s)).length;
+    expect({
+      files: TENANT_MIGRATIONS.length,
+      statements: all.length,
+      createTable: count(/^CREATE TABLE IF NOT EXISTS/i),
+      createIndex: count(/^CREATE INDEX/i),
+      createUniqueIndex: count(/^CREATE UNIQUE INDEX/i),
+      alterTable: count(/^ALTER TABLE/i),
+      insert: count(/^INSERT/i),
+    }).toEqual({
+      files: 8,
+      statements: 65,
+      createTable: 24,
+      createIndex: 30,
+      createUniqueIndex: 1,
+      alterTable: 9,
+      insert: 1,
+    });
+
+    // The other half of the argument: the comment lines that carry a `;`, which
+    // is what makes comment-stripping-before-splitting mandatory rather than
+    // tidy. Per file, so a failure names the migration that moved the number.
+    const commentSemicolons = Object.fromEntries(
+      TENANT_MIGRATIONS.map((migration) => [
+        migration.name,
+        migration.sql
+          .split("\n")
+          .filter((line) => line.trimStart().startsWith("--") && line.includes(";")).length,
+      ]).filter(([, lines]) => lines !== 0),
+    );
+    expect(commentSemicolons).toEqual({
+      "0001_init_tenant": 18,
+      "0003_api_key_attribution_tags": 1,
+      "0005_responses_conversations": 5,
+      "0008_model_catalog": 3,
+    });
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(27);
+
+    // The claim those two counts exist to support, asserted rather than
+    // restated: NO statement the splitter produces still carries a `;`, i.e.
+    // nothing was cut inside a literal and no comment survived the strip.
+    expect(all.filter((statement) => statement.includes(";"))).toEqual([]);
+    // And the trigger case the docblock says would break it, so a future
+    // `CREATE TRIGGER` fails HERE — where the fix is described — rather than at
+    // a tenant's cold start.
+    expect(all.filter((statement) => /CREATE\s+TRIGGER/i.test(statement))).toEqual([]);
+  });
 });
 
 describe("a fresh tenant object", () => {

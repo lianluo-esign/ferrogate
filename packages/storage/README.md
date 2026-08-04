@@ -238,11 +238,21 @@ genuinely open *for D1* — see the OPEN QUESTION on the `rest` entry in
 `src/tenant-router.ts`, which is deliberately *not* asserted because it cannot be
 verified locally and guessing wrong is an oversell.
 
-What is still open for `durable_object` is the WIRING, not the storage:
-`DurableObjectTenantDatabaseRouter` has no composition root yet — no
-`durable_object` mode in `apps/gateway/src/tenancy/resolver.ts` — and
-`test/mount-inventory.test.ts` lists it under `DEAD` on purpose so that the slice
-which mounts it must move the entry rather than leave the claim unstated.
+The WIRING landed in #819 and this paragraph used to deny it. For the record,
+because a stale claim is worse than none: `DurableObjectTenantDatabaseRouter` is
+constructed on the `durable_object` branch of
+`apps/gateway/src/tenancy/resolver.ts`, that branch is the committed DEFAULT
+(`GATEWAY_TENANT_DB_ROUTING = "durable_object"` in `apps/gateway/wrangler.toml`),
+and `test/mount-inventory.test.ts` accordingly carries the symbol in `MOUNTED`.
+`DurableObjectD1Database` is the one that stays in `DEAD`, and deliberately: no
+app names it, because the router constructs it — a transitive mount, which is a
+weaker claim than a direct one.
+
+What IS still open is that the two Workers do not agree about where a tenant's
+rows live. `apps/gateway` routes on the DO; `apps/control-plane` resolves its
+tenant-data paths through `EnvBindingTenantDatabaseRouter` unless the roster row
+says `durable_object` (see `resolveTenantDatabases` there). Every call site that
+predates the roster still depends on that dispatch being right.
 
 ### Fail-closed is the invariant
 

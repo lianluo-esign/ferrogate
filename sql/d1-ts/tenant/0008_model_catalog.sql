@@ -4,16 +4,23 @@
 --
 -- ## Why a tenant needs a catalog of its own at all
 --
--- A tenant with an empty catalog answers `400 model_not_found` on every
--- inference request — that is `buildModelCatalog`'s deliberate fail-closed
--- posture (`apps/gateway/src/inference/catalog.ts`: an invalid or absent table
--- yields the EMPTY catalog rather than a permissive one). Under the D1-per-
--- tenant topology the question never came up, because onboarding a tenant was a
--- `wrangler deploy` and an operator was already in the loop. Under
--- `durable_object` an object materialises the instant it is addressed, with no
--- operator anywhere, so "who puts the first row in" has to be answered by the
--- onboarding code or it is answered by nobody and the tenant is dead on
--- arrival.
+-- This header used to claim that a tenant with an empty catalog answers
+-- `400 model_not_found` on every inference request, attributing that to
+-- `buildModelCatalog`'s fail-closed posture. THAT WAS FALSE, and it was the
+-- stated justification for this whole migration and for the mandatory seed.
+-- `buildModelCatalog` (`apps/gateway/src/inference/catalog.ts`) is handed rows
+-- parsed from the `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` config VARS by
+-- `modelCatalogFromEnv`; it never opens a database, and it has never read this
+-- table. Nothing in `apps/<app>/src` reads this table at all today.
+--
+-- The honest reason it exists: per-tenant model visibility and per-tenant
+-- pricing need a per-tenant row, and the design doc
+-- (`docs/design/per-tenant-durable-object-storage-2026-08.md`) names the catalog
+-- as something a tenant object can cache in memory across requests once a
+-- resolver reads it. Seeding at provisioning time is cheap — 16 rows, once —
+-- and means the table is already populated when that reader lands, instead of
+-- needing a fleet-wide backfill over objects a namespace cannot enumerate.
+-- Seeding EARLY is the argument. "The tenant is dead on arrival" was not true.
 --
 -- ## Seeded ONCE, then the tenant owns it
 --

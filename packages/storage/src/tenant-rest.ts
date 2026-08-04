@@ -422,6 +422,8 @@ export class D1RestDatabase {
  * default-database parameter.
  */
 export class NonAtomicD1RestTenantDatabaseRouter implements TenantDatabaseRouter {
+  /** Every handle it hands back is `rest`, and therefore non-atomic. */
+  readonly backend = "rest" as const;
   readonly #registry: ControlDatabaseTenantRegistry;
 
   constructor(

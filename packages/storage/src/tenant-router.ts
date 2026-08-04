@@ -107,6 +107,27 @@ export interface TenantDatabaseHandle {
  * Worker without touching a single algorithm.
  */
 export interface TenantDatabaseRouter {
+  /**
+   * Which topology this router serves, knowable WITHOUT resolving a tenant.
+   *
+   * ## Why a router has to be able to say this before it routes
+   *
+   * `provisionTenantStorage` writes a `pending` roster row BEFORE it touches
+   * anything, so a crashed provisioner leaves "started, never finished" instead
+   * of silence. That row has to state a `storage_backend`, and until this
+   * property existed there was nothing to state it from: the backend was only
+   * learned at step (5), from the resolved handle's `source`. So every `pending`
+   * row — and every `failed` row, which is the one that SURVIVES — was written
+   * with the registry's `native_binding` default, mislabelling every Durable
+   * Object tenant whose provisioning had not finished.
+   *
+   * It is a property rather than a method because it is a constant per router
+   * instance, and it is OPTIONAL because a router that dispatches per tenant
+   * (or refuses everything) genuinely does not have one answer. An absent value
+   * means "do not overwrite whatever the roster already believes"; it never
+   * means `native_binding`.
+   */
+  readonly backend?: TenantDatabaseSource;
   /** The account-global CONTROL database. Always a native binding. */
   control(): D1Database;
   /** Resolve one tenant's database, or throw. NEVER falls back. */
@@ -641,6 +662,8 @@ export interface EnvBindingTenantRouterOptions {
  * ```
  */
 export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
+  /** Every tenant this router can serve is a `[[d1_databases]]` stanza. */
+  readonly backend = "native_binding" as const;
   private readonly registry: ControlDatabaseTenantRegistry;
   private readonly ttlMs: number;
   private readonly cache = new Map<string, { at: number; value: TenantDatabaseRegistration }>();
@@ -695,13 +718,38 @@ export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
           ].join(" "),
         );
       }
+      const databaseUuid = registration.databaseUuid;
+      if (databaseUuid === undefined || databaseUuid === "") {
+        // NO binding AND no database uuid: there is nothing to be un-redeployed
+        // FROM. The row records that a tenant exists and that its storage is
+        // somewhere else (or nowhere yet) — a `pending` row written before
+        // provisioning touched anything, a `failed` one left behind when it
+        // stopped, or any backend that has no D1 database at all.
+        //
+        // The old code reported that as `runtime` and printed "database
+        // undefined has no binding_name", which is a claim that a database
+        // EXISTS. It does not, and the difference is operator-visible: `runtime`
+        // becomes a 503 on every control-plane tenant-data route
+        // (`apps/control-plane/src/store/tenancy.ts` maps every other kind that
+        // way), so the moment onboarding wrote its `pending` row a tenant that
+        // had worked started failing. `not_found` is the honest kind and the one
+        // callers already handle as "no tenant database, act on the document
+        // only" — the same answer this router gives for a tenant with no row.
+        throw StorageError.notFound(
+          [
+            `tenant ${tenantId} has a control-registry row but no D1 database: neither a`,
+            "binding_name nor a database_uuid is recorded, so nothing has been provisioned",
+            "for it in D1. This router serves [[d1_databases]] bindings only.",
+          ].join(" "),
+        );
+      }
       // Provisioned but not yet bound: the database exists in the account, the
       // Worker has not been redeployed with its binding. Fail closed — falling
       // back to the control database here is precisely how a tenant's ledger
       // ends up in the account-global one.
       throw StorageError.runtime(
         [
-          `tenant ${tenantId} database ${registration.databaseUuid} has no binding_name;`,
+          `tenant ${tenantId} database ${databaseUuid} has no binding_name;`,
           "the Worker must be redeployed with its [[d1_databases]] stanza before it can",
           "be routed to",
         ].join(" "),
@@ -786,6 +834,9 @@ function isD1Database(value: unknown): value is D1Database {
  * recognized downstream.
  */
 export class SharedDatabaseTenantRouter implements TenantDatabaseRouter {
+  /** One database standing in for every tenant — no physical isolation. */
+  readonly backend = "shared_development" as const;
+
   constructor(
     private readonly db: D1Database,
     private readonly tenantIds: readonly string[] = [],
@@ -997,6 +1048,9 @@ export const D1_BINDING_STRATEGIES = {
  * one experiment that could change that and the reason it is not asserted here.
  */
 export class D1RestTenantDatabaseRouter implements TenantDatabaseRouter {
+  /** The topology it REFUSES to serve — see `forTenant`. */
+  readonly backend = "rest" as const;
+
   constructor(
     private readonly controlDb: D1Database,
     private readonly config: { accountId: string; apiTokenRef: string },
