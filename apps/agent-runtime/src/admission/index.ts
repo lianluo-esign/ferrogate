@@ -62,11 +62,10 @@
  * script_name = "ferrogate-gateway"
  * ```
  *
- * **No `[[migrations]]` entry belongs in this app for it.** A migration
- * INTRODUCES a class, and the class is introduced by the script that defines
- * it: `apps/gateway/wrangler.toml` carries
- * `new_sqlite_classes = ["RateLimiterDurableObject"]`. Adding a second
- * `new_sqlite_classes` here would claim to define a class this script does not
+ * **No lifecycle declaration belongs in this app for it.** The class is
+ * introduced by the script that defines it: `apps/gateway/wrangler.toml`
+ * carries `[exports.RateLimiterDurableObject]`. Adding a second lifecycle
+ * declaration here would claim to define a class this script does not
  * export, and Wrangler rejects that at deploy. Deploy `ferrogate-gateway`
  * FIRST — a `script_name` binding to a script that does not exist yet fails.
  *

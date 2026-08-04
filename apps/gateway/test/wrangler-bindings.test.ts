@@ -9,16 +9,15 @@
  * was not mounted by anything — the exact "fake mount" shape this project keeps
  * finding:
  *
- *  1. deleting `new_sqlite_classes = ["RateLimiterDurableObject"]` from the
- *     `[[migrations]]` stanza. `@cloudflare/vitest-pool-workers` creates a
- *     Durable Object namespace from the BINDING alone and never consults the
- *     migration list, so the suite cannot tell. Cloudflare can: a
- *     `[[durable_objects.bindings]]` whose `class_name` was never introduced by
- *     a migration is rejected AT DEPLOY (`Cannot create binding for class
- *     RateLimiterDurableObject because it is not currently defined`), so the
- *     first `wrangler deploy` of the cloud verification would fail — and, worse,
- *     a class introduced with `new_classes` instead of `new_sqlite_classes`
- *     deploys fine and gives every counter the WRONG storage backend.
+ *  1. deleting `[exports.RateLimiterDurableObject]` from the declarative
+ *     lifecycle map. `@cloudflare/vitest-pool-workers` creates a Durable
+ *     Object namespace from the BINDING alone and never consults this deploy
+ *     config, so the suite cannot tell. Cloudflare can: a
+ *     `[[durable_objects.bindings]]` whose `class_name` is not declared in
+ *     `exports` is rejected AT DEPLOY, so the first `wrangler deploy` of the
+ *     cloud verification would fail — and, worse, a class declared with
+ *     `storage = "legacy-kv"` would not provide the SQLite backend this Worker
+ *     requires.
  *  2. deleting the whole `[[services]] TELEMETRY_COLLECTOR` stanza. Every
  *     telemetry test injects its own collector onto `env`, so none of them reads
  *     the declared binding; without this file the gateway could ship with no
@@ -95,21 +94,29 @@ function value(body: readonly string[], key: string): string | undefined {
   return undefined;
 }
 
-/** Every class named by any migration, split by which storage backend it got. */
-function migratedClasses(): { sqlite: string[]; legacy: string[] } {
-  const sqlite: string[] = [];
-  const legacy: string[] = [];
-  for (const body of stanzas("migrations")) {
-    for (const line of body) {
-      const match = /^(new_sqlite_classes|new_classes)\s*=\s*\[([^\]]*)\]/.exec(line);
-      if (match === null) continue;
-      const target = match[1] === "new_sqlite_classes" ? sqlite : legacy;
-      for (const entryMatch of (match[2] ?? "").matchAll(/"([^"]+)"/g)) {
-        target.push(entryMatch[1] as string);
-      }
+/** Parse the live `[exports.ClassName]` tables from the committed config. */
+function durableObjectExports(): Map<string, Map<string, string>> {
+  const out = new Map<string, Map<string, string>>();
+  let current: Map<string, string> | undefined;
+  for (const line of wranglerToml().split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) continue;
+    const header = /^\[exports\.([A-Za-z_$][\w$]*)\]$/.exec(trimmed);
+    if (header !== null) {
+      current = new Map<string, string>();
+      out.set(header[1] as string, current);
+      continue;
+    }
+    if (/^\[/.test(trimmed)) {
+      current = undefined;
+      continue;
+    }
+    const property = /^(\w+)\s*=\s*"([^"]*)"$/.exec(trimmed);
+    if (current !== undefined && property !== null) {
+      current.set(property[1] as string, property[2] as string);
     }
   }
-  return { sqlite, legacy };
+  return out;
 }
 
 describe("the runtime contract at the top of the file", () => {
@@ -146,20 +153,23 @@ describe("every Durable Object binding is deployable", () => {
     expect(bindings.length).toBeGreaterThanOrEqual(4);
   });
 
-  it("introduces each bound class in a [[migrations]] new_sqlite_classes", () => {
-    const { sqlite, legacy } = migratedClasses();
+  it("declares each bound class as an SQLite Durable Object export", () => {
+    const exports = durableObjectExports();
+    expect(wranglerToml()).not.toMatch(/^\[\[migrations\]\]/m);
     for (const body of bindings) {
       const className = value(body, "class_name");
       expect(
         className,
         `a [[durable_objects.bindings]] has no class_name: ${body.join(" ")}`,
       ).toBeDefined();
-      // `new_classes` is not an acceptable substitute: it deploys, and then the
-      // object gets the key-value backend instead of the SQLite one every
-      // counter/state class here assumes.
-      expect(legacy, `${className} was introduced with new_classes`).not.toContain(className);
-      expect(sqlite, `${className} is bound but no migration introduces it`).toContain(className);
+      const definition = exports.get(className as string);
+      expect(definition, `${className} is bound but absent from [exports]`).toBeDefined();
+      expect(definition?.get("type"), `${className} is not a Durable Object export`).toBe(
+        "durable-object",
+      );
+      expect(definition?.get("storage"), `${className} is not SQLite-backed`).toBe("sqlite");
     }
+    expect(exports.size, "the exports map must not be empty or parser-vacuous").toBe(4);
   });
 
   it("binds each namespace under the NAME src/ reads it by", () => {
@@ -207,9 +217,9 @@ describe("every Durable Object binding is deployable", () => {
     expect(tenantData, "no [[durable_objects.bindings]] is named TENANT_DATA").toBeDefined();
     expect(value(tenantData as string[], "class_name")).toBe("TenantDataObject");
 
-    const { sqlite, legacy } = migratedClasses();
-    expect(sqlite).toContain("TenantDataObject");
-    expect(legacy).not.toContain("TenantDataObject");
+    const definition = durableObjectExports().get("TenantDataObject");
+    expect(definition?.get("type")).toBe("durable-object");
+    expect(definition?.get("storage")).toBe("sqlite");
 
     // And the entry-module half of the pair. The generic loop below asserts
     // this for every binding; it is repeated here so that deleting the

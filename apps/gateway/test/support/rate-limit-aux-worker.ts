@@ -135,7 +135,7 @@ export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
     // unassignable to `WorkerOptions` at the call site.
     modules: [{ type: "ESModule" as const, path: "index.mjs", contents: script }],
     // Mirrors `apps/gateway/wrangler.toml`: the gateway binds the class it
-    // defines, and `new_sqlite_classes` there means `useSQLite` here. Getting
+    // defines, and its SQLite export means `useSQLite` here. Getting
     // this wrong locally would exercise the key-value backend the real
     // namespace does not use.
     durableObjects: {
@@ -157,7 +157,8 @@ export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
  * harmless today and exactly the kind of harmless that makes a later
  * "why is this here" edit break a suite it has no visible connection to.
  *
- * `useSQLite: true` mirrors the gateway's `new_sqlite_classes = ["TenantDataObject"]`.
+ * `useSQLite: true` mirrors the gateway's SQLite
+ * `[exports.TenantDataObject]` declaration.
  * Getting it wrong locally would exercise the key-value backend against a class
  * whose entire implementation is `ctx.storage.sql`, so the suite would fail
  * loudly rather than silently — but it would fail for a reason that has nothing
