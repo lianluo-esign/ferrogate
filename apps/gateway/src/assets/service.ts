@@ -767,7 +767,7 @@ export class AssetService {
   async #recordEgress(
     caller: AssetCaller,
     context: AssetRequestContext,
-    asset: { assetType: string; name: string; version: string },
+    asset: { id: string; assetType: string; name: string; version: string },
     servedBytes: number,
   ): Promise<void> {
     const charge = await recordAssetEgress({
@@ -787,7 +787,7 @@ export class AssetService {
       nowUnix: this.#now(),
     });
     if (charge === null) return;
-    const id = storedAssetId(caller.tenantId, asset.assetType, asset.name, asset.version);
+    const id = asset.id;
     this.#record(
       context,
       caller,
@@ -1400,7 +1400,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version },
+          { id: served.id, assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -1420,7 +1420,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version },
+          { id: served.id, assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -2437,7 +2437,12 @@ export class AssetService {
     await this.#recordEgress(
       caller,
       context,
-      { assetType: ref.assetType, name: ref.name, version: ref.version },
+      {
+        id: asset.id,
+        assetType: ref.assetType,
+        name: ref.name,
+        version: ref.version,
+      },
       asset.size_bytes,
     );
 

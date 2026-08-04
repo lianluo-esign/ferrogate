@@ -979,7 +979,9 @@ function isDownloadable(row: Row): boolean {
 /** Map a D1 row to the MCP's {@link StoredAsset}. */
 function rowToStoredAsset(row: Row): StoredAsset {
   return {
-    ...(text(row.id) === "" ? {} : { id: text(row.id) }),
+    // Keep the database identity even when malformed data is empty; the shared
+    // audit target helper then fails closed instead of deriving a synthetic ID.
+    id: text(row.id),
     assetType: text(row.asset_type),
     name: text(row.name),
     version: text(row.version),

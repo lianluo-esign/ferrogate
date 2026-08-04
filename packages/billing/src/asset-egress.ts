@@ -336,6 +336,8 @@ export interface AssetEgressCharge {
   readonly requestId: string;
   readonly agentRunId?: string | undefined;
   readonly tenantId: string;
+  /** The authenticated credential that caused this transfer, when present. */
+  readonly apiKeyId?: string | undefined;
   readonly projectId?: string | undefined;
   readonly assetType: string;
   readonly name: string;
@@ -443,6 +445,9 @@ export function assetEgressBillingEvent(charge: AssetEgressCharge): BillingEvent
     tenant: {
       ...(charge.tenantId !== "" ? { organization_id: charge.tenantId } : {}),
       ...(charge.projectId !== undefined ? { project_id: charge.projectId } : {}),
+      ...(charge.apiKeyId !== undefined && charge.apiKeyId !== ""
+        ? { api_key_id: charge.apiKeyId }
+        : {}),
     },
     logical_model: charge.logicalModel,
     provider: charge.provider,
@@ -544,6 +549,7 @@ export async function recordAssetEgress(
     requestId: input.requestId,
     agentRunId: input.agentRunId,
     tenantId: input.tenantId,
+    ...(input.apiKeyId !== "" ? { apiKeyId: input.apiKeyId } : {}),
     projectId: input.projectId,
     assetType: input.assetType,
     name: input.name,
@@ -625,7 +631,11 @@ export function assetEgressTargetId(
   asset: AssetEgressReadableAsset,
   tenantId: string,
 ): string {
-  return asset.id ?? `${tenantId}:${asset.assetType}:${asset.name}:${asset.version}`;
+  void tenantId;
+  if (asset.id === undefined || asset.id === "") {
+    throw new Error("stored_assets.id is required for asset egress audit");
+  }
+  return asset.id;
 }
 
 // ---------------------------------------------------------------------------
