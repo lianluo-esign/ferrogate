@@ -344,9 +344,11 @@ const UNDOCUMENTED = ["FG_DEV_MCP_DURABLE_UPSTREAMS"] as const;
 
 /**
  * Declared names read through a renamed parameter, invisible to the
- * `env`-anchored scanner. None here — every declared name is read directly.
+ * `env`-anchored scanner. `BILLING_DB` is passed as part of the environment to
+ * billing's shared resolver, so its concrete property read lives in the
+ * package rather than this app's composition root.
  */
-const READ_INDIRECTLY: readonly string[] = [];
+const READ_INDIRECTLY: readonly string[] = ["BILLING_DB"];
 
 describe("the env-var drift gate itself", () => {
   it("inlined the real source tree — an empty scan would assert nothing", () => {
@@ -369,6 +371,7 @@ describe("the env-var drift gate itself", () => {
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "ASSETS",
+      "BILLING_DB",
       "DB",
       // #687's unified CLIENT session, the other axis from MCP_SESSION below.
       "MCP_CLIENT_SESSION",
