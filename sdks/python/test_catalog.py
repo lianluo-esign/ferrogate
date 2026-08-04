@@ -118,6 +118,29 @@ class GeneratedCatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.request_operation("notAnOpenApiOperation")
 
+    def test_request_operation_rejects_invalid_generated_transport_metadata(self) -> None:
+        client = AdminClient(
+            "https://gateway.example.com",
+            token="token",
+            transport=lambda _request: HttpResponse(200, {}, "{}"),
+        )
+        invalid = {
+            "method": "NOT_A_HTTP_METHOD",
+            "path": "/admin/v1/projects",
+            "security": (),
+            "tags": (),
+        }
+        previous = OPERATIONS.get("invalidGeneratedOperation")
+        OPERATIONS["invalidGeneratedOperation"] = invalid
+        try:
+            with self.assertRaises(ValueError):
+                client.request_operation("invalidGeneratedOperation")
+        finally:
+            if previous is None:
+                del OPERATIONS["invalidGeneratedOperation"]
+            else:
+                OPERATIONS["invalidGeneratedOperation"] = previous
+
 
 if __name__ == "__main__":
     unittest.main()
