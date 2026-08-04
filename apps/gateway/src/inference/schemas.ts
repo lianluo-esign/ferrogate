@@ -554,14 +554,21 @@ const modelModalitiesSchema = z.object({
 });
 
 /**
- * Per-1M-token prices. `null` is UNPRICED and is NOT the same as `0`, which is
- * a genuinely free route — see `./model-metadata.ts` for why both states exist.
+ * One price direction across every leg. Equal legs emit a scalar; differing
+ * legs emit their range. `null` is UNPRICED and is NOT the same as `0`, which
+ * is a genuinely free route — see `./model-metadata.ts` for the mixed case.
  */
+const modelPriceSchema = z.union([
+  z.number(),
+  z.null(),
+  z.object({ min: z.number().nullable(), max: z.number().nullable() }),
+]);
+
 const modelPricingSchema = z.object({
   currency: z.literal("USD"),
   unit: z.literal("per_1m_tokens"),
-  input: z.number().nullable(),
-  output: z.number().nullable(),
+  input: modelPriceSchema,
+  output: modelPriceSchema,
 });
 
 /**
@@ -607,6 +614,9 @@ export type OpenAiModelList = z.infer<typeof openAiModelListSchema>;
  *  - `capabilities` → `null` (FerroGate's own capability model is
  *    `ModelCapability[]`, not the Anthropic `ModelCapabilities` shape);
  *  - `max_tokens` → `null` (not tracked per model).
+ *
+ * The SDK's `ModelInfo` has no pricing field. FerroGate's price scalar/range is
+ * therefore intentionally absent here rather than added as a dialect extension.
  *
  * `max_input_tokens` maps to `descriptor.context_window` (the same concept).
  *

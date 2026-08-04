@@ -8586,6 +8586,13 @@ export interface components {
         MachineTransportRequest: {
             [key: string]: unknown;
         };
+        /** @description The per-1M-token price range across physical legs when configured prices differ. A null min means at least one leg is unpriced; max is the maximum known numeric price. */
+        ModelPriceRange: {
+            min: number | null;
+            max: number | null;
+        };
+        /** @description One advertised per-1M-token price. Equal leg prices stay scalar; differing prices use ModelPriceRange. Null means unpriced and remains distinct from a genuinely free zero price. */
+        ModelPrice: number | null | components["schemas"]["ModelPriceRange"];
         OpenAiModel: {
             id: string;
             /** @constant */
@@ -8605,8 +8612,8 @@ export interface components {
                 currency: "USD";
                 /** @constant */
                 unit: "per_1m_tokens";
-                input: number | null;
-                output: number | null;
+                input: components["schemas"]["ModelPrice"];
+                output: components["schemas"]["ModelPrice"];
             };
         };
         OpenAiModelList: {
