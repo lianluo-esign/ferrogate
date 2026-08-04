@@ -63,8 +63,9 @@ persistence:
 
 # Standalone admin console frontend (issue #158/#159): a static SPA served
 # by nginx, disabled by default since it's optional like the rest of this
-# chart. It calls ferrogate-auth and the gateway cross-origin, so both need
-# CORS configured for whatever host adminConsole.ingress uses.
+# chart. Nginx proxies control-plane and gateway paths through the console
+# host, so browser requests remain same-origin. Gateway CORS is required only
+# for the separately deployed Workers Static Assets console shape.
 adminConsole:
   enabled: false
   replicaCount: 2
