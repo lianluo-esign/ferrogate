@@ -18,10 +18,15 @@ import {
 import {
   type AssetBundleScreeningRequest,
   type AssetBundleScreeningVerdict,
+  type AssetObjectBody,
   type AssetScreener,
   BuiltinEicarScreener,
+  InMemoryAssetObjectStore,
   type StoredAsset,
 } from "../../src/assets/ports.js";
+import { ScannerBackedScreener, type AssetContentScanner } from "../../src/assets/scan.js";
+import { SignatureVerifyingScreener } from "../../src/assets/signature-screener.js";
+import { PublisherKeyRegistry } from "../../src/assets/signature.js";
 import { buildTar, gzip } from "./archives.js";
 import {
   CTX,
@@ -37,6 +42,47 @@ import {
 const A = callerFor("tenant_a");
 const B = callerFor("tenant_b");
 const CLI = { assetType: "cli", name: "ferrogate" } as const;
+
+class StreamingCommitObjectStore extends InMemoryAssetObjectStore {
+  readonly putValues: unknown[] = [];
+
+  constructor(private readonly chunkSize = Number.MAX_SAFE_INTEGER) {
+    super();
+  }
+
+  override async put(
+    key: string,
+    value: Parameters<InMemoryAssetObjectStore["put"]>[1],
+    options?: Parameters<InMemoryAssetObjectStore["put"]>[2],
+  ) {
+    this.putValues.push(value);
+    return super.put(key, value, options);
+  }
+
+  override async get(
+    key: string,
+  ): Promise<(AssetObjectBody & { body: ReadableStream<Uint8Array> }) | null> {
+    const stored = await super.get(key);
+    if (stored === null) return null;
+    const bytes = new Uint8Array(await stored.arrayBuffer());
+    const chunkSize = this.chunkSize;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+          controller.enqueue(bytes.slice(offset, offset + chunkSize));
+        }
+        controller.close();
+      },
+    });
+    return {
+      ...stored,
+      body,
+      arrayBuffer: async () => {
+        throw new Error("buffered staged reads are forbidden");
+      },
+    };
+  }
+}
 
 function ref(version: string, variant?: string) {
   return { ...CLI, version, ...(variant === undefined ? {} : { variant }) };
@@ -405,15 +451,25 @@ describe("cross-tenant isolation", () => {
 describe("presigned upload lifecycle (#259/#368)", () => {
   const CONTENT = "large-object-bytes";
 
-  async function intent(h: ReturnType<typeof harness>, caller = A, version = "3.0.0") {
-    const sha256 = await sha256Hex(bytes(CONTENT));
+  async function intentFor(
+    h: ReturnType<typeof harness>,
+    content: string,
+    caller = A,
+    version = "3.0.0",
+  ) {
+    const contentBytes = bytes(content);
+    const sha256 = await sha256Hex(contentBytes);
     const result = await h.service.createUploadIntent(
       caller,
       ref(version),
-      { size_bytes: bytes(CONTENT).byteLength, sha256 },
+      { size_bytes: contentBytes.byteLength, sha256 },
       CTX,
     );
-    return { result, sha256, size: bytes(CONTENT).byteLength };
+    return { result, sha256, size: contentBytes.byteLength };
+  }
+
+  async function intent(h: ReturnType<typeof harness>, caller = A, version = "3.0.0") {
+    return intentFor(h, CONTENT, caller, version);
   }
 
   test("an intent binds the URL to the declared size and checksum", async () => {
@@ -513,6 +569,161 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const pulled = await pull(h, A, "3.0.0");
     if (!pulled.ok) throw new Error("unreachable");
     expect(decode(pulled.bytes)).toBe(CONTENT);
+  });
+
+  test("a large commit verifies and copies the staged body as a stream", async () => {
+    const objects = new StreamingCommitObjectStore();
+    const h = harness({ objects, limits: { inlineMaxBytes: 4 } });
+    const { result, sha256, size } = await intent(h);
+    if (!result.ok) throw new Error("unreachable");
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
+    const stagingKey = h.presigner.puts[0]?.key as string;
+    await stage(objects, stagingKey, bytes(CONTENT));
+
+    const commit = await h.service.commitUpload(
+      A,
+      ref("3.0.0"),
+      { upload_id: uploadId, size_bytes: size, sha256, content_type: "application/octet-stream" },
+      CTX,
+    );
+
+    expect(commit.ok).toBe(true);
+    expect(objects.putValues.some((value) => value instanceof ReadableStream)).toBe(true);
+    expect(objects.objects.has(stagingKey)).toBe(false);
+    expect(
+      await h.metadata.getAsset(storedAssetId("tenant_a", "cli", "ferrogate", "3.0.0")),
+    ).not.toBeNull();
+  });
+
+  test("a streamed EICAR signature is detected across body chunks", async () => {
+    const eicar = "prefix X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H* suffix";
+    const objects = new StreamingCommitObjectStore(7);
+    const h = harness({ objects, limits: { inlineMaxBytes: 4 } });
+    const { result, sha256, size } = await intentFor(h, eicar, A, "3.0.1");
+    if (!result.ok) throw new Error("unreachable");
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
+    const stagingKey = h.presigner.puts[0]?.key as string;
+    await stage(objects, stagingKey, bytes(eicar));
+
+    const commit = await h.service.commitUpload(
+      A,
+      ref("3.0.1"),
+      { upload_id: uploadId, size_bytes: size, sha256, content_type: "application/octet-stream" },
+      CTX,
+    );
+
+    expect(commit.ok).toBe(false);
+    if (commit.ok) throw new Error("unreachable");
+    expect(commit.status).toBe(422);
+    expect(commit.code).toBe("asset_rejected");
+    expect(commit.message).toContain("known malware");
+    expect(objects.objects.size).toBe(0);
+    expect(
+      await h.metadata.getAsset(storedAssetId("tenant_a", "cli", "ferrogate", "3.0.1")),
+    ).toBeNull();
+  });
+
+  test("a large configured-scanner commit is stored pending_scan without buffering", async () => {
+    let scanned = 0;
+    const scanner: AssetContentScanner = {
+      backendName: "test-scanner",
+      async scan() {
+        scanned += 1;
+        return { kind: "clean" };
+      },
+    };
+    const objects = new StreamingCommitObjectStore();
+    const h = harness({
+      objects,
+      screener: new ScannerBackedScreener(scanner),
+      limits: { inlineMaxBytes: 4 },
+    });
+    const { result, sha256, size } = await intent(h, A, "3.0.2");
+    if (!result.ok) throw new Error("unreachable");
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
+    const stagingKey = h.presigner.puts[0]?.key as string;
+    await stage(objects, stagingKey, bytes(CONTENT));
+
+    const commit = await h.service.commitUpload(
+      A,
+      ref("3.0.2"),
+      { upload_id: uploadId, size_bytes: size, sha256 },
+      CTX,
+    );
+
+    expect(commit.ok).toBe(true);
+    if (!commit.ok) throw new Error("unreachable");
+    expect(commit.status).toBe(202);
+    expect((commit.body as { asset: { visibility: string } }).asset.visibility).toBe(
+      "pending_scan",
+    );
+    expect(scanned).toBe(0);
+    expect(objects.objects.has(stagingKey)).toBe(false);
+  });
+
+  test("a streamed mcp_manifest fails closed because it cannot be parsed", async () => {
+    const content = JSON.stringify({ transport: "http", padding: "x".repeat(32) });
+    const objects = new StreamingCommitObjectStore();
+    const h = harness({ objects, limits: { inlineMaxBytes: 4 } });
+    const contentBytes = bytes(content);
+    const sha256 = await sha256Hex(contentBytes);
+    const result = await h.service.createUploadIntent(
+      A,
+      { assetType: "mcp_manifest", name: "manifest", version: "3.0.3" },
+      { size_bytes: contentBytes.byteLength, sha256 },
+      CTX,
+    );
+    if (!result.ok) throw new Error("unreachable");
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
+    const stagingKey = h.presigner.puts[0]?.key as string;
+    await stage(objects, stagingKey, contentBytes);
+
+    const commit = await h.service.commitUpload(
+      A,
+      { assetType: "mcp_manifest", name: "manifest", version: "3.0.3" },
+      {
+        upload_id: uploadId,
+        size_bytes: contentBytes.byteLength,
+        sha256,
+        content_type: "application/json",
+      },
+      CTX,
+    );
+
+    expect(commit.ok).toBe(false);
+    if (commit.ok) throw new Error("unreachable");
+    expect(commit.code).toBe("asset_rejected");
+    expect(commit.message).toContain("max_gateway_buffer_bytes");
+    expect(objects.objects.size).toBe(0);
+  });
+
+  test("a streamed commit with detached signature evidence fails closed", async () => {
+    const objects = new StreamingCommitObjectStore();
+    const h = harness({
+      objects,
+      screener: new SignatureVerifyingScreener(
+        new BuiltinEicarScreener(),
+        new PublisherKeyRegistry(),
+      ),
+      limits: { inlineMaxBytes: 4 },
+    });
+    const { result, sha256, size } = await intent(h, A, "3.0.4");
+    if (!result.ok) throw new Error("unreachable");
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
+    const stagingKey = h.presigner.puts[0]?.key as string;
+    await stage(objects, stagingKey, bytes(CONTENT));
+
+    const commit = await h.service.commitUpload(
+      A,
+      ref("3.0.4"),
+      { upload_id: uploadId, size_bytes: size, sha256, signature: "detached" },
+      CTX,
+    );
+
+    expect(commit.ok).toBe(false);
+    if (commit.ok) throw new Error("unreachable");
+    expect(commit.code).toBe("asset_signature_requires_buffering");
+    expect(objects.objects.size).toBe(0);
   });
 
   test("a presigned skill archive is screened before the final object is committed", async () => {

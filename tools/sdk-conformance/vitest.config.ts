@@ -153,6 +153,9 @@ export default defineConfig({
         bindings: {
           GATEWAY_NATIVE_API_KEYS: JSON.stringify(NATIVE_API_KEYS),
           GATEWAY_STATIC_API_KEYS: "[]",
+          ASSET_ENTITLEMENTS: JSON.stringify({
+            tenant_sdk: { asset_hosting_enabled: true },
+          }),
           SELF_HOSTED_WORKER_REGISTRY: "[]",
           TENANCY_LIFECYCLE: JSON.stringify({ tenant_sdk_suspended: "suspended" }),
           TENANT_RBAC_ACTIONS: "{}",

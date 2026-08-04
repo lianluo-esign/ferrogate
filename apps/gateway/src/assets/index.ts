@@ -23,6 +23,7 @@
  */
 export {
   ORDERED_ASSET_OPERATION_IDS,
+  ORDERED_FILE_OPERATION_IDS,
   assetDepsFromEnv,
   assetRouteModule,
   buildAssetService,

@@ -118,6 +118,7 @@ import {
   type AssetScreeningRejection,
   type AssetScreeningRequest,
   type AssetScreeningVerdict,
+  type AssetStreamScreeningRequest,
   type AssetVisibility,
   isScreeningRejection,
   strictestVisibility,
@@ -471,6 +472,31 @@ export class GuardrailAssetScreener implements AssetScreener {
     };
   }
 
+  async streamedScreen(
+    request: AssetStreamScreeningRequest,
+  ): Promise<AssetScreeningVerdict | AssetScreeningRejection> {
+    const verdict =
+      this.#inner.streamedScreen === undefined
+        ? streamedGuardrailPendingVerdict(request)
+        : await this.#inner.streamedScreen(request);
+    if (isScreeningRejection(verdict)) return verdict;
+
+    const mode = this.#modes.modeFor(request.tenantId, request.assetType);
+    if (mode === "off") return verdict;
+    const visibility = mode === "block" ? "quarantined" : "pending_scan";
+    return {
+      ...verdict,
+      visibility: strictestVisibility(verdict.visibility, visibility),
+      auditDetail: `${verdict.auditDetail} guardrail=${
+        mode === "block" ? "undecidable" : "pending_scan"
+      }(reason=screening_requires_buffering)`,
+      manifest: {
+        ...verdict.manifest,
+        guardrail: `screening_requires_buffering mode=${mode}`,
+      },
+    };
+  }
+
   /**
    * The per-FILE pass over an expanded `static_site` or `skill_bundle` archive.
    *
@@ -650,6 +676,23 @@ export class GuardrailAssetScreener implements AssetScreener {
       await runtime.evidence?.flush?.({ env: this.#env }).catch(() => undefined);
     }
   }
+}
+
+function streamedGuardrailPendingVerdict(
+  request: AssetStreamScreeningRequest,
+): AssetScreeningVerdict {
+  return {
+    visibility: "pending_scan",
+    auditDetail: "scan=pending_scan backend=buffer-required reason=screening_requires_buffering",
+    manifest: {
+      scanner: "buffer-required",
+      outcome: "pending_scan",
+      reason: "screening_requires_buffering",
+      sha256: request.contentSha256,
+      size_bytes: request.sizeBytes,
+      screened_at_unix: request.nowUnix,
+    },
+  };
 }
 
 /**

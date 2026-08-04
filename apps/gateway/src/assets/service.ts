@@ -36,6 +36,8 @@ import {
   ASSET_REJECTED_CODE,
   ASSET_REJECTED_STATUS,
   assetContentRejection,
+  EICAR_SIGNATURE,
+  streamedAssetContentRejection,
 } from "./content-gate.js";
 import {
   type AssetEgressCounters,
@@ -47,7 +49,7 @@ import {
   assetPullAuditMessage,
   recordAssetEgress,
 } from "@ferrogate/billing";
-import { sha256Hex } from "./hash.js";
+import { randomHex128, sha256Hex, StreamingSha256, toHex } from "./hash.js";
 import {
   type AssetObjectRef,
   CrossTenantKeyError,
@@ -63,6 +65,7 @@ import {
   storedAssetVariantId,
 } from "./keys.js";
 import {
+  type AssetObjectBody,
   type AssetAuditSink,
   type AssetBundleIndexStore,
   type AssetBundleScreeningVerdict,
@@ -72,11 +75,14 @@ import {
   type AssetPresigner,
   type AssetScreener,
   type AssetScreeningRequest,
+  type AssetScreeningVerdict,
+  type AssetStreamScreeningRequest,
   type AssetVisibility,
   InMemoryAssetBundleIndexStore,
   PresignUnavailableError,
   type PresignedUpload,
   type StoredAsset,
+  type StoredAssetMetadata,
   type StoredAssetChannel,
   type StoredBundleFile,
   isDownloadable,
@@ -94,6 +100,9 @@ import type {
   AssetStorageSummary,
   AssetSummary,
   AssetVisibilityPromotionRequest,
+  FileListQuery,
+  FileListResponse,
+  FileObject,
   PresignAbortRequest,
   PresignCommitRequest,
   PresignUploadIntentRequest,
@@ -358,6 +367,10 @@ export interface AssetVersionRef extends AssetName {
   readonly variant?: string | undefined;
 }
 
+/** Reserved asset coordinates backing the OpenAI-compatible Files API. */
+export const OPENAI_FILE_ASSET_TYPE = "openai_file";
+export const OPENAI_FILE_VERSION = "1";
+
 export interface AssetPushInput {
   readonly contentType?: string | undefined;
   readonly content: Uint8Array;
@@ -369,6 +382,16 @@ export interface AssetPushInput {
    * decision — the service never interprets it.
    */
   readonly signature?: AssetScreeningRequest["signature"];
+  /** Metadata projection used by the OpenAI Files adapter. */
+  readonly metadata?: StoredAssetMetadata | undefined;
+}
+
+/** Replayable multipart file input; the stream factory is used twice on the large path. */
+export interface FileUploadInput {
+  readonly size_bytes: number;
+  readonly stream: () => ReadableStream<Uint8Array>;
+  readonly contentType: string;
+  readonly metadata: { readonly filename: string; readonly purpose: string };
 }
 
 export interface AssetPullInput {
@@ -461,6 +484,26 @@ export function assetSummary(asset: StoredAsset): AssetSummary {
     visibility: asset.visibility,
     created_at_unix: asset.created_at_unix,
     updated_at_unix: asset.updated_at_unix,
+  };
+}
+
+/** Project one reserved asset row into the OpenAI Files object. */
+export function fileObject(asset: StoredAsset): FileObject {
+  const status =
+    asset.visibility === "visible"
+      ? "processed"
+      : asset.visibility === "pending_scan"
+        ? "uploaded"
+        : "error";
+  return {
+    id: asset.name,
+    object: "file",
+    bytes: asset.size_bytes,
+    created_at: asset.created_at_unix,
+    filename: asset.metadata?.filename ?? asset.name,
+    purpose: asset.metadata?.purpose ?? "assistants",
+    status,
+    status_details: asset.visibility === "quarantined" ? "asset screening withheld the file" : null,
   };
 }
 
@@ -840,6 +883,205 @@ export class AssetService {
   }
 
   // -------------------------------------------------------------------------
+  // OpenAI Files projection (#742)
+  // -------------------------------------------------------------------------
+
+  async createFile(
+    caller: AssetCaller,
+    input: FileUploadInput,
+    context: AssetRequestContext,
+  ): Promise<AssetResult<FileObject>> {
+    const fileId = `file-${randomHex128()}`;
+    const ref: AssetVersionRef = {
+      assetType: OPENAI_FILE_ASSET_TYPE,
+      name: fileId,
+      version: OPENAI_FILE_VERSION,
+    };
+    const inlineLimit = inlinePushByteLimit(
+      this.#limits.inlineMaxBytes,
+      caller.assetMaxObjectBytes,
+      caller.assetStorageQuotaBytes,
+    );
+
+    let status: number;
+    if (input.size_bytes <= inlineLimit) {
+      let content: Uint8Array;
+      try {
+        content = await readUploadBytes(input.stream(), inlineLimit);
+      } catch (error) {
+        return fileUploadReadFailure(error, inlineLimit);
+      }
+      const pushed = await this.putAsset(
+        caller,
+        ref,
+        {
+          content,
+          contentType: input.contentType,
+          metadata: input.metadata,
+        },
+        context,
+      );
+      if (!pushed.ok) return pushed;
+      status = pushed.status;
+    } else {
+      // A multipart File is replayable, so the first pass only measures and
+      // hashes chunks. The second pass is handed directly to R2 under the
+      // intent-derived staging key; no large Uint8Array is created in Worker.
+      const maxObjectBytes = effectiveMaxObjectBytes(
+        this.#limits.presignMaxObjectBytes,
+        caller.assetMaxObjectBytes,
+        caller.assetStorageQuotaBytes,
+      );
+      let measured: { size_bytes: number; sha256: string };
+      try {
+        measured = await measureUpload(input.stream(), maxObjectBytes);
+      } catch (error) {
+        return fileUploadReadFailure(error, maxObjectBytes);
+      }
+      const intent = await this.createUploadIntent(
+        caller,
+        ref,
+        { size_bytes: measured.size_bytes, sha256: measured.sha256 },
+        context,
+      );
+      if (!intent.ok) return intent;
+      const uploadId = (intent.body as { upload_id?: unknown }).upload_id;
+      if (typeof uploadId !== "string") {
+        return fail(503, "storage_unavailable", "the upload intent did not return an upload id");
+      }
+      const stagingKey = stagingObjectKey(
+        this.#ref(caller, { ...ref, variant: "" }),
+        uploadId,
+        measured.size_bytes,
+        measured.sha256,
+      );
+      const guard = this.#guardKey(stagingKey, caller.tenantId);
+      if (guard) return guard;
+      try {
+        await this.#objects.put(stagingKey, input.stream(), {
+          httpMetadata: { contentType: input.contentType },
+        });
+      } catch (error) {
+        await this.#bestEffortDelete(stagingKey, caller.tenantId);
+        return fail(
+          503,
+          "storage_unavailable",
+          `the file could not be staged in the object bucket: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const committed = await this.commitUpload(
+        caller,
+        ref,
+        {
+          upload_id: uploadId,
+          size_bytes: measured.size_bytes,
+          sha256: measured.sha256,
+          content_type: input.contentType,
+          metadata: input.metadata,
+        },
+        context,
+      );
+      if (!committed.ok) return committed;
+      status = committed.status;
+    }
+
+    const asset = await this.#metadata.getAsset(
+      storedAssetVariantId(
+        caller.tenantId,
+        OPENAI_FILE_ASSET_TYPE,
+        fileId,
+        OPENAI_FILE_VERSION,
+        "",
+      ),
+    );
+    if (asset === null) {
+      return fail(503, "storage_unavailable", "the file metadata row was not available after upload");
+    }
+    return { ok: true, status, body: fileObject(asset) };
+  }
+
+  async listFiles(
+    caller: AssetCaller,
+    input: FileListQuery = {},
+  ): Promise<AssetResult<FileListResponse>> {
+    const denied = this.#requireTenant(caller);
+    if (denied) return denied;
+    let files = (await this.#metadata.listAssets(caller.tenantId, OPENAI_FILE_ASSET_TYPE))
+      .filter((asset) => asset.asset_type === OPENAI_FILE_ASSET_TYPE && asset.variant === "")
+      .filter(
+        (asset) =>
+          input.purpose === undefined || asset.metadata?.purpose === input.purpose,
+      )
+      .sort((left, right) => {
+        const byCreated = right.created_at_unix - left.created_at_unix;
+        return byCreated !== 0 ? byCreated : right.name.localeCompare(left.name);
+      });
+    const afterIndex = input.after === undefined ? -1 : files.findIndex((file) => file.name === input.after);
+    if (afterIndex >= 0) files = files.slice(afterIndex + 1);
+    const limit = input.limit ?? 10_000;
+    const data = files.slice(0, limit).map(fileObject);
+    return {
+      ok: true,
+      status: 200,
+      body: { object: "list", data, has_more: files.length > data.length },
+    };
+  }
+
+  async getFile(caller: AssetCaller, fileId: string): Promise<AssetResult<FileObject>> {
+    const denied = this.#requireTenant(caller);
+    if (denied) return denied;
+    const asset = await this.#metadata.getAsset(
+      storedAssetVariantId(
+        caller.tenantId,
+        OPENAI_FILE_ASSET_TYPE,
+        fileId,
+        OPENAI_FILE_VERSION,
+        "",
+      ),
+    );
+    if (asset === null || asset.asset_type !== OPENAI_FILE_ASSET_TYPE || asset.variant !== "") {
+      return fail(404, "asset_not_found", "no such file");
+    }
+    return { ok: true, status: 200, body: fileObject(asset) };
+  }
+
+  async fileContent(
+    caller: AssetCaller,
+    fileId: string,
+    input: AssetPullInput,
+    context: AssetRequestContext,
+  ): Promise<AssetPullResult> {
+    return this.pullAsset(
+      caller,
+      {
+        assetType: OPENAI_FILE_ASSET_TYPE,
+        name: fileId,
+        reference: OPENAI_FILE_VERSION,
+      },
+      input,
+      context,
+    );
+  }
+
+  async deleteFile(
+    caller: AssetCaller,
+    fileId: string,
+    context: AssetRequestContext,
+  ): Promise<AssetResult<{ id: string; object: "file"; deleted: true }>> {
+    const deleted = await this.deleteAsset(
+      caller,
+      {
+        assetType: OPENAI_FILE_ASSET_TYPE,
+        name: fileId,
+        version: OPENAI_FILE_VERSION,
+      },
+      context,
+    );
+    if (!deleted.ok) return deleted;
+    return { ok: true, status: deleted.status, body: { id: fileId, object: "file", deleted: true } };
+  }
+
+  // -------------------------------------------------------------------------
   // listWithheldAssets (#379)
   // -------------------------------------------------------------------------
 
@@ -1077,6 +1319,7 @@ export class AssetService {
       version: ref.version,
       content_type: contentType,
       content_hash: contentHash,
+      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
       size_bytes: input.content.byteLength,
       storage_uri: candidateKey,
       variant,
@@ -2062,6 +2305,15 @@ export class AssetService {
         "no object was uploaded to the presigned URL for this asset",
       );
     }
+    if (head.size > this.#limits.inlineMaxBytes) {
+      return this.#commitStreamedUpload(
+        caller,
+        ref,
+        request,
+        context,
+        { id, objectRef, stagingKey, staged, sha256, contentType, bundle },
+      );
+    }
     const bytes = new Uint8Array(await staged.arrayBuffer());
     const actualSha256 = await sha256Hex(bytes);
     if (actualSha256 !== sha256 || bytes.byteLength !== request.size_bytes) {
@@ -2162,6 +2414,7 @@ export class AssetService {
       version: ref.version,
       content_type: contentType,
       content_hash: actualSha256,
+      ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
       size_bytes: bytes.byteLength,
       storage_uri: finalKey,
       variant: "",
@@ -2279,6 +2532,226 @@ export class AssetService {
       `asset ${id} committed via presigned upload ${request.upload_id} (${asset.size_bytes} bytes); ${screening.auditDetail}${skillBundleScreening.body === undefined ? "" : `; ${skillBundleScreening.body.auditDetail}`}${bundleScreening}; manifest=${JSON.stringify(screening.manifest)}`,
     );
     await this.#bestEffortDelete(stagingKey, caller.tenantId);
+    return {
+      ok: true,
+      status: assetMutationStatus(asset.visibility),
+      body: { object: "asset", asset: assetSummary(asset) },
+    };
+  }
+
+  /**
+   * Commit an object above the inline budget without materializing it.
+   *
+   * The transform is deliberately the source for both verification and the
+   * final PUT: a staged body is one-shot in R2, so a second read would either
+   * buffer the object or silently verify different bytes than were copied.
+   */
+  async #commitStreamedUpload(
+    caller: AssetCaller,
+    ref: AssetVersionRef,
+    request: PresignCommitRequest,
+    context: AssetRequestContext,
+    input: {
+      readonly id: string;
+      readonly objectRef: AssetObjectRef;
+      readonly stagingKey: string;
+      readonly staged: AssetObjectBody;
+      readonly sha256: string;
+      readonly contentType: string;
+      readonly bundle: boolean;
+    },
+  ): Promise<AssetResult<unknown>> {
+    const finalKey = newCommitObjectKey(input.objectRef, request.upload_id);
+    const finalGuard = this.#guardKey(finalKey, caller.tenantId);
+    if (finalGuard) {
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      return finalGuard;
+    }
+
+    const observed = trackedAssetBody(input.staged.body);
+    try {
+      // The transform hashes and scans the exact bytes this PUT consumes. The
+      // object store therefore never receives an unverified buffered copy.
+      await this.#objects.put(finalKey, observed.stream, {
+        httpMetadata: { contentType: input.contentType },
+      });
+    } catch (error) {
+      await this.#bestEffortDelete(finalKey, caller.tenantId);
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      return fail(
+        503,
+        "storage_unavailable",
+        `the streamed asset commit could not copy the staged object: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const result = observed.result();
+    if (
+      result.sizeBytes !== input.staged.size ||
+      result.sizeBytes !== request.size_bytes ||
+      result.sha256 !== input.sha256
+    ) {
+      await this.#bestEffortDelete(finalKey, caller.tenantId);
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      return this.#rejectedCommit(
+        context,
+        caller,
+        input.id,
+        request.upload_id,
+        "asset_commit_hash_mismatch",
+        "committed object sha256/size does not match the registered intent",
+      );
+    }
+
+    const contentRejected = streamedAssetContentRejection(
+      ref.assetType,
+      input.contentType,
+      result.eicarFound,
+    );
+    if (contentRejected !== undefined) {
+      await this.#bestEffortDelete(finalKey, caller.tenantId);
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      return this.#rejectedCommit(
+        context,
+        caller,
+        input.id,
+        request.upload_id,
+        ASSET_REJECTED_CODE,
+        contentRejected,
+      );
+    }
+
+    // Bundle expansion needs the complete archive. Keeping this refusal here
+    // makes the large presigned path fail closed instead of publishing an
+    // archive whose projected files were never screened or indexed.
+    if (input.bundle || ref.assetType === "skill_bundle") {
+      const message =
+        "bundle assets above the gateway's streaming commit budget must use a buffered commit";
+      await this.#bestEffortDelete(finalKey, caller.tenantId);
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      return this.#rejectedCommit(
+        context,
+        caller,
+        input.id,
+        request.upload_id,
+        ASSET_REJECTED_CODE,
+        message,
+      );
+    }
+
+    const now = this.#now();
+    const screeningRequest: AssetStreamScreeningRequest = {
+      assetId: input.id,
+      tenantId: caller.tenantId,
+      assetType: ref.assetType,
+      contentType: input.contentType,
+      contentSha256: result.sha256,
+      sizeBytes: result.sizeBytes,
+      nowUnix: now,
+      requestId: context.requestId,
+      signaturePresented:
+        request.signature !== undefined ||
+        request.signature_format !== undefined ||
+        request.signature_key_id !== undefined,
+    };
+    const screening =
+      this.#screener.streamedScreen === undefined
+        ? streamedPendingScreening(screeningRequest)
+        : await this.#screener.streamedScreen(screeningRequest);
+    if (isScreeningRejection(screening)) {
+      await this.#bestEffortDelete(finalKey, caller.tenantId);
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      return this.#rejectedCommit(
+        context,
+        caller,
+        input.id,
+        request.upload_id,
+        screening.code,
+        screening.message,
+      );
+    }
+
+    const asset: StoredAsset = {
+      id: input.id,
+      tenant_id: caller.tenantId,
+      project_id: caller.projectId,
+      asset_type: ref.assetType,
+      name: ref.name,
+      version: ref.version,
+      content_type: input.contentType,
+      content_hash: result.sha256,
+      ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+      size_bytes: result.sizeBytes,
+      storage_uri: finalKey,
+      variant: "",
+      yanked: false,
+      visibility: screening.visibility,
+      created_at_unix: now,
+      updated_at_unix: now,
+    };
+    const admission = await this.#metadata.createAssetWithinQuota(
+      asset,
+      caller.assetStorageQuotaBytes,
+    );
+    if (admission.kind === "over_quota") {
+      await this.#bestEffortDelete(finalKey, caller.tenantId);
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      this.#record(
+        context,
+        caller,
+        "asset.push",
+        input.id,
+        "rejected_commit",
+        `asset ${input.id} upload ${request.upload_id} rejected at commit: ${asset.size_bytes} bytes would exceed the tenant's ${admission.quota_bytes}-byte asset storage quota`,
+      );
+      return fail(
+        422,
+        "asset_storage_quota_exceeded",
+        `committing this asset would exceed the tenant's ${admission.quota_bytes}-byte asset storage quota`,
+      );
+    }
+    if (admission.kind === "already_exists") {
+      await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
+      const winner = await this.#metadata.getAsset(input.id);
+      if (winner === null) {
+        await this.#bestEffortDelete(finalKey, caller.tenantId);
+        return fail(
+          503,
+          "storage_unavailable",
+          "the conflicting asset disappeared before it could be reconciled",
+        );
+      }
+      if (winner.storage_uri !== finalKey) {
+        await this.#bestEffortDelete(finalKey, caller.tenantId);
+      }
+      if (
+        this.#existingMatchesCommit(
+          winner,
+          input.objectRef,
+          request.upload_id,
+          request.size_bytes,
+          input.sha256,
+          input.contentType,
+        )
+      ) {
+        return {
+          ok: true,
+          status: assetMutationStatus(winner.visibility),
+          body: { object: "asset", asset: assetSummary(winner) },
+        };
+      }
+      return this.#versionImmutable(ref);
+    }
+
+    this.#record(
+      context,
+      caller,
+      "asset.push",
+      input.id,
+      "committed",
+      `asset ${input.id} committed via streamed presigned upload ${request.upload_id} (${asset.size_bytes} bytes); ${screening.auditDetail}; manifest=${JSON.stringify(screening.manifest)}`,
+    );
+    await this.#bestEffortDelete(input.stagingKey, caller.tenantId);
     return {
       ok: true,
       status: assetMutationStatus(asset.visibility),
@@ -2795,6 +3268,183 @@ export class AssetService {
       return false;
     }
   }
+}
+
+class FileUploadTooLargeError extends Error {
+  constructor() {
+    super("file upload exceeds the configured inline or object-size limit");
+    this.name = "FileUploadTooLargeError";
+  }
+}
+
+class FileUploadReadError extends Error {
+  constructor() {
+    super("the uploaded file stream could not be read");
+    this.name = "FileUploadReadError";
+  }
+}
+
+interface StreamedAssetObservation {
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly eicarFound: boolean;
+}
+
+const STREAMED_EICAR_BYTES = new TextEncoder().encode(EICAR_SIGNATURE);
+
+function trackedAssetBody(body: ReadableStream<Uint8Array>): {
+  readonly stream: ReadableStream<Uint8Array>;
+  readonly result: () => StreamedAssetObservation;
+} {
+  const digest = new StreamingSha256();
+  let sizeBytes = 0;
+  let eicarFound = false;
+  let carry = new Uint8Array(0);
+  const stream = body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        sizeBytes += chunk.byteLength;
+        digest.update(chunk);
+        if (!eicarFound) {
+          const searchable = new Uint8Array(carry.byteLength + chunk.byteLength);
+          searchable.set(carry);
+          searchable.set(chunk, carry.byteLength);
+          eicarFound = containsBytes(searchable, STREAMED_EICAR_BYTES);
+          if (!eicarFound) {
+            const carryLength = Math.min(
+              STREAMED_EICAR_BYTES.byteLength - 1,
+              searchable.byteLength,
+            );
+            carry = searchable.slice(searchable.byteLength - carryLength);
+          }
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return {
+    stream,
+    result: () => ({
+      sizeBytes,
+      sha256: toHex(digest.digest()),
+      eicarFound,
+    }),
+  };
+}
+
+function containsBytes(haystack: Uint8Array, needle: Uint8Array): boolean {
+  if (needle.byteLength === 0) return true;
+  if (haystack.byteLength < needle.byteLength) return false;
+  for (let offset = 0; offset <= haystack.byteLength - needle.byteLength; offset += 1) {
+    let matches = true;
+    for (let index = 0; index < needle.byteLength; index += 1) {
+      if (haystack[offset + index] !== needle[index]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return true;
+  }
+  return false;
+}
+
+function streamedPendingScreening(request: AssetStreamScreeningRequest): AssetScreeningVerdict {
+  return {
+    visibility: "pending_scan",
+    auditDetail:
+      "scan=pending_scan backend=buffer-required reason=screening_requires_buffering signature=absent approval=not_required",
+    manifest: {
+      scanner: "buffer-required",
+      outcome: "pending_scan",
+      reason: "screening_requires_buffering",
+      sha256: request.contentSha256,
+      size_bytes: request.sizeBytes,
+      screened_at_unix: request.nowUnix,
+    },
+  };
+}
+
+function uploadChunk(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  throw new FileUploadReadError();
+}
+
+async function readUploadBytes(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = uploadChunk(next.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new FileUploadTooLargeError();
+      }
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    if (error instanceof FileUploadTooLargeError || error instanceof FileUploadReadError) {
+      throw error;
+    }
+    throw new FileUploadReadError();
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function measureUpload(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<{ size_bytes: number; sha256: string }> {
+  const reader = stream.getReader();
+  const digest = new StreamingSha256();
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = uploadChunk(next.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new FileUploadTooLargeError();
+      }
+      digest.update(chunk);
+    }
+  } catch (error) {
+    if (error instanceof FileUploadTooLargeError || error instanceof FileUploadReadError) {
+      throw error;
+    }
+    throw new FileUploadReadError();
+  } finally {
+    reader.releaseLock();
+  }
+  return { size_bytes: total, sha256: toHex(digest.digest()) };
+}
+
+function fileUploadReadFailure(error: unknown, maxBytes: number): AssetFailure {
+  if (error instanceof FileUploadTooLargeError) {
+    return fail(
+      413,
+      "payload_too_large",
+      `file size exceeds the configured ${maxBytes}-byte upload ceiling`,
+    );
+  }
+  return fail(400, "invalid_request", "could not read the uploaded file");
 }
 
 /** Rust `asset_bucket_unavailable`. */

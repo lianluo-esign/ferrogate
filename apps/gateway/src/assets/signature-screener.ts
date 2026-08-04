@@ -31,6 +31,7 @@ import {
   type AssetScreeningRejection,
   type AssetScreeningRequest,
   type AssetScreeningVerdict,
+  type AssetStreamScreeningRequest,
   isScreeningRejection,
 } from "./ports.js";
 import {
@@ -123,6 +124,35 @@ export class SignatureVerifyingScreener implements AssetScreener {
         `signature=${signatureStatusLabel(status)}`,
       ),
       manifest: { ...verdict.manifest, signature: status },
+    };
+  }
+
+  async streamedScreen(
+    request: AssetStreamScreeningRequest,
+  ): Promise<AssetScreeningVerdict | AssetScreeningRejection> {
+    if (this.#requireSignature || request.signaturePresented) {
+      return {
+        status: 422,
+        code: "asset_signature_requires_buffering",
+        message:
+          "detached publisher signatures cannot be verified during a streaming commit; retry with a buffered commit",
+      };
+    }
+    if (this.#inner.streamedScreen !== undefined) {
+      return this.#inner.streamedScreen(request);
+    }
+    return {
+      visibility: "pending_scan",
+      auditDetail:
+        "scan=pending_scan backend=buffer-required reason=screening_requires_buffering signature=absent approval=not_required",
+      manifest: {
+        scanner: "buffer-required",
+        outcome: "pending_scan",
+        reason: "screening_requires_buffering",
+        sha256: request.contentSha256,
+        size_bytes: request.sizeBytes,
+        screened_at_unix: request.nowUnix,
+      },
     };
   }
 }

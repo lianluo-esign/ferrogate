@@ -30,6 +30,8 @@ export interface AssetObjectMetadata {
 
 /** The subset of `R2ObjectBody` the asset service reads. */
 export interface AssetObjectBody extends AssetObjectMetadata {
+  /** One-shot R2 body used by the streaming commit path. */
+  readonly body: ReadableStream<Uint8Array>;
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
@@ -57,7 +59,7 @@ export interface AssetObjectPutOptions {
 export interface AssetObjectStore {
   put(
     key: string,
-    value: ArrayBuffer | ArrayBufferView | string | null,
+    value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string | null,
     options?: AssetObjectPutOptions,
   ): Promise<AssetObjectMetadata | null>;
   get(key: string): Promise<AssetObjectBody | null>;
@@ -71,7 +73,7 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
 
   async put(
     key: string,
-    value: ArrayBuffer | ArrayBufferView | string | null,
+    value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string | null,
     options?: AssetObjectPutOptions,
   ): Promise<AssetObjectMetadata | null> {
     if (value === null) {
@@ -81,6 +83,30 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
     let bytes: Uint8Array;
     if (typeof value === "string") {
       bytes = new TextEncoder().encode(value);
+    } else if (isReadableByteStream(value)) {
+      const reader = value.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          const chunk = next.value;
+          const copy = new Uint8Array(
+            chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength),
+          );
+          chunks.push(copy);
+          total += copy.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
     } else if (value instanceof ArrayBuffer) {
       bytes = new Uint8Array(value.slice(0));
     } else {
@@ -103,6 +129,12 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
       key,
       size: bytes.byteLength,
       httpMetadata: { contentType: object.contentType },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
       arrayBuffer: async () =>
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
     };
@@ -125,6 +157,15 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
   }
 }
 
+function isReadableByteStream(value: unknown): value is ReadableStream<Uint8Array> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "getReader" in value &&
+    typeof (value as { getReader?: unknown }).getReader === "function"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Asset metadata (control-plane rows)
 // ---------------------------------------------------------------------------
@@ -137,6 +178,12 @@ export function isDownloadable(visibility: AssetVisibility): boolean {
   return visibility === "visible";
 }
 
+/** Optional wire metadata retained alongside an asset row. */
+export interface StoredAssetMetadata {
+  readonly filename?: string | undefined;
+  readonly purpose?: string | undefined;
+}
+
 /** One durable asset row — Rust `StoredAsset`. */
 export interface StoredAsset {
   id: string;
@@ -147,6 +194,7 @@ export interface StoredAsset {
   version: string;
   content_type: string;
   content_hash: string;
+  metadata?: StoredAssetMetadata | undefined;
   size_bytes: number;
   /** Object-store key holding the bytes. Always tenant-prefixed. */
   storage_uri: string;
@@ -689,6 +737,20 @@ export interface AssetScreeningRequest {
     | undefined;
 }
 
+/** Screening evidence available when an object was never buffered. */
+export interface AssetStreamScreeningRequest {
+  readonly assetId: string;
+  readonly tenantId: string;
+  readonly assetType: string;
+  readonly contentType: string;
+  readonly contentSha256: string;
+  readonly sizeBytes: number;
+  readonly nowUnix: number;
+  readonly requestId?: string | undefined;
+  /** A detached signature was supplied but cannot be verified incrementally. */
+  readonly signaturePresented: boolean;
+}
+
 /**
  * Supply-chain screening gate — Rust `asset_security::screen_asset_push`
  * (issues #179/#261/#366).
@@ -737,6 +799,13 @@ export interface AssetScreeningRequest {
  */
 export interface AssetScreener {
   screen(request: AssetScreeningRequest): Promise<AssetScreeningVerdict | AssetScreeningRejection>;
+  /**
+   * Optional streamed-commit verdict. Absent means the screener needs the
+   * whole object; the service stores that result as `pending_scan`.
+   */
+  streamedScreen?(
+    request: AssetStreamScreeningRequest,
+  ): Promise<AssetScreeningVerdict | AssetScreeningRejection>;
   /**
    * Screen the FILES of an expanded `static_site` bundle (#740), if this
    * screener has an opinion about them.
@@ -856,6 +925,20 @@ export class BuiltinEicarScreener implements AssetScreener {
         outcome: infected ? "infected" : "clean",
         sha256: request.contentSha256,
         size_bytes: request.content.byteLength,
+        screened_at_unix: request.nowUnix,
+      },
+    };
+  }
+
+  async streamedScreen(request: AssetStreamScreeningRequest): Promise<AssetScreeningVerdict> {
+    return {
+      visibility: "visible",
+      auditDetail: "scan=clean backend=builtin-eicar signature=absent approval=not_required",
+      manifest: {
+        scanner: "builtin-eicar",
+        outcome: "clean",
+        sha256: request.contentSha256,
+        size_bytes: request.sizeBytes,
         screened_at_unix: request.nowUnix,
       },
     };
