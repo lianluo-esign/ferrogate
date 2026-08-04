@@ -11,10 +11,10 @@ import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   ControlMonotonicUpserts,
-  TenantMonotonicUpserts,
   type TenantDatabaseHandle,
+  TenantMonotonicUpserts,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_700_000_000;
 
@@ -23,15 +23,15 @@ let handleB: TenantDatabaseHandle;
 let control: ControlMonotonicUpserts;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
   control = new ControlMonotonicUpserts(router.control());
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
   await env.CONTROL_DB.prepare("DELETE FROM control_plane_replay_floors").run();
 });
 

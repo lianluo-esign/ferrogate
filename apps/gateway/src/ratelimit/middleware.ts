@@ -20,11 +20,17 @@
  * and 3 need durable spend/balance reads, which arrive through the
  * {@link SpendSource} port in `./quota.ts`: `d1SpendSource` reads
  * `usage_monthly_rollups` (each budgeted scope's aggregate spend for the current
- * calendar month) and `wallets` minus the live `wallet_reservations` holds, all
- * out of the TENANT database the `DB` binding already points at. A deployment
- * with no `DB` bound gets `NO_SPEND_SOURCE`, which reports the same values an
- * empty store would — 0 spent, no wallet — so binding the database can only
- * tighten admission, never loosen it.
+ * calendar month) and `wallets` minus the live `wallet_reservations` holds. A
+ * deployment with no `DB` bound gets `NO_SPEND_SOURCE`, which reports the same
+ * values an empty store would — 0 spent, no wallet — so binding the database can
+ * only tighten admission, never loosen it.
+ *
+ * Those two legs no longer read the SAME database, and `defaultSpendSource`
+ * below is where the split is decided. Since #819 a tenant's `wallets` row lives
+ * inside `env.TENANT_DATA.idFromName(tenantId)`, so the wallet leg follows the
+ * routed handle — the same database step 3b reserves in. The rollup leg stays on
+ * `env.DB`, because that is still where `../metering/` WRITES it. Each leg reads
+ * what writes it; that is the whole rule.
  *
  * ## The four guards this file MOUNTS, which existed and guarded nothing
  *
@@ -86,18 +92,12 @@ import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
+import { parseTenantDatabaseRoutingMode, tenantDatabaseOf } from "../tenancy/index.js";
 import { DurableObjectRateLimiter } from "./do-limiter.js";
 import type { RateLimiterNamespace } from "./durable-object.js";
 import { type RateLimitDimension, rateLimitDenialHeaders } from "./headers.js";
 import { type CounterWindow, tokenBudgetCounterKey } from "./keys.js";
 import { InMemoryRateLimiter } from "./memory.js";
-import {
-  RATE_LIMIT_REFUSALS,
-  type RateLimitOptions,
-  type RateLimitOutcome,
-  type RateLimiter,
-  type TokenAdmission,
-} from "./ports.js";
 import {
   type PolicyBindings,
   type PolicyRuleSet,
@@ -106,17 +106,27 @@ import {
   policyRulesFromEnv,
 } from "./policy.js";
 import {
+  RATE_LIMIT_REFUSALS,
+  type RateLimitOptions,
+  type RateLimitOutcome,
+  type RateLimiter,
+  type TokenAdmission,
+} from "./ports.js";
+import {
   type BudgetHoldBindings,
+  NO_SPEND_SOURCE,
   type QuotaBindings,
   type QuotaPolicySource,
   type QuotaSubject,
   type SpendBindings,
   type SpendSource,
+  type WalletBalanceReading,
   budgetHoldUsdFromEnv,
   currentPeriodMonth,
   monthlyBudgetCharges,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
+  routedWalletSpendSource,
   spendSourceFromEnv,
 } from "./quota.js";
 import {
@@ -125,16 +135,21 @@ import {
   tokenBudgetSourceFromEnv,
 } from "./token-budget.js";
 import {
+  NO_WALLET_ADMISSION,
   type WalletAdmission,
   type WalletAdmissionBindings,
+  routedWalletAdmission,
   walletAdmissionFromEnv,
+  walletHoldCreditsFromEnv,
   walletHoldId,
 } from "./wallet.js";
 import {
+  NO_WORKFLOW_BUDGETS,
   type WorkflowBudgetBindings,
   type WorkflowBudgetSource,
   type WorkflowStepDeclaration,
   preflightStep,
+  routedWorkflowBudgetSource,
   workflowBudgetSourceFromEnv,
   workflowDeclarationFrom,
 } from "./workflow.js";
@@ -158,6 +173,20 @@ export interface RateLimitBindings
     PolicyBindings {
   /** The `RateLimiterDurableObject` namespace. Absent ⇒ in-memory fallback. */
   readonly RATE_LIMIT?: RateLimiterNamespace | undefined;
+  /**
+   * The tenant-routing posture, read by {@link defaultWalletAdmission} to
+   * decide whether the no-oversell guard runs against the ROUTED tenant handle
+   * or against the shared `DB`. Read from configuration rather than inferred
+   * from the middleware chain — see that function for why.
+   */
+  readonly GATEWAY_TENANT_DB_ROUTING?: string | undefined;
+  /**
+   * The per-tenant Durable Object namespace. Read only to distinguish "routing
+   * is on and the storage is bound" from "routing is on and this Worker has no
+   * tenant storage at all" — see {@link defaultWalletAdmission}. The namespace
+   * itself is addressed through `src/tenancy/`, never from here.
+   */
+  readonly TENANT_DATA?: unknown;
 }
 
 /** Wiring for {@link rateLimit}. Every field has a runnable default. */
@@ -168,7 +197,10 @@ export interface RateLimitDeps extends RateLimitOptions {
   readonly quotas?: QuotaPolicySource | ((env: RateLimitBindings) => QuotaPolicySource);
   /**
    * Override the spend/wallet source behind admission steps 2 and 3. Defaults
-   * to {@link spendSourceFromEnv}, i.e. the tenant database when `DB` is bound.
+   * to `defaultSpendSource`: the monthly rollups from `env.DB` (where the
+   * metering sink writes them) and the WALLET balance from whichever database
+   * admission step 3b reserves in — the tenant's own Durable Object under the
+   * `durable_object` default, `env.DB` only when routing is explicitly `"off"`.
    */
   readonly spend?: SpendSource | ((env: RateLimitBindings) => SpendSource);
   /**
@@ -305,11 +337,7 @@ function refuse(
     refusal.status,
     refusal.code,
     message,
-    rateLimitHeadersFor(
-      code === "rate_limit_exceeded" ? "requests" : "tokens",
-      outcome,
-      options,
-    ),
+    rateLimitHeadersFor(code === "rate_limit_exceeded" ? "requests" : "tokens", outcome, options),
   );
 }
 
@@ -342,6 +370,165 @@ function unavailable(detail: string): never {
 }
 
 /**
+ * Pick the no-oversell guard's database: the ROUTED tenant handle, or the
+ * shared `DB` only when this deployment says it is not routing.
+ *
+ * ## Why the decision is made from the VAR and not from the context
+ *
+ * The obvious implementation reads `c.get("tenantDatabase")` and uses the
+ * shared `DB` when it is absent. That is the unmount defect in its purest form:
+ * deleting `tenantDatabase()` from `GATEWAY_MIDDLEWARE` would silently move
+ * every tenant's wallet back into one shared database, with every test green,
+ * which is exactly the class of failure `src/tenancy/` was built to make
+ * impossible. So the question "is this deployment routing?" is answered by
+ * `GATEWAY_TENANT_DB_ROUTING` — configuration the middleware array cannot
+ * contradict — and only then is the accessor demanded. When the var says
+ * routing and the middleware is missing, {@link tenantDatabaseOf} throws a 500
+ * naming it. Loud and attributable beats silent and shared.
+ *
+ * ## Laziness is not politeness here
+ *
+ * The accessor is read inside `reserve()` rather than at middleware entry so
+ * the refusal lands only on requests that actually reach the wallet guard —
+ * i.e. those carrying a wallet-bearing tenant. A request with no tenant
+ * (`/v1/models` on a platform-operator key) never asks, and must not be 500'd
+ * for a seam it does not use.
+ *
+ * A platform-operator credential gets {@link NO_WALLET_ADMISSION}, not a
+ * refusal: it is account-global by definition, so there is no single tenant
+ * whose balance it could be spending. `rateLimit()` only consults the wallet
+ * when the admission subject carries a tenant id anyway, so this arm is the
+ * belt to that braces.
+ */
+/**
+ * The workflow-run budget's database, chosen by exactly the rule
+ * {@link defaultWalletAdmission} uses — and it has to be the same rule.
+ *
+ * These two are admission step 3b and admission step 5 of ONE decision. If they
+ * disagreed about where a tenant's storage is, a deployment would enforce the
+ * wallet against the tenant's object and the run budget against rows in a
+ * shared database that the routed topology never writes: every run would read
+ * as `unbudgeted` and run ungated, with both features "mounted" and every test
+ * green. Keeping the choice in two functions that make the same decision, next
+ * to each other, is the cheapest way to make a future divergence visible.
+ */
+function defaultWorkflowBudgets(
+  c: Context<GatewayEnv>,
+  env: RateLimitBindings,
+): WorkflowBudgetSource {
+  const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
+  if (mode === "off") return workflowBudgetSourceFromEnv(env);
+  // Routing is on with no tenant storage bound at all: nothing has ever opened
+  // a budget envelope, so nothing is capped. `unbudgeted`, exactly as
+  // `workflowBudgetSourceFromEnv` answers for an unbound `DB` — and, as there,
+  // NOT by reaching for the shared database.
+  if (mode === "durable_object" && env.TENANT_DATA === undefined) return NO_WORKFLOW_BUDGETS;
+  return {
+    async forStep(step, tenantId) {
+      return routedWorkflowBudgetSource(tenantDatabaseOf(c)).forStep(step, tenantId);
+    },
+  };
+}
+
+function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings): WalletAdmission {
+  const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
+  // Only an EXPLICIT `"off"` opts out. An unparseable value is NOT treated as
+  // "off": the tenancy middleware has already answered it with a 503, and
+  // guessing "not routing" here would be the guess that reaches for `DB`.
+  if (mode === "off") return walletAdmissionFromEnv(env);
+  if (mode === "durable_object" && env.TENANT_DATA === undefined) {
+    // Routing is on, but this Worker has NO tenant storage bound at all — so
+    // there are no `wallets` rows anywhere, for any tenant.
+    //
+    // `not_applicable`, not a refusal, and the distinction is the one
+    // `WalletAdmissionOutcome` already draws: the prepaid wallet is OPT-IN per
+    // tenant, so "no wallet exists" must never deny. This is the same
+    // conclusion `walletAdmissionFromEnv` reaches when `DB` is unbound, reached
+    // the same way. A 503 belongs to storage that IS bound and then FAILED —
+    // that is an outage, and an outage has not proven the caller is overdrawn.
+    //
+    // What this arm deliberately does NOT do is reach for `env.DB`. An unbound
+    // namespace means no wallet; it does not mean "use the shared database",
+    // which is the cross-tenant fallback the tenancy directory forbids.
+    return NO_WALLET_ADMISSION;
+  }
+  const holdCredits = walletHoldCreditsFromEnv(env);
+  return {
+    async reserve(tenantId, holdId, nowUnixSeconds) {
+      const accessor = tenantDatabaseOf(c);
+      if (accessor.tenantId === null) {
+        return NO_WALLET_ADMISSION.reserve(tenantId, holdId, nowUnixSeconds);
+      }
+      return routedWalletAdmission(accessor, { holdCredits }).reserve(
+        tenantId,
+        holdId,
+        nowUnixSeconds,
+      );
+    },
+  };
+}
+
+/**
+ * The spend readings, with the WALLET leg pointed at the same database
+ * {@link defaultWalletAdmission} reserves in — chosen by the same rule, for the
+ * same reason {@link defaultWorkflowBudgets} states.
+ *
+ * Step 3 (this function's `walletBalanceCredits`) and step 3b
+ * ({@link defaultWalletAdmission}) are two halves of ONE wallet decision: step 3
+ * bounds CUMULATIVE spend against the settled balance, step 3b bounds CONCURRENT
+ * admission with an in-statement guard. Neither substitutes for the other, and
+ * both must therefore read the same `wallets` row. Until this function existed,
+ * step 3 read `env.DB` while step 3b reserved inside the tenant's Durable
+ * Object, so a tenant funded in its object was refused on a stale row in a
+ * database nothing writes any more, and a fresh routed deployment ran step 3 as
+ * dead code. Three functions, one rule, next to each other — see
+ * {@link routedWalletSpendSource} for why the ROLLUP leg deliberately does not
+ * move with it.
+ */
+function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): SpendSource {
+  const rollups = spendSourceFromEnv(env);
+  const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
+  // Only an EXPLICIT `"off"` keeps the wallet on the shared `DB`; an
+  // unparseable value is not a licence to guess, exactly as in
+  // `defaultWalletAdmission`.
+  if (mode === "off") return rollups;
+  if (mode === "durable_object" && env.TENANT_DATA === undefined) {
+    // No tenant storage bound at all ⇒ no `wallets` row exists for any tenant.
+    // `availableCredits: null` is the OPT-IN answer ("this tenant has no
+    // wallet"), never `0`, and never a read of `env.DB` — the same conclusion
+    // `NO_WALLET_ADMISSION` reaches at step 3b, reached the same way.
+    return { ...rollups, walletBalanceCredits: NO_SPEND_SOURCE.walletBalanceCredits };
+  }
+  const routed = routedWalletSpendSource(rollups, async (tenantId) => {
+    const handle = await tenantDatabaseOf(c).handle();
+    if (handle.tenantId !== tenantId) {
+      // The same cross-check `routedWalletAdmission` makes, for the same
+      // reason: reading one tenant's balance to admit another is a denial (or
+      // an admission) taken against the wrong money.
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this balance check is ` +
+          `for tenant ${tenantId}; refusing rather than reading the wrong wallet`,
+      );
+    }
+    return handle.db;
+  });
+  return {
+    committedSpendUsd: (scopeKind, scopeId, periodMonth) =>
+      rollups.committedSpendUsd(scopeKind, scopeId, periodMonth),
+    async walletBalanceCredits(tenantId: string): Promise<WalletBalanceReading> {
+      // A platform-operator credential is account-global by definition, so
+      // there is no single tenant whose balance it could be spending. `null`
+      // (no wallet) is the answer, exactly the arm step 3b takes via
+      // `NO_WALLET_ADMISSION` — and, like it, NOT a read of `env.DB`.
+      if (tenantDatabaseOf(c).tenantId === null) {
+        return NO_SPEND_SOURCE.walletBalanceCredits(tenantId);
+      }
+      return routed.walletBalanceCredits(tenantId);
+    },
+  };
+}
+
+/**
  * The RPM + quota-denial guard.
  *
  * MUST be mounted AFTER `contractAuth`, because it reads `c.get("auth")` — a
@@ -368,11 +555,13 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
         ? deps.quotas(env)
         : (deps.quotas ?? quotaPolicySourceFromEnv(env));
     const spend =
-      typeof deps.spend === "function" ? deps.spend(env) : (deps.spend ?? spendSourceFromEnv(env));
+      typeof deps.spend === "function"
+        ? deps.spend(env)
+        : (deps.spend ?? defaultSpendSource(c, env));
     const wallet =
       typeof deps.wallet === "function"
         ? deps.wallet(env)
-        : (deps.wallet ?? walletAdmissionFromEnv(env));
+        : (deps.wallet ?? defaultWalletAdmission(c, env));
     const tokenBudget =
       typeof deps.tokenBudget === "function"
         ? deps.tokenBudget(env)
@@ -380,7 +569,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
     const workflowBudgets =
       typeof deps.workflowBudgets === "function"
         ? deps.workflowBudgets(env)
-        : (deps.workflowBudgets ?? workflowBudgetSourceFromEnv(env));
+        : (deps.workflowBudgets ?? defaultWorkflowBudgets(c, env));
     const policyResolution: PolicyRulesResolution =
       typeof deps.policies === "function"
         ? deps.policies(env)

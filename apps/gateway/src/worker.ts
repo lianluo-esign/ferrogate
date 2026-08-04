@@ -113,3 +113,28 @@ export { ProviderCircuitDurableObject } from "./inference/index.js";
  * "no cap". Bound, it is the only cross-isolate cap the platform offers.
  */
 export { ShadowBudgetDurableObject } from "@ferrogate/routing/durable-objects";
+
+/**
+ * The `TENANT_DATA` Durable Object class — one SQLite-backed object per tenant,
+ * which IS that tenant's database (#822,
+ * `@ferrogate/storage/durable-objects`, addressed from
+ * `src/tenancy/tenant-data.ts` as `env.TENANT_DATA.idFromName(tenantId)`).
+ *
+ * Same startup rule as the three classes above: workerd resolves the
+ * `[[durable_objects.bindings]]` `class_name` against THIS module, so without
+ * this line `wrangler dev` fails with "Durable Object class TenantDataObject
+ * not found" while the vitest suite stays green.
+ *
+ * IT IS ALSO THE FOURTH CLASS AND THE FIRST THAT IS NOT DEGRADABLE. The other
+ * three have a documented per-isolate fallback — a weaker limiter, a weaker
+ * breaker, a weaker spend cap. This one holds the tenant's wallet, usage and
+ * asset rows; there is no degraded mode, and `src/tenancy/ports.ts`'s
+ * fail-closed rule means an unresolvable tenant is a 503, never the shared
+ * database. Unbound, `tenantDataNamespace()` raises
+ * `tenant_database_routing_misconfigured` rather than falling back.
+ *
+ * `apps/gateway/test/wrangler-bindings.test.ts` closes the loop from the CONFIG
+ * side, and `packages/storage/test/mount-inventory.test.ts` from the library
+ * side; deleting this line reddens both.
+ */
+export { TenantDataObject } from "@ferrogate/storage/durable-objects";

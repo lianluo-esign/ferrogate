@@ -20,8 +20,24 @@
  * `wrangler.toml` declares, and `SELF` is `src/worker.ts` with
  * `GATEWAY_MIDDLEWARE`, i.e. `rateLimit()` with NO arguments — so every default
  * asserted here is the default the deployed Worker gets.
+ *
+ * ## WHERE THE WALLET LIVES (#819)
+ *
+ * `wrangler.toml` now ships `GATEWAY_TENANT_DB_ROUTING = "durable_object"`, so
+ * the deployed wallet guard reads the tenant's OWN Durable Object rather than
+ * the shared `env.DB`. The mount gate therefore seeds and asserts through
+ * {@link tenantWalletDb}, not `db` — and that is not a test detail to tidy
+ * away, it is the property being gated: seeding `env.DB` and watching the guard
+ * refuse would now prove only that some database somewhere had a row in it.
+ * The two 429/hold cases below FAILED against `env.DB` the moment routing was
+ * turned on, which is the correct signal and the reason they were moved.
+ *
+ * The UNIT cases in the same file keep using `db`: `d1WalletAdmission(db)` is
+ * the `"off"`-mode constructor and is still shipped for self-hosted
+ * single-tenant deploys, so it is still worth its coverage.
  */
 import { SELF, env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { MiddlewareHandler } from "hono";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
@@ -53,6 +69,27 @@ import { interceptProviderFetch, providerJson } from "../inference/provider-mock
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const vars = env as unknown as Record<string, string | undefined>;
+
+/**
+ * One tenant's routed database — the same object `SELF` reaches, addressed the
+ * same way (`TENANT_DATA.idFromName(tenantId)`).
+ *
+ * Built through `@ferrogate/storage`'s router rather than by calling
+ * `idFromName` here, so this helper cannot drift from the addressing the
+ * gateway actually uses. If it did, the mount gate would seed one object and
+ * assert against another, and would pass or fail for reasons unrelated to the
+ * guard.
+ */
+function tenantWalletDb(tenantId: string): D1Database {
+  const bindings = env as unknown as {
+    TENANT_DATA: ConstructorParameters<typeof DurableObjectTenantDatabaseRouter>[0];
+    CONTROL_DB: D1Database;
+  };
+  return new DurableObjectTenantDatabaseRouter(
+    bindings.TENANT_DATA,
+    bindings.CONTROL_DB,
+  ).databaseFor(tenantId);
+}
 
 const NOW = 1_800_000_000;
 const LATER = NOW + 3600;
@@ -90,6 +127,30 @@ async function reservationRows(
   return result.results;
 }
 
+/** {@link seedWallet}, but into the tenant's OWN object — what `SELF` reads. */
+async function seedRoutedWallet(tenantId: string, balanceCredits: number): Promise<void> {
+  await tenantWalletDb(tenantId)
+    .prepare(
+      "INSERT OR REPLACE INTO wallets " +
+        "(id, tenant_id, balance_credits, created_at_unix, updated_at_unix) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(tenantId, tenantId, balanceCredits, NOW, NOW)
+    .run();
+}
+
+/** {@link reservationRows}, but from the tenant's OWN object. */
+async function routedReservationRows(
+  tenantId: string,
+): Promise<{ id: string; status: string; amount_credits: number }[]> {
+  const result = await tenantWalletDb(tenantId)
+    .prepare(
+      "SELECT id, status, amount_credits FROM wallet_reservations WHERE tenant_id = ? ORDER BY id",
+    )
+    .bind(tenantId)
+    .all<{ id: string; status: string; amount_credits: number }>();
+  return result.results;
+}
+
 async function get(key: string, headers: Record<string, string> = {}): Promise<Response> {
   return await SELF.fetch(MODELS, { headers: { Authorization: `Bearer ${key}`, ...headers } });
 }
@@ -100,6 +161,16 @@ const savedVars = new Map<string, string | undefined>();
 
 beforeEach(async () => {
   for (const name of MUTATED_VARS) savedVars.set(name, vars[name]);
+  // The tenant's OBJECT is truncated explicitly, and it has to be: this pool's
+  // per-test isolated storage rolls back D1 and the DO key-value API, but the
+  // rows a Durable Object holds in `ctx.storage.sql` survive into the next test
+  // — measured here, when three holds taken by earlier cases showed up in a
+  // case that had taken none. Without these two statements the mount gate would
+  // read another test's ledger and pass or fail for the wrong reason.
+  const routed = tenantWalletDb("tenant_a");
+  await routed.prepare("DELETE FROM wallet_reservations").run();
+  await routed.prepare("DELETE FROM wallets").run();
+  await routed.prepare("DELETE FROM workflow_run_budgets").run();
   await db.prepare("DELETE FROM wallets").run();
   await db.prepare("DELETE FROM wallet_reservations").run();
   await db.prepare("DELETE FROM workflow_run_budgets").run();
@@ -168,9 +239,7 @@ describe("wallet no-oversell: the guard object", () => {
     const guard = walletAdmissionFromEnv(env as never);
 
     const outcomes = await Promise.all(
-      Array.from({ length: 12 }, (_, index) =>
-        guard.reserve("tenant_a", `burst_${index}`, NOW),
-      ),
+      Array.from({ length: 12 }, (_, index) => guard.reserve("tenant_a", `burst_${index}`, NOW)),
     );
 
     expect(outcomes.filter((o) => o.kind === "admitted")).toHaveLength(3);
@@ -223,14 +292,20 @@ describe("wallet no-oversell: the guard object", () => {
 
 /**
  * MOUNT GATE. Delete the `wallet.reserve(...)` block from `rateLimit` (step 3b
- * in `src/ratelimit/middleware.ts`) and both tests below go red while every
+ * in `src/ratelimit/middleware.ts`) and the tests below go red while every
  * other suite stays green.
+ *
+ * Since #819 they also gate the ROUTING: they seed
+ * {@link seedRoutedWallet} — tenant_a's own Durable Object, addressed exactly
+ * as the deployed Worker addresses it — so removing `tenantDatabase()` from
+ * `GATEWAY_MIDDLEWARE`, or reverting the guard to `env.DB`, turns them red too.
+ * The last case in this block is the one that states that directly.
  */
 describe("wallet no-oversell: MOUNTED in the deployed app", () => {
   test("a request that would OVERDRAW the wallet is refused before dispatch", async () => {
     // Balance 5 is POSITIVE, so step 3 (the balance read) admits it — this can
     // only be refused by the reserve, which asks for 10 and does not fit.
-    await seedWallet("tenant_a", 5);
+    await seedRoutedWallet("tenant_a", 5);
     vars.GATEWAY_WALLET_HOLD_CREDITS = "10";
 
     const response = await get(TENANT_A_KEY);
@@ -239,15 +314,15 @@ describe("wallet no-oversell: MOUNTED in the deployed app", () => {
     expect(body.error.code).toBe("wallet_balance_exhausted");
     expect(body.error.message).toBe("prepaid credit balance has been exhausted for this tenant");
     // Refused, so nothing may be left holding the tenant's money.
-    expect(await reservationRows("tenant_a")).toHaveLength(0);
+    expect(await routedReservationRows("tenant_a")).toHaveLength(0);
   });
 
   test("an admitted request takes a durable hold and RELEASES it on the way out", async () => {
-    await seedWallet("tenant_a", 5_000);
+    await seedRoutedWallet("tenant_a", 5_000);
 
     expect((await get(TENANT_A_KEY)).status).toBe(200);
 
-    const rows = await reservationRows("tenant_a");
+    const rows = await routedReservationRows("tenant_a");
     expect(rows).toHaveLength(1);
     // The hold really was taken (so the guard ran) and really was let go (so a
     // served request cannot strand the tenant's credits) — JS has no `Drop`, so
@@ -258,7 +333,29 @@ describe("wallet no-oversell: MOUNTED in the deployed app", () => {
 
   test("a tenant with no wallet is untouched — the guard stays opt-in", async () => {
     expect((await get(TENANT_A_KEY)).status).toBe(200);
+    expect(await routedReservationRows("tenant_a")).toHaveLength(0);
+  });
+
+  test("the guard reads the TENANT'S OBJECT, not the shared DB", async () => {
+    // The routing assertion, stated as a contradiction between the two
+    // databases: the shared `DB` is funded, the tenant's own object is not.
+    // A guard still reading `env.DB` sees 5,000 credits and serves; the routed
+    // guard sees no wallet row at all.
+    await seedWallet("tenant_a", 5_000);
+    vars.GATEWAY_WALLET_HOLD_CREDITS = "10";
+
+    expect((await get(TENANT_A_KEY)).status).toBe(200);
+    // No hold in EITHER database: not in the object (no wallet ⇒ opt-out), and
+    // not in the shared one (nothing routes there any more).
+    expect(await routedReservationRows("tenant_a")).toHaveLength(0);
     expect(await reservationRows("tenant_a")).toHaveLength(0);
+
+    // And the inverse, in the same test so neither half can rot alone: fund the
+    // OBJECT below the hold and the very same request is refused.
+    await seedRoutedWallet("tenant_a", 5);
+    const refused = await get(TENANT_A_KEY);
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as ErrorEnvelope).error.code).toBe("wallet_balance_exhausted");
   });
 });
 
@@ -389,7 +486,12 @@ describe("deny rules: MOUNTED in the deployed app", () => {
 
   test("a per-API-KEY rule denies exactly that credential", async () => {
     vars.GATEWAY_POLICY_RULES = JSON.stringify([
-      { name: "block-key", api_key_ids: [TENANT_A_KEY_ID], code: "key_blocked", message: "blocked" },
+      {
+        name: "block-key",
+        api_key_ids: [TENANT_A_KEY_ID],
+        code: "key_blocked",
+        message: "blocked",
+      },
     ]);
     expect(((await (await get(TENANT_A_KEY)).json()) as ErrorEnvelope).error.code).toBe(
       "key_blocked",
@@ -406,6 +508,11 @@ describe("deny rules: MOUNTED in the deployed app", () => {
   });
 
   test("no rules configured ⇒ the shipped default allows everything", async () => {
+    // `delete` on the LIVE `env` object, not a spread copy: the app under test
+    // holds the same reference, so replacing `vars` with a copy would leave the
+    // handler still reading the configured value. The `afterEach` at the top of
+    // this file restores it the same way.
+    // biome-ignore lint/performance/noDelete: the binding must be absent on the shared `env` identity the worker reads.
     delete vars.GATEWAY_POLICY_RULES;
     expect((await get(TENANT_A_KEY)).status).toBe(200);
   });
@@ -453,7 +560,9 @@ describe("deny rules: model- and provider-scoped, over a real inference request"
       providerJson({
         id: "c1",
         object: "chat.completion",
-        choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        choices: [
+          { index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" },
+        ],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       }),
     );
@@ -505,7 +614,10 @@ describe("deny rules: model- and provider-scoped, over a real inference request"
         // `src/index.ts` gets this for free: both sides are `modelsFromEnv`.
         [rateLimit({ providerForModel: (model) => registry.resolve(model)?.provider })],
       );
-      const denied = await call({ model: "gpt-4o-mini", messages: [{ role: "user", content: "x" }] });
+      const denied = await call({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "x" }],
+      });
       expect(denied.status).toBe(403);
       expect((await errorBody(denied)).error.code).toBe("provider_banned");
       expect(provider.requests).toHaveLength(0);
@@ -530,7 +642,40 @@ async function seedRunBudget(
     status: string;
   }> = {},
 ): Promise<void> {
-  await db
+  await seedRunBudgetInto(db, id, runId, tenantId, overrides);
+}
+
+/**
+ * {@link seedRunBudget}, but into the tenant's OWN object — what `SELF` reads.
+ *
+ * The mount gate needs this and the unit cases do not: since #819 the deployed
+ * `rateLimit()` resolves admission step 5 through `tenantDatabaseOf(c)`, so a
+ * budget seeded into the shared `DB` is a row the Worker never sees. Seeding
+ * both from one statement builder is what stops the two copies drifting into
+ * disagreeing column lists.
+ */
+async function seedRoutedRunBudget(
+  id: string,
+  runId: string,
+  tenantId: string,
+  overrides: Parameters<typeof seedRunBudget>[3] = {},
+): Promise<void> {
+  await seedRunBudgetInto(tenantWalletDb(tenantId), id, runId, tenantId, overrides);
+}
+
+async function seedRunBudgetInto(
+  target: D1Database,
+  id: string,
+  runId: string,
+  tenantId: string,
+  overrides: Partial<{
+    token_budget: number | null;
+    wall_clock_deadline_unix: number | null;
+    spent_tokens: number;
+    status: string;
+  }> = {},
+): Promise<void> {
+  await target
     .prepare(
       "INSERT OR REPLACE INTO workflow_run_budgets " +
         "(id, workflow_id, workflow_version, run_id, tenant_id, token_budget, " +
@@ -623,6 +768,13 @@ describe("workflow budget: the source", () => {
 /**
  * MOUNT GATE. Delete the `enforceWorkflowBudget(...)` call from `rateLimit`
  * (step 5) and every test below goes red.
+ *
+ * Seeded through {@link seedRoutedRunBudget} for the same reason the wallet
+ * gate above uses {@link seedRoutedWallet}: since #819 admission step 5
+ * resolves through `tenantDatabaseOf(c)`, so a budget in the shared `DB` is a
+ * row the deployed Worker never reads. The two steps deliberately use the SAME
+ * database — see `defaultWorkflowBudgets` on why one admission decision must
+ * not straddle two topologies.
  */
 describe("workflow budget: MOUNTED in the deployed app", () => {
   function workflowHeaders(runId: string): Record<string, string> {
@@ -643,7 +795,7 @@ describe("workflow budget: MOUNTED in the deployed app", () => {
 
   test("an EXHAUSTED run denies every subsequent step — 402", async () => {
     const { workflowRunBudgetId } = await import("@ferrogate/storage");
-    await seedRunBudget(workflowRunBudgetId("wf_1", 1, "run_dead"), "run_dead", "tenant_a", {
+    await seedRoutedRunBudget(workflowRunBudgetId("wf_1", 1, "run_dead"), "run_dead", "tenant_a", {
       status: "exhausted",
     });
 
@@ -655,7 +807,7 @@ describe("workflow budget: MOUNTED in the deployed app", () => {
 
   test("a run past its wall-clock deadline denies", async () => {
     const { workflowRunBudgetId } = await import("@ferrogate/storage");
-    await seedRunBudget(workflowRunBudgetId("wf_1", 1, "run_late"), "run_late", "tenant_a", {
+    await seedRoutedRunBudget(workflowRunBudgetId("wf_1", 1, "run_late"), "run_late", "tenant_a", {
       // Already in the past relative to the real clock the deployed app uses.
       wall_clock_deadline_unix: 1,
     });
@@ -820,7 +972,9 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
       providerJson({
         id: "c1",
         object: "chat.completion",
-        choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        choices: [
+          { index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" },
+        ],
         usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
       }),
     );
@@ -840,7 +994,9 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
       providerJson({
         id: "c1",
         object: "chat.completion",
-        choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        choices: [
+          { index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" },
+        ],
         usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
       }),
     );

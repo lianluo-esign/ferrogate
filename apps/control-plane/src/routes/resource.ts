@@ -244,6 +244,33 @@ export interface CollectionSpec {
    */
   readonly project?: (db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>;
   /**
+   * Provision the record's per-tenant STORAGE (#820), after {@link
+   * CollectionSpec.project} has written the typed row it admits on.
+   *
+   * Declared for `tenant-accounts` only. A tenant's data lives in its own
+   * Durable Object, addressed `idFromName(tenantId)`, and that object exists the
+   * moment anything writes to it — so onboarding is not "create a database" any
+   * more, it is "record that this tenant exists, and put the first rows in".
+   * Nothing did either, so a tenant created here was absent from the fleet
+   * roster and had an empty model catalog. (An earlier version of this comment
+   * added "and answered `400 model_not_found` on its first inference request".
+   * That was false — the gateway resolves models from `GATEWAY_MODELS` /
+   * `GATEWAY_PROVIDERS`, never from the tenant table — and the invisible-to-
+   * every-fleet-view half is the part that was real.)
+   *
+   * It is a SEPARATE hook from `project` rather than folded into it because the
+   * two have different signatures for a reason: `project` gets a `D1Database`
+   * and writes one control row, while provisioning needs the tenant ROUTER (it
+   * writes into a different store entirely) and must run strictly AFTER the
+   * typed row exists — {@link provisionTenantStorageFor} refuses a tenant with
+   * no `tenants` row, and that refusal is what keeps a typo from manufacturing a
+   * billable object.
+   *
+   * Ordered after `project` for the same reason and enforced by
+   * {@link runProjection} calling them in that order, not by convention.
+   */
+  readonly provision?: (deps: ControlPlaneDeps, record: StoreRecord) => Promise<unknown>;
+  /**
    * Remove the TYPED row {@link CollectionSpec.project} wrote, on DELETE.
    *
    * Declaring `project` without this is the defect it exists to prevent, one
@@ -277,6 +304,7 @@ interface ResolvedSpec {
   readonly project:
     | ((db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>)
     | null;
+  readonly provision: ((deps: ControlPlaneDeps, record: StoreRecord) => Promise<unknown>) | null;
   readonly unproject: ((db: D1Database, id: string, record: StoreRecord) => Promise<void>) | null;
 }
 
@@ -290,6 +318,7 @@ function resolveSpec(spec: CollectionSpec): ResolvedSpec {
     body,
     patch: spec.patch ?? body,
     project: spec.project ?? null,
+    provision: spec.provision ?? null,
     unproject: spec.unproject ?? null,
   };
 }
@@ -307,10 +336,18 @@ async function runProjection(
   spec: ResolvedSpec,
   record: StoreRecord,
 ): Promise<void> {
-  if (spec.project === null) return;
-  const db = depsOf(c).controlDatabase;
-  if (db === null) return;
-  await spec.project(db, record, Math.floor(Date.now() / 1000));
+  const deps = depsOf(c);
+  const db = deps.controlDatabase;
+  if (spec.project !== null && db !== null) {
+    await spec.project(db, record, Math.floor(Date.now() / 1000));
+  }
+  // AFTER the typed row, never before: the provisioner admits a tenant on its
+  // `tenants` row, so running these in the other order would refuse every
+  // freshly created tenant on its own creation. The ordering is here rather than
+  // in a comment on the two hooks because this is the only place both are called.
+  if (spec.provision !== null) {
+    await spec.provision(deps, record);
+  }
 }
 
 // ---------------------------------------------------------------------------

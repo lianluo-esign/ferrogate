@@ -12,8 +12,8 @@ import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   ControlDatabaseTenantRegistry,
-  D1_BINDING_STRATEGIES,
   D1RestTenantDatabaseRouter,
+  D1_BINDING_STRATEGIES,
   type EnvBindingTenantDatabaseRouter,
   SharedDatabaseTenantRouter,
   type TenantDatabaseHandle,

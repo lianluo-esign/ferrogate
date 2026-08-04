@@ -50,6 +50,7 @@ import {
   tenantOf,
   workspaceTenantRow,
 } from "../store/tenancy.js";
+import { provisionTenantStorageFor } from "../store/tenant_storage.js";
 import {
   type GroupModule,
   type Handler,
@@ -277,6 +278,12 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       object: "tenant_account",
       body: tenantAccountSchema,
       project: projectTenantAccount,
+      // #820. A tenant's data plane is its own Durable Object, and the object is
+      // created by being addressed — so onboarding is "record the tenant on the
+      // roster and seed its model catalog", and nothing did either. Declared on
+      // the SPEC so POST, PUT and PATCH all run it: PUT/PATCH cannot create a
+      // tenant, but they are the repair points for one whose provisioning failed.
+      provision: (deps, record) => provisionTenantStorageFor(deps, String(record.id)),
     },
     /**
      * PORT-TODO(P: cert2-controlplane §CLASS-A tenant_hierarchy GET /tenants) —
@@ -359,6 +366,13 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       if (db !== null) {
         await projectTenantAccount(db, stored, Math.floor(Date.now() / 1000));
       }
+      // #820, and for the same "this route is an OVERRIDE, so the spec hooks do
+      // not run for it" reason as the projection above. This route cannot create
+      // a tenant, but it IS the route that retroactively materialises the typed
+      // `tenants` row of a self-registered tenant — so it is exactly the moment a
+      // tenant whose storage provisioning was refused for want of that row
+      // becomes provisionable, and repairing it here costs one idempotent call.
+      await provisionTenantStorageFor(deps, tenantId);
       return json(c, 200, adminItem("tenant_account", stored));
     },
 

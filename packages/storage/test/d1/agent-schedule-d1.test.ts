@@ -20,7 +20,7 @@ import {
   agentScheduleFireId,
   planScheduleTick,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_784_073_600;
 
@@ -30,7 +30,7 @@ let storeA: D1AgentScheduleStore;
 let storeB: D1AgentScheduleStore;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
   storeA = new D1AgentScheduleStore(handleA);
@@ -38,8 +38,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
 });
 
 function schedule(overrides: Partial<StoredAgentSchedule> = {}): StoredAgentSchedule {
@@ -212,9 +212,8 @@ describe("D1AgentScheduleStore — schedules", () => {
 
   test("an unknown enum token in the row FAILS CLOSED instead of defaulting", async () => {
     await storeA.upsertSchedule(schedule());
-    await env.TENANT_DB_A.prepare(
-      "UPDATE agent_schedules SET catchup_policy = 'whatever' WHERE schedule_id = ?",
-    )
+    await tenantDb(TENANT_A)
+      .prepare("UPDATE agent_schedules SET catchup_policy = 'whatever' WHERE schedule_id = ?")
       .bind("sched_1")
       .run();
     // Defaulting an unrecognized catchup policy to `skip_missed` would silently

@@ -407,12 +407,21 @@ describe("the env-var drift gate itself", () => {
     // operation (the operator force-delete) and narrowed to `delete` at the
     // composition root, so this Worker can reclaim an object and cannot fetch
     // one.
+    // `TENANT_DATA` (#820) is the FOURTH and the only DURABLE OBJECT namespace,
+    // and the only binding here declared with a `script_name`: it is the
+    // gateway's `TenantDataObject`, borrowed cross-script so that
+    // `idFromName(tenantId)` names the SAME object from both Workers. This
+    // Worker mints tenants, so it is the Worker that has to record them on the
+    // roster and seed their model catalog — into the object the data plane will
+    // read, not one of its own. See the stanza's comment in `wrangler.toml` for
+    // why it carries no `[[migrations]]` entry and no `src/worker.ts` re-export.
     expect([...DECLARED.bindings.keys()]).toEqual([
       "DB",
       "PROMPT_LABELS",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",
       "ASSETS",
+      "TENANT_DATA",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the

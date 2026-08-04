@@ -29,7 +29,7 @@ import {
   sweepAssetRetention,
   sweepOrphanBlobs,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -47,7 +47,7 @@ let assets: D1AssetMetadataStore;
 let blobs: R2AssetBlobStore;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
   policies = new D1RetentionPolicyStore(handleA);
@@ -56,8 +56,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
   for (const object of (await env.ASSETS_BUCKET.list({ prefix: "assets/" })).objects) {
     await env.ASSETS_BUCKET.delete(object.key);
   }
@@ -190,9 +190,8 @@ describe("sweepAssetRetention — the executor", () => {
       get(target, property, receiver) {
         if (property === "delete") {
           return async (key: string) => {
-            const row = await env.TENANT_DB_A.prepare(
-              "SELECT COUNT(*) AS n FROM stored_assets WHERE storage_uri = ?",
-            )
+            const row = await tenantDb(TENANT_A)
+              .prepare("SELECT COUNT(*) AS n FROM stored_assets WHERE storage_uri = ?")
               .bind(key)
               .first<{ n: number }>();
             order.push(Number(row?.n) === 0 ? "row-gone-first" : "object-first");

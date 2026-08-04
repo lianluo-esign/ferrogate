@@ -890,6 +890,68 @@ export function spendSourceFromEnv(env: SpendBindings): SpendSource {
 }
 
 /**
+ * A {@link SpendSource} whose WALLET leg reads a different database from its
+ * monthly-rollup leg — because since #819 they really are in different
+ * databases, and pretending otherwise is what broke.
+ *
+ * ## The defect this exists to close
+ *
+ * `wallets` and `wallet_reservations` are TENANT-schema tables
+ * (`sql/d1-ts/tenant/0001_init_tenant.sql`). Under the `durable_object` default
+ * they live inside `env.TENANT_DATA.idFromName(tenantId)`, and admission step 3b
+ * (`../ratelimit/wallet.ts::routedWalletAdmission`) already reserves against
+ * exactly that object. Step 3 — the balance PRE-CHECK — kept reading `env.DB`,
+ * so the two halves of one wallet decision were deciding from different
+ * topologies. Two concrete outcomes, both observed:
+ *
+ *  - a deployment migrated from `"off"` still carries a legacy `wallets` row in
+ *    `DB` that nothing in the routed topology ever writes, so a tenant funded in
+ *    its object is refused `429 wallet_balance_exhausted` forever and topping up
+ *    the object cannot clear it;
+ *  - a fresh routed deployment has no row in `DB` at all, so the pre-check
+ *    reads `null` on every request and is dead code.
+ *
+ * This is precisely what `../ratelimit/middleware.ts::defaultWorkflowBudgets`
+ * already argues must not happen for steps 3b and 5. The rule is the same one:
+ * every leg of one admission decision reads the database that leg's rows are
+ * actually written to.
+ *
+ * ## Why the rollup leg is deliberately NOT routed with it
+ *
+ * `usage_monthly_rollups` is a tenant-schema table too, but the gateway's own
+ * metering sink still WRITES it to `env.DB` (`../metering/d1.ts`,
+ * `../metering/runtime.ts`). Routing the read without moving the write would
+ * recreate the exact defect one table over: a budget enforced against rows
+ * nothing writes. So step 2 stays self-consistent on `DB` until the sink moves,
+ * and that pairing is stated here rather than left for a reader to infer.
+ *
+ * @param rollups the source for `committedSpendUsd` — unchanged.
+ * @param walletDb resolves the database holding THIS tenant's `wallets` row.
+ *   Throwing is reported as `ok: false` (→ 503), never as an empty wallet: an
+ *   unresolvable tenant has not proven the caller is out of credit.
+ */
+export function routedWalletSpendSource(
+  rollups: SpendSource,
+  walletDb: (tenantId: string) => Promise<D1Database>,
+  nowUnixSeconds: () => number = () => Math.floor(Date.now() / 1000),
+): SpendSource {
+  return {
+    committedSpendUsd: (scopeKind, scopeId, periodMonth) =>
+      rollups.committedSpendUsd(scopeKind, scopeId, periodMonth),
+    async walletBalanceCredits(tenantId: string): Promise<WalletBalanceReading> {
+      let db: D1Database;
+      try {
+        db = await walletDb(tenantId);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `routed wallet database unavailable: ${detail}` };
+      }
+      return d1SpendSource(db, nowUnixSeconds).walletBalanceCredits(tenantId);
+    },
+  };
+}
+
+/**
  * The scope a monthly budget is CHARGED against — `finalize_auth`'s
  * `budget_scope` argument.
  *

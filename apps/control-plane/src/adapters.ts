@@ -39,7 +39,9 @@
  * `authenticate_with_admission`'s source ordering exactly.
  */
 import {
+  BackendDispatchingTenantDatabaseRouter,
   type BindingEnvironment,
+  DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
@@ -686,9 +688,10 @@ export function resolveLifecycle(
 }
 
 /**
- * Pick the tenant-database router — `@ferrogate/storage`'s
- * `EnvBindingTenantDatabaseRouter`, over the control database's
- * `tenant_databases` registry.
+ * Pick the tenant-database router for every tenant-DATA path on this Worker —
+ * `@ferrogate/storage`'s `BackendDispatchingTenantDatabaseRouter`, which reads
+ * the control database's `tenant_databases` registry and sends each tenant to
+ * the backend its own row names.
  *
  * THE mount for the database-per-tenant directive on this Worker. Before it, the
  * whole durable half of `@ferrogate/storage` had zero importers under `apps/*`
@@ -719,6 +722,75 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
   // request, so the TTL only ever elides repeat lookups WITHIN a request. A
   // provisioning write is therefore visible on the very next request, with no
   // cache to invalidate.
+  const bindings = new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
+  // PER TENANT, from the roster — not per Worker, from a var. See
+  // `BackendDispatchingTenantDatabaseRouter`: since #820 every newly onboarded
+  // tenant lives in a Durable Object that the binding router cannot reach, and
+  // the binding router answers `not_found` for it, which every caller here
+  // reads as "no tenant database, act on the document only". That silence made
+  // an admin wallet credit write no `wallets` row anywhere (so the gateway's
+  // no-oversell reserve found nothing to enforce) and made the fleet asset view
+  // report an empty fleet for a deployment whose tenants all had assets.
+  //
+  // The `durableObject` arm is omitted when this Worker binds no namespace, and
+  // that omission is a NAMED refusal rather than a fall-through: a
+  // `durable_object` tenant resolved through the binding router would land on a
+  // D1 database holding none of its rows.
+  return new BackendDispatchingTenantDatabaseRouter(env.DB, {
+    fallback: bindings,
+    ...(env.TENANT_DATA === undefined
+      ? {}
+      : { durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB) }),
+  });
+}
+
+/**
+ * The router tenant STORAGE PROVISIONING runs through (#820) — the Durable
+ * Object namespace when this Worker binds one, otherwise whatever
+ * {@link resolveTenantDatabases} resolved.
+ *
+ * ## Why this is a second router and not a change to the first one
+ *
+ * PROVISIONING and ROUTING ask different questions, and only one of them has a
+ * roster row to read.
+ *
+ * {@link resolveTenantDatabases} dispatches on
+ * `tenant_databases.storage_backend`, so it can only answer for a tenant that
+ * ALREADY has a row. Provisioning is the thing that writes that row: at the
+ * moment it runs there is nothing to dispatch on, and the backend a NEW tenant
+ * should be created on is a property of this deployment — the namespace it
+ * binds — not of the tenant. Hence a router that states one backend outright.
+ * It is also why this one, and not the dispatching one, is what
+ * `provisionTenantStorage` reads `router.backend` from: the dispatcher
+ * deliberately leaves that property absent rather than stamping one backend onto
+ * every tenant it provisions.
+ *
+ * (This docblock used to say the two Workers disagreed about where a tenant's
+ * rows live, and called reconciling them a separate migration. That deferral was
+ * wrong in a way that cost real money: an admin wallet credit for a
+ * `durable_object` tenant took the document-only branch, answered 200, and wrote
+ * no `wallets` row anywhere, so the gateway's no-oversell guard had nothing to
+ * enforce. `BackendDispatchingTenantDatabaseRouter` closes it without moving any
+ * `native_binding` tenant, because the roster says which is which.)
+ *
+ * The choice is made from the BINDING rather than from a routing var,
+ * deliberately: a var could name a topology this Worker has no binding for, and
+ * the failure would be a runtime `undefined` on the first tenant write instead
+ * of a deploy-time refusal. `apps/gateway` can afford the var because it DEFINES
+ * the class; this Worker only borrows it.
+ */
+export function resolveTenantStorage(env: ControlPlaneBindings): TenantDatabaseRouter {
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") {
+    return new UnprovisionedTenantDatabaseRouter();
+  }
+  if (env.DB === undefined || env.DB === null) return new UnprovisionedTenantDatabaseRouter();
+  if (env.TENANT_DATA !== undefined) {
+    return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+  }
+  // No namespace bound: new tenants are provisioned on whatever the data paths
+  // can reach, which is the binding router underneath the dispatcher. It states
+  // `native_binding` as its own backend, so the roster row is labelled honestly
+  // and the dispatcher will keep routing that tenant the same way afterwards.
   return new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
 }
 
@@ -823,6 +895,7 @@ export function resolveDeps(
     rbac: resolveRbac(env),
     store,
     tenantDatabases: resolveTenantDatabases(env),
+    tenantStorage: resolveTenantStorage(env),
     controlDatabase: resolveControlDatabase(env),
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.

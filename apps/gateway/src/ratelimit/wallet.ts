@@ -67,6 +67,7 @@ import {
   type TenantDatabaseHandle,
   type WalletReservationResult,
 } from "@ferrogate/storage";
+import type { TenantDatabaseAccessor } from "../tenancy/ports.js";
 
 /**
  * Credits held per admitted request when the operator configures none.
@@ -150,7 +151,11 @@ export interface WalletAdmission {
    * hold under that id first and returns it verbatim, so a retried admission of
    * the same request cannot take a second hold against the same balance.
    */
-  reserve(tenantId: string, holdId: string, nowUnixSeconds: number): Promise<WalletAdmissionOutcome>;
+  reserve(
+    tenantId: string,
+    holdId: string,
+    nowUnixSeconds: number,
+  ): Promise<WalletAdmissionOutcome>;
 }
 
 /** A guard for a deployment with no tenant database bound. Never denies. */
@@ -169,12 +174,19 @@ export interface WalletAdmissionOptions {
 /**
  * The tenant-database handle for this deployment's `DB` binding.
  *
- * `source: "shared_development"` is the honest label: `apps/gateway/wrangler.toml`
- * declares ONE `[[d1_databases]] binding = "DB"`, so every tenant's wallet lives
- * in that database today. `supportsAtomicBatch` is `true` because a NATIVE D1
- * binding really does run `batch()` as one transaction and really does return
- * `RETURNING` rows — which is the only thing `requireAtomicBatch` gates on, and
- * the only property the guard's correctness depends on.
+ * `source: "shared_development"` is the honest label: this is the handle built
+ * when `GATEWAY_TENANT_DB_ROUTING = "off"`, where ONE `[[d1_databases]] binding
+ * = "DB"` holds every tenant's wallet and only the `tenant_id` column separates
+ * them. `supportsAtomicBatch` is `true` because a NATIVE D1 binding really does
+ * run `batch()` as one transaction and really does return `RETURNING` rows —
+ * which is the only thing `requireAtomicBatch` gates on, and the only property
+ * the guard's correctness depends on.
+ *
+ * Under the `durable_object` DEFAULT this function is not on the path at all:
+ * {@link routedWalletAdmission} takes the handle the tenancy resolver produced,
+ * whose `source` is `"durable_object"` and whose database is that tenant's own
+ * object. The label difference is the whole point — a handle that says
+ * `shared_development` is telling you there is no physical isolation behind it.
  *
  * The `tenantId` on the handle is load-bearing, not decorative:
  * `D1WalletStore.assertTenant` refuses any write whose `tenant_id` disagrees
@@ -213,6 +225,74 @@ export function d1WalletAdmission(
   db: D1Database,
   options: WalletAdmissionOptions = {},
 ): WalletAdmission {
+  return walletAdmissionOverHandle(async (tenantId) => gatewayTenantHandle(db, tenantId), options);
+}
+
+/**
+ * The guard over the handle the TENANCY RESOLVER produced — i.e. over that
+ * tenant's own Durable Object under the `durable_object` default.
+ *
+ * ## This is `tenantDatabaseOf(c)`'s first production call site, and it is the
+ * ## point of #819
+ *
+ * `src/tenancy/` shipped complete, mounted and tested, with `tenantDatabaseOf`
+ * called by nothing — the same shape as the defect this module's own header
+ * describes ("the wallet no-oversell guard is not guarding any money"), one
+ * layer down. A router with no callers routes nothing.
+ *
+ * The wallet reserve is the right first caller rather than an arbitrary one:
+ * `reserveWalletCredits` is `requireAtomicBatch()` call site #1 of 13, so a
+ * reserve completing through a resolved handle is a single observation that
+ * proves the handle resolved, that its `supportsAtomicBatch` was honoured, and
+ * that a three-statement `RETURNING` batch really ran as one transaction inside
+ * the object. Under the `rest` strategy this exact path was the one that could
+ * not work at all.
+ *
+ * ## Two refusals, both fail-closed
+ *
+ * The accessor throws (503 unavailable / 403 unscoped) rather than ever handing
+ * back the shared database, and that throw is reported as `unavailable` — never
+ * `insufficient`. An unresolvable tenant has NOT proven the caller is overdrawn,
+ * so it must become a 503 and not a 429; the same split
+ * {@link d1WalletAdmission} already makes for a storage outage.
+ *
+ * The `tenantId` cross-check is the second. The accessor is bound to the tenant
+ * the CREDENTIAL resolved to, while `reserve()` is called with the tenant the
+ * admission SUBJECT carries. They are the same value on every path today, and
+ * the check is here so that a future divergence is a refusal rather than one
+ * tenant's hold taken against another's balance — which is precisely what
+ * `D1WalletStore.assertTenant` would then be too late to catch, because the
+ * handle it is handed would agree with the id it is handed.
+ */
+export function routedWalletAdmission(
+  accessor: TenantDatabaseAccessor,
+  options: WalletAdmissionOptions = {},
+): WalletAdmission {
+  return walletAdmissionOverHandle(async (tenantId) => {
+    const handle = await accessor.handle();
+    if (handle.tenantId !== tenantId) {
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this admission is for ` +
+          `tenant ${tenantId}; refusing rather than holding credits against the wrong balance`,
+      );
+    }
+    return handle;
+  }, options);
+}
+
+/**
+ * The shared body of both admissions: resolve a handle, drive the storage
+ * guard, wrap the hold.
+ *
+ * Extracted so the two factories differ ONLY in which handle they hand over —
+ * the reserve, the outcome mapping and the release are one implementation, so a
+ * fix to the `unavailable`/`insufficient` split cannot land on one topology and
+ * miss the other.
+ */
+function walletAdmissionOverHandle(
+  resolveHandle: (tenantId: string) => Promise<TenantDatabaseHandle>,
+  options: WalletAdmissionOptions = {},
+): WalletAdmission {
   const amountCredits = options.holdCredits ?? DEFAULT_WALLET_HOLD_CREDITS;
   const ttlSeconds = options.ttlSeconds ?? WALLET_HOLD_TTL_SECONDS;
 
@@ -222,7 +302,17 @@ export function d1WalletAdmission(
       holdId: string,
       nowUnixSeconds: number,
     ): Promise<WalletAdmissionOutcome> {
-      const store = new D1WalletStore(gatewayTenantHandle(db, tenantId));
+      let store: D1WalletStore;
+      try {
+        store = new D1WalletStore(await resolveHandle(tenantId));
+      } catch (error) {
+        // Resolution failed — an unbound namespace, a blank tenant id, a
+        // platform-operator credential. NOT a proof of overdraft, so 503.
+        return {
+          kind: "unavailable",
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
       let result: WalletReservationResult;
       try {
         result = await store.reserveWalletCredits(
@@ -236,6 +326,12 @@ export function d1WalletAdmission(
         // A storage outage has NOT proven the caller is overdrawn, so it is
         // reported as `unavailable` (→ 503) and never as `insufficient`
         // (→ 429). Same split `SpendSource` takes one layer up.
+        //
+        // Under `durable_object` this arm also carries the object's own
+        // refusals: a stub that adopted a different tenant, or a schema that
+        // stopped mid-migration. `DurableObjectD1Database` labels both before
+        // they get here, and neither is retried — see `refuseObjectFailure` in
+        // `@ferrogate/storage`'s `tenant-do.ts`.
         const detail = error instanceof Error ? error.message : String(error);
         return { kind: "unavailable", detail };
       }
@@ -270,11 +366,19 @@ export function d1WalletAdmission(
 }
 
 /**
- * The guard the composition root gets: the durable D1 one whenever the tenant
- * database is bound, {@link NO_WALLET_ADMISSION} otherwise.
+ * The `"off"`-mode guard: the durable D1 one whenever the shared `DB` is bound,
+ * {@link NO_WALLET_ADMISSION} otherwise.
  *
  * Binding `DB` can therefore only ever TIGHTEN admission, never loosen it —
  * the same property `spendSourceFromEnv` has.
+ *
+ * Since #819 this is the FALLBACK-FREE second choice, not the first: when the
+ * tenancy resolver is routing (the `durable_object` default, or any of the
+ * `binding*` modes), `rateLimit()` builds {@link routedWalletAdmission} instead
+ * and this function is not consulted. That ordering is deliberate — reaching
+ * for `env.DB` while a tenant handle exists is exactly the cross-tenant
+ * fallback `src/tenancy/` forbids, so the routed guard must win rather than be
+ * a co-equal alternative.
  */
 export function walletAdmissionFromEnv(env: WalletAdmissionBindings): WalletAdmission {
   const db = walletDatabase(env);

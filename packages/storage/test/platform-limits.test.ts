@@ -13,14 +13,14 @@
  */
 import { describe, expect, test } from "vitest";
 import {
-  DEFAULT_POOL_ACQUIRE_TIMEOUT_MILLIS,
-  DEFAULT_POSTGRES_POOL_SIZE,
   D1RestTenantDatabaseRouter,
   D1_BINDING_STRATEGIES,
+  DEFAULT_POOL_ACQUIRE_TIMEOUT_MILLIS,
+  DEFAULT_POSTGRES_POOL_SIZE,
+  type PostgresStorageConfig,
   StorageError,
   memoryProviderConfig,
   providerIsDurable,
-  type PostgresStorageConfig,
 } from "../src/index.js";
 
 describe("PLATFORM LIMIT — a Worker cannot hold a warm connection pool (§1.6)", () => {
@@ -86,20 +86,43 @@ describe("PLATFORM LIMIT — no runtime bind-by-uuid for D1 (§1.7)", () => {
     // single guarded `UPDATE … RETURNING` cannot report its own guard over REST
     // reaches for SELECT-then-UPDATE, which IS the race.
     expect(D1_BINDING_STRATEGIES.rest.returning).toBe(true);
-    // …and it is the ONLY strategy with no deploy-time coupling, which is
+    // …and it is the only D1 strategy with no deploy-time coupling, which is
     // exactly why it keeps being tempting.
     expect(D1_BINDING_STRATEGIES.rest.requiresDeployPerTenant).toBe(false);
     expect(D1_BINDING_STRATEGIES.native_binding.atomicBatch).toBe(true);
     expect(D1_BINDING_STRATEGIES.native_binding.requiresDeployPerTenant).toBe(true);
-    // The ONLY strategy that is both deploy-free and money-safe would be one
-    // with atomicBatch AND !requiresDeployPerTenant. There is none; if one ever
-    // appears, this is the assertion that fails and sends a reader to the
-    // `rest` entry's OPEN QUESTION.
+  });
+
+  /**
+   * THE CELL THAT USED TO BE EMPTY.
+   *
+   * This assertion read `toEqual([])` — "a strategy that is both deploy-free
+   * and money-safe does not exist; if one ever appears, this is the assertion
+   * that fails and sends a reader to the `rest` entry's OPEN QUESTION". One
+   * appeared, and the update is the point of #823 rather than a fixup: it is
+   * NOT the `rest` open question resolving (whether the D1 HTTP API's `batch`
+   * envelope is all-or-nothing is still unverified and still `false`), it is
+   * the tenant plane leaving D1 for a SQLite-backed Durable Object, where
+   * `ctx.storage.transactionSync()` is a real transaction and the object is
+   * created by being addressed.
+   *
+   * The pin stays exact rather than becoming `toContain`, because the
+   * interesting fact is that the cell holds EXACTLY ONE entry. A second would
+   * mean either a genuine new capability or — far more likely — a strategy that
+   * claims `atomicBatch: true` without a transaction underneath it, which is
+   * the claim `requireAtomicBatch()` trusts on all 13 money paths.
+   */
+  test("exactly one strategy is both deploy-free and money-safe: durable_object", () => {
     expect(
-      Object.values(D1_BINDING_STRATEGIES).filter(
-        (s) => s.atomicBatch && !s.requiresDeployPerTenant,
-      ),
-    ).toEqual([]);
+      Object.entries(D1_BINDING_STRATEGIES)
+        .filter(([, s]) => s.atomicBatch && !s.requiresDeployPerTenant)
+        .map(([name]) => name),
+    ).toEqual(["durable_object"]);
+    expect(D1_BINDING_STRATEGIES.durable_object.returning).toBe(true);
+    // Not free, and the table must not pretend otherwise: a stub call is an RPC
+    // to wherever the object lives. It is one hop for a whole `batch()`, which
+    // is the difference between this and the `rest` row, not zero hops.
+    expect(D1_BINDING_STRATEGIES.durable_object.extraNetworkHop).toBe(true);
   });
 
   test("the strict REST router THROWS rather than serving a non-atomic write path", async () => {

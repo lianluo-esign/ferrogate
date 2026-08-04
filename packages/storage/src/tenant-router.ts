@@ -64,6 +64,18 @@ export type TenantDatabaseSource =
    */
   | "rest"
   /**
+   * A SQLite-backed Durable Object, one per tenant, addressed
+   * `env.TENANT_DATA.idFromName(tenantId)` — `./tenant-do.ts` (#823).
+   *
+   * The only source that is BOTH deploy-free and money-safe, which is why it
+   * exists: the object is created by being addressed, so onboarding a tenant is
+   * not a `wrangler deploy`, and `ctx.storage.transactionSync()` is a real
+   * SQLite transaction, so `batch()` is one commit and `RETURNING` rows come
+   * back. `supportsAtomicBatch` is therefore `true` and the 13
+   * {@link requireAtomicBatch} money paths RUN over it rather than refusing.
+   */
+  | "durable_object"
+  /**
    * One shared database standing in for every tenant. DEVELOPMENT AND
    * SINGLE-TENANT DEPLOYMENTS ONLY — it provides no physical isolation.
    */
@@ -95,6 +107,27 @@ export interface TenantDatabaseHandle {
  * Worker without touching a single algorithm.
  */
 export interface TenantDatabaseRouter {
+  /**
+   * Which topology this router serves, knowable WITHOUT resolving a tenant.
+   *
+   * ## Why a router has to be able to say this before it routes
+   *
+   * `provisionTenantStorage` writes a `pending` roster row BEFORE it touches
+   * anything, so a crashed provisioner leaves "started, never finished" instead
+   * of silence. That row has to state a `storage_backend`, and until this
+   * property existed there was nothing to state it from: the backend was only
+   * learned at step (5), from the resolved handle's `source`. So every `pending`
+   * row — and every `failed` row, which is the one that SURVIVES — was written
+   * with the registry's `native_binding` default, mislabelling every Durable
+   * Object tenant whose provisioning had not finished.
+   *
+   * It is a property rather than a method because it is a constant per router
+   * instance, and it is OPTIONAL because a router that dispatches per tenant
+   * (or refuses everything) genuinely does not have one answer. An absent value
+   * means "do not overwrite whatever the roster already believes"; it never
+   * means `native_binding`.
+   */
+  readonly backend?: TenantDatabaseSource;
   /** The account-global CONTROL database. Always a native binding. */
   control(): D1Database;
   /** Resolve one tenant's database, or throw. NEVER falls back. */
@@ -142,16 +175,79 @@ export function requireAtomicBatch(
 // ---------------------------------------------------------------------------
 
 /**
- * One `tenant_databases` row. `bindingName` is `undefined` for a tenant whose
- * database exists but whose binding has not been deployed yet — the router
- * treats that as unresolvable, not as "use the control database".
+ * How far a tenant's storage got through onboarding (#820).
+ *
+ * The states exist because recording the row and provisioning the storage span
+ * the control database and the tenant's own object, and those two CANNOT be one
+ * transaction. A crash between them is therefore not an edge case, it is a
+ * matter of time — so the only question is whether the resulting state is
+ * distinguishable from a healthy one. These make it so.
+ *
+ * `pending` is written BEFORE anything is touched, so the failure mode of a
+ * crashed provisioner is a row that says "started, never finished" rather than
+ * no row at all. Under `durable_object` that ordering matters more than it did
+ * under D1: the object materialises by being addressed, so by the time a
+ * provisioner has touched one there is already storage to account for.
+ */
+export type TenantProvisioningStatus =
+  /** Recorded, not yet confirmed. The resumable state. */
+  | "pending"
+  /** Every provisioning step confirmed: schema applied, catalog seeded. */
+  | "ready"
+  /** A step refused. `lastError` says which; re-running resumes from there. */
+  | "failed";
+
+/**
+ * One `tenant_databases` row — the tenant's PROVISIONING STATE, since #820.
+ *
+ * It used to be a routing table, and under `native_binding` it still is: the
+ * binding router reads `bindingName` on the request path, and `undefined` there
+ * means "provisioned but not yet redeployed", which it treats as unresolvable
+ * rather than as "use the control database". Under `durable_object` the address
+ * is `idFromName(tenantId)` and nothing in this row participates in resolution;
+ * what it carries instead is the roster (a DO namespace cannot be enumerated in
+ * production) and the answer to "did onboarding finish".
+ *
+ * The three D1-topology fields are optional because a `durable_object` tenant
+ * has none of them: no database uuid, no database name, no binding. See
+ * `sql/d1-ts/control/0012_tenant_storage_provisioning.sql` for why the columns
+ * are kept rather than dropped, and which slice gets to drop each one.
  */
 export interface TenantDatabaseRegistration {
   tenantId: string;
-  databaseUuid: string;
-  databaseName: string;
+  /** D1 topology only. Absent for a `durable_object` tenant. */
+  databaseUuid?: string;
+  /** D1 topology only. Absent for a `durable_object` tenant. */
+  databaseName?: string;
+  /** D1 topology only. Absent for a `durable_object` tenant, and for one whose stanza is undeployed. */
   bindingName?: string;
+  /**
+   * The tenant schema version. Under D1 it is what an operator's
+   * `wrangler d1 migrations apply` reached; under `durable_object` it is the
+   * version the OBJECT last reported out of its own `storage_schema_migrations`
+   * ledger — an observation, never an instruction. The object migrates itself
+   * on every cold start and consults nothing here to decide what to apply.
+   */
   schemaVersion: number;
+  /**
+   * Which topology this tenant's data physically lives in. Absent means the row
+   * predates #820, and every writer that predates #820 is a binding-topology
+   * one — which is why the column's SQL default is `native_binding` and not the
+   * newer value.
+   */
+  storageBackend?: TenantDatabaseSource;
+  /** Absent for a row written before #820; such a row is not yet classifiable. */
+  status?: TenantProvisioningStatus;
+  /** When the model catalog was seeded. Absent = never. */
+  catalogSeededAtUnix?: number;
+  /** The refusal that stopped the last provisioning attempt, verbatim. */
+  lastError?: string;
+  /**
+   * The `locationHint` the object was FIRST addressed with. A Durable Object is
+   * homed near its first `get()` and cannot be moved, so the choice is permanent
+   * and recorded rather than inferred.
+   */
+  locationHint?: string;
 }
 
 /**
@@ -217,8 +313,10 @@ export function parseTenantDatabaseRegistryDocument(
   for (const [tenantId, uuid] of Object.entries(map)) {
     if (typeof uuid !== "string" || uuid.trim() === "") {
       throw StorageError.runtime(
-        `tenant database registry document maps tenant ${tenantId} to a non-string ` +
+        [
+          `tenant database registry document maps tenant ${tenantId} to a non-string`,
           "or empty database uuid",
+        ].join(" "),
       );
     }
     tenantDatabases[tenantId] = uuid;
@@ -322,12 +420,24 @@ export async function migrateTenantDatabaseRegistryDocument(
     try {
       await controlDb
         .prepare(
+          // `native_binding` / `pending` are stated rather than defaulted: a
+          // migrated row names a real D1 database with no deployed stanza, which
+          // is precisely "provisioned but not yet routable" — the state #820
+          // spells `pending`. Leaving it to the column default would give the
+          // same two values by luck rather than by intent.
           "INSERT INTO tenant_databases " +
             "(tenant_id, database_uuid, database_name, binding_name, schema_version, " +
-            " provisioned_at_unix, updated_at_unix) " +
-            "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+            " storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, ?, NULL, ?, 'native_binding', 'pending', ?, ?)",
         )
-        .bind(tenantId, databaseUuid, nameFor(tenantId, databaseUuid), schemaVersion, nowUnix, nowUnix)
+        .bind(
+          tenantId,
+          databaseUuid,
+          nameFor(tenantId, databaseUuid),
+          schemaVersion,
+          nowUnix,
+          nowUnix,
+        )
         .run();
     } catch (error) {
       throw StorageError.runtime(
@@ -346,16 +456,18 @@ export async function migrateTenantDatabaseRegistryDocument(
   };
 }
 
-/** Reads the tenant→database registry from the CONTROL database. */
+/** Every column {@link registrationFromRow} decodes. One list, so the reads cannot drift. */
+const TENANT_DATABASE_COLUMNS =
+  "tenant_id, database_uuid, database_name, binding_name, schema_version, " +
+  "storage_backend, provisioning_status, catalog_seeded_at_unix, last_error, location_hint";
+
+/** Reads and writes the tenant provisioning registry in the CONTROL database. */
 export class ControlDatabaseTenantRegistry {
   constructor(private readonly controlDb: D1Database) {}
 
   async get(tenantId: string): Promise<TenantDatabaseRegistration | undefined> {
     const row = await this.controlDb
-      .prepare(
-        "SELECT tenant_id, database_uuid, database_name, binding_name, schema_version " +
-          "FROM tenant_databases WHERE tenant_id = ?",
-      )
+      .prepare(`SELECT ${TENANT_DATABASE_COLUMNS} FROM tenant_databases WHERE tenant_id = ?`)
       .bind(tenantId)
       .first<TenantDatabaseRow>();
     return row ? registrationFromRow(row) : undefined;
@@ -363,38 +475,93 @@ export class ControlDatabaseTenantRegistry {
 
   async list(): Promise<TenantDatabaseRegistration[]> {
     const result = await this.controlDb
+      .prepare(`SELECT ${TENANT_DATABASE_COLUMNS} FROM tenant_databases ORDER BY tenant_id`)
+      .all<TenantDatabaseRow>();
+    return result.results.map(registrationFromRow);
+  }
+
+  /**
+   * Every tenant NOT in `ready`, ascending — the resume worklist (#820).
+   *
+   * This is the query the whole `provisioning_status` column exists to make
+   * answerable. Without it, "some tenants mysteriously have no models" is
+   * diagnosed one tenant at a time, by someone who already suspects it.
+   */
+  async listUnfinished(): Promise<TenantDatabaseRegistration[]> {
+    const result = await this.controlDb
       .prepare(
-        "SELECT tenant_id, database_uuid, database_name, binding_name, schema_version " +
-          "FROM tenant_databases ORDER BY tenant_id",
+        `SELECT ${TENANT_DATABASE_COLUMNS} FROM tenant_databases WHERE provisioning_status <> 'ready' ORDER BY tenant_id`,
       )
       .all<TenantDatabaseRow>();
     return result.results.map(registrationFromRow);
   }
 
   /**
-   * Register (or re-register) a tenant's database. Idempotent by `tenant_id`;
-   * a redeploy that assigns a binding name is the common second call.
+   * Delete a tenant's registration row.
+   *
+   * Deliberately narrow: this removes the tenant from the ROSTER and touches no
+   * tenant data whatsoever. Under `durable_object` the object survives, holding
+   * every row the tenant ever wrote — documented behaviour rather than an
+   * omission, see the deprovisioning section of
+   * `docs/design/per-tenant-durable-object-storage-2026-08.md`. Erasing tenant
+   * data is a data-retention decision with legal weight, and a registry method
+   * is the wrong place to take it silently.
+   */
+  async remove(tenantId: string): Promise<boolean> {
+    const result = await this.controlDb
+      .prepare("DELETE FROM tenant_databases WHERE tenant_id = ? RETURNING tenant_id")
+      .bind(tenantId)
+      .all<{ tenant_id: string }>();
+    return result.results.length > 0;
+  }
+
+  /**
+   * Register (or re-register) a tenant. Idempotent by `tenant_id`; a redeploy
+   * that assigns a binding name, and a provisioner advancing a tenant from
+   * `pending` to `ready`, are both the common second call.
+   *
+   * Every field is written from `excluded`, including the nullable ones, so this
+   * REPLACES the row's meaning rather than merging into it: a caller that omits
+   * a field is stating the field is absent, not declining to comment. The one
+   * exception is `provisioned_at_unix` — a tenant's first provisioning time is
+   * not re-stamped by a later resume, the same rule `projectPlan` follows for
+   * `created_at_unix`.
    */
   async upsert(registration: TenantDatabaseRegistration, nowUnix: number): Promise<void> {
     await this.controlDb
       .prepare(
         "INSERT INTO tenant_databases " +
           "(tenant_id, database_uuid, database_name, binding_name, schema_version, " +
-          " provisioned_at_unix, updated_at_unix) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+          " storage_backend, provisioning_status, catalog_seeded_at_unix, last_error, " +
+          " location_hint, provisioned_at_unix, updated_at_unix) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT (tenant_id) DO UPDATE SET " +
           "database_uuid = excluded.database_uuid, " +
           "database_name = excluded.database_name, " +
           "binding_name = excluded.binding_name, " +
           "schema_version = excluded.schema_version, " +
+          "storage_backend = excluded.storage_backend, " +
+          "provisioning_status = excluded.provisioning_status, " +
+          "catalog_seeded_at_unix = excluded.catalog_seeded_at_unix, " +
+          "last_error = excluded.last_error, " +
+          "location_hint = excluded.location_hint, " +
           "updated_at_unix = excluded.updated_at_unix",
       )
       .bind(
         registration.tenantId,
-        registration.databaseUuid,
-        registration.databaseName,
+        registration.databaseUuid ?? null,
+        registration.databaseName ?? null,
         registration.bindingName ?? null,
         registration.schemaVersion,
+        // The column's own DEFAULT is `native_binding`, for rows written by SQL
+        // that predates #820. A caller reaching THIS method through the typed
+        // API has no such excuse, so the same value is stated here where a
+        // reader of the code sees it rather than left to the DDL.
+        registration.storageBackend ?? "native_binding",
+        registration.status ?? "pending",
+        registration.catalogSeededAtUnix ?? null,
+        registration.lastError ?? null,
+        registration.locationHint ?? null,
         nowUnix,
         nowUnix,
       )
@@ -404,19 +571,46 @@ export class ControlDatabaseTenantRegistry {
 
 interface TenantDatabaseRow {
   tenant_id: string;
-  database_uuid: string;
-  database_name: string;
+  database_uuid: string | null;
+  database_name: string | null;
   binding_name: string | null;
   schema_version: number;
+  storage_backend: string | null;
+  provisioning_status: string | null;
+  catalog_seeded_at_unix: number | null;
+  last_error: string | null;
+  location_hint: string | null;
 }
 
+/** The legal `provisioning_status` spellings. Anything else decodes to ABSENT. */
+const PROVISIONING_STATUSES: readonly TenantProvisioningStatus[] = ["pending", "ready", "failed"];
+
+/**
+ * Row → registration.
+ *
+ * Absent optional fields are OMITTED rather than set to `undefined`, because
+ * `exactOptionalPropertyTypes` is on for this package. An unrecognised
+ * `provisioning_status` decodes to absent rather than to `failed`: inventing a
+ * failure for a value we merely do not recognise would make a schema drift look
+ * like a broken tenant, and the two get opposite fixes.
+ */
 function registrationFromRow(row: TenantDatabaseRow): TenantDatabaseRegistration {
+  const status = PROVISIONING_STATUSES.find((candidate) => candidate === row.provisioning_status);
   return {
     tenantId: row.tenant_id,
-    databaseUuid: row.database_uuid,
-    databaseName: row.database_name,
+    ...(row.database_uuid === null ? {} : { databaseUuid: row.database_uuid }),
+    ...(row.database_name === null ? {} : { databaseName: row.database_name }),
     ...(row.binding_name === null ? {} : { bindingName: row.binding_name }),
     schemaVersion: row.schema_version,
+    ...(row.storage_backend === null
+      ? {}
+      : { storageBackend: row.storage_backend as TenantDatabaseSource }),
+    ...(status === undefined ? {} : { status }),
+    ...(row.catalog_seeded_at_unix === null
+      ? {}
+      : { catalogSeededAtUnix: row.catalog_seeded_at_unix }),
+    ...(row.last_error === null ? {} : { lastError: row.last_error }),
+    ...(row.location_hint === null ? {} : { locationHint: row.location_hint }),
   };
 }
 
@@ -468,6 +662,8 @@ export interface EnvBindingTenantRouterOptions {
  * ```
  */
 export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
+  /** Every tenant this router can serve is a `[[d1_databases]]` stanza. */
+  readonly backend = "native_binding" as const;
   private readonly registry: ControlDatabaseTenantRegistry;
   private readonly ttlMs: number;
   private readonly cache = new Map<string, { at: number; value: TenantDatabaseRegistration }>();
@@ -497,13 +693,63 @@ export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
     }
     const bindingName = registration.bindingName;
     if (bindingName === undefined || bindingName === "") {
+      // A row that says `durable_object` is not a mis-deployed D1 tenant, and
+      // reporting it as one is worse than useless: since #820 the onboarding
+      // path writes a roster row the moment a tenant is created, carrying no
+      // binding because a Durable Object has none. Read as "provisioned but not
+      // yet redeployed" that row turns every such tenant into a hard `runtime`
+      // refusal — which is how registering a tenant started answering 503 on a
+      // deployment whose control plane still routes its DATA paths through
+      // bindings.
+      //
+      // `not_found` is the honest kind: this router serves D1 bindings, and this
+      // tenant has no D1 database registered for it — the same answer it gives
+      // for a tenant with no row at all, because from a binding router's point of
+      // view those are the same fact. Callers that distinguish the two kinds
+      // (`apps/control-plane/src/store/tenancy.ts` maps `not_found` to a
+      // document-only outcome and everything else to a 503) then behave exactly
+      // as they did before a roster row existed.
+      if (registration.storageBackend === "durable_object") {
+        throw StorageError.notFound(
+          [
+            `tenant ${tenantId} is provisioned on the durable_object backend and has no D1`,
+            "binding; this router serves [[d1_databases]] bindings only. Route it through",
+            "DurableObjectTenantDatabaseRouter instead.",
+          ].join(" "),
+        );
+      }
+      const databaseUuid = registration.databaseUuid;
+      if (databaseUuid === undefined || databaseUuid === "") {
+        // NO binding AND no database uuid: there is nothing to be un-redeployed
+        // FROM. The row records that a tenant exists and that its storage is
+        // somewhere else (or nowhere yet) — a `pending` row written before
+        // provisioning touched anything, a `failed` one left behind when it
+        // stopped, or any backend that has no D1 database at all.
+        //
+        // The old code reported that as `runtime` and printed "database
+        // undefined has no binding_name", which is a claim that a database
+        // EXISTS. It does not, and the difference is operator-visible: `runtime`
+        // becomes a 503 on every control-plane tenant-data route
+        // (`apps/control-plane/src/store/tenancy.ts` maps every other kind that
+        // way), so the moment onboarding wrote its `pending` row a tenant that
+        // had worked started failing. `not_found` is the honest kind and the one
+        // callers already handle as "no tenant database, act on the document
+        // only" — the same answer this router gives for a tenant with no row.
+        throw StorageError.notFound(
+          [
+            `tenant ${tenantId} has a control-registry row but no D1 database: neither a`,
+            "binding_name nor a database_uuid is recorded, so nothing has been provisioned",
+            "for it in D1. This router serves [[d1_databases]] bindings only.",
+          ].join(" "),
+        );
+      }
       // Provisioned but not yet bound: the database exists in the account, the
       // Worker has not been redeployed with its binding. Fail closed — falling
       // back to the control database here is precisely how a tenant's ledger
       // ends up in the account-global one.
       throw StorageError.runtime(
         [
-          `tenant ${tenantId} database ${registration.databaseUuid} has no binding_name;`,
+          `tenant ${tenantId} database ${databaseUuid} has no binding_name;`,
           "the Worker must be redeployed with its [[d1_databases]] stanza before it can",
           "be routed to",
         ].join(" "),
@@ -524,7 +770,13 @@ export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
       db: bound,
       source: "native_binding",
       supportsAtomicBatch: true,
-      databaseUuid: registration.databaseUuid,
+      // Spread rather than assigned: since #820 a registration may legitimately
+      // carry no uuid (a `durable_object` tenant has none), and under
+      // `exactOptionalPropertyTypes` an explicit `undefined` is not the same
+      // thing as an absent key.
+      ...(registration.databaseUuid === undefined
+        ? {}
+        : { databaseUuid: registration.databaseUuid }),
       schemaVersion: registration.schemaVersion,
     };
   }
@@ -582,6 +834,9 @@ function isD1Database(value: unknown): value is D1Database {
  * recognized downstream.
  */
 export class SharedDatabaseTenantRouter implements TenantDatabaseRouter {
+  /** One database standing in for every tenant — no physical isolation. */
+  readonly backend = "shared_development" as const;
+
   constructor(
     private readonly db: D1Database,
     private readonly tenantIds: readonly string[] = [],
@@ -615,10 +870,16 @@ export class SharedDatabaseTenantRouter implements TenantDatabaseRouter {
 // ---------------------------------------------------------------------------
 
 /**
- * The three ways to reach a per-tenant D1 database from a Worker, with the
- * honest cost of each. This constant is documentation that ships with the code
- * (and is asserted by a test, so it cannot silently rot); the same table is in
+ * The four ways to reach a per-tenant database from a Worker, with the honest
+ * cost of each. This constant is documentation that ships with the code (and is
+ * asserted by a test, so it cannot silently rot); the same table is in
  * `packages/storage/README.md`.
+ *
+ * Three of the four reach a per-tenant **D1** database and are constrained by
+ * the same fact — bindings resolve at DEPLOY time. The fourth,
+ * `durable_object`, is not a D1 strategy at all: it replaces the database with
+ * a SQLite-backed Durable Object and is the reason `test/platform-limits.test.ts`
+ * no longer asserts that the deploy-free × money-safe cell is empty.
  */
 export const D1_BINDING_STRATEGIES = {
   /**
@@ -700,6 +961,51 @@ export const D1_BINDING_STRATEGIES = {
     tenantCeiling: "unbounded",
     extraNetworkHop: true,
   },
+  /**
+   * One SQLite-backed **Durable Object** per tenant, addressed
+   * `env.TENANT_DATA.idFromName(tenantId)` — `./tenant-do.ts` (#823),
+   * `docs/design/per-tenant-durable-object-storage-2026-08.md`.
+   *
+   * This is the row the other three exist to be compared against, because it is
+   * the one that answers the OPEN QUESTION in the `rest` entry from a different
+   * direction: it gives runtime addressing AND a multi-statement transaction.
+   * Not by finding a transaction envelope in the D1 HTTP API — that question is
+   * still open and still unverified — but by not using D1 for the tenant plane
+   * at all.
+   *
+   * `atomicBatch: true` is the load-bearing claim and it is not a doc-derived
+   * one: `TenantDataObject.batch()` runs the whole statement array inside ONE
+   * `ctx.storage.transactionSync()`, which is a real SQLite transaction that
+   * rolls back on throw. `packages/storage/test/do/tenant-do-facade.test.ts`
+   * proves it the way the `rest` entry says such a claim must be proved — with
+   * a rolled-back mid-batch failure, not with a doc quote.
+   *
+   * `requiresDeployPerTenant: false` because a Durable Object is created by
+   * being addressed. There is no stanza, no `wrangler deploy`, and no binding
+   * budget: ONE `[[durable_objects.bindings]]` entry serves every tenant that
+   * will ever exist. That is what makes `tenantCeiling` unbounded in a way the
+   * `native_binding` row can never be.
+   *
+   * `extraNetworkHop: true` and it must stay honest. A stub call is an RPC to
+   * wherever the object lives, which may be another colo; it is cheaper than
+   * the `rest` row's public HTTP round trip and it is not free. The facade's
+   * `batch()` makes the WHOLE statement array cross in ONE hop for exactly this
+   * reason — N sequential stub calls would be the `rest` strategy with extra
+   * steps, and would lose the transaction too.
+   *
+   * The costs this row does NOT hide: 10 GB per object (vs D1's 10 GB per
+   * database — the same number, but now a hard per-tenant wall with no shard),
+   * ~1,000 req/s per object single-threaded, and no way to ENUMERATE a
+   * namespace in production, which is why a `durable_object` router still reads
+   * `tenant_databases` to answer `provisionedTenants()`.
+   */
+  durable_object: {
+    atomicBatch: true,
+    returning: true,
+    requiresDeployPerTenant: false,
+    tenantCeiling: "unbounded; one binding serves every tenant, 10 GB per object",
+    extraNetworkHop: true,
+  },
 } as const;
 
 /**
@@ -742,6 +1048,9 @@ export const D1_BINDING_STRATEGIES = {
  * one experiment that could change that and the reason it is not asserted here.
  */
 export class D1RestTenantDatabaseRouter implements TenantDatabaseRouter {
+  /** The topology it REFUSES to serve — see `forTenant`. */
+  readonly backend = "rest" as const;
+
   constructor(
     private readonly controlDb: D1Database,
     private readonly config: { accountId: string; apiTokenRef: string },
