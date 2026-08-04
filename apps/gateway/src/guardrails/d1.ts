@@ -44,7 +44,12 @@
  * `generation` stay real columns because the CAS predicate and the read path
  * index on them.
  */
-import { type PolicyRevision, immutableId, validatePolicyRevision } from "@ferrogate/guardrails";
+import {
+  type PolicyRevision,
+  immutableId,
+  policyRevisionSchema,
+  validatePolicyRevision,
+} from "@ferrogate/guardrails";
 import {
   type CasResult,
   type GuardrailPolicyBinding,
@@ -209,7 +214,8 @@ function revisionFromRow(row: Row): PolicyRevision | undefined {
   const raw = row.revision_json;
   if (typeof raw !== "string") return undefined;
   try {
-    return JSON.parse(raw) as PolicyRevision;
+    const parsed = policyRevisionSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? (parsed.data as PolicyRevision) : undefined;
   } catch {
     return undefined;
   }
