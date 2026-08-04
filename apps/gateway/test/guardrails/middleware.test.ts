@@ -175,6 +175,23 @@ describe("input screening through the middleware", () => {
     );
   });
 
+  test("a gateway-config scoped policy does not match another profile", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-scoped-negative",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    const response = await app.fetch(
+      post(bodyWithProbeSecret(), "/v1/chat/completions", {
+        "x-ferrogate-config": "ordinary-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   test("the middleware does NOT consume the body the route still needs", async () => {
     // A `Request.clone()` read must leave the original stream intact — otherwise
     // the inference module's own bounded read would see an empty body.

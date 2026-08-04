@@ -106,7 +106,6 @@ export interface GuardrailEvaluationContext {
   readonly workflowNodeId?: string | undefined;
   readonly actorApiKeyId?: string | undefined;
   readonly tenant: GuardrailTenant;
-  readonly serviceAccountId?: string | undefined;
   readonly gatewayConfigId?: string | undefined;
   readonly model?: string | undefined;
   readonly provider?: string | undefined;
@@ -120,7 +119,7 @@ export interface GuardrailEvaluationContext {
 export function selectionContextFrom(
   context: Pick<
     GuardrailEvaluationContext,
-    "tenant" | "serviceAccountId" | "gatewayConfigId" | "model" | "provider" | "managedAction"
+    "tenant" | "gatewayConfigId" | "model" | "provider" | "managedAction"
   >,
 ): PolicySelectionContext {
   const selection: PolicySelectionContext = {};
@@ -135,9 +134,6 @@ export function selectionContextFrom(
   }
   if (context.tenant.apiKeyId !== undefined) {
     selection.api_key_id = context.tenant.apiKeyId;
-  }
-  if (context.serviceAccountId !== undefined) {
-    selection.service_account_id = context.serviceAccountId;
   }
   if (context.gatewayConfigId !== undefined) {
     selection.gateway_config_id = context.gatewayConfigId;

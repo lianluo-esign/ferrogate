@@ -105,7 +105,6 @@ export interface PolicySelectionContext {
   project_id?: string;
   workspace_id?: string;
   api_key_id?: string;
-  service_account_id?: string;
   gateway_config_id?: string;
   model?: string;
   provider?: string;
@@ -138,7 +137,6 @@ export const policyScopeSelectorSchema = z
     project_ids: z.array(z.string()).default([]),
     workspace_ids: z.array(z.string()).default([]),
     api_key_ids: z.array(z.string()).default([]),
-    service_account_ids: z.array(z.string()).default([]),
     gateway_config_ids: z.array(z.string()).default([]),
     models: z.array(z.string()).default([]),
     providers: z.array(z.string()).default([]),
@@ -151,7 +149,6 @@ export type PolicyScopeSelector = {
   project_ids: string[];
   workspace_ids: string[];
   api_key_ids: string[];
-  service_account_ids: string[];
   gateway_config_ids: string[];
   models: string[];
   providers: string[];
@@ -185,7 +182,6 @@ export function scopeMatches(scope: PolicyScopeSelector, context: PolicySelectio
     matchesOptional(scope.project_ids, context.project_id) &&
     matchesOptional(scope.workspace_ids, context.workspace_id) &&
     matchesOptional(scope.api_key_ids, context.api_key_id) &&
-    matchesOptional(scope.service_account_ids, context.service_account_id) &&
     matchesOptional(scope.gateway_config_ids, context.gateway_config_id) &&
     matchesOptional(scope.models, context.model) &&
     matchesOptional(scope.providers, context.provider)
@@ -196,7 +192,7 @@ export function administrativeRank(scope: PolicyScopeSelector): number {
   if (scope.gateway_config_ids.length > 0) {
     return 5;
   }
-  if (scope.api_key_ids.length > 0 || scope.service_account_ids.length > 0) {
+  if (scope.api_key_ids.length > 0) {
     return 4;
   }
   if (scope.workspace_ids.length > 0) {
@@ -218,7 +214,6 @@ function validateScope(scope: PolicyScopeSelector): void {
     ["project_ids", scope.project_ids],
     ["workspace_ids", scope.workspace_ids],
     ["api_key_ids", scope.api_key_ids],
-    ["service_account_ids", scope.service_account_ids],
     ["gateway_config_ids", scope.gateway_config_ids],
     ["models", scope.models],
     ["providers", scope.providers],
@@ -730,7 +725,6 @@ export const policyRevisionSchema = z
       project_ids: [],
       workspace_ids: [],
       api_key_ids: [],
-      service_account_ids: [],
       gateway_config_ids: [],
       models: [],
       providers: [],

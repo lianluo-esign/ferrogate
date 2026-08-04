@@ -21,7 +21,6 @@ function emptyScope(overrides: Partial<PolicyScopeSelector> = {}): PolicyScopeSe
     project_ids: [],
     workspace_ids: [],
     api_key_ids: [],
-    service_account_ids: [],
     gateway_config_ids: [],
     models: [],
     providers: [],
@@ -96,7 +95,7 @@ describe("scope matching + administrative rank", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("service-account scopes must not be admitted");
-    expect(result.error.field).toBe("scope.service_account_ids");
+    expect(result.error.field).toBe("scope");
   });
 
   test("model-content policy only matches model content (not managed actions)", () => {
