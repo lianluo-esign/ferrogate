@@ -14,12 +14,13 @@
  *    non-overlapping per segment.
  *  - Bounded evidence: after `MAX_FINDINGS_PER_EVALUATION` findings, stop and
  *    emit ONE zero-width `detector.truncated` (Critical) finding with no covering
- *    patch → forces fail-closed (unredactable).
+ *    patch → forces fail-closed (unredactable). The cap bounds finding/evidence
+ *    memory, not raw input size or detector CPU.
  *  - Secrets are Critical (conf 0.99); keyword/regex are High (conf 1.0);
  *    fingerprints are keyed `hmac-sha256:<hex>`; `matched_text` is never set.
  */
 import { z } from "zod";
-import { byteLen, byteMatchIndices, byteOffsetMap, byteSlice } from "./bytes.js";
+import { byteLen, byteMatchIndices, byteOffsetMap, decodeUtf8, encodeUtf8 } from "./bytes.js";
 import { hmacSha256, toHex } from "./hash.js";
 import { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "./jsonschema.js";
 import {
@@ -44,7 +45,7 @@ import {
 const DETERMINISTIC_VERSION = "deterministic/1";
 const REDACTION = "[REDACTED]";
 
-/** Hard cap on findings per evaluate; overflow emits one truncation marker. */
+/** Hard cap on findings/evidence per evaluate; it is not a raw-input or CPU cap. */
 export const MAX_FINDINGS_PER_EVALUATION = 10_000;
 
 export const jsonConstraintsSchema = z
@@ -233,6 +234,7 @@ export interface CoalescedGroup {
   text: string;
   segments: ContentSegment[];
   starts: number[];
+  ends: number[];
 }
 
 /** Whether a segment is a mutable text source eligible for a redaction patch. */
@@ -252,11 +254,16 @@ export function coalesceSelectedSegments(selected: ContentSegment[]): CoalescedG
   for (const segment of selected) {
     const last = groups[groups.length - 1];
     const extend = last !== undefined && last.segments[last.segments.length - 1]?.source === segment.source;
-    const group = extend ? (last as CoalescedGroup) : { text: "", segments: [], starts: [] };
+    const group = extend
+      ? (last as CoalescedGroup)
+      : { text: "", segments: [], starts: [], ends: [] };
     if (!extend) {
       groups.push(group);
     }
-    group.starts.push(byteLen(group.text));
+    const segmentStart = group.ends[group.ends.length - 1] ?? 0;
+    const segmentEnd = segmentStart + byteLen(segment.text);
+    group.starts.push(segmentStart);
+    group.ends.push(segmentEnd);
     group.text += segment.text;
     group.segments.push(segment);
   }
@@ -267,7 +274,8 @@ class TextMatchSink {
   findings: Finding[] = [];
   patches: ContentPatch[] = [];
   seenFindings = new Set<string>();
-  patchedIntervals = new Map<string, Array<[number, number]>>();
+  encodedSegments = new Map<string, Uint8Array>();
+  patchedIntervals = new Map<string, PatchedIntervalIndex>();
   truncated = false;
 }
 
@@ -300,6 +308,104 @@ export function regexByteMatches(
     }
   }
   return out;
+}
+
+interface IntervalNode {
+  start: number;
+  end: number;
+  height: number;
+  left?: IntervalNode;
+  right?: IntervalNode;
+}
+
+function intervalHeight(node: IntervalNode | undefined): number {
+  return node?.height ?? 0;
+}
+
+function updateIntervalHeight(node: IntervalNode): void {
+  node.height = 1 + Math.max(intervalHeight(node.left), intervalHeight(node.right));
+}
+
+function rotateIntervalRight(node: IntervalNode): IntervalNode {
+  const pivot = node.left as IntervalNode;
+  node.left = pivot.right;
+  pivot.right = node;
+  updateIntervalHeight(node);
+  updateIntervalHeight(pivot);
+  return pivot;
+}
+
+function rotateIntervalLeft(node: IntervalNode): IntervalNode {
+  const pivot = node.right as IntervalNode;
+  node.right = pivot.left;
+  pivot.left = node;
+  updateIntervalHeight(node);
+  updateIntervalHeight(pivot);
+  return pivot;
+}
+
+function insertInterval(node: IntervalNode | undefined, start: number, end: number): IntervalNode {
+  if (node === undefined) {
+    return { start, end, height: 1 };
+  }
+  if (start < node.start) {
+    node.left = insertInterval(node.left, start, end);
+  } else {
+    node.right = insertInterval(node.right, start, end);
+  }
+  updateIntervalHeight(node);
+
+  const balance = intervalHeight(node.left) - intervalHeight(node.right);
+  if (balance > 1 && node.left !== undefined) {
+    if (start > node.left.start) {
+      node.left = rotateIntervalLeft(node.left);
+    }
+    return rotateIntervalRight(node);
+  }
+  if (balance < -1 && node.right !== undefined) {
+    if (start < node.right.start) {
+      node.right = rotateIntervalRight(node.right);
+    }
+    return rotateIntervalLeft(node);
+  }
+  return node;
+}
+
+/**
+ * Accepted positive-width patches are disjoint. An AVL index can therefore
+ * answer overlap by checking only the predecessor and successor of a match,
+ * even when different matcher rules emit matches in different orders.
+ */
+class PatchedIntervalIndex {
+  #root: IntervalNode | undefined;
+
+  hasOverlap(start: number, end: number): boolean {
+    if (start >= end) {
+      return false;
+    }
+    let node = this.#root;
+    let predecessor: IntervalNode | undefined;
+    let successor: IntervalNode | undefined;
+    while (node !== undefined) {
+      if (start < node.start) {
+        successor = node;
+        node = node.left;
+      } else {
+        predecessor = node;
+        node = node.right;
+      }
+    }
+    return (
+      (predecessor !== undefined && start < predecessor.end) ||
+      (successor !== undefined && successor.start < end && start < successor.end)
+    );
+  }
+
+  add(start: number, end: number): void {
+    if (start < end) {
+      this.#root = insertInterval(this.#root, start, end);
+    }
+  }
 }
 
 export class DeterministicDetector implements GuardrailDetector {
@@ -392,22 +498,26 @@ export class DeterministicDetector implements GuardrailDetector {
       return;
     }
     if (sink.findings.length >= MAX_FINDINGS_PER_EVALUATION) {
-      sink.truncated = true;
-      sink.findings.push(this.finding("detector.truncated", "critical", 1.0, segment, [0, 0], undefined));
+      this.addTruncation(sink, segment);
       return;
     }
     const { category, severity, confidence, start, end } = detected;
-    const matched = byteSlice(segment.text, start, end);
+    let encoded = sink.encodedSegments.get(segment.segment_id);
+    if (encoded === undefined) {
+      encoded = encodeUtf8(segment.text);
+      sink.encodedSegments.set(segment.segment_id, encoded);
+    }
+    const matched = decodeUtf8(encoded.subarray(start, end));
     const key = `${category}\u0000${segment.segment_id}\u0000${start}\u0000${end}`;
     if (!sink.seenFindings.has(key)) {
       sink.seenFindings.add(key);
-      sink.findings.push(this.finding(category, severity, confidence, segment, [start, end], matched));
+      this.addFinding(sink, this.finding(category, severity, confidence, segment, [start, end], matched), segment);
     }
     if (isMutableTextSegment(segment)) {
-      const intervals = sink.patchedIntervals.get(segment.segment_id) ?? [];
-      const overlaps = intervals.some(([s, e]) => start < e && s < end);
+      const intervals = sink.patchedIntervals.get(segment.segment_id) ?? new PatchedIntervalIndex();
+      const overlaps = intervals.hasOverlap(start, end);
       if (!overlaps) {
-        intervals.push([start, end]);
+        intervals.add(start, end);
         sink.patchedIntervals.set(segment.segment_id, intervals);
         sink.patches.push({
           segment_id: segment.segment_id,
@@ -424,7 +534,7 @@ export class DeterministicDetector implements GuardrailDetector {
   private addGroupMatch(sink: TextMatchSink, group: CoalescedGroup, detected: TextMatch): void {
     group.segments.forEach((segment, index) => {
       const segmentStart = group.starts[index] as number;
-      const segmentEnd = segmentStart + byteLen(segment.text);
+      const segmentEnd = group.ends[index] as number;
       const overlapStart = Math.max(detected.start, segmentStart);
       const overlapEnd = Math.min(detected.end, segmentEnd);
       if (overlapStart < overlapEnd) {
@@ -448,7 +558,10 @@ export class DeterministicDetector implements GuardrailDetector {
       this.config.max_input_bytes !== undefined &&
       selected.reduce((acc, s) => acc + byteLen(s.text), 0) > this.config.max_input_bytes
     ) {
-      sink.findings.push(this.finding("size.input_bytes", "high", 1.0, undefined, undefined, undefined));
+      this.addFinding(
+        sink,
+        this.finding("size.input_bytes", "high", 1.0, undefined, undefined, undefined),
+      );
     }
 
     for (const group of coalesceSelectedSegments(selected)) {
@@ -513,12 +626,12 @@ export class DeterministicDetector implements GuardrailDetector {
 
     if (this.config.json) {
       for (const segment of selected) {
-        this.evaluateJsonSegment(this.config.json, segment, "json", sink.findings);
+        this.evaluateJsonSegment(this.config.json, segment, "json", sink);
       }
     }
 
     if (this.config.request) {
-      this.evaluateRequestConstraints(this.config.request, input, selected, sink.findings);
+      this.evaluateRequestConstraints(this.config.request, input, selected, sink);
     }
 
     return {
@@ -533,17 +646,25 @@ export class DeterministicDetector implements GuardrailDetector {
     constraints: JsonConstraints,
     segment: ContentSegment,
     prefix: string,
-    findings: Finding[],
+    sink: TextMatchSink,
   ): void {
     let value: unknown;
     try {
       value = JSON.parse(segment.text);
     } catch {
-      findings.push(this.finding(`${prefix}.invalid`, "high", 1.0, segment, undefined, undefined));
+      this.addFinding(
+        sink,
+        this.finding(`${prefix}.invalid`, "high", 1.0, segment, undefined, undefined),
+        segment,
+      );
       return;
     }
     for (const failure of evaluateJsonConstraints(constraints, value)) {
-      findings.push(this.finding(`${prefix}.${failure}`, "high", 1.0, segment, undefined, undefined));
+      this.addFinding(
+        sink,
+        this.finding(`${prefix}.${failure}`, "high", 1.0, segment, undefined, undefined),
+        segment,
+      );
     }
   }
 
@@ -551,42 +672,64 @@ export class DeterministicDetector implements GuardrailDetector {
     definition: RequestConstraints,
     input: DetectorInput,
     selected: ContentSegment[],
-    findings: Finding[],
+    sink: TextMatchSink,
   ): void {
     const endpointDenied =
       definition.allowed_endpoints.length > 0 && !definition.allowed_endpoints.includes(input.protocol);
-    this.addContextFinding(findings, endpointDenied, "request.endpoint");
+    this.addContextFinding(sink, endpointDenied, "request.endpoint");
 
     const model = input.model;
     const modelDenied =
       model !== undefined &&
       ((definition.allowed_models.length > 0 && !definition.allowed_models.includes(model)) ||
         definition.forbidden_models.includes(model));
-    this.addContextFinding(findings, modelDenied, "request.model");
+    this.addContextFinding(sink, modelDenied, "request.model");
 
     const provider = input.provider;
     const providerDenied =
       provider !== undefined &&
       ((definition.allowed_providers.length > 0 && !definition.allowed_providers.includes(provider)) ||
         definition.forbidden_providers.includes(provider));
-    this.addContextFinding(findings, providerDenied, "request.provider");
+    this.addContextFinding(sink, providerDenied, "request.provider");
 
     if (definition.metadata) {
       for (const segment of selected.filter((s) => s.source === "metadata")) {
-        this.evaluateJsonSegment(definition.metadata, segment, "metadata", findings);
+        this.evaluateJsonSegment(definition.metadata, segment, "metadata", sink);
       }
     }
     if (definition.tool_parameters) {
       for (const segment of selected.filter((s) => s.source === "tool_arguments")) {
-        this.evaluateJsonSegment(definition.tool_parameters, segment, "tool_parameters", findings);
+        this.evaluateJsonSegment(definition.tool_parameters, segment, "tool_parameters", sink);
       }
     }
   }
 
-  private addContextFinding(findings: Finding[], denied: boolean, category: string): void {
+  private addContextFinding(sink: TextMatchSink, denied: boolean, category: string): void {
     if (denied) {
-      findings.push(this.finding(category, "high", 1.0, undefined, undefined, undefined));
+      this.addFinding(sink, this.finding(category, "high", 1.0, undefined, undefined, undefined));
     }
+  }
+
+  private addFinding(sink: TextMatchSink, finding: Finding, segment?: ContentSegment): boolean {
+    if (sink.truncated) {
+      return false;
+    }
+    if (sink.findings.length >= MAX_FINDINGS_PER_EVALUATION) {
+      this.addTruncation(sink, segment);
+      return false;
+    }
+    sink.findings.push(finding);
+    return true;
+  }
+
+  private addTruncation(sink: TextMatchSink, segment?: ContentSegment): void {
+    if (sink.truncated) {
+      return;
+    }
+    sink.truncated = true;
+    sink.findings.push(
+      this.finding("detector.truncated", "critical", 1.0, segment, [0, 0], undefined),
+    );
   }
 }
 

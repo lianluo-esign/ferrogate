@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   DetectorError,
   type DetectorInput,
@@ -11,6 +11,16 @@ import {
 const AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"; // valid AKIA + 16 chars
 const DEADLINE = () => Date.now() + 5_000;
 
+interface ComplexitySample {
+  size: number;
+  encodeCalls: number;
+  codePointAtCalls: number;
+  overlapChecks: number;
+  elapsedMs: number;
+  findings: number;
+  patches: number;
+}
+
 function inputFrom(body: unknown): DetectorInput {
   const env = normalizeRequest("chat_completions", body);
   return {
@@ -20,6 +30,64 @@ function inputFrom(body: unknown): DetectorInput {
     text: "",
     segments: env.segments,
   };
+}
+
+async function measureRepetitiveInput(
+  detector: DeterministicDetector,
+  size: number,
+): Promise<ComplexitySample> {
+  const input = inputFrom({ messages: [{ role: "user", content: "x".repeat(size) }] });
+  let encodeCalls = 0;
+  let overlapChecks = 0;
+  const originalEncode = TextEncoder.prototype.encode;
+  const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode").mockImplementation(function (
+    this: TextEncoder,
+    value,
+  ) {
+    encodeCalls += 1;
+    return originalEncode.call(this, value);
+  });
+  const originalSome = Array.prototype.some;
+  const someSpy = vi.spyOn(Array.prototype, "some").mockImplementation(function (
+    this: unknown[],
+    callback,
+    thisArg,
+  ) {
+    return originalSome.call(
+      this,
+      (value, index, array) => {
+        overlapChecks += 1;
+        return callback.call(thisArg, value, index, array);
+      },
+      thisArg,
+    );
+  });
+  let codePointAtCalls = 0;
+  const originalCodePointAt = String.prototype.codePointAt;
+  const codePointAtSpy = vi.spyOn(String.prototype, "codePointAt").mockImplementation(function (
+    this: string,
+    index?: number,
+  ) {
+    codePointAtCalls += 1;
+    return originalCodePointAt.call(this, index ?? 0);
+  });
+  const started = performance.now();
+  try {
+    const result = await detector.evaluate(input, DEADLINE());
+    return {
+      size,
+      encodeCalls,
+      codePointAtCalls,
+      overlapChecks,
+      elapsedMs: performance.now() - started,
+      findings: result.findings.length,
+      patches: result.patches.length,
+    };
+  } finally {
+    encodeSpy.mockRestore();
+    someSpy.mockRestore();
+    codePointAtSpy.mockRestore();
+  }
 }
 
 describe("DeterministicDetector secret scanning", () => {
@@ -111,6 +179,26 @@ describe("coalesced + per-segment scanning", () => {
     });
     const result = await detector.evaluate(input, DEADLINE());
     expect(result.findings.some((f) => f.category === "secret.aws_access_key_id")).toBe(true);
+  });
+
+  test("keeps non-overlapping patches when matcher rules emit positions out of order", async () => {
+    const detector = DeterministicDetector.new({
+      id: "ordered-patches",
+      supported_sources: ["user"],
+      keywords: ["later", "earlier"],
+      regex: [],
+      secret_patterns: [],
+    });
+    const result = await detector.evaluate(
+      inputFrom({ messages: [{ role: "user", content: "earlier later" }] }),
+      DEADLINE(),
+    );
+
+    expect(result.findings).toHaveLength(2);
+    expect(result.patches.map((patch) => [patch.byte_start, patch.byte_end])).toEqual([
+      [8, 13],
+      [0, 7],
+    ]);
   });
 });
 
@@ -213,16 +301,17 @@ describe("config validation", () => {
    * Bounded evidence (`MAX_FINDINGS_PER_EVALUATION`). Two properties, both
    * load-bearing:
    *
-   *  1. per-request memory is CAPPED regardless of input size — an unbounded
-   *     findings array is an O(N) memory amplifier a repetitive flood can open;
+   *  1. per-request finding/evidence memory is CAPPED regardless of input size
+   *     — an unbounded findings array is an O(N) memory amplifier a repetitive
+   *     flood can open;
    *  2. truncation FAILS CLOSED. The marker is a zero-width located finding at
    *     `[0, 0)`, which no positive-width patch can ever cover, so a downstream
    *     `has_unredactable_findings` check forces Deny. A truncated scan can
    *     never be fully scrubbed, so it must never be treated as scrubbable.
    *
-   * The cap bounds memory, not the current quadratic CPU cost on repetitive
-   * attacker-controlled input. Issue #817 tracks that production defect; a
-   * longer test timeout here would only hide its signal.
+   * The cap is not a raw-input or CPU cap. Repetitive keyword matching and
+   * patch bookkeeping stay linear after #817; regex engine runtime and raw
+   * input processing remain separate controls.
    */
   test("bounded evidence: >10k matches emit one detector.truncated marker", async () => {
     const detector = DeterministicDetector.new({
@@ -298,5 +387,58 @@ describe("config validation", () => {
     const result = await detector.evaluate(input, Date.now() + 30_000);
     expect(result.findings.some((f) => f.category === "detector.truncated")).toBe(false);
     expect(result.findings).toHaveLength(10);
+  });
+
+  test("the finding cap also covers structured findings", async () => {
+    const detector = DeterministicDetector.new({
+      id: "json-flood",
+      supported_sources: ["user"],
+      keywords: [],
+      regex: [],
+      secret_patterns: [],
+      json: { required_keys: ["/required"], forbidden_keys: [] },
+    });
+    const input = inputFrom({
+      messages: Array.from({ length: MAX_FINDINGS_PER_EVALUATION + 1 }, () => ({
+        role: "user",
+        content: "not-json",
+      })),
+    });
+    const result = await detector.evaluate(input, Date.now() + 30_000);
+
+    expect(result.findings).toHaveLength(MAX_FINDINGS_PER_EVALUATION + 1);
+    expect(result.findings.filter((f) => f.category === "detector.truncated")).toHaveLength(1);
+    expect(result.findings.at(-1)?.category).toBe("detector.truncated");
+  });
+});
+
+describe("repetitive input complexity", () => {
+  test("keeps byte encoding and overlap checks bounded across three input sizes", async () => {
+    const detector = DeterministicDetector.new({
+      id: "complexity",
+      supported_sources: ["user"],
+      keywords: ["x"],
+      regex: [],
+      secret_patterns: [],
+    });
+    const samples = [];
+    for (const size of [1_250, 2_500, 5_000]) {
+      samples.push(await measureRepetitiveInput(detector, size));
+    }
+
+    expect(samples.map((sample) => sample.size)).toEqual([1_250, 2_500, 5_000]);
+    for (const sample of samples) {
+      expect(sample.findings).toBe(sample.size);
+      expect(sample.patches).toBe(sample.size);
+      // One cached segment encoding is enough; a small allowance permits one
+      // encode per scan while still rejecting one encode per match.
+      expect(sample.encodeCalls).toBeLessThanOrEqual(2);
+      // `byteLen(segment.text)` must not run once per match. Counting the
+      // underlying code-point visits keeps this assertion deterministic.
+      expect(sample.codePointAtCalls).toBeLessThanOrEqual(sample.size * 10);
+      // A linear scan over all prior intervals would exceed this bound by the
+      // largest input size; the matcher must answer overlap without O(k^2).
+      expect(sample.overlapChecks).toBeLessThanOrEqual(sample.size * 4);
+    }
   });
 });
