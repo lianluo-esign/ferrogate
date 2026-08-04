@@ -793,6 +793,31 @@ token/state format change, which is a smaller diff than the migration would be).
 
 ---
 
+## Execution sub-issues (ordered)
+
+The issue was written against a 78-table census. The live schema is now **81 tables**:
+56 tables from `sql/d1-ts/control/`, 3 MCP identity tables created by application code, and
+22 tables from `sql/d1-ts/tenant/`. The three runtime-created tables are included as C57-C59
+above; the issue title keeps the original 78-table wording for history.
+
+The classification is deliberately separate from the moves. Each move below has one PR-sized
+scope, an explicit reader disposition, and a dependency order that follows Part 4:
+
+| step | scope | sub-issue |
+|---|---|---|
+| 1 | `request_logs`, `agent_runs`, `agent_run_events` | [#859](https://github.com/lianluo-esign/ferrogate/issues/859) |
+| 2 | guardrail evidence and policy state | [#860](https://github.com/lianluo-esign/ferrogate/issues/860) |
+| 3 | split `control_plane_resources` by document kind | [#861](https://github.com/lianluo-esign/ferrogate/issues/861) |
+| 4 | MCP registrations, credentials, and identity generations | [#862](https://github.com/lianluo-esign/ferrogate/issues/862) |
+| 5 | tenant configuration, secrets, and policy records | [#863](https://github.com/lianluo-esign/ferrogate/issues/863) |
+| 6 | managed/self-hosted workers and schedules | [#856](https://github.com/lianluo-esign/ferrogate/issues/856) |
+| 7 | assets and retention state | [#851](https://github.com/lianluo-esign/ferrogate/issues/851) |
+| 8 | usage, evaluation, audit, and derived rollups | [#852](https://github.com/lianluo-esign/ferrogate/issues/852) |
+| 9 | billing and wallet state as one consistency domain | [#858](https://github.com/lianluo-esign/ferrogate/issues/858) |
+
+The sub-issues are attached to #831 in this order. A later move cannot start until its named
+cross-tenant reader and transactional coupling are covered by the earlier slice or by #825.
+
 ## What this document does not decide
 
 - **Where the projection lands.** Alarm→control-D1 write vs alarm→Queue→consumer is a
