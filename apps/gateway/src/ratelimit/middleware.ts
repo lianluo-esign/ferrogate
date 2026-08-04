@@ -20,11 +20,17 @@
  * and 3 need durable spend/balance reads, which arrive through the
  * {@link SpendSource} port in `./quota.ts`: `d1SpendSource` reads
  * `usage_monthly_rollups` (each budgeted scope's aggregate spend for the current
- * calendar month) and `wallets` minus the live `wallet_reservations` holds, all
- * out of the TENANT database the `DB` binding already points at. A deployment
- * with no `DB` bound gets `NO_SPEND_SOURCE`, which reports the same values an
- * empty store would — 0 spent, no wallet — so binding the database can only
- * tighten admission, never loosen it.
+ * calendar month) and `wallets` minus the live `wallet_reservations` holds. A
+ * deployment with no `DB` bound gets `NO_SPEND_SOURCE`, which reports the same
+ * values an empty store would — 0 spent, no wallet — so binding the database can
+ * only tighten admission, never loosen it.
+ *
+ * Those two legs no longer read the SAME database, and `defaultSpendSource`
+ * below is where the split is decided. Since #819 a tenant's `wallets` row lives
+ * inside `env.TENANT_DATA.idFromName(tenantId)`, so the wallet leg follows the
+ * routed handle — the same database step 3b reserves in. The rollup leg stays on
+ * `env.DB`, because that is still where `../metering/` WRITES it. Each leg reads
+ * what writes it; that is the whole rule.
  *
  * ## The four guards this file MOUNTS, which existed and guarded nothing
  *
@@ -108,16 +114,19 @@ import {
 } from "./ports.js";
 import {
   type BudgetHoldBindings,
+  NO_SPEND_SOURCE,
   type QuotaBindings,
   type QuotaPolicySource,
   type QuotaSubject,
   type SpendBindings,
   type SpendSource,
+  type WalletBalanceReading,
   budgetHoldUsdFromEnv,
   currentPeriodMonth,
   monthlyBudgetCharges,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
+  routedWalletSpendSource,
   spendSourceFromEnv,
 } from "./quota.js";
 import {
@@ -188,7 +197,10 @@ export interface RateLimitDeps extends RateLimitOptions {
   readonly quotas?: QuotaPolicySource | ((env: RateLimitBindings) => QuotaPolicySource);
   /**
    * Override the spend/wallet source behind admission steps 2 and 3. Defaults
-   * to {@link spendSourceFromEnv}, i.e. the tenant database when `DB` is bound.
+   * to `defaultSpendSource`: the monthly rollups from `env.DB` (where the
+   * metering sink writes them) and the WALLET balance from whichever database
+   * admission step 3b reserves in — the tenant's own Durable Object under the
+   * `durable_object` default, `env.DB` only when routing is explicitly `"off"`.
    */
   readonly spend?: SpendSource | ((env: RateLimitBindings) => SpendSource);
   /**
@@ -457,6 +469,66 @@ function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings):
 }
 
 /**
+ * The spend readings, with the WALLET leg pointed at the same database
+ * {@link defaultWalletAdmission} reserves in — chosen by the same rule, for the
+ * same reason {@link defaultWorkflowBudgets} states.
+ *
+ * Step 3 (this function's `walletBalanceCredits`) and step 3b
+ * ({@link defaultWalletAdmission}) are two halves of ONE wallet decision: step 3
+ * bounds CUMULATIVE spend against the settled balance, step 3b bounds CONCURRENT
+ * admission with an in-statement guard. Neither substitutes for the other, and
+ * both must therefore read the same `wallets` row. Until this function existed,
+ * step 3 read `env.DB` while step 3b reserved inside the tenant's Durable
+ * Object, so a tenant funded in its object was refused on a stale row in a
+ * database nothing writes any more, and a fresh routed deployment ran step 3 as
+ * dead code. Three functions, one rule, next to each other — see
+ * {@link routedWalletSpendSource} for why the ROLLUP leg deliberately does not
+ * move with it.
+ */
+function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): SpendSource {
+  const rollups = spendSourceFromEnv(env);
+  const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
+  // Only an EXPLICIT `"off"` keeps the wallet on the shared `DB`; an
+  // unparseable value is not a licence to guess, exactly as in
+  // `defaultWalletAdmission`.
+  if (mode === "off") return rollups;
+  if (mode === "durable_object" && env.TENANT_DATA === undefined) {
+    // No tenant storage bound at all ⇒ no `wallets` row exists for any tenant.
+    // `availableCredits: null` is the OPT-IN answer ("this tenant has no
+    // wallet"), never `0`, and never a read of `env.DB` — the same conclusion
+    // `NO_WALLET_ADMISSION` reaches at step 3b, reached the same way.
+    return { ...rollups, walletBalanceCredits: NO_SPEND_SOURCE.walletBalanceCredits };
+  }
+  const routed = routedWalletSpendSource(rollups, async (tenantId) => {
+    const handle = await tenantDatabaseOf(c).handle();
+    if (handle.tenantId !== tenantId) {
+      // The same cross-check `routedWalletAdmission` makes, for the same
+      // reason: reading one tenant's balance to admit another is a denial (or
+      // an admission) taken against the wrong money.
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this balance check is ` +
+          `for tenant ${tenantId}; refusing rather than reading the wrong wallet`,
+      );
+    }
+    return handle.db;
+  });
+  return {
+    committedSpendUsd: (scopeKind, scopeId, periodMonth) =>
+      rollups.committedSpendUsd(scopeKind, scopeId, periodMonth),
+    async walletBalanceCredits(tenantId: string): Promise<WalletBalanceReading> {
+      // A platform-operator credential is account-global by definition, so
+      // there is no single tenant whose balance it could be spending. `null`
+      // (no wallet) is the answer, exactly the arm step 3b takes via
+      // `NO_WALLET_ADMISSION` — and, like it, NOT a read of `env.DB`.
+      if (tenantDatabaseOf(c).tenantId === null) {
+        return NO_SPEND_SOURCE.walletBalanceCredits(tenantId);
+      }
+      return routed.walletBalanceCredits(tenantId);
+    },
+  };
+}
+
+/**
  * The RPM + quota-denial guard.
  *
  * MUST be mounted AFTER `contractAuth`, because it reads `c.get("auth")` — a
@@ -483,7 +555,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
         ? deps.quotas(env)
         : (deps.quotas ?? quotaPolicySourceFromEnv(env));
     const spend =
-      typeof deps.spend === "function" ? deps.spend(env) : (deps.spend ?? spendSourceFromEnv(env));
+      typeof deps.spend === "function" ? deps.spend(env) : (deps.spend ?? defaultSpendSource(c, env));
     const wallet =
       typeof deps.wallet === "function"
         ? deps.wallet(env)
