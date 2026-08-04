@@ -14,18 +14,21 @@
 # time, which can't be runtime-configured any other way -- see
 # src/lib/config.ts).
 #
-# ONE variable since #696. The Rust-era pair (AUTH_BASE_URL for the deleted
-# ferrogate-auth-service, GATEWAY_ADMIN_BASE_URL for the deleted gateway
-# /admin/v1) described a topology that no longer exists AND that the TypeScript
-# control plane refuses: it 403s cross-site mutations on sec-fetch-site and
-# preflights only /admin/, so a console on a second origin cannot even log in.
-# Leaving CONTROL_PLANE_BASE_URL unset -- the normal case -- makes the console
-# call the origin it was served from, which is what the supported deployment
-# (Workers Static Assets on apps/control-plane) gives it.
+# The control plane and gateway are separate runtime origins. The former must
+# stay same-origin with the console for browser mutations; the latter owns
+# data-plane paths such as assets and published sites.
 set -eu
+
+# New names take precedence. The legacy names keep existing container and
+# Kubernetes images usable during the migration: ADMIN_API_BASE_URL is the
+# old dedicated control-plane proxy and GATEWAY_ADMIN_BASE_URL is the gateway
+# origin that also serves the data-plane paths.
+control_plane_base_url="${CONTROL_PLANE_BASE_URL:-${ADMIN_API_BASE_URL:-}}"
+gateway_base_url="${GATEWAY_BASE_URL:-${GATEWAY_ADMIN_BASE_URL:-}}"
 
 cat > /usr/share/nginx/html/env-config.js <<JS
 window.__ENV__ = {
-  VITE_CONTROL_PLANE_BASE_URL: "${CONTROL_PLANE_BASE_URL:-}"
+  VITE_CONTROL_PLANE_BASE_URL: "${control_plane_base_url}",
+  VITE_GATEWAY_BASE_URL: "${gateway_base_url}"
 };
 JS

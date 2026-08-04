@@ -1,4 +1,4 @@
-// The console talks to ONE origin: its own (#696).
+// Control-plane requests stay on the console's own origin (#696).
 //
 // THE DEFECT THIS PINS
 // --------------------
@@ -21,7 +21,7 @@
 //     (`OPTIONS /v1/admin/login`) 404s and the login is never even sent.
 //
 // Neither is a bug to relax: they are the CSRF posture of an admin surface.
-// The fix is to stop being cross-origin, which `apps/control-plane`'s
+// The fix is to keep control-plane requests same-origin, which `apps/control-plane`'s
 // `[assets]` block now makes true in production by serving this console from
 // the control-plane Worker itself.
 //
@@ -47,6 +47,7 @@ import {
   gatewayPost,
   gatewayPut,
 } from "@/lib/gateway-client";
+import { baseUrlForRequestPath } from "@/lib/config";
 
 describe("every control-plane request the console makes is same-origin", () => {
   /** Absolute URLs `fetch` was called with, in order, for the current test. */
@@ -127,4 +128,29 @@ describe("every control-plane request the console makes is same-origin", () => {
     expect(url.searchParams.get("limit")).toBe("25");
     expect(url.searchParams.get("offset")).toBe("50");
   });
+});
+
+
+describe("routes each request to the service that owns its path", () => {
+  const controlPlane = "https://control-plane.example.test";
+  const gateway = "https://gateway.example.test";
+
+  it.each([
+    ["/admin", controlPlane],
+    ["/admin/v1/plans", controlPlane],
+    ["/control/v1/status", controlPlane],
+    ["/v1/admin/login", controlPlane],
+    ["/scim/v2/Users", controlPlane],
+    ["/metrics", controlPlane],
+    ["/v1/assets", gateway],
+    ["/v1/agent-jobs/run-1/events", gateway],
+    ["/v1/mcp/identity/github", gateway],
+    ["/v1/tools", gateway],
+    ["/sites/acme/docs/", gateway],
+  ] satisfies readonly [string, string][]) (
+    "%s uses its owning backend",
+    (path, expected) => {
+      expect(baseUrlForRequestPath(path, controlPlane, gateway)).toBe(expected);
+    },
+  );
 });

@@ -44,12 +44,12 @@ the gateway process:
 helm upgrade --install ferrogate charts/ferrogate \
   --set adminConsole.enabled=true \
   --set adminConsole.ingress.enabled=true \
-  --set adminConsole.env.authBaseUrl=https://auth.ferrogate.example.com \
-  --set adminConsole.env.gatewayAdminBaseUrl=https://ferrogate.example.com
+  --set adminConsole.env.controlPlaneBaseUrl=https://admin-api.ferrogate.example.com \
+  --set adminConsole.env.gatewayBaseUrl=https://ferrogate.example.com
 ```
 
 It has no secrets, PVCs, or `/metrics` — just a stateless Deployment/Service
 health-checked at `/healthz`, and its own optional Ingress
-(`adminConsole.ingress.*`) on a distinct host, since it calls the gateway and
-auth service Services cross-origin (both need CORS configured for that
-host).
+(`adminConsole.ingress.*`) on a distinct host. Control-plane mutations must be
+served same-origin through the configured control-plane proxy, while gateway
+data-plane paths use `gatewayBaseUrl` and need their own CORS configuration.

@@ -1,4 +1,4 @@
-import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
+import { baseUrlForRequestPath } from "@/lib/config";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
 import type { components, paths } from "@/lib/api-types.generated";
 
@@ -192,7 +192,7 @@ export interface GatewayRequestOptions {
 }
 
 function buildUrl(path: string, query?: GatewayRequestOptions["query"]): string {
-  const url = new URL(path, GATEWAY_ADMIN_BASE_URL);
+  const url = new URL(path, baseUrlForRequestPath(path));
   if (query) {
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) url.searchParams.set(key, String(value));

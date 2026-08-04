@@ -85,10 +85,12 @@ adminConsole:
           - path: /
             pathType: Prefix
     tls: []
-  # Rendered as container env vars AUTH_BASE_URL / GATEWAY_ADMIN_BASE_URL,
-  # which the image's nginx entrypoint turns into env-config.js at
-  # container start -- see admin-console/render-env-config.sh.
+  # Rendered as container env vars and turned into env-config.js at container
+  # start -- see admin-console/render-env-config.sh. The control-plane origin
+  # owns /admin/v1/* and the gateway origin owns /v1/* and /sites/*.
   env:
+    controlPlaneBaseUrl: ""
+    gatewayBaseUrl: ""
     authBaseUrl: "https://auth.ferrogate.example.com"
     gatewayAdminBaseUrl: "https://ferrogate.example.com"
     # Optional: the dedicated admin-console API service (issue #315,

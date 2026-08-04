@@ -1,12 +1,13 @@
-// The console's contract IS the control plane's contract (#696).
+// The console's API contract is the shared runtime contract (#696).
 //
 // WHAT THIS CLOSES
 // ----------------
 // The console generates `src/lib/api-types.generated.ts` from
 // `docs/openapi/admin-api.openapi.json`, and the `api-contract-drift` workflow
 // gates that one hop. The hop BEFORE it was ungated: nothing checked that
-// `admin-api.openapi.json` still describes the surface the TypeScript control
-// plane actually serves. That plane is table-driven off a DIFFERENT document —
+// `admin-api.openapi.json` still describes the shared runtime surface. The
+// TypeScript control plane owns only its admin slice of that document and is
+// table-driven off the same source —
 // `docs/openapi/runtime-api-contract.json`, which `apps/control-plane/src/
 // contract.ts` imports, validates at module load, and turns directly into its
 // route table and its auth/RBAC guards.
@@ -15,10 +16,11 @@
 // that rots quietly: the console would keep type-checking against a spec the
 // server had moved on from, and the first symptom would be a 404 in a browser.
 //
-// It holds TODAY — that was the first thing #696's audit checked, and all 251
-// operations match on both sides with zero divergence in either direction. So
-// this is a characterization gate, not a fix: it pins a property that is
-// currently true and would otherwise be nobody's job to keep true.
+// It holds TODAY — that was the first thing #696's audit checked, and all
+// shared operations match on both sides with zero divergence in either
+// direction. The backend origin predicate in `config.ts` separately sends
+// gateway-owned `/v1/*` and `/sites/*` paths to the data plane; this test does
+// not claim that the control-plane Worker serves those paths.
 //
 // WHY NOT COMPARE THE CONSOLE'S CALL SITES INSTEAD
 // ------------------------------------------------
@@ -27,7 +29,7 @@
 // each bespoke page) and requires every contract GROUP to have a surface or a
 // reviewed exclusion. That gate answers "does the console cover the contract".
 // This one answers the question underneath it — "is that contract the one the
-// server implements" — and the two together are what make the coverage claim
+// runtime implements" — and the two together are what make the coverage claim
 // mean anything.
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -74,7 +76,7 @@ function consoleOperations(): Map<string, string> {
   return operations;
 }
 
-/** `METHOD /path` for every operation the runtime contract declares. */
+/** `METHOD /path` for every operation the shared runtime contract declares. */
 function runtimeOperations(): Map<string, string> {
   const document = readJson<{ operations: RuntimeOperation[] }>(RUNTIME_CONTRACT);
   return new Map(
@@ -85,8 +87,8 @@ function runtimeOperations(): Map<string, string> {
   );
 }
 
-describe("the console's Admin API spec matches the control plane's route table", () => {
-  it("declares no operation the control plane does not route", () => {
+describe("the console's Admin API spec matches the runtime contract", () => {
+  it("declares no operation the runtime does not route", () => {
     const runtime = runtimeOperations();
     const orphaned = [...consoleOperations().keys()].filter((key) => !runtime.has(key));
     // An orphan is a console screen that type-checks and 404s: the generated
@@ -97,7 +99,7 @@ describe("the console's Admin API spec matches the control plane's route table",
     ).toEqual([]);
   });
 
-  it("is not missing an operation the control plane routes", () => {
+  it("is not missing an operation the runtime routes", () => {
     const spec = consoleOperations();
     const unspecified = [...runtimeOperations().keys()].filter((key) => !spec.has(key));
     // The mirror direction: a served operation absent from the console's spec is
@@ -105,7 +107,7 @@ describe("the console's Admin API spec matches the control plane's route table",
     // against it without hand-writing an untyped call.
     expect(
       unspecified,
-      `served by the control plane but absent from docs/openapi/admin-api.openapi.json: ${unspecified.join(", ")}`,
+      `served by the runtime but absent from docs/openapi/admin-api.openapi.json: ${unspecified.join(", ")}`,
     ).toEqual([]);
   });
 

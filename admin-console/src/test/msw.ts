@@ -7,8 +7,9 @@
 // automatically after each test). Unhandled requests FAIL the test, so every
 // request a component makes must be mocked explicitly.
 //
-// Base URL comes from `src/lib/config.ts`, which resolves the console's OWN
-// origin (jsdom: http://localhost:3000) — one origin for both surfaces.
+// Base URLs come from `src/lib/config.ts`: control-plane paths default to the
+// console's own origin (jsdom: http://localhost:3000), while data-plane paths
+// can be configured for the gateway.
 //
 // ```ts
 // import { HttpResponse, http } from "msw";
@@ -26,20 +27,17 @@
 // ```
 import { HttpResponse, http } from "msw";
 import { setupServer } from "msw/node";
-import { CONTROL_PLANE_BASE_URL } from "@/lib/config";
+import { baseUrlForRequestPath, CONTROL_PLANE_BASE_URL } from "@/lib/config";
 
 export const server = setupServer();
 
-// Both helpers resolve against `CONTROL_PLANE_BASE_URL` — ONE origin since
-// #696, because `apps/control-plane` serves both `/admin/v1/*` and
-// `/v1/admin/*` and the console must be same-origin with it (`src/lib/config.ts`
-// carries the CSRF/preflight argument). They are still two functions so the two
-// surfaces read differently at their call sites; under jsdom the origin they
-// both produce is `window.location.origin`.
+// Admin API paths resolve through the same ownership predicate as the real
+// client. Under jsdom both configured origins normally default to the document
+// origin, while a production build can point data-plane paths at the gateway.
 
 /** Absolute URL for an Admin API path, e.g. `gatewayUrl("/admin/v1/plans")`. */
 export function gatewayUrl(path: string): string {
-  return new URL(path, CONTROL_PLANE_BASE_URL).toString();
+  return new URL(path, baseUrlForRequestPath(path)).toString();
 }
 
 /** Absolute URL for a console-session path, e.g. `authUrl("/v1/admin/login")`. */

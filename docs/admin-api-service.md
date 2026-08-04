@@ -150,13 +150,13 @@ processes.
 
 ## Console wiring
 
-The console reads `ADMIN_API_BASE_URL` (rendered into `env-config.js` by
-`admin-console/render-env-config.sh`) and prefers it over the legacy
-`GATEWAY_ADMIN_BASE_URL`, which remains a backward-compatible fallback.
-Kubernetes manifests: `deploy/kubernetes/admin-api.yaml` runs the service
-against the shared `ferrogate-config` ConfigMap; the admin-console
-Deployment (and the Helm chart's `adminConsole.env.adminApiBaseUrl`
-value) points the console at it.
+The console reads `CONTROL_PLANE_BASE_URL` and `GATEWAY_BASE_URL` (rendered
+into `env-config.js` by `admin-console/render-env-config.sh`). The legacy
+`ADMIN_API_BASE_URL` and `GATEWAY_ADMIN_BASE_URL` names remain renderer
+fallbacks for older images. Kubernetes manifests:
+`deploy/kubernetes/admin-api.yaml` runs the service against the shared
+`ferrogate-config` ConfigMap; the admin-console Deployment points the
+control-plane origin at it.
 
 ## Tests
 
