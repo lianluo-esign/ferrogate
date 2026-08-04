@@ -148,13 +148,21 @@ function deadlineFetch(
       }
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("request deadline exceeded"));
+      }, timeoutMs);
+    });
     try {
       const signal =
         typeof AbortSignal.any === "function"
           ? AbortSignal.any([request.signal, controller.signal])
           : controller.signal;
-      return await base(new Request(request, { signal }));
+      // Abort compliant fetch implementations and release callers whose
+      // injected fetch does not observe AbortSignal.
+      return await Promise.race([base(new Request(request, { signal })), timeout]);
     } catch (error) {
       if (controller.signal.aborted) {
         throw new FerrogateTransportError(
@@ -165,7 +173,7 @@ function deadlineFetch(
       }
       throw transportError(request.url, error);
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
   };
 }
