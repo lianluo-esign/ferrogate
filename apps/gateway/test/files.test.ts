@@ -34,11 +34,18 @@ const ENV = {
       tenant_id: "tenant_files_other",
       scopes: ["assets.read", "assets.write"],
     },
+    {
+      key: "fg_files_quota",
+      id: "key_files_quota",
+      tenant_id: "tenant_files_quota",
+      scopes: ["assets.read", "assets.write"],
+    },
   ]),
   ASSET_ENTITLEMENTS: JSON.stringify({
     tenant_files: { asset_hosting_enabled: true },
     tenant_files_no_host: { asset_hosting_enabled: false },
     tenant_files_other: { asset_hosting_enabled: true },
+    tenant_files_quota: { asset_hosting_enabled: true, asset_storage_quota_bytes: 5 },
   }),
 };
 
@@ -187,5 +194,33 @@ describe("OpenAI-compatible Files API", () => {
     const ownerContent = await call(`/v1/files/${file.id}/content`);
     expect(ownerContent.status).toBe(200);
     expect(await ownerContent.text()).toBe("tenant-owned content");
+  });
+
+  test("preserves asset quota and screening state", async () => {
+    const { call } = gateway();
+
+    const overQuota = await call("/v1/files", {
+      method: "POST",
+      token: "fg_files_quota",
+      body: fileForm("too large"),
+    });
+    expect(overQuota.status).toBe(403);
+    expect((await overQuota.json() as { error: { code: string } }).error.code).toBe(
+      "asset_storage_quota_exceeded",
+    );
+
+    const screened = await call("/v1/files", {
+      method: "POST",
+      body: fileForm(
+        "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+        "infected.txt",
+      ),
+    });
+    expect(screened.status).toBe(202);
+    const file = (await screened.json()) as FileObject;
+    expect(file.status).toBe("error");
+
+    const content = await call(`/v1/files/${file.id}/content`);
+    expect(content.status).toBe(404);
   });
 });
