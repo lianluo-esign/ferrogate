@@ -10,7 +10,7 @@
  * test. So a tenant created through the admin API or through console signup was
  * invisible to every fleet view, and had an empty model catalog. (This sentence
  * used to end "which is `400 model_not_found` on its first inference request".
- * It is not: nothing in `apps/<app>/src` reads the tenant `model_catalog` table, and
+ * It is not: nothing in `apps/<app>/src` reads the tenant catalog tables yet, and
  * the gateway resolves models from `GATEWAY_MODELS` / `GATEWAY_PROVIDERS`. The
  * roster half was the real defect; see `@ferrogate/storage`\'s
  * `tenant-model-catalog.ts` for what the seed is actually for.)

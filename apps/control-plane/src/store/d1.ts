@@ -1157,13 +1157,13 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 //     statement above. The Rust schema did not need it because its D1 topology
 //     isolated tenants PHYSICALLY (one database per tenant); this Worker holds
 //     one control database, so the fence is logical.
-//  2. The REMAINING typed tables are still not written: `gateway_providers`,
-//     `gateway_models`, `site_domains` (control) and `wallets` (tenant). The
+//  2. The REMAINING typed tables are still not written: `site_domains` (control)
+//     and `wallets` (tenant). The
 //     pattern is settled (see above) and the rest is mechanical rather than
 //     undecided, but each remaining one is load-bearing for a DIFFERENT slice
 //     and is reported here rather than guessed: the gateway's model resolver
-//     reads `gateway_providers`/`gateway_models` and owns what a "deployed
-//     model" means, `site_domains` is verified by `routes/site_domain.ts`'s
+//     model resolver is still env-backed and owns what a "deployed model"
+//     means, `site_domains` is verified by `routes/site_domain.ts`'s
 //     rate-limited DNS challenge (whose CAS lives in the document today), and
 //     `wallets` is money, whose ledger/balance pair `routes/wallets.ts` already
 //     writes through `store.atomic()` and must not gain a second, unguarded

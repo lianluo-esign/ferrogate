@@ -202,7 +202,7 @@ describe("POST /admin/v1/tenant-accounts", () => {
 
     const handle = await router().forTenant(tenantId);
     await handle.db
-      .prepare("DELETE FROM model_catalog WHERE tenant_id = ? AND model = ?")
+      .prepare("DELETE FROM catalog_models WHERE tenant_id = ? AND name = ?")
       .bind(tenantId, "gpt-5")
       .run();
 
@@ -237,9 +237,10 @@ describe("POST /admin/v1/tenant-accounts", () => {
     const b = await router().forTenant(second);
     await a.db
       .prepare(
-        "UPDATE model_catalog SET input_price_per_1m = 42.0 WHERE tenant_id = ? AND model = ?",
+        "UPDATE catalog_model_offerings SET input_price_per_1m = 42.0 " +
+          "WHERE tenant_id = ? AND model_id = ?",
       )
-      .bind(first, "gpt-4o")
+      .bind(first, `${first}:model:gpt-4o`)
       .run();
 
     expect((await resolveTenantModel(a.db, first, "gpt-4o"))?.inputPricePer1m).toBe(42.0);
@@ -250,7 +251,7 @@ describe("POST /admin/v1/tenant-accounts", () => {
     // one object would pass the assertion above by writing 42.0 into the shared
     // row and then reading a row it had not touched.
     const rows = await b.db
-      .prepare("SELECT DISTINCT tenant_id FROM model_catalog")
+      .prepare("SELECT DISTINCT tenant_id FROM catalog_models")
       .all<{ tenant_id: string }>();
     expect(rows.results.map((row) => row.tenant_id)).toEqual([second]);
   });

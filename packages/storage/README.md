@@ -45,7 +45,7 @@ A family lives in **CONTROL** when any of these hold:
 
 | rule | why | examples |
 |---|---|---|
-| **(a)** account-global configuration shared across tenants | there is no tenant to route it to | `plans`, `permissions`, `roles`, `gateway_providers`, `gateway_models` |
+| **(a)** account-global configuration shared across tenants | there is no tenant to route it to | `plans`, `permissions`, `roles` |
 | **(b)** read on a path that has **no tenant id yet** | the lookup is what *produces* the tenant id, so it cannot be tenant-routed | `api_key_directory`, `static_api_keys`, `site_domains`, `quota_policies`, `sso_pending_flows` |
 | **(c)** rows span tenants by nature | one human belongs to several tenants, so the edge fits in no single tenant database | `tenants`, `tenant_databases`, `admin_user_tenant_memberships` |
 | **(d)** whole-table, time-ordered, `count(*)`-paginated cross-tenant analytics | the `tenant` column is a **composite storage key**, not a routing key; sharding would turn every list into a lossy fan-out merge-sort plus fetch-all-then-slice pagination | `request_logs`, `audit_events`, `agent_runs`, `billing_*`, `guardrail_*`, managed/self-hosted worker stores |
@@ -63,14 +63,13 @@ admin_users  admin_user_tenant_memberships  admin_user_refresh_tokens
 sso_provider_configs  sso_pending_flows
 site_domains  site_domain_verifications  budget_alert_notifications
 api_key_directory  static_api_keys
-gateway_providers  gateway_models
 billing_ledger  billing_report_outbox  billing_events
 guardrail_policy_revisions  guardrail_policy_bindings
 agent_runs  agent_run_events  request_logs  audit_events
 managed_worker_*  agent_worker_instances  self_hosted_worker_*  self_hosted_run_dispatches
 ```
 
-**TENANT** — `sql/d1-ts/tenant/0001_init_tenant.sql`, one database per tenant
+**TENANT** — `sql/d1-ts/tenant/*.sql`, one routed tenant database or Durable Object
 
 ```
 projects  workspaces  api_keys
@@ -80,6 +79,8 @@ stored_assets  asset_channels  retention_policies
 workflow_run_budgets
 agent_schedules  agent_schedule_fires
 observed_agent_presence  agent_cost_burn
+tenant_database_identity  provider_channels  catalog_models
+catalog_model_offerings  catalog_revisions
 ```
 
 ### Divergences from the Rust D1 file, stated so they are auditable
@@ -119,15 +120,15 @@ load-bearing tables. Four deliberate divergences:
    object that no read path can name; `R2AssetBlobStore.deleteOrphans` reclaims
    it.
 
-3. **The model/provider registry becomes tables.** In Rust this is *configuration*
-   (`[[providers]]` / `[[models]]` TOML, today the `GATEWAY_PROVIDERS` /
-   `GATEWAY_MODELS` Worker vars). There is no Rust *table* to keep parity with,
-   so the columns are named after the config keys `apps/gateway/src/inference/
-   catalog.ts` already validates. Two loader invariants become DDL: `models.name`
-   is UNIQUE (Rust refuses to boot on `DuplicateModel`) and `models.provider` is
-   a real FK (Rust refuses to boot on an unknown provider). **Credentials are
-   never stored** — `api_key_var` names a secret binding, exactly as
-   `api_key_env` named an environment variable.
+3. **The model/provider registry is tenant-owned catalog data.**
+   `provider_channels` stores endpoint and secret-reference metadata,
+   `catalog_models` stores the logical client-facing SKU, and
+   `catalog_model_offerings` stores one upstream leg and its price. A model can
+   therefore have several channels and prices without duplicating the logical
+   model. The new schema's role/binding uniques and real foreign keys carry the
+   loader invariants; **credentials are never stored** — `api_key_var` names a
+   secret binding. The gateway still uses `GATEWAY_PROVIDERS` /
+   `GATEWAY_MODELS` until #812 makes this graph the runtime source.
 
 4. **`tenant_databases` is a new control table.** Rust kept the tenant→database
    registry only as a `control_plane_resources` JSON document, because it reached
@@ -463,9 +464,9 @@ pass `--local` plus an explicit path; the D1 suite loads both sets through
   approximation is claim-then-accumulate, whose residual window UNDER-counts
   rather than double-bills. The caller owns the ordering: run the claim first,
   accumulate only on `recorded: true`.
-* `PORT-TODO(inventory-request-path §1.6)` — the model/provider registry tables
-  exist but the gateway still reads `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` vars;
-  swapping in a D1-backed `ModelResolver` is a `packages/routing` slice.
+* `PORT-TODO(inventory-request-path §1.6)` — the tenant model catalog schema
+  exists but the gateway still reads `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` vars;
+  swapping in a tenant-DB-backed `ModelResolver` is #812.
 * `PORT-TODO(inventory-data-billing §1.7)` — `request_logs` / `audit_events` /
   `billing_events` are append-heavy and time-ordered, the exact shape Analytics
   Engine is for. Ported as D1 tables so the admin read surface stays queryable;
