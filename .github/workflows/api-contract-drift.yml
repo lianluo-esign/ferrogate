@@ -78,7 +78,9 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/ferrogate-sdk-build"
           "$RUNNER_TEMP/ferrogate-sdk-build/bin/python" -m pip install --disable-pip-version-check build
 
-      - name: Check generated clients and package artifacts
+      - name: Check generated clients, SDK runtime contracts and package artifacts
         run: |
           node tools/generated-clients/check.mjs
+          bun x vitest run tools/generated-clients/test
+          python3 -m unittest discover -s sdks/python
           PYTHON="$RUNNER_TEMP/ferrogate-sdk-build/bin/python" bun run check:sdk-packages
