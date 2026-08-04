@@ -225,7 +225,8 @@ export function unroutableTenantHttpError(error: UnroutableTenantError): HttpErr
  * and the predicate IS the isolation, exactly as it is for `api_keys`. A read
  * that dropped it would be correct on the routed topology and a cross-tenant
  * leak on the shared one — the failure mode nobody notices in a test that runs
- * only the routed shape.
+ * only the routed shape. That is not hypothetical now that `durable_object` is
+ * the gateway default (#819): the two shapes coexist across a fleet.
  */
 async function tenantAssets(
   db: D1Database,

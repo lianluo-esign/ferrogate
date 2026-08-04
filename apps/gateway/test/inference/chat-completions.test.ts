@@ -114,7 +114,7 @@ describe("POST /v1/chat/completions", () => {
       const h = harness();
       const res = await h.post(
         "/v1/chat/completions",
-        { model: "gpt-4o-mini", messages: [] },
+        { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
         { headers: { "x-request-id": "fg-deadbeefdeadbeef" } },
       );
 

@@ -59,6 +59,7 @@
         "@ferrogate/identity": "workspace:*",
         "@ferrogate/observability": "workspace:*",
         "@ferrogate/policy": "workspace:*",
+        "@ferrogate/routing": "workspace:*",
         "@ferrogate/schemas": "workspace:*",
         "@ferrogate/secrets": "workspace:*",
         "@ferrogate/sso": "workspace:*",

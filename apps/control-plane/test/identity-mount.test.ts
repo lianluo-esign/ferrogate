@@ -134,6 +134,13 @@ async function login(email: string): Promise<Session> {
 /**
  * Point a tenant at a real per-tenant D1, the way the provisioning flow would.
  *
+ * An UPSERT since #820, not an INSERT: registering a tenant now provisions its
+ * storage, which writes a `tenant_databases` row of its own — so a bare INSERT
+ * here fails the primary key and takes the whole registration flow down with it.
+ * Re-pointing the row at a D1 binding is exactly what this fixture means, and
+ * `storage_backend` has to move with it or the binding router will (correctly)
+ * refuse to serve a row that says the data lives in an object.
+ *
  * A virtual key is TWO rows — `api_key_directory` in the control database and
  * `api_keys` in the tenant's own — and the SCIM token is an ordinary virtual
  * key. Without this the projection has nowhere to write the tenant leg and the
@@ -145,7 +152,13 @@ async function provisionTenantDatabase(tenantId: string, binding: "TENANT_DB_A" 
       `INSERT INTO tenant_databases
          (tenant_id, database_uuid, database_name, binding_name, schema_version,
           provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, ?, 1, 1, 1)`,
+       VALUES (?, ?, ?, ?, 1, 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         database_uuid = excluded.database_uuid,
+         database_name = excluded.database_name,
+         binding_name = excluded.binding_name,
+         storage_backend = 'native_binding',
+         provisioning_status = 'ready'`,
     )
     .bind(tenantId, `uuid-${binding}`, `ferrogate-${binding}`, binding)
     .run();

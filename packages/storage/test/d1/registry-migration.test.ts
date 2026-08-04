@@ -79,12 +79,12 @@ describe("parseTenantDatabaseRegistryDocument", () => {
   test("refuses malformed JSON, a non-object, and a non-string uuid", () => {
     expect(() => parseTenantDatabaseRegistryDocument("{oops")).toThrow(StorageError);
     expect(() => parseTenantDatabaseRegistryDocument("[]")).toThrow(StorageError);
-    expect(() =>
-      parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":42}}'),
-    ).toThrow(StorageError);
-    expect(() =>
-      parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":"  "}}'),
-    ).toThrow(StorageError);
+    expect(() => parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":42}}')).toThrow(
+      StorageError,
+    );
+    expect(() => parseTenantDatabaseRegistryDocument('{"tenant_databases":{"a":"  "}}')).toThrow(
+      StorageError,
+    );
   });
 });
 
@@ -108,17 +108,27 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
 
     const rows = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).list();
     expect(rows).toEqual([
+      // `native_binding` / `pending` are what a migrated row MEANS under #820's
+      // vocabulary: it names a real D1 database whose `[[d1_databases]]` stanza
+      // has not been deployed, i.e. "provisioned but not yet routable". They are
+      // asserted rather than elided because the migration states them
+      // explicitly — leaving them to the column defaults would give the same two
+      // values by luck, and a later default change would move them silently.
       {
         tenantId: "acme",
         databaseUuid: "uuid-acme",
         databaseName: "ferrogate-tenant-acme",
         schemaVersion: 1,
+        storageBackend: "native_binding",
+        status: "pending",
       },
       {
         tenantId: "zeta",
         databaseUuid: "uuid-zeta",
         databaseName: "ferrogate-tenant-zeta",
         schemaVersion: 1,
+        storageBackend: "native_binding",
+        status: "pending",
       },
     ]);
   });
@@ -171,6 +181,8 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
       databaseName: "ferrogate-tenant-acme",
       bindingName: "TENANT_DB_A",
       schemaVersion: 3,
+      storageBackend: "native_binding",
+      status: "pending",
     });
   });
 
@@ -181,9 +193,9 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
         tenant_databases: { alpha: "uuid-shared", beta: "uuid-shared" },
       }),
     );
-    await expect(
-      migrateTenantDatabaseRegistryDocument(env.CONTROL_DB, NOW),
-    ).rejects.toThrow(StorageError);
+    await expect(migrateTenantDatabaseRegistryDocument(env.CONTROL_DB, NOW)).rejects.toThrow(
+      StorageError,
+    );
     // `alpha` (sorted first) landed before `beta` was refused; the refusal is
     // the point — two tenants must never share one database.
     const rows = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).list();

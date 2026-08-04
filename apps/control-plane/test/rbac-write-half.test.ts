@@ -265,6 +265,22 @@ describe("permissions reach the typed table too", () => {
 // Tenancy: a tenant admin cannot grant itself, or anyone else, a role
 // ---------------------------------------------------------------------------
 
+/**
+ * The heading above claimed both halves and these two cases only ever proved
+ * the CROSS-tenant one. The `itself` half was open until #791 — a tenant-scoped
+ * key could author `permissions: ["*"]` and bind it to its own tenant, and
+ * nothing here looked. It is pinned in `rbac-self-grant.test.ts`, which is also
+ * where the read/write split and the operator's surviving capability live.
+ *
+ * These two cases are kept unchanged and still assert what they always did (a
+ * cross-tenant write is refused and writes nothing), but note what they no
+ * longer DISTINGUISH: since #791 the refusal is `rbac_write_operator_only` from
+ * the group's write fence rather than `tenant_scope_denied` from
+ * `authorizeTenantPath`, because operator-only is checked first. Neither case
+ * asserted the code, so both stayed green — the still-live coverage of
+ * `authorizeTenantPath` is on the READ leg, in `rbac-self-grant.test.ts` and
+ * `crud.test.ts`.
+ */
 describe("the tenant fence still holds over the typed rows", () => {
   it("a tenant-scoped caller cannot bind a role into ANOTHER tenant", async () => {
     await createRole("role_reader", [ACTION]);

@@ -325,6 +325,13 @@ export function extractTextDeltas(
     return out;
   }
 
+  if (
+    eventName === "response.output_text.delta" ||
+    getString(parsed, "type") === "response.output_text.delta"
+  ) {
+    const delta = asString(get(parsed, "delta"));
+    return delta !== undefined && delta.length > 0 ? [delta] : [];
+  }
   const outputText = asString(get(parsed, "output_text"));
   if (outputText !== undefined) {
     return outputText.length > 0 ? [outputText] : [];

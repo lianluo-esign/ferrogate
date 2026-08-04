@@ -64,6 +64,7 @@
  * the inference hot path and is itself a cross-tenant read.
  */
 import type { TenantDatabaseHandle, TenantDatabaseRouter } from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { Context, MiddlewareHandler } from "hono";
 import type { GatewayBindings, GatewayEnv, GatewayVariables } from "../ports.js";
 
@@ -80,12 +81,34 @@ import type { GatewayBindings, GatewayEnv, GatewayVariables } from "../ports.js"
  */
 export type TenantDatabaseRoutingMode =
   /**
-   * DEFAULT. No per-tenant routing is configured. The resolver hands out NO
-   * handle at all: a caller that asks for one gets `503
+   * **THE DEFAULT since #819**, and the mode an absent/empty var parses to.
+   *
+   * `DurableObjectTenantDatabaseRouter` over `env.TENANT_DATA`: one
+   * SQLite-backed Durable Object per tenant, addressed
+   * `idFromName(tenantId)`. It is the only mode that is BOTH deploy-free and
+   * money-safe — a tenant's object exists the moment it is named, so onboarding
+   * is not a `wrangler deploy` and there is no ~5,000-binding ceiling, and
+   * `ctx.storage.transactionSync()` makes `batch()` one real SQLite
+   * transaction, so `supportsAtomicBatch` is `true` and the 13
+   * `requireAtomicBatch()` money paths RUN instead of refusing.
+   *
+   * Resolution performs NO control-database read: the address is a pure
+   * function of the tenant id. `CONTROL_DB` is still required, because
+   * `control()` and `provisionedTenants()` are genuinely account-global and a
+   * DO namespace cannot be enumerated in production.
+   */
+  | "durable_object"
+  /**
+   * No per-tenant routing is configured. The resolver hands out NO handle at
+   * all: a caller that asks for one gets `503
    * tenant_database_routing_disabled`. This is still fail-closed — the absence
-   * of a route is an error, not a silent redirection to the shared database —
-   * and it is what lets the middleware be mounted before the tenant databases
-   * exist without changing the behaviour of any request that does not ask.
+   * of a route is an error, not a silent redirection to the shared database.
+   *
+   * It was the default until #819 turned routing on, and it is KEPT rather
+   * than deleted: a self-hosted deployment that binds no `TENANT_DATA`
+   * namespace needs a posture that is honestly "no tenant storage" instead of
+   * a 503 on every request whose handler asks. It must now be named
+   * EXPLICITLY, so a deployment that is not routing says so in its config.
    */
   | "off"
   /**
@@ -118,8 +141,15 @@ export type TenantDatabaseRoutingMode =
    */
   | "shared_development";
 
-/** Every legal `GATEWAY_TENANT_DB_ROUTING` value, for diagnostics and tests. */
+/**
+ * Every legal `GATEWAY_TENANT_DB_ROUTING` value, for diagnostics and tests.
+ *
+ * `durable_object` is FIRST because it is the default; the order is what the
+ * misconfiguration message lists, so the mode an operator most likely wanted
+ * is the one they read first.
+ */
 export const TENANT_DATABASE_ROUTING_MODES: readonly TenantDatabaseRoutingMode[] = [
+  "durable_object",
   "off",
   "binding",
   "binding_strict",
@@ -209,8 +239,15 @@ export interface TenantDatabaseAccessor {
  * root's, and the integrate step owns it. See `WIRING` in `./index.ts`.
  */
 export interface TenancyBindings {
-  /** One of {@link TENANT_DATABASE_ROUTING_MODES}. Absent ⇒ `"off"`. */
+  /** One of {@link TENANT_DATABASE_ROUTING_MODES}. Absent ⇒ `"durable_object"`. */
   readonly GATEWAY_TENANT_DB_ROUTING?: string;
+  /**
+   * The per-tenant Durable Object namespace — `"durable_object"` mode, i.e. the
+   * default. Optional in the TYPE because a self-hosted `"binding"` or
+   * `"shared_development"` deployment legitimately declares no stanza; absent
+   * under `"durable_object"` is a NAMED 503, never a fallback to `DB`.
+   */
+  readonly TENANT_DATA?: TenantDataNamespace;
   /** Cloudflare account id — `"rest"` mode only. */
   readonly GATEWAY_TENANT_DB_ACCOUNT_ID?: string;
   /** D1-capable API token — `"rest"` mode only. A SECRET, never a var. */

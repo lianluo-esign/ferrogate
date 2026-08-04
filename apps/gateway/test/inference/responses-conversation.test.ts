@@ -11,12 +11,13 @@
  * either refused upstream or — the dangerous case — answered from half a
  * conversation with nothing in the response saying so.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { publishConversationReplayScreener } from "../../src/guardrails/conversation-replay.js";
 import { InMemoryConversationStore } from "../../src/inference/conversation-store.js";
 import type { StoredResponseTurn } from "../../src/inference/conversation-store.js";
 import { MAX_CONVERSATION_TURNS } from "../../src/inference/conversation.js";
 import type { Caller, InferenceDeps } from "../../src/inference/index.js";
-import { OPENAI_ROUTE, errorBody, harness, tenantCaller } from "./fixtures.js";
+import { ALL_ROUTES, OPENAI_ROUTE, errorBody, harness, tenantCaller } from "./fixtures.js";
 import { interceptProviderFetch, providerJson } from "./provider-mock.js";
 
 /**
@@ -137,6 +138,101 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
       expect((await errorBody(res)).error.code).toBe("previous_response_not_found");
       // The refusal happens BEFORE dispatch: no provider call, nothing billed.
       expect(provider.requests).toHaveLength(0);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("fails closed when a foreign turn needs screening but no screener is available", async () => {
+    const store = new InMemoryConversationStore();
+    await store.append(
+      { tenantId: "acme", projectId: "" },
+      {
+        responseId: "resp_foreign_unscreened",
+        previousResponseId: null,
+        screeningApiKeyId: "key_other",
+        turnIndex: 0,
+        model: "gpt-4o-mini",
+        input: [{ role: "user", content: "stored question" }],
+        response: responseBody("stored answer", "resp_foreign_unscreened"),
+        createdAtUnix: 0,
+        expiresAtUnix: 4_000_000_000,
+      },
+    );
+    const provider = interceptProviderFetch(() => providerJson(responseBody("must not dispatch")));
+    try {
+      const h = harness(
+        { conversations: store, caller: callerFor("acme") },
+        ALL_ROUTES,
+        {},
+        { conversationReplayScreener: false },
+      );
+      const res = await h.post("/v1/responses", {
+        model: "gpt-4o-mini",
+        input: "continue",
+        previous_response_id: "resp_foreign_unscreened",
+      });
+
+      expect(res.status).toBe(503);
+      expect((await errorBody(res)).error.code).toBe("guardrail_screening_unavailable");
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("re-screens a turn from another API key even when both keys select the same policies", async () => {
+    const store = new InMemoryConversationStore();
+    const screen = vi.fn(async ({ response }) => ({ ok: true as const, response }));
+    const provider = interceptProviderFetch(() => providerJson(responseBody("same answer")));
+    try {
+      const h = harness(
+        {
+          conversations: store,
+          caller: (request) => ({
+            scope: { kind: "tenant", tenantId: "acme" },
+            apiKeyId:
+              request.headers.get("authorization") === "Bearer credential-a" ? "key_a" : "key_b",
+          }),
+        },
+        ALL_ROUTES,
+        {},
+        { conversationReplayScreener: false },
+      );
+      const post = async (credential: string, body: unknown): Promise<Response> => {
+        const request = new Request("https://gw.test/v1/responses", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${credential}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        publishConversationReplayScreener(request, {
+          policyRevisionMarker: "[]",
+          screen,
+        });
+        return await h.router.request(request);
+      };
+      const first = await post("credential-a", {
+        model: "gpt-4o-mini",
+        input: "first",
+        store: true,
+      });
+      expect(first.status).toBe(200);
+      const firstId = String(((await first.json()) as Record<string, unknown>)["id"]);
+      const stored = await store.chain({ tenantId: "acme", projectId: "" }, firstId, 0);
+      expect(stored.ok && stored.turns[0]?.screeningApiKeyId).toBe("key_a");
+      expect(stored.ok && stored.turns[0]?.screeningPolicyRevision).toBe("[]");
+
+      const second = await post("credential-b", {
+        model: "gpt-4o-mini",
+        input: "continue",
+        previous_response_id: firstId,
+      });
+
+      expect(second.status).toBe(200);
+      expect(screen).toHaveBeenCalledOnce();
     } finally {
       provider.restore();
     }

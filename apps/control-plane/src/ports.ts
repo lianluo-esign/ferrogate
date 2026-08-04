@@ -16,6 +16,11 @@
  */
 import type { PromptLabelKv } from "@ferrogate/config";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
+// TYPE-ONLY, and it must stay that way: `@ferrogate/storage/durable-objects`
+// imports `DurableObject` from `cloudflare:workers`, which resolves in workerd
+// and nowhere else. A value import here would break `apps/cli` and every plain
+// node importer of this module's siblings.
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 import type { SiteDomainCertificatePort } from "./site_domain_certificates.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
@@ -434,6 +439,21 @@ export interface ControlPlaneDeps {
    */
   readonly tenantDatabases: TenantDatabaseRouter;
   /**
+   * The router tenant STORAGE PROVISIONING runs through (#820) — the Durable
+   * Object namespace when {@link ControlPlaneBindings.TENANT_DATA} is bound,
+   * otherwise the same router as {@link ControlPlaneDeps.tenantDatabases}.
+   *
+   * Optional so that a test composing a partial `deps` literal keeps compiling;
+   * {@link resolveDeps} always sets it. `provisionTenantStorageFor` falls back to
+   * `tenantDatabases` when it is absent, which is the correct answer for any
+   * deployment that binds no object namespace.
+   *
+   * The two are separate on purpose and the reason is not tidiness — see
+   * `resolveTenantStorage` in `src/adapters.ts` for what closing the gap costs
+   * and why it is not this slice.
+   */
+  readonly tenantStorage?: TenantDatabaseRouter;
+  /**
    * The CONTROL database itself, or `null` when this deployment is running
    * without one (`CONTROL_PLANE_STORE = "memory"`, or no `DB` binding).
    *
@@ -628,6 +648,24 @@ export interface ControlPlaneBindings {
    * `CONTROL_PLANE_STORE = "memory"`.
    */
   readonly DB: D1Database;
+  /**
+   * The gateway's `TenantDataObject` namespace, bound CROSS-SCRIPT (#820).
+   *
+   * The same namespace `apps/gateway` binds, reached with
+   * `script_name = "ferrogate-gateway"` — so `idFromName(tenantId)` names the
+   * SAME object from both Workers. That identity is the whole point: this app
+   * mints a tenant, and the object it provisions has to be the one the data
+   * plane will later read. A second, locally-defined namespace would give every
+   * tenant two disjoint databases and the failure would look like data loss.
+   *
+   * OPTIONAL, and its absence is a real deployment posture rather than an
+   * oversight: a `native_binding` (single-tenant / self-hosted) deployment has
+   * no tenant object namespace at all, and under that topology onboarding
+   * genuinely still requires a `wrangler deploy` to add the tenant's
+   * `[[d1_databases]]` stanza — there is nothing this Worker could provision.
+   * `resolveTenantDatabases` picks the router from this binding's presence.
+   */
+  readonly TENANT_DATA?: TenantDataNamespace;
   /**
    * The prompt-label KV namespace (`[[kv_namespaces]] binding = "PROMPT_LABELS"`).
    *

@@ -71,7 +71,9 @@ describe("ingressTraceContext", () => {
   it("falls back to the request id when the header is absent or invalid", () => {
     expect(ingressTraceContext(headers({}), "fg-1").traceId).toBe("fg-1");
     expect(ingressTraceContext(headers({ traceparent: "bogus" }), "fg-1").traceId).toBe("fg-1");
-    expect(ingressTraceContext(headers({ traceparent: "bogus" }), "fg-1").traceparent).toBeUndefined();
+    expect(
+      ingressTraceContext(headers({ traceparent: "bogus" }), "fg-1").traceparent,
+    ).toBeUndefined();
   });
 
   it("carries tracestate ONLY alongside a valid traceparent", () => {
@@ -80,7 +82,9 @@ describe("ingressTraceContext", () => {
         .tracestate,
     ).toBe("vendor=xyz");
     // An orphan `tracestate` belongs to no trace we adopted, so it is dropped.
-    expect(ingressTraceContext(headers({ tracestate: "vendor=xyz" }), "fg-1").tracestate).toBeUndefined();
+    expect(
+      ingressTraceContext(headers({ tracestate: "vendor=xyz" }), "fg-1").tracestate,
+    ).toBeUndefined();
     expect(
       ingressTraceContext(headers({ traceparent: "bogus", tracestate: "vendor=xyz" }), "fg-1")
         .tracestate,
@@ -126,5 +130,15 @@ describe("the gateway adopts the caller's trace", () => {
     expect(clean.headers.get("x-trace-id")).toBe("req_3");
     const malformed = await call("/healthz", { "x-request-id": "req_4", traceparent: "00-bad-01" });
     expect(malformed.headers.get("x-trace-id")).toBe("req_4");
+  });
+
+  it("sets the separate request-id header on the fallback path (no inbound x-request-id)", async () => {
+    // When no `x-request-id` arrives, the middleware mints a UUID and the
+    // fallback at line 284-288 of errors.ts stamps `request-id` on the response.
+    const res = await call("/healthz");
+    expect(res.headers.get("x-request-id")).toBeTruthy();
+    // The Anthropic SDK reads the separate `request-id` header emitted alongside `x-request-id`
+    // (`err.requestID`). This assertion pins the fallback path at line 286.
+    expect(res.headers.get("request-id")).toBe(res.headers.get("x-request-id"));
   });
 });

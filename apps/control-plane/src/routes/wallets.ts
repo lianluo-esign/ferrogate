@@ -12,13 +12,25 @@
  *   DELETE      /admin/v1/payment-methods/{payment_method_id}
  * ```
  *
- * Three shapes here are deliberate and easy to get wrong:
+ * ## 0. Reading a balance is one authority; MOVING it is another (#790)
+ *
+ * The reads and the two movements do NOT share a fence.
+ * {@link authorizeWalletTenant} asks "is this wallet MINE?" — the right question
+ * for `GET /wallets/{tenant_id}` and the ledger, and on a movement the
+ * escalation itself, because `walletAdjustSchema.amount_cents` is SIGNED: a
+ * tenant-scoped `admin.write` key adjusted its own wallet by `+10_000_000` and
+ * got a `200`. `adjust` and `charge` therefore run
+ * {@link authorizeWalletMovement} — **operator only, both directions** — which
+ * states why a negative self-adjustment is refused too rather than waved
+ * through as self-harm.
+ *
+ * Three more shapes here are deliberate and easy to get wrong:
  *
  *  - **A wallet is keyed by `{tenant_id}`, not a wallet id.** One wallet per
  *    tenant; the path parameter IS the tenancy. A tenant-scoped caller may
- *    therefore only ever address its own wallet, which is checked explicitly
- *    (the tenant is a path parameter, not a row attribute the store can filter
- *    on) — Rust `authorize_tenant_scope`.
+ *    therefore only ever READ its own wallet, which is checked explicitly (the
+ *    tenant is a path parameter, not a row attribute the store can filter on) —
+ *    Rust `authorize_tenant_scope`.
  *  - **There is no wallet DELETE.** A balance with a ledger behind it is not
  *    deletable; that would destroy the audit trail for money.
  *  - **`adjust` and `charge` both write a LEDGER ENTRY, then move the
@@ -134,7 +146,14 @@ export const paymentMethodSchema = adminRecordSchema
     message: "raw payment instrument data is never accepted on the admin surface",
   });
 
-/** Rust `authorize_tenant_scope` — the tenant is named in the path here. */
+/**
+ * Rust `authorize_tenant_scope` — the tenant is named in the path here.
+ *
+ * The fence for the READ legs ONLY (`GET /wallets/{tenant_id}` and the ledger).
+ * It asks "is this wallet MINE?", which is the right question for a read and,
+ * on a money movement, is the escalation itself — see
+ * {@link authorizeWalletMovement} and decision 0 in the module header.
+ */
 function authorizeWalletTenant(scope: CallerScope, tenantId: string): void {
   if (scope.kind === "platform_operator") return;
   if (scope.tenantId === tenantId) return;
@@ -142,6 +161,75 @@ function authorizeWalletTenant(scope: CallerScope, tenantId: string): void {
     403,
     "tenant_scope_denied",
     "API key is not authorized to access this tenant's resources",
+  );
+}
+
+/**
+ * The fence for a money MOVEMENT — `adjust` and `charge`: **operator only**
+ * (#790).
+ *
+ * `authorizeWalletTenant` used to be the only fence on both movements, and
+ * `walletAdjustSchema.amount_cents` is SIGNED and is handed straight to the
+ * movement as its delta. So a tenant-scoped `admin.write` key `POST`ing
+ * `/admin/v1/wallets/{its own id}/adjust` with `+10_000_000` answered `200` and
+ * took `balance_cents` 500 → 10_000_500, projecting the `balance_credits`
+ * `apps/gateway`'s admission actually spends. The tenant minted its own prepaid
+ * money, with a ledger entry to explain it.
+ *
+ * Both verbs, both directions, decided rather than defaulted:
+ *
+ *  - **Crediting is the whole defect**, and it is the one place on this surface
+ *    where a tenant-scoped credential can create value out of nothing. There is
+ *    no argument for it.
+ *  - **A DEBIT is refused too**, and that is the judgement call — spending your
+ *    own credit is not an escalation, so the sign alone does not settle it.
+ *    Three things do. (1) `adjust` is the OPERATOR's verb by construction: its
+ *    rows land in the ledger as `kind: "adjustment"` with a mandatory `reason`,
+ *    which in this system means "an operator moved this money, and here is
+ *    why". A tenant-authored adjustment is indistinguishable from an operator's
+ *    on every read and every export, so admitting it does not just move money —
+ *    it makes the operator's reconciliation of credits and write-offs untrue.
+ *    (2) The ledger entry id is DERIVED from the caller-chosen `reference`
+ *    (`walletLedgerEntryId`), and the replay check below compares only the
+ *    AMOUNT — not the kind, not the author. A tenant that may write any
+ *    movement can therefore SQUAT a reference the operator is about to use:
+ *    reproduced on the pre-fix tree, a tenant `adjust` of `-1` at reference
+ *    `promo-2026-08` made the operator's real `+5_000` credit under that same
+ *    reference answer `409 conflict`, permanently. At the SAME amount it is
+ *    worse and quieter — the operator's movement is taken for a replay and
+ *    skips the control leg entirely. A self-harming debit is therefore not
+ *    confined to the tenant's own money; it is a claim on the operator's
+ *    idempotency namespace. (3) A tenant that wants to spend already has a way
+ *    to: the data plane. The gateway debits `wallets.balance_credits` directly
+ *    through `@ferrogate/storage`, never through this route, so refusing the
+ *    verb here costs the product nothing.
+ *  - **`charge` is refused as well**, even though it always debits. Reasons (1)
+ *    and (2) apply to it unchanged — it writes into the same ledger and the
+ *    same `wl_{tenant}_{reference}` id space — and this is what the product
+ *    already tells its users: the console's own copy says "Adjust and charge
+ *    are platform-operator-only (#229/#232); a non-operator caller sees a 403"
+ *    (`admin-console/src/i18n/locales/en/rest.ts`), and the legacy scope for
+ *    that screen (#319) called them "operator adjust/charge flows". The
+ *    implementation had drifted from its own stated contract; this restores it.
+ *  - **The READ stays open**, unchanged. A customer that cannot see its prepaid
+ *    balance and its ledger cannot tell an exhausted wallet from an outage, and
+ *    cannot reconcile what it was charged.
+ *
+ * Refusing BEFORE the wallet is resolved and BEFORE the body is parsed is
+ * deliberate, exactly as in `quota_policy.ts`: a fence after the lookup would
+ * answer `404` for a tenant with no wallet document and `403` for one that has
+ * a wallet, which makes the write leg an oracle for who has adopted prepaid
+ * billing; and a caller this verb will never admit is not told which fields its
+ * request was missing. One refusal, one code, no probe — which is also why a
+ * non-operator naming ANOTHER tenant's wallet gets this code here rather than
+ * `tenant_scope_denied`.
+ */
+function authorizeWalletMovement(scope: CallerScope, verb: string): void {
+  if (scope.kind === "platform_operator") return;
+  throw new HttpError(
+    403,
+    "wallet_movement_operator_only",
+    `${verb} a wallet is an operator action: this credential is scoped to tenant ${scope.tenantId}, which may read its own wallet and its ledger but may not move the balance it is billed against`,
   );
 }
 
@@ -163,6 +251,8 @@ function balanceOf(record: StoreRecord): number {
  */
 function movement(options: {
   readonly entryKind: "adjustment" | "charge";
+  /** Gerund naming the verb in the refusal — "adjusting", "charging". */
+  readonly verb: string;
   readonly schema: z.ZodTypeAny;
   readonly delta: (body: Record<string, unknown>) => number;
 }): Handler {
@@ -170,7 +260,16 @@ function movement(options: {
     const deps = c.get("deps");
     const scope = scopeOf(c);
     const tenantId = pathParam(c, "tenant_id");
-    authorizeWalletTenant(scope, tenantId);
+    /**
+     * FIRST — before the wallet is resolved and before the body is read (#790).
+     *
+     * This is the whole fence for a movement: `authorizeWalletTenant` is NOT
+     * called here, and its absence is deliberate rather than an omission. Only
+     * a platform operator gets past this line, and an operator passes the
+     * tenant check unconditionally, so running both would be one live fence and
+     * one dead one — and a dead fence reads like protection.
+     */
+    authorizeWalletMovement(scope, options.verb);
 
     const wallet = await deps.store.get(WALLETS, scope, tenantId);
     if (wallet === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
@@ -333,12 +432,14 @@ export const walletsRoutes: GroupModule = crudGroup(
 
     adjustWallet: movement({
       entryKind: "adjustment",
+      verb: "adjusting",
       schema: walletAdjustSchema,
       delta: (body) => (typeof body.amount_cents === "number" ? body.amount_cents : 0),
     }),
 
     chargeWallet: movement({
       entryKind: "charge",
+      verb: "charging",
       schema: walletChargeSchema,
       // A charge always DEBITS, whatever sign the body used.
       delta: (body) => -Math.abs(typeof body.amount_cents === "number" ? body.amount_cents : 0),

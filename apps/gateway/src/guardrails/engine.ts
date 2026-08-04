@@ -93,6 +93,17 @@ export class GuardrailEngine {
     this.#now = deps.now ?? (() => Date.now());
   }
 
+  /** Canonical identity of the complete active policy-revision set selected for this request. */
+  policyRevisionMarker(context: GuardrailEvaluationContext): string {
+    const selection = selectionContextFrom(context);
+    return JSON.stringify(
+      this.#deps.policies
+        .policiesFor(selection)
+        .map((policy) => immutableId(policy.revision))
+        .sort(),
+    );
+  }
+
   /**
    * `AppState::match_guardrail`. Returns the selected enforcement, or `null`
    * when nothing enforcing matched.

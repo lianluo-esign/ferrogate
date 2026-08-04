@@ -218,6 +218,7 @@ export {
   NO_WALLET_ADMISSION,
   WALLET_HOLD_TTL_SECONDS,
   d1WalletAdmission,
+  routedWalletAdmission,
   gatewayTenantHandle,
   walletAdmissionFromEnv,
   walletHoldCreditsFromEnv,
@@ -236,6 +237,7 @@ export {
   WORKFLOW_VERSION_HEADER,
   d1WorkflowBudgetSource,
   preflightStep,
+  routedWorkflowBudgetSource,
   workflowBudgetSourceFromEnv,
   workflowDeclarationFrom,
 } from "./workflow.js";

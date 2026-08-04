@@ -1,7 +1,4 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
-import { defineConfig } from "vitest/config";
+import { d1SuiteConfig } from "./vitest.d1.shared.js";
 
 /**
  * The D1 suite: `test/d1/**` runs inside the REAL local `workerd` (miniflare),
@@ -10,7 +7,7 @@ import { defineConfig } from "vitest/config";
  * This is a SECOND config rather than a replacement for `vitest.config.ts`
  * because the two suites answer different questions and have different costs:
  *
- *   * `vitest.config.ts`  — the 87 pure-algorithm tests. Plain vitest, ~250 ms.
+ *   * `vitest.config.ts`  — the pure-algorithm tests. Plain vitest, ~250 ms.
  *     They are the executable specification of every invariant.
  *   * `vitest.d1.config.ts` (this file) — the durable twins. Boots `workerd`,
  *     so it is far slower, and it is the ONLY place the atomicity claims
@@ -19,7 +16,11 @@ import { defineConfig } from "vitest/config";
  *     these would be exactly the green-but-vacuous test this repo keeps being
  *     bitten by: a fake's `batch()` is atomic because the fake says so.
  *
- * `bun run test` in this package runs BOTH (see package.json).
+ * `bun run test` in this package runs all FOUR legs (see package.json). The
+ * fourth is `vitest.d1do.config.ts`, which runs THIS suite again against
+ * per-tenant Durable Objects through the `D1Database` facade — the acceptance
+ * test for #823. The shared body of both is in `vitest.d1.shared.ts`; the only
+ * difference is the `TENANT_BACKEND` binding the harness reads.
  *
  * ## Bindings
  *
@@ -32,41 +33,4 @@ import { defineConfig } from "vitest/config";
  * registers a tenant naming it and asserts the router FAILS CLOSED rather than
  * falling back to the control database.
  */
-const here = path.dirname(fileURLToPath(import.meta.url));
-const sqlRoot = path.resolve(here, "../../sql/d1-ts");
-
-const controlMigrations = await readD1Migrations(path.join(sqlRoot, "control"));
-const tenantMigrations = await readD1Migrations(path.join(sqlRoot, "tenant"));
-
-if (controlMigrations.length === 0 || tenantMigrations.length === 0) {
-  // A silently-empty migration set would make every D1 test fail with
-  // "no such table" and look like a code bug. Fail here, where the cause is.
-  throw new Error(
-    [
-      `no D1 migrations found under ${sqlRoot}; expected control/ and tenant/`,
-      "to each contain at least one NNNN_*.sql file",
-    ].join(" "),
-  );
-}
-
-export default defineConfig({
-  plugins: [
-    cloudflareTest({
-      miniflare: {
-        compatibilityDate: "2025-06-01",
-        compatibilityFlags: ["nodejs_compat"],
-        d1Databases: ["CONTROL_DB", "TENANT_DB_A", "TENANT_DB_B", "TENANT_DB_C"],
-        // Real R2, for the same reason as real D1: the asset commit protocol's
-        // whole content is that R2 and D1 are two services with no shared
-        // transaction, and a fake bucket would be "atomic" with the row because
-        // the fake was written to agree.
-        r2Buckets: ["ASSETS_BUCKET"],
-        bindings: {
-          CONTROL_MIGRATIONS: controlMigrations,
-          TENANT_MIGRATIONS: tenantMigrations,
-        },
-      },
-    }),
-  ],
-  test: { include: ["test/d1/**/*.test.ts"] },
-});
+export default d1SuiteConfig("native_binding");

@@ -193,4 +193,71 @@ export * from "./tenant-router.js";
  * atomic/non-atomic table.
  */
 export * from "./tenant-rest.js";
+/**
+ * The DURABLE-OBJECT leg of the tenant router (strategy `durable_object`): a
+ * `D1Database`-shaped facade over one tenant's `TenantDataObject`, with
+ * `batch()` forwarded into the object's `transactionSync()` in ONE round trip
+ * and `supportsAtomicBatch: true`, so the 13 `requireAtomicBatch()` money paths
+ * RUN over it instead of refusing.
+ *
+ * Exporting it from this barrel is safe and `./tenant-data-object.js` is not:
+ * every reference this module makes to the object's types is `import type` and
+ * is erased at compile time, so nothing here reaches `cloudflare:workers`. See
+ * the note below on why the CLASS still ships through a subpath.
+ */
+export * from "./tenant-do.js";
+/**
+ * The router that picks between the two legs above PER TENANT, from
+ * `tenant_databases.storage_backend`.
+ *
+ * `apps/control-plane` mounts it. Its tenant-data paths cannot simply switch to
+ * `durable_object` — a `native_binding` tenant's rows really are in a D1
+ * database — and they cannot stay on the binding router either, because since
+ * #820 every newly onboarded tenant is on an object the binding router cannot
+ * reach, which made an admin wallet credit write nothing and the fleet asset
+ * view report an empty fleet.
+ */
+export * from "./tenant-dispatch.js";
+/**
+ * TENANT ONBOARDING (#820): the tenant's own model catalog and the seeder that
+ * fills it once, plus the provisioner that refuses an unregistered tenant BEFORE
+ * addressing its object, records resumable state on `tenant_databases`, and
+ * states the deprovisioning retention decision as code rather than as a guess.
+ *
+ * Both are plain `D1Database` consumers — they reach a tenant through the
+ * `TenantDatabaseRouter` port and never through a `TenantDataObject` stub — so
+ * they run identically over `native_binding` and `durable_object`, and neither
+ * pulls `cloudflare:workers` into this barrel's graph.
+ */
+export * from "./tenant-model-catalog.js";
+export * from "./tenant-provisioning.js";
 export * from "./d1/index.js";
+
+/**
+ * `TenantDataObject` (#822) IS NOT EXPORTED HERE, AND THAT IS DELIBERATE.
+ *
+ * It reaches consumers through the `@ferrogate/storage/durable-objects` subpath
+ * in `package.json`, copying `@ferrogate/routing`'s `./durable-objects` →
+ * `./src/shadow-budget-do.ts` shape. Two independent reasons, both load-bearing:
+ *
+ *  1. `src/tenant-data-object.ts` imports the `DurableObject` base class from
+ *     `cloudflare:workers`, which resolves in `workerd` and NOWHERE ELSE. This
+ *     barrel is imported by plain-node vitest suites (`test/wallet.test.ts` and
+ *     nine others import `../src/index.js`) and by `apps/cli`; an `export *`
+ *     here would make every one of them fail to resolve a module they never use.
+ *  2. workerd resolves a `[[durable_objects.bindings]]` `class_name` against the
+ *     ENTRY module's named exports. Pulling the class into every importer's
+ *     graph is exactly how that resolution failure gets hidden — the class looks
+ *     reachable from everywhere while `apps/gateway/src/worker.ts` is the only
+ *     place the export actually counts.
+ *
+ * `./tenant-schema-sql.js` is likewise absent: it is a GENERATED module inlining
+ * ~66 KB of `sql/d1-ts/tenant/*.sql` bytes, and its only consumer is the object
+ * that applies them. Re-exporting it would put the whole tenant schema in the
+ * CLI's bundle to no purpose. `test/tenant-schema-sql.test.ts` reaches it by
+ * relative path and pins it byte-for-byte against the directory on disk.
+ *
+ * The mount claim for the class is therefore made where it can fail:
+ * `test/mount-inventory.test.ts` re-derives it from `apps/` on every run, so
+ * deleting the `src/worker.ts` re-export reddens this package.
+ */

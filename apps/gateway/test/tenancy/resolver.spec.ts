@@ -276,10 +276,24 @@ describe("fail closed — an unresolvable tenant NEVER falls back", () => {
 // ---------------------------------------------------------------------------
 
 describe("GATEWAY_TENANT_DB_ROUTING parsing", () => {
-  test("absent or empty is off; every legal mode round-trips", () => {
-    expect(parseTenantDatabaseRoutingMode(undefined)).toBe("off");
-    expect(parseTenantDatabaseRoutingMode("   ")).toBe("off");
-    for (const mode of ["off", "binding", "binding_strict", "rest", "shared_development"]) {
+  test("absent or empty is durable_object; every legal mode round-trips", () => {
+    // #819 reversed this: the default used to be `"off"`, i.e. per-tenant
+    // storage was opt-in and every deployment that forgot the var had none.
+    // `durable_object` costs nothing to turn on — no deploy, no provisioning —
+    // so the safe posture is no longer the opt-in one. `durable-object.spec.ts`
+    // owns the rest of that claim; this case pins the parse.
+    expect(parseTenantDatabaseRoutingMode(undefined)).toBe("durable_object");
+    expect(parseTenantDatabaseRoutingMode("   ")).toBe("durable_object");
+    // `"off"` is still reachable, but only by NAME — which is what keeps a
+    // deployment that binds no TENANT_DATA able to say so.
+    for (const mode of [
+      "durable_object",
+      "off",
+      "binding",
+      "binding_strict",
+      "rest",
+      "shared_development",
+    ]) {
       expect(parseTenantDatabaseRoutingMode(mode)).toBe(mode);
     }
   });

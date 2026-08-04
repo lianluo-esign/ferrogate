@@ -16,7 +16,7 @@ import {
   type TenantDatabaseHandle,
   workflowRunBudgetId,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, resetTenantData, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_700_000_000;
 
@@ -24,14 +24,14 @@ let handleA: TenantDatabaseHandle;
 let handleB: TenantDatabaseHandle;
 
 beforeAll(async () => {
-  const router = await setupDatabases();
+  const router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
 });
 
 beforeEach(async () => {
-  await resetTenantData(env.TENANT_DB_A);
-  await resetTenantData(env.TENANT_DB_B);
+  await resetTenantData(tenantDb(TENANT_A));
+  await resetTenantData(tenantDb(TENANT_B));
 });
 
 const ID = workflowRunBudgetId("wf", 1, "run");

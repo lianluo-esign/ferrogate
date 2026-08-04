@@ -227,9 +227,76 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 #    have had one.
 #
 # It points at the CONTROL schema because `database_name` says so and
-# `src/ports.ts` says so ("`env.DB` already IS the control database"). Per-tenant
-# databases are resolved at runtime through `tenant_databases`, never bound here.
+# `src/ports.ts` says so ("`env.DB` already IS the control database").
+# `EnvBindingTenantDatabaseRouter` is mounted for THREE ports — auth
+# (`durableAuth`), lifecycle (`durableLifecycle`) and admission
+# (`durableAdmission`) in `src/ports.ts` — resolving per-tenant databases at
+# runtime through `tenant_databases`. The FLAT `TENANT_DB` binding below is a
+# separate database holding the `stored_assets` / `asset_channels` tables for
+# the asset reader.
 migrations_dir = "../../sql/d1-ts/control"
+
+# ---------------------------------------------------------------------------
+# R2 — asset object storage
+#
+# Read as `env.ASSETS`, the production `AssetObjectStore` — the same binding
+# name and the same bucket `apps/gateway/wrangler.toml` declares. It holds the
+# bytes of every hosted asset, and the MCP `resources/read` / `fetch_asset`
+# surfaces fetch the object at `storage_uri` from this bucket.
+#
+# What breaks without it in the non-dev posture: `resolvePorts` uses
+# `InMemoryAssets`, whose contents vanish with the isolate. For assets stored
+# only in D1/R2, `resources/list` returns empty, `resources/read` returns
+# JSON-RPC `-32602` (`InvalidParams`), and the `fetch_asset` tool returns 404.
+#
+# WIRING STATE — LIVE. `resolvePorts` selects `D1R2AssetReader` when both
+# `env.ASSETS` and `env.TENANT_DB` are present and
+# `FG_DEV_IN_MEMORY_PORTS !== "1"`. It uses `InMemoryAssets` when either binding
+# is absent or when `FG_DEV_IN_MEMORY_PORTS === "1"` selects the dev posture.
+#
+# `bucket_name` / `preview_bucket_name` are PLACEHOLDERS; the deploy step
+# substitutes the account's real buckets. R2 names are lowercase alphanumerics
+# and hyphens, 3–63 chars.
+#
+# NOTE: the live account (ferrogate) has R2 unactivated. A deploy with this
+# stanza against an account without the R2 plan fails with error 10042, not
+# 10000. Activate R2 on the account before deploying this Worker.
+# ---------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "replace-at-deploy-ferrogate-assets"
+preview_bucket_name = "replace-at-deploy-ferrogate-assets-preview"
+
+# ---------------------------------------------------------------------------
+# D1 — the TENANT database holding `stored_assets` / `asset_channels`
+#
+# Read as `env.TENANT_DB` by `resolvePorts` (src/ports.ts). The tenant database
+# is where `stored_assets` rows live (`sql/d1-ts/tenant/0001_init_tenant.sql`),
+# and the MCP asset reader queries this database for asset metadata before
+# fetching the object body from `env.ASSETS`.
+#
+# This is a SEPARATE binding from `env.DB` (the CONTROL database), because the
+# MCP Worker already binds `DB` for the control-plane tables (identity grants,
+# server catalog, lifecycle, RBAC). The tenant database is a FLAT binding —
+# tenant isolation is provided by the `WHERE tenant_id = ?1` predicate on every
+# query, exactly as `apps/gateway`'s `D1AssetMetadataStore` works. There is
+# no per-tenant database routing for this reader: when selected,
+# `D1R2AssetReader` receives the flat `TENANT_DB` binding directly, and the MCP
+# Worker reads no routing variable for the asset surface.
+#
+# Without it in the non-dev posture, `resolvePorts` uses `InMemoryAssets` and
+# the same listing/read failure posture described for a missing `ASSETS` binding
+# applies to assets stored only in D1/R2.
+#
+# `database_name` / `database_id` are PLACEHOLDERS; the deploy step substitutes
+# the real ids. The migration must be applied first (`wrangler d1 migrations
+# apply ferrogate-tenant --local`).
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "TENANT_DB"
+database_name = "ferrogate-tenant"
+database_id = "replace-at-deploy"
+migrations_dir = "../../sql/d1-ts/tenant"
 
 # ===========================================================================
 # NOT DECLARED — and why

@@ -55,6 +55,7 @@ import { type GuardrailProtocol, normalizeRequest, normalizeResponse } from "@fe
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { contributeRequestLogFacts, requestLogFactsFor } from "../requestlog/facts.js";
 import type { GuardrailVerdict } from "../requestlog/record.js";
+import { publishConversationReplayScreener } from "./conversation-replay.js";
 import { GuardrailEngine, evidenceLocation, evidenceTarget, redactText } from "./engine.js";
 import type {
   GuardrailAuditSink,
@@ -242,16 +243,11 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
   // stage entirely and leave this binding inert. An operation with no request
   // body records no request-stage verdict, which is the honest reading.
   //
-  // WHAT THIS DOES NOT COVER, stated so it is not mistaken for covered: a
-  // CONTINUATION by the governed key from the ungoverned key's turn still
-  // replays the stored text upstream as `input`. Nothing on this table can
-  // reach it — the chain is assembled inside the inner inference router, after
-  // this middleware's request stage has already run on the client's own body,
-  // so the assembled document does not exist at any point this middleware can
-  // observe before dispatch. Closing it means screening at the point of
-  // assembly, inside the router, under a different cost argument. Tracked as
-  // #779, with the measurement in it; see also the module doc of
-  // `inference/conversation-commit.ts`.
+  // A continuation is distinct from this GET binding. Its chain is assembled
+  // inside the inference router, so the request-stage path below publishes the
+  // already-resolved engine and selected revision marker through
+  // `conversation-replay.ts`; the router calls it at assembly for turns whose
+  // screening context differs (#779, #808).
   getResponse: {
     protocol: "responses",
     dialect: "openai.responses",
@@ -478,6 +474,7 @@ export function guardrails(
   // gate — which is how a REORDERING, the one defect no behavioural test can
   // see, would slip through.
   return async function guardrailsMiddleware(c: Context, next: Next) {
+    const inbound = c.req.raw;
     const operationId = (c.get("operation") as { operationId?: string } | null)?.operationId;
     const binding = operationId === undefined ? undefined : GUARDRAIL_OPERATIONS[operationId];
     if (binding === undefined) {
@@ -546,6 +543,74 @@ export function guardrails(
         // `matchGuardrail` above already produced that verdict, so by here the plan
         // only distinguishes enforcement from shadow.
         plan = engine.streamingGuardrailPlan(context);
+
+        publishConversationReplayScreener(inbound, {
+          policyRevisionMarker: engine.policyRevisionMarker(context),
+          screen: async ({ requestId: replayId, input, response }) => {
+            const replayRequestContext: GuardrailEvaluationContext = {
+              ...context,
+              requestId: replayId,
+              streaming: false,
+              envelope: normalizeRequest("responses", { input }),
+            };
+            const requestMatch = await engine.matchGuardrail("request", replayRequestContext);
+            if (requestMatch !== null) {
+              await auditBlock(
+                options.audit,
+                replayRequestContext,
+                requestMatch,
+                "conversation replay",
+              );
+              recordGuardrailVerdict(c, "blocked", requestMatch);
+              return { ok: false, code: requestMatch.code, message: requestMatch.message };
+            }
+
+            const replayContext: GuardrailEvaluationContext = {
+              ...context,
+              requestId: replayId,
+              streaming: false,
+              envelope: normalizeResponse(
+                "responses",
+                new TextEncoder().encode(JSON.stringify(response)),
+                false,
+              ),
+            };
+            const match = await engine.matchGuardrail("response", replayContext);
+            if (match === null) return { ok: true, response };
+            if (match.effect === "deny") {
+              await auditBlock(options.audit, replayContext, match, "conversation replay");
+              recordGuardrailVerdict(c, "blocked", match);
+              return { ok: false, code: match.code, message: match.message };
+            }
+
+            const redactedText = redactText(match, JSON.stringify(response));
+            try {
+              const redacted: unknown = JSON.parse(redactedText);
+              if (typeof redacted !== "object" || redacted === null || Array.isArray(redacted)) {
+                return {
+                  ok: false,
+                  code: "guardrail_invalid_redaction",
+                  message: "guardrail could not redact a stored conversation turn safely",
+                };
+              }
+              await options.audit?.record({
+                requestId: replayId,
+                tenant: replayContext.tenant,
+                action: "guardrail.redact",
+                target: evidenceTarget(match),
+                outcome: "redacted",
+                message: `guardrail ${match.ruleName} redacted conversation replay at ${evidenceLocation(match)}`,
+              });
+              return { ok: true, response: redacted as Record<string, unknown> };
+            } catch {
+              return {
+                ok: false,
+                code: "guardrail_invalid_redaction",
+                message: "guardrail could not redact a stored conversation turn safely",
+              };
+            }
+          },
+        });
 
         await next();
       } else {

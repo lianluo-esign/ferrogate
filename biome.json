@@ -1,8 +1,22 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "organizeImports": { "enabled": true },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "files": {
-    "ignore": ["node_modules", "dist", ".wrangler", "target", "crates", "workers", "vendor", "docs/legacy"]
+    "ignore": [
+      "node_modules",
+      "dist",
+      ".wrangler",
+      "target",
+      "crates",
+      "workers",
+      "vendor",
+      "docs/legacy"
+    ]
   },
   "linter": {
     "enabled": true,

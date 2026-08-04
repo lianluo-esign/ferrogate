@@ -5,7 +5,7 @@
  * container (eliminated). A Hono streaming proxy for OpenAI-compatible
  * inference, tool/MCP execution, and agent invoke.
  *
- * Routing and auth are **contract-driven**: `src/contract.ts` is the 279
+ * Routing and auth are **contract-driven**: `src/contract.ts` is the 281
  * operations from `docs/openapi/runtime-api-contract.json`, `src/middleware/
  * auth.ts` is the single guard that enforces each operation's declared
  * `auth.kind` / `auth.scope` / `rbac_action`, and `src/routes/index.ts` mounts
@@ -318,6 +318,32 @@ export const GATEWAY_MIDDLEWARE = [
   // evidence for outermost position and nothing is lost by sitting two layers
   // in: both return the same `Response` object they received.
   requestLogging(requestLogs),
+  // Per-tenant storage — ONE SQLite-backed DURABLE OBJECT PER TENANT
+  // (`src/tenancy/`, the only importer of `@ferrogate/storage`'s
+  // `DurableObjectTenantDatabaseRouter` / `EnvBindingTenantDatabaseRouter` /
+  // `ControlDatabaseTenantRegistry`).
+  //
+  // IMMEDIATELY ABOVE `rateLimit()`, AND THE ORDER IS LOAD-BEARING. It used to
+  // be LAST in this array, on the argument that nothing ahead of it read a
+  // tenant handle. #819 falsified that argument by giving `tenantDatabaseOf(c)`
+  // its first production call site: the wallet no-oversell guard, which is
+  // admission step 3b INSIDE `rateLimit()`. Mounted below it, `c.get(
+  // "tenantDatabase")` is `undefined` when that guard runs and every wallet
+  // reserve becomes a 500 naming this middleware — loudly, by design, but the
+  // fix is the position, not the throw.
+  //
+  // Everything else in this array stays where it was: the admission counters
+  // and the guardrail policies are CONTROL-plane state (`CONTROL_DB` /
+  // `BILLING_DB`), which per-tenant routing deliberately does not move — see
+  // `tenancy/ports.ts` on the CONTROL/TENANT split.
+  //
+  // Resolution is LAZY and does NO I/O: the address is
+  // `TENANT_DATA.idFromName(tenantId)`, a pure function of the tenant the
+  // credential resolved to, so mounting it earlier costs a request nothing. It
+  // NEVER falls back to the shared `DB`: an unresolvable tenant is refused
+  // `503 tenant_database_unavailable` rather than silently served another
+  // tenant's rows.
+  tenantDatabase(),
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
   rateLimit(),
@@ -445,20 +471,6 @@ export const GATEWAY_MIDDLEWARE = [
       return translated.ok ? translated.body : undefined;
     },
   })),
-  // Per-tenant D1 — ONE DATABASE PER TENANT (`src/tenancy/`, which is the only
-  // importer of `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter` /
-  // `ControlDatabaseTenantRegistry`). It is LAST in this array because it is
-  // the only entry that routes on the tenant the credential resolved to and
-  // nothing ahead of it reads a tenant handle: the admission counters and the
-  // guardrail policies are CONTROL-plane state (`CONTROL_DB` / `BILLING_DB`),
-  // which per-tenant routing deliberately does not move — see `tenancy/ports.ts`
-  // on the CONTROL/TENANT split.
-  //
-  // Inert while `GATEWAY_TENANT_DB_ROUTING` is `"off"` (the committed default),
-  // and it NEVER falls back to the shared `DB`: an unprovisioned or unbound
-  // tenant is refused `503 tenant_database_unavailable` rather than silently
-  // served another tenant's rows.
-  tenantDatabase(),
 ] as const;
 
 const { app, router } = createGatewayApp({

@@ -422,6 +422,8 @@ export class D1RestDatabase {
  * default-database parameter.
  */
 export class NonAtomicD1RestTenantDatabaseRouter implements TenantDatabaseRouter {
+  /** Every handle it hands back is `rest`, and therefore non-atomic. */
+  readonly backend = "rest" as const;
   readonly #registry: ControlDatabaseTenantRegistry;
 
   constructor(
@@ -453,19 +455,25 @@ export class NonAtomicD1RestTenantDatabaseRouter implements TenantDatabaseRouter
         `tenant ${tenantId} has no provisioned D1 database in the control registry`,
       );
     }
-    if (registration.databaseUuid === "") {
+    // Since #820 the column is NULLABLE — a `durable_object` tenant has no D1
+    // database and therefore no uuid — so absent joins empty as a refusal here.
+    // The two arrive at the same place for the same reason: without a uuid there
+    // is nothing for the HTTP query API to address, and inventing one would
+    // address SOMEBODY's database.
+    const databaseUuid = registration.databaseUuid;
+    if (databaseUuid === undefined || databaseUuid === "") {
       throw StorageError.runtime(
-        `tenant ${tenantId} has a registry row with an empty database_uuid; refusing to route`,
+        `tenant ${tenantId} has a registry row with no database_uuid; refusing to route`,
       );
     }
     return {
       tenantId,
-      db: new D1RestDatabase(registration.databaseUuid, this.config).asD1Database(),
+      db: new D1RestDatabase(databaseUuid, this.config).asD1Database(),
       source: "rest",
       // The whole point. `requireAtomicBatch` refuses this handle, so the
       // no-oversell reserve and the workflow-budget CAS cannot run over it.
       supportsAtomicBatch: false,
-      databaseUuid: registration.databaseUuid,
+      databaseUuid,
       schemaVersion: registration.schemaVersion,
     };
   }

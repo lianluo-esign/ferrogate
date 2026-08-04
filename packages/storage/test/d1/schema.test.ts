@@ -103,6 +103,15 @@ const TENANT_ONLY = [
   // bundle's file index holds one tenant's paths and R2 keys, so landing it in
   // the control database would be the cross-tenant leak the split prevents.
   "asset_bundle_files", // 0004 (#736)
+  // 0008 (#820). The tenant's OWN copy of the model catalog, seeded once at
+  // onboarding. It belongs on THIS side of the split even though the platform
+  // also has a `gateway_models` table in the control database, and the two are
+  // not duplicates: `gateway_models` is what the OPERATOR has deployed fleet-
+  // wide, this is what one tenant may use and what it costs THAT tenant. Landing
+  // it in the control database would make one tenant's negotiated price visible
+  // to every other tenant's read.
+  "model_catalog",
+  "tenant_provisioning_marks",
 ] as const;
 
 describe("control / tenant split", () => {

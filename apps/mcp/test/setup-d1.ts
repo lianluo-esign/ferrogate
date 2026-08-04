@@ -39,6 +39,7 @@ import { forgetControlTableProbe } from "../src/auth.js";
 
 interface McpTestBindings {
   readonly DB?: D1Database;
+  readonly TENANT_DB?: D1Database;
   readonly TENANT_DB_A?: D1Database;
   readonly TEST_CONTROL_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
   readonly TEST_TENANT_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
@@ -46,23 +47,25 @@ interface McpTestBindings {
 
 beforeAll(async () => {
   const bindings = env as unknown as McpTestBindings;
-  const { DB, TENANT_DB_A, TEST_CONTROL_D1_SCHEMA, TEST_TENANT_D1_SCHEMA } = bindings;
+  const { DB, TENANT_DB, TENANT_DB_A, TEST_CONTROL_D1_SCHEMA, TEST_TENANT_D1_SCHEMA } = bindings;
   if (
     DB === undefined ||
+    TENANT_DB === undefined ||
     TENANT_DB_A === undefined ||
     TEST_CONTROL_D1_SCHEMA === undefined ||
     TEST_TENANT_D1_SCHEMA === undefined
   ) {
-    // Loud, never a silent skip: all four come from `wrangler.toml` +
+    // Loud, never a silent skip: all five come from `wrangler.toml` +
     // `vitest.config.ts`, so an absent one means the wiring was removed and the
     // suite is about to prove something other than what it claims.
     throw new Error(
-      "mcp test setup: expected the `DB` and `TENANT_DB_A` bindings plus " +
+      "mcp test setup: expected the `DB`, `TENANT_DB` and `TENANT_DB_A` bindings plus " +
         "`TEST_CONTROL_D1_SCHEMA` / `TEST_TENANT_D1_SCHEMA`. " +
         "See src/lifecycle.ts for why this suite runs against a real, MIGRATED D1.",
     );
   }
   await applyD1Migrations(DB, TEST_CONTROL_D1_SCHEMA);
+  await applyD1Migrations(TENANT_DB, TEST_TENANT_D1_SCHEMA);
   await applyD1Migrations(TENANT_DB_A, TEST_TENANT_D1_SCHEMA);
   // `src/auth.ts` caches its table probe per D1 handle for the life of the
   // isolate. Forgetting it here is what an isolate recycle does after a

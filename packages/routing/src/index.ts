@@ -90,5 +90,27 @@
 
 export { fnv1a64, rolloutBucket } from "./fnv.js";
 export { canarySelected, shadowSampled, ShadowBudgetLedger } from "./rollout.js";
+export {
+  armChargedTo,
+  armDelivered,
+  compareExperimentQuality,
+  EXPERIMENT_ARMS,
+  experimentIdFor,
+  summariseArmOperations,
+} from "./experiment.js";
+export type {
+  ArmOperationalAggregate,
+  ArmOperationalSummary,
+  ArmQualitySide,
+  ArmScoreAggregate,
+  ExperimentArm,
+  ExperimentIncomparableCell,
+  ExperimentQualityCell,
+  ExperimentQualityOptions,
+  ExperimentQualityReport,
+  ExperimentQualityVerdict,
+  ExperimentRouteIdentity,
+  ExperimentSplitSpec,
+} from "./experiment.js";
 export type { RouteMatch, RouteMatcher } from "./route.js";
 export type { AsyncShadowBudgetLedger } from "./shadow-budget-do.js";

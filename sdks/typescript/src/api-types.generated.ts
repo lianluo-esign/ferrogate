@@ -3865,7 +3865,10 @@ export interface paths {
         /** List quota policies. */
         get: operations["listQuotaPolicies"];
         put?: never;
-        /** Create a quota policy. */
+        /**
+         * Create a quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug.
+         */
         post: operations["createQuotaPolicy"];
         delete?: never;
         options?: never;
@@ -3893,14 +3896,23 @@ export interface paths {
         };
         /** Get a scoped quota policy. */
         get: operations["getQuotaPolicy"];
-        /** Replace a scoped quota policy. */
+        /**
+         * Replace a scoped quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug.
+         */
         put: operations["replaceQuotaPolicy"];
         post?: never;
-        /** Delete a scoped quota policy. */
+        /**
+         * Delete a scoped quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug. DELETE is the LARGEST raise available here rather than a self-imposed zero: an empty scope chain resolves to no rpm cap, no monthly budget and no model allowlist.
+         */
         delete: operations["deleteQuotaPolicy"];
         options?: never;
         head?: never;
-        /** Update a scoped quota policy. */
+        /**
+         * Update a scoped quota policy.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the reads use (#782). A tenant-scoped credential — including the credential of the very tenant the policy governs — is refused `403 quota_policy_write_operator_only` at every scope kind (`tenant`, `project`, `workspace`, `key`) and the stored policy does NOT move. A quota the quota-holder can raise is not a quota: `rpm_limit`, `monthly_token_budget` and `asset_storage_quota_bytes` are the numbers the gateway admits requests against, and a tenant-scope policy value takes PRECEDENCE over the plan default rather than a minimum with it. The refusal covers a LOWERING edit too, deliberately — the same credential could raise it back, and this document carries fields with no monotone direction (`required_tags`, `on_missing_tags`) and fields where a larger number is LOOSER, the opposite direction from `rpm_limit` (`spend_anomaly_ratio`, `spend_anomaly_cooldown_secs`), so "is this edit a tightening?" is not decidable field-by-field without a table the next added field silently defaults into the wrong half of. A tenant may still READ its own policy on GET /admin/v1/quota-policies/{scope_type}/{scope_id}; that read is how it tells a 429 from a bug.
+         */
         patch: operations["updateQuotaPolicy"];
         trace?: never;
     };
@@ -4153,7 +4165,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Atomically adjust wallet credits. */
+        /**
+         * Atomically adjust wallet credits.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the wallet reads use (#790). A tenant-scoped credential -- including the credential of the very tenant that owns the wallet -- is refused `403 wallet_movement_operator_only`, and neither the balance nor the ledger moves. `amount_cents` is SIGNED and is applied as the delta, so before this fence a tenant `admin.write` key credited its own prepaid balance 500 -> 10_000_500 cents and projected the `balance_credits` the gateway spends. A NEGATIVE self-adjustment is refused too, deliberately: `adjust` writes ledger rows that assert an OPERATOR moved this money for this reason, and the entry id is derived from the caller-chosen `reference` while the replay check compares only the amount, so any tenant-written movement is also a claim on the operator's idempotency namespace. A tenant may still READ its balance on GET /admin/v1/wallets/{tenant_id} and its ledger on GET /admin/v1/wallets/{tenant_id}/ledger.
+         */
         post: operations["adjustWallet"];
         delete?: never;
         options?: never;
@@ -4181,7 +4196,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Charge a payment method and credit a wallet. */
+        /**
+         * Charge a payment method and credit a wallet.
+         * @description OPERATOR ONLY, and that is a DIFFERENT fence from the one the wallet reads use (#790). A tenant-scoped credential is refused `403 wallet_movement_operator_only`, and neither the balance nor the ledger moves. A charge always debits, so this is not an escalation of the balance; it is refused because it writes into the same operator ledger and the same `reference`-derived idempotency namespace as `adjust`, and because operator-only is what this surface already documents. A tenant that wants to spend its prepaid credit does so through the data plane, which debits `wallets.balance_credits` directly. The tenant's READ of its balance and ledger is unchanged.
+         */
         post: operations["chargeWallet"];
         delete?: never;
         options?: never;
@@ -4430,7 +4448,10 @@ export interface paths {
          */
         get: operations["listPermissions"];
         put?: never;
-        /** Create a DB-backed permission action. */
+        /**
+         * Create a DB-backed permission action.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         post: operations["createPermission"];
         delete?: never;
         options?: never;
@@ -4463,7 +4484,10 @@ export interface paths {
         get: operations["getPermission"];
         put?: never;
         post?: never;
-        /** Delete a permission action. */
+        /**
+         * Delete a permission action.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         delete: operations["deletePermission"];
         options?: never;
         head?: never;
@@ -4494,7 +4518,10 @@ export interface paths {
          */
         get: operations["listRoles"];
         put?: never;
-        /** Create a role from permission action keys. */
+        /**
+         * Create a role from permission action keys.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         post: operations["createRole"];
         delete?: never;
         options?: never;
@@ -4527,7 +4554,10 @@ export interface paths {
         get: operations["getRole"];
         put?: never;
         post?: never;
-        /** Delete a DB-backed role. */
+        /**
+         * Delete a DB-backed role.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         delete: operations["deleteRole"];
         options?: never;
         head?: never;
@@ -4555,7 +4585,10 @@ export interface paths {
         /** List role bindings for a tenant. */
         get: operations["listTenantRoles"];
         put?: never;
-        /** Bind a DB-backed role to a tenant. */
+        /**
+         * Bind a DB-backed role to a tenant.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         post: operations["bindTenantRole"];
         delete?: never;
         options?: never;
@@ -4584,7 +4617,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Remove a tenant role binding. */
+        /**
+         * Remove a tenant role binding.
+         * @description OPERATOR ONLY (#791), and that is a DIFFERENT fence from the one the reads use. A tenant-scoped credential is refused `403 rbac_write_operator_only` before the body is parsed and before any row is resolved, and nothing is written on the way to the refusal. RBAC is the mechanism every other tenant fence is expressed in: a tenant-scoped `admin.write` key could `POST /admin/v1/roles` a role with `permissions: ["*"]` (the store stamps the caller's `tenant_id`) and bind it to its own tenant, after which every RBAC authorizer in the fleet allows on `granted.has("*")` and the tenant holds the guardrail verbs its operator withheld. There is deliberately NO subset carve-out letting a tenant author a role within what it already holds: `tenant_role_bindings` has no subject columns and every authorizer unions the permission keys of all roles bound to the TENANT, so a subset binding is not a delegation but a second copy of the grant owned by the governed party, and it survives the operator revoking the first. A tenant may still READ the roles, permissions and bindings it is subject to on the GET operations.
+         */
         delete: operations["unbindTenantRole"];
         options?: never;
         head?: never;
@@ -5793,6 +5829,70 @@ export interface paths {
          *     A `reason` is required, the decision record is written (and hash-chained into audit_events on the OWNING tenant's chain) BEFORE anything is destroyed, and the applying delete is a compare-and-set on the exact state that was read — a version that changed under the operator is `409 asset_delete_conflict`. On a deployment that binds no ASSETS bucket the operation answers `503 asset_bucket_not_configured` and writes nothing, rather than performing a metadata-only delete that would report a takedown while the bytes stayed in the bucket.
          */
         delete: operations["forceDeleteAssetVersion"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/experiments": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the canary/shadow splits that actually served traffic, with each arm's cost, latency and error rate.
+         * @description Experiments are DISCOVERED from observations rather than registered, so this lists exactly the splits that really routed traffic in the window -- an experiment a registry knew about but the router did not would be worse than no report (#693). Each arm carries requests, failures, error rate, mean latency and cost, plus `delivered` and `charged_to`, which are derived from the arm and not stored: a shadow arm's response is never delivered to a caller and its provider spend is the OPERATOR's, because the customer never saw the answer and never asked for the second provider. `error_rate` is computed on the requests each arm ANSWERED rather than on the requests assigned to it, so a variant's failure-with-fallback contributes to the control arm and does not raise the variant's rate -- see the field's own description before comparing the number across arms. Tenant-fenced; a NULL tenant matches nobody. Use GET /admin/v1/experiments/{experiment_id} for the quality comparison.
+         */
+        get: operations["listAdminExperiments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/experiments/{experiment_id}": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * One experiment's per-arm cost, latency and error rate, plus the quality verdict on the variant.
+         * @description The quality half is built on #692's online-evaluation scores and inherits their governing honesty: a score row means 'judge X, shown this exchange and asked criterion Y, answered Z', which licenses a RELATIVE comparison between two populations scored by the SAME judge under the SAME criterion and nothing else. That precondition is enforced structurally rather than documented -- the aggregate is grouped by (judge_model, criterion_id, arm) and arms are only ever paired inside one group, so arms scored differently appear under `quality.incomparable` with no difference and no means, and never as a number. Below `min_samples` in either arm the verdict is `insufficient_samples` and the means are OMITTED from the response, so a client cannot render a figure computed from two requests. A difference the spread does not support at `alpha` comes back as `no_measured_difference` rather than as a winner. The SHADOW arm is scored too: its mirrored response is retained just long enough to build one eval sample, derived from the SERVED sample so the judge, the criteria and the prompt are the same VALUES rather than a second resolution that could disagree -- and a shadow arm scored under a different judge or criterion is therefore still incomparable and still refuses. Retention happens only for an exchange the tenant's own eval policy already authorised: a tenant that is not opted in, a ZERO-DATA-RETENTION tenant, and a request outside the sample are never shadow-scored, and a region-pinned tenant is never mirrored in the first place. When reading `error_rate` across arms, see that field: it is computed on the requests each arm ANSWERED, so a variant's failure-with-fallback does not raise the variant's rate. Refuses with 409 when the experiment has no variant arm in the window, and with 400 when it has both a canary and a shadow and the caller did not name one -- picking one would be a rollout decision taken on the operator's behalf.
+         */
+        get: operations["getAdminExperiment"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -8431,12 +8531,35 @@ export interface components {
             previous_identity_expires_at_unix: number | null;
             rotated_at_unix: number | null;
         };
+        /**
+         * @description Provider-neutral prompt-caching directive (#690). Controls whether and how the request prompt is cached by the upstream provider.
+         *
+         *     Refusal by provider family:
+         *     - `auto` — never refused by any family.
+         *     - `explicit` — refused by OpenAI-compatible, Azure OpenAI, Gemini, Vertex (they choose their own prefix/lifetime), and Workers AI (no prompt cache). Bedrock Converse refuses `ttl: "1h"` (no selectable lifetime).
+         *     - `off` — refused by OpenAI-compatible, Azure OpenAI, Gemini, Vertex (caching cannot be disabled per request). Accepted by Workers AI (no cache to disable) and families with per-request breakpoints (breakpoints are stripped).
+         */
+        PromptCache: {
+            /**
+             * @description `auto` — best-effort caching, never refused. `explicit` — a contract to place a cache breakpoint at the static prefix for `ttl`. `off` — a contract to not write this prompt into a provider prompt cache.
+             *
+             *     Refusal: `auto` is never refused. `explicit` is refused by families without per-request breakpoints (OpenAI-compatible, Azure OpenAI, Gemini, Vertex, Workers AI). `off` is refused by families whose caching cannot be disabled per request (OpenAI-compatible, Azure OpenAI, Gemini, Vertex).
+             * @enum {string}
+             */
+            mode: "auto" | "explicit" | "off";
+            /**
+             * @description Cache lifetime. Only meaningful with `mode: "explicit"`. Defaults to `"5m"` when omitted with `mode: "explicit"`. Rejected as invalid_request on any other mode. Bedrock Converse refuses `"1h"` (no selectable lifetime).
+             * @enum {string}
+             */
+            ttl?: "5m" | "1h";
+        };
         AiRequest: {
             model: string;
             stream?: boolean;
             metadata?: {
                 [key: string]: string;
             };
+            prompt_cache?: components["schemas"]["PromptCache"];
         };
         EmbeddingsRequest: {
             model: string;
@@ -10418,6 +10541,108 @@ export interface components {
             /** @constant */
             object: "asset_deletion";
             asset_deletion: components["schemas"]["AdminAssetDeletion"];
+        };
+        /** @description One arm's OPERATIONAL outcome over the window. `delivered` and `charged_to` are derived from the arm rather than stored, so a shadow arm can never be reported as having been delivered to a caller or as having been billed to the tenant. */
+        ExperimentArmOutcome: {
+            /** @constant */
+            object: "experiment_arm";
+            /** @enum {string} */
+            arm: "control" | "canary" | "shadow";
+            requests: number;
+            /** @description Legs that failed under the request LOG's rule (status >= 400 or an error code), not the circuit breaker's: a provider answering 400 to a body it dislikes failed the caller even though the breaker ignores it. */
+            failures: number;
+            /** @description NULL for an arm that served nothing. 0/0 is not 0, and rendering an idle canary as "0% errors" is how a split that is not receiving traffic gets promoted. THIS NUMBER DOES NOT MEAN THE SAME THING FOR EVERY ARM, and the difference is not a defect: a request is attributed to the arm that ACTUALLY ANSWERED, not to the arm the caller was assigned, so a variant that failed and fell back to the primary contributes a `control` row and does NOT raise the variant's error rate here. (A request nothing answered at all IS attributed to the assigned arm, so a total variant outage still lands on the variant.) The rule keeps `experiment_arm` consistent with the `provider`, `provider_model` and token columns of the same row, and keeps the quality comparison honest -- a score filed under an arm has to be a score of that arm's response. Those fallback failures are still observable per provider through the routing metrics and the circuit breaker; they are simply not in this ratio. Do not read a served arm's error rate as "every way this arm failed", and note that the SHADOW arm has no fallback at all, so its rate is every way it failed. */
+            error_rate: number | null;
+            /** @description NULL for an arm that served nothing. Averaged over the same population `error_rate` is computed on -- see that field for why a served arm's population is "requests this arm answered" rather than "requests assigned to this arm". */
+            mean_latency_ms: number | null;
+            /** @description Provider spend attributed to this arm. For a SHADOW arm this is the OPERATOR's cost of taking the measurement -- see `charged_to`. */
+            cost_usd: number;
+            /** @description False for the shadow arm only: a mirror's response is discarded and no caller ever receives it. */
+            delivered: boolean;
+            /**
+             * @description Who pays for this arm's provider spend. `tenant` for a served arm, exactly as with no experiment running. `operator` for the shadow arm: the customer never saw that response and never asked for the second provider, so the tokens are the operator's cost of running the experiment. The gateway backs this structurally -- the mirror has no code path to metering, the ledger, the billing outbox or the TPM governor.
+             * @enum {string}
+             */
+            charged_to: "tenant" | "operator";
+        };
+        /** @description One arm's side of a quality comparison. `mean` and `std_dev` are ABSENT -- not null -- when the verdict is `insufficient_samples`, so a client rendering that verdict has no number available to render. */
+        ExperimentQualitySide: {
+            /** @enum {string} */
+            arm: "control" | "canary" | "shadow";
+            /** @description Scored samples in this arm under this judge and criterion. */
+            count: number;
+            mean?: number;
+            std_dev?: number;
+        };
+        /** @description A comparison between the control arm and the variant arm under ONE judge model and ONE criterion. Both arms in a comparison were scored by the same judge under the same criterion by construction: the aggregate is grouped by (judge_model, criterion_id, arm) and only arms inside one group are ever paired. Arms that do not share a group appear under `incomparable` instead and carry no difference at all. */
+        ExperimentQualityComparison: {
+            criterion_id: string;
+            judge_model: string;
+            /**
+             * @description `insufficient_samples` means at least one arm is below `min_samples` and NO means are reported -- two requests per arm is not a result, and a number on a screen will be acted on however it is captioned. `no_measured_difference` means both arms are adequately sampled and the difference is not distinguishable from noise at `alpha`, which is itself a rollout decision. The two winners are decided by Welch's unequal-variance t-test, two-sided.
+             * @enum {string}
+             */
+            verdict: "variant_better" | "control_better" | "no_measured_difference" | "insufficient_samples";
+            min_samples: number;
+            control: components["schemas"]["ExperimentQualitySide"];
+            variant: components["schemas"]["ExperimentQualitySide"];
+            /** @description variant mean minus control mean. Absent under `insufficient_samples`. */
+            difference?: number;
+            /** @description Two-sided Welch p-value. Absent under `insufficient_samples`. */
+            p_value?: number;
+        };
+        /** @description A (judge, criterion) pair only ONE arm was scored under, so no comparison exists. This is what a violated precondition looks like on this surface: it deliberately carries no mean and no difference, because a score row licenses only a relative comparison between two populations scored by the SAME judge under the SAME criterion (#692), and subtracting across instruments produces a plausible number that measures the instruments rather than the models. */
+        ExperimentIncomparableCell: {
+            criterion_id: string;
+            judge_model: string;
+            /** @enum {string} */
+            reason: "control_arm_not_scored" | "variant_arm_not_scored";
+            scored_arms: ("control" | "canary" | "shadow")[];
+            detail: string;
+        };
+        /** @description The quality half of an experiment report. */
+        ExperimentQuality: {
+            /** @constant */
+            object: "experiment_quality";
+            /** @description True when some judge model carried scores from only one arm. Hoisted out of `incomparable` so a surface cannot render the report without it: it says the arms were measured with different instruments, which invalidates the whole comparison rather than one row of it. */
+            judge_mismatch: boolean;
+            /** @description The same, for the criterion. */
+            criterion_mismatch: boolean;
+            comparisons: components["schemas"]["ExperimentQualityComparison"][];
+            incomparable: components["schemas"]["ExperimentIncomparableCell"][];
+        };
+        /** @description One traffic-splitting experiment DISCOVERED from the observations, with its arms' operational outcomes. There is no experiments table: an experiment is the split a model's `[[models]].canary` / `.shadow` config already declares, and its id is a fingerprint of the control, canary and shadow routes -- so moving any of them starts a NEW experiment rather than pooling a population measured against one baseline with one measured against another. */
+        Experiment: {
+            /** @constant */
+            object: "experiment";
+            id: string;
+            logical_model: string | null;
+            first_seen_unix: number;
+            last_seen_unix: number;
+            arms: components["schemas"]["ExperimentArmOutcome"][];
+        };
+        /** @description One experiment's arms and the verdict on the variant. The verdict is produced by the same pure comparator the unit tests hold (`@ferrogate/routing`), never by this route, so the three refusals -- different instrument, too few samples, a difference the spread does not support -- cannot be forgotten at the reporting layer. */
+        ExperimentReport: {
+            /** @constant */
+            object: "experiment_report";
+            id: string;
+            logical_model: string | null;
+            /** @enum {string} */
+            variant_arm: "canary" | "shadow";
+            since_unix: number;
+            min_samples: number;
+            alpha: number;
+            arms: components["schemas"]["ExperimentArmOutcome"][];
+            quality: components["schemas"]["ExperimentQuality"];
+        };
+        /** @description The paginated envelope listAdminExperiments answers unconditionally. A first page that looks like the whole set is a wrong answer on a surface a rollout decision is made from. */
+        PaginatedList_Experiment: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["Experiment"][];
+            total: number;
+            offset: number;
+            limit: number;
         };
     };
     responses: {
@@ -16507,6 +16732,8 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    prompt_cache?: components["schemas"]["PromptCache"];
+                } & {
                     [key: string]: unknown;
                 };
             };
@@ -16550,6 +16777,8 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    prompt_cache?: components["schemas"]["PromptCache"];
+                } & {
                     [key: string]: unknown;
                 };
             };
@@ -21918,6 +22147,91 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listAdminExperiments: {
+        parameters: {
+            query?: {
+                /** @description Unix seconds, INCLUSIVE lower bound. Defaults to 30 days ago. An experiment's arms must be compared over a window in which the same thing was being compared: pooling a year of traffic across every config change made in it produces a difference that is mostly the config changes. */
+                since?: number;
+                /** @description Clamped by storage.admin_list_max_limit. */
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of experiments, most recently active first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedList_Experiment"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getAdminExperiment: {
+        parameters: {
+            query?: {
+                /** @description Unix seconds, INCLUSIVE lower bound. Defaults to 30 days ago. An experiment's arms must be compared over a window in which the same thing was being compared: pooling a year of traffic across every config change made in it produces a difference that is mostly the config changes. */
+                since?: number;
+                /** @description Which arm is compared against the control. Required when the experiment has both a canary and a shadow arm: pooling them would compare the control against a mixture of two different variants. */
+                variant?: "canary" | "shadow";
+                /** @description Minimum scored samples in BOTH arms before any mean is reported. Defaults to 30. There is no universally right value -- it depends on the effect size that matters and on the judge's noise floor -- so it is always stated back in the response. */
+                min_samples?: number;
+                /** @description Two-sided significance level for Welch's t-test. Defaults to 0.05. */
+                alpha?: number;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The experiment's arms and the quality verdict on the chosen variant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentReport"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

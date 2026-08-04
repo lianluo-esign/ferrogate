@@ -177,21 +177,39 @@ database's `tenant_databases` table.
 `D1Database` per tenant: real `batch()`, real `RETURNING`, and the whole
 `d1-proxy` HTTP hop disappears.
 
-### The three strategies, honestly compared
+### The four strategies, honestly compared
 
 Encoded as `D1_BINDING_STRATEGIES` in `src/tenant-router.ts` and asserted by
-`test/d1/router.test.ts`, so this table cannot silently rot.
+`test/d1/router.test.ts` and `test/platform-limits.test.ts`, so this table
+cannot silently rot.
 
 | strategy | atomic `batch()` | `RETURNING` | deploy per tenant? | tenant ceiling | extra hop |
 |---|---|---|---|---|---|
 | **`native_binding`** — one `[[d1_databases]]` stanza per tenant; `env[name]` selects it | yes | yes | **yes** | low hundreds | no |
 | **`proxy_service`** — a proxy Worker holds the bindings behind a `[[services]]` binding (the `d1-proxy` shape, minus the public HTTP hop) | yes | yes | yes, but only the proxy redeploys | low hundreds per proxy; shard beyond | yes |
 | **`rest`** — D1 HTTP query API, runtime uuid | **no** | yes | **no** | unbounded | yes |
+| **`durable_object`** — one SQLite-backed DO per tenant, `env.TENANT_DATA.idFromName(tenantId)` | **yes** | yes | **no** | unbounded; 10 GB per object | yes (one stub hop per `batch()`) |
 
-**The honest tradeoff.** `native_binding` is what to deploy today, and its price
-is that onboarding a tenant requires a `wrangler deploy` and the tenant count is
-capped by the Worker's binding budget. `rest` is the only strategy with no
-deploy-time coupling — and it is **unusable for the money paths**. There is no
+**The cell that used to be empty.** For three strategies, "atomic `batch()`" and
+"no deploy per tenant" were mutually exclusive, and `test/platform-limits.test.ts`
+pinned that as an empty set. `durable_object` (#822/#823,
+`docs/design/per-tenant-durable-object-storage-2026-08.md`) fills it — not by
+finding a transaction envelope in the D1 HTTP API (that question is still open
+and still `false`), but by leaving D1 for the tenant plane. A Durable Object is
+created by being addressed, so onboarding is not a deploy, and
+`ctx.storage.transactionSync()` is a real SQLite transaction, so `batch()` is one
+commit. `src/tenant-do.ts` is a `D1Database`-shaped facade over
+`src/tenant-data-object.ts`, which is what lets the eight tenant-plane modules
+under `src/d1/` run over it **unmodified** — `test/d1/**` executes twice, once
+per backend (`vitest.d1.config.ts` and `vitest.d1do.config.ts`), and that is the
+acceptance test rather than a facade-shaped suite that would agree with the
+facade by construction.
+
+**The honest tradeoff among the D1 three.** `native_binding` is what to deploy
+today, and its price is that onboarding a tenant requires a `wrangler deploy` and
+the tenant count is capped by the Worker's binding budget. `rest` is the only D1
+strategy with no deploy-time coupling — and it is **unusable for the money
+paths**. There is no
 envelope over the query API that makes N statements one commit, so the wallet
 reserve's 3-statement guard would become three independent round trips with a
 race window between the guard and the insert. That is not a slower reserve, it
@@ -210,14 +228,31 @@ A stub that "worked" for reads and silently lost atomicity on writes would be
 the more dangerous artifact than either.
 
 `PORT-TODO(inventory-data-billing §1.7 "per-tenant D1 binding at runtime")`: the
-unresolved half is the path past a few hundred tenants. **(i) has landed** —
+unresolved half was the path past a few hundred tenants. **(i) landed** —
 `NonAtomicD1RestTenantDatabaseRouter` is REST restricted to what it can serve
-safely, mounted in `apps/gateway/src/tenancy/resolver.ts`. What remains is
-(ii) sharding across proxy Workers, or (iii) a D1 API offering a
-runtime-addressed transaction (evaluate `D1 Sessions` / `getByName` maturity,
-and the REST `/query` multi-statement `batch` form — see the OPEN QUESTION on
-the `rest` entry in `src/tenant-router.ts`, which is deliberately *not* asserted
-because it cannot be verified locally and guessing wrong is an oversell).
+safely, mounted in `apps/gateway/src/tenancy/resolver.ts`. **The path itself is
+now `durable_object`**, which needs neither (ii) sharding across proxy Workers
+nor (iii) a D1 API offering a runtime-addressed transaction: it obtains runtime
+addressing and a real transaction from the same primitive. (iii) remains
+genuinely open *for D1* — see the OPEN QUESTION on the `rest` entry in
+`src/tenant-router.ts`, which is deliberately *not* asserted because it cannot be
+verified locally and guessing wrong is an oversell.
+
+The WIRING landed in #819 and this paragraph used to deny it. For the record,
+because a stale claim is worse than none: `DurableObjectTenantDatabaseRouter` is
+constructed on the `durable_object` branch of
+`apps/gateway/src/tenancy/resolver.ts`, that branch is the committed DEFAULT
+(`GATEWAY_TENANT_DB_ROUTING = "durable_object"` in `apps/gateway/wrangler.toml`),
+and `test/mount-inventory.test.ts` accordingly carries the symbol in `MOUNTED`.
+`DurableObjectD1Database` is the one that stays in `DEAD`, and deliberately: no
+app names it, because the router constructs it — a transitive mount, which is a
+weaker claim than a direct one.
+
+What IS still open is that the two Workers do not agree about where a tenant's
+rows live. `apps/gateway` routes on the DO; `apps/control-plane` resolves its
+tenant-data paths through `EnvBindingTenantDatabaseRouter` unless the roster row
+says `durable_object` (see `resolveTenantDatabases` there). Every call site that
+predates the roster still depends on that dispatch being right.
 
 ### Fail-closed is the invariant
 

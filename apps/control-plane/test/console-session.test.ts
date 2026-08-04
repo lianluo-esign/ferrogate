@@ -6,7 +6,7 @@
  * `crates/ferrogate-auth-service/src/admin_console.rs` is 1481 lines and
  * `admin_console_test.rs` is 3780 — the biggest test file in the Rust tree.
  * NONE of it had a TypeScript counterpart: `grep -rl "admin/login" apps/` found
- * zero files, the nine routes are absent from the 279-operation contract (they
+ * zero files, the nine routes are absent from the 281-operation contract (they
  * are the auth SERVICE's surface, not the gateway runtime's), and
  * `src/index.ts`'s own docblock lists them under "Still to come on this
  * Worker". The control migration has shipped `admin_users`,
@@ -208,6 +208,12 @@ async function setStoredRole(userId: string, role: MembershipRole): Promise<void
 /**
  * Point a tenant at `TENANT_DB_A`, the way the provisioning flow would.
  *
+ * An UPSERT since #820, not an INSERT: registration now provisions the tenant's
+ * storage and writes a `tenant_databases` row of its own, so a bare INSERT here
+ * fails the primary key. Re-pointing that row at a D1 binding is what this
+ * fixture means, and `storage_backend` must move with it — a row still saying
+ * `durable_object` is one the binding router refuses, correctly.
+ *
  * A console session key is TWO rows — `api_key_directory` in the control
  * database and `api_keys` in the tenant's own — and the second one is only
  * writable once that tenant has a database. Registration mints the tenant id
@@ -221,7 +227,13 @@ async function provisionTenantDatabase(tenantId: string): Promise<void> {
       `INSERT INTO tenant_databases
          (tenant_id, database_uuid, database_name, binding_name, schema_version,
           provisioned_at_unix, updated_at_unix)
-       VALUES (?, 'uuid-a', 'ferrogate-tenant-a', 'TENANT_DB_A', 1, 1, 1)`,
+       VALUES (?, 'uuid-a', 'ferrogate-tenant-a', 'TENANT_DB_A', 1, 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         database_uuid = excluded.database_uuid,
+         database_name = excluded.database_name,
+         binding_name = excluded.binding_name,
+         storage_backend = 'native_binding',
+         provisioning_status = 'ready'`,
     )
     .bind(tenantId)
     .run();

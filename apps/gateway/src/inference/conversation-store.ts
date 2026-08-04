@@ -9,16 +9,16 @@
  * caller-supplied id. There is no code path that resolves a `response_id`
  * alone.
  */
-import {
-  type ConversationOwner,
-  MAX_CONVERSATION_TURNS,
-  outputItemsOf,
-} from "./conversation.js";
+import { type ConversationOwner, MAX_CONVERSATION_TURNS, outputItemsOf } from "./conversation.js";
 
 /** One persisted turn. */
 export interface StoredResponseTurn {
   readonly responseId: string;
   readonly previousResponseId: string | null;
+  /** The credential under which this turn's guardrails were decided. */
+  readonly screeningApiKeyId?: string | null;
+  /** The complete selected active policy-revision set, or NULL when unknown. */
+  readonly screeningPolicyRevision?: string | null;
   /** 0 for the first turn of a chain. */
   readonly turnIndex: number;
   readonly model: string;
@@ -51,11 +51,7 @@ export interface ConversationStore {
    * Expiry is evaluated on read as well as by the sweep: a deployment whose
    * Cron is not firing must refuse expired state, not serve it.
    */
-  chain(
-    owner: ConversationOwner,
-    responseId: string,
-    nowUnix: number,
-  ): Promise<ChainResolution>;
+  chain(owner: ConversationOwner, responseId: string, nowUnix: number): Promise<ChainResolution>;
   /** Persist one turn. Throws on a storage failure — the caller decides. */
   append(owner: ConversationOwner, turn: StoredResponseTurn): Promise<void>;
   /** One turn, for `GET /v1/responses/{id}`. `null` = absent or expired. */
@@ -216,11 +212,7 @@ export class InMemoryConversationStore implements ConversationStore {
     return row;
   }
 
-  async remove(
-    owner: ConversationOwner,
-    responseId: string,
-    nowUnix: number,
-  ): Promise<boolean> {
+  async remove(owner: ConversationOwner, responseId: string, nowUnix: number): Promise<boolean> {
     const key = this.#key(owner, responseId);
     const row = this.#rows.get(key);
     if (row === undefined || row.expiresAtUnix <= nowUnix) return false;
@@ -239,12 +231,14 @@ export class InMemoryConversationStore implements ConversationStore {
 // ---------------------------------------------------------------------------
 
 const COLUMNS =
-  "response_id, previous_response_id, turn_index, model, input_json, response_json, " +
-  "created_at_unix, expires_at_unix";
+  "response_id, previous_response_id, screening_api_key_id, screening_policy_revision, turn_index, " +
+  "model, input_json, response_json, created_at_unix, expires_at_unix";
 
 interface ConversationRow {
   response_id: string;
   previous_response_id: string | null;
+  screening_api_key_id: string | null;
+  screening_policy_revision: string | null;
   turn_index: number;
   model: string;
   input_json: string;
@@ -257,6 +251,8 @@ function rowToTurn(row: ConversationRow): StoredResponseTurn {
   return {
     responseId: row.response_id,
     previousResponseId: row.previous_response_id,
+    screeningApiKeyId: row.screening_api_key_id,
+    screeningPolicyRevision: row.screening_policy_revision,
     turnIndex: Number(row.turn_index),
     model: row.model,
     input: safeArray(row.input_json),
@@ -297,9 +293,13 @@ function safeObject(json: string): Record<string, unknown> {
  * fence is repeated in BOTH the anchor and the recursive term — the recursive
  * term needs it independently, because without it the walk would follow a
  * `previous_response_id` out of the caller's tenant the moment two tenants share
- * a physical database (`GATEWAY_TENANT_DB_ROUTING = "off"`, the committed
- * default). `test/inference/conversation-tenancy.test.ts` mutates exactly that
- * clause.
+ * a physical database — which is what `GATEWAY_TENANT_DB_ROUTING = "off"` still
+ * means, and what this store still gets: `conversationStoreFromEnv` reads
+ * `env.DB` directly rather than the routed handle, so under the
+ * `durable_object` default (#819) it is a shared database holding no routed
+ * tenant's rows. Moving it onto `tenantDatabaseOf(c)` is its own slice; until
+ * then the fence is the only isolation this table has, and
+ * `test/inference/conversation-tenancy.test.ts` mutates exactly that clause.
  *
  * The depth guard inside the CTE is a second, independent bound: a corrupted
  * cycle in the rows must not become an unbounded query, whatever the write path
@@ -314,14 +314,16 @@ export class D1ConversationStore implements ConversationStore {
     nowUnix: number,
   ): Promise<ChainResolution> {
     const sql =
+      // biome-ignore lint/style/useTemplate: Clauses stay split so both tenant fences remain reviewable.
       `WITH RECURSIVE chain(${COLUMNS}, depth) AS (` +
       `SELECT ${COLUMNS}, 0 FROM responses_conversations ` +
-      ` WHERE tenant_id = ? AND project_id = ? AND response_id = ?` +
-      ` UNION ALL ` +
-      `SELECT r.response_id, r.previous_response_id, r.turn_index, r.model, r.input_json, ` +
-      ` r.response_json, r.created_at_unix, r.expires_at_unix, chain.depth + 1 ` +
-      ` FROM responses_conversations r JOIN chain ON r.response_id = chain.previous_response_id ` +
-      ` WHERE r.tenant_id = ? AND r.project_id = ? AND chain.depth < ?` +
+      " WHERE tenant_id = ? AND project_id = ? AND response_id = ?" +
+      " UNION ALL " +
+      "SELECT r.response_id, r.previous_response_id, r.screening_api_key_id, " +
+      " r.screening_policy_revision, r.turn_index, r.model, r.input_json, r.response_json, " +
+      " r.created_at_unix, r.expires_at_unix, chain.depth + 1 " +
+      " FROM responses_conversations r JOIN chain ON r.response_id = chain.previous_response_id " +
+      " WHERE r.tenant_id = ? AND r.project_id = ? AND chain.depth < ?" +
       `) SELECT ${COLUMNS} FROM chain`;
     const result = await this.db
       .prepare(sql)
@@ -351,15 +353,18 @@ export class D1ConversationStore implements ConversationStore {
     await this.db
       .prepare(
         "INSERT OR REPLACE INTO responses_conversations " +
-          "(tenant_id, project_id, response_id, previous_response_id, turn_index, model, " +
-          " input_json, response_json, created_at_unix, expires_at_unix) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "(tenant_id, project_id, response_id, previous_response_id, screening_api_key_id, " +
+          " screening_policy_revision, turn_index, model, input_json, response_json, " +
+          " created_at_unix, expires_at_unix) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .bind(
         owner.tenantId,
         owner.projectId,
         turn.responseId,
         turn.previousResponseId,
+        turn.screeningApiKeyId ?? null,
+        turn.screeningPolicyRevision ?? null,
         turn.turnIndex,
         turn.model,
         JSON.stringify(turn.input),
@@ -377,19 +382,14 @@ export class D1ConversationStore implements ConversationStore {
   ): Promise<StoredResponseTurn | null> {
     const row = await this.db
       .prepare(
-        `SELECT ${COLUMNS} FROM responses_conversations ` +
-          "WHERE tenant_id = ? AND project_id = ? AND response_id = ? AND expires_at_unix > ?",
+        `SELECT ${COLUMNS} FROM responses_conversations WHERE tenant_id = ? AND project_id = ? AND response_id = ? AND expires_at_unix > ?`,
       )
       .bind(owner.tenantId, owner.projectId, responseId, nowUnix)
       .first<ConversationRow>();
     return row === null || row === undefined ? null : rowToTurn(row);
   }
 
-  async remove(
-    owner: ConversationOwner,
-    responseId: string,
-    nowUnix: number,
-  ): Promise<boolean> {
+  async remove(owner: ConversationOwner, responseId: string, nowUnix: number): Promise<boolean> {
     const result = await this.db
       .prepare(
         "DELETE FROM responses_conversations " +
@@ -444,10 +444,7 @@ export function conversationStoreFromEnv(env: unknown): ConversationStore {
  * with it — the same contract `sweepRequestLogs` has, and `gatewayScheduled`
  * calls the two in sequence.
  */
-export async function sweepResponseConversations(
-  env: unknown,
-  nowUnix: number,
-): Promise<number> {
+export async function sweepResponseConversations(env: unknown, nowUnix: number): Promise<number> {
   const db = tenantDatabaseOf(env);
   if (db === undefined) return 0;
   try {

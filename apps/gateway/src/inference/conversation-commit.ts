@@ -61,28 +61,30 @@
  * binding above re-decides under that reader's own live policy.
  *
  * ============================================================================
- * THE RESIDUAL: A CROSS-KEY CONTINUATION
+ * CONTINUATIONS ACROSS SCREENING CONTEXTS (#779, #808)
  * ============================================================================
  *
- * One leg is open and is deliberately not closed here. A GOVERNED credential
- * that continues an UNGOVERNED credential's chain replays that turn's stored
- * text UPSTREAM as `input`. Neither fix reaches it:
+ * This module still does not screen a continuation: it cannot, because the
+ * chain is assembled inside the inner inference router. The router now closes
+ * that leg at the assembly point:
  *
- *  - this module writes what the WRITER's policy approved, which for an
- *    ungoverned writer is the verbatim text, and that is correct for the writer;
- *  - the `getResponse` binding screens a READ, and a continuation is not a read.
+ * Each row records the screening API-key id where known and a canonical marker
+ * for the complete active policy-revision set selected for that request. The
+ * marker is derived from the same `policiesFor(selection)` result the engine
+ * evaluates; it does not enumerate selection dimensions in this module.
+ * Marker equality implies an equivalent verdict only when screening is a pure
+ * function of that policy set and content: `custom_http` receives `protocol`,
+ * `stage`, tenant `organization_id`, `team_id`, `project_id`, `user_id` and
+ * `api_key_id`, plus `model`, `provider`, `text` and `segments`, so it may decide
+ * differently for the same policy set in different request contexts.
  *
- * It cannot be closed from the guardrail middleware at any position: the chain
- * is assembled INSIDE the inner inference router, after the middleware's request
- * stage has already run over the client's own body (which carries only
- * `previous_response_id` and the new input), so the assembled document does not
- * exist at any point the screener can observe before dispatch. Closing it means
- * screening at the point of assembly, under a cost argument of its own —
- * O(foreign turns), zero for the same-credential conversations that are the
- * common case. That is a change inside the router, and it needs each stored turn
- * to record the credential its screening was decided under, so it is tracked as
- * #779 — with the measured upstream body in it — rather than smuggled into this
- * one.
+ * `handlers.ts::prepareConversation` re-screens a stored turn when either its
+ * credential id or policy marker differs from the continuing request. A NULL
+ * policy marker is unknown (including rows predating migration 0007) and always
+ * re-screens. The guardrail middleware publishes the current marker and its
+ * already-resolved engine as one request-scoped replay capability; if that
+ * capability is missing, continuation refuses before provider dispatch. Replay
+ * screening works on a clone and does not rewrite the stored row.
  *
  * ============================================================================
  * THE SEAM

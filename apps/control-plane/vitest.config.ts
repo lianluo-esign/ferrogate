@@ -37,6 +37,7 @@
 import { readFileSync } from "node:fs";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { gatewayTenantDataAuxWorker } from "../gateway/test/support/rate-limit-aux-worker.js";
 
 /**
  * The committed deploy config, read here because workerd has no filesystem.
@@ -83,6 +84,20 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
         d1Databases: ["TENANT_DB_A", "TENANT_DB_B"],
+        // The `ferrogate-gateway` script this Worker's committed
+        // `[[durable_objects.bindings]] TENANT_DATA` points at with
+        // `script_name` (#820). Without it workerd refuses to START the session
+        // ("binding TENANT_DATA refers to a service core:user:ferrogate-gateway,
+        // but no such service is defined"), and the alternative — leaving the
+        // stanza out of the committed config — is the defect #666 fixed for
+        // RATE_LIMIT: a committed configuration that only works after a human
+        // edits it at deploy time.
+        //
+        // It carries the gateway's REAL `TenantDataObject`, so
+        // `test/tenant-onboarding.test.ts` provisions a tenant through the same
+        // namespace the data plane would read, rather than through a stub that
+        // would agree with whatever the provisioner did.
+        workers: [gatewayTenantDataAuxWorker(new URL("../gateway/", import.meta.url))],
         bindings: {
           TEST_D1_SCHEMA: controlMigrations,
           TEST_TENANT_D1_SCHEMA: tenantMigrations,

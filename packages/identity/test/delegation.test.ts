@@ -56,10 +56,59 @@
  *    The dangerous half — a revoked subject admitted for a whole TTL after a
  *    blip — was invisible. The recovered read now reports the subject as
  *    REVOKED, so the poisoned cache answers `[]` and goes red.
+ *
+ * ## #773 — the verify-side sweep, and what it found
+ *
+ * The log above records mutations by the test that caught them. It does not
+ * record WHERE that test lives, and that turned out to be the interesting
+ * question: six of `verify.ts`'s refusals were held only by `apps/gateway`, in
+ * a different workspace from the code they constrain. Running this package's
+ * suite — 168 green at the time — proved nothing about any of them.
+ *
+ * Every guard in `verifyDelegationChain` was disarmed one at a time (`if (…)`
+ * → `if (false)`) and BOTH suites were run. The `after` column is this file
+ * following the cases added below; `[gw]` is
+ * `apps/gateway/test/delegation/chain.test.ts`.
+ *
+ * | guard (verify.ts step) | before: identity | before: [gw] | after: identity |
+ * |---|---|---|---|
+ * | 1 header size bound     | green¹ | green | RED |
+ * | 1 depth bound           | RED    | RED   | RED |
+ * | 1 empty link            | green² | green | green² |
+ * | 2 per-link signature    | RED    | RED   | RED |
+ * | 3 tenant claim          | green  | RED   | RED |
+ * | 5a expired              | green  | RED   | RED |
+ * | 5a issued-in-future     | green  | green | RED |
+ * | 5a lifetime cap         | RED    | green | RED |
+ * | 4 headless root         | RED    | green | RED |
+ * | 4 prev linkage (splice) | RED    | RED   | RED |
+ * | 4 act linkage (reparent)| RED    | green | RED |
+ * | 5b outlives delegator   | RED    | green | RED |
+ * | **6 ATTENUATION**       | green  | RED   | RED |
+ * | 7 presenter binding     | green  | RED   | RED |
+ * | 8 credential ceiling    | green  | RED   | RED |
+ * | 9 required scope        | RED    | RED   | RED |
+ * | 10 revocation outage    | RED    | green | RED |
+ * | 10 revoked subject      | green  | RED   | RED |
+ *
+ * ¹ The size-bound case presented a string that was not a token at all, so the
+ *   TOKENISER refused it with the same `delegation_malformed` code and the
+ *   assertion held with the bound disarmed. Rewritten to present an oversized
+ *   chain that would otherwise VERIFY.
+ *
+ * ² The only mutation still surviving, and it is not a coverage hole: with the
+ *   empty-link guard removed, `splitDelegationLink("")` refuses the same input
+ *   with the same code one step later. It is an early exit, not a rule, and no
+ *   behavioural case can separate the two. Recorded rather than papered over.
+ *
+ * The gateway cases all stay. The two layers answer different questions — "is
+ * the rule right" here, "is the verifier mounted and wired" there — and for a
+ * security property that is defence in depth, not duplication.
  */
 import { describe, expect, it } from "vitest";
 
 import {
+  DELEGATION_CLOCK_SKEW_SECONDS,
   DELEGATION_FORMAT_VERSION,
   DELEGATION_JWS_HEADER,
   type DelegationClaims,
@@ -335,9 +384,28 @@ describe("the verifier chooses the algorithm, never the token", () => {
 // ---------------------------------------------------------------------------
 
 describe("bounds on work the caller controls", () => {
-  it("refuses an oversized header before it parses anything", async () => {
-    const header = "a".repeat(MAX_DELEGATION_HEADER_BYTES + 1);
-    expect(codeOf(await verify(header))).toBe("delegation_malformed");
+  it("refuses an oversized header even when every byte of it is a VALID link", async () => {
+    // DELIBERATE STRENGTHENING (#773). This case used to present
+    // `"a".repeat(MAX_DELEGATION_HEADER_BYTES + 1)` — a string that is not a
+    // compact token at all, so `splitDelegationLink` refused it with the same
+    // `delegation_malformed` code the size bound returns. The assertion held
+    // with the size bound DISARMED, which made it a test of the tokeniser
+    // wearing the size bound's name.
+    //
+    // The bound exists to cap work on bytes the caller controls, so the case
+    // that exercises it is a chain that would otherwise VERIFY. Delegation
+    // claims are an open set (unknown members are ignored, not refused), so a
+    // padding claim inflates a perfectly good root link past the limit without
+    // changing anything else about it.
+    const oversized = await forge({ ...ROOT_CLAIMS, pad: "x".repeat(9_000) });
+    expect(oversized.length).toBeGreaterThan(MAX_DELEGATION_HEADER_BYTES);
+    expect(codeOf(await verify(oversized))).toBe("delegation_malformed");
+
+    // …and the same link under the limit is admitted, so the refusal above is
+    // attributable to the size and to nothing else about the padded claim.
+    const underLimit = await forge({ ...ROOT_CLAIMS, pad: "x".repeat(16) });
+    expect(underLimit.length).toBeLessThan(MAX_DELEGATION_HEADER_BYTES);
+    expect(codeOf(await verify(underLimit))).toBe("ok");
   });
 
   it("refuses one link past the depth bound", async () => {
@@ -445,6 +513,168 @@ describe("bounds on work the caller controls", () => {
     });
     const result = await verify(`${root}~${child}`);
     expect(result.ok && result.chain.expiresAtUnix).toBe(NOW + 300);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The verify side of every rule the mint also enforces (#773)
+// ---------------------------------------------------------------------------
+
+/**
+ * The two attenuation guards defend different things, and only one of them is
+ * load-bearing against an adversary.
+ *
+ * `mintDelegationLink` refuses to ISSUE a link that grants more than its
+ * parent (`scope_widened`, covered above). That stops US producing a bad link.
+ * It stops nobody presenting one: an attacker does not use our minter, they
+ * hand us bytes they signed — or captured, or spliced — and the only thing
+ * between those bytes and an over-scoped request is `verifyDelegationChain`.
+ *
+ * The same asymmetry holds for the tenant claim, freshness, presenter binding,
+ * the credential ceiling and revocation: the mint's version of each rule is a
+ * courtesy to honest callers, and the verifier's version is the control. Every
+ * case below therefore drives `verifyDelegationChain` over a FORGED chain —
+ * one this package's own minter would have refused to produce — because that
+ * is the only shape the attacker can actually present.
+ *
+ * Each case is written to isolate ONE guard: the chain is otherwise entirely
+ * valid, so disarming that guard alone does not merely change the failure code,
+ * it makes the chain VERIFY. See the mutation log at the top of this file.
+ */
+describe("the verifier refuses a forged chain the mint would never have issued", () => {
+  /** A root the fixtures below hang a child off. Scope: `chat.completions`. */
+  async function root(overrides: Record<string, unknown> = {}): Promise<string> {
+    return forge({ ...ROOT_CLAIMS, ...overrides });
+  }
+
+  /** A well-formed child of `root()` — every claim correct unless overridden. */
+  async function child(overrides: Record<string, unknown> = {}): Promise<string> {
+    return forge({
+      jti: "dl_2",
+      prev: "dl_1",
+      act: "agent:planner",
+      sub: "agent:writer",
+      sub_key: "key_planner",
+      scope: ["chat.completions"],
+      iat: NOW,
+      exp: NOW + 600,
+      ...overrides,
+    });
+  }
+
+  it("refuses a link that claims MORE than its delegator held", async () => {
+    // THE case #773 was filed for. `tools.read` is deliberately a scope the
+    // PRESENTING CREDENTIAL does hold, so the credential ceiling (step 8) does
+    // not refuse this chain on the verifier's behalf: with the subset check at
+    // step 6 disarmed, this chain verifies and the request runs under an
+    // authority `user:u_1` never delegated.
+    const widened = `${await root()}~${await child({ scope: ["chat.completions", "tools.read"] })}`;
+    expect(codeOf(await verify(widened))).toBe("delegation_scope_widened");
+
+    // The refusal is a REFUSAL, not a silent narrowing to the delegator's set.
+    // Narrowing would serve the request and write an audit row describing a
+    // delegation that was never authorised.
+    const result = await verify(widened);
+    expect(result.ok).toBe(false);
+  });
+
+  it("refuses a link that promotes itself to the wildcard", async () => {
+    // The single most valuable widening: `*` reads as "everything" everywhere
+    // else in the tree, and a delegator holding one concrete scope must not be
+    // able to have a child claim it.
+    const chain = `${await root()}~${await child({ scope: ["*"] })}`;
+    expect(codeOf(await verify(chain, { presenterScopes: ["*"] }))).toBe(
+      "delegation_scope_widened",
+    );
+  });
+
+  it("refuses a chain minted for another tenant, however valid its signature", async () => {
+    // The mint key is fleet-wide, so the signature on tenant B's link verifies
+    // perfectly inside tenant A. The tenant CLAIM is the only thing that stops
+    // a genuine link from one tenant authorising a request in another.
+    const foreign = await root({ tenant: "tenant_b" });
+    expect(codeOf(await verify(foreign, { tenantId: TENANT }))).toBe("delegation_tenant_mismatch");
+  });
+
+  it("refuses an expired link once the skew allowance is spent", async () => {
+    const token = await root();
+    // Inside the allowance the chain still verifies — this is what makes the
+    // refusal below attributable to expiry rather than to the allowance being
+    // absent, and it pins the skew window as a bounded thing rather than an
+    // open-ended one.
+    expect(
+      codeOf(await verify(token, { nowUnix: NOW + 600 + DELEGATION_CLOCK_SKEW_SECONDS })),
+    ).toBe("ok");
+    expect(
+      codeOf(await verify(token, { nowUnix: NOW + 600 + DELEGATION_CLOCK_SKEW_SECONDS + 1 })),
+    ).toBe("delegation_expired");
+  });
+
+  it("refuses a link issued in the future", async () => {
+    // A post-dated link is a stockpiling primitive: mint (or forge) now, hold
+    // it, present it after the delegation it attenuates has been withdrawn.
+    // Its own lifetime is well inside the cap, so only the `iat` check refuses
+    // it.
+    const postdated = await root({ iat: NOW + 3_600, exp: NOW + 3_900 });
+    expect(codeOf(await verify(postdated))).toBe("delegation_not_yet_valid");
+  });
+
+  it("refuses a chain replayed by a credential it was not issued to", async () => {
+    // What makes a captured `x-ferrogate-delegation` header useless on its own:
+    // replaying it also requires the leaf's api key. The replaying credential
+    // here holds a SUPERSET of the chain's scopes, so nothing downstream would
+    // have refused it.
+    const chain = `${await root()}~${await child()}`;
+    expect(
+      codeOf(
+        await verify(chain, {
+          presenterKeyId: "key_attacker",
+          presenterScopes: ["chat.completions", "tools.read"],
+        }),
+      ),
+    ).toBe("delegation_subject_mismatch");
+  });
+
+  it("refuses a chain that grants more than the presenting credential holds", async () => {
+    // The chain is internally consistent — no widening between its links — and
+    // it is presented by the credential it names. It still must not be a
+    // privilege-escalation channel that turns a read-only key into a writing
+    // one, so the credential is a ceiling over the whole chain and not just a
+    // starting point for it.
+    const token = await root({ scope: ["admin.write"] });
+    expect(codeOf(await verify(token, { presenterScopes: ["chat.completions"] }))).toBe(
+      "delegation_scope_exceeds_credential",
+    );
+  });
+
+  it("breaks a chain through a revoked MIDDLE link, not only the leaf", async () => {
+    // Revoking a delegation must break every chain that passes THROUGH it, or
+    // revocation would only ever reach the hop that was named and an agent
+    // could keep sub-delegating out of a withdrawn grant.
+    const chain = `${await root()}~${await child()}`;
+    const source = stubRevocations(["dl_1"]);
+    expect(codeOf(await verify(chain, { revocations: source }))).toBe("delegation_revoked");
+  });
+
+  it("breaks every chain a revoked PRINCIPAL appears in", async () => {
+    // Revoking an agent, rather than one of its links, is the operator action
+    // during an incident: it must not require enumerating the agent's links.
+    const chain = `${await root()}~${await child()}`;
+    const source = stubRevocations(["agent:planner"]);
+    expect(codeOf(await verify(chain, { revocations: source }))).toBe("delegation_revoked");
+  });
+
+  it("refuses a chain padded with an empty link", async () => {
+    // HONEST LABEL: this case does NOT discriminate `verify.ts`'s explicit
+    // empty-link guard, and it is the one case in the #773 sweep for which no
+    // case can. Deleting that guard leaves the behaviour identical, because
+    // `splitDelegationLink("")` returns null and the very next step refuses the
+    // same input with the same `delegation_malformed` code — the guard is a
+    // (worthwhile) early exit, not an independent rule. The behaviour is still
+    // worth pinning: a trailing separator must never be read as "one link,
+    // plus nothing".
+    expect(codeOf(await verify(`${await root()}~`))).toBe("delegation_malformed");
+    expect(codeOf(await verify(`~${await root()}`))).toBe("delegation_malformed");
   });
 });
 

@@ -65,10 +65,11 @@ export const ONLINE_EVAL_REGRESSION_TABLE = "online_eval_regressions";
 export const ONLINE_EVAL_SCORE_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SCORE_TABLE} (
   request_id, criterion_id, tenant, project, workspace, api_key_id, agent_run_id,
   operation_id, provider, logical_model, provider_model,
+  experiment_id, experiment_arm,
   sampling_key, sampling_unit, sample_rate,
   judge_model, score, rationale,
   prompt_truncated, completion_truncated, scored_at_unix
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (request_id, criterion_id) DO UPDATE SET
   score = excluded.score,
   rationale = excluded.rationale,
@@ -89,6 +90,8 @@ export function onlineEvalScoreBindings(record: OnlineEvalScoreRecord): unknown[
     record.provider ?? null,
     record.logicalModel ?? null,
     record.providerModel ?? null,
+    record.experimentId ?? null,
+    record.experimentArm ?? null,
     record.samplingKey,
     record.samplingUnit,
     record.sampleRate,
