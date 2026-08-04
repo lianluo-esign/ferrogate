@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   InMemoryAssetEgressCounters,
   InMemoryAssetEgressMeter,
+  assetEgressTargetId,
 } from "@ferrogate/billing";
 import type { StoredAsset } from "../src/ports.js";
 import {
@@ -63,6 +64,15 @@ beforeEach(() => {
 });
 
 describe("#801 MCP asset egress uses one billing path", () => {
+  it("fails closed instead of deriving an audit target when stored_assets.id is missing", () => {
+    expect(() =>
+      assetEgressTargetId(
+        { ...asset(), id: undefined } as never,
+        TENANT,
+      ),
+    ).toThrow("stored_assets.id");
+  });
+
   it("meters both resources/read and builtin.fetch_asset and audits stored_assets.id", async () => {
     const { counters, meter } = configureEgress();
 

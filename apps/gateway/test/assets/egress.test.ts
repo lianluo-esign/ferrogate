@@ -37,6 +37,8 @@
  */
 import { QuotaScopeSelector } from "@ferrogate/policy";
 import { describe, expect, it } from "vitest";
+import { LedgerAssetEgressMeter } from "@ferrogate/billing/asset-egress";
+import { D1LedgerStore } from "@ferrogate/billing/metering";
 import {
   ASSET_EGRESS_LOGICAL_MODEL_PREFIX,
   ASSET_EGRESS_PROVIDER,
@@ -48,6 +50,8 @@ import {
   assetEgressQuotaDenial,
   assetEgressRpmCounterKey,
 } from "../../src/assets/egress.js";
+import { storedAssetVariantId } from "../../src/assets/keys.js";
+import { billingDb, resetMeteringTables } from "../metering/d1-harness.js";
 import type { AssetEgressCounters } from "../../src/assets/egress.js";
 import { CTX, bytes, callerFor, harness } from "./helpers.js";
 
@@ -325,6 +329,7 @@ describe("D4 — getAsset enforces the budget and bills the bytes", () => {
     expect(charge?.logicalModel).toBe(`${ASSET_EGRESS_LOGICAL_MODEL_PREFIX}cli_tool/installer`);
     expect(charge?.agentRunId).toBe("run-egress-1");
     expect(charge?.requestId).toBe("req_pull");
+    expect(charge?.apiKeyId).toBe(KEY);
     // 4096 bytes @ $0.09/GB.
     expect(charge?.costUsd).toBeCloseTo((4_096 / 1_000_000_000) * 0.09, 15);
 
@@ -349,6 +354,70 @@ describe("D4 — getAsset enforces the budget and bills the bytes", () => {
     expect(pull?.target).toBe("tenant-a:cli_tool:installer:1.0.0");
     expect(pull?.message).toContain("512 bytes");
     expect(pull?.agentRunId).toBe("run-egress-2");
+  });
+
+  it("audits the resolved variant row's stored_assets.id", async () => {
+    const counters = new InMemoryAssetEgressCounters();
+    const meter = new InMemoryAssetEgressMeter();
+    const h = harness({ egress: { counters, meter } });
+    const content = bytes("variant payload");
+    const put = await h.service.putAsset(
+      callerFor(TENANT),
+      {
+        assetType: "cli_tool",
+        name: "installer",
+        version: "1.0.0",
+        variant: "linux-x86_64",
+      },
+      { contentType: "application/octet-stream", content },
+      CTX,
+    );
+    expect(put.ok).toBe(true);
+
+    const result = await h.service.pullAsset(
+      egressCaller(),
+      { assetType: "cli_tool", name: "installer", reference: "1.0.0" },
+      { headers: new Headers(), platform: "linux-x86_64" },
+      { requestId: "req_variant" },
+    );
+    expect(result.ok).toBe(true);
+
+    const pull = h.audit.events.find((event) => event.action === "asset.pull");
+    expect(pull?.target).toBe(
+      storedAssetVariantId(TENANT, "cli_tool", "installer", "1.0.0", "linux-x86_64"),
+    );
+  });
+
+  it("persists gateway egress with the authenticated api key in D1", async () => {
+    await resetMeteringTables();
+    const db = billingDb();
+    const h = await published(64, {
+      egress: {
+        counters: new InMemoryAssetEgressCounters(),
+        meter: new LedgerAssetEgressMeter(new D1LedgerStore(db)),
+        pricePerGb: 0.09,
+      },
+    });
+
+    const result = await h.service.pullAsset(
+      egressCaller(),
+      { assetType: "cli_tool", name: "installer", reference: "1.0.0" },
+      { headers: new Headers() },
+      { requestId: "req_gateway_d1" },
+    );
+    expect(result.ok).toBe(true);
+
+    const ledger = await db
+      .prepare("SELECT api_key_id, entry_json FROM billing_ledger")
+      .all<{ api_key_id: string | null; entry_json: string }>();
+    const events = await db
+      .prepare("SELECT event_json FROM billing_events")
+      .all<{ event_json: string }>();
+    expect(ledger.results).toHaveLength(1);
+    expect(events.results).toHaveLength(1);
+    expect(ledger.results?.[0]?.api_key_id).toBe(KEY);
+    expect(JSON.parse(ledger.results?.[0]?.entry_json ?? "{}").tenant.api_key_id).toBe(KEY);
+    expect(JSON.parse(events.results?.[0]?.event_json ?? "{}").tenant.api_key_id).toBe(KEY);
   });
 
   it("bills before the body is handed back, so a client disconnect cannot lose the charge", async () => {
