@@ -360,6 +360,51 @@ export interface AssetEgressMeter {
   record(charge: AssetEgressCharge): void | Promise<void>;
 }
 
+/** Asset metadata required by the shared read-side egress path. */
+export interface AssetEgressReadableAsset {
+  readonly id?: string | undefined;
+  readonly assetType: string;
+  readonly name: string;
+  readonly version: string;
+  readonly sizeBytes: number;
+}
+
+export type AssetEgressRead<TAsset extends AssetEgressReadableAsset, TFailure> =
+  | { readonly ok: true; readonly asset: TAsset; readonly content: Uint8Array }
+  | { readonly ok: false; readonly error: TFailure };
+
+export interface ReadAssetWithEgressInput<
+  TAsset extends AssetEgressReadableAsset,
+  TFailure,
+> {
+  readonly quota: AssetEgressQuota;
+  readonly apiKeyId: string;
+  readonly tenantId: string;
+  readonly projectId?: string | undefined;
+  readonly requestId: string;
+  readonly agentRunId?: string | undefined;
+  /** Metadata from the resolved asset row, used for the pre-read gate. */
+  readonly asset: TAsset;
+  readonly read: () => Promise<AssetEgressRead<TAsset, TFailure>>;
+  readonly pricePerGb?: number | undefined;
+  readonly counters: AssetEgressCounters;
+  readonly meter: AssetEgressMeter;
+  readonly nowUnix: number;
+}
+
+export type ReadAssetWithEgressResult<
+  TAsset extends AssetEgressReadableAsset,
+  TFailure,
+> =
+  | {
+      readonly ok: true;
+      readonly asset: TAsset;
+      readonly content: Uint8Array;
+      readonly charge: AssetEgressCharge | null;
+    }
+  | { readonly ok: false; readonly kind: "quota"; readonly error: AssetEgressDenial }
+  | { readonly ok: false; readonly kind: "read"; readonly error: TFailure };
+
 /** Offline meter: the charges, in order. */
 export class InMemoryAssetEgressMeter implements AssetEgressMeter {
   readonly charges: AssetEgressCharge[] = [];
@@ -529,9 +574,58 @@ export async function recordAssetEgress(
   return charge;
 }
 
+/**
+ * One read-side path for every asset consumer: gate the resolved object before
+ * reading it, then meter the bytes returned by storage.
+ */
+export async function readAssetWithEgress<
+  TAsset extends AssetEgressReadableAsset,
+  TFailure,
+>(
+  input: ReadAssetWithEgressInput<TAsset, TFailure>,
+): Promise<ReadAssetWithEgressResult<TAsset, TFailure>> {
+  const denial = await assetEgressQuotaDenial({
+    quota: input.quota,
+    apiKeyId: input.apiKeyId,
+    tenantId: input.tenantId,
+    bytes: input.asset.sizeBytes,
+    counters: input.counters,
+  });
+  if (denial !== null) return { ok: false, kind: "quota", error: denial };
+
+  const read = await input.read();
+  if (!read.ok) return { ok: false, kind: "read", error: read.error };
+
+  const charge = await recordAssetEgress({
+    quota: input.quota,
+    apiKeyId: input.apiKeyId,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    requestId: input.requestId,
+    agentRunId: input.agentRunId,
+    assetType: read.asset.assetType,
+    name: read.asset.name,
+    version: read.asset.version,
+    bytes: read.content.byteLength,
+    pricePerGb: input.pricePerGb,
+    counters: input.counters,
+    meter: input.meter,
+    nowUnix: input.nowUnix,
+  });
+  return { ok: true, asset: read.asset, content: read.content, charge };
+}
+
 /** Rust: `asset {id} downloaded ({bytes} bytes)` — the pull audit message. */
 export function assetPullAuditMessage(assetId: string, bytes: number): string {
   return `asset ${assetId} downloaded (${bytes} bytes)`;
+}
+
+/** The canonical `stored_assets.id` used by gateway and MCP audit rows. */
+export function assetEgressTargetId(
+  asset: AssetEgressReadableAsset,
+  tenantId: string,
+): string {
+  return asset.id ?? `${tenantId}:${asset.assetType}:${asset.name}:${asset.version}`;
 }
 
 // ---------------------------------------------------------------------------

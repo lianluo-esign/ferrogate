@@ -24,6 +24,7 @@
  * tenant and surface.
  */
 import type { JsonValue } from "@ferrogate/core";
+import { assetEgressTargetId } from "@ferrogate/billing";
 
 import { mcpJsonRpcMethodScopes } from "./contract.js";
 import {
@@ -31,6 +32,7 @@ import {
   jsonRpcError,
   jsonRpcResult,
   JsonRpcErrorCode,
+  mcpErrorCode,
   renderJsonRpcResponse,
   type JsonRpcResponse,
   type McpIngressRequest,
@@ -56,6 +58,7 @@ import {
   assetUri,
   auditEvent,
   parseAssetUri,
+  readAssetForMcp,
   toolsCall,
   toolsList,
 } from "./tools.js";
@@ -445,8 +448,17 @@ async function resourcesRead(
       "assets require a tenant-attributed API key",
     );
   }
-  const read = await ports.assets.read(tenantId, parsed.assetType, parsed.name, parsed.version);
+  const read = await readAssetForMcp(
+    ports,
+    context,
+    parsed.assetType,
+    parsed.name,
+    parsed.version,
+  );
   if (!read.ok) {
+    if (read.kind === "quota") {
+      return jsonRpcError(rpc.id, mcpErrorCode(read.error.code), read.error.message);
+    }
     switch (read.error.kind) {
       case "not_found":
         return jsonRpcError(
@@ -482,7 +494,7 @@ async function resourcesRead(
     auditEvent(
       context,
       "resource.read",
-      assetUri(read.asset.assetType, read.asset.name, read.asset.version),
+      assetEgressTargetId(read.asset, tenantId),
       "success",
       `read asset resource ${read.asset.name}@${read.asset.version} (${read.asset.sizeBytes} bytes)`,
     ),
