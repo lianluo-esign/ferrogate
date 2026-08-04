@@ -199,7 +199,7 @@ and still `false`), but by leaving D1 for the tenant plane. A Durable Object is
 created by being addressed, so onboarding is not a deploy, and
 `ctx.storage.transactionSync()` is a real SQLite transaction, so `batch()` is one
 commit. `src/tenant-do.ts` is a `D1Database`-shaped facade over
-`src/tenant-data-object.ts`, which is what lets the eight tenant-plane modules
+`src/tenant-data-object.ts`, which is what lets the tenant-plane modules
 under `src/d1/` run over it **unmodified** — `test/d1/**` executes twice, once
 per backend (`vitest.d1.config.ts` and `vitest.d1do.config.ts`), and that is the
 acceptance test rather than a facade-shaped suite that would agree with the
