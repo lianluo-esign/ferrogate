@@ -39,9 +39,7 @@ function asArray(value: unknown): unknown[] | undefined {
 }
 
 function asUint(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function get(value: unknown, key: string): unknown {
@@ -124,8 +122,8 @@ function collapseContent(parts: readonly Json[]): unknown {
     return null;
   }
   const [single] = parts;
-  if (parts.length === 1 && single !== undefined && single["type"] === "text") {
-    return single["text"] ?? "";
+  if (parts.length === 1 && single !== undefined && single.type === "text") {
+    return single.text ?? "";
   }
   return [...parts];
 }
@@ -160,9 +158,7 @@ function toolResultToText(content: unknown): string {
   }
   const blocks = asArray(content);
   if (blocks !== undefined) {
-    return blocks
-      .map((block) => asString(get(block, "text")) ?? valueToString(block))
-      .join("\n");
+    return blocks.map((block) => asString(get(block, "text")) ?? valueToString(block)).join("\n");
   }
   return valueToString(content);
 }
@@ -193,18 +189,49 @@ export function parseArguments(argumentsValue: unknown): unknown {
 
 /** `anthropic_tool_to_openai`. */
 function toolToOpenAi(tool: unknown): Json {
+  const record = asRecord(tool);
+  if (record !== undefined && isNativeTool(record)) {
+    return record;
+  }
   const fn: Json = { name: get(tool, "name") ?? null };
   const description = get(tool, "description");
   if (description !== undefined) {
-    fn["description"] = description;
+    fn.description = description;
   }
-  fn["parameters"] = get(tool, "input_schema") ?? { type: "object" };
+  fn.parameters = get(tool, "input_schema") ?? { type: "object" };
   return { type: "function", function: fn };
+}
+
+/** Preserve typed Anthropic server tools while translating client functions. */
+function isNativeTool(record: Json): boolean {
+  return (
+    asString(record.type) !== undefined &&
+    record.type !== "function" &&
+    record.function === undefined
+  );
 }
 
 /** `anthropic_tool_choice_to_openai`. */
 function toolChoiceToOpenAi(choice: unknown): unknown {
-  switch (asString(get(choice, "type"))) {
+  const keyword = asString(choice);
+  if (keyword !== undefined) {
+    switch (keyword) {
+      case "auto":
+        return "auto";
+      case "none":
+        return "none";
+      case "any":
+        return "required";
+      default:
+        return choice;
+    }
+  }
+
+  const record = asRecord(choice);
+  if (record === undefined) {
+    return choice;
+  }
+  switch (asString(record.type)) {
     case "auto":
       return "auto";
     case "none":
@@ -212,11 +239,11 @@ function toolChoiceToOpenAi(choice: unknown): unknown {
     case "any":
       return "required";
     case "tool": {
-      const name = asString(get(choice, "name"));
-      return name === undefined ? undefined : { type: "function", function: { name } };
+      const name = asString(record.name);
+      return name === undefined ? record : { type: "function", function: { name } };
     }
     default:
-      return undefined;
+      return record;
   }
 }
 
@@ -313,7 +340,7 @@ export function toChatCompletions(body: Json): TranslationResult {
     }
   }
   if ("stop_sequences" in body) {
-    out["stop"] = body["stop_sequences"];
+    out.stop = body.stop_sequences;
   }
   // Anthropic's `metadata` is exactly `{user_id}` — the end-user identifier for
   // abuse monitoring — while `metadata` on the OpenAI side of this gateway is
@@ -321,32 +348,36 @@ export function toChatCompletions(body: Json): TranslationResult {
   // would file a caller's end user as a cost centre, so the ONE member it
   // defines takes OpenAI's name for the same thing and the adapter spells it
   // back (issue #725).
-  const userId = asString(get(body["metadata"], "user_id"));
+  const userId = asString(get(body.metadata, "user_id"));
   if (userId !== undefined) {
-    out["user"] = userId;
+    out.user = userId;
   }
 
   const messages: Json[] = [];
-  const system = systemToText(body["system"]);
+  const system = systemToText(body.system);
   if (system !== undefined) {
     messages.push({ role: "system", content: system });
   }
-  for (const message of asArray(body["messages"]) ?? []) {
+  for (const message of asArray(body.messages) ?? []) {
     messageToChat(message, messages);
   }
-  out["messages"] = messages;
+  out.messages = messages;
 
-  const tools = asArray(body["tools"]);
+  const tools = asArray(body.tools);
   if (tools !== undefined) {
     const converted = tools.map(toolToOpenAi);
     if (converted.length > 0) {
-      out["tools"] = converted;
+      out.tools = converted;
     }
   }
   if ("tool_choice" in body) {
-    const converted = toolChoiceToOpenAi(body["tool_choice"]);
+    const choice = body.tool_choice;
+    const converted = toolChoiceToOpenAi(choice);
     if (converted !== undefined) {
-      out["tool_choice"] = converted;
+      out.tool_choice = converted;
+    }
+    if (get(choice, "disable_parallel_tool_use") === true) {
+      out.parallel_tool_calls = false;
     }
   }
 
@@ -419,7 +450,7 @@ function findCacheControl(value: unknown): unknown {
   }
   const record = asRecord(value);
   if (record === undefined) return undefined;
-  if (record["cache_control"] !== undefined) return record["cache_control"];
+  if (record.cache_control !== undefined) return record.cache_control;
   for (const entry of Object.values(record)) {
     const found = findCacheControl(entry);
     if (found !== undefined) return found;
@@ -485,37 +516,37 @@ export function chatCompletionsToMessages(
   // overwrites it: a forwarded value can never shadow a translated one.
   const out: Json = {};
   for (const [key, value] of Object.entries(body)) {
-    if (!CHAT_CLASSIFIED.has(key)) {
+    if (!CHAT_CLASSIFIED.has(key) && value !== null && value !== undefined) {
       out[key] = value;
     }
   }
 
-  const { messages, system } = chatMessagesToAnthropic(body["messages"], body["system"]);
-  out["model"] = options.model;
-  out["messages"] = messages;
+  const { messages, system } = chatMessagesToAnthropic(body.messages, body.system);
+  out.model = options.model;
+  out.messages = messages;
   if (system !== undefined) {
-    out["system"] = system;
+    out.system = system;
   }
   // Anthropic REQUIRES `max_tokens`, hence the default the Rust adapter also
   // applied. `max_completion_tokens` is OpenAI's newer spelling of the same cap.
-  out["max_tokens"] = body["max_tokens"] ?? body["max_completion_tokens"] ?? 1024;
-  out["stream"] = options.stream;
+  out.max_tokens = body.max_tokens ?? body.max_completion_tokens ?? 1024;
+  out.stream = options.stream;
 
   const stop = anthropicStopSequences(body);
   if (stop !== undefined) {
-    out["stop_sequences"] = stop;
+    out.stop_sequences = stop;
   }
-  const tools = toolsToAnthropic(body["tools"]);
+  const tools = toolsToAnthropic(body.tools);
   if (tools !== undefined) {
-    out["tools"] = tools;
+    out.tools = tools;
   }
-  const toolChoice = toolChoiceToAnthropic(body["tool_choice"], body["parallel_tool_calls"]);
+  const toolChoice = toolChoiceToAnthropic(body.tool_choice, body.parallel_tool_calls);
   if (toolChoice !== undefined) {
-    out["tool_choice"] = toolChoice;
+    out.tool_choice = toolChoice;
   }
-  const user = asString(body["user"]);
+  const user = asString(body.user);
   if (user !== undefined) {
-    out["metadata"] = { user_id: user };
+    out.metadata = { user_id: user };
   }
   return out;
 }
@@ -546,6 +577,15 @@ const CHAT_CLASSIFIED = new Set<string>([
   "tool_choice",
   "parallel_tool_calls",
   "user",
+  // inexpressible: no-op values are stripped rather than forwarded
+  "n",
+  "frequency_penalty",
+  "presence_penalty",
+  "logit_bias",
+  "logprobs",
+  "top_logprobs",
+  "seed",
+  "reasoning_effort",
   // gateway- / transport-owned
   PROMPT_CACHE_MEMBER,
   "metadata",
@@ -636,7 +676,7 @@ function assertAnthropicCanExpress(body: Json, providerKind: string): void {
 
 /** `stop` (string or array) and Anthropic's own spelling both land here. */
 function anthropicStopSequences(body: Json): unknown {
-  const value = body["stop_sequences"] ?? body["stop"];
+  const value = body.stop_sequences ?? body.stop;
   if (value === undefined || value === null) {
     return undefined;
   }
@@ -662,24 +702,24 @@ function toolsToAnthropic(tools: unknown): unknown[] | undefined {
 
 function toolToAnthropic(tool: unknown): unknown {
   const record = asRecord(tool);
-  if (record === undefined || record["input_schema"] !== undefined) {
+  if (record === undefined || record.input_schema !== undefined || isNativeTool(record)) {
     return tool;
   }
   // Chat nests the definition under `function`; `/v1/responses` flattens it.
-  const fn = asRecord(record["function"]) ?? record;
-  const name = asString(fn["name"]);
+  const fn = asRecord(record.function) ?? record;
+  const name = asString(fn.name);
   if (name === undefined) {
     return tool;
   }
   const out: Json = { name };
-  const description = fn["description"];
+  const description = fn.description;
   if (description !== undefined) {
-    out["description"] = description;
+    out.description = description;
   }
-  out["input_schema"] = fn["parameters"] ?? { type: "object" };
-  const cacheControl = record["cache_control"] ?? fn["cache_control"];
+  out.input_schema = fn.parameters ?? { type: "object" };
+  const cacheControl = record.cache_control ?? fn.cache_control;
   if (cacheControl !== undefined) {
-    out["cache_control"] = cacheControl;
+    out.cache_control = cacheControl;
   }
   return out;
 }
@@ -716,16 +756,16 @@ function toolChoiceGrammar(choice: unknown): unknown {
       case "required":
         return { type: "any" };
       default:
-        return undefined;
+        return choice;
     }
   }
   const record = asRecord(choice);
   if (record === undefined) {
-    return undefined;
+    return choice;
   }
-  if (asString(record["type"]) === "function") {
-    const name = asString(record["name"] ?? get(record["function"], "name"));
-    return name === undefined ? undefined : { type: "tool", name };
+  if (asString(record.type) === "function") {
+    const name = asString(record.name ?? get(record.function, "name"));
+    return name === undefined ? record : { type: "tool", name };
   }
   // Already Anthropic's grammar (`auto` / `any` / `none` / `tool`), or a member
   // this tree has no name for. Forwarded, per the remainder rule.
@@ -828,17 +868,17 @@ function chatTurnToAnthropic(role: string, message: unknown): Json {
  */
 function contentPartToAnthropic(part: unknown): Json {
   const record = asRecord(part);
-  if (record === undefined || asString(record["type"]) !== "image_url") {
+  if (record === undefined || asString(record.type) !== "image_url") {
     return (record ?? { type: "text", text: valueToString(part) }) as Json;
   }
-  const url = asString(get(record["image_url"], "url"));
+  const url = asString(get(record.image_url, "url"));
   if (url === undefined) {
     return record;
   }
   const source = dataUrlToSource(url) ?? { type: "url", url };
   const out: Json = { type: "image", source };
-  if (record["cache_control"] !== undefined) {
-    out["cache_control"] = record["cache_control"];
+  if (record.cache_control !== undefined) {
+    out.cache_control = record.cache_control;
   }
   return out;
 }
@@ -885,11 +925,11 @@ function anthropicSystem(blocks: readonly Json[]): unknown {
   if (
     blocks.length === 1 &&
     single !== undefined &&
-    single["type"] === "text" &&
+    single.type === "text" &&
     Object.keys(single).length === 2 &&
-    typeof single["text"] === "string"
+    typeof single.text === "string"
   ) {
-    return single["text"];
+    return single.text;
   }
   return [...blocks];
 }

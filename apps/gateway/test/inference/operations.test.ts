@@ -94,7 +94,7 @@ describe("GET /v1/models", () => {
       created_at: expect.any(String),
     });
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
-    expect((body.data[0] as Record<string, unknown>)["object"]).toBeUndefined();
+    expect((body.data[0] as Record<string, unknown>).object).toBeUndefined();
   });
 });
 
@@ -129,19 +129,19 @@ describe("POST /v1/messages", () => {
       expect(upstream.url).toBe("https://api.anthropic.example/v1/messages");
       expect(upstream.headers["x-api-key"]).toBe("sk-test-anthropic");
       expect(upstream.headers["anthropic-version"]).toBe("2023-06-01");
-      expect(upstream.headers["authorization"]).toBeUndefined();
+      expect(upstream.headers.authorization).toBeUndefined();
 
       const body = upstream.body as Record<string, unknown>;
-      expect(body["model"]).toBe("claude-3-5-sonnet-20241022");
-      expect(body["max_tokens"]).toBe(256);
+      expect(body.model).toBe("claude-3-5-sonnet-20241022");
+      expect(body.max_tokens).toBe(256);
       // The system prompt is the TOP-LEVEL parameter. `to_chat_completions`
       // folds it into `messages[0]` as a `system`-role turn on the way in
       // because that is the shape the OpenAI-side estimator and adapters read,
       // and the Anthropic adapter lifts it back out on the way to the wire —
       // the Messages API accepts only `user` and `assistant` turns, so the old
       // body was one a real upstream would have rejected outright (issue #725).
-      expect(body["system"]).toBe("be concise");
-      expect(body["messages"]).toEqual([{ role: "user", content: "hi" }]);
+      expect(body.system).toBe("be concise");
+      expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
     } finally {
       provider.restore();
     }
@@ -154,7 +154,7 @@ describe("POST /v1/messages", () => {
         model: "claude-logical",
         messages: [{ role: "user", content: "hi" }],
       });
-      expect((provider.lastRequest().body as Record<string, unknown>)["max_tokens"]).toBe(1024);
+      expect((provider.lastRequest().body as Record<string, unknown>).max_tokens).toBe(1024);
     } finally {
       provider.restore();
     }
@@ -230,7 +230,7 @@ describe("POST /v1/messages", () => {
       });
 
       const body = provider.lastRequest().body as Record<string, unknown>;
-      const messages = body["messages"] as Array<Record<string, unknown>>;
+      const messages = body.messages as Array<Record<string, unknown>>;
       expect(messages[0]).toMatchObject({
         role: "assistant",
         tool_calls: [
@@ -238,14 +238,14 @@ describe("POST /v1/messages", () => {
         ],
       });
       expect(messages[1]).toEqual({ role: "tool", tool_call_id: "toolu_1", content: "42" });
-      expect(body["tools"]).toEqual([
+      expect(body.tools).toEqual([
         {
           type: "function",
           function: { name: "lookup", description: "d", parameters: { type: "object" } },
         },
       ]);
       // Anthropic `any` maps to OpenAI `required`.
-      expect(body["tool_choice"]).toBe("required");
+      expect(body.tool_choice).toBe("required");
     } finally {
       provider.restore();
     }
@@ -311,7 +311,7 @@ describe("POST /v1/embeddings", () => {
       expect(upstream.url).toBe("https://api.openai.example/v1/embeddings");
       // `EmbeddingsPlan` has no `stream` field at all — the adapter must not
       // invent one.
-      expect((upstream.body as Record<string, unknown>)["stream"]).toBeUndefined();
+      expect((upstream.body as Record<string, unknown>).stream).toBeUndefined();
       expect(h.usage.last).toMatchObject({ route: "openai.embeddings", promptTokens: 6 });
     } finally {
       provider.restore();

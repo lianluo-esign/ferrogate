@@ -270,10 +270,10 @@ describe("@anthropic-ai/sdk — messages", () => {
       // The translated body is COMPLETE on this leg — this is the control case
       // that makes the next test's finding a divergence rather than a design.
       const body = upstream.last().body as Record<string, unknown>;
-      expect(body["temperature"]).toBe(0.3);
-      expect(body["stop"]).toEqual(["STOP"]);
-      expect(body["tool_choice"]).toBe("auto");
-      expect(body["tools"]).toEqual([
+      expect(body.temperature).toBe(0.3);
+      expect(body.stop).toEqual(["STOP"]);
+      expect(body.tool_choice).toBe("auto");
+      expect(body.tools).toEqual([
         {
           type: "function",
           function: {
@@ -287,7 +287,7 @@ describe("@anthropic-ai/sdk — messages", () => {
           },
         },
       ]);
-      expect((body["messages"] as Array<Record<string, unknown>>)[0]).toEqual({
+      expect((body.messages as Array<Record<string, unknown>>)[0]).toEqual({
         role: "system",
         content: "be brief",
       });
@@ -342,7 +342,7 @@ describe("@anthropic-ai/sdk — messages", () => {
       // The round trip lands back on Anthropic's OWN spelling — `input_schema`,
       // not the `parameters` the inbound translation produced — because a body
       // carrying the OpenAI grammar would be a 400 from the real upstream.
-      expect(body["tools"]).toEqual([
+      expect(body.tools).toEqual([
         {
           name: "get_weather",
           description: "Look up the weather",
@@ -353,13 +353,13 @@ describe("@anthropic-ai/sdk — messages", () => {
           },
         },
       ]);
-      expect(body["tool_choice"]).toEqual({ type: "auto" });
-      expect(body["temperature"]).toBe(0.3);
-      expect(body["stop_sequences"]).toEqual(["STOP"]);
+      expect(body.tool_choice).toEqual({ type: "auto" });
+      expect(body.temperature).toBe(0.3);
+      expect(body.stop_sequences).toEqual(["STOP"]);
       // `system` is the TOP-LEVEL parameter, and `messages` carries only the
       // roles the Messages API accepts.
-      expect(body["system"]).toBe("be brief");
-      expect(body["messages"]).toEqual([{ role: "user", content: "weather?" }]);
+      expect(body.system).toBe("be brief");
+      expect(body.messages).toEqual([{ role: "user", content: "weather?" }]);
     } finally {
       upstream.restore();
     }
@@ -521,18 +521,18 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     // (seven-field `ModelInfo` shape) on that ingress, while the OpenAI ingress
     // keeps the OpenAI dialect (`{id, object:"model", created, owned_by}`).
     const first = page.data[0] as unknown as Record<string, unknown>;
-    expect(first?.["id"]).toEqual(expect.any(String));
-    expect(first?.["type"]).toBe("model");
-    expect(first?.["display_name"]).toBe("gpt-4o-mini");
-    expect(first?.["created_at"]).toEqual(expect.any(String));
+    expect(first?.id).toEqual(expect.any(String));
+    expect(first?.type).toBe("model");
+    expect(first?.display_name).toBe("gpt-4o-mini");
+    expect(first?.created_at).toEqual(expect.any(String));
     // Two fields are emitted as null because FerroGate does not track the
     // Anthropic capability model or per-model max_tokens limits. These
     // assertions pin the omission as a recorded contract rather than an accident.
-    expect(first?.["capabilities"]).toBeNull();
-    expect(first?.["max_input_tokens"]).toBe(128_000);
-    expect(first?.["max_tokens"]).toBeNull();
+    expect(first?.capabilities).toBeNull();
+    expect(first?.max_input_tokens).toBe(128_000);
+    expect(first?.max_tokens).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
-    expect(first?.["object"]).toBeUndefined();
+    expect(first?.object).toBeUndefined();
   });
 
   it("models.retrieve() returns the Anthropic dialect on the Anthropic ingress", async () => {
@@ -543,22 +543,18 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
 
     expect(model.id).toBe("gpt-4o-mini");
     // The Anthropic SDK's ModelInfo type has `type: "model"`.
-    expect((model as unknown as Record<string, unknown>)?.["type"]).toBe("model");
-    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toEqual(
-      expect.any(String),
-    );
-    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toEqual(
-      expect.any(String),
-    );
+    expect((model as unknown as Record<string, unknown>)?.type).toBe("model");
+    expect((model as unknown as Record<string, unknown>)?.display_name).toEqual(expect.any(String));
+    expect((model as unknown as Record<string, unknown>)?.created_at).toEqual(expect.any(String));
     // Two fields are emitted as null because FerroGate does not track the
     // Anthropic capability model or per-model max_tokens limits. These
     // assertions pin the omission as a recorded contract rather than an accident.
-    expect((model as unknown as Record<string, unknown>)?.["capabilities"]).toBeNull();
-    expect((model as unknown as Record<string, unknown>)?.["max_input_tokens"]).toBe(128_000);
-    expect((model as unknown as Record<string, unknown>)?.["max_tokens"]).toBeNull();
+    expect((model as unknown as Record<string, unknown>)?.capabilities).toBeNull();
+    expect((model as unknown as Record<string, unknown>)?.max_input_tokens).toBe(128_000);
+    expect((model as unknown as Record<string, unknown>)?.max_tokens).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
-    expect((model as unknown as Record<string, unknown>)?.["object"]).toBeUndefined();
-    expect((model as unknown as Record<string, unknown>)?.["created"]).toBeUndefined();
-    expect((model as unknown as Record<string, unknown>)?.["owned_by"]).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.object).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.created).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.owned_by).toBeUndefined();
   });
 });

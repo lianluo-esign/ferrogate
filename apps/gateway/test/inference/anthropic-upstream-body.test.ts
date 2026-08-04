@@ -61,11 +61,17 @@ const WEATHER_TOOL_OPENAI = {
   },
 };
 
+const WEB_SEARCH_TOOL = {
+  type: "web_search_20250305",
+  name: "web_search",
+  max_uses: 5,
+};
+
 interface Sent {
   readonly status: number;
   readonly calls: number;
   /** The body the Anthropic upstream actually received. */
-  readonly body: Record<string, any>;
+  readonly body: Record<string, unknown>;
   readonly code: string | undefined;
   readonly message: string | undefined;
 }
@@ -80,7 +86,7 @@ async function sent(path: string, request: unknown): Promise<Sent> {
     return {
       status: res.status,
       calls: provider.requests.length,
-      body: (provider.requests[0]?.body ?? {}) as Record<string, any>,
+      body: (provider.requests[0]?.body ?? {}) as Record<string, unknown>,
       code: failure.code,
       message: failure.message,
     };
@@ -125,13 +131,13 @@ describe("/v1/messages on an anthropic upstream forwards what the caller sent", 
     // OpenAI grammar on the way in, so forwarding the translated shape verbatim
     // would be a 400 from Anthropic. The round trip has to land back on
     // `input_schema`.
-    expect(out.body["tools"]).toEqual([WEATHER_TOOL]);
+    expect(out.body.tools).toEqual([WEATHER_TOOL]);
   });
 
   it("forwards tool_choice", async () => {
     const out = await sent("/v1/messages", messagesRequest());
     expect(out.status).toBe(200);
-    expect(out.body["tool_choice"]).toEqual({ type: "auto" });
+    expect(out.body.tool_choice).toEqual({ type: "auto" });
   });
 
   it("forwards a forced tool choice by name", async () => {
@@ -140,35 +146,57 @@ describe("/v1/messages on an anthropic upstream forwards what the caller sent", 
       messagesRequest({ tool_choice: { type: "tool", name: "get_weather" } }),
     );
     expect(out.status).toBe(200);
-    expect(out.body["tool_choice"]).toEqual({ type: "tool", name: "get_weather" });
+    expect(out.body.tool_choice).toEqual({ type: "tool", name: "get_weather" });
+  });
+
+  it("preserves disable_parallel_tool_use through the shared chat grammar", async () => {
+    const out = await sent(
+      "/v1/messages",
+      messagesRequest({ tool_choice: { type: "auto", disable_parallel_tool_use: true } }),
+    );
+    expect(out.status).toBe(200);
+    expect(out.body.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
+  });
+
+  it("preserves an Anthropic-native server tool instead of inventing a function schema", async () => {
+    const out = await sent("/v1/messages", messagesRequest({ tools: [WEB_SEARCH_TOOL] }));
+    expect(out.status).toBe(200);
+    expect(out.body.tools).toEqual([WEB_SEARCH_TOOL]);
+  });
+
+  it("forwards an unrecognised tool choice instead of dropping it", async () => {
+    const choice = { type: "future_choice", policy: "keep" };
+    const out = await sent("/v1/messages", messagesRequest({ tool_choice: choice }));
+    expect(out.status).toBe(200);
+    expect(out.body.tool_choice).toEqual(choice);
   });
 
   it("forwards temperature", async () => {
     const out = await sent("/v1/messages", messagesRequest());
     expect(out.status).toBe(200);
-    expect(out.body["temperature"]).toBe(0.3);
+    expect(out.body.temperature).toBe(0.3);
   });
 
   it("forwards stop_sequences", async () => {
     const out = await sent("/v1/messages", messagesRequest());
     expect(out.status).toBe(200);
-    expect(out.body["stop_sequences"]).toEqual(["STOP"]);
+    expect(out.body.stop_sequences).toEqual(["STOP"]);
   });
 
   it("forwards top_p", async () => {
     const out = await sent("/v1/messages", messagesRequest({ top_p: 0.9 }));
     expect(out.status).toBe(200);
-    expect(out.body["top_p"]).toBe(0.9);
+    expect(out.body.top_p).toBe(0.9);
   });
 
   it("passes system as the top-level parameter, not as a role inside messages", async () => {
     const out = await sent("/v1/messages", messagesRequest());
     expect(out.status).toBe(200);
-    expect(out.body["system"]).toBe("be brief");
+    expect(out.body.system).toBe("be brief");
     // The Messages API accepts only `user` and `assistant` turns, so a
     // `role: "system"` entry here is a body the upstream would reject outright
     // — the request only "worked" because no real Anthropic endpoint saw it.
-    expect(out.body["messages"]).toEqual([{ role: "user", content: "weather?" }]);
+    expect(out.body.messages).toEqual([{ role: "user", content: "weather?" }]);
   });
 
   it("carries a tool_use / tool_result turn back in the Anthropic grammar", async () => {
@@ -184,7 +212,9 @@ describe("/v1/messages on an anthropic upstream forwards what the caller sent", 
           { role: "user", content: "weather?" },
           {
             role: "assistant",
-            content: [{ type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "SF" } }],
+            content: [
+              { type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "SF" } },
+            ],
           },
           {
             role: "user",
@@ -194,7 +224,7 @@ describe("/v1/messages on an anthropic upstream forwards what the caller sent", 
       }),
     );
     expect(out.status).toBe(200);
-    expect(out.body["messages"]).toEqual([
+    expect(out.body.messages).toEqual([
       { role: "user", content: "weather?" },
       {
         role: "assistant",
@@ -211,7 +241,7 @@ describe("/v1/messages on an anthropic upstream forwards what the caller sent", 
   it("maps the Anthropic metadata.user_id through the OpenAI grammar and back", async () => {
     const out = await sent("/v1/messages", messagesRequest({ metadata: { user_id: "u-42" } }));
     expect(out.status).toBe(200);
-    expect(out.body["metadata"]).toEqual({ user_id: "u-42" });
+    expect(out.body.metadata).toEqual({ user_id: "u-42" });
   });
 });
 
@@ -219,7 +249,7 @@ describe("/v1/chat/completions on an anthropic upstream forwards what the caller
   it("translates OpenAI tools into Anthropic tools", async () => {
     const out = await sent("/v1/chat/completions", chatRequest({ tools: [WEATHER_TOOL_OPENAI] }));
     expect(out.status).toBe(200);
-    expect(out.body["tools"]).toEqual([WEATHER_TOOL]);
+    expect(out.body.tools).toEqual([WEATHER_TOOL]);
   });
 
   it('translates tool_choice "required" into Anthropic\'s "any"', async () => {
@@ -228,26 +258,26 @@ describe("/v1/chat/completions on an anthropic upstream forwards what the caller
       chatRequest({ tools: [WEATHER_TOOL_OPENAI], tool_choice: "required" }),
     );
     expect(out.status).toBe(200);
-    expect(out.body["tool_choice"]).toEqual({ type: "any" });
+    expect(out.body.tool_choice).toEqual({ type: "any" });
   });
 
   it("translates a single `stop` string into a stop_sequences array", async () => {
     const out = await sent("/v1/chat/completions", chatRequest({ stop: "STOP" }));
     expect(out.status).toBe(200);
-    expect(out.body["stop_sequences"]).toEqual(["STOP"]);
+    expect(out.body.stop_sequences).toEqual(["STOP"]);
   });
 
   it("lifts the system-role message to the top-level system parameter", async () => {
     const out = await sent("/v1/chat/completions", chatRequest());
     expect(out.status).toBe(200);
-    expect(out.body["system"]).toBe("be brief");
-    expect(out.body["messages"]).toEqual([{ role: "user", content: "weather?" }]);
+    expect(out.body.system).toBe("be brief");
+    expect(out.body.messages).toEqual([{ role: "user", content: "weather?" }]);
   });
 
   it("translates the OpenAI `user` field into Anthropic's metadata.user_id", async () => {
     const out = await sent("/v1/chat/completions", chatRequest({ user: "u-42" }));
     expect(out.status).toBe(200);
-    expect(out.body["metadata"]).toEqual({ user_id: "u-42" });
+    expect(out.body.metadata).toEqual({ user_id: "u-42" });
   });
 
   it("expresses parallel_tool_calls: false as disable_parallel_tool_use", async () => {
@@ -256,7 +286,7 @@ describe("/v1/chat/completions on an anthropic upstream forwards what the caller
       chatRequest({ tools: [WEATHER_TOOL_OPENAI], parallel_tool_calls: false }),
     );
     expect(out.status).toBe(200);
-    expect(out.body["tool_choice"]).toEqual({ type: "auto", disable_parallel_tool_use: true });
+    expect(out.body.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
   });
 
   it("translates an assistant tool_calls turn and a tool-role result", async () => {
@@ -282,7 +312,7 @@ describe("/v1/chat/completions on an anthropic upstream forwards what the caller
       }),
     );
     expect(out.status).toBe(200);
-    expect(out.body["messages"]).toEqual([
+    expect(out.body.messages).toEqual([
       { role: "user", content: "weather?" },
       {
         role: "assistant",
@@ -329,15 +359,32 @@ describe("what Anthropic cannot express is refused, not dropped", () => {
     });
   }
 
-  it("tolerates the no-op spellings SDKs send by default", async () => {
+  it("strips no-op spellings and nulls before sending to Anthropic", async () => {
     // `n: 1`, a zero penalty and `logprobs: false` ask for nothing, so refusing
     // them would break working traffic to make a point.
     const out = await sent(
       "/v1/chat/completions",
-      chatRequest({ n: 1, frequency_penalty: 0, presence_penalty: 0, logprobs: false }),
+      chatRequest({
+        n: 1,
+        frequency_penalty: 0,
+        presence_penalty: 0,
+        logprobs: false,
+        seed: null,
+        temperature: null,
+      }),
     );
     expect(out.status).toBe(200);
     expect(out.calls).toBe(1);
+    for (const member of [
+      "n",
+      "frequency_penalty",
+      "presence_penalty",
+      "logprobs",
+      "seed",
+      "temperature",
+    ]) {
+      expect(out.body[member]).toBeUndefined();
+    }
   });
 });
 
@@ -355,7 +402,7 @@ describe("the members FerroGate owns never reach the wire", () => {
     expect(out.status).toBe(200);
     // FerroGate's billing metadata is not Anthropic's `{user_id}` metadata;
     // forwarding it is a 400 upstream.
-    expect(out.body["metadata"]).toBeUndefined();
+    expect(out.body.metadata).toBeUndefined();
     const wire = JSON.stringify(out.body);
     expect(wire).not.toContain("prompt_cache");
     expect(wire).not.toContain("stream_options");
@@ -379,7 +426,7 @@ describe("the members FerroGate owns never reach the wire", () => {
     expect(out.status).toBe(200);
     expect(JSON.stringify(out.body)).not.toContain("response_format");
     // #674's coercion still holds through the new translation.
-    expect(out.body["tool_choice"]).toMatchObject({ type: "tool" });
+    expect(out.body.tool_choice).toMatchObject({ type: "tool" });
   });
 });
 
@@ -410,10 +457,10 @@ describe("a member no one has classified is forwarded, never dropped", () => {
       }),
     );
     expect(out.status).toBe(200);
-    expect(out.body["top_k"]).toBe(5);
-    expect(out.body["thinking"]).toEqual({ type: "enabled", budget_tokens: 1024 });
-    expect(out.body["service_tier"]).toBe("auto");
-    expect(out.body["container"]).toBe("container_725");
+    expect(out.body.top_k).toBe(5);
+    expect(out.body.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+    expect(out.body.service_tier).toBe("auto");
+    expect(out.body.container).toBe("container_725");
   });
 
   it("carries an Anthropic-native member the OpenAI grammar has no name for", async () => {
@@ -424,6 +471,6 @@ describe("a member no one has classified is forwarded, never dropped", () => {
     // the upstream naming it. Neither outcome is silent.
     const out = await sent("/v1/chat/completions", chatRequest({ top_k: 5 }));
     expect(out.status).toBe(200);
-    expect(out.body["top_k"]).toBe(5);
+    expect(out.body.top_k).toBe(5);
   });
 });

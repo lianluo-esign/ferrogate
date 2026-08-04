@@ -110,7 +110,9 @@ const ANTHROPIC_MESSAGE = {
 
 const OPENAI_COMPLETION = {
   id: "chatcmpl-1",
-  choices: [{ index: 0, message: { role: "assistant", content: "covered" }, finish_reason: "stop" }],
+  choices: [
+    { index: 0, message: { role: "assistant", content: "covered" }, finish_reason: "stop" },
+  ],
   usage: {
     prompt_tokens: 9_012,
     completion_tokens: 3,
@@ -137,18 +139,18 @@ describe("the directive reaches the selected family's mechanism", () => {
         chatRequest("claude-logical", { mode: "explicit", ttl: "1h" }),
       );
       expect(res.status).toBe(200);
-      const body = provider.lastRequest().body as Record<string, any>;
+      const body = provider.lastRequest().body as Record<string, unknown>;
       // The breakpoint lands on the top-level `system` parameter, which is
       // where Anthropic's static prefix actually lives — #725 lifted the
       // system-role turn out of `messages`, so the prefix and the breakpoint
       // are now the same object rather than a role the API does not accept.
-      expect(body["system"]).toEqual([
+      expect(body.system).toEqual([
         { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
       ]);
       // The volatile turn stays OUTSIDE the cached prefix, or the cache would
       // be rewritten on every request and never read.
-      expect(body["messages"]).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
-      expect(JSON.stringify(body["messages"])).not.toContain("cache_control");
+      expect(body.messages).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
+      expect(JSON.stringify(body.messages)).not.toContain("cache_control");
     } finally {
       provider.restore();
     }
@@ -228,9 +230,10 @@ describe("preparing one family never rewrites what another family sends", () => 
       );
       expect(res.status).toBe(200);
       expect(provider.requests).toHaveLength(2);
-      expect(provider.requests[0]!.url).toContain("api.anthropic.example");
+      expect(provider.requests[0]?.url).toContain("api.anthropic.example");
 
-      const openai = provider.requests[1]!;
+      const openai = provider.requests[1];
+      if (openai === undefined) throw new Error("missing OpenAI fallback request");
       expect(openai.url).toContain("api.openai.example");
       // Anthropic's breakpoint is an Anthropic-only member. OpenAI has no
       // `cache_control`; receiving one means the Anthropic adapter wrote into
@@ -239,7 +242,7 @@ describe("preparing one family never rewrites what another family sends", () => 
       // And the CONTENT SHAPE is the caller's own: marking a breakpoint
       // promotes a string `content` to a block array, so a leak changes the
       // message OpenAI is asked to complete, not just its metadata.
-      expect((openai.body as Record<string, any>)["messages"]).toEqual([
+      expect((openai.body as Record<string, unknown>).messages).toEqual([
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: "is claim 91 covered?" },
       ]);
@@ -271,9 +274,10 @@ describe("preparing one family never rewrites what another family sends", () => 
       );
       expect(res.status).toBe(200);
       expect(provider.requests).toHaveLength(2);
-      const anthropic = provider.requests[1]!;
+      const anthropic = provider.requests[1];
+      if (anthropic === undefined) throw new Error("missing Anthropic fallback request");
       expect(anthropic.url).toContain("api.anthropic.example");
-      expect((anthropic.body as Record<string, any>)["system"]).toEqual([
+      expect((anthropic.body as Record<string, unknown>).system).toEqual([
         { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
       ]);
     } finally {
@@ -337,7 +341,7 @@ describe("the /v1/messages ingress keeps the caller's caching intent", () => {
       // before routing, and that translation rebuilds every content block —
       // which used to drop the markers on the floor and cost the caller the
       // whole discount, silently, on its OWN protocol.
-      const body = provider.lastRequest().body as Record<string, any>;
+      const body = provider.lastRequest().body as Record<string, unknown>;
       expect(JSON.stringify(body)).toContain("cache_control");
       expect(JSON.stringify(body)).not.toContain("prompt_cache");
     } finally {
@@ -380,11 +384,11 @@ describe("the /v1/messages ingress keeps the caller's caching intent", () => {
         prompt_cache: { mode: "explicit", ttl: "1h" },
       });
       expect(res.status).toBe(200);
-      const body = provider.lastRequest().body as Record<string, any>;
-      expect(body["system"]).toEqual([
+      const body = provider.lastRequest().body as Record<string, unknown>;
+      expect(body.system).toEqual([
         { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
       ]);
-      expect(body["messages"]).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
+      expect(body.messages).toEqual([{ role: "user", content: "is claim 91 covered?" }]);
       // FerroGate's own member never reaches a provider.
       expect(JSON.stringify(body)).not.toContain("prompt_cache");
     } finally {
@@ -427,8 +431,8 @@ describe("the /v1/messages ingress keeps the caller's caching intent", () => {
         messages: [{ role: "user", content: "is claim 91 covered?" }],
       });
       expect(res.status).toBe(200);
-      const message = (await res.json()) as Record<string, any>;
-      expect(message["usage"]).toEqual({
+      const message = (await res.json()) as Record<string, unknown>;
+      expect(message.usage).toEqual({
         // Anthropic's `input_tokens` EXCLUDES cache reads, where OpenAI's
         // `prompt_tokens` includes them — so the fresh count is the difference.
         // Reporting 9012 fresh AND 9000 cached would double-count the prompt.

@@ -45,24 +45,23 @@
  * equivalent of the Rust config validator's refusal to boot.
  */
 import {
+  BedrockAdapter,
+  GeminiAdapter,
+  AdapterError as PackageAdapterError,
+  SecretValue,
+  VertexAiAdapter,
+  WorkersAiAdapter,
   applyCloudflareAiGatewayRouting,
   applyPromptCacheToAnthropic,
   applyStructuredOutputToAnthropic,
   assertPromptCacheForAutomaticFamily,
-  BedrockAdapter,
   canonicalProviderAdapterFamily,
-  GeminiAdapter,
   ownBody,
-  AdapterError as PackageAdapterError,
   promptCacheFromBody,
-  SecretValue,
   stripPromptCacheDirective,
   structuredOutputFromChatBody,
   structuredOutputFromResponsesBody,
-  VertexAiAdapter,
-  WorkersAiAdapter,
 } from "@ferrogate/providers";
-import { chatCompletionsToMessages } from "./anthropic.js";
 import type {
   CloudflareAiGatewaySurface,
   Json,
@@ -73,6 +72,7 @@ import type {
   ProviderHeader as PackageProviderHeader,
   ProviderHttpRequest as PackageProviderHttpRequest,
 } from "@ferrogate/providers";
+import { chatCompletionsToMessages } from "./anthropic.js";
 import type {
   AdapterError,
   AdapterRegistry,
@@ -108,13 +108,13 @@ function ensureObjectBody(plan: UpstreamPlan, label: string): AdapterResult | nu
  * replaced, exactly as the Rust code does.
  */
 function requestOpenAiStreamUsage(body: Record<string, unknown>): void {
-  const existing = body["stream_options"];
+  const existing = body.stream_options;
   const options =
     typeof existing === "object" && existing !== null && !Array.isArray(existing)
       ? (existing as Record<string, unknown>)
       : {};
-  options["include_usage"] = true;
-  body["stream_options"] = options;
+  options.include_usage = true;
+  body.stream_options = options;
 }
 
 /**
@@ -131,7 +131,7 @@ function credentialHeader(
     return;
   }
   if (scheme === "bearer") {
-    headers["authorization"] = `Bearer ${apiKey}`;
+    headers.authorization = `Bearer ${apiKey}`;
   } else {
     headers["x-api-key"] = apiKey;
   }
@@ -318,7 +318,7 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     const body = owned.body;
     // The adapter OWNS these two fields — a caller cannot pin the physical model
     // or contradict the resolved stream decision.
-    body["model"] = plan.providerModel;
+    body.model = plan.providerModel;
 
     const headers = openAiHeaders(plan.route.apiKey, plan.route.authScheme ?? "bearer");
     const base: Omit<UpstreamRequest, "endpoint" | "body" | "stream"> = {
@@ -329,7 +329,7 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
 
     switch (plan.operation) {
       case "chat.completions": {
-        body["stream"] = plan.stream;
+        body.stream = plan.stream;
         if (plan.stream) {
           requestOpenAiStreamUsage(body);
         }
@@ -347,7 +347,7 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
         // NOTE: `prepare_responses` deliberately does NOT inject
         // `stream_options.include_usage` — the Responses API reports usage on
         // its own `response.completed` event.
-        body["stream"] = plan.stream;
+        body.stream = plan.stream;
         return {
           ok: true,
           request: {
@@ -574,8 +574,8 @@ export const anthropicAdapter: ProviderAdapter = {
 function responsesDraft(plan: UpstreamPlan, source: Record<string, unknown>): Record<string, Json> {
   const draft: Record<string, Json> = {
     model: plan.providerModel,
-    messages: (source["messages"] ?? []) as Json,
-    max_tokens: (source["max_tokens"] ?? 1024) as Json,
+    messages: (source.messages ?? []) as Json,
+    max_tokens: (source.max_tokens ?? 1024) as Json,
     stream: plan.stream,
   };
   for (const key of ["system", "tools", "tool_choice"]) {
@@ -614,7 +614,10 @@ function asOpenAiCompatible(plan: UpstreamPlan): UpstreamPlan {
  * than quietly "fixed" — changing it is a behavior change that belongs with the
  * `@ferrogate/providers` port, where the Rust tests move too.
  */
-function validateExactKind(providerKind: string, accepted: readonly string[]): AdapterResult | null {
+function validateExactKind(
+  providerKind: string,
+  accepted: readonly string[],
+): AdapterResult | null {
   return accepted.includes(providerKind)
     ? null
     : { ok: false, error: { kind: "unsupported_provider_kind", providerKind } };
@@ -679,12 +682,15 @@ function audioUnsupported(kind: string): AdapterResult {
  * bypassed, and cheap depth against exactly that.
  */
 function audioUploadForm(body: Record<string, unknown>, providerModel: string): FormData | null {
-  const file = body["file"] as { bytes?: unknown; filename?: unknown; contentType?: unknown } | undefined;
+  const file = body.file as
+    | { bytes?: unknown; filename?: unknown; contentType?: unknown }
+    | undefined;
   const bytes = file?.bytes;
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) return null;
 
   const form = new FormData();
-  const filename = typeof file?.filename === "string" && file.filename !== "" ? file.filename : "audio";
+  const filename =
+    typeof file?.filename === "string" && file.filename !== "" ? file.filename : "audio";
   const contentType =
     typeof file?.contentType === "string" && file.contentType !== ""
       ? file.contentType
@@ -694,7 +700,8 @@ function audioUploadForm(body: Record<string, unknown>, providerModel: string): 
   for (const [name, value] of Object.entries(body)) {
     if (name === "file" || name === "model" || name === "metadata") continue;
     if (typeof value === "string") form.append(name, value);
-    else if (typeof value === "number" || typeof value === "boolean") form.append(name, String(value));
+    else if (typeof value === "number" || typeof value === "boolean")
+      form.append(name, String(value));
   }
   return form;
 }
@@ -991,8 +998,8 @@ export const azureOpenAiAdapter: ProviderAdapter = {
     const body = owned.body;
     // The model is addressed as a deployment in the PATH; Azure rejects it in
     // the body. Deleted from the owned copy, never from the caller's.
-    delete body["model"];
-    body["stream"] = plan.stream;
+    Reflect.deleteProperty(body, "model");
+    body.stream = plan.stream;
     if (plan.stream) {
       requestOpenAiStreamUsage(body);
     }
@@ -1249,10 +1256,7 @@ function packageAdapterError(error: unknown): AdapterError {
  * `gemini` dialect of the Responses normalizer and `src/streaming/usage.ts`
  * `gemini.rs::extract_usage`.
  */
-export const geminiAdapter: ProviderAdapter = packageProviderAdapter(
-  "gemini",
-  new GeminiAdapter(),
-);
+export const geminiAdapter: ProviderAdapter = packageProviderAdapter("gemini", new GeminiAdapter());
 
 /**
  * `bedrock` — `@ferrogate/providers`' port of `bedrock.rs` (issue #172).
@@ -1423,9 +1427,7 @@ export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): Provid
             gatewayBaseUrl: routing.gatewayBaseUrl,
             apiBaseUrl: routing.apiBaseUrl,
             mode: routing.mode,
-            ...(routing.providerSlug === undefined
-              ? {}
-              : { providerSlug: routing.providerSlug }),
+            ...(routing.providerSlug === undefined ? {} : { providerSlug: routing.providerSlug }),
             ...(routing.aigToken === undefined
               ? {}
               : { aigToken: new SecretValue(routing.aigToken) }),
@@ -1466,10 +1468,8 @@ export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): Provid
     ...(adapter.translateEmbeddingsResponse === undefined
       ? {}
       : {
-          translateEmbeddingsResponse: (
-            body: unknown,
-            logicalModel: string,
-          ): unknown | undefined => adapter.translateEmbeddingsResponse?.(body, logicalModel),
+          translateEmbeddingsResponse: (body: unknown, logicalModel: string): unknown | undefined =>
+            adapter.translateEmbeddingsResponse?.(body, logicalModel),
         }),
     ...(adapter.translateRerankResponse === undefined
       ? {}
@@ -1478,8 +1478,7 @@ export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): Provid
             body: unknown,
             logicalModel: string,
             request: Record<string, unknown>,
-          ): unknown | undefined =>
-            adapter.translateRerankResponse?.(body, logicalModel, request),
+          ): unknown | undefined => adapter.translateRerankResponse?.(body, logicalModel, request),
         }),
     ...(adapter.translateTranscriptionResponse === undefined
       ? {}
