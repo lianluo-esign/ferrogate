@@ -118,11 +118,23 @@ export function createInMemoryControlPlaneClient(
       const scripted = lookup(spec);
       const status = scripted.status ?? 200;
       if (status < 200 || status > 299) {
+        const envelope = asJsonObject(scripted.body);
+        const error = asJsonObject(envelope?.error);
+        const message =
+          typeof error?.message === "string"
+            ? error.message
+            : `the in-memory control-plane client was scripted to answer ${status}`;
+        const code = typeof error?.code === "string" ? error.code : "scripted_error";
+        const details = error?.details;
+        const envelopeRequestId = typeof error?.request_id === "string" ? error.request_id : undefined;
         throw CliError.api({
           httpStatus: status,
-          code: "scripted_error",
-          message: `the in-memory control-plane client was scripted to answer ${status}`,
-          ...(scripted.requestId === undefined ? {} : { requestId: scripted.requestId }),
+          code,
+          message,
+          ...(scripted.requestId === undefined && envelopeRequestId === undefined
+            ? {}
+            : { requestId: scripted.requestId ?? envelopeRequestId }),
+          ...(details === undefined ? {} : { details }),
         });
       }
       return {

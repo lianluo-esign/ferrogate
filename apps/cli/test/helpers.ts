@@ -33,6 +33,7 @@ export interface TestRuntime extends CliRuntime {
 export interface TestRuntimeOptions {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly script?: Readonly<Record<string, FakeResponse>>;
+  readonly client?: FakeControlPlaneClient;
   readonly gatewayScript?: Readonly<Record<string, FakeResponse>>;
   readonly store?: ContextStore;
   readonly files?: Readonly<Record<string, string>>;
@@ -101,7 +102,7 @@ export function createTestRuntime(options: TestRuntimeOptions = {}): TestRuntime
 
   return {
     io,
-    client: createInMemoryControlPlaneClient(options.script ?? {}),
+    client: options.client ?? createInMemoryControlPlaneClient(options.script ?? {}),
     gatewayClient: createInMemoryGatewayClient(options.gatewayScript ?? {}),
     contextStorage: createMemoryContextStorage(options.store ?? { contexts: [] }),
     configValidator: options.configValidator ?? createStructuralConfigValidator(),

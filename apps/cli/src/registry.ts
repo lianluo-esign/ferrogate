@@ -312,6 +312,30 @@ function buildCrudWithItemSegments(
   }
 }
 
+/** Map the catalog's issue-facing aliases onto the standard CRUD verbs. */
+function buildAliasedCrud(api: ResourceApi, verb: string, input: ResourceInput): RequestSpec {
+  switch (verb) {
+    case "show":
+      return api.get(requireTargetSegments(api, verb, input.segments, 1));
+    case "add":
+      return api.create(requireBody(input, verb));
+    case "replace":
+      return api.replace(
+        requireTargetSegments(api, verb, input.segments, 1),
+        requireBody(input, verb),
+      );
+    case "update":
+      return api.update(
+        requireTargetSegments(api, verb, input.segments, 1),
+        requireBody(input, verb),
+      );
+    case "rm":
+      return api.delete(requireTargetSegments(api, verb, input.segments, 1));
+    default:
+      throw CliError.usage(`verb '${verb}' is not a catalog CRUD verb for ${api.collection}`);
+  }
+}
+
 /** `POST .../{id}/{action}` with the target id from the first segment. */
 function buildItemAction(
   api: ResourceApi,
@@ -396,6 +420,38 @@ const PROVIDERS = new ResourceApi("/admin/v1/providers");
 const PROVIDER_MODELS = new ResourceApi("/admin/v1/provider-models");
 const EXTENSIONS = new ResourceApi("/admin/v1/extensions");
 const FRAMEWORK_ADAPTERS = new ResourceApi("/admin/v1/framework-adapters");
+
+function buildOfferingRequest(verb: string, input: ResourceInput): RequestSpec {
+  const modelId = requireTargetSegments(MODELS, verb, input.segments, 1)[0] as string;
+  switch (verb) {
+    case "list":
+      return MODELS.read([modelId, "offerings"], input.list);
+    case "show":
+      return MODELS.get(requireTargetSegments(MODELS, verb, input.segments, 2));
+    case "add":
+      return MODELS.mutate("POST", [modelId, "offerings"], requireBody(input, verb));
+    case "replace": {
+      const [targetModel, offeringId] = requireTargetSegments(MODELS, verb, input.segments, 2);
+      return MODELS.replace(
+        [targetModel as string, "offerings", offeringId as string],
+        requireBody(input, verb),
+      );
+    }
+    case "update": {
+      const [targetModel, offeringId] = requireTargetSegments(MODELS, verb, input.segments, 2);
+      return MODELS.update(
+        [targetModel as string, "offerings", offeringId as string],
+        requireBody(input, verb),
+      );
+    }
+    case "rm": {
+      const [targetModel, offeringId] = requireTargetSegments(MODELS, verb, input.segments, 2);
+      return MODELS.delete([targetModel as string, "offerings", offeringId as string]);
+    }
+    default:
+      throw CliError.usage(`verb '${verb}' is not a model-offerings verb`);
+  }
+}
 
 const WALLETS = new ResourceApi("/admin/v1/wallets");
 const PAYMENT_METHODS = new ResourceApi("/admin/v1/payment-methods");
@@ -1306,6 +1362,43 @@ export const GROUPS: readonly GroupDescriptor[] = [
       mutating("delete", "Delete a plugin", "deleteAdminPlugin"),
     ],
     build: (verb, input) => buildCrud(PLUGINS, verb, input),
+  },
+  {
+    name: "providers",
+    about: "Manage provider channels",
+    verbs: [
+      read("show", "Show a provider channel", "getAdminProvider"),
+      mutating("add", "Create a provider channel", "createAdminProvider"),
+      mutating("replace", "Replace a provider channel", "replaceAdminProvider"),
+      mutating("update", "Patch a provider channel", "patchAdminProvider"),
+      mutating("rm", "Delete a provider channel", "deleteAdminProvider"),
+    ],
+    build: (verb, input) => buildAliasedCrud(PROVIDERS, verb, input),
+  },
+  {
+    name: "models",
+    about: "Manage logical models",
+    verbs: [
+      read("show", "Show a logical model", "getAdminModel"),
+      mutating("add", "Create a logical model", "createAdminModel"),
+      mutating("replace", "Replace a logical model", "replaceAdminModel"),
+      mutating("update", "Patch a logical model", "patchAdminModel"),
+      mutating("rm", "Delete a logical model", "deleteAdminModel"),
+    ],
+    build: (verb, input) => buildAliasedCrud(MODELS, verb, input),
+  },
+  {
+    name: "model-offerings",
+    about: "Manage model offerings",
+    verbs: [
+      read("list", "List offerings for a model", "listAdminModelOfferings"),
+      read("show", "Show a model offering", "getAdminModelOffering"),
+      mutating("add", "Attach a model offering", "createAdminModelOffering"),
+      mutating("replace", "Replace a model offering", "replaceAdminModelOffering"),
+      mutating("update", "Patch a model offering", "patchAdminModelOffering"),
+      mutating("rm", "Delete a model offering", "deleteAdminModelOffering"),
+    ],
+    build: (verb, input) => buildOfferingRequest(verb, input),
   },
   {
     name: "catalog",
