@@ -236,7 +236,7 @@ const CATALOG_COLUMNS =
   "m.name AS model, " +
   "CASE WHEN p.kind = 'platform' THEN '*' ELSE p.name END AS provider, " +
   "o.upstream_model_id AS provider_model, " +
-  "CASE WHEN m.enabled = 1 AND o.enabled = 1 THEN 1 ELSE 0 END AS enabled, " +
+  "CASE WHEN m.enabled = 1 AND o.enabled = 1 AND p.enabled = 1 THEN 1 ELSE 0 END AS enabled, " +
   "o.input_price_per_1m, o.output_price_per_1m, " +
   "CASE WHEN o.cached_input_price_per_1m IS NULL OR o.input_price_per_1m <= 0 " +
   "THEN NULL ELSE o.cached_input_price_per_1m / o.input_price_per_1m END " +
@@ -246,13 +246,37 @@ const CATALOG_COLUMNS =
   "AS cache_write_multiplier, " +
   "o.audio_second_price_per_1m, o.audio_character_price_per_1m, o.source";
 
+/**
+ * The pre-#811 compatibility API returns one route per logical model. Prefer
+ * its primary offering, and use the deterministic best fallback only for a
+ * model that has no primary yet. The #812 loader will read the full offering
+ * ladder, including every fallback, canary, and shadow row.
+ */
+const COMPATIBILITY_OFFERING_PREDICATE =
+  "(o.role = 'primary' OR (" +
+  "o.role = 'fallback' AND NOT EXISTS (" +
+  "SELECT 1 FROM catalog_model_offerings primary_o " +
+  "WHERE primary_o.tenant_id = o.tenant_id AND primary_o.model_id = o.model_id " +
+  "AND primary_o.role = 'primary'" +
+  ") AND NOT EXISTS (" +
+  "SELECT 1 FROM catalog_model_offerings better_fallback " +
+  "WHERE better_fallback.tenant_id = o.tenant_id " +
+  "AND better_fallback.model_id = o.model_id " +
+  "AND better_fallback.role = 'fallback' " +
+  "AND (better_fallback.priority < o.priority " +
+  "OR (better_fallback.priority = o.priority AND better_fallback.weight > o.weight) " +
+  "OR (better_fallback.priority = o.priority AND better_fallback.weight = o.weight " +
+  "AND better_fallback.id < o.id))" +
+  ")" +
+  "))";
+
 interface CatalogRow {
   model: string;
   provider: string;
   provider_model: string;
   enabled: number;
-  input_price_per_1m: number;
-  output_price_per_1m: number;
+  input_price_per_1m: number | null;
+  output_price_per_1m: number | null;
   cached_input_multiplier: number | null;
   cache_write_multiplier: number | null;
   audio_second_price_per_1m: number | null;
@@ -260,13 +284,20 @@ interface CatalogRow {
   source: string;
 }
 
-/** One row as stored, including the two columns the seed does not set. */
-export interface StoredTenantModelCatalogEntry extends TenantModelCatalogEntry {
+/** One row as stored, including nullable prices and the two seed does not set. */
+export type StoredTenantModelCatalogEntry = Omit<
+  TenantModelCatalogEntry,
+  "inputPricePer1m" | "outputPricePer1m"
+> & {
+  /** `NULL` means unpriced; `0` means free. */
+  readonly inputPricePer1m: number | null;
+  /** `NULL` means unpriced; `0` means free. */
+  readonly outputPricePer1m: number | null;
   /** `false` disables the model WITHOUT deleting the price the tenant negotiated. */
   readonly enabled: boolean;
   /** `platform_seed` until an operator writes the row. Descriptive, not enforced. */
   readonly source: string;
-}
+};
 
 /** What {@link seedTenantModelCatalog} did. */
 export interface TenantModelCatalogSeedOutcome {
@@ -513,7 +544,7 @@ export async function listTenantModelCatalog(
       `SELECT ${CATALOG_COLUMNS} FROM catalog_models m
        JOIN catalog_model_offerings o ON o.tenant_id = m.tenant_id AND o.model_id = m.id
        JOIN provider_channels p ON p.tenant_id = o.tenant_id AND p.id = o.provider_id
-       WHERE m.tenant_id = ? AND o.role = 'primary' ORDER BY m.name`,
+       WHERE m.tenant_id = ? AND ${COMPATIBILITY_OFFERING_PREDICATE} ORDER BY m.name`,
     )
     .bind(tenantId)
     .all<CatalogRow>();
@@ -538,8 +569,8 @@ export async function resolveTenantModel(
       `SELECT ${CATALOG_COLUMNS} FROM catalog_models m
        JOIN catalog_model_offerings o ON o.tenant_id = m.tenant_id AND o.model_id = m.id
        JOIN provider_channels p ON p.tenant_id = o.tenant_id AND p.id = o.provider_id
-       WHERE m.tenant_id = ? AND m.name = ? AND o.role = 'primary'
-       AND m.enabled = 1 AND o.enabled = 1`,
+       WHERE m.tenant_id = ? AND m.name = ? AND ${COMPATIBILITY_OFFERING_PREDICATE}
+       AND m.enabled = 1 AND o.enabled = 1 AND p.enabled = 1`,
     )
     .bind(tenantId, model)
     .first<CatalogRow>();

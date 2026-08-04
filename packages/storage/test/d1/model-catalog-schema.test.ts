@@ -4,6 +4,7 @@
  * through the same D1-shaped handle that storage callers use.
  */
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { listTenantModelCatalog, resolveTenantModel } from "../../src/tenant-model-catalog.js";
 import { TENANT_MIGRATIONS } from "../../src/tenant-schema-sql.js";
 import { TENANT_A, setupDatabases, tenantDb } from "./harness.js";
 
@@ -182,6 +183,50 @@ describe("tenant model catalog schema", () => {
       { input_price_per_1m: 0, is_unpriced: 0 },
       { input_price_per_1m: null, is_unpriced: 1 },
     ]);
+  });
+
+  test("compatibility reads preserve NULL prices instead of treating them as zero", async () => {
+    await insertChannel("unpriced-channel");
+    await insertModel();
+    await insertOffering("unpriced-offering", "unpriced-channel", {
+      role: "primary",
+      inputPrice: null,
+    });
+
+    const listed = await listTenantModelCatalog(db(), TENANT_A);
+    expect(listed[0]?.inputPricePer1m).toBeNull();
+    expect(listed[0]?.outputPricePer1m).toBeNull();
+    expect((await resolveTenantModel(db(), TENANT_A, "gpt-test"))?.inputPricePer1m).toBeNull();
+  });
+
+  test("disabled provider channels are reported disabled and do not resolve", async () => {
+    await insertChannel("disabled-channel");
+    await insertModel();
+    await insertOffering("disabled-offering", "disabled-channel", { role: "primary" });
+
+    await db()
+      .prepare("UPDATE provider_channels SET enabled = 0 WHERE id = ?")
+      .bind("disabled-channel")
+      .run();
+
+    expect((await listTenantModelCatalog(db(), TENANT_A))[0]?.enabled).toBe(false);
+    expect(await resolveTenantModel(db(), TENANT_A, "gpt-test")).toBeUndefined();
+  });
+
+  test("compatibility reads choose the best fallback when no primary exists", async () => {
+    await insertChannel("fallback-channel");
+    await insertModel();
+    await insertOffering("fallback-offering", "fallback-channel", {
+      role: "fallback",
+      upstream: "fallback-upstream",
+    });
+
+    expect((await listTenantModelCatalog(db(), TENANT_A))[0]?.providerModel).toBe(
+      "fallback-upstream",
+    );
+    expect((await resolveTenantModel(db(), TENANT_A, "gpt-test"))?.providerModel).toBe(
+      "fallback-upstream",
+    );
   });
 
   test("allows at most one primary, canary, and shadow offering per model", async () => {
