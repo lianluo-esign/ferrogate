@@ -43,6 +43,7 @@ interface Harness {
 function harness(
   options: {
     priceBook?: PriceBook;
+    settlementMode?: "rate_card" | "serving_offering";
     settledCostUsd?: (usage: ReturnType<typeof usageFixture>) => number | undefined;
   } = {},
 ): Harness {
@@ -66,6 +67,7 @@ function harness(
     scheduler,
     clock,
     diagnostics,
+    ...(options.settlementMode === undefined ? {} : { settlementMode: options.settlementMode }),
     ...(options.settledCostUsd === undefined ? {} : { settledCostUsd: options.settledCostUsd }),
   });
   return { sink, ledger, outbox, publisher, scheduler, clock, divergences, unpricedReports };
@@ -179,6 +181,47 @@ describe("MeteringUsageSink — gateway-settled cost is authoritative (#135/#152
 });
 
 describe("MeteringUsageSink — FAIL CLOSED on an unknown price (#129)", () => {
+  it("does not use a wildcard card when the serving offering is unpriced (#814)", async () => {
+    const h = harness({
+      priceBook: PriceBook.new([priceEntry("*", "*", modelPriceUsd(99, 99))]),
+      settlementMode: "serving_offering",
+      settledCostUsd: () => undefined,
+    });
+
+    h.sink.record(
+      usageFixture({ provider: "fallback-channel", providerModel: "served-model" }),
+    );
+    await h.scheduler.idle();
+
+    expect(h.ledger.size).toBe(0);
+    expect(h.ledger.events).toHaveLength(1);
+    expect(h.ledger.events[0]?.event.provider).toBe("fallback-channel");
+    expect(h.ledger.events[0]?.event.provider_model).toBe("served-model");
+    expect(h.ledger.events[0]?.event.cost_usd).toBeUndefined();
+    expect(h.sink.stats.priceNotFound).toBe(1);
+    expect(h.sink.unpriced[0]?.message).toContain("serving offering");
+  });
+
+  it("keeps a numeric zero offering distinct from an unpriced offering (#814)", async () => {
+    const h = harness({
+      priceBook: PriceBook.new([priceEntry("*", "*", modelPriceUsd(99, 99))]),
+      settlementMode: "serving_offering",
+      settledCostUsd: () => 0,
+    });
+
+    h.sink.record(
+      usageFixture({ provider: "free-channel", providerModel: "free-model" }),
+    );
+    await h.scheduler.idle();
+
+    expect(h.ledger.size).toBe(1);
+    expect(h.ledger.events).toHaveLength(0);
+    expect(h.ledger.charges[0]?.entry.provider).toBe("free-channel");
+    expect(h.ledger.charges[0]?.entry.cost_source).toBe("gateway_settled");
+    expect(h.ledger.charges[0]?.entry.cost.total_cost).toBe(0);
+    expect(h.sink.stats.priceNotFound).toBe(0);
+  });
+
   it("refuses the charge instead of billing zero", async () => {
     const h = harness();
     h.sink.record(usageFixture({ providerModel: "model-with-no-price" }));
