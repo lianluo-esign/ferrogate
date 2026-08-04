@@ -45,10 +45,9 @@ setting real domains, email, and DNS provider credentials.
 
 `admin-console.yaml` deploys the admin console frontend as a separate,
 stateless workload: no secrets, no PVCs, no `/metrics` (it's a static SPA
-served by nginx, health-checked at `/healthz`). It has its own Ingress on a
-distinct host (`admin.ferrogate.example.com` by default) since it calls the
-`ferrogate-admin-api` and `ferrogate-auth` Services cross-origin — both of
-those need CORS configured for that host before the console will work.
+served by nginx, health-checked at `/healthz`). The image's entrypoint proxies
+control-plane and data-plane paths through that same nginx origin, using the
+`CONTROL_PLANE_BASE_URL` and `GATEWAY_BASE_URL` upstreams below.
 
 `admin-api.yaml` deploys the standalone admin-console API service (issue
 #315, `ferrogate admin-api serve`, see `docs/admin-api-service.md`): a
@@ -56,6 +55,8 @@ dedicated listener that authenticates console callers and reverse-proxies
 the path-compatible `/admin/v1/*` (+ `/v1/assets/*`) surface to the
 `ferrogate` Service, so admin control-plane traffic never rides the AI
 data-plane listener. It reads the same `ferrogate-config` ConfigMap as the
-gateway plus an `[admin_api]` section; point the console's
-`ADMIN_API_BASE_URL` at it (`GATEWAY_ADMIN_BASE_URL` stays as a
-backward-compatible fallback).
+gateway plus an `[admin_api]` section. The console manifest sets
+`CONTROL_PLANE_BASE_URL` to this service and `GATEWAY_BASE_URL` to the gateway;
+nginx keeps the browser-facing requests same-origin. `AUTH_BASE_URL` remains
+only for the legacy session service when that service is deployed; a combined
+TypeScript control plane leaves it unset.

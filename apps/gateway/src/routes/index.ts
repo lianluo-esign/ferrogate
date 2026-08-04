@@ -24,6 +24,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { depsFromEnv } from "../adapters.js";
 import { type ApiOperation, type HttpMethod, operationById } from "../contract.js";
 import { type DepsResolver, contractAuth } from "../middleware/auth.js";
+import { gatewayCors } from "../middleware/cors.js";
 import {
   HttpError,
   envelopeBoundary,
@@ -648,6 +649,10 @@ export function createGatewayApp(options: CreateGatewayAppOptions = {}): Gateway
   // flood or credential-stuffing scan must never pay the virtual-key/storage
   // lookup cost. Inert until one of the four `GATEWAY_*` vars is set.
   app.use("*", options.networkAccess ?? networkAccess());
+
+  // CORS preflight must run before contractAuth: browsers do not send bearer
+  // credentials on OPTIONS, and only the configured origin is allowed.
+  app.use("*", gatewayCors);
 
   // VERIFIED CUSTOM DOMAINS (issue #738) — a request that arrived on a hostname
   // some tenant has PROVEN it controls is served from that tenant's published

@@ -39,7 +39,7 @@ import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
 import { LocalizedError } from "@/lib/localized-error";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
+import { CONTROL_PLANE_BASE_URL } from "@/lib/config";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type ObservabilityStatus = AdminSchema<"ObservabilityStatus">;
@@ -59,7 +59,7 @@ interface ExportPreview {
 }
 
 function buildExportUrl(filters: ExportFilters): string {
-  const url = new URL("/admin/v1/request-log-exports", GATEWAY_ADMIN_BASE_URL);
+  const url = new URL("/admin/v1/request-log-exports", CONTROL_PLANE_BASE_URL);
   if (filters.model.trim()) url.searchParams.set("model", filters.model.trim());
   if (filters.provider.trim())
     url.searchParams.set("provider", filters.provider.trim());

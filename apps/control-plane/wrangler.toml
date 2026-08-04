@@ -405,6 +405,80 @@ bucket_name = "replace-at-deploy-ferrogate-assets"
 #   route groups: /admin/v1/* (canonical), /control/v1/* (alias), /v1/admin/* (auth service)
 
 # ---------------------------------------------------------------------------
+# WORKERS STATIC ASSETS: the admin console (#696)
+# ---------------------------------------------------------------------------
+#
+# The console is served from THIS Worker, on THIS origin, and that is a
+# correctness requirement rather than a packaging preference. Two guards on this
+# app make a cross-origin console unusable in a real browser:
+#
+#  1. `adminCrossSiteRejection` (src/middleware/auth.ts) refuses any
+#     state-changing request whose `sec-fetch-site` is `cross-site` or
+#     `same-site` with `403 cross_site_admin_denied`. A browser sets that header
+#     itself and a page cannot forge it, so a console on another origin gets 403
+#     on every POST/PUT/PATCH/DELETE — including `POST /v1/admin/login`, which is
+#     guarded by the same rule via `consoleCsrf` (src/session/routes.ts).
+#  2. the CORS preflight surface (src/middleware/cors.ts) answers
+#     `OPTIONS /admin/{*rest}` ONLY — the prefix is `/admin/` verbatim, as Rust
+#     wrote it. `POST /v1/admin/login` carries `content-type: application/json`,
+#     so a cross-origin browser preflights `OPTIONS /v1/admin/login`, which is
+#     documented for no operation and therefore 404s. The login never leaves the
+#     browser.
+#
+# Same origin removes both: `sec-fetch-site: same-origin` passes guard 1, and a
+# same-origin request is never preflighted at all, so guard 2 is not consulted.
+# Nothing is widened to achieve it.
+#
+# `directory` is the console's BUILD OUTPUT, copied there by
+# `scripts/build-admin-console.sh`; only `.gitignore`/`.assetsignore` are
+# committed, so a checkout that has never built the console serves no assets and
+# every API route still answers exactly as before.
+#
+# There is deliberately NO `binding`. An assets binding exists so the Worker can
+# pull an asset itself (`env.ASSETS.fetch(request)`), which is only needed with
+# `run_worker_first = true`; here the Worker runs first for the API paths and
+# never for an asset path, so it would be a binding nothing in `src/` reads —
+# precisely what `test/env-var-drift.test.ts`'s dead-binding assertion refuses,
+# and it refused this one while it was briefly declared. Adding it back requires
+# a reader. (Were one added it must NOT be called `ASSETS`: `apps/gateway` binds
+# that name to the R2 bucket of hosted tenant artifacts, and one name for two
+# resources across the fleet is how a copy-paste reaches the wrong one.)
+#
+# `not_found_handling = "single-page-application"` is what makes a deep link
+# such as `/app/request-logs` load the console shell instead of 404ing — the
+# console is a client-side router (react-router), so every route but `/` is a
+# path the asset server has no file for.
+#
+# `run_worker_first` IS THE LOAD-BEARING KEY, and the reason
+# `test/console-assets.test.ts` exists. Static assets are served BEFORE the
+# Worker by default, and with SPA not-found handling the fallback swallows every
+# unmatched path: without the list below, `GET /admin/v1/plans` would return the
+# console's `index.html` with `200 text/html` instead of reaching a handler, and
+# the entire API would look "up" while answering HTML to everything. The list
+# must therefore cover EVERY path this Worker routes; the test derives that set
+# from `app.routes` (Hono's own table on the exported instance) rather than from
+# a hand-written list, so mounting a new surface without listing it here is RED.
+[assets]
+directory = "./public"
+not_found_handling = "single-page-application"
+#
+# `/admin` is listed on its own beside `/admin/*` because `GET /admin` (the
+# overview probe) has no trailing segment, and a wildcard that happens to cover
+# its own prefix is not something worth betting the API surface on.
+run_worker_first = [
+  "/admin",
+  "/admin/*",
+  "/control/v1/*",
+  "/v1/admin/*",
+  "/scim/v2/*",
+  "/healthz",
+  "/readyz",
+  "/health",
+  "/version",
+  "/metrics",
+]
+
+# ---------------------------------------------------------------------------
 # The agent-schedule TICK (`src/schedule/scheduled.ts`, dispatched from the
 # `scheduled` handler on `src/worker.ts`'s default export).
 #

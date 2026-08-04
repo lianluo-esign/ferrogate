@@ -37,6 +37,7 @@ each.
 | `GATEWAY_MODELS` | var (JSON array) | `modelCatalogFromEnv`, `src/inference/catalog.ts` | Same — this is the logical→physical mapping itself. `GET /v1/models` lists nothing. |
 | *(per provider)* `api_key_var` target | **secret** | `buildModelCatalog`, `src/inference/catalog.ts` | A provider naming an unbound key var refuses the WHOLE catalog, rather than dispatching an unauthenticated request to a paid upstream. |
 | `GATEWAY_DEV_AUTH` | var (`"true"`/`"false"`) | `developmentApiKeys`, `src/adapters.ts` | Ships as `"false"`; the local development key path stays closed. |
+| `GATEWAY_CORS_ALLOWED_ORIGIN` | var (exact origin) | `src/middleware/cors.ts` | Empty disables browser CORS; a separately hosted Admin Console cannot call gateway data-plane routes until its exact origin is configured. |
 | `GATEWAY_DEV_API_KEY` | **secret** | `developmentApiKeys`, `src/adapters.ts` | No development key exists. Required *and* `GATEWAY_DEV_AUTH == "true"` *and* an `fg_dev_` prefix. |
 | `ASSETS` | `[[r2_buckets]]` | `AssetObjectStore` (`src/assets/ports.ts`) — the port is R2-shaped, so a live `R2Bucket` satisfies it structurally | Falls back to `InMemoryAssetObjectStore`: bytes vanish with the isolate, so a push "succeeds" and a later read 404s. The presign family answers `503 asset_bucket_unavailable`. |
 
@@ -49,6 +50,10 @@ Notes that matter before you deploy:
   `GATEWAY_STATIC_API_KEYS` and `SELF_HOSTED_WORKER_REGISTRY` carry live
   credentials; a secret of the same name lands in the same `env` namespace and
   takes precedence over the var.
+- **`GATEWAY_CORS_ALLOWED_ORIGIN` is an exact browser origin, never `*`.** Set
+  it to the origin serving a separately deployed Workers Static Assets Admin
+  Console when that console's build uses `VITE_GATEWAY_BASE_URL`. Leave it
+  blank for the nginx container shape, where the browser stays same-origin.
 - **`bucket_name` / `preview_bucket_name` are placeholders**
   (`replace-at-deploy-ferrogate-assets…`). The deploy step substitutes the real
   bucket from the target account. No real Cloudflare resource id is committed.
@@ -200,6 +205,11 @@ Wrangler bundles and deploys. Nothing else does, at any stage.
    ```sh
    bunx wrangler deploy --dry-run
    ```
+
+   For a separately deployed Workers Static Assets console, override the
+   committed blank `GATEWAY_CORS_ALLOWED_ORIGIN` in the deployment environment
+   (for example through a production vars section or Wrangler's `--var`
+   override) with the console's exact origin before shipping.
 
 4. Ship:
 

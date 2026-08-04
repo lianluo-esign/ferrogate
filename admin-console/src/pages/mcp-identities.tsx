@@ -5,9 +5,8 @@
 //   DELETE /v1/mcp/identity/{server}            → revoke locally
 //
 // These are RUNTIME (/v1/mcp/...) not /admin/v1/... paths, but they live in the
-// same Admin API OpenAPI contract and are served on the same base the typed
-// client already targets (GATEWAY_ADMIN_BASE_URL), so `adminGet/adminPost/
-// adminDelete` reach them with the same bearer auth — no separate client.
+// same Admin API OpenAPI contract and the shared client routes them to the
+// gateway data-plane origin with the same bearer auth — no separate client.
 //
 // OAuth redirect dance (out-of-band): "Connect" only INITIATES the flow and
 // returns an authorization URL. The operator (or the bound subject) opens that

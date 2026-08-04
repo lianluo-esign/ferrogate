@@ -1,19 +1,20 @@
 # FerroGate Admin Console
 
 A standalone Vite + React + TypeScript + Tailwind + shadcn/ui single-page app
-that covers the gateway's control plane: tenant/project/workspace hierarchy,
+that covers FerroGate's control plane: tenant/project/workspace hierarchy,
 API/virtual keys, quota policies, gateway configuration (providers, models,
 agent upstreams/workflows, skill packages, prompt templates, plugins, MCP
 servers), infrastructure (self-hosted/managed workers), and observability
 (request logs, audit events, usage reports, billing events).
 
-It is deployed as its own service, separate from the gateway and the auth
-service, and talks to both over HTTP:
+The TypeScript control plane serves the console and the admin/session API from
+one origin. The console also calls the gateway for data-plane resources such
+as assets, agent jobs, MCP identity and published sites:
 
-- `ferrogate-auth-service`'s admin-console endpoints (`/v1/admin/register|login|refresh|logout|me`)
-  for human login/registration and session management.
-- The gateway's Admin API (`/admin/v1/*`) for everything else, authenticated
-  with a virtual API key minted by the auth service on register/login.
+- The control plane's session endpoints (`/v1/admin/register|login|refresh|logout|me`)
+  and Admin API (`/admin/v1/*`).
+- The gateway's data-plane endpoints (`/v1/*` and `/sites/*`) when a page needs
+  assets, jobs, MCP identity or published site content.
 
 ## Toolchain (#508)
 
@@ -42,16 +43,12 @@ when it cannot. `scripts/test-check-admin-console.sh` holds that contract.
 
 ```bash
 npm ci                       # required first step on a fresh checkout
-cp .env.example .env.local   # point at your local auth service + gateway
+cp .env.example .env.local   # point at your local control plane + gateway
 npm run dev
 ```
 
-Both backends need to be pointed at the **same** Postgres schema (see
-`--admin-jwt-secret`'s doc comment on `ferrogate auth serve`) and the gateway
-needs `admin.cors_allowed_origin` set to this app's origin (`--cors-allowed-origin`
-equivalent is `FERROGATE_AUTH_CORS_ALLOWED_ORIGIN` on the auth service; the
-gateway reads `admin.cors_allowed_origin` from its own config file) so the
-browser is allowed to call `/admin/v1/*` cross-origin.
+Run a control-plane Worker and a gateway Worker on the targets configured by
+`.env.local`. The Vite proxy keeps browser requests on the console origin.
 
 ## Build
 
@@ -155,22 +152,62 @@ failing threshold by #334 after those defects are fixed.
 
 ## Docker / production
 
+### The supported shape: same origin as the control plane
+
+```bash
+# Configure the gateway Worker with the exact console origin (no wildcard):
+# GATEWAY_CORS_ALLOWED_ORIGIN=https://control-plane.example.com
+VITE_GATEWAY_BASE_URL=https://gateway.example.com \
+  scripts/build-admin-console.sh        # from the repo root
+cd apps/control-plane && wrangler deploy
+```
+
+`scripts/build-admin-console.sh` builds this app into
+`apps/control-plane/public/`, which that Worker serves as Workers Static
+Assets. `VITE_GATEWAY_BASE_URL` is required for this deployment shape because
+the control-plane Worker does not serve gateway data-plane paths. The console
+still uses the control-plane origin for browser mutations; the gateway URL is
+only baked into data-plane request routing.
+
+When the gateway is a separate Worker, set its `GATEWAY_CORS_ALLOWED_ORIGIN`
+to the exact origin serving this console. The gateway then answers browser
+preflights and data-plane responses for that origin only; leaving it unset is
+appropriate for the container image because nginx keeps those requests
+same-origin.
+
+That is a **correctness requirement**, not a packaging choice. The control
+plane answers `403 cross_site_admin_denied` to any state-changing request
+carrying `sec-fetch-site: cross-site`, and its CORS preflight surface covers
+`/admin/` only -- so a console on a second origin cannot write, and cannot even
+log in (`OPTIONS /v1/admin/login` 404s, so the browser never sends the POST).
+`src/lib/config.ts` carries the full write-up.
+
+### The container image
+
 ```bash
 docker build -t ferrogate-admin-console .
 docker run --rm -p 8081:8080 \
-  -e AUTH_BASE_URL=https://auth.ferrogate.example.com \
-  -e GATEWAY_ADMIN_BASE_URL=https://ferrogate.example.com \
+  -e CONTROL_PLANE_BASE_URL=https://control-plane.example.com \
+  -e GATEWAY_BASE_URL=https://gateway.example.com \
   ferrogate-admin-console
 ```
 
-The dev-server env vars above (`VITE_AUTH_BASE_URL`/`VITE_GATEWAY_ADMIN_BASE_URL`)
-are Vite build-time values, baked into the JS bundle by `npm run build` --
-they can't be changed without a rebuild. The Docker image instead reads plain
-`AUTH_BASE_URL`/`GATEWAY_ADMIN_BASE_URL` container env vars and renders them
-into `/env-config.js` at container start (`render-env-config.sh`, installed
-as an nginx `docker-entrypoint.d/` hook), which `index.html` loads before the
-app bundle and `src/lib/config.ts` prefers over the Vite build-time value.
-This lets the same image serve dev/staging/prod with different backend URLs.
+The image serves the built SPA from nginx. Set `CONTROL_PLANE_BASE_URL` and
+`GATEWAY_BASE_URL` to absolute upstream origins. The entrypoint generates
+same-origin nginx proxy locations for `/admin/v1`, `/control/v1`, `/v1/admin`,
+`/scim/v2`, `/v1/*` and `/sites/*`, so the browser never sends a control-plane
+mutation cross-origin.
+
+`CONTROL_PLANE_BASE_URL` and `GATEWAY_BASE_URL` are available as container env
+vars and are used by `render-env-config.sh` at container start
+(`docker-entrypoint.d/` hook) to generate the nginx upstreams. The generated
+`env-config.js` points both client origins at the console itself.
+`ADMIN_API_BASE_URL` and `GATEWAY_ADMIN_BASE_URL` remain renderer fallbacks for
+older Kubernetes images.
+
+The old `AUTH_BASE_URL` name is no longer used by the client. The old
+`GATEWAY_ADMIN_BASE_URL` name is retained only as a runtime compatibility
+fallback; new deployments should use the two explicit variables above.
 
 Kubernetes: [`deploy/kubernetes/admin-console.yaml`](../deploy/kubernetes/admin-console.yaml)
 or the optional `adminConsole.*` Helm values in

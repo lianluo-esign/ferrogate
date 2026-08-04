@@ -3,8 +3,8 @@
 // Admin API (`/admin/v1/*`) that installAuthenticatedAdminApi covers — it
 // fetches the tenant gateway paths `/v1/assets`, `/v1/assets/storage/summary`,
 // `/v1/assets/{type}/{name}/manifest`, the presign upload/commit endpoints, and
-// the channel/yank/delete mutation endpoints, all against GATEWAY_ADMIN_BASE_URL
-// (`http://localhost:8080` in tests). #348 flagged that the shared admin mock
+// the channel/yank/delete mutation endpoints, all against the console's own
+// origin since #696. #348 flagged that the shared admin mock
 // leaves those unmocked, so this module supplies faithful, STATEFUL mocks whose
 // shapes match the generated OpenAPI contract (AssetSummary / AssetManifest /
 // AssetStorageSummary / AssetPresignUploadIntentResponse / ...).
@@ -39,7 +39,9 @@ export interface GatewayAssetsOptions {
   uploadHoldMs?: number;
 }
 
-const GATEWAY_ORIGIN = "http://localhost:8080";
+// NOT the console origin: this stands in for the S3-compatible BUCKET a
+// presign intent hands back, which is a third-party host by construction.
+const PRESIGNED_BUCKET_ORIGIN = "http://localhost:8080";
 const BUCKET_PREFIX = "/e2e-bucket/";
 
 const HASH_A = "1".repeat(64);
@@ -369,7 +371,7 @@ async function handleAssetsRequest(
       object: "asset_upload_intent",
       key: `${assetType}/${name}/${version}`,
       upload_id: uploadId,
-      upload_url: `${GATEWAY_ORIGIN}${BUCKET_PREFIX}staging/${uploadId}`,
+      upload_url: `${PRESIGNED_BUCKET_ORIGIN}${BUCKET_PREFIX}staging/${uploadId}`,
       method: "PUT",
       expires_in_seconds: 900,
       size_bytes: body.size_bytes ?? 0,

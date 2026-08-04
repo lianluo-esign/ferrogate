@@ -131,7 +131,7 @@ import { useI18n } from "@/i18n";
 import { LocalizedError } from "@/lib/localized-error";
 import { useOperatorError } from "@/hooks/use-operator-error";
 import { APP_ROUTES } from "@/lib/app-routes";
-import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
+import { GATEWAY_BASE_URL } from "@/lib/config";
 import {
   adminDelete,
   adminGet,
@@ -473,7 +473,7 @@ function rollbackErrorMessage(
  * path against that base; a malformed base degrades to the raw path. */
 function serveHref(servePath: string): string {
   try {
-    return new URL(servePath, GATEWAY_ADMIN_BASE_URL).toString();
+    return new URL(servePath, GATEWAY_BASE_URL).toString();
   } catch {
     return servePath;
   }
@@ -573,7 +573,7 @@ function putBundleWithProgress<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("PUT", new URL(path, GATEWAY_ADMIN_BASE_URL).toString());
+    xhr.open("PUT", new URL(path, GATEWAY_BASE_URL).toString());
     xhr.responseType = "text";
     xhr.setRequestHeader("Authorization", `Bearer ${apiKey}`);
     xhr.setRequestHeader("Content-Type", contentType || "application/octet-stream");

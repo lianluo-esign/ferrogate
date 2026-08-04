@@ -297,6 +297,8 @@ export interface GatewayDeps {
  * var here with no durable leg.
  */
 export interface GatewayBindings {
+  /** Exact browser origin allowed to call this gateway from an Admin Console. */
+  readonly GATEWAY_CORS_ALLOWED_ORIGIN?: string;
   /** JSON array of durable/native virtual keys (see `adapters.ts`). */
   readonly GATEWAY_NATIVE_API_KEYS?: string;
   /** JSON array of operator-authored static config keys. */

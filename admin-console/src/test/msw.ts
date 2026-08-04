@@ -7,8 +7,9 @@
 // automatically after each test). Unhandled requests FAIL the test, so every
 // request a component makes must be mocked explicitly.
 //
-// Base URLs match `src/lib/config.ts` fallbacks (tests run without
-// `window.__ENV__` or Vite env): gateway Admin API on :8080, auth on :8081.
+// Base URLs come from `src/lib/config.ts`: control-plane paths default to the
+// console's own origin (jsdom: http://localhost:3000), while data-plane paths
+// can be configured for the gateway.
 //
 // ```ts
 // import { HttpResponse, http } from "msw";
@@ -26,18 +27,22 @@
 // ```
 import { HttpResponse, http } from "msw";
 import { setupServer } from "msw/node";
-import { AUTH_BASE_URL, GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
+import { baseUrlForRequestPath, CONTROL_PLANE_BASE_URL } from "@/lib/config";
 
 export const server = setupServer();
 
-/** Absolute URL for a gateway Admin API path, e.g. `gatewayUrl("/admin/v1/plans")`. */
+// Admin API paths resolve through the same ownership predicate as the real
+// client. Under jsdom both configured origins normally default to the document
+// origin, while a production build can point data-plane paths at the gateway.
+
+/** Absolute URL for an Admin API path, e.g. `gatewayUrl("/admin/v1/plans")`. */
 export function gatewayUrl(path: string): string {
-  return new URL(path, GATEWAY_ADMIN_BASE_URL).toString();
+  return new URL(path, baseUrlForRequestPath(path)).toString();
 }
 
-/** Absolute URL for an auth-service path, e.g. `authUrl("/v1/admin/login")`. */
+/** Absolute URL for a console-session path, e.g. `authUrl("/v1/admin/login")`. */
 export function authUrl(path: string): string {
-  return new URL(path, AUTH_BASE_URL).toString();
+  return new URL(path, CONTROL_PLANE_BASE_URL).toString();
 }
 
 /** Mocks `GET <path>` with the Admin API `{ object: "list", data }` envelope. */
