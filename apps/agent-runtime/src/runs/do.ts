@@ -419,6 +419,9 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       if (existing.tenant_id !== input.tenantId) {
         throw new Error("agent run belongs to a different tenant");
       }
+      // A previous attempt may have committed the DO row before the tenant
+      // object was reachable. Idempotent create is also the repair entrypoint.
+      await this.#repairEvidence(existing);
       return { run: existing, deduplicated: true };
     }
 
@@ -445,7 +448,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       cancel_requested: false,
     };
     await this.ctx.storage.put(RUN_KEY, run);
-    await persistAgentRunEvidence(this.#env, run);
+    await this.#repairEvidence(run);
     await this.ctx.storage.put(SEQ_KEY, 0);
     await this.#append({
       kind: "job_submitted",
@@ -502,6 +505,22 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
     return event;
   }
 
+  /**
+   * Replay the DO's durable run and retained events into tenant evidence.
+   *
+   * The run DO and the tenant object are separate Durable Objects, so a local
+   * commit can succeed while the authoritative write is temporarily rejected.
+   * Every mutating retry enters here before creating another event; the
+   * idempotent upserts make the replay safe and repair the missing prefix.
+   */
+  async #repairEvidence(run: StoredAgentRun): Promise<void> {
+    await persistAgentRunEvidence(this.#env, run);
+    const events = (await this.#allEvents()).sort((left, right) => left.seq - right.seq);
+    for (const event of events) {
+      await persistAgentRunEventEvidence(this.#env, run.tenant_id, event);
+    }
+  }
+
   /** Append a timeline row (tenant-checked). */
   async appendEvent(
     tenantId: string,
@@ -509,6 +528,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
   ): Promise<StoredRunEvent | undefined> {
     const run = await this.snapshot(tenantId);
     if (run === undefined) return undefined;
+    await this.#repairEvidence(run);
     return await this.#append(input);
   }
 
@@ -546,6 +566,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
   ): Promise<EventPage | undefined> {
     const run = await this.snapshot(tenantId);
     if (run === undefined) return undefined;
+    await this.#repairEvidence(run);
 
     const events = (await this.#allEvents()).sort((left, right) =>
       comparePosition(eventPosition(left), eventPosition(right)),
@@ -624,7 +645,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       runtime_reported_event_count: run.runtime_reported_event_count + 1,
     };
     await this.ctx.storage.put(RUN_KEY, next);
-    await persistAgentRunEvidence(this.#env, next);
+    await this.#repairEvidence(next);
     await this.#append({
       kind: `run.${report.status}`,
       body: {
@@ -670,6 +691,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
   ): Promise<CancelOutcome | undefined> {
     const run = await this.snapshot(tenantId);
     if (run === undefined) return undefined;
+    await this.#repairEvidence(run);
     if (isTerminalStatus(run.status)) {
       return { run: { ...run, cancel_requested: true }, cancelled: false };
     }
@@ -680,7 +702,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       completed_at_unix: context.nowUnix,
     };
     await this.ctx.storage.put(RUN_KEY, next);
-    await persistAgentRunEvidence(this.#env, next);
+    await this.#repairEvidence(next);
     await this.#append({
       kind: "job_cancelled",
       body: { state: "cancelled", reason: "cancelled by caller" },

@@ -38,6 +38,7 @@ import {
   sweepRequestLogRetention,
   sweepRequestLogs,
   writeRequestLogs,
+  writeTenantRequestLogs,
 } from "../../src/requestlog/index.js";
 import type { RequestLogRecord } from "../../src/requestlog/index.js";
 import {
@@ -358,7 +359,7 @@ describe("policy-driven retention", () => {
     if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
     await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
     await writeRequestLogs(controlDb(), [old]);
-    await writeRequestLogs(objectDb, [old]);
+    await writeTenantRequestLogs(objectDb, [old]);
 
     // A failing projection batch is a mutation-backed ordering probe: if the
     // implementation deletes control first, the object row would still exist.

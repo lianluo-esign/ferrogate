@@ -20,7 +20,22 @@ export const REQUEST_LOG_TABLE = "request_logs";
 export const REQUEST_LOG_PROJECTION_TABLE = REQUEST_LOG_TABLE;
 
 /**
- * The upsert every write goes through.
+ * Key the derived projection by its owning tenant and logical id. The length
+ * prefix keeps tenant ids containing `:` unambiguous while leaving the
+ * human-facing request id unchanged for joins and exports.
+ */
+export function evidenceProjectionKey(
+  tenantId: string | null | undefined,
+  logicalId: string,
+): string {
+  const tenant = tenantId ?? "";
+  return `${tenant.length}:${tenant}:${logicalId}`;
+}
+
+/**
+ * The control-projection upsert. Tenant-object writes use the sibling
+ * `TENANT_REQUEST_LOG_UPSERT_SQL`, whose single physical database makes the
+ * logical request id sufficient as its conflict target.
  *
  * ## Why UPSERT and not INSERT
  *
@@ -54,17 +69,7 @@ export const REQUEST_LOG_PROJECTION_TABLE = REQUEST_LOG_TABLE;
  * one fact, and merging two JSON blobs in SQLite would need `json_patch()` and
  * a decision about array semantics that nothing here needs yet.
  */
-export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
-  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
-  experiment_id, experiment_arm,
-  tenant, project, workspace, api_key_id,
-  route, provider, logical_model, provider_model,
-  status_code, error_code, cache_status, latency_ms,
-  prompt_tokens, completion_tokens, total_tokens,
-  guardrail_verdict, guardrail_policy_id, streamed,
-  started_at_unix, completed_at_unix, request_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (request_id) DO UPDATE SET
+const REQUEST_LOG_UPDATE_SET = `DO UPDATE SET
   trace_id = COALESCE(excluded.trace_id, ${REQUEST_LOG_TABLE}.trace_id),
   agent_run_id = COALESCE(excluded.agent_run_id, ${REQUEST_LOG_TABLE}.agent_run_id),
   delegation_chain = COALESCE(excluded.delegation_chain, ${REQUEST_LOG_TABLE}.delegation_chain),
@@ -93,6 +98,32 @@ ON CONFLICT (request_id) DO UPDATE SET
   request_json = CASE WHEN excluded.request_json = '{}' THEN ${REQUEST_LOG_TABLE}.request_json
                       ELSE excluded.request_json END`;
 
+/** Control-D1 projection write: the tenant-qualified key is authoritative. */
+export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
+  projection_key, request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
+  experiment_id, experiment_arm,
+  tenant, project, workspace, api_key_id,
+  route, provider, logical_model, provider_model,
+  status_code, error_code, cache_status, latency_ms,
+  prompt_tokens, completion_tokens, total_tokens,
+  guardrail_verdict, guardrail_policy_id, streamed,
+  started_at_unix, completed_at_unix, request_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) ${REQUEST_LOG_UPDATE_SET}`;
+
+/** Tenant-object write: one object contains one tenant, so request_id is enough. */
+export const TENANT_REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
+  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
+  experiment_id, experiment_arm,
+  tenant, project, workspace, api_key_id,
+  route, provider, logical_model, provider_model,
+  status_code, error_code, cache_status, latency_ms,
+  prompt_tokens, completion_tokens, total_tokens,
+  guardrail_verdict, guardrail_policy_id, streamed,
+  started_at_unix, completed_at_unix, request_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (request_id) ${REQUEST_LOG_UPDATE_SET}`;
+
 /** `undefined` → SQL NULL, so an unknown fact is stored as unknown. */
 function bindOptional(value: string | number | undefined): string | number | null {
   return value === undefined ? null : value;
@@ -100,6 +131,16 @@ function bindOptional(value: string | number | undefined): string | number | nul
 
 /** The bound values for one record, in `REQUEST_LOG_UPSERT_SQL`'s column order. */
 export function requestLogBindings(record: RequestLogRecord): (string | number | null)[] {
+  return [
+    evidenceProjectionKey(record.tenantId, record.requestId),
+    ...tenantRequestLogBindings(record),
+  ];
+}
+
+/** Bound values for the tenant-object SQL, which has no projection key column. */
+export function tenantRequestLogBindings(
+  record: RequestLogRecord,
+): (string | number | null)[] {
   return [
     record.requestId,
     bindOptional(record.traceId),
@@ -183,5 +224,7 @@ export async function writeTenantRequestLogs(
   db: RequestLogDatabase,
   records: readonly RequestLogRecord[],
 ): Promise<void> {
-  await writeRequestLogs(db, records);
+  if (records.length === 0) return;
+  const statement = db.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
+  await db.batch(records.map((record) => statement.bind(...tenantRequestLogBindings(record))));
 }

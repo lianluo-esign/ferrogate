@@ -19,10 +19,11 @@ import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
  *
  * ## The batch contract, and why a bad message does not poison a good one
  *
- * Queues are AT LEAST ONCE. The write is an upsert keyed on `request_id`
- * (`d1.ts`), so a redelivered message re-applies the same row instead of
- * failing on the primary key — which is what makes `retryAll()` on a partial
- * failure safe rather than a loop.
+ * Queues are AT LEAST ONCE. The tenant-object write is keyed on `request_id`,
+ * while the control projection is keyed on its tenant-qualified
+ * `projection_key` (`d1.ts`). A redelivered message therefore re-applies the
+ * same row instead of failing on the primary key, which is what makes
+ * `retryAll()` on a partial failure safe rather than a loop.
  *
  * A message whose body does not decode is `ack()`ed and counted, NOT retried:
  * it cannot become valid on redelivery, and retrying it would keep a
@@ -39,8 +40,10 @@ import {
   guardrailEvidenceFromWire,
 } from "../guardrails/evidence-wire.js";
 import {
+  TENANT_REQUEST_LOG_UPSERT_SQL,
   REQUEST_LOG_UPSERT_SQL,
   requestLogBindings,
+  tenantRequestLogBindings,
   type RequestLogDatabase,
 } from "./d1.js";
 import { requestLogFromWire } from "./record.js";
@@ -126,9 +129,9 @@ export async function consumeRequestLogBatch(
       if (tenantDb === undefined) {
         throw new Error(`authoritative TenantDataObject is unavailable for tenant ${tenantId}`);
       }
-      const statement = tenantDb.prepare(REQUEST_LOG_UPSERT_SQL);
+      const statement = tenantDb.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
       await tenantDb.batch(
-        tenantRecords.map((record) => statement.bind(...requestLogBindings(record))),
+        tenantRecords.map((record) => statement.bind(...tenantRequestLogBindings(record))),
       );
     }
 

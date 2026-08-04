@@ -11,7 +11,12 @@ import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { AgentRuntimeBindings } from "../ports.js";
 import type { StoredAgentRun, StoredRunEvent } from "./model.js";
 
-const AGENT_RUN_UPSERT_SQL = `INSERT INTO agent_runs (
+/** Keep this key format identical to sql/d1-ts/control/0014. */
+function evidenceProjectionKey(tenantId: string, logicalId: string): string {
+  return `${tenantId.length}:${tenantId}:${logicalId}`;
+}
+
+const TENANT_AGENT_RUN_UPSERT_SQL = `INSERT INTO agent_runs (
   id, request_id, tenant, started_at_unix, completed_at_unix, run_json
 ) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
@@ -21,10 +26,30 @@ ON CONFLICT (id) DO UPDATE SET
   completed_at_unix = COALESCE(excluded.completed_at_unix, agent_runs.completed_at_unix),
   run_json = excluded.run_json`;
 
-const AGENT_RUN_EVENT_UPSERT_SQL = `INSERT INTO agent_run_events (
+const CONTROL_AGENT_RUN_UPSERT_SQL = `INSERT INTO agent_runs (
+  projection_key, id, request_id, tenant, started_at_unix, completed_at_unix, run_json
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) DO UPDATE SET
+  request_id = CASE WHEN excluded.request_id = '' THEN agent_runs.request_id ELSE excluded.request_id END,
+  tenant = excluded.tenant,
+  started_at_unix = MIN(excluded.started_at_unix, agent_runs.started_at_unix),
+  completed_at_unix = COALESCE(excluded.completed_at_unix, agent_runs.completed_at_unix),
+  run_json = excluded.run_json`;
+
+const TENANT_AGENT_RUN_EVENT_UPSERT_SQL = `INSERT INTO agent_run_events (
   id, run_id, request_id, tenant, occurred_at_unix, event_json
 ) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
+  run_id = excluded.run_id,
+  request_id = CASE WHEN excluded.request_id = '' THEN agent_run_events.request_id ELSE excluded.request_id END,
+  tenant = excluded.tenant,
+  occurred_at_unix = excluded.occurred_at_unix,
+  event_json = excluded.event_json`;
+
+const CONTROL_AGENT_RUN_EVENT_UPSERT_SQL = `INSERT INTO agent_run_events (
+  projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) DO UPDATE SET
   run_id = excluded.run_id,
   request_id = CASE WHEN excluded.request_id = '' THEN agent_run_events.request_id ELSE excluded.request_id END,
   tenant = excluded.tenant,
@@ -59,9 +84,12 @@ export async function persistAgentRunEvidence(
     JSON.stringify(run),
   ] as const;
   const db = tenantDatabase(env, run.tenant_id);
-  const statement = db.prepare(AGENT_RUN_UPSERT_SQL);
+  const statement = db.prepare(TENANT_AGENT_RUN_UPSERT_SQL);
   await db.batch([statement.bind(...params)]);
-  await mirrorBestEffort(controlDatabase(env), AGENT_RUN_UPSERT_SQL, params);
+  await mirrorBestEffort(controlDatabase(env), CONTROL_AGENT_RUN_UPSERT_SQL, [
+    evidenceProjectionKey(run.tenant_id, run.run_id),
+    ...params,
+  ]);
 }
 
 /** Write one append-only event to the tenant object, then to the mirror. */
@@ -79,9 +107,12 @@ export async function persistAgentRunEventEvidence(
     JSON.stringify(event),
   ] as const;
   const db = tenantDatabase(env, tenantId);
-  const statement = db.prepare(AGENT_RUN_EVENT_UPSERT_SQL);
+  const statement = db.prepare(TENANT_AGENT_RUN_EVENT_UPSERT_SQL);
   await db.batch([statement.bind(...params)]);
-  await mirrorBestEffort(controlDatabase(env), AGENT_RUN_EVENT_UPSERT_SQL, params);
+  await mirrorBestEffort(controlDatabase(env), CONTROL_AGENT_RUN_EVENT_UPSERT_SQL, [
+    evidenceProjectionKey(tenantId, event.id),
+    ...params,
+  ]);
 }
 
 async function mirrorBestEffort(

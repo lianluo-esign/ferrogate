@@ -585,6 +585,7 @@ describe("a later write MERGES into the row rather than blanking it", () => {
         latencyMs: 12,
         guardrailVerdict: "blocked",
         streamed: false,
+        tenantId: "tenant_a",
       },
     ]);
 
@@ -596,5 +597,33 @@ describe("a later write MERGES into the row rather than blanking it", () => {
       logical_model: "gpt-4o-mini",
       total_tokens: 15,
     });
+  });
+
+  it("keeps the same logical request id separate across tenant projections", async () => {
+    await applyControlMigrations();
+    const db = controlDb();
+    const { writeRequestLogs } = await import("../../src/requestlog/index.js");
+    const base = {
+      requestId: "fg-collision",
+      method: "POST",
+      path: "/v1/chat/completions",
+      statusCode: 200,
+      startedAtUnix: 1_700_000_001,
+      completedAtUnix: 1_700_000_001,
+      latencyMs: 1,
+      guardrailVerdict: "allowed" as const,
+      streamed: false,
+    };
+    await writeRequestLogs(db, [
+      { ...base, tenantId: "tenant_a", route: "a" },
+      { ...base, tenantId: "tenant_b", route: "b" },
+    ]);
+
+    const rows = await storedRequestLogs();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => [row.tenant, row.route])).toEqual([
+      ["tenant_a", "a"],
+      ["tenant_b", "b"],
+    ]);
   });
 });

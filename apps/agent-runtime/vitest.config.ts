@@ -282,7 +282,10 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       main: "./src/worker.ts",
-      wrangler: { configPath: "./wrangler.toml" },
+      // The root config is the deploy contract and carries live D1 authorities.
+      // Its named unit environment omits non-inheritable D1 bindings while
+      // keeping the local DO topology and test-safe vars explicit.
+      wrangler: { configPath: "./wrangler.toml", environment: "unit" },
       miniflare: {
         // The `ferrogate-gateway` script this Worker's committed
         // `[[durable_objects.bindings]] RATE_LIMIT` points at with

@@ -696,7 +696,10 @@ CREATE TABLE IF NOT EXISTS guardrail_policy_bindings (
 -- queryable compatibility projection and does not implement that sink swap.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_runs (
-    id TEXT PRIMARY KEY,
+    -- `id` is a caller-supplied business identifier and may repeat across
+    -- tenants. `projection_key` is the storage key for the derived mirror.
+    projection_key TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     request_id TEXT NOT NULL,
     tenant TEXT,
     started_at_unix INTEGER NOT NULL,
@@ -711,7 +714,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_started
     ON agent_runs(started_at_unix);
 
 CREATE TABLE IF NOT EXISTS agent_run_events (
-    id TEXT PRIMARY KEY,
+    -- Event ids are only unique within the tenant that owns the run.
+    projection_key TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
     tenant TEXT,
@@ -726,7 +731,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_events_request
     ON agent_run_events(request_id);
 
 CREATE TABLE IF NOT EXISTS request_logs (
-    request_id TEXT PRIMARY KEY,
+    -- Clients may supply the same request id in different tenants. Keep the
+    -- logical id for joins, but key the projection by tenant plus id.
+    projection_key TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
     agent_run_id TEXT,
     tenant TEXT,
     started_at_unix INTEGER NOT NULL,

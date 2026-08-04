@@ -161,6 +161,7 @@ export function requestLogRetentionFromEnv(env: unknown): RequestLogRetentionSco
 
 interface CandidateRow {
   readonly request_id: string;
+  readonly tenant?: string | null;
   readonly started_at_unix: number;
 }
 
@@ -178,6 +179,23 @@ interface RetentionFence {
 /** `?` placeholders for the bounded projection discovery queries. */
 function placeholders(count: number): string {
   return new Array(count).fill("?").join(", ");
+}
+
+/** Delete exactly one projection namespace, never every tenant's same id. */
+function deleteCandidateStatements(
+  db: RequestLogDatabase,
+  rows: readonly CandidateRow[],
+): unknown[] {
+  return rows.map((row) => {
+    if (typeof row.tenant === "string") {
+      return db
+        .prepare(`DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ? AND tenant = ?`)
+        .bind(row.request_id, row.tenant);
+    }
+    return db
+      .prepare(`DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ? AND tenant IS NULL`)
+      .bind(row.request_id);
+  });
 }
 
 /** Resolve an authoritative object without letting a Cron binding fault escape. */
@@ -214,7 +232,7 @@ async function sweepCandidates(
   try {
     const result = (await authoritativeDb
       .prepare(
-        `SELECT request_id, started_at_unix FROM ${REQUEST_LOG_TABLE}${fence.sql}
+        `SELECT request_id, tenant, started_at_unix FROM ${REQUEST_LOG_TABLE}${fence.sql}
           ORDER BY started_at_unix ASC LIMIT ?`,
       )
       .bind(...fence.params, maxRows)
@@ -230,12 +248,10 @@ async function sweepCandidates(
   }));
   const doomed = planLogRetention(candidates, nowUnix, policy);
   if (doomed.length === 0) return { scanned: rows.length, pruned: 0 };
+  const doomedRows = rows.filter((row) => doomed.includes(row.request_id));
 
   try {
-    const statement = authoritativeDb.prepare(
-      `DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`,
-    );
-    await authoritativeDb.batch(doomed.map((id) => statement.bind(id)));
+    await authoritativeDb.batch(deleteCandidateStatements(authoritativeDb, doomedRows));
   } catch {
     return { scanned: rows.length, pruned: 0 };
   }
@@ -244,10 +260,7 @@ async function sweepCandidates(
   // projection failure leaves stale discovery state, never a missing authority.
   if (projectionDb !== undefined && projectionDb !== authoritativeDb) {
     try {
-      const statement = projectionDb.prepare(
-        `DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`,
-      );
-      await projectionDb.batch(doomed.map((id) => statement.bind(id)));
+      await projectionDb.batch(deleteCandidateStatements(projectionDb, doomedRows));
     } catch {
       return { scanned: rows.length, pruned: doomed.length };
     }
