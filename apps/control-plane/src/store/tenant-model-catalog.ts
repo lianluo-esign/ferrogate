@@ -1,6 +1,6 @@
 import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import { type AuditAction, appendControlPlaneAudit } from "./d1.js";
+import { type AuditAction, appendControlPlaneAudit, controlPlaneAuditJson } from "./d1.js";
 
 export class TenantCatalogNotFoundError extends Error {
   override readonly name = "TenantCatalogNotFoundError";
@@ -125,6 +125,19 @@ interface OfferingRow {
   readonly enabled: number;
 }
 
+interface CatalogAuditOutboxRow {
+  readonly id: string;
+  readonly tenant_id: string;
+  readonly revision: number | string;
+  readonly action: AuditAction;
+  readonly collection: string;
+  readonly record_json: string;
+  readonly audit_json: string;
+  readonly request_id: string;
+  readonly actor_scope: string;
+  readonly actor_tenant_id: string | null;
+}
+
 export interface TenantModelCatalogStoreOptions {
   readonly db: D1Database;
   readonly controlDatabase: D1Database;
@@ -157,6 +170,57 @@ const OFFERING_SELECT = `
     FROM catalog_model_offerings o
     LEFT JOIN provider_channels p
       ON p.tenant_id = o.tenant_id AND p.id = o.provider_id`;
+
+/** Deliver durable catalog audit entries and remove only successfully delivered rows. */
+export async function reconcileTenantCatalogAudit(
+  db: D1Database,
+  controlDatabase: D1Database,
+  tenantId: string,
+): Promise<void> {
+  const pending = await db
+    .prepare(
+      `SELECT id, tenant_id, revision, action, collection, record_json, audit_json,
+              request_id, actor_scope, actor_tenant_id
+         FROM catalog_audit_outbox
+        WHERE tenant_id = ?
+        ORDER BY revision ASC, id ASC`,
+    )
+    .bind(tenantId)
+    .all<CatalogAuditOutboxRow>();
+
+  for (const row of pending.results) {
+    try {
+      const record = JSON.parse(row.record_json) as StoreRecord;
+      const scope: CallerScope =
+        row.actor_scope === "tenant" && row.actor_tenant_id !== null
+          ? { kind: "tenant", tenantId: row.actor_tenant_id }
+          : { kind: "platform_operator" };
+      await appendControlPlaneAudit(controlDatabase, {
+        action: row.action,
+        collection: row.collection,
+        record,
+        revision: Number(row.revision),
+        scope,
+        requestId: row.request_id,
+        auditJson: row.audit_json,
+        newId: () => row.id,
+      });
+      await db
+        .prepare("DELETE FROM catalog_audit_outbox WHERE tenant_id = ? AND id = ?")
+        .bind(tenantId, row.id)
+        .run();
+    } catch (error) {
+      await db
+        .prepare(
+          "UPDATE catalog_audit_outbox SET attempt_count = attempt_count + 1 WHERE tenant_id = ? AND id = ?",
+        )
+        .bind(tenantId, row.id)
+        .run()
+        .catch(() => undefined);
+      throw error;
+    }
+  }
+}
 
 function hasOwn(input: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(input, key);
@@ -491,7 +555,7 @@ export class TenantModelCatalogStore {
       .bind(tenantId, id)
       .first<{ present: number }>();
     if (live !== null) throw new TenantCatalogConflictError(`provider ${id} has live offerings`);
-    return this.#commit(
+    const deleted = await this.#commit(
       tenantId,
       scope,
       "remove",
@@ -507,6 +571,23 @@ export class TenantModelCatalogStore {
               )`,
         )
         .bind(tenantId, id, tenantId, id),
+    );
+    if (deleted) return true;
+
+    // The preflight and guarded DELETE are deliberately separate reads around
+    // one atomic batch. If an offering appeared in that window, the guarded
+    // DELETE is a no-op and must still be reported as a live-reference conflict.
+    if ((await this.#providerRow(tenantId, id)) === null) return false;
+    const liveAfter = await this.#db
+      .prepare(
+        "SELECT 1 AS present FROM catalog_model_offerings WHERE tenant_id = ? AND provider_id = ? LIMIT 1",
+      )
+      .bind(tenantId, id)
+      .first<{ present: number }>();
+    throw new TenantCatalogConflictError(
+      liveAfter === null
+        ? `provider ${id} could not be deleted`
+        : `provider ${id} has live offerings`,
     );
   }
 
@@ -1002,6 +1083,9 @@ export class TenantModelCatalogStore {
     requireMutation = false,
   ): Promise<boolean> {
     const now = Math.floor(Date.now() / 1000);
+    await reconcileTenantCatalogAudit(this.#db, this.#controlDatabase, tenantId);
+    const outboxId = crypto.randomUUID();
+    const auditJson = controlPlaneAuditJson({ action, collection, record, revision: 0, scope });
     let results: readonly D1Result<unknown>[];
     try {
       results = await this.#db.batch([
@@ -1016,9 +1100,31 @@ export class TenantModelCatalogStore {
           .prepare(
             `UPDATE catalog_revisions
                 SET revision = revision + 1, updated_at_unix = ?
-              WHERE tenant_id = ? AND id = 1 AND changes() > 0`,
+              WHERE tenant_id = ? AND id = 1 AND changes() > 0
+              RETURNING revision`,
           )
           .bind(now, tenantId),
+        this.#db
+          .prepare(
+            `INSERT INTO catalog_audit_outbox
+                (id, tenant_id, revision, action, collection, record_json, audit_json,
+                 request_id, actor_scope, actor_tenant_id, created_at_unix)
+             SELECT ?, tenant_id, revision, ?, ?, ?, json_set(?, '$.revision', revision), ?, ?, ?, ?
+               FROM catalog_revisions
+              WHERE tenant_id = ? AND id = 1 AND changes() > 0`,
+          )
+          .bind(
+            outboxId,
+            action,
+            collection,
+            JSON.stringify(record),
+            auditJson,
+            this.#requestId,
+            scope.kind,
+            scope.kind === "tenant" ? scope.tenantId : null,
+            now,
+            tenantId,
+          ),
       ]);
     } catch (error) {
       if (isConstraintError(error)) {
@@ -1032,23 +1138,17 @@ export class TenantModelCatalogStore {
     }
     const bump = results[2];
     if (bump === undefined || Number(bump.meta.changes ?? 0) === 0) return false;
-    const revision = await this.#revision(tenantId);
-    await appendControlPlaneAudit(this.#controlDatabase, {
-      action,
-      collection,
-      record,
-      revision,
-      scope,
-      requestId: this.#requestId,
-    });
+    const revision = Number(
+      (bump.results[0] as { revision?: number | string } | undefined)?.revision ?? 0,
+    );
+    if (revision <= 0) {
+      throw new Error("tenant model catalog revision bump did not return its revision");
+    }
+    const outbox = results[3];
+    if (outbox === undefined || Number(outbox.meta.changes ?? 0) === 0) {
+      throw new Error("tenant model catalog audit outbox did not record the mutation");
+    }
+    await reconcileTenantCatalogAudit(this.#db, this.#controlDatabase, tenantId);
     return true;
-  }
-
-  async #revision(tenantId: string): Promise<number> {
-    const row = await this.#db
-      .prepare("SELECT revision FROM catalog_revisions WHERE tenant_id = ? AND id = 1")
-      .bind(tenantId)
-      .first<{ revision: number | string }>();
-    return Number(row?.revision ?? 0);
   }
 }

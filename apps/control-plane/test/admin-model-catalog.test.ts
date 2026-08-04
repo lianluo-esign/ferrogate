@@ -16,6 +16,10 @@ import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import {
+  TenantCatalogConflictError,
+  TenantModelCatalogStore,
+} from "../src/store/tenant-model-catalog.js";
 
 const OPERATOR = operatorKey.secret;
 
@@ -411,6 +415,156 @@ describe("tenant model catalog CRUD", () => {
       auditRows.results.some((row) => row.audit_json.includes("providers")),
       JSON.stringify(auditRows.results),
     ).toBe(true);
+  });
+
+  it("audits the revision returned by the catalog batch", async () => {
+    const tenantId = freshTenantId("exact-revision");
+    await provisionTenant(tenantId);
+    const beforeRevision = await revision(tenantId);
+    const handle = await tenantDb(tenantId);
+    let injected = false;
+    const spiedDb = new Proxy(handle.db, {
+      get(target, property, receiver) {
+        if (property === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            const results = await target.batch(statements);
+            if (!injected) {
+              injected = true;
+              await target
+                .prepare(
+                  "UPDATE catalog_revisions SET revision = revision + 1 WHERE tenant_id = ? AND id = 1",
+                )
+                .bind(tenantId)
+                .run();
+            }
+            return results;
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database;
+    const store = new TenantModelCatalogStore({
+      db: spiedDb,
+      controlDatabase: db(),
+      requestId: "exact-revision-request",
+    });
+
+    await store.createProvider(
+      tenantId,
+      { kind: "tenant", tenantId },
+      {
+        id: "channel_exact_revision",
+        name: "channel_exact_revision",
+        kind: "openai-compatible",
+        base_url: "https://exact-revision.example.test/v1",
+      },
+    );
+
+    const auditRows = await db()
+      .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?")
+      .bind(tenantId)
+      .all<{ audit_json: string }>();
+    const audit = JSON.parse(auditRows.results[0]?.audit_json ?? "{}") as { revision?: number };
+    expect(audit.revision).toBe(beforeRevision + 1);
+    expect(await revision(tenantId)).toBe(beforeRevision + 2);
+  });
+
+  it("leaves a durable tenant audit outbox row when control audit is unavailable", async () => {
+    const tenantId = freshTenantId("audit-outbox");
+    await provisionTenant(tenantId);
+    const beforeRevision = await revision(tenantId);
+    const handle = await tenantDb(tenantId);
+    const failingControlDb = new Proxy(db(), {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return () => {
+            throw new Error("control audit unavailable");
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database;
+    const store = new TenantModelCatalogStore({
+      db: handle.db,
+      controlDatabase: failingControlDb,
+      requestId: "audit-outbox-request",
+    });
+
+    await expect(
+      store.createProvider(
+        tenantId,
+        { kind: "tenant", tenantId },
+        {
+          id: "channel_audit_outbox",
+          name: "channel_audit_outbox",
+          kind: "openai-compatible",
+          base_url: "https://audit-outbox.example.test/v1",
+        },
+      ),
+    ).rejects.toThrow("audit append failed");
+
+    const outboxRows = await handle.db
+      .prepare("SELECT audit_json, revision FROM catalog_audit_outbox WHERE tenant_id = ?")
+      .bind(tenantId)
+      .all<{ audit_json: string; revision: number | string }>();
+    expect(outboxRows.results).toHaveLength(1);
+    expect(JSON.parse(outboxRows.results[0]?.audit_json ?? "{}")).toMatchObject({
+      collection: "providers",
+      resource_id: "channel_audit_outbox",
+      revision: beforeRevision + 1,
+    });
+    expect(Number(outboxRows.results[0]?.revision)).toBe(beforeRevision + 1);
+  });
+
+  it("maps a guarded provider-delete race to a conflict", async () => {
+    const tenantId = freshTenantId("delete-race");
+    const tenantSecret = `catalog-race-${tenantId}`;
+    arm({
+      store: "d1",
+      staticKeys: [operatorKey],
+      nativeKeys: [tenantKey(tenantSecret, tenantId)],
+    });
+    await provisionTenant(tenantId);
+    await createChannel(tenantSecret, "channel_delete_race");
+    await createModel(tenantSecret);
+    const handle = await tenantDb(tenantId);
+    let injected = false;
+    const spiedDb = new Proxy(handle.db, {
+      get(target, property, receiver) {
+        if (property === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!injected) {
+              injected = true;
+              await target
+                .prepare(
+                  `INSERT INTO catalog_model_offerings
+                    (id, tenant_id, model_id, provider_id, upstream_model_id, role, currency, source)
+                   VALUES (?, ?, ?, ?, ?, 'primary', 'USD', 'tenant')`,
+                )
+                .bind(
+                  "offering_delete_race",
+                  tenantId,
+                  "model_catalog",
+                  "channel_delete_race",
+                  "upstream-delete-race",
+                )
+                .run();
+            }
+            return target.batch(statements);
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database;
+    const store = new TenantModelCatalogStore({
+      db: spiedDb,
+      controlDatabase: db(),
+      requestId: "delete-race-request",
+    });
+
+    await expect(
+      store.deleteProvider(tenantId, { kind: "tenant", tenantId }, "channel_delete_race"),
+    ).rejects.toBeInstanceOf(TenantCatalogConflictError);
   });
 
   it("enforces catalog conflicts and supports successful item updates and deletes", async () => {

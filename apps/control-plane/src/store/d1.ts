@@ -1113,17 +1113,20 @@ export interface ControlPlaneAuditOptions {
   readonly revision: number;
   readonly scope: CallerScope;
   readonly requestId?: string | null;
+  readonly auditJson?: string;
   readonly now?: () => number;
   readonly newId?: () => string;
 }
 
-/** Append one hash-chained audit row for a mutation outside the document store. */
-export async function appendControlPlaneAudit(
-  db: D1Database,
-  options: ControlPlaneAuditOptions,
-): Promise<void> {
+/** Build the stable JSON payload stored in the control-plane audit chain. */
+export function controlPlaneAuditJson(
+  options: Pick<
+    ControlPlaneAuditOptions,
+    "action" | "collection" | "record" | "revision" | "scope"
+  >,
+): string {
   const tenantId = typeof options.record.tenant_id === "string" ? options.record.tenant_id : null;
-  const auditJson = JSON.stringify({
+  return JSON.stringify({
     object: AUDIT_OBJECT,
     action: options.action,
     collection: options.collection,
@@ -1133,6 +1136,15 @@ export async function appendControlPlaneAudit(
     actor_tenant_id: options.scope.kind === "tenant" ? options.scope.tenantId : null,
     resource_tenant_id: tenantId,
   });
+}
+
+/** Append one hash-chained audit row for a mutation outside the document store. */
+export async function appendControlPlaneAudit(
+  db: D1Database,
+  options: ControlPlaneAuditOptions,
+): Promise<void> {
+  const tenantId = typeof options.record.tenant_id === "string" ? options.record.tenant_id : null;
+  const auditJson = options.auditJson ?? controlPlaneAuditJson(options);
   const chainKey = auditChainKey(tenantId);
   const id = options.newId?.() ?? crypto.randomUUID();
   const requestId = options.requestId ?? "";
@@ -1140,6 +1152,12 @@ export async function appendControlPlaneAudit(
 
   for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
     try {
+      const existing = await db
+        .prepare(`SELECT id FROM ${AUDIT_TABLE} WHERE id = ? LIMIT 1`)
+        .bind(id)
+        .first<{ id: string }>();
+      if (existing !== null) return;
+
       const head = await db
         .prepare(
           `SELECT seq, row_hash FROM ${AUDIT_TABLE}

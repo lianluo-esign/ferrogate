@@ -108,6 +108,7 @@ const TENANT_ONLY = [
   "provider_channels",
   "catalog_models",
   "catalog_model_offerings",
+  "catalog_audit_outbox",
   "catalog_revisions",
   "tenant_provisioning_marks",
 ] as const;
