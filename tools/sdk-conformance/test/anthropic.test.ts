@@ -270,10 +270,10 @@ describe("@anthropic-ai/sdk — messages", () => {
       // The translated body is COMPLETE on this leg — this is the control case
       // that makes the next test's finding a divergence rather than a design.
       const body = upstream.last().body as Record<string, unknown>;
-      expect(body["temperature"]).toBe(0.3);
-      expect(body["stop"]).toEqual(["STOP"]);
-      expect(body["tool_choice"]).toBe("auto");
-      expect(body["tools"]).toEqual([
+      expect(body.temperature).toBe(0.3);
+      expect(body.stop).toEqual(["STOP"]);
+      expect(body.tool_choice).toBe("auto");
+      expect(body.tools).toEqual([
         {
           type: "function",
           function: {
@@ -287,7 +287,7 @@ describe("@anthropic-ai/sdk — messages", () => {
           },
         },
       ]);
-      expect((body["messages"] as Array<Record<string, unknown>>)[0]).toEqual({
+      expect((body.messages as Array<Record<string, unknown>>)[0]).toEqual({
         role: "system",
         content: "be brief",
       });
@@ -297,32 +297,24 @@ describe("@anthropic-ai/sdk — messages", () => {
   });
 
   /**
-   * THE MOST SERIOUS FINDING IN THIS SUITE, pinned exactly as the gateway
-   * behaves today and deliberately NOT fixed here.
+   * WAS THE MOST SERIOUS FINDING IN THIS SUITE — fixed by issue #725, and this
+   * is the assertion flipped from the divergence it used to pin.
    *
    * `/v1/messages` is translated to a chat-completions body on the way in, and
-   * `anthropicAdapter.buildUpstreamRequest`
-   * (apps/gateway/src/inference/adapters.ts:355-380) then rebuilds a MINIMAL
-   * native body from it — `model`, `messages`, `max_tokens`, `stream`, plus
-   * `system` only if the translated body still had one, plus `tools` /
-   * `tool_choice` only when the operation is `responses`. `/v1/messages` plans
-   * as `chat_completions`, so on the Anthropic-upstream leg:
+   * `anthropicAdapter.buildUpstreamRequest` used to REBUILD a minimal native
+   * body from it — `model`, `messages`, `max_tokens`, `stream`, plus `system`
+   * only if the translated body still had one, plus `tools` / `tool_choice`
+   * only when the operation was `responses`. `/v1/messages` plans as
+   * `chat_completions`, so on the Anthropic-upstream leg `tools`,
+   * `tool_choice`, `temperature` and `stop_sequences` were all DROPPED while
+   * the request answered 200, and `system` was smuggled in as a `role:"system"`
+   * entry the Messages API does not accept.
    *
-   *   - `tools` and `tool_choice` are DROPPED — an Anthropic-SDK caller's tool
-   *     definitions never reach the model, so it can never emit a `tool_use`
-   *     block and agent loops silently degrade to plain text;
-   *   - `temperature` and `stop_sequences` are DROPPED;
-   *   - `system` arrives as a `{role:"system"}` entry INSIDE `messages`,
-   *     because the inbound translation folded it there and the adapter copies
-   *     `messages` verbatim. The real Anthropic Messages API accepts only
-   *     `user` and `assistant` roles and takes `system` as a TOP-LEVEL
-   *     parameter, so this body is one the upstream would reject outright.
-   *
-   * The same request served by an OPENAI upstream (test above) carries every
-   * one of these correctly, which is what makes this a defect in one adapter
-   * rather than a limit of the translation.
+   * The adapter now translates the whole body instead, so the leg below matches
+   * the OPENAI-upstream control above member for member — which is what makes
+   * the pair a regression fence rather than two independent snapshots.
    */
-  it("DIVERGENCE: the Anthropic-upstream leg drops system, tools, temperature and stop_sequences", async () => {
+  it("relays system, tools, temperature and stop_sequences to an ANTHROPIC upstream", async () => {
     const upstream = interceptUpstream(() => upstreamJson(ANTHROPIC_MESSAGE));
     try {
       await anthropicClient().messages.create({
@@ -347,17 +339,27 @@ describe("@anthropic-ai/sdk — messages", () => {
       });
 
       const body = upstream.last().body as Record<string, unknown>;
-      expect(body["tools"]).toBeUndefined();
-      expect(body["tool_choice"]).toBeUndefined();
-      expect(body["temperature"]).toBeUndefined();
-      expect(body["stop_sequences"]).toBeUndefined();
-      expect(body["system"]).toBeUndefined();
-      // …and the system prompt is smuggled in as a role the Anthropic API
-      // does not accept.
-      expect((body["messages"] as Array<Record<string, unknown>>)[0]).toEqual({
-        role: "system",
-        content: "be brief",
-      });
+      // The round trip lands back on Anthropic's OWN spelling — `input_schema`,
+      // not the `parameters` the inbound translation produced — because a body
+      // carrying the OpenAI grammar would be a 400 from the real upstream.
+      expect(body.tools).toEqual([
+        {
+          name: "get_weather",
+          description: "Look up the weather",
+          input_schema: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+          },
+        },
+      ]);
+      expect(body.tool_choice).toEqual({ type: "auto" });
+      expect(body.temperature).toBe(0.3);
+      expect(body.stop_sequences).toEqual(["STOP"]);
+      // `system` is the TOP-LEVEL parameter, and `messages` carries only the
+      // roles the Messages API accepts.
+      expect(body.system).toBe("be brief");
+      expect(body.messages).toEqual([{ role: "user", content: "weather?" }]);
     } finally {
       upstream.restore();
     }
@@ -519,18 +521,18 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
     // (seven-field `ModelInfo` shape) on that ingress, while the OpenAI ingress
     // keeps the OpenAI dialect (`{id, object:"model", created, owned_by}`).
     const first = page.data[0] as unknown as Record<string, unknown>;
-    expect(first?.["id"]).toEqual(expect.any(String));
-    expect(first?.["type"]).toBe("model");
-    expect(first?.["display_name"]).toBe("gpt-4o-mini");
-    expect(first?.["created_at"]).toEqual(expect.any(String));
+    expect(first?.id).toEqual(expect.any(String));
+    expect(first?.type).toBe("model");
+    expect(first?.display_name).toBe("gpt-4o-mini");
+    expect(first?.created_at).toEqual(expect.any(String));
     // Two fields are emitted as null because FerroGate does not track the
     // Anthropic capability model or per-model max_tokens limits. These
     // assertions pin the omission as a recorded contract rather than an accident.
-    expect(first?.["capabilities"]).toBeNull();
-    expect(first?.["max_input_tokens"]).toBe(128_000);
-    expect(first?.["max_tokens"]).toBeNull();
+    expect(first?.capabilities).toBeNull();
+    expect(first?.max_input_tokens).toBe(128_000);
+    expect(first?.max_tokens).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
-    expect(first?.["object"]).toBeUndefined();
+    expect(first?.object).toBeUndefined();
   });
 
   it("models.retrieve() returns the Anthropic dialect on the Anthropic ingress", async () => {
@@ -541,22 +543,18 @@ describe("@anthropic-ai/sdk — error taxonomy", () => {
 
     expect(model.id).toBe("gpt-4o-mini");
     // The Anthropic SDK's ModelInfo type has `type: "model"`.
-    expect((model as unknown as Record<string, unknown>)?.["type"]).toBe("model");
-    expect((model as unknown as Record<string, unknown>)?.["display_name"]).toEqual(
-      expect.any(String),
-    );
-    expect((model as unknown as Record<string, unknown>)?.["created_at"]).toEqual(
-      expect.any(String),
-    );
+    expect((model as unknown as Record<string, unknown>)?.type).toBe("model");
+    expect((model as unknown as Record<string, unknown>)?.display_name).toEqual(expect.any(String));
+    expect((model as unknown as Record<string, unknown>)?.created_at).toEqual(expect.any(String));
     // Two fields are emitted as null because FerroGate does not track the
     // Anthropic capability model or per-model max_tokens limits. These
     // assertions pin the omission as a recorded contract rather than an accident.
-    expect((model as unknown as Record<string, unknown>)?.["capabilities"]).toBeNull();
-    expect((model as unknown as Record<string, unknown>)?.["max_input_tokens"]).toBe(128_000);
-    expect((model as unknown as Record<string, unknown>)?.["max_tokens"]).toBeNull();
+    expect((model as unknown as Record<string, unknown>)?.capabilities).toBeNull();
+    expect((model as unknown as Record<string, unknown>)?.max_input_tokens).toBe(128_000);
+    expect((model as unknown as Record<string, unknown>)?.max_tokens).toBeNull();
     // The OpenAI-specific fields should NOT be present on the Anthropic ingress.
-    expect((model as unknown as Record<string, unknown>)?.["object"]).toBeUndefined();
-    expect((model as unknown as Record<string, unknown>)?.["created"]).toBeUndefined();
-    expect((model as unknown as Record<string, unknown>)?.["owned_by"]).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.object).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.created).toBeUndefined();
+    expect((model as unknown as Record<string, unknown>)?.owned_by).toBeUndefined();
   });
 });
