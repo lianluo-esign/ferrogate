@@ -23,9 +23,9 @@
  * is a per-request binding. `settledCostUsd` is the seam that already exists
  * for "the data plane priced this request itself", and `charge()` already
  * treats such a cost as authoritative, breaks it into input/output components,
- * and warns (never overrides) on a >5% divergence from the card when the card
- * ALSO knows the pair. So a row-priced model that is also on the card keeps the
- * card as a cross-check rather than losing it.
+ * Legacy rate-card mode may compare the result with its card, but production
+ * serving-offering mode deliberately has no wildcard reference to consult or
+ * compare.
  */
 import { inputTokenSplit, outputTokenSplit, reconcileSplit } from "@ferrogate/billing";
 import type { Usage } from "../inference/ports.js";
@@ -44,12 +44,12 @@ const PER_1M = 1_000_000;
  *     upstream, or a stream the client cut before any usage frame — and also
  *     covers `/v1/images`, which settles on an image count and not on tokens.
  *     Returning `0` there would convert "nothing observed" into an authoritative
- *     $0 settlement and suppress the rate card for a request the card can price
- *     perfectly well.
+ *     $0 settlement. Serving-offering mode records this as unpriced.
  *  2. **A side with tokens but no price.** A row that prices only input, on a
  *     response that produced completion tokens, cannot settle the whole call;
  *     billing only the priced half is a wrong number stated with confidence.
- *     Deferring to the card (and to fail-closed after it) is the honest answer.
+ *     Returning `undefined` lets serving-offering mode record the missing price
+ *     instead of charging another route's card value.
  *  3. **A non-finite or negative price.** The config schema already rejects
  *     these (`z.number().nonnegative()`), so this is depth rather than
  *     duplication — a negative settled cost would be a CREDIT to the customer
@@ -59,8 +59,8 @@ const PER_1M = 1_000_000;
  * The token split is reconciled first, for the same reason `charge()` does it
  * (#140): a provider that reports only `total_tokens` must not have the missing
  * side billed at $0. Doing it here as well is what keeps this settled figure
- * within the divergence tolerance of the rate-card estimate `charge()` compares
- * it against, instead of tripping a spurious warning on every such response.
+ * within the divergence tolerance of the rate-card estimate in legacy mode.
+ * Serving-offering mode does not consult a card.
  */
 export function routePriceSettledCostUsd(usage: Usage): number | undefined {
   // The AUDIO arm (issue #703), checked FIRST and returning outright.
@@ -68,10 +68,9 @@ export function routePriceSettledCostUsd(usage: Usage): number | undefined {
   // It is first because the token arm below opens by refusing a usage row with
   // no observed tokens, and an audio row has none by construction: transcription
   // settles on seconds and speech on characters. Reaching that refusal would
-  // send every audio call to the rate card — which has no `("*","*")` wildcard
-  // and no audio entry — so `charge()` would throw `price_not_found` and the
-  // sink would fail closed. A live, successful, correctly-priced call would land
-  // in `billing_ledger`, `billing_events` and `billing_report_outbox` at zero.
+  // send every audio call to a legacy rate card. A live, successful,
+  // correctly-priced call would otherwise be refused instead of using the
+  // serving route's audio price.
   // That is precisely the #663 defect, and this arm is what stops audio
   // reproducing it.
   //
@@ -88,7 +87,7 @@ export function routePriceSettledCostUsd(usage: Usage): number | undefined {
     usage.completionTokens === undefined &&
     usage.totalTokens === undefined
   ) {
-    return undefined; // (1) nothing observed — let the card decide
+    return undefined; // (1) nothing observed — serving-offering mode records unpriced
   }
 
   const input = priceOrUndefined(usage.inputPricePer1m);
@@ -148,9 +147,9 @@ export function routePriceSettledCostUsd(usage: Usage): number | undefined {
  *
  *  1. **No observed quantity.** A transcription whose provider reported no
  *     duration has `audioSeconds` ABSENT — not zero — and this returns
- *     `undefined` so the rate card decides, exactly as an unmeasured token row
- *     does. Reading an absent duration as `0` would settle a real, billable call
- *     authoritatively at $0, which is the free-inference bug #129 named.
+ *     `undefined` so serving-offering mode records an unmeasured row. Reading an
+ *     absent duration as `0` would settle a real, billable call authoritatively
+ *     at $0, which is the free-inference bug #129 named.
  *  2. **A quantity the route does not price.** A row that states no audio rate
  *     cannot settle an audio call; deferring is the honest answer.
  *  3. **A non-finite or negative rate**, via {@link priceOrUndefined} — a

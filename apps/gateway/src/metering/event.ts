@@ -128,8 +128,9 @@ export interface BillingEventContext {
   readonly nowUnixSeconds: number;
   /**
    * A gateway-settled cost, when the request path priced and budget-enforced
-   * the call itself. `undefined` ⇒ the rate card decides and `charge()` fails
-   * closed if it cannot.
+   * the call itself. In legacy rate-card mode, `undefined` lets `charge()` try
+   * the configured card; production serving-offering mode refuses it as
+   * unpriced instead.
    */
   readonly settledCostUsd?: number | undefined;
   /** `cluster_identity.cluster_id` — a Worker's colo/deployment identity. */

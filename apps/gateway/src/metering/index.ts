@@ -214,7 +214,7 @@ export {
   MeteringUsageSink,
   createMeteringUsageSink,
 } from "./sink.js";
-export type { MeteringSinkOptions, UnpricedUsage } from "./sink.js";
+export type { MeteringSettlementMode, MeteringSinkOptions, UnpricedUsage } from "./sink.js";
 
 /**
  * The model-registry pricing leg of settlement (#663) — `src/index.ts` passes

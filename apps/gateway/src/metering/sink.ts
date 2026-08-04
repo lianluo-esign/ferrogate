@@ -180,6 +180,9 @@ export const OUTBOX_SWEEP_GRACE_SECONDS = 60;
  */
 export const MAX_PENDING_UNPRICED_EVENTS = 256;
 
+/** Which source is allowed to settle an inference usage event. */
+export type MeteringSettlementMode = "rate_card" | "serving_offering";
+
 /** A charge that could not be priced — kept for operator inspection. */
 export interface UnpricedUsage {
   readonly id: string;
@@ -190,14 +193,26 @@ export interface UnpricedUsage {
   readonly event: BillingEvent;
 }
 
+/** A settled offering price is valid only when it is finite and non-negative. */
+function usableSettledCostUsd(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 /** Construction options. Every one has a runnable default. */
 export interface MeteringSinkOptions {
   /**
-   * The rate card. Defaults to `PriceBook.withDefaultRateCard()` — the seeded
-   * per-vendor card, which is what makes the fail-closed path a real signal
-   * (an UNKNOWN model, not "nothing is configured yet").
+   * The legacy rate card. Defaults to `PriceBook.withDefaultRateCard()` for
+   * `rate_card` mode. `serving_offering` mode keeps only its credit conversion
+   * and never reads its model entries.
    */
   readonly priceBook?: PriceBook;
+  /**
+   * Settlement source for inference events. `rate_card` preserves the generic
+   * legacy sink behavior. `serving_offering` is the production inference mode:
+   * the route that answered must provide a usable settled cost, and the sink
+   * never consults a wildcard card when it does not.
+   */
+  readonly settlementMode?: MeteringSettlementMode;
   /**
    * The ledger used when no {@link MeteringSinkOptions.bindings} resolver
    * produces a durable one. Defaults to {@link InMemoryLedgerStore}.
@@ -254,10 +269,10 @@ export interface MeteringSinkOptions {
    * forward to settlement.
    *
    * The seam is here and it is EXERCISED (`test/metering/sink.test.ts`: the
-   * authoritative branch records the supplied cost verbatim, and a >5%
-   * divergence from the card is warned, never overridden). So the day budgets
-   * land the change is `settledCostUsd: (u) => budget.settled(u)` at the
-   * composition root, not a retro-fit onto a path that never had the branch.
+   * authoritative branch records the supplied cost verbatim). In legacy
+   * `rate_card` mode a >5% card divergence is still warned, never overridden.
+   * Production inference uses `serving_offering`, where a missing result is
+   * recorded as unpriced rather than delegated to a card.
    */
   readonly settledCostUsd?: (usage: Usage) => number | undefined;
 }
@@ -279,6 +294,7 @@ export class MeteringUsageSink implements UsageSink {
   readonly #clusterId: string | undefined;
   readonly #nodeId: string | undefined;
   readonly #settledCostUsd: ((usage: Usage) => number | undefined) | undefined;
+  readonly #settlementMode: MeteringSettlementMode;
   readonly #stats: MeteringStats = emptyMeteringStats();
   readonly #unpriced: UnpricedUsage[] = [];
   /**
@@ -304,7 +320,15 @@ export class MeteringUsageSink implements UsageSink {
   #draining: Promise<void> | undefined;
 
   constructor(options: MeteringSinkOptions = {}) {
-    this.#priceBook = options.priceBook ?? PriceBook.withDefaultRateCard();
+    this.#settlementMode = options.settlementMode ?? "rate_card";
+    const configuredPriceBook = options.priceBook ?? PriceBook.withDefaultRateCard();
+    // A serving offering is the only inference price source in production.
+    // Keep the configured credit conversion, but remove every model entry so a
+    // wildcard card cannot participate in either settlement or divergence.
+    this.#priceBook =
+      this.#settlementMode === "serving_offering"
+        ? PriceBook.default().withCreditsPerUsd(configuredPriceBook.credits_per_usd)
+        : configuredPriceBook;
     this.#ledger = options.ledger ?? new InMemoryLedgerStore();
     this.#outbox = options.outbox ?? new InMemoryMeteringOutbox();
     this.#publisher = options.publisher ?? new InMemoryBillingReportPublisher();
@@ -463,7 +487,11 @@ export class MeteringUsageSink implements UsageSink {
 
   #settle(usage: Usage, rc: MeteringDrainContext | undefined): void {
     const now = this.#clock.nowUnixSeconds();
-    const settledCostUsd = this.#settledCostUsd?.(usage);
+    const candidateSettledCostUsd = this.#settledCostUsd?.(usage);
+    const settledCostUsd =
+      this.#settlementMode === "serving_offering"
+        ? usableSettledCostUsd(candidateSettledCostUsd)
+        : candidateSettledCostUsd;
     const event = billingEventFromUsage(usage, {
       nowUnixSeconds: now,
       ...(settledCostUsd !== undefined ? { settledCostUsd } : {}),
@@ -472,6 +500,17 @@ export class MeteringUsageSink implements UsageSink {
       diagnostics: this.#diagnostics,
     });
     const id = ledgerEntryId(event);
+
+    if (this.#settlementMode === "serving_offering" && settledCostUsd === undefined) {
+      this.#recordUnpriced(
+        event,
+        id,
+        `serving offering for provider '${event.provider}' model '${event.provider_model}' ` +
+          "did not provide a usable settled cost; wildcard rate-card settlement is disabled",
+      );
+      this.#scheduleDrain(rc);
+      return;
+    }
 
     const entry = this.#price(event, id);
     if (entry === undefined) {
@@ -530,34 +569,38 @@ export class MeteringUsageSink implements UsageSink {
       });
     } catch (error) {
       if (error instanceof BillingError && error.code === "price_not_found") {
-        this.#stats.priceNotFound += 1;
-        const refused: UnpricedUsage = {
-          id,
-          requestId: event.request_id,
-          provider: event.provider,
-          providerModel: event.provider_model,
-          message: error.message,
-          event,
-        };
-        this.#unpriced.push(refused);
-        // #663 — queue the DURABLE trace. `#unpriced` above is isolate-local
-        // and dies with the isolate, which is precisely how the live evidence
-        // came to be "recorded nowhere"; this list is what `#drain` writes out.
-        this.#queueUnpricedEvent(refused);
-        this.#guard(
-          () =>
-            this.#diagnostics.onPriceNotFound?.({
-              requestId: event.request_id,
-              provider: event.provider,
-              providerModel: event.provider_model,
-              message: error.message,
-            }),
-          "price_not_found",
-        );
-        return undefined;
+        return this.#recordUnpriced(event, id, error.message);
       }
       throw error;
     }
+  }
+
+  /** Record a charge refusal without ever collapsing NULL into a zero charge. */
+  #recordUnpriced(event: BillingEvent, id: string, message: string): undefined {
+    this.#stats.priceNotFound += 1;
+    const refused: UnpricedUsage = {
+      id,
+      requestId: event.request_id,
+      provider: event.provider,
+      providerModel: event.provider_model,
+      message,
+      event,
+    };
+    this.#unpriced.push(refused);
+    // #663 — queue the DURABLE trace. `#unpriced` above is isolate-local and dies
+    // with the isolate; this list is what `#drain` writes out.
+    this.#queueUnpricedEvent(refused);
+    this.#guard(
+      () =>
+        this.#diagnostics.onPriceNotFound?.({
+          requestId: event.request_id,
+          provider: event.provider,
+          providerModel: event.provider_model,
+          message,
+        }),
+      "price_not_found",
+    );
+    return undefined;
   }
 
   /**
