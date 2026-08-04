@@ -26,9 +26,12 @@
  *     `provisionedTenants()` — which `apps/control-plane/src/store/asset_fleet.ts`
  *     fans out over — reads it. Nothing wrote it. A tenant created today would
  *     be invisible to every fleet view.
- *  3. **Seeding.** A tenant with an empty model catalog answers
- *     `400 model_not_found` on every inference request. See
- *     `./tenant-model-catalog.ts`.
+ *  3. **Seeding.** The tenant's own `model_catalog`, so per-tenant visibility
+ *     and per-tenant pricing have rows to read when the reader lands, rather
+ *     than needing a backfill over objects a namespace cannot enumerate. This
+ *     list used to say an unseeded tenant answers `400 model_not_found` on
+ *     every inference request; it does not, and `./tenant-model-catalog.ts`
+ *     records what was actually true.
  *
  * ## Two stores, one operation, and therefore no transaction
  *
@@ -66,6 +69,7 @@
  * safe to run over the whole fleet, including the healthy ones.
  */
 import { StorageError } from "./errors.js";
+import { parseLifecycleStatus } from "./lifecycle-status.js";
 import {
   DEFAULT_TENANT_MODEL_CATALOG,
   MODEL_CATALOG_SEED_MARK,
@@ -119,8 +123,9 @@ export interface TenantProvisioningOptions {
 /**
  * The `tenants` row this module refuses without.
  *
- * Only the two columns that decide admission. `status` is read but deliberately
- * NOT gated on here — see {@link assertTenantRegistered}.
+ * Only the two columns that decide admission. `status` gates exactly one value,
+ * `deleted`; `suspended` and `disabled` are admitted on purpose — see
+ * {@link assertTenantRegistered}.
  */
 interface TenantRow {
   id: string;
@@ -150,10 +155,33 @@ interface TenantRow {
  * reversible and its data must survive it — refusing to provision a suspended
  * tenant would mean a tenant suspended between its creation and its first
  * provisioning attempt could never be resumed, which turns a billing control
- * into data loss. Admission is a question about EXISTENCE; whether a request may
- * be served is the lifecycle gate's question and it is asked per request.
+ * into data loss. `disabled` is admitted for the same reason. Admission is a
+ * question about EXISTENCE; whether a request may be served is the lifecycle
+ * gate's question and it is asked per request.
+ *
+ * ## `deleted` is NOT admitted, and existence alone could never have caught it
+ *
+ * There is no `deleteTenantAccount` operation in the contract. The teardown
+ * request is `PATCH {"status":"deleted"}`
+ * (`apps/control-plane/src/routes/tenant_hierarchy.ts`), the spec declares no
+ * `unproject`, and `mergeHandler` runs `runProjection`, which runs `project`
+ * and then `provision` unconditionally. So deleting a tenant used to PROVISION
+ * it: a tenant that predates this slice (or whose first provisioning failed)
+ * had `idFromName(t)` addressed for the first time by the request that deleted
+ * it, materialising an object, seeding it, and recording a `ready` roster row —
+ * manufacturing exactly the permanently-billable object this function's own
+ * header says it exists to prevent, for a tenant that will never serve a
+ * request again. The header even named "a deleted tenant" as the category, and
+ * an EXISTENCE check structurally cannot refuse it, because the typed `tenants`
+ * row survives the delete.
+ *
+ * It is a refusal rather than a silent skip because `provisionTenantStorageFor`
+ * swallows it: the delete still succeeds, and the reason is recorded rather than
+ * invented. Undeleting is `PATCH {"status":"active"}`, which provisions on its
+ * way through — so this costs a deleted tenant nothing it can still use.
  *
  * @throws {@link StorageError} `notFound` when there is no row.
+ * @throws {@link StorageError} `conflict` when the row says `deleted`.
  */
 export async function assertTenantRegistered(
   controlDb: D1Database,
@@ -179,6 +207,17 @@ export async function assertTenantRegistered(
         "will not be provisioned. Under the Durable Object topology an object is created by",
         "being addressed, so provisioning an unregistered id would leave an unenumerable,",
         "billable object behind for a tenant that does not exist.",
+      ].join(" "),
+    );
+  }
+  if (parseLifecycleStatus(row.status ?? "") === "deleted") {
+    throw StorageError.conflict(
+      [
+        `tenant ${tenantId} is marked deleted, so its storage will not be provisioned. The only`,
+        'teardown request the contract has is PATCH {"status":"deleted"}, and the projection that',
+        "serves it runs this provisioner on its way through — so without this refusal deleting a",
+        "tenant would ADDRESS its object for the first time, materialise it, seed it and record",
+        "it ready. Undeleting (status: active) provisions it then, when it can be used again.",
       ].join(" "),
     );
   }
@@ -217,9 +256,22 @@ export async function provisionTenantStorage(
   // not silence. The prior row's D1-topology fields are carried across verbatim:
   // this function has no opinion about a `native_binding` tenant's binding name
   // and must not erase one by omission.
+  //
+  // The BACKEND is stated here rather than left to the registry's
+  // `native_binding` default, and that is not cosmetic. Until it was, a new
+  // tenant carried no `storageBackend` into this write (`existing` is absent, so
+  // the spread contributes nothing), so `pending` — and, more damagingly,
+  // `failed`, which is the row that SURVIVES — labelled every Durable Object
+  // tenant `native_binding` with a NULL binding. A binding router then read that
+  // row as "provisioned but not yet redeployed" and 503'd every control-plane
+  // tenant-data route for a tenant that had worked fine when it had no row at
+  // all. `router.backend` is knowable without resolving anything, so the label
+  // is right from the first write; a router that has no single answer leaves it
+  // absent and the roster's prior belief stands.
   const base: TenantDatabaseRegistration = {
     ...(existing ?? { tenantId, schemaVersion: 0 }),
     tenantId,
+    ...(router.backend === undefined ? {} : { storageBackend: router.backend }),
     ...(options.locationHint === undefined ? {} : { locationHint: options.locationHint }),
   };
   await registry.upsert({ ...base, status: "pending", lastError: undefined }, nowUnix);
@@ -243,15 +295,20 @@ export async function provisionTenantStorage(
     if (catalog.length === 0) {
       // Reached only if the seed reported "already done" against a catalog that
       // is empty — i.e. a mark committed without its rows, which the seeder's
-      // single transaction is designed to make impossible. Refusing is the point:
-      // reporting `ready` here is exactly how a tenant ends up permanently
-      // 400ing with a roster row that says it is healthy.
+      // single `transactionSync` is designed to make impossible. The refusal is
+      // about the SEEDER, not about inference: it says the one-shot mark and the
+      // rows it vouches for disagree, so the mark will suppress every future
+      // seed of a table that is empty and no later run will repair it. Reporting
+      // `ready` on that would make the roster's own integrity claim false. (It
+      // used to say "because a tenant with no catalog answers 400
+      // model_not_found", which nothing in the tree does — see
+      // `./tenant-model-catalog.ts`.)
       throw StorageError.runtime(
         [
           `tenant ${tenantId} carries the ${MODEL_CATALOG_SEED_MARK} mark but has an EMPTY model`,
           "catalog. The seed mark and its rows are written in one transaction, so this state",
-          "should be unreachable; refusing to report the tenant ready, because a tenant with no",
-          "catalog answers 400 model_not_found on every inference request.",
+          "should be unreachable; refusing to report the tenant ready, because the mark will now",
+          "suppress every later seed of a table that has nothing in it.",
         ].join(" "),
       );
     }
@@ -386,8 +443,10 @@ export async function describeTenantStorage(
     catalogEntries = (await listTenantModelCatalog(handle.db, tenantId)).length;
     if (catalogEntries === 0) {
       problems.push(
-        "the model catalog is EMPTY, so every inference request by this tenant answers " +
-          "400 model_not_found",
+        "the model catalog is EMPTY: the seed step either never ran or ran against a mark " +
+          "that suppressed it, so per-tenant model visibility and pricing have no rows. " +
+          "Inference is NOT affected — the gateway resolves models from GATEWAY_MODELS / " +
+          "GATEWAY_PROVIDERS, not from this table",
       );
     }
   } catch (error) {

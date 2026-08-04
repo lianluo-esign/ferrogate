@@ -252,7 +252,11 @@ export interface CollectionSpec {
    * moment anything writes to it — so onboarding is not "create a database" any
    * more, it is "record that this tenant exists, and put the first rows in".
    * Nothing did either, so a tenant created here was absent from the fleet
-   * roster and answered `400 model_not_found` on its first inference request.
+   * roster and had an empty model catalog. (An earlier version of this comment
+   * added "and answered `400 model_not_found` on its first inference request".
+   * That was false — the gateway resolves models from `GATEWAY_MODELS` /
+   * `GATEWAY_PROVIDERS`, never from the tenant table — and the invisible-to-
+   * every-fleet-view half is the part that was real.)
    *
    * It is a SEPARATE hook from `project` rather than folded into it because the
    * two have different signatures for a reason: `project` gets a `D1Database`

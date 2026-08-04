@@ -35,14 +35,18 @@ import {
   DurableObjectTenantDatabaseRouter,
   requireAtomicBatch,
 } from "@ferrogate/storage";
+import { Hono } from "hono";
 import { beforeAll, describe, expect, test } from "vitest";
 import { HttpError } from "../../src/middleware/errors.js";
+import type { GatewayEnv } from "../../src/ports.js";
 import {
   TENANT_DATABASE_ROUTING_MISCONFIGURED,
   TENANT_DATABASE_UNAVAILABLE,
   type TenancyBindings,
   createTenantDatabaseResolver,
   parseTenantDatabaseRoutingMode,
+  tenantDatabase,
+  tenantDatabaseOf,
 } from "../../src/tenancy/index.js";
 import { TENANT_ACME, TENANT_GHOST, TENANT_GLOBEX, setupTenancy, walletFor } from "./setup.js";
 
@@ -170,18 +174,52 @@ describe("a request-path resolution performs NO control-database read", () => {
   });
 
   test("a resolution the tenancy MIDDLEWARE performs reads nothing either", async () => {
-    // The same claim through the seam the request path actually takes, so a
-    // future accessor that helpfully pre-warmed a registry row would be caught
-    // as well as a router that read one.
+    // The same claim through the seam the request path actually takes.
+    //
+    // This test used to call `createTenantDatabaseResolver(...).forTenant(...)`
+    // — the identical seam as the case above — and assert `handle.db` is
+    // defined, which `forTenant` sets as an eager plain property and so could
+    // never fail. It therefore could not catch the ONE thing its own comment
+    // claimed: an accessor that pre-warms a registry row. So it now mounts the
+    // REAL `tenantDatabase()` middleware and reaches the handle through
+    // `tenantDatabaseOf(c)`, which is the only path that constructs
+    // `RequestTenantDatabaseAccessor`. Adding
+    // `void this.resolver().control().prepare("SELECT 1")` to that constructor
+    // turns this red; it left the old version green.
     const { db, prepared } = countingControlDb();
-    const resolver = createTenantDatabaseResolver({
+    const app = new Hono<GatewayEnv>();
+    app.use("*", async (c, next) => {
+      c.set("auth", {
+        subject: "key_probe",
+        tenancy: { tenantId: TENANT_ACME },
+        scopes: ["*"],
+        platformOperator: false,
+        source: "durable_native",
+      });
+      await next();
+    });
+    app.use("*", tenantDatabase());
+    app.get("/probe", async (c) => {
+      const handle = await tenantDatabaseOf(c).handle();
+      // Reading the handle's own database must not touch the control plane
+      // either; the object is addressed, not looked up. A real statement, so
+      // the tally covers the first RPC into the object and not just resolution.
+      await handle.db.prepare("SELECT tenant_id FROM wallets WHERE tenant_id = ?").bind(
+        handle.tenantId,
+      ).all();
+      return c.json({ tenantId: handle.tenantId, source: handle.source });
+    });
+
+    const response = await app.request("https://probe.test/probe", {}, {
       ...defaultBindings(),
       CONTROL_DB: db,
-    } as TenancyBindings);
-    const handle = await resolver.forTenant(TENANT_ACME);
-    // Reading the handle's own database must not touch the control plane
-    // either; the object is addressed, not looked up.
-    expect(handle.db).toBeDefined();
+    } as unknown as Record<string, unknown>);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      tenantId: TENANT_ACME,
+      source: "durable_object",
+    });
     expect(prepared).toEqual([]);
   });
 

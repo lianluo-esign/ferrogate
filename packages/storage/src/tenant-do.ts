@@ -713,6 +713,13 @@ export class DurableObjectD1Database {
  * would be a second source of truth that no writer updates.
  */
 export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
+  /**
+   * Known before any tenant is named, because the address is a pure function of
+   * the id. That is what lets `provisionTenantStorage` label its `pending` row
+   * `durable_object` instead of guessing `native_binding` and leaving a
+   * mislabelled roster row behind on every failed onboarding.
+   */
+  readonly backend = "durable_object" as const;
   readonly #namespace: TenantDataNamespaceLike;
   readonly #controlDb: D1Database;
   readonly #registry: ControlDatabaseTenantRegistry;
