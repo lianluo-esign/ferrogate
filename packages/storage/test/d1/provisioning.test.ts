@@ -19,7 +19,7 @@
  *    real bookkeeping elsewhere, so a D1 tenant honestly reports `1`. Asserting
  *    the same number on both legs would mean asserting a lie on one of them.
  */
-import { env } from "cloudflare:test";
+import { env, listDurableObjectIds } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
 import { StorageError } from "../../src/errors.js";
 import {
@@ -92,6 +92,22 @@ beforeEach(async () => {
 });
 
 describe("refusing before the object is addressed", () => {
+  test.runIf(IS_DURABLE_OBJECT_BACKEND)(
+    "an unknown tenant does not materialize its Durable Object",
+    async () => {
+      const targetId = env.TENANT_DATA.idFromName(UNREGISTERED).toString();
+      const before = await listDurableObjectIds(env.TENANT_DATA);
+      expect(before.some((id) => id.toString() === targetId)).toBe(false);
+
+      await expect(provisionTenantStorage(router, UNREGISTERED)).rejects.toThrow(
+        /has no row in the control database's tenants table/,
+      );
+
+      const after = await listDurableObjectIds(env.TENANT_DATA);
+      expect(after.some((id) => id.toString() === targetId)).toBe(false);
+    },
+  );
+
   test("a tenant with no `tenants` row is refused, and leaves NO roster row", async () => {
     await expect(provisionTenantStorage(router, UNREGISTERED)).rejects.toThrow(
       /has no row in the control database's tenants table/,
