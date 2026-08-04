@@ -68,6 +68,17 @@ describe("gateway CORS", () => {
     expect(response.headers.get("vary")).toBe("origin");
   });
 
+  it("adds CORS headers to an authentication refusal", async () => {
+    const response = await request(
+      "/metrics",
+      { headers: { Origin: CONSOLE_ORIGIN } },
+      { GATEWAY_CORS_ALLOWED_ORIGIN: CONSOLE_ORIGIN },
+    );
+    expect(response.status).toBe(401);
+    expect(response.headers.get("access-control-allow-origin")).toBe(CONSOLE_ORIGIN);
+    expect(response.headers.get("vary")).toBe("origin");
+  });
+
   it("does not grant a mismatched origin a preflight or response header", async () => {
     const response = await request(
       "/healthz",

@@ -8,6 +8,7 @@
  */
 import type { MiddlewareHandler } from "hono";
 import type { GatewayEnv } from "../ports.js";
+import { classifyError, writeJsonError } from "./errors.js";
 
 /** Rust-compatible response contract plus the headers used by site uploads. */
 export const PREFLIGHT_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
@@ -51,6 +52,13 @@ export const gatewayCors: MiddlewareHandler<GatewayEnv> = async (c, next) => {
     return new Response(null, { status: 204, headers });
   }
 
-  await next();
+  try {
+    await next();
+  } catch (error) {
+    // The outer envelope boundary would otherwise catch this after this
+    // middleware unwinds, leaving the generated error without CORS headers.
+    const { status, code, message, headers } = classifyError(error);
+    c.res = writeJsonError(c, status, code, message, headers ?? {});
+  }
   applyCorsHeaders(c.res.headers, allowedOrigin, requestOrigin);
 };
