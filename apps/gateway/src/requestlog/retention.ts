@@ -306,16 +306,27 @@ async function tenantIdsFromProjection(
   projectionDb: RequestLogDatabase,
   maxRows: number,
   excluded: readonly string[],
+  policy: RetentionPolicy,
+  nowUnix: number,
 ): Promise<string[]> {
+  // `planLogRetention` prunes age-only rows only when age is strictly greater
+  // than maxAgeSecs. Discovering the same boundary here means tenants whose
+  // rows are all still within policy do not occupy the bounded tenant window.
+  // Without this predicate, the first 5,000 recent tenants are returned on
+  // every tick and tenants after them can never be reached.
+  const maxAgeSecs = policy.maxAgeSecs;
+  if (maxAgeSecs === undefined || !Number.isFinite(maxAgeSecs)) return [];
+  const eligibleBeforeUnix = nowUnix - maxAgeSecs;
   const exclusion = excluded.length === 0 ? "" : ` AND tenant NOT IN (${placeholders(excluded.length)})`;
   try {
     const result = (await projectionDb
       .prepare(
         `SELECT tenant FROM ${REQUEST_LOG_TABLE}
-          WHERE tenant IS NOT NULL AND tenant <> ''${exclusion}
+          WHERE tenant IS NOT NULL AND tenant <> ''
+            AND started_at_unix < ?${exclusion}
           GROUP BY tenant ORDER BY tenant ASC LIMIT ?`,
       )
-      .bind(...excluded, maxRows)
+      .bind(eligibleBeforeUnix, ...excluded, maxRows)
       .all()) as { results?: { tenant?: unknown }[] };
     return (result.results ?? [])
       .map((row) => (typeof row.tenant === "string" ? row.tenant : ""))
@@ -369,6 +380,8 @@ export async function sweepRequestLogs(
       db,
       REQUEST_LOG_SWEEP_MAX_ROWS,
       [...overrides.keys()],
+      fleet.policy,
+      nowUnix,
     );
     for (const tenantId of tenantIds) {
       const authoritative = tenantDatabaseForSweep(env, tenantId);
