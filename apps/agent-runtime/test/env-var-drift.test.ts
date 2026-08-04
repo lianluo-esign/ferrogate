@@ -427,6 +427,9 @@ describe("the env-var drift gate itself", () => {
       // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
       // because it is LIVE; while it was commented out it was not.
       "RATE_LIMIT",
+      // Cross-script, pointed at the gateway's authoritative tenant evidence
+      // object (#859). AgentRunState writes request/run evidence through it.
+      "TENANT_DATA",
       "WORKER_PLANE",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(14);
