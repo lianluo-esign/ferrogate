@@ -8531,12 +8531,35 @@ export interface components {
             previous_identity_expires_at_unix: number | null;
             rotated_at_unix: number | null;
         };
+        /**
+         * @description Provider-neutral prompt-caching directive (#690). Controls whether and how the request prompt is cached by the upstream provider.
+         *
+         *     Refusal by provider family:
+         *     - `auto` — never refused by any family.
+         *     - `explicit` — refused by OpenAI-compatible, Azure OpenAI, Gemini, Vertex (they choose their own prefix/lifetime), and Workers AI (no prompt cache). Bedrock Converse refuses `ttl: "1h"` (no selectable lifetime).
+         *     - `off` — refused by OpenAI-compatible, Azure OpenAI, Gemini, Vertex (caching cannot be disabled per request). Accepted by Workers AI (no cache to disable) and families with per-request breakpoints (breakpoints are stripped).
+         */
+        PromptCache: {
+            /**
+             * @description `auto` — best-effort caching, never refused. `explicit` — a contract to place a cache breakpoint at the static prefix for `ttl`. `off` — a contract to not write this prompt into a provider prompt cache.
+             *
+             *     Refusal: `auto` is never refused. `explicit` is refused by families without per-request breakpoints (OpenAI-compatible, Azure OpenAI, Gemini, Vertex, Workers AI). `off` is refused by families whose caching cannot be disabled per request (OpenAI-compatible, Azure OpenAI, Gemini, Vertex).
+             * @enum {string}
+             */
+            mode: "auto" | "explicit" | "off";
+            /**
+             * @description Cache lifetime. Only meaningful with `mode: "explicit"`. Defaults to `"5m"` when omitted with `mode: "explicit"`. Rejected as invalid_request on any other mode. Bedrock Converse refuses `"1h"` (no selectable lifetime).
+             * @enum {string}
+             */
+            ttl?: "5m" | "1h";
+        };
         AiRequest: {
             model: string;
             stream?: boolean;
             metadata?: {
                 [key: string]: string;
             };
+            prompt_cache?: components["schemas"]["PromptCache"];
         };
         EmbeddingsRequest: {
             model: string;
@@ -16709,6 +16732,8 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    prompt_cache?: components["schemas"]["PromptCache"];
+                } & {
                     [key: string]: unknown;
                 };
             };
@@ -16752,6 +16777,8 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    prompt_cache?: components["schemas"]["PromptCache"];
+                } & {
                     [key: string]: unknown;
                 };
             };

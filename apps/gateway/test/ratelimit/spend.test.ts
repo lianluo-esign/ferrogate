@@ -19,15 +19,39 @@
  *
  * `describe("the deployed app")` drives `SELF` — i.e. `src/worker.ts` →
  * `createGatewayApp({ middleware: GATEWAY_MIDDLEWARE })` → `rateLimit()` with
- * NO arguments, so the spend source is whatever `spendSourceFromEnv(c.env)`
- * builds for the real binding. Those tests fail if the two checks are removed
- * from `rateLimit`, if `spendSourceFromEnv` stops finding `env.DB`, or if
- * `rateLimit()` is ever dropped from `GATEWAY_MIDDLEWARE` — the "implemented,
- * tested, never mounted" failure mode this repo has shipped twice.
+ * NO arguments, so the spend source is whatever the composition root builds for
+ * the real bindings. Those tests fail if the two checks are removed from
+ * `rateLimit`, if the source stops finding its database, or if `rateLimit()` is
+ * ever dropped from `GATEWAY_MIDDLEWARE` — the "implemented, tested, never
+ * mounted" failure mode this repo has shipped twice.
+ *
+ * ## THE TWO LEGS READ TWO DATABASES, and the end-to-end tests say which
+ *
+ * `wrangler.toml` ships `GATEWAY_TENANT_DB_ROUTING = "durable_object"`, so a
+ * tenant's `wallets`/`wallet_reservations` rows live inside
+ * `TENANT_DATA.idFromName(tenantId)` and NOT in the shared `env.DB`. Admission
+ * step 3b has reserved there since #819; step 3's balance read now follows it
+ * (`defaultSpendSource` in `src/ratelimit/middleware.ts`). `usage_monthly_rollups`
+ * did NOT move, because `src/metering/` still writes it to `env.DB`.
+ *
+ * So the deployed-app wallet cases seed {@link seedRoutedWallet} while the
+ * deployed-app budget cases keep seeding `db`, and that asymmetry is the
+ * property under test rather than an inconsistency to tidy: seeding `env.DB` and
+ * watching the wallet gate refuse would now prove only that some database
+ * somewhere had a row in it. The two 429 cases below FAILED against `env.DB` the
+ * moment the balance read was routed, which is the correct signal and the reason
+ * they moved — the same move `test/ratelimit/guards.test.ts` records for 3b.
+ *
+ * The UNIT cases keep using `db`: `d1SpendSource(db)` is the `"off"`-mode
+ * constructor, still shipped for self-hosted single-tenant deploys.
  */
 import { SELF, env } from "cloudflare:test";
 import { QuotaScopeSelector } from "@ferrogate/policy";
-import { periodMonthFromUnix, usageMonthlyRollupId } from "@ferrogate/storage";
+import {
+  DurableObjectTenantDatabaseRouter,
+  periodMonthFromUnix,
+  usageMonthlyRollupId,
+} from "@ferrogate/storage";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   NO_SPEND_SOURCE,
@@ -99,6 +123,54 @@ async function seedHold(
     .run();
 }
 
+/**
+ * One tenant's ROUTED database — the object `SELF` actually reads, addressed the
+ * same way the gateway addresses it.
+ *
+ * Built through `@ferrogate/storage`'s router rather than by calling
+ * `idFromName` here, so this helper cannot drift from the deployed addressing.
+ * If it did, these tests would seed one object and assert against another.
+ */
+function tenantWalletDb(tenantId: string): D1Database {
+  const bindings = env as unknown as {
+    TENANT_DATA: ConstructorParameters<typeof DurableObjectTenantDatabaseRouter>[0];
+    CONTROL_DB: D1Database;
+  };
+  return new DurableObjectTenantDatabaseRouter(
+    bindings.TENANT_DATA,
+    bindings.CONTROL_DB,
+  ).databaseFor(tenantId);
+}
+
+/** {@link seedWallet}, but into the tenant's OWN object — what `SELF` reads. */
+async function seedRoutedWallet(tenantId: string, balanceCredits: number): Promise<void> {
+  await tenantWalletDb(tenantId)
+    .prepare(
+      "INSERT OR REPLACE INTO wallets " +
+        "(id, tenant_id, balance_credits, created_at_unix, updated_at_unix) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(tenantId, tenantId, balanceCredits, NOW, NOW)
+    .run();
+}
+
+/** {@link seedHold}, but into the tenant's OWN object. */
+async function seedRoutedHold(
+  id: string,
+  tenantId: string,
+  amountCredits: number,
+  status: string,
+  expiresAtUnix: number,
+): Promise<void> {
+  await tenantWalletDb(tenantId)
+    .prepare(
+      "INSERT OR REPLACE INTO wallet_reservations " +
+        "(id, tenant_id, amount_credits, status, expires_at_unix, created_at_unix, updated_at_unix) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id, tenantId, amountCredits, status, expiresAtUnix, NOW, NOW)
+    .run();
+}
+
 /** A `quota_policies` row in the CONTROL database, which is where they live. */
 async function seedPolicy(
   scopeType: string,
@@ -127,6 +199,16 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM wallets").run();
   await db.prepare("DELETE FROM wallet_reservations").run();
   await controlDb.prepare("DELETE FROM quota_policies").run();
+  // The tenants' OBJECTS are truncated explicitly, and they have to be: this
+  // pool's per-test isolated storage rolls back D1 and the DO key-value API,
+  // but rows a Durable Object holds in `ctx.storage.sql` survive into the next
+  // test. Without this a wallet seeded by an earlier case would decide a later
+  // one. Same reset `guards.test.ts` makes, for the same reason.
+  for (const tenantId of ["tenant_a", "tenant_b"]) {
+    const routed = tenantWalletDb(tenantId);
+    await routed.prepare("DELETE FROM wallet_reservations").run();
+    await routed.prepare("DELETE FROM wallets").run();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -349,12 +431,12 @@ describe("the deployed app: step 3 — prepaid wallet", () => {
   });
 
   test("a funded wallet is served", async () => {
-    await seedWallet("tenant_a", 5_000);
+    await seedRoutedWallet("tenant_a", 5_000);
     expect((await get(TENANT_A_KEY)).status).toBe(200);
   });
 
   test("an exhausted wallet is refused — 429 wallet_balance_exhausted", async () => {
-    await seedWallet("tenant_a", 0);
+    await seedRoutedWallet("tenant_a", 0);
     const response = await get(TENANT_A_KEY);
     expect(response.status).toBe(429);
     const body = (await response.json()) as ErrorEnvelope;
@@ -365,21 +447,51 @@ describe("the deployed app: step 3 — prepaid wallet", () => {
   test("live holds that consume the balance refuse the NEXT request", async () => {
     // Issue #169's concurrent-overdraft case: the balance is positive but every
     // credit is already committed to in-flight requests.
-    await seedWallet("tenant_a", 500);
-    await seedHold("hold_inflight", "tenant_a", 500, "active", Math.floor(Date.now() / 1000) + 300);
+    await seedRoutedWallet("tenant_a", 500);
+    await seedRoutedHold(
+      "hold_inflight",
+      "tenant_a",
+      500,
+      "active",
+      Math.floor(Date.now() / 1000) + 300,
+    );
     const response = await get(TENANT_A_KEY);
     expect(response.status).toBe(429);
     expect(((await response.json()) as ErrorEnvelope).error.code).toBe("wallet_balance_exhausted");
   });
 
   test("another tenant's exhausted wallet does not refuse this one", async () => {
-    await seedWallet("tenant_b", 0);
+    await seedRoutedWallet("tenant_b", 0);
     expect((await get(TENANT_A_KEY)).status).toBe(200);
   });
 
   test("an anonymous operation is never wallet-checked", async () => {
-    await seedWallet("tenant_a", 0);
+    await seedRoutedWallet("tenant_a", 0);
     expect((await SELF.fetch("https://gateway.test/healthz")).status).toBe(200);
+  });
+
+  test("a balance in the SHARED `DB` is not the balance the gate reads", async () => {
+    // The regression this whole split closes. A deployment migrated from
+    // `GATEWAY_TENANT_DB_ROUTING = "off"` still carries the tenant's legacy row
+    // in `env.DB`, and nothing in the routed topology writes it any more. If
+    // step 3 read it, this tenant — funded in the object the gate is supposed
+    // to enforce — would be refused 429 forever, and topping up the object
+    // could never clear it. Deleting `defaultSpendSource`'s routed arm turns
+    // this red.
+    await seedWallet("tenant_a", 0);
+    await seedRoutedWallet("tenant_a", 5_000);
+    expect((await get(TENANT_A_KEY)).status).toBe(200);
+  });
+
+  test("a stale FUNDED row in the shared `DB` cannot admit a drained tenant", async () => {
+    // The mirror, and the reason routing the read is not merely cosmetic: the
+    // shared row says 1,000,000 credits and the tenant's own object says zero.
+    // The object wins, because the object is what the money moves in.
+    await seedWallet("tenant_a", 1_000_000);
+    await seedRoutedWallet("tenant_a", 0);
+    const response = await get(TENANT_A_KEY);
+    expect(response.status).toBe(429);
+    expect(((await response.json()) as ErrorEnvelope).error.code).toBe("wallet_balance_exhausted");
   });
 });
 
@@ -393,7 +505,7 @@ describe("the deployed app: ordering and failure posture", () => {
       .bind("tenant:tenant_a", "tenant", "tenant_a", 1)
       .run();
     await seedRollup("tenant", "tenant_a", 500, currentPeriodMonth());
-    await seedWallet("tenant_a", 0);
+    await seedRoutedWallet("tenant_a", 0);
 
     const response = await get(TENANT_A_KEY);
     // Step 1 wins: a disabled scope is a hard deny, not a throttle.
@@ -404,7 +516,7 @@ describe("the deployed app: ordering and failure posture", () => {
   test("budget is refused BEFORE the wallet, matching finalize_auth's order", async () => {
     await seedPolicy("tenant", "tenant_a", 1);
     await seedRollup("tenant", "tenant_a", 2, currentPeriodMonth());
-    await seedWallet("tenant_a", 0);
+    await seedRoutedWallet("tenant_a", 0);
     const body = (await (await get(TENANT_A_KEY)).json()) as ErrorEnvelope;
     expect(body.error.code).toBe("monthly_budget_exceeded");
   });
