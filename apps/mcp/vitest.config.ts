@@ -70,6 +70,33 @@ if (controlMigrations.length === 0 || tenantMigrations.length === 0) {
 }
 
 export default defineConfig({
+  /**
+   * Vitest's 5s default is too tight for this workspace under contention.
+   *
+   * During a 29-way concurrent root sweep, tests that take 74ms and
+   * 324ms on an otherwise idle machine instead reached the 5.096s and 5.121s
+   * timeout walls. Other runs starved different session and eviction tests, so
+   * there is no stable set of test bodies on which to put inline budgets.
+   * Per-file setup also reached its inherited 10s wall when that root sweep
+   * shared eight cores with four pinned CPU burners.
+   *
+   * This baseline covers that scheduler-selected population for test bodies
+   * and their per-file setup hooks. 60s is roughly twice the 30.060s timeout
+   * reached by the inherently expensive 261-storage-round-trip session-pruning
+   * test under the same 29-way contention, while still surfacing a genuine
+   * deadlock promptly.
+   */
+  test: {
+    include: ["test/**/*.test.ts"],
+    // `setup-d1.ts` MIGRATES both databases before every file. It is not
+    // convenience: the FC-2 lifecycle gate fails closed on an unreadable
+    // `tenants` table, so a bound-but-unmigrated control database would 503 the
+    // whole suite. See that file for why the fail-closed posture is the one that
+    // must not be relaxed to make tests pass.
+    setupFiles: ["./test/setup-d1.ts"],
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
+  },
   plugins: [
     cloudflareTest({
       main: "./src/worker.ts",
@@ -95,10 +122,4 @@ export default defineConfig({
       },
     }),
   ],
-  // `setup-d1.ts` MIGRATES both databases before every file. It is not
-  // convenience: the FC-2 lifecycle gate fails closed on an unreadable
-  // `tenants` table, so a bound-but-unmigrated control database would 503 the
-  // whole suite. See that file for why the fail-closed posture is the one that
-  // must not be relaxed to make tests pass.
-  test: { include: ["test/**/*.test.ts"], setupFiles: ["./test/setup-d1.ts"] },
 });

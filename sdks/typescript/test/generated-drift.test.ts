@@ -43,5 +43,8 @@ describe("generated types", () => {
     }
 
     expect(failure, failure ?? undefined).toBeNull();
-  });
+    // 30s is sized against 539ms in an otherwise-idle sweep and 4.061s while
+    // a 29-way concurrent root sweep contended for CPU; sampling
+    // the 2 MiB contract would weaken the drift proof.
+  }, 30_000);
 });
