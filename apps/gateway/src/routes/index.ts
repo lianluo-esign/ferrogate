@@ -147,6 +147,15 @@ export const ASSET_OPERATION_IDS = [
   "getAssetDownloadUrl",
 ] as const;
 
+/** The five OpenAI-compatible `/v1/files` operations, backed by assets. */
+export const FILES_OPERATION_IDS = [
+  "listFiles",
+  "createFile",
+  "getFile",
+  "getFileContent",
+  "deleteFile",
+] as const;
+
 /** Tools / functions / skills / prompts / agent discovery — mounted here. */
 export const TOOLING_OPERATION_IDS = [
   "listTools",
@@ -178,6 +187,7 @@ export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
   ...ASSET_OPERATION_IDS,
+  ...FILES_OPERATION_IDS,
   ...SITE_OPERATION_IDS,
 ];
 

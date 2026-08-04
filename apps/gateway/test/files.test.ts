@@ -199,10 +199,17 @@ describe("OpenAI-compatible Files API", () => {
   test("preserves asset quota and screening state", async () => {
     const { call } = gateway();
 
+    const withinQuota = await call("/v1/files", {
+      method: "POST",
+      token: "fg_files_quota",
+      body: fileForm("1234", "under-quota.txt"),
+    });
+    expect(withinQuota.status).toBe(200);
+
     const overQuota = await call("/v1/files", {
       method: "POST",
       token: "fg_files_quota",
-      body: fileForm("too large"),
+      body: fileForm("xy", "over-quota.txt"),
     });
     expect(overQuota.status).toBe(403);
     expect((await overQuota.json() as { error: { code: string } }).error.code).toBe(

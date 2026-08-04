@@ -47,7 +47,7 @@ import {
   assetPullAuditMessage,
   recordAssetEgress,
 } from "@ferrogate/billing";
-import { sha256Hex } from "./hash.js";
+import { randomHex128, sha256Hex } from "./hash.js";
 import {
   type AssetObjectRef,
   CrossTenantKeyError,
@@ -77,6 +77,7 @@ import {
   PresignUnavailableError,
   type PresignedUpload,
   type StoredAsset,
+  type StoredAssetMetadata,
   type StoredAssetChannel,
   type StoredBundleFile,
   isDownloadable,
@@ -94,6 +95,9 @@ import type {
   AssetStorageSummary,
   AssetSummary,
   AssetVisibilityPromotionRequest,
+  FileListQuery,
+  FileListResponse,
+  FileObject,
   PresignAbortRequest,
   PresignCommitRequest,
   PresignUploadIntentRequest,
@@ -358,6 +362,10 @@ export interface AssetVersionRef extends AssetName {
   readonly variant?: string | undefined;
 }
 
+/** Reserved asset coordinates backing the OpenAI-compatible Files API. */
+export const OPENAI_FILE_ASSET_TYPE = "openai_file";
+export const OPENAI_FILE_VERSION = "1";
+
 export interface AssetPushInput {
   readonly contentType?: string | undefined;
   readonly content: Uint8Array;
@@ -369,6 +377,8 @@ export interface AssetPushInput {
    * decision — the service never interprets it.
    */
   readonly signature?: AssetScreeningRequest["signature"];
+  /** Metadata projection used by the OpenAI Files adapter. */
+  readonly metadata?: StoredAssetMetadata | undefined;
 }
 
 export interface AssetPullInput {
@@ -461,6 +471,26 @@ export function assetSummary(asset: StoredAsset): AssetSummary {
     visibility: asset.visibility,
     created_at_unix: asset.created_at_unix,
     updated_at_unix: asset.updated_at_unix,
+  };
+}
+
+/** Project one reserved asset row into the OpenAI Files object. */
+export function fileObject(asset: StoredAsset): FileObject {
+  const status =
+    asset.visibility === "visible"
+      ? "processed"
+      : asset.visibility === "pending_scan"
+        ? "uploaded"
+        : "error";
+  return {
+    id: asset.name,
+    object: "file",
+    bytes: asset.size_bytes,
+    created_at: asset.created_at_unix,
+    filename: asset.metadata?.filename ?? asset.name,
+    purpose: asset.metadata?.purpose ?? "assistants",
+    status,
+    status_details: asset.visibility === "quarantined" ? "asset screening withheld the file" : null,
   };
 }
 
@@ -840,6 +870,193 @@ export class AssetService {
   }
 
   // -------------------------------------------------------------------------
+  // OpenAI Files projection (#742)
+  // -------------------------------------------------------------------------
+
+  async createFile(
+    caller: AssetCaller,
+    input: {
+      readonly content: Uint8Array;
+      readonly contentType: string;
+      readonly metadata: { readonly filename: string; readonly purpose: string };
+    },
+    context: AssetRequestContext,
+  ): Promise<AssetResult<FileObject>> {
+    const fileId = `file-${randomHex128()}`;
+    const ref: AssetVersionRef = {
+      assetType: OPENAI_FILE_ASSET_TYPE,
+      name: fileId,
+      version: OPENAI_FILE_VERSION,
+    };
+    const inlineLimit = inlinePushByteLimit(
+      this.#limits.inlineMaxBytes,
+      caller.assetMaxObjectBytes,
+      caller.assetStorageQuotaBytes,
+    );
+
+    let status: number;
+    if (input.content.byteLength <= inlineLimit) {
+      const pushed = await this.putAsset(
+        caller,
+        ref,
+        {
+          content: input.content,
+          contentType: input.contentType,
+          metadata: input.metadata,
+        },
+        context,
+      );
+      if (!pushed.ok) return pushed;
+      status = pushed.status;
+    } else {
+      // Large Files uploads use the same intent/commit lifecycle as assets. The
+      // object store receives the staged bytes under the intent-derived key;
+      // commit then reuses its hash, screening, quota, and immutable-row gates.
+      const sha256 = await sha256Hex(input.content);
+      const intent = await this.createUploadIntent(
+        caller,
+        ref,
+        { size_bytes: input.content.byteLength, sha256 },
+        context,
+      );
+      if (!intent.ok) return intent;
+      const uploadId = (intent.body as { upload_id?: unknown }).upload_id;
+      if (typeof uploadId !== "string") {
+        return fail(503, "storage_unavailable", "the upload intent did not return an upload id");
+      }
+      const stagingKey = stagingObjectKey(
+        this.#ref(caller, { ...ref, variant: "" }),
+        uploadId,
+        input.content.byteLength,
+        sha256,
+      );
+      const guard = this.#guardKey(stagingKey, caller.tenantId);
+      if (guard) return guard;
+      try {
+        await this.#objects.put(stagingKey, bufferOf(input.content), {
+          httpMetadata: { contentType: input.contentType },
+        });
+      } catch (error) {
+        await this.#bestEffortDelete(stagingKey, caller.tenantId);
+        return fail(
+          503,
+          "storage_unavailable",
+          `the file could not be staged in the object bucket: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const committed = await this.commitUpload(
+        caller,
+        ref,
+        {
+          upload_id: uploadId,
+          size_bytes: input.content.byteLength,
+          sha256,
+          content_type: input.contentType,
+          metadata: input.metadata,
+        },
+        context,
+      );
+      if (!committed.ok) return committed;
+      status = committed.status;
+    }
+
+    const asset = await this.#metadata.getAsset(
+      storedAssetVariantId(
+        caller.tenantId,
+        OPENAI_FILE_ASSET_TYPE,
+        fileId,
+        OPENAI_FILE_VERSION,
+        "",
+      ),
+    );
+    if (asset === null) {
+      return fail(503, "storage_unavailable", "the file metadata row was not available after upload");
+    }
+    return { ok: true, status, body: fileObject(asset) };
+  }
+
+  async listFiles(
+    caller: AssetCaller,
+    input: FileListQuery = {},
+  ): Promise<AssetResult<FileListResponse>> {
+    const denied = this.#requireTenant(caller);
+    if (denied) return denied;
+    let files = (await this.#metadata.listAssets(caller.tenantId, OPENAI_FILE_ASSET_TYPE))
+      .filter((asset) => asset.asset_type === OPENAI_FILE_ASSET_TYPE && asset.variant === "")
+      .filter(
+        (asset) =>
+          input.purpose === undefined || asset.metadata?.purpose === input.purpose,
+      )
+      .sort((left, right) => {
+        const byCreated = right.created_at_unix - left.created_at_unix;
+        return byCreated !== 0 ? byCreated : right.name.localeCompare(left.name);
+      });
+    const afterIndex = input.after === undefined ? -1 : files.findIndex((file) => file.name === input.after);
+    if (afterIndex >= 0) files = files.slice(afterIndex + 1);
+    const limit = input.limit ?? 10_000;
+    const data = files.slice(0, limit).map(fileObject);
+    return {
+      ok: true,
+      status: 200,
+      body: { object: "list", data, has_more: files.length > data.length },
+    };
+  }
+
+  async getFile(caller: AssetCaller, fileId: string): Promise<AssetResult<FileObject>> {
+    const denied = this.#requireTenant(caller);
+    if (denied) return denied;
+    const asset = await this.#metadata.getAsset(
+      storedAssetVariantId(
+        caller.tenantId,
+        OPENAI_FILE_ASSET_TYPE,
+        fileId,
+        OPENAI_FILE_VERSION,
+        "",
+      ),
+    );
+    if (asset === null || asset.asset_type !== OPENAI_FILE_ASSET_TYPE || asset.variant !== "") {
+      return fail(404, "asset_not_found", "no such file");
+    }
+    return { ok: true, status: 200, body: fileObject(asset) };
+  }
+
+  async fileContent(
+    caller: AssetCaller,
+    fileId: string,
+    input: AssetPullInput,
+    context: AssetRequestContext,
+  ): Promise<AssetPullResult> {
+    return this.pullAsset(
+      caller,
+      {
+        assetType: OPENAI_FILE_ASSET_TYPE,
+        name: fileId,
+        reference: OPENAI_FILE_VERSION,
+      },
+      input,
+      context,
+    );
+  }
+
+  async deleteFile(
+    caller: AssetCaller,
+    fileId: string,
+    context: AssetRequestContext,
+  ): Promise<AssetResult<{ id: string; object: "file"; deleted: true }>> {
+    const deleted = await this.deleteAsset(
+      caller,
+      {
+        assetType: OPENAI_FILE_ASSET_TYPE,
+        name: fileId,
+        version: OPENAI_FILE_VERSION,
+      },
+      context,
+    );
+    if (!deleted.ok) return deleted;
+    return { ok: true, status: deleted.status, body: { id: fileId, object: "file", deleted: true } };
+  }
+
+  // -------------------------------------------------------------------------
   // listWithheldAssets (#379)
   // -------------------------------------------------------------------------
 
@@ -1077,6 +1294,7 @@ export class AssetService {
       version: ref.version,
       content_type: contentType,
       content_hash: contentHash,
+      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
       size_bytes: input.content.byteLength,
       storage_uri: candidateKey,
       variant,
@@ -2162,6 +2380,7 @@ export class AssetService {
       version: ref.version,
       content_type: contentType,
       content_hash: actualSha256,
+      ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
       size_bytes: bytes.byteLength,
       storage_uri: finalKey,
       variant: "",

@@ -1,5 +1,6 @@
 /**
- * The 18 `/v1/assets/**` Hono routes owned by `apps/gateway`.
+ * The `/v1/assets/**` and OpenAI-compatible `/v1/files` Hono routes owned by
+ * `apps/gateway`.
  *
  * | contract operation | method + path | scope |
  * |---|---|---|
@@ -84,6 +85,8 @@ import {
   assetVersionParamsSchema,
   assetVisibilityPromotionRequestSchema,
   channelMoveQuerySchema,
+  fileIdParamsSchema,
+  fileListQuerySchema,
   platformQuerySchema,
   presignAbortRequestSchema,
   presignCommitRequestSchema,
@@ -453,6 +456,50 @@ async function controlBody<T extends z.ZodTypeAny>(
   return parsed.data;
 }
 
+/** Decode the OpenAI multipart upload into the asset service's narrow input. */
+async function fileUploadBody(
+  c: Context<AssetEnv>,
+): Promise<{ content: Uint8Array; contentType: string; metadata: { filename: string; purpose: string } }> {
+  let form: FormData;
+  try {
+    form = await c.req.formData();
+  } catch {
+    throw new HttpError(
+      400,
+      "invalid_multipart",
+      "request body is not a readable multipart/form-data document",
+    );
+  }
+  const purpose = form.get("purpose");
+  const upload = form.get("file");
+  if (
+    typeof purpose !== "string" ||
+    purpose.trim() === "" ||
+    purpose.length > 64 ||
+    upload === null ||
+    typeof upload === "string"
+  ) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      "multipart uploads require a non-empty purpose and a file field",
+    );
+  }
+  const filename = upload.name?.trim() ?? "";
+  if (filename === "" || filename.length > 512) {
+    throw new HttpError(400, "invalid_request", "file must have a filename of 1-512 characters");
+  }
+  try {
+    return {
+      content: new Uint8Array(await upload.arrayBuffer()),
+      contentType: upload.type || "application/octet-stream",
+      metadata: { filename, purpose: purpose.trim() },
+    };
+  } catch {
+    throw new HttpError(400, "invalid_request", "could not read the uploaded file");
+  }
+}
+
 /** Every service refusal leaves through the app's uniform error envelope. */
 function raise(failure: AssetFailure): never {
   throw new HttpError(failure.status, failure.code, failure.message);
@@ -742,6 +789,15 @@ export const ORDERED_ASSET_OPERATION_IDS = [
   "deleteAsset",
 ] as const;
 
+/** The five OpenAI-compatible `/v1/files` operations. */
+export const ORDERED_FILE_OPERATION_IDS = [
+  "listFiles",
+  "createFile",
+  "getFile",
+  "getFileContent",
+  "deleteFile",
+] as const;
+
 export function buildAssetService(deps?: Partial<AssetServiceDeps>): AssetService {
   return new AssetService({
     objects: deps?.objects ?? new InMemoryAssetObjectStore(),
@@ -801,7 +857,7 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
   };
 
   return {
-    operationIds: [...ORDERED_ASSET_OPERATION_IDS],
+    operationIds: [...ORDERED_ASSET_OPERATION_IDS, ...ORDERED_FILE_OPERATION_IDS],
     register(router: GatewayRouter): void {
       /**
        * Every asset operation goes through here, and the `finally` is why:
@@ -879,6 +935,46 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
         const params = parseOrThrow(assetVersionParamsSchema, c.req.param());
         return render(
           await serviceFor(c).downloadUrl(await caller(c), refOf(params), requestContext(c)),
+        );
+      });
+
+      // --- OpenAI Files projection ------------------------------------------
+
+      on("createFile", async (c) => {
+        // Resolve auth and the governed-action context before reading multipart
+        // bytes, matching the inline asset push ordering.
+        const resolved = await caller(c);
+        const context = requestContext(c);
+        const body = await fileUploadBody(c);
+        return render(await serviceFor(c).createFile(resolved, body, context));
+      });
+
+      on("listFiles", async (c) => {
+        const query = parseOrThrow(fileListQuerySchema, c.req.query());
+        return render(await serviceFor(c).listFiles(await caller(c), query));
+      });
+
+      on("getFile", async (c) => {
+        const params = parseOrThrow(fileIdParamsSchema, c.req.param());
+        return render(await serviceFor(c).getFile(await caller(c), params.file_id));
+      });
+
+      on("getFileContent", async (c) => {
+        const params = parseOrThrow(fileIdParamsSchema, c.req.param());
+        return renderBytes(
+          await serviceFor(c).fileContent(
+            await caller(c),
+            params.file_id,
+            { headers: c.req.raw.headers, method: c.req.method },
+            requestContext(c),
+          ),
+        );
+      });
+
+      on("deleteFile", async (c) => {
+        const params = parseOrThrow(fileIdParamsSchema, c.req.param());
+        return render(
+          await serviceFor(c).deleteFile(await caller(c), params.file_id, requestContext(c)),
         );
       });
 

@@ -479,6 +479,14 @@
       "group": "asset"
     },
     {
+      "pattern": "/v1/files",
+      "group": "file"
+    },
+    {
+      "pattern": "/v1/files/{*rest}",
+      "group": "file"
+    },
+    {
       "pattern": "/sites/{*rest}",
       "group": "site"
     },
@@ -3497,6 +3505,61 @@
       "auth": {
         "kind": "bearer",
         "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/files",
+      "method": "get",
+      "operation_id": "listFiles",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/files",
+      "method": "post",
+      "operation_id": "createFile",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/files/{file_id}",
+      "method": "get",
+      "operation_id": "getFile",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/files/{file_id}/content",
+      "method": "get",
+      "operation_id": "getFileContent",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/files/{file_id}",
+      "method": "delete",
+      "operation_id": "deleteFile",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
       },
       "rbac_action": null
     },

@@ -79,6 +79,7 @@ import type {
   AssetVisibilityPromotionOutcome,
   ChannelMoveOutcome,
   StoredAsset,
+  StoredAssetMetadata,
   StoredAssetChannel,
   StoredBundleFile,
   VariantDeleteOutcome,
@@ -133,7 +134,7 @@ export function isAssetDatabase(value: unknown): value is AssetDatabase {
 
 const ASSET_COLUMNS =
   "id, tenant_id, project_id, asset_type, name, version, content_type, content_hash, " +
-  "size_bytes, storage_uri, variant, yanked, visibility, created_at_unix, updated_at_unix";
+  "metadata_json, size_bytes, storage_uri, variant, yanked, visibility, created_at_unix, updated_at_unix";
 
 export const ASSET_SELECT_SQL = `SELECT ${ASSET_COLUMNS} FROM stored_assets WHERE id = ?1`;
 
@@ -176,10 +177,10 @@ export const ASSET_BYTES_USED_SQL =
 export const ASSET_CREATE_WITHIN_QUOTA_SQL =
   "INSERT INTO stored_assets " +
   "(id, tenant_id, project_id, asset_type, name, version, content_type, content_hash, " +
-  "size_bytes, storage_uri, variant, yanked, visibility, created_at_unix, updated_at_unix) " +
-  "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15 " +
-  "WHERE ?16 IS NULL " +
-  "OR (SELECT COALESCE(SUM(size_bytes), 0) FROM stored_assets WHERE tenant_id = ?2) + ?9 <= ?16 " +
+  "metadata_json, size_bytes, storage_uri, variant, yanked, visibility, created_at_unix, updated_at_unix) " +
+  "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16 " +
+  "WHERE ?17 IS NULL " +
+  "OR (SELECT COALESCE(SUM(size_bytes), 0) FROM stored_assets WHERE tenant_id = ?2) + ?10 <= ?17 " +
   "ON CONFLICT DO NOTHING " +
   "RETURNING id";
 
@@ -302,6 +303,25 @@ function boolFromSqlite(value: unknown): boolean {
   return value === 1 || value === true || value === "1";
 }
 
+function metadataFromSqlite(value: unknown): StoredAssetMetadata | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    const metadata: StoredAssetMetadata = {
+      ...(typeof (parsed as Record<string, unknown>).filename === "string"
+        ? { filename: (parsed as Record<string, unknown>).filename as string }
+        : {}),
+      ...(typeof (parsed as Record<string, unknown>).purpose === "string"
+        ? { purpose: (parsed as Record<string, unknown>).purpose as string }
+        : {}),
+    };
+    return metadata.filename === undefined && metadata.purpose === undefined ? undefined : metadata;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * `visibility` is a free `TEXT` column in the migration (no CHECK), so an
  * unknown token has to mean something. It reads as `quarantined`: the ONE value
@@ -325,6 +345,9 @@ function assetFromRow(row: Row): StoredAsset {
     version: text(row.version),
     content_type: text(row.content_type),
     content_hash: text(row.content_hash),
+    ...(metadataFromSqlite(row.metadata_json) === undefined
+      ? {}
+      : { metadata: metadataFromSqlite(row.metadata_json) }),
     size_bytes: integer(row.size_bytes),
     storage_uri: text(row.storage_uri),
     variant: text(row.variant),
@@ -407,6 +430,7 @@ export class D1AssetMetadataStore implements AssetMetadataStore {
           asset.version,
           asset.content_type,
           asset.content_hash,
+          asset.metadata === undefined ? null : JSON.stringify(asset.metadata),
           asset.size_bytes,
           asset.storage_uri,
           asset.variant,

@@ -137,6 +137,12 @@ export function isDownloadable(visibility: AssetVisibility): boolean {
   return visibility === "visible";
 }
 
+/** Optional wire metadata retained alongside an asset row. */
+export interface StoredAssetMetadata {
+  readonly filename?: string | undefined;
+  readonly purpose?: string | undefined;
+}
+
 /** One durable asset row — Rust `StoredAsset`. */
 export interface StoredAsset {
   id: string;
@@ -147,6 +153,7 @@ export interface StoredAsset {
   version: string;
   content_type: string;
   content_hash: string;
+  metadata?: StoredAssetMetadata | undefined;
   size_bytes: number;
   /** Object-store key holding the bytes. Always tenant-prefixed. */
   storage_uri: string;

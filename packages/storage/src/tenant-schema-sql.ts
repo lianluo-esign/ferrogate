@@ -81,6 +81,11 @@ export const TENANT_MIGRATIONS: readonly TenantMigration[] = [
     name: "0010_catalog_audit_outbox",
     sql: "-- ===========================================================================\n-- Tenant catalog audit outbox (#813)\n--\n-- Catalog mutations commit in a tenant Durable Object while the existing\n-- hash-chained audit log lives in the control database. Those databases cannot\n-- share a transaction. This outbox records the audit payload in the same\n-- tenant batch as the catalog mutation and revision bump, so a temporary\n-- control-database failure leaves durable evidence to reconcile later.\n-- ===========================================================================\n\nCREATE TABLE IF NOT EXISTS catalog_audit_outbox (\n    id                TEXT PRIMARY KEY,\n    tenant_id         TEXT NOT NULL,\n    revision          INTEGER NOT NULL,\n    action            TEXT NOT NULL,\n    collection        TEXT NOT NULL,\n    record_json       TEXT NOT NULL,\n    audit_json        TEXT NOT NULL,\n    request_id        TEXT NOT NULL DEFAULT '',\n    actor_scope       TEXT NOT NULL,\n    actor_tenant_id   TEXT,\n    created_at_unix   INTEGER NOT NULL DEFAULT (unixepoch()),\n    attempt_count     INTEGER NOT NULL DEFAULT 0,\n    UNIQUE (tenant_id, revision)\n);\n\nCREATE INDEX IF NOT EXISTS idx_catalog_audit_outbox_pending\n    ON catalog_audit_outbox (tenant_id, revision, created_at_unix);\n",
   },
+  {
+    version: 11,
+    name: "0011_asset_file_metadata",
+    sql: "-- ===========================================================================\n-- OpenAI Files metadata on the existing stored asset row (#742)\n--\n-- Files are not a second object or quota ledger. The asset row remains the\n-- source of truth for bytes, screening, visibility, and lifecycle; this\n-- nullable JSON projection carries the OpenAI filename/purpose pair without\n-- exposing it on the ordinary `/v1/assets` summary.\n-- ===========================================================================\n\nALTER TABLE stored_assets ADD COLUMN metadata_json TEXT;\n",
+  },
 ];
 
 /**
