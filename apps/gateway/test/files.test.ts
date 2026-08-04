@@ -60,7 +60,7 @@ function fileForm(
   return form;
 }
 
-function gateway() {
+function gateway(limits: { inlineMaxBytes?: number } = {}) {
   const h = harness();
   const { app } = createGatewayApp({
     modules: [
@@ -70,7 +70,7 @@ function gateway() {
           metadata: h.metadata,
           audit: h.audit,
           presigner: h.presigner,
-          limits: { presignEnabled: true, presignTtlSeconds: 900 },
+          limits: { presignEnabled: true, presignTtlSeconds: 900, ...limits },
         },
       }),
     ],
@@ -86,7 +86,7 @@ function gateway() {
     return Promise.resolve(app.request(`https://gw.test${path}`, { ...rest, headers: merged }, ENV));
   };
 
-  return { call };
+  return { call, presigner: h.presigner };
 }
 
 interface FileObject {
@@ -241,6 +241,25 @@ describe("OpenAI-compatible Files API", () => {
     expect(response.status).toBe(400);
     expect((await response.json() as { error: { code: string } }).error.code).toBe(
       "invalid_request",
+    );
+  });
+
+  test("uses the existing presign lifecycle above the inline cap", async () => {
+    const { call, presigner } = gateway({ inlineMaxBytes: 4 });
+    const created = await call("/v1/files", {
+      method: "POST",
+      body: fileForm("large file", "large.txt"),
+    });
+
+    expect(created.status).toBe(200);
+    const file = (await created.json()) as FileObject;
+    expect(file.filename).toBe("large.txt");
+    expect(presigner.puts).toHaveLength(1);
+
+    const content = await call(`/v1/files/${file.id}/content`);
+    expect(content.status).toBe(413);
+    expect((await content.json() as { error: { code: string } }).error.code).toBe(
+      "asset_too_large_for_inline_pull",
     );
   });
 });
