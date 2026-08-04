@@ -118,7 +118,7 @@ export {
  *
  * `tenantDataObjectFor` is the raw stub, and it is NOT what the request path
  * takes: routing goes through the router, which wraps the stub in the
- * `D1Database` facade so the eight tenant-plane modules under
+ * `D1Database` facade so the tenant-plane modules under
  * `packages/storage/src/d1/` work unchanged. It is exported for maintenance and
  * test paths that want the object itself.
  */
