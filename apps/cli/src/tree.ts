@@ -5,11 +5,11 @@
  */
 import { applyCommand } from "./commands/apply.js";
 import { assetsCommand } from "./commands/assets.js";
+import { modelCommand, providerCommand } from "./commands/catalog.js";
 import { completionsCommand } from "./commands/completions.js";
 import { hashKeyCommand, reloadCommand, validateCommand } from "./commands/config-commands.js";
 import { contextCommand } from "./commands/context.js";
 import { ctlCommand } from "./commands/ctl.js";
-import { modelCommand, providerCommand } from "./commands/catalog.js";
 import { opsCommand } from "./commands/ops.js";
 import { plansCommand } from "./commands/plans.js";
 import {

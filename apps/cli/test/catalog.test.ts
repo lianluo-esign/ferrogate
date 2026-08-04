@@ -198,15 +198,29 @@ describe("provider catalog commands", () => {
       script: {
         "GET /admin/v1/providers/openai": ok({ object: "provider", provider: { id: "openai" } }),
         "PATCH /admin/v1/providers/openai": ok({ object: "provider", provider: { id: "openai" } }),
-        "DELETE /admin/v1/providers/openai": ok({ object: "provider", id: "openai", deleted: true }),
+        "DELETE /admin/v1/providers/openai": ok({
+          object: "provider",
+          id: "openai",
+          deleted: true,
+        }),
         "POST /admin/v1/models": ok({ object: "model", model: { id: "fast" } }),
         "PATCH /admin/v1/models/fast": ok({ object: "model", model: { id: "fast" } }),
         "DELETE /admin/v1/models/fast": ok({ object: "model", id: "fast", deleted: true }),
         "POST /admin/v1/models/fast/offerings": ok({ object: "offering", offering: { id: "o1" } }),
         "GET /admin/v1/models/fast/offerings": ok({ object: "list", data: [{ id: "o1" }] }),
-        "GET /admin/v1/models/fast/offerings/o1": ok({ object: "offering", offering: { id: "o1" } }),
-        "PATCH /admin/v1/models/fast/offerings/o1": ok({ object: "offering", offering: { id: "o1" } }),
-        "DELETE /admin/v1/models/fast/offerings/o1": ok({ object: "offering", id: "o1", deleted: true }),
+        "GET /admin/v1/models/fast/offerings/o1": ok({
+          object: "offering",
+          offering: { id: "o1" },
+        }),
+        "PATCH /admin/v1/models/fast/offerings/o1": ok({
+          object: "offering",
+          offering: { id: "o1" },
+        }),
+        "DELETE /admin/v1/models/fast/offerings/o1": ok({
+          object: "offering",
+          id: "o1",
+          deleted: true,
+        }),
       },
     });
 
@@ -418,7 +432,12 @@ describe("provider import", () => {
     const runtime = createTestRuntime({
       env: {
         GATEWAY_PROVIDERS: JSON.stringify([
-          { name: "openai", kind: "openai", base_url: "https://api.openai.com", api_key_var: "sk-live-key" },
+          {
+            name: "openai",
+            kind: "openai",
+            base_url: "https://api.openai.com",
+            api_key_var: "sk-live-key",
+          },
         ]),
       },
     });

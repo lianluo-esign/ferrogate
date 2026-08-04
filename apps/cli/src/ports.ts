@@ -126,7 +126,8 @@ export function createInMemoryControlPlaneClient(
             : `the in-memory control-plane client was scripted to answer ${status}`;
         const code = typeof error?.code === "string" ? error.code : "scripted_error";
         const details = error?.details;
-        const envelopeRequestId = typeof error?.request_id === "string" ? error.request_id : undefined;
+        const envelopeRequestId =
+          typeof error?.request_id === "string" ? error.request_id : undefined;
         throw CliError.api({
           httpStatus: status,
           code,

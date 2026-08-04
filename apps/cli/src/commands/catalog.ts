@@ -3,13 +3,13 @@ import { ClientActionIdentity, fingerprintEnvFrom } from "../action-identity.js"
 import type { Args, FlagSpec } from "../args.js";
 import type { EffectiveContext, OutputFormat } from "../context.js";
 import { reportError } from "../diagnostics.js";
-import { asCliError, CliError } from "../errors.js";
+import { CliError, asCliError } from "../errors.js";
 import { GLOBAL_FLAGS, resolveEffective } from "../global-args.js";
-import { renderJson, renderTable, Table } from "../output.js";
-import { type ApiResponse, type RequestContext, type RequestSpec } from "../ports.js";
+import { Table, renderJson, renderTable } from "../output.js";
+import type { ApiResponse, RequestContext, RequestSpec } from "../ports.js";
 import { redactSecretFields } from "../registry.js";
-import { requestContextFor } from "./ctl.js";
 import type { CliRuntime, CommandNode } from "../runtime.js";
+import { requestContextFor } from "./ctl.js";
 
 const PROVIDERS_PATH = "/admin/v1/providers";
 const MODELS_PATH = "/admin/v1/models";
@@ -183,11 +183,15 @@ function catalogFlags(extra: readonly FlagSpec[] = []): readonly FlagSpec[] {
 }
 
 function pathFor(base: string, ...segments: string[]): string {
-  return [base, ...segments].map((segment, index) => (index === 0 ? segment : encodeURIComponent(segment))).join("/");
+  return [base, ...segments]
+    .map((segment, index) => (index === 0 ? segment : encodeURIComponent(segment)))
+    .join("/");
 }
 
 function isObject(value: JsonValue | undefined): value is Record<string, JsonValue> {
-  return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
+  return (
+    value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value)
+  );
 }
 
 function objectValue(value: JsonValue | undefined): Record<string, JsonValue> {
@@ -255,7 +259,12 @@ function setCapabilities(
     .filter((capability) => capability !== "");
 }
 
-function setJsonValue(body: Record<string, JsonValue>, args: Args, flag: string, field: string): void {
+function setJsonValue(
+  body: Record<string, JsonValue>,
+  args: Args,
+  flag: string,
+  field: string,
+): void {
   if (!args.present(flag)) return;
   const raw = args.requireString(flag);
   try {
@@ -380,7 +389,8 @@ async function openSession(runtime: CliRuntime, args: Args): Promise<CatalogSess
 
 async function send(session: CatalogSession, spec: RequestSpec): Promise<ApiResponse> {
   const response = await session.runtime.client.send(spec, session.context);
-  if (response.requestId !== undefined) session.runtime.io.stderr(`request-id: ${response.requestId}\n`);
+  if (response.requestId !== undefined)
+    session.runtime.io.stderr(`request-id: ${response.requestId}\n`);
   if (response.traceId !== undefined) session.runtime.io.stderr(`trace-id: ${response.traceId}\n`);
   return response;
 }
@@ -396,7 +406,11 @@ function emit(session: CatalogSession, body: JsonValue): void {
   );
 }
 
-function emitModelShow(session: CatalogSession, model: Record<string, JsonValue>, offerings: JsonValue[]): void {
+function emitModelShow(
+  session: CatalogSession,
+  model: Record<string, JsonValue>,
+  offerings: JsonValue[],
+): void {
   const safeModel = objectValue(safeBody({ ...model, offerings }));
   if (session.format === "json") {
     session.runtime.io.stdout(`${renderJson(safeModel)}\n`);
@@ -431,7 +445,10 @@ function emitModelShow(session: CatalogSession, model: Record<string, JsonValue>
   const prices =
     offeringRows.length === 0
       ? "(no offerings)"
-      : Table.create(offeringColumns.map((column) => column.toUpperCase()), offeringRows).render();
+      : Table.create(
+          offeringColumns.map((column) => column.toUpperCase()),
+          offeringRows,
+        ).render();
   session.runtime.io.stdout(`MODEL\n${metadata}\n\nOFFERINGS\n${prices}\n`);
 }
 
@@ -473,7 +490,8 @@ async function providerShow(runtime: CliRuntime, args: Args): Promise<number> {
 async function providerUpdate(runtime: CliRuntime, args: Args): Promise<number> {
   exactPositionCount(args, 1, "provider update");
   const body = providerBody(args, false);
-  if (Object.keys(body).length === 0) throw CliError.usage("provider update requires at least one field");
+  if (Object.keys(body).length === 0)
+    throw CliError.usage("provider update requires at least one field");
   const session = await openSession(runtime, args);
   return emitRequest(session, {
     method: "PATCH",
@@ -526,7 +544,8 @@ async function modelShow(runtime: CliRuntime, args: Args): Promise<number> {
 async function modelUpdate(runtime: CliRuntime, args: Args): Promise<number> {
   exactPositionCount(args, 1, "model update");
   const body = modelBody(args, false);
-  if (Object.keys(body).length === 0) throw CliError.usage("model update requires at least one field");
+  if (Object.keys(body).length === 0)
+    throw CliError.usage("model update requires at least one field");
   const session = await openSession(runtime, args);
   return emitRequest(session, {
     method: "PATCH",
@@ -552,7 +571,11 @@ async function resolveOfferingModel(session: CatalogSession, offeringId: string)
   for (const model of models) {
     const modelId = stringValue(model.id);
     if (modelId === undefined) continue;
-    if (arrayValue(model.offerings).some((offering) => stringValue(objectValue(offering).id) === offeringId)) {
+    if (
+      arrayValue(model.offerings).some(
+        (offering) => stringValue(objectValue(offering).id) === offeringId,
+      )
+    ) {
       return modelId;
     }
     const offeringsResponse = await send(session, {
@@ -560,7 +583,11 @@ async function resolveOfferingModel(session: CatalogSession, offeringId: string)
       path: pathFor(MODELS_PATH, modelId, OFFERINGS_SUFFIX),
       query: [],
     });
-    if (listBody(offeringsResponse.body).some((offering) => stringValue(objectValue(offering).id) === offeringId)) {
+    if (
+      listBody(offeringsResponse.body).some(
+        (offering) => stringValue(objectValue(offering).id) === offeringId,
+      )
+    ) {
       return modelId;
     }
   }
@@ -613,7 +640,8 @@ async function offeringShow(runtime: CliRuntime, args: Args): Promise<number> {
 
 async function offeringUpdate(runtime: CliRuntime, args: Args): Promise<number> {
   const body = offeringBody(args, false);
-  if (Object.keys(body).length === 0) throw CliError.usage("model offering update requires at least one field");
+  if (Object.keys(body).length === 0)
+    throw CliError.usage("model offering update requires at least one field");
   const session = await openSession(runtime, args);
   const target = await offeringTarget(session, args, "model offering update");
   return emitRequest(session, {
@@ -649,17 +677,32 @@ function envArray(runtime: CliRuntime, variable: string): Record<string, JsonVal
   return decoded.map((item) => objectValue(item));
 }
 
-function copyString(source: Record<string, JsonValue>, target: Record<string, JsonValue>, from: string, to = from): void {
+function copyString(
+  source: Record<string, JsonValue>,
+  target: Record<string, JsonValue>,
+  from: string,
+  to = from,
+): void {
   const value = source[from];
   if (value !== undefined && typeof value === "string") target[to] = value;
 }
 
-function copyNumber(source: Record<string, JsonValue>, target: Record<string, JsonValue>, from: string, to = from): void {
+function copyNumber(
+  source: Record<string, JsonValue>,
+  target: Record<string, JsonValue>,
+  from: string,
+  to = from,
+): void {
   const value = source[from];
   if (value !== undefined && typeof value === "number") target[to] = value;
 }
 
-function copyBoolean(source: Record<string, JsonValue>, target: Record<string, JsonValue>, from: string, to = from): void {
+function copyBoolean(
+  source: Record<string, JsonValue>,
+  target: Record<string, JsonValue>,
+  from: string,
+  to = from,
+): void {
   const value = source[from];
   if (value !== undefined && typeof value === "boolean") target[to] = value;
 }
@@ -684,7 +727,8 @@ function importProviderBody(source: Record<string, JsonValue>): Record<string, J
   copyBoolean(source, body, "zero_data_retention");
   copyString(source, body, "openrouter_http_referer");
   copyString(source, body, "openrouter_x_title");
-  if (source.cloudflare_ai_gateway !== undefined) body.cloudflare_ai_gateway = source.cloudflare_ai_gateway;
+  if (source.cloudflare_ai_gateway !== undefined)
+    body.cloudflare_ai_gateway = source.cloudflare_ai_gateway;
   copyBoolean(source, body, "enabled");
   return body;
 }
@@ -733,7 +777,8 @@ function routeOffering(
     source: "env",
   };
   const providerName = stringValue(route.provider) ?? stringValue(model.provider);
-  const providerId = providerName === undefined ? undefined : providerIds.get(providerName) ?? providerName;
+  const providerId =
+    providerName === undefined ? undefined : (providerIds.get(providerName) ?? providerName);
   if (providerId !== undefined) body.provider_id = providerId;
   const upstream = stringValue(route.provider_model) ?? stringValue(model.provider_model);
   if (upstream !== undefined) body.upstream_model_id = upstream;
@@ -751,7 +796,8 @@ function importedOfferings(
 ): Record<string, JsonValue>[] {
   const offerings: Record<string, JsonValue>[] = [];
   const primary = routeOffering(model, model, "primary", 0, providerIds, modelId);
-  if (primary.provider_id !== undefined || primary.upstream_model_id !== undefined) offerings.push(primary);
+  if (primary.provider_id !== undefined || primary.upstream_model_id !== undefined)
+    offerings.push(primary);
   for (const [index, value] of arrayValue(model.fallbacks).entries()) {
     const route = objectValue(value);
     offerings.push(routeOffering(model, route, "fallback", index, providerIds, modelId));
@@ -772,7 +818,10 @@ function importedOfferings(
   return offerings;
 }
 
-function sameIdentity(existing: Record<string, JsonValue>, desired: Record<string, JsonValue>): boolean {
+function sameIdentity(
+  existing: Record<string, JsonValue>,
+  desired: Record<string, JsonValue>,
+): boolean {
   const desiredId = stringValue(desired.id);
   const desiredName = stringValue(desired.name);
   return (
@@ -812,8 +861,14 @@ async function providerImport(runtime: CliRuntime, args: Args): Promise<number> 
     const existing = existingProviders.find((candidate) => sameIdentity(candidate, desired));
     let providerId = existing === undefined ? undefined : stringValue(existing.id);
     if (existing === undefined) {
-      const created = await send(session, { method: "POST", path: PROVIDERS_PATH, query: [], body: desired });
-      providerId = stringValue(itemBody(created.body, "provider").id) ?? providerIdFor(desired, String(index));
+      const created = await send(session, {
+        method: "POST",
+        path: PROVIDERS_PATH,
+        query: [],
+        body: desired,
+      });
+      providerId =
+        stringValue(itemBody(created.body, "provider").id) ?? providerIdFor(desired, String(index));
       providersCreated += 1;
     } else {
       providersExisting += 1;
@@ -834,7 +889,12 @@ async function providerImport(runtime: CliRuntime, args: Args): Promise<number> 
     let modelId = existing === undefined ? undefined : stringValue(existing.id);
     let modelRecord = existing;
     if (existing === undefined) {
-      const created = await send(session, { method: "POST", path: MODELS_PATH, query: [], body: desired });
+      const created = await send(session, {
+        method: "POST",
+        path: MODELS_PATH,
+        query: [],
+        body: desired,
+      });
       modelRecord = itemBody(created.body, "model");
       modelId = stringValue(modelRecord.id) ?? providerIdFor(desired, "model");
       modelsCreated += 1;
@@ -952,7 +1012,9 @@ export const providerCommand: CommandNode = {
     leaf({
       name: "import",
       about: "Import provider and model catalog rows from gateway environment JSON",
-      flags: [{ name: "from-env", kind: "boolean", help: "Read GATEWAY_PROVIDERS and GATEWAY_MODELS" }],
+      flags: [
+        { name: "from-env", kind: "boolean", help: "Read GATEWAY_PROVIDERS and GATEWAY_MODELS" },
+      ],
       run: providerImport,
     }),
   ],
