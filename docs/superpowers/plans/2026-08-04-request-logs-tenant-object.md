@@ -35,4 +35,3 @@
 - Add mutation-backed storage, writer, queue, investigation, projection-authority, ordering, and tenant-isolation tests.
 - Run focused storage/gateway/agent/control-plane tests, relevant full package suites, typechecks, lint/format checks, and `git diff --check`.
 - Commit in reviewable slices, push after every commit, keep the PR body linked to #859/#831/#825, and do not merge or delete the branch/worktree.
-

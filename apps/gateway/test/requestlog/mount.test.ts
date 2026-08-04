@@ -278,10 +278,10 @@ describe("policy-driven retention", () => {
     const tenantId = "retention-order-tenant";
     const old = record("retention-order-old", NOW - 10 * DAY, tenantId);
     const objectDb = requestLogTenantDatabaseFromEnv(env, tenantId);
-    expect(objectDb).toBeDefined();
-    await objectDb?.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
+    if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
+    await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
     await writeRequestLogs(controlDb(), [old]);
-    await writeRequestLogs(objectDb!, [old]);
+    await writeRequestLogs(objectDb, [old]);
 
     // A failing projection batch is a mutation-backed ordering probe: if the
     // implementation deletes control first, the object row would still exist.
@@ -301,12 +301,11 @@ describe("policy-driven retention", () => {
     );
 
     expect(result.pruned).toBe(1);
-    expect(
-      await objectDb
-        ?.prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
-        .bind(old.requestId)
-        .first(),
-    ).toBeNull();
+    const objectRows = (await objectDb
+      .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+      .bind(old.requestId)
+      .all()) as { results?: unknown[] };
+    expect(objectRows.results ?? []).toHaveLength(0);
     expect(
       await controlDb()
         .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)

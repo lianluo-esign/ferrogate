@@ -82,4 +82,3 @@ CREATE INDEX IF NOT EXISTS idx_tenant_agent_run_events_run_time
 
 CREATE INDEX IF NOT EXISTS idx_tenant_agent_run_events_request
     ON agent_run_events(request_id);
-

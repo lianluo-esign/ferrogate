@@ -41,7 +41,6 @@ function tenantDatabase(env: AgentRuntimeBindings, tenantId: string): D1Database
   const stub = namespace.get(namespace.idFromName(tenantId));
   return new DurableObjectD1Database(tenantId, stub).asD1Database();
 }
-
 function controlDatabase(env: AgentRuntimeBindings): D1Database | undefined {
   return env.CONTROL_DB;
 }
@@ -98,4 +97,3 @@ async function mirrorBestEffort(
     console.error("agent evidence control projection failed; tenant object remains authoritative", error);
   }
 }
-

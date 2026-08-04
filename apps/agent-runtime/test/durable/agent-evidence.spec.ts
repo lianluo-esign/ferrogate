@@ -7,10 +7,14 @@ const TENANT_A = "tenant-evidence-a";
 const TENANT_B = "tenant-evidence-b";
 const RUN_ID = "run-evidence-authority";
 
+function tenantDataNamespace(): NonNullable<typeof env.TENANT_DATA> {
+  if (env.TENANT_DATA === undefined) throw new Error("TENANT_DATA binding is required");
+  return env.TENANT_DATA;
+}
+
 beforeAll(async () => {
   await setupDurablePorts();
 });
-
 describe("agent evidence source of truth", () => {
   it("writes ordered evidence to one tenant object and ignores mirror mutations", async () => {
     const run = runStateStub(env, TENANT_A, RUN_ID);
@@ -44,8 +48,9 @@ describe("agent evidence source of truth", () => {
       requestId: "request-evidence",
     });
 
-    const objectA = env.TENANT_DATA.get(env.TENANT_DATA.idFromName(TENANT_A));
-    const objectB = env.TENANT_DATA.get(env.TENANT_DATA.idFromName(TENANT_B));
+    const tenantData = tenantDataNamespace();
+    const objectA = tenantData.get(tenantData.idFromName(TENANT_A));
+    const objectB = tenantData.get(tenantData.idFromName(TENANT_B));
     const runsA = await objectA.query({
       tenantId: TENANT_A,
       sql: "SELECT id, tenant, run_json FROM agent_runs WHERE id = ?",
@@ -87,4 +92,3 @@ describe("agent evidence source of truth", () => {
     expect(JSON.parse(String(afterMirrorMutation.results[0]?.run_json)).tenant_id).toBe(TENANT_A);
   });
 });
-
