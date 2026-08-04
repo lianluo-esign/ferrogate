@@ -169,6 +169,7 @@ import {
   validateRequestMetadata,
 } from "./schemas.js";
 import type {
+  AnthropicModel,
   AnthropicModelList,
   AnthropicTokenCount,
   AudioUploadFile,
@@ -1977,15 +1978,7 @@ function isAnthropicIngress(c: InferenceContext): boolean {
  * upstream model descriptors carry no human-readable label, so the id is used
  * verbatim. `created_at` is the ISO-8601 string the SDK expects.
  */
-function anthropicModelFrom(descriptor: ModelDescriptor): {
-  id: string;
-  type: "model";
-  display_name: string;
-  created_at: string;
-  capabilities: null;
-  max_input_tokens: number | null;
-  max_tokens: null;
-} {
+function anthropicModelFrom(descriptor: ModelDescriptor): AnthropicModel {
   return {
     id: descriptor.id,
     type: "model",

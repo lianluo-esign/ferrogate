@@ -62,6 +62,9 @@ describe("generated clients", () => {
       const result = checkArtifact(artifact);
       expect(result.ok, result.reason).toBe(true);
     },
+    // 30s is sized against 518ms in an otherwise-idle sweep and 7.46s for both
+    // generator runs during a 29-way concurrent root sweep.
+    30_000,
   );
 
   it("registers every generated client that exists in the tree", () => {
@@ -70,9 +73,7 @@ describe("generated clients", () => {
 
     expect(
       unregistered,
-      `these generated clients are not in tools/generated-clients/artifacts.mjs, so NOTHING ` +
-        `reachable from root \`bun run test\` checks them and nothing regenerates them with ` +
-        `\`${GENERATE_COMMAND}\`:\n${unregistered.map((f) => `  ${f}`).join("\n")}`,
+      `these generated clients are not in tools/generated-clients/artifacts.mjs, so NOTHING reachable from root \`bun run test\` checks them and nothing regenerates them with \`${GENERATE_COMMAND}\`:\n${unregistered.map((f) => `  ${f}`).join("\n")}`,
     ).toEqual([]);
   });
 
@@ -215,8 +216,7 @@ describe("generation is one command", () => {
     }
     expect(
       offenders,
-      "these scripts invoke the generator directly instead of tools/generated-clients/generate.mjs:\n" +
-        offenders.map((o) => `  ${o}`).join("\n"),
+      `these scripts invoke the generator directly instead of tools/generated-clients/generate.mjs:\n${offenders.map((o) => `  ${o}`).join("\n")}`,
     ).toEqual([]);
   });
 
@@ -246,5 +246,7 @@ describe("generation is one command", () => {
       cwd: REPO_ROOT,
       stdio: ["ignore", "ignore", "inherit"],
     });
-  });
+    // 30s is sized against 549ms in an otherwise-idle sweep and 7.46s for both
+    // generator runs during a 29-way concurrent root sweep.
+  }, 30_000);
 });

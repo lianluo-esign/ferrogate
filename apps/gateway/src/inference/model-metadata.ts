@@ -21,32 +21,29 @@
  * A logical model flattens into one PRIMARY leg plus its fallbacks/canary
  * (`catalog.ts::buildModelCatalog`), and capabilities are declared PER LEG —
  * that is `docs/model-route-capabilities.md`'s rule, not a choice made here.
- * The three fields are therefore aggregated differently, and each rule follows
- * from what the eligibility gate (`candidates.ts::eligibleCandidates`) will
- * actually do with the request the answer is used to plan:
+ * The three fields are therefore aggregated differently:
  *
- *  - **capabilities: the UNION over the legs.** A vision request is servable if
- *    ANY eligible leg declares `vision`, because the gate excludes the legs that
- *    do not and dispatches the one that does. Reporting only the primary's
- *    declaration would tell a client "no vision" about a model that serves
- *    vision through its fallback.
- *  - **context_window: the MAXIMUM declared.** Same argument: the gate admits
- *    the request if some leg's window covers it. `null` means NO leg declares
- *    one, which is "undeclared", not "unlimited" — an undeclared window is a
- *    hard exclusion for anything but the capability-neutral legacy case.
- *  - **pricing: the PRIMARY leg's.** Price is not a capability: it is what this
- *    request is likely to cost, and the primary is the leg that serves under the
- *    default `priority` strategy. It is an estimate and is documented as one —
- *    a failover, a canary, or a cost-aware `routing_strategy` can put a
- *    differently-priced leg on the wire. Taking a max here would systematically
- *    overstate the bill; taking a min would understate it.
+ *  - **capabilities: the INTERSECTION over the legs.** Discovery does not bind a
+ *    later request to the leg whose declaration supplied the answer. Failover,
+ *    canary, or strategy routing may select any leg, so advertising a capability
+ *    only one leg has would promise behavior the logical model cannot guarantee.
+ *  - **context_window: the MAXIMUM declared.** Unlike capability discovery,
+ *    context eligibility compares the request against each leg's declared
+ *    window before dispatch, so a smaller leg is excluded rather than silently
+ *    violating the advertised ceiling. `null` means NO leg declares one, which
+ *    is "undeclared", not "unlimited".
+ *  - **pricing: the RANGE over all legs when they differ.** Equal values stay
+ *    scalar for the common case. A range exposes both possible ends without
+ *    pretending the primary is guaranteed to serve the request. If priced and
+ *    unpriced legs are mixed, `min: null` records that unpriced state and `max`
+ *    is the maximum known price; this keeps `null` distinct from a free `0` leg.
  *
  * `null` prices mean UNPRICED, and that is a real state: the config validator
  * only forces prices when `routing_strategy = lowest_cost` / `balanced` or the
  * billing service is enabled (`packages/config/src/validate/entities.ts:95-144`),
  * so an operator may legitimately ship a model with no price. `0` is a genuinely
- * FREE route and must stay distinguishable from it, which is why the field is
- * `number | null` and never an omitted key or a `0` default.
+ * FREE route and must stay distinguishable from it, which is why a scalar or a
+ * range endpoint is `number | null` and never an omitted key or a `0` default.
  */
 import type { ModelCapability, PhysicalRoute } from "./ports.js";
 import type { OpenAiModel } from "./schemas.js";
@@ -54,7 +51,7 @@ import type { OpenAiModel } from "./schemas.js";
 /**
  * Capability vocabulary in CONFIG order (`catalog.ts::capabilitySchema`).
  *
- * The union below is emitted in this order rather than in first-seen order so
+ * The intersection below is emitted in this order rather than in route order so
  * the wire answer for a given catalog is stable no matter how the legs were
  * written down — a client diffing two `GET /v1/models` responses should see a
  * change only when the configuration actually changed.
@@ -104,13 +101,27 @@ export interface ModelModalities {
   readonly output: ModelModality[];
 }
 
-/** Per-1M-token prices, in USD. `null` on either leg means UNPRICED. */
+/** The advertised price for one token direction across every physical leg. */
+export type ModelPrice = number | null | ModelPriceRange;
+
+/**
+ * The possible price endpoints when legs disagree.
+ *
+ * `min: null` means at least one leg is UNPRICED; `max` remains the maximum
+ * known numeric price so an unpriced leg never erases the configured prices.
+ */
+export interface ModelPriceRange {
+  readonly min: number | null;
+  readonly max: number | null;
+}
+
+/** Per-1M-token prices, in USD. `null` means UNPRICED, never free. */
 export interface ModelPricing {
   readonly currency: "USD";
   /** Naming the unit on the wire so `3` can never be read as "$3 per call". */
   readonly unit: "per_1m_tokens";
-  readonly input: number | null;
-  readonly output: number | null;
+  readonly input: ModelPrice;
+  readonly output: ModelPrice;
 }
 
 /**
@@ -203,6 +214,27 @@ export function modalitiesFor(capabilities: readonly ModelCapability[]): ModelMo
   return { input, output };
 }
 
+/** Collapse equal leg prices to a scalar; otherwise expose their honest range. */
+function aggregatePrice(
+  routes: readonly PhysicalRoute[],
+  priceFor: (route: PhysicalRoute) => number | undefined,
+): ModelPrice {
+  const prices = routes.map((route) => priceFor(route) ?? null);
+  const first = prices[0];
+  if (first === undefined) {
+    return null;
+  }
+  if (prices.every((price) => price === first)) {
+    return first;
+  }
+
+  const known = prices.filter((price): price is number => price !== null);
+  return {
+    min: prices.includes(null) ? null : Math.min(...known),
+    max: known.length === 0 ? null : Math.max(...known),
+  };
+}
+
 /**
  * Describe one logical model.
  *
@@ -223,21 +255,14 @@ export function describeModel(
 ): ModelDescriptor {
   const routes = legs.length > 0 ? legs : [entry];
 
-  const declared = new Set<ModelCapability>();
-  for (const route of routes) {
-    for (const capability of route.capabilities ?? []) {
-      declared.add(capability);
-    }
-  }
-  const capabilities = CAPABILITY_ORDER.filter((capability) => declared.has(capability));
+  const capabilities = CAPABILITY_ORDER.filter((capability) =>
+    routes.every((route) => (route.capabilities ?? []).includes(capability)),
+  );
 
   const windows = routes
     .map((route) => route.contextWindow)
     .filter((window): window is number => typeof window === "number");
   const contextWindow = windows.length === 0 ? null : Math.max(...windows);
-
-  // The leg that serves under the default `priority` strategy — see the header.
-  const primary = routes[0] as PhysicalRoute;
 
   return {
     id: entry.logicalModel,
@@ -250,8 +275,8 @@ export function describeModel(
     pricing: {
       currency: "USD",
       unit: "per_1m_tokens",
-      input: primary.inputPricePer1m ?? null,
-      output: primary.outputPricePer1m ?? null,
+      input: aggregatePrice(routes, (route) => route.inputPricePer1m),
+      output: aggregatePrice(routes, (route) => route.outputPricePer1m),
     },
   };
 }

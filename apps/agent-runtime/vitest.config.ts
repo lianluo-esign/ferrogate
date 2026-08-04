@@ -264,6 +264,21 @@ const DEV_AGENT_UPSTREAMS = [
 ];
 
 export default defineConfig({
+  /**
+   * Vitest's 5s default is too tight for this workspace under contention.
+   *
+   * A 29-way concurrent root sweep moved otherwise unrelated event-feed
+   * and upstream-withdrawal bodies to 5.974s and 5.089s, while the intentional
+   * TTL body reached 7.702s. Which default-budget body gets starved varies with
+   * scheduling, and setup hooks reached their inherited 10s wall when that
+   * root sweep shared eight cores with four pinned CPU burners, so inline
+   * timeouts cannot identify the failure population.
+   *
+   * 30s leaves almost four times the highest observed loaded cost while still
+   * surfacing a genuine hang promptly. Individually slow wall-clock tests keep
+   * inline budgets to document their inherent cost.
+   */
+  test: { include: ["test/**/*.test.ts"], testTimeout: 30_000, hookTimeout: 30_000 },
   plugins: [
     cloudflareTest({
       main: "./src/worker.ts",
@@ -295,5 +310,4 @@ export default defineConfig({
       },
     }),
   ],
-  test: { include: ["test/**/*.test.ts"] },
 });

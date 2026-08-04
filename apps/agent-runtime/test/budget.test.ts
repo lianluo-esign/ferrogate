@@ -142,7 +142,10 @@ describe("open-job budget", () => {
       { input: "work" },
     );
     expect(afterTtl.status).toBe(202);
-  });
+    // 30s is sized against 1.462s in an otherwise-idle sweep and 7.702s during
+    // a 29-way concurrent root sweep; 1.1s is an intentional wall-clock
+    // wait that proves a workerless tenant self-heals.
+  }, 30_000);
 });
 
 describe("operator kill switch", () => {

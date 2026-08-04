@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 import {
   DetectorError,
+  type DetectorInput,
   DetectorSecret,
   DeterministicDetector,
   MAX_FINDINGS_PER_EVALUATION,
   normalizeRequest,
-  type DetectorInput,
 } from "../src/index.js";
 
 const AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"; // valid AKIA + 16 chars
@@ -56,7 +56,9 @@ describe("DeterministicDetector secret scanning", () => {
 
   test("expired deadline yields timeout", async () => {
     const input = inputFrom({ messages: [{ role: "user", content: "x" }] });
-    await expect(detector.evaluate(input, Date.now() - 1)).rejects.toMatchObject({ kind: "timeout" });
+    await expect(detector.evaluate(input, Date.now() - 1)).rejects.toMatchObject({
+      kind: "timeout",
+    });
   });
 });
 
@@ -164,7 +166,9 @@ describe("size + json + request constraints", () => {
         forbidden_providers: [],
       },
     });
-    const env = normalizeRequest("chat_completions", { messages: [{ role: "user", content: "hi" }] });
+    const env = normalizeRequest("chat_completions", {
+      messages: [{ role: "user", content: "hi" }],
+    });
     const result = await detector.evaluate(
       {
         protocol: "chat_completions",
@@ -215,6 +219,10 @@ describe("config validation", () => {
    *     `[0, 0)`, which no positive-width patch can ever cover, so a downstream
    *     `has_unredactable_findings` check forces Deny. A truncated scan can
    *     never be fully scrubbed, so it must never be treated as scrubbable.
+   *
+   * The cap bounds memory, not the current quadratic CPU cost on repetitive
+   * attacker-controlled input. Issue #817 tracks that production defect; a
+   * longer test timeout here would only hide its signal.
    */
   test("bounded evidence: >10k matches emit one detector.truncated marker", async () => {
     const detector = DeterministicDetector.new({

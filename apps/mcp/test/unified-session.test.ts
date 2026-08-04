@@ -184,10 +184,11 @@ describe("FerroGateMcpUnifiedSession", () => {
     if (ok.kind !== "replay") throw new Error("unreachable");
     expect(ok.frames).toHaveLength(MAX_RETAINED_FRAMES);
     expect(ok.frames[0]?.seq).toBe(oldest);
-    // Generous, and deliberately not a smaller retention bound to make it fast:
-    // this test's whole point is overflowing the REAL bound against the REAL
-    // Durable Object, which is 261 sequential storage round trips in workerd.
-  }, 30_000);
+    // 60s is sized against the 30.060s timeout wall reached during a
+    // 29-way concurrent root sweep. The work stays intact: this test's
+    // point is overflowing the REAL bound through 261 sequential storage round
+    // trips against the REAL Durable Object in workerd.
+  }, 60_000);
 
   it("records an upstream that dropped mid-conversation without closing the session", async () => {
     const id = mintSessionId();
@@ -287,7 +288,7 @@ describe("an upstream that drops mid-conversation reaches the session", () => {
     // The listing itself already reported the degradation (the leg PR #754
     // landed); what is new is that the SESSION now learns about it too.
     const result = response.result as Record<string, unknown>;
-    const meta = result["_meta"] as Record<string, unknown>;
+    const meta = result._meta as Record<string, unknown>;
     expect(meta[MULTIPLEX_DEGRADED_META]).toBeDefined();
 
     expect(sink.servers).toEqual(["alpha"]);
