@@ -1,13 +1,14 @@
 /** Focused #801 regression coverage for the shared billing asset read path. */
 import { SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   InMemoryAssetEgressCounters,
   InMemoryAssetEgressMeter,
   assetEgressTargetId,
 } from "@ferrogate/billing";
-import type { StoredAsset } from "../src/ports.js";
+import type { DispatchContext, StoredAsset } from "../src/ports.js";
+import { readAssetForMcp } from "../src/tools.js";
 import {
   EXEC_KEY,
   READ_KEY,
@@ -15,6 +16,7 @@ import {
   type Fixture,
   rpcRequest,
   seedFixture,
+  tenantAuth,
 } from "./fixtures.js";
 
 const CONTENT = new TextEncoder().encode("echo hello");
@@ -63,7 +65,39 @@ beforeEach(() => {
   fixture.ports.assets.seed(TENANT, asset(), CONTENT);
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("#801 MCP asset egress uses one billing path", () => {
+  it("rejects a missing stored asset ID before storage read or billing", async () => {
+    const { counters, meter } = configureEgress();
+    vi.spyOn(fixture.ports.assets, "list").mockResolvedValue([
+      { ...asset(), id: "" } as never,
+    ]);
+    const read = vi.spyOn(fixture.ports.assets, "read");
+    const context: DispatchContext = {
+      requestId: "req_missing_asset_id",
+      auth: tenantAuth(),
+    };
+
+    const result = await readAssetForMcp(
+      fixture.ports,
+      context,
+      "cli_tool",
+      "deploy",
+      "1.0.0",
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      kind: "read",
+      error: { kind: "storage" },
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(meter.charges).toHaveLength(0);
+    expect(counters.bytesUsed(`egress:tenant:${TENANT}`)).toBe(0);
+  });
+
   it("refuses an in-memory asset without its durable stored_assets.id", () => {
     expect(() =>
       fixture.ports.assets.seed(
