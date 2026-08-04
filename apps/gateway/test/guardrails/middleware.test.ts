@@ -92,10 +92,18 @@ function harness(options: {
   return { app, evidence, audit };
 }
 
-function post(body: unknown, path = "/v1/chat/completions"): Request {
+function post(
+  body: unknown,
+  path = "/v1/chat/completions",
+  extraHeaders: Record<string, string> = {},
+): Request {
   return new Request(`https://gateway.test${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+    headers: {
+      authorization: `Bearer ${KEY}`,
+      "content-type": "application/json",
+      ...extraHeaders,
+    },
     body: JSON.stringify(body),
   });
 }
@@ -145,6 +153,26 @@ describe("input screening through the middleware", () => {
     const response = await app.fetch(post(cleanBody()), env);
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("all good");
+  });
+
+  test("a gateway-config scoped policy blocks the selected profile", async () => {
+    const { app } = harness({
+      policy: secretScanPolicy({
+        policyId: "gateway-config-scoped",
+        scope: { gateway_config_ids: ["sensitive-profile"] },
+      }),
+    });
+    const response = await app.fetch(
+      post(bodyWithProbeSecret(), "/v1/chat/completions", {
+        "x-ferrogate-config": "sensitive-profile",
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "guardrail_blocked",
+    );
   });
 
   test("the middleware does NOT consume the body the route still needs", async () => {

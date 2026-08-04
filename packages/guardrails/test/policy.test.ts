@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  admitPolicyRevision,
   aggregateCheckOutcomes,
   administrativeRank,
   immutableId,
@@ -85,6 +86,19 @@ describe("aggregateCheckOutcomes", () => {
 });
 
 describe("scope matching + administrative rank", () => {
+  test("rejects a service-account scope with no data-plane identity source", () => {
+    const candidate: unknown = {
+      ...revision(),
+      scope: { ...emptyScope(), service_account_ids: ["service-account-1"] },
+    };
+
+    const result = admitPolicyRevision(candidate);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("service-account scopes must not be admitted");
+    expect(result.error.field).toBe("scope.service_account_ids");
+  });
+
   test("model-content policy only matches model content (not managed actions)", () => {
     const scope = emptyScope({ tenant_ids: ["t1"] });
     expect(scopeMatches(scope, { organization_id: "t1" })).toBe(true);
