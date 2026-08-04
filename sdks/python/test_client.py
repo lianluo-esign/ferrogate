@@ -116,6 +116,14 @@ class StubTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AdminClient("https://x", token="t", api_key="k")
 
+    def test_refuses_a_caller_api_key_when_token_is_configured(self) -> None:
+        with self.assertRaises(ValueError):
+            AdminClient("https://x", token="t", headers={"X-API-Key": "attacker-key"})
+
+    def test_refuses_a_caller_authorization_when_api_key_is_configured(self) -> None:
+        with self.assertRaises(ValueError):
+            AdminClient("https://x", api_key="k", headers={"Authorization": "Bearer attacker"})
+
     def test_carries_the_tenant_and_caller_headers(self) -> None:
         transport = RecordingTransport(json_response(PROJECT_LIST))
         client = AdminClient(
@@ -164,6 +172,14 @@ class StubTransportTests(unittest.TestCase):
         client.get("/admin/v1/projects", query={"limit": 10})
 
         self.assertEqual(transport.last.url, "https://x/control/v1/projects?limit=10")
+
+    def test_alias_requires_an_admin_v1_path_segment_boundary(self) -> None:
+        transport = RecordingTransport(json_response(PROJECT_LIST))
+        client = AdminClient("https://x", token="t", prefix="/control/v1", transport=transport)
+
+        client.get("/admin/v10/projects")
+
+        self.assertEqual(transport.last.url, "https://x/admin/v10/projects")
 
     def test_decodes_the_error_envelope(self) -> None:
         transport = RecordingTransport(

@@ -112,6 +112,32 @@ function credentialHeaders(options: AdminClientOptions): Record<string, string> 
   return {};
 }
 
+function validateCredentialHeaders(
+  headers: Headers,
+  configured: Readonly<Record<string, string>>,
+): void {
+  const authorization = headers.get("authorization");
+  const apiKey = headers.get("x-api-key");
+
+  if (authorization !== null && apiKey !== null) {
+    throw new TypeError("request headers cannot contain both authorization and x-api-key");
+  }
+
+  for (const [name, expected] of Object.entries(configured)) {
+    const received = headers.get(name);
+    if (received !== null && received !== expected) {
+      throw new TypeError(`request header ${name} conflicts with the configured SDK credential`);
+    }
+  }
+
+  if (configured.authorization !== undefined && apiKey !== null) {
+    throw new TypeError("request header x-api-key conflicts with the configured bearer credential");
+  }
+  if (configured["x-api-key"] !== undefined && authorization !== null) {
+    throw new TypeError("request header authorization conflicts with the configured API key");
+  }
+}
+
 /**
  * Rewrite `/admin/v1/**` to the configured prefix.
  *
@@ -121,10 +147,15 @@ function credentialHeaders(options: AdminClientOptions): Record<string, string> 
 function withPrefix(url: string, prefix: ControlPlanePrefix): string {
   if (prefix === "/admin/v1") return url;
   const parsed = new URL(url);
-  if (!parsed.pathname.includes("/admin/v1/") && !parsed.pathname.endsWith("/admin/v1")) {
+  const marker = "/admin/v1";
+  const markerIndex = parsed.pathname.indexOf(marker);
+  if (markerIndex < 0) return url;
+  const boundary = parsed.pathname[markerIndex + marker.length];
+  if (boundary !== undefined && boundary !== "/") {
     return url;
   }
-  parsed.pathname = parsed.pathname.replace("/admin/v1", prefix);
+  parsed.pathname =
+    parsed.pathname.slice(0, markerIndex) + prefix + parsed.pathname.slice(markerIndex + marker.length);
   return parsed.toString();
 }
 
@@ -197,10 +228,15 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  const configuredCredentials = credentialHeaders(options);
+  validateCredentialHeaders(
+    new Headers(options.headers as Record<string, string> | undefined),
+    configuredCredentials,
+  );
 
   const client = createClient<paths>({
     baseUrl,
-    headers: { accept: "application/json", ...credentialHeaders(options), ...options.headers },
+    headers: { accept: "application/json", ...configuredCredentials, ...options.headers },
     fetch: deadlineFetch(fetchImpl, timeoutMs),
   });
 
@@ -219,6 +255,13 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     },
   };
 
+  const credentialGuard: Middleware = {
+    onRequest({ request }) {
+      validateCredentialHeaders(request.headers, configuredCredentials);
+      return undefined;
+    },
+  };
+
   /**
    * The reason a caller never has to look at `response.ok`.
    *
@@ -234,7 +277,7 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     },
   };
 
-  client.use(alias, tenantHeader, throwOnError);
+  client.use(alias, tenantHeader, credentialGuard, throwOnError);
   return client;
 }
 

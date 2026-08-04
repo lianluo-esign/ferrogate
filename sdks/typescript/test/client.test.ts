@@ -107,6 +107,26 @@ describe("createAdminClient — the request it builds", () => {
     ).toThrow(TypeError);
   });
 
+  it("refuses a caller x-api-key when a bearer token is configured", () => {
+    expect(() =>
+      createAdminClient({
+        baseUrl: "https://gateway.example.com",
+        token: "fg_admin_token",
+        headers: { "X-API-Key": "attacker-key" },
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it("refuses a caller Authorization header when an API key is configured", () => {
+    expect(() =>
+      createAdminClient({
+        baseUrl: "https://gateway.example.com",
+        apiKey: "fg_admin_key",
+        headers: { Authorization: "Bearer attacker" },
+      }),
+    ).toThrow(TypeError);
+  });
+
   it("carries the tenant header and any caller-supplied headers", async () => {
     const client = createAdminClient({
       baseUrl: "https://gateway.example.com",

@@ -25,6 +25,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PYTHON_BANNER, renderPythonOperationCatalog } from "./python.mjs";
+
+export { PYTHON_BANNER };
 
 /** Absolute path of the repository root (this file lives at tools/generated-clients/). */
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -58,6 +61,13 @@ export const ARTIFACTS = [
     slug: "sdks/typescript",
     spec: "docs/openapi/admin-api.openapi.json",
     output: "sdks/typescript/src/api-types.generated.ts",
+    format: "typescript",
+  },
+  {
+    slug: "sdks/python",
+    spec: "docs/openapi/admin-api.openapi.json",
+    output: "sdks/python/ferrogate_admin/api/generated.py",
+    format: "python",
   },
   {
     // The one this issue exists for. admin-console is not a Bun workspace (it
@@ -67,6 +77,7 @@ export const ARTIFACTS = [
     slug: "admin-console",
     spec: "docs/openapi/admin-api.openapi.json",
     output: "admin-console/src/lib/api-types.generated.ts",
+    format: "typescript",
   },
 ];
 
@@ -114,7 +125,7 @@ function resolveGeneratorCli() {
  *
  * @type {Map<string, string>}
  */
-const renderedBySpec = new Map();
+const renderedByArtifact = new Map();
 
 /**
  * Produce the exact bytes the committed artifact must contain: run
@@ -125,8 +136,16 @@ const renderedBySpec = new Map();
  * @returns {string}
  */
 export function render(artifact) {
-  const cached = renderedBySpec.get(artifact.spec);
+  const format = artifact.format ?? "typescript";
+  const cacheKey = format + ":" + artifact.spec;
+  const cached = renderedByArtifact.get(cacheKey);
   if (cached !== undefined) return cached;
+
+  if (format === "python") {
+    const text = renderPythonOperationCatalog(path.join(REPO_ROOT, artifact.spec));
+    renderedByArtifact.set(cacheKey, text);
+    return text;
+  }
 
   const scratch = mkdtempSync(path.join(tmpdir(), "ferrogate-generated-clients-"));
   try {
@@ -143,7 +162,7 @@ export function render(artifact) {
       },
     );
     const text = BANNER + readFileSync(tempOut, "utf8");
-    renderedBySpec.set(artifact.spec, text);
+    renderedByArtifact.set(cacheKey, text);
     return text;
   } finally {
     rmSync(scratch, { recursive: true, force: true });

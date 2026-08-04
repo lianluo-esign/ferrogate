@@ -19,8 +19,9 @@ name: API contract drift
 # surfaces later as a reviewer reproducing it by hand. Gating it here catches
 # it on the commit that causes it, which is the only cheap moment.
 #
-# Path-filtered to the two files that can drift, so a commit touching neither
-# cannot trigger it.
+# Path-filtered to the contract, generated artifacts, SDK package metadata and
+# the shared generator/checker, so a stale or unpackageable SDK is reported on
+# the change that caused it.
 on:
   workflow_call:
   workflow_dispatch:
@@ -29,12 +30,20 @@ on:
       - "docs/openapi/admin-api.openapi.json"
       - "admin-console/src/lib/api-types.generated.ts"
       - "admin-console/scripts/check-api-types-drift.mjs"
+      - "sdks/**"
+      - "tools/generated-clients/**"
+      - "tools/sdk-packaging/**"
+      - "package.json"
       - ".github/workflows/api-contract-drift.yml"
   pull_request:
     paths:
       - "docs/openapi/admin-api.openapi.json"
       - "admin-console/src/lib/api-types.generated.ts"
       - "admin-console/scripts/check-api-types-drift.mjs"
+      - "sdks/**"
+      - "tools/generated-clients/**"
+      - "tools/sdk-packaging/**"
+      - "package.json"
       - ".github/workflows/api-contract-drift.yml"
 
 permissions:
@@ -52,21 +61,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: admin-console/package-lock.json
+          bun-version: 1.3.14
 
       # The guard replays `generate:api` (openapi-typescript + the stamp
       # banner) into a temp file and diffs it against the committed client, so
       # it needs the generator itself installed. It never writes to the
       # committed file.
-      - name: Install admin-console dependencies
-        working-directory: admin-console
-        run: npm ci --no-audit --no-fund
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
 
-      - name: Check OpenAPI -> generated client drift
-        working-directory: admin-console
-        run: npm run check:api-types
+      - name: Install Python build frontend
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ferrogate-sdk-build"
+          "$RUNNER_TEMP/ferrogate-sdk-build/bin/python" -m pip install --disable-pip-version-check build
+
+      - name: Check generated clients, SDK runtime contracts and package artifacts
+        run: |
+          node tools/generated-clients/check.mjs
+          bun x vitest run tools/generated-clients/test
+          python3 -m unittest discover -s sdks/python
+          PYTHON="$RUNNER_TEMP/ferrogate-sdk-build/bin/python" bun run check:sdk-packages
