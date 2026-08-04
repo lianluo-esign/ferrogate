@@ -18,7 +18,15 @@ from .client import (
     Transport,
     urllib_transport,
 )
-from .api import ADMIN_OPERATION_IDS, OPENAPI_OPERATION_COUNT, OPERATIONS, Operation
+from .api import (
+    ADMIN_OPERATION_IDS,
+    OPENAPI_OPERATION_COUNT,
+    OPERATIONS,
+    Operation,
+    SecurityRequirement,
+    SecurityRequirements,
+    SecurityScheme,
+)
 from .errors import (
     ERROR_ENVELOPE_FIELDS,
     FerrogateApiError,
@@ -42,6 +50,9 @@ __all__ = [
     "OPENAPI_OPERATION_COUNT",
     "OPERATIONS",
     "Operation",
+    "SecurityRequirement",
+    "SecurityRequirements",
+    "SecurityScheme",
     "Transport",
     "api_error_from",
     "default_code_for_status",

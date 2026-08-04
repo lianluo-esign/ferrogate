@@ -17,9 +17,32 @@ function pythonTuple(values) {
   return "(" + values.map(pythonString).join(", ") + ")";
 }
 
+function compareStrings(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function pythonSecurityRequirement(requirement) {
+  const entries = requirement;
+  if (entries.length === 0) return "()";
+  const pairs = entries.map(
+    ([scheme, scopes]) => "(" + pythonString(scheme) + ", " + pythonTuple(scopes) + ")",
+  );
+  return "(" + pairs.join(", ") + (pairs.length === 1 ? "," : "") + ")";
+}
+
+function pythonSecurityRequirements(requirements) {
+  if (requirements.length === 0) return "()";
+  const alternatives = requirements.map(pythonSecurityRequirement);
+  return "(" + alternatives.join(", ") + (alternatives.length === 1 ? "," : "") + ")";
+}
+
 function operationSecurity(operation, document) {
   const requirements = operation.security ?? document.security ?? [];
-  return [...new Set(requirements.flatMap((requirement) => Object.keys(requirement)))].sort();
+  return requirements.map((requirement) =>
+    Object.entries(requirement)
+      .sort(([left], [right]) => compareStrings(left, right))
+      .map(([scheme, scopes]) => [scheme, [...scopes]]),
+  );
 }
 
 /**
@@ -48,7 +71,7 @@ export function renderPythonOperationCatalog(specPath) {
     }
   }
 
-  operations.sort((left, right) => left.operationId.localeCompare(right.operationId));
+  operations.sort((left, right) => compareStrings(left.operationId, right.operationId));
   const adminOperationIds = operations
     .filter((operation) => operation.path.startsWith("/admin/v1/"))
     .map((operation) => operation.operationId);
@@ -61,10 +84,14 @@ export function renderPythonOperationCatalog(specPath) {
     "from typing import Final, TypedDict",
     "",
     "",
+    "SecurityScheme = tuple[str, tuple[str, ...]]",
+    "SecurityRequirement = tuple[SecurityScheme, ...]",
+    "SecurityRequirements = tuple[SecurityRequirement, ...]",
+    "",
     "class Operation(TypedDict):",
     "    method: str",
     "    path: str",
-    "    security: tuple[str, ...]",
+    "    security: SecurityRequirements",
     "    tags: tuple[str, ...]",
     "",
     "OPENAPI_OPERATION_COUNT: Final[int] = " + operations.length,
@@ -76,7 +103,9 @@ export function renderPythonOperationCatalog(specPath) {
     lines.push("    " + pythonString(operation.operationId) + ": {");
     lines.push("        \"method\": " + pythonString(operation.method) + ",");
     lines.push("        \"path\": " + pythonString(operation.path) + ",");
-    lines.push("        \"security\": " + pythonTuple(operation.security) + ",");
+    lines.push(
+      "        \"security\": " + pythonSecurityRequirements(operation.security) + ",",
+    );
     lines.push("        \"tags\": " + pythonTuple(operation.tags) + ",");
     lines.push("    },");
   }

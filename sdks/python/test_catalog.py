@@ -63,7 +63,7 @@ class GeneratedCatalogTests(unittest.TestCase):
     def test_catalog_matches_the_openapi_surface_and_required_admin_groups(self) -> None:
         self.assertEqual(len(OPERATIONS), OPENAPI_OPERATION_COUNT)
         self.assertTrue(REQUIRED_ADMIN_OPERATIONS <= set(OPERATIONS))
-        self.assertEqual(OPERATIONS["listProjects"]["security"], ("bearerAuth",))
+        self.assertEqual(OPERATIONS["listProjects"]["security"], ((('bearerAuth', ()),),))
 
     def test_catalog_preserves_openapi_security_alternatives_and_metadata(self) -> None:
         with (Path(__file__).resolve().parents[2] / "docs/openapi/admin-api.openapi.json").open() as stream:
