@@ -236,6 +236,15 @@ database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 # the asset reader.
 migrations_dir = "../../sql/d1-ts/control"
 
+# The billing-owned asset egress meter uses the same control database as the
+# admission and inference ledger paths. Keeping the binding explicit makes the
+# MCP Worker resolve the shared meter instead of silently dropping charges.
+[[d1_databases]]
+binding = "BILLING_DB"
+database_name = "ferrogate-control"
+database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+migrations_dir = "../../sql/d1-ts/control"
+
 # ---------------------------------------------------------------------------
 # R2 — asset object storage
 #

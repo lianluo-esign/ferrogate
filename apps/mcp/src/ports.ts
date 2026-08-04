@@ -58,6 +58,18 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 import {
+  assetEgressCountersFromEnv,
+  assetEgressMeterFromEnv,
+  assetEgressPricePerGb,
+  assetEgressTargetId,
+  InMemoryAssetEgressCounters,
+  InMemoryAssetEgressMeter,
+  NO_ASSET_EGRESS_METER,
+  type AssetEgressCounters,
+  type AssetEgressMeter,
+  type AssetEgressQuota,
+} from "@ferrogate/billing";
+import {
   DeterministicDetector,
   type SecretPattern,
   envelopeManagedAction,
@@ -296,6 +308,8 @@ export interface DispatchContext {
   traceId?: string;
   agentRunId?: string;
   auth: AuthContext;
+  /** Egress half of the quota resolved by MCP admission. */
+  egressQuota?: AssetEgressQuota;
   /** Validated original bearer (`x-ferrogate-mcp-bearer`) for `original_bearer` upstreams. */
   originalBearer?: string;
   skill?: { id: string; version: string };
@@ -505,6 +519,8 @@ export interface ApprovalPort {
 
 /** A hosted asset exposed as an MCP resource (`asset://{type}/{name}/{version}`). */
 export interface StoredAsset {
+  /** The durable `stored_assets.id`, shared with gateway audit targets. */
+  id: string;
   assetType: string;
   name: string;
   version: string;
@@ -768,8 +784,10 @@ export class InMemoryAssets implements AssetReaderPort {
   readonly #assets = new Map<string, { asset: StoredAsset; content: Uint8Array }>();
 
   seed(tenantId: string, asset: StoredAsset, content: Uint8Array): this {
+    const id = assetEgressTargetId(asset, tenantId);
+    const normalized = { ...asset, id };
     this.#assets.set(assetKey(tenantId, asset.assetType, asset.name, asset.version), {
-      asset,
+      asset: normalized,
       content,
     });
     return this;
@@ -861,7 +879,7 @@ export class D1R2AssetReader implements AssetReaderPort {
   async list(tenantId: string): Promise<readonly StoredAsset[]> {
     const rows = await this.#db
       .prepare(
-        `SELECT asset_type, name, version, content_type, content_hash, size_bytes, yanked, visibility FROM stored_assets WHERE tenant_id = ?1`,
+        `SELECT id, asset_type, name, version, content_type, content_hash, size_bytes, yanked, visibility FROM stored_assets WHERE tenant_id = ?1`,
       )
       .bind(tenantId)
       .all<Row>();
@@ -878,7 +896,7 @@ export class D1R2AssetReader implements AssetReaderPort {
   > {
     const rows = await this.#db
       .prepare(
-        `SELECT asset_type, name, version, content_type, content_hash, size_bytes, storage_uri, yanked, visibility FROM stored_assets WHERE tenant_id = ?1 AND asset_type = ?2 AND name = ?3 AND version = ?4`,
+        `SELECT id, asset_type, name, version, content_type, content_hash, size_bytes, storage_uri, yanked, visibility FROM stored_assets WHERE tenant_id = ?1 AND asset_type = ?2 AND name = ?3 AND version = ?4`,
       )
       .bind(tenantId, assetType, name, version)
       .all<Row>();
@@ -960,6 +978,9 @@ function isDownloadable(row: Row): boolean {
 /** Map a D1 row to the MCP's {@link StoredAsset}. */
 function rowToStoredAsset(row: Row): StoredAsset {
   return {
+    // Keep the database identity even when malformed data is empty; the shared
+    // audit target helper then fails closed instead of deriving a synthetic ID.
+    id: text(row.id),
     assetType: text(row.asset_type),
     name: text(row.name),
     version: text(row.version),
@@ -1111,6 +1132,15 @@ export interface IdentityCipherPort {
   signingKey(): Promise<CryptoKey>;
 }
 
+/** Billing-owned dependencies for every MCP asset read surface. */
+export interface McpAssetEgressPort {
+  counters: AssetEgressCounters;
+  meter: AssetEgressMeter;
+  pricePerGb?: number;
+  /** Test-only/default quota when admission has no policy database. */
+  quota?: AssetEgressQuota;
+}
+
 // ---------------------------------------------------------------------------
 // The port bundle
 // ---------------------------------------------------------------------------
@@ -1164,6 +1194,8 @@ export interface McpPorts {
   guardrails: GuardrailsPort;
   approvals: ApprovalPort;
   assets: AssetReaderPort;
+  /** Shared billing-owned asset egress gate, meter and counters. */
+  assetEgress: McpAssetEgressPort;
   credentials: McpCredentialStorePort;
   oauth: OauthProviderPort;
   secrets: SecretResolverPort;
@@ -1642,6 +1674,9 @@ export interface McpEnv {
    */
   DB?: D1Database;
 
+  /** CONTROL D1 binding used by the shared billing egress meter. */
+  BILLING_DB?: D1Database;
+
   /**
    * R2 bucket holding the bytes of every hosted asset. Read as `env.ASSETS`
    * by {@link resolvePorts} — the same binding name and the same bucket
@@ -1800,6 +1835,7 @@ export interface InMemoryMcpPorts extends McpPorts {
   entitlements: InMemoryEntitlements;
   upstreams: InMemoryUpstreams;
   assets: InMemoryAssets;
+  assetEgress: McpAssetEgressPort;
   credentials: InMemoryCredentialStore;
   audit: InMemoryAuditSink;
   metrics: InMemoryMetrics;
@@ -1835,6 +1871,11 @@ export function inMemoryPorts(): InMemoryMcpPorts {
     guardrails: deterministicManagedActionGuardrails({}),
     approvals: new AutoApproval(),
     assets: new InMemoryAssets(),
+    assetEgress: {
+      counters: new InMemoryAssetEgressCounters(),
+      meter: new InMemoryAssetEgressMeter(),
+      pricePerGb: assetEgressPricePerGb(),
+    },
     credentials: new InMemoryCredentialStore(),
     oauth: unboundOauthProvider(),
     secrets: unresolvableSecrets(),
@@ -1853,6 +1894,11 @@ export function resetInMemoryPorts(): void {
   ports.entitlements.deniedTenants.clear();
   ports.upstreams.clear();
   ports.assets.clear();
+  ports.assetEgress = {
+    counters: new InMemoryAssetEgressCounters(),
+    meter: new InMemoryAssetEgressMeter(),
+    pricePerGb: assetEgressPricePerGb(),
+  };
   ports.credentials.clear();
   ports.audit.clear();
   ports.metrics.clear();
@@ -2187,6 +2233,14 @@ export function resolvePorts(env: McpEnv): McpPorts {
     env.ASSETS !== undefined && env.TENANT_DB !== undefined
       ? new D1R2AssetReader(env.TENANT_DB, env.ASSETS)
       : inMemoryPorts().assets;
+  const assetEgress: McpAssetEgressPort =
+    env.FG_DEV_IN_MEMORY_PORTS === "1"
+      ? inMemoryPorts().assetEgress
+      : {
+          counters: assetEgressCountersFromEnv(env),
+          meter: assetEgressMeterFromEnv(env) ?? NO_ASSET_EGRESS_METER,
+          pricePerGb: assetEgressPricePerGb(),
+        };
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")
     return {
       ...inMemoryPorts(),
@@ -2210,6 +2264,7 @@ export function resolvePorts(env: McpEnv): McpPorts {
     rbac,
     entitlements,
     assets,
+    assetEgress,
   };
   if (durableIdentityBound(env)) {
     return {

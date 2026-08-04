@@ -32,6 +32,7 @@ beforeEach(() => {
 
 function asset(overrides: Record<string, unknown> = {}) {
   return {
+    id: "stored-assets-mcp-visibility",
     assetType: "cli_tool",
     name: "deploy",
     version: "1.0.0",

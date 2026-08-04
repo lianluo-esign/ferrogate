@@ -335,6 +335,7 @@ describe("resources/read conforms to #/$defs/ReadResourceResultResponse", () => 
     fixture.ports.assets.seed(
       TENANT,
       {
+        id: "stored-assets-mcp-schema",
         assetType: "cli_tool",
         name: "deploy",
         version: "1.0.0",

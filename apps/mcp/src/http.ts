@@ -340,6 +340,7 @@ export async function authenticateRequest(
   }
 
   const context: DispatchContext = { requestId, auth: authenticated };
+  if (admitted.egressQuota !== undefined) context.egressQuota = admitted.egressQuota;
   if (traceId !== undefined) context.traceId = traceId;
   if (agentRunId.value !== undefined) context.agentRunId = agentRunId.value;
   const originalBearer = request.headers.get(MCP_ORIGINAL_BEARER_HEADER);

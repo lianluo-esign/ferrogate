@@ -61,6 +61,12 @@ export const JsonRpcErrorCode = {
    * upstream it meant, and the message names every claimant.
    */
   McpToolAmbiguous: -32006,
+  /** Asset egress monthly byte budget refused the read before storage access. */
+  AssetEgressQuotaExceeded: -32007,
+  /** Asset egress per-minute download cap refused the read. */
+  AssetDownloadRateLimitExceeded: -32008,
+  /** Shared asset egress counter backend could not make an admission decision. */
+  AssetEgressCounterUnavailable: -32009,
 
   // --- Modern 2026-07-28 candidate protocol codes (`mcp_ingress.rs`) --------
   /** Routing/protocol header disagrees with the body. */
@@ -87,6 +93,12 @@ export function mcpErrorCode(code: string): number {
       return JsonRpcErrorCode.McpServerUnavailable;
     case "mcp_tool_ambiguous":
       return JsonRpcErrorCode.McpToolAmbiguous;
+    case "asset_egress_quota_exceeded":
+      return JsonRpcErrorCode.AssetEgressQuotaExceeded;
+    case "asset_download_rate_limit_exceeded":
+      return JsonRpcErrorCode.AssetDownloadRateLimitExceeded;
+    case "governance_counter_unavailable":
+      return JsonRpcErrorCode.AssetEgressCounterUnavailable;
     default:
       return JsonRpcErrorCode.ApplicationError;
   }

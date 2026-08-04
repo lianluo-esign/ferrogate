@@ -82,7 +82,7 @@ async function seedAsset(
         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )
     .bind(
-      `${tenantId}_${assetType}_${name}_${version}`,
+      `${tenantId}:${assetType}:${name}:${version}`,
       tenantId,
       assetType,
       name,

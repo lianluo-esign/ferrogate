@@ -39,6 +39,7 @@ import { forgetControlTableProbe } from "../src/auth.js";
 
 interface McpTestBindings {
   readonly DB?: D1Database;
+  readonly BILLING_DB?: D1Database;
   readonly TENANT_DB?: D1Database;
   readonly TENANT_DB_A?: D1Database;
   readonly TEST_CONTROL_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
@@ -47,7 +48,14 @@ interface McpTestBindings {
 
 beforeAll(async () => {
   const bindings = env as unknown as McpTestBindings;
-  const { DB, TENANT_DB, TENANT_DB_A, TEST_CONTROL_D1_SCHEMA, TEST_TENANT_D1_SCHEMA } = bindings;
+  const {
+    DB,
+    BILLING_DB,
+    TENANT_DB,
+    TENANT_DB_A,
+    TEST_CONTROL_D1_SCHEMA,
+    TEST_TENANT_D1_SCHEMA,
+  } = bindings;
   if (
     DB === undefined ||
     TENANT_DB === undefined ||
@@ -65,6 +73,9 @@ beforeAll(async () => {
     );
   }
   await applyD1Migrations(DB, TEST_CONTROL_D1_SCHEMA);
+  if (BILLING_DB !== undefined && BILLING_DB !== DB) {
+    await applyD1Migrations(BILLING_DB, TEST_CONTROL_D1_SCHEMA);
+  }
   await applyD1Migrations(TENANT_DB, TEST_TENANT_D1_SCHEMA);
   await applyD1Migrations(TENANT_DB_A, TEST_TENANT_D1_SCHEMA);
   // `src/auth.ts` caches its table probe per D1 handle for the life of the

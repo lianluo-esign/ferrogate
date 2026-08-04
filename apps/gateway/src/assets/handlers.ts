@@ -61,7 +61,7 @@ import {
   assetEgressCountersFromEnv,
   assetEgressMeterFromEnv,
   assetEgressPricePerGb,
-} from "./egress.js";
+} from "@ferrogate/billing";
 import { D1AssetEntitlements } from "./entitlements.js";
 import { withAssetGuardrailScreening } from "./guardrail-screener.js";
 import {

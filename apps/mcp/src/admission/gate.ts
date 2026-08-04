@@ -44,6 +44,7 @@
  * degradation. `apps/gateway/src/ratelimit/quota.ts` argues the same posture
  * for the same reason; this matches it.
  */
+import type { EffectiveQuota } from "@ferrogate/policy";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 
 import { type McpRateLimiter, type RateLimiterNamespace, limiterForEnv } from "./counters.js";
@@ -143,6 +144,8 @@ export type AdmissionOutcome =
        * no `Drop`; Rust released these when the guard dropped.
        */
       readonly holds: readonly WalletHold[];
+      /** The same resolved quota used by the admission ladder. */
+      readonly egressQuota?: EffectiveQuota;
     }
   | { readonly ok: false; readonly error: AdmissionRefusal };
 
@@ -317,7 +320,7 @@ export class McpAdmissionGate implements AdmissionPort {
       return refuse(ADMISSION_REFUSALS.rate_limit_exceeded(requestId));
     }
 
-    return { ok: true, holds };
+    return { ok: true, holds, egressQuota: resolution.quota };
   }
 }
 

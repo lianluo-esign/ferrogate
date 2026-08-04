@@ -51,6 +51,7 @@ beforeEach(() => {
   fixture.ports.assets.seed(
     TENANT,
     {
+      id: "stored-assets-mcp-agent-run",
       assetType: "cli_tool",
       name: "deploy",
       version: "1.0.0",

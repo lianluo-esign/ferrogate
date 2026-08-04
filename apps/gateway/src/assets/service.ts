@@ -43,9 +43,10 @@ import {
   InMemoryAssetEgressCounters,
   NO_ASSET_EGRESS_METER,
   assetEgressQuotaDenial,
+  assetEgressTargetId,
   assetPullAuditMessage,
   recordAssetEgress,
-} from "./egress.js";
+} from "@ferrogate/billing";
 import { sha256Hex } from "./hash.js";
 import {
   type AssetObjectRef,
@@ -135,6 +136,23 @@ export type AssetPullResult = AssetBytesOk | AssetFailure;
 
 function fail(status: number, code: string, message: string): AssetFailure {
   return { ok: false, status, code, message };
+}
+
+function assetEgressAuditTarget(asset: StoredAsset, tenantId: string): string | AssetFailure {
+  try {
+    return assetEgressTargetId(
+      {
+        id: asset.id,
+        assetType: asset.asset_type,
+        name: asset.name,
+        version: asset.version,
+        sizeBytes: asset.size_bytes,
+      },
+      tenantId,
+    );
+  } catch {
+    return fail(500, "asset_identity_invalid", "stored asset has no valid durable ID");
+  }
 }
 
 /** Rust `AdminList<T>` / `AdminPage<T>`. */
@@ -767,7 +785,7 @@ export class AssetService {
   async #recordEgress(
     caller: AssetCaller,
     context: AssetRequestContext,
-    asset: { assetType: string; name: string; version: string },
+    asset: { id: string; assetType: string; name: string; version: string },
     servedBytes: number,
   ): Promise<void> {
     const charge = await recordAssetEgress({
@@ -787,7 +805,7 @@ export class AssetService {
       nowUnix: this.#now(),
     });
     if (charge === null) return;
-    const id = storedAssetId(caller.tenantId, asset.assetType, asset.name, asset.version);
+    const id = asset.id;
     this.#record(
       context,
       caller,
@@ -1331,6 +1349,8 @@ export class AssetService {
     const projected = await this.#projectBundleFile(selected, input.bundlePath);
     if (!projected.ok) return projected;
     const served = projected.body;
+    const egressTarget = assetEgressAuditTarget(served, caller.tenantId);
+    if (typeof egressTarget !== "string") return egressTarget;
 
     // #262 egress quota (finding D4): the fail-closed deny gate, BEFORE a byte
     // is read or served, charged the RESOLVED OBJECT SIZE exactly as Rust does
@@ -1400,7 +1420,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version },
+          { id: egressTarget, assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -1420,7 +1440,7 @@ export class AssetService {
         await this.#recordEgress(
           caller,
           context,
-          { assetType: ref.assetType, name: ref.name, version },
+          { id: egressTarget, assetType: ref.assetType, name: ref.name, version },
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -2401,6 +2421,8 @@ export class AssetService {
         "this asset is bucket-backed but no asset_bucket is configured",
       );
     }
+    const egressTarget = assetEgressAuditTarget(asset, caller.tenantId);
+    if (typeof egressTarget !== "string") return egressTarget;
 
     // #262 egress quota (finding D4): gate the presigned path too. The bytes
     // leave the bucket DIRECTLY and the gateway never observes them, so URL
@@ -2437,7 +2459,12 @@ export class AssetService {
     await this.#recordEgress(
       caller,
       context,
-      { assetType: ref.assetType, name: ref.name, version: ref.version },
+      {
+        id: egressTarget,
+        assetType: ref.assetType,
+        name: ref.name,
+        version: ref.version,
+      },
       asset.size_bytes,
     );
 
