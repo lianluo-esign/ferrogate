@@ -5,11 +5,10 @@
 # description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 #
 # Admin console frontend (issue #158/#159): a static SPA served by nginx,
-# deployed as its own workload -- no secrets, no PVCs, no /metrics. It calls
-# the ferrogate-auth and ferrogate Services cross-origin, so both of those
-# need CORS configured for this Ingress host (ferrogate-auth's
-# --cors-allowed-origin / FERROGATE_AUTH_CORS_ALLOWED_ORIGIN, and the
-# gateway's admin.cors_allowed_origin config field).
+# deployed as its own workload -- no secrets, no PVCs, no /metrics. Nginx
+# proxies the control-plane and gateway upstreams below, so browser requests
+# remain same-origin. The gateway CORS var is needed only by the separately
+# deployed Workers Static Assets console shape documented in admin-console/.
 
 apiVersion: apps/v1
 kind: Deployment

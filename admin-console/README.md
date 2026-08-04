@@ -155,6 +155,8 @@ failing threshold by #334 after those defects are fixed.
 ### The supported shape: same origin as the control plane
 
 ```bash
+# Configure the gateway Worker with the exact console origin (no wildcard):
+# GATEWAY_CORS_ALLOWED_ORIGIN=https://control-plane.example.com
 VITE_GATEWAY_BASE_URL=https://gateway.example.com \
   scripts/build-admin-console.sh        # from the repo root
 cd apps/control-plane && wrangler deploy
@@ -166,6 +168,12 @@ Assets. `VITE_GATEWAY_BASE_URL` is required for this deployment shape because
 the control-plane Worker does not serve gateway data-plane paths. The console
 still uses the control-plane origin for browser mutations; the gateway URL is
 only baked into data-plane request routing.
+
+When the gateway is a separate Worker, set its `GATEWAY_CORS_ALLOWED_ORIGIN`
+to the exact origin serving this console. The gateway then answers browser
+preflights and data-plane responses for that origin only; leaving it unset is
+appropriate for the container image because nginx keeps those requests
+same-origin.
 
 That is a **correctness requirement**, not a packaging choice. The control
 plane answers `403 cross_site_admin_denied` to any state-changing request

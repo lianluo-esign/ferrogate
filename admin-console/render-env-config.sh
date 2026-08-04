@@ -41,6 +41,13 @@ case "$gateway_base_url" in
     exit 1
     ;;
 esac
+case "$auth_base_url" in
+  http://*|https://*) ;;
+  *)
+    echo "admin-console nginx did NOT start: AUTH_BASE_URL (when set) must be an absolute origin" >&2
+    exit 1
+    ;;
+esac
 
 control_plane_base_url="${control_plane_base_url%/}"
 gateway_base_url="${gateway_base_url%/}"
