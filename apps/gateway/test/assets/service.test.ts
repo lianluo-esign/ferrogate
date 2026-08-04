@@ -15,7 +15,14 @@ import {
   storedAssetId,
   tenantKeyPrefix,
 } from "../../src/assets/keys.js";
-import type { StoredAsset } from "../../src/assets/ports.js";
+import {
+  type AssetBundleScreeningRequest,
+  type AssetBundleScreeningVerdict,
+  type AssetScreener,
+  BuiltinEicarScreener,
+  type StoredAsset,
+} from "../../src/assets/ports.js";
+import { buildTar, gzip } from "./archives.js";
 import {
   CTX,
   PendingScreener,
@@ -256,7 +263,7 @@ describe("yank (#260/#367)", () => {
     // The whole point of yank: an existing pin keeps working.
     expect(decode(exact.bytes)).toBe("v2");
     expect(exact.headers["x-ferrogate-asset-yanked"]).toBe("true");
-    expect(exact.headers["warning"]).toContain("is yanked");
+    expect(exact.headers.warning).toContain("is yanked");
     expect(exact.headers["x-ferrogate-asset-resolved"]).toBe("exact=2.0.0");
   });
 
@@ -414,12 +421,12 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
     const body = result.body as Record<string, unknown>;
-    expect(body["object"]).toBe("asset_upload_intent");
-    expect(body["upload_protocol"]).toBe("single_put");
-    expect(body["method"]).toBe("PUT");
-    expect(body["expires_in_seconds"]).toBe(900);
+    expect(body.object).toBe("asset_upload_intent");
+    expect(body.upload_protocol).toBe("single_put");
+    expect(body.method).toBe("PUT");
+    expect(body.expires_in_seconds).toBe(900);
     // #368: the two headers the bucket re-signs against.
-    expect(body["required_headers"]).toEqual({
+    expect(body.required_headers).toEqual({
       "content-length": String(size),
       "x-amz-content-sha256": sha256,
     });
@@ -434,7 +441,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
           version: "3.0.0",
           variant: "",
         },
-        String(body["upload_id"]),
+        String(body.upload_id),
         size,
         sha256,
       ),
@@ -445,7 +452,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
 
     const commit = await h.service.commitUpload(
       A,
@@ -467,7 +474,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     const stagingKey = h.presigner.puts[0]?.key as string;
     await stage(h.objects, stagingKey, bytes(CONTENT));
 
@@ -508,11 +515,67 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     expect(decode(pulled.bytes)).toBe(CONTENT);
   });
 
+  test("a presigned skill archive is screened before the final object is committed", async () => {
+    const inner = new BuiltinEicarScreener();
+    let screenedPaths: readonly string[] = [];
+    const screener: AssetScreener = {
+      screen: (request) => inner.screen(request),
+      async screenBundleFiles(
+        request: AssetBundleScreeningRequest,
+      ): Promise<AssetBundleScreeningVerdict> {
+        screenedPaths = request.files.map((file) => file.path);
+        return {
+          visibility: "quarantined",
+          auditDetail: "guardrail=blocked(rule=skill_probe at=SKILL.md)",
+        };
+      },
+    };
+    const h = harness({ screener });
+    const archive = await gzip(buildTar([{ name: "SKILL.md", body: "skill instructions" }]));
+    const skillRef = { assetType: "skill_bundle", name: "presigned", version: "1.0.0" };
+    const sha256 = await sha256Hex(archive);
+    const intentResult = await h.service.createUploadIntent(
+      A,
+      skillRef,
+      { size_bytes: archive.byteLength, sha256 },
+      CTX,
+    );
+    if (!intentResult.ok) throw new Error("unreachable");
+    const uploadId = String((intentResult.body as Record<string, unknown>).upload_id);
+    const stagingKey = h.presigner.puts[0]?.key;
+    if (stagingKey === undefined) throw new Error("missing staging key");
+    await stage(h.objects, stagingKey, archive);
+
+    const commit = await h.service.commitUpload(
+      A,
+      skillRef,
+      {
+        upload_id: uploadId,
+        size_bytes: archive.byteLength,
+        sha256,
+        content_type: "application/gzip",
+      },
+      CTX,
+    );
+
+    expect(commit.ok).toBe(true);
+    expect(commit.status).toBe(202);
+    expect(screenedPaths).toEqual(["SKILL.md"]);
+    const pulled = await h.service.pullAsset(
+      A,
+      { assetType: skillRef.assetType, name: skillRef.name, reference: skillRef.version },
+      { headers: new Headers() },
+    );
+    expect(pulled.ok).toBe(false);
+    if (pulled.ok) throw new Error("unreachable");
+    expect(pulled.status).toBe(404);
+  });
+
   test("a re-commit of the same upload is idempotent", async () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     await stage(h.objects, h.presigner.puts[0]?.key as string, bytes(CONTENT));
     const request = { upload_id: uploadId, size_bytes: size, sha256 };
     const first = await h.service.commitUpload(A, ref("3.0.0"), request, CTX);
@@ -527,7 +590,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const first = await intent(h);
     if (!first.result.ok) throw new Error("unreachable");
-    const firstUpload = String((first.result.body as Record<string, unknown>)["upload_id"]);
+    const firstUpload = String((first.result.body as Record<string, unknown>).upload_id);
     await stage(h.objects, h.presigner.puts[0]?.key as string, bytes(CONTENT));
     await h.service.commitUpload(
       A,
@@ -561,7 +624,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     const stagingKey = h.presigner.puts[0]?.key as string;
     await stage(h.objects, stagingKey, bytes(`${CONTENT}-extra`));
 
@@ -584,7 +647,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     const stagingKey = h.presigner.puts[0]?.key as string;
     // Byte substitution that preserves the declared length.
     await stage(h.objects, stagingKey, bytes("X".repeat(CONTENT.length)));
@@ -605,7 +668,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
 
     const abort = await h.service.abortUpload(
       A,
@@ -627,7 +690,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     const stagingKey = h.presigner.puts[0]?.key as string;
     await stage(h.objects, stagingKey, bytes(CONTENT));
 
@@ -660,7 +723,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
       CTX,
     );
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     await stage(store, h.presigner.puts[0]?.key as string, bytes(CONTENT));
 
     const abort = await h.service.abortUpload(
@@ -681,7 +744,7 @@ describe("presigned upload lifecycle (#259/#368)", () => {
     const h = harness();
     const { result, sha256, size } = await intent(h);
     if (!result.ok) throw new Error("unreachable");
-    const uploadId = String((result.body as Record<string, unknown>)["upload_id"]);
+    const uploadId = String((result.body as Record<string, unknown>).upload_id);
     await stage(h.objects, h.presigner.puts[0]?.key as string, bytes(CONTENT));
     await h.service.commitUpload(
       A,
@@ -749,11 +812,11 @@ describe("presigned download", () => {
     const result = await h.service.downloadUrl(A, ref("1.0.0"), CTX);
     if (!result.ok) throw new Error("unreachable");
     const body = result.body as Record<string, unknown>;
-    expect(body["object"]).toBe("asset_download_url");
-    expect(body["method"]).toBe("GET");
-    expect(body["expires_in_seconds"]).toBe(900);
-    expect(body["sha256"]).toBe(await sha256Hex(bytes("payload")));
-    expect(String(body["download_url"])).toContain(tenantKeyPrefix("tenant_a"));
+    expect(body.object).toBe("asset_download_url");
+    expect(body.method).toBe("GET");
+    expect(body.expires_in_seconds).toBe(900);
+    expect(body.sha256).toBe(await sha256Hex(bytes("payload")));
+    expect(String(body.download_url)).toContain(tenantKeyPrefix("tenant_a"));
   });
 
   test("a withheld asset is a 404 here, exactly as on the pull path", async () => {
@@ -982,7 +1045,7 @@ describe("pull transport semantics (#258/#301)", () => {
     await push(h, A, "1.0.0", "payload");
     const first = await pull(h, A, "1.0.0");
     if (!first.ok) throw new Error("unreachable");
-    const etag = first.headers["etag"] as string;
+    const etag = first.headers.etag as string;
     expect(etag).toBe(`"${await sha256Hex(bytes("payload"))}"`);
 
     const revalidated = await h.service.pullAsset(

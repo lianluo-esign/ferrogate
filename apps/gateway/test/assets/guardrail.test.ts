@@ -45,12 +45,20 @@ import { describe, expect, test } from "vitest";
 import {
   ASSET_GUARDRAIL_MODES_VAR,
   DEFAULT_ASSET_GUARDRAIL_MODES,
+  GuardrailAssetScreener,
   assetGuardrailModesFromEnv,
   assetTextSurface,
   isTextBearingAssetContentType,
 } from "../../src/assets/guardrail-screener.js";
 import { assetDepsFromEnv, assetRouteModule } from "../../src/assets/handlers.js";
-import { strictestVisibility } from "../../src/assets/ports.js";
+import {
+  BuiltinEicarScreener,
+  isScreeningRejection,
+  strictestVisibility,
+} from "../../src/assets/ports.js";
+import { guardrailDepsFromEnv } from "../../src/guardrails/config.js";
+import { GuardrailEngine } from "../../src/guardrails/engine.js";
+import type { GuardrailEvidenceSink } from "../../src/guardrails/ports.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { buildTar, gzip } from "./archives.js";
 
@@ -261,6 +269,23 @@ describe("a published mcp_manifest is screened by the bound guardrail policy", (
     expect(push.status).toBeLessThan(300);
     expect((await call("/v1/assets/cli_tool/widget/1.0.0")).status).toBe(200);
   });
+
+  test("a poisoned skill_bundle archive is screened before it can be fetched", async () => {
+    const call = gateway();
+    const archive = await gzip(buildTar([{ name: "SKILL.md", body: `# instructions ${PROBE}` }]));
+    const push = await call("/v1/assets/skill_bundle/poisoned/1.0.0", {
+      method: "PUT",
+      body: archive,
+      headers: { "content-type": "application/gzip" },
+    });
+
+    expect(push.status).toBeLessThan(300);
+    expect((await call("/v1/assets/skill_bundle/poisoned/1.0.0")).status).toBe(404);
+    const body = (await (await call("/v1/assets/withheld")).json()) as WithheldBody;
+    expect(
+      body.data.find((entry) => entry.name === "poisoned")?.screening_evidence ?? "",
+    ).toContain("SKILL.md");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -428,7 +453,7 @@ describe("the byte ceiling refuses WITHOUT reading", () => {
     });
     // Under the ceiling the same bytes ARE read, and the difference shows.
     expect(assetTextSurface("application/json", invalid, 128)).toEqual({
-      kind: "opaque",
+      kind: "undecidable",
       reason: "not_utf8",
     });
   });
@@ -526,5 +551,43 @@ describe("the unconfigured deployment is byte-for-byte what it was", () => {
     expect(
       assetDepsFromEnv({ GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([ASSET_POLICY]) }).screener,
     ).toBeDefined();
+  });
+});
+
+describe("asset guardrail evidence keeps the publish correlation id", () => {
+  test("the shared evidence sink receives the request id and is flushed", async () => {
+    const configured = await guardrailDepsFromEnv(ENV);
+    const requestIds: string[] = [];
+    let flushes = 0;
+    const evidence: GuardrailEvidenceSink = {
+      append(evaluation) {
+        requestIds.push(evaluation.requestId);
+        return true;
+      },
+      async flush() {
+        flushes += 1;
+      },
+    };
+    const engine = new GuardrailEngine({ ...configured, evidence });
+    const screener = new GuardrailAssetScreener(new BuiltinEicarScreener(), {
+      runtime: { engine, evidence },
+      modes: assetGuardrailModesFromEnv({}),
+    });
+
+    const verdict = await screener.screen({
+      assetId: "tenant_a:mcp_manifest:correlated:1.0.0",
+      tenantId: "tenant_a",
+      assetType: "mcp_manifest",
+      contentType: "application/json",
+      content: new TextEncoder().encode(JSON.stringify({ instructions: PROBE })),
+      contentSha256: "sha256",
+      nowUnix: 1,
+      requestId: "asset-request-1",
+    });
+
+    if (isScreeningRejection(verdict)) throw new Error("unexpected asset screening rejection");
+    expect(verdict.visibility).toBe("quarantined");
+    expect(requestIds).toEqual(["asset-request-1"]);
+    expect(flushes).toBe(1);
   });
 });

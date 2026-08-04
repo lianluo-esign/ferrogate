@@ -63,6 +63,7 @@ import {
   assetEgressPricePerGb,
 } from "./egress.js";
 import { D1AssetEntitlements } from "./entitlements.js";
+import { withAssetGuardrailScreening } from "./guardrail-screener.js";
 import {
   type AssetAuthFailure,
   type AssetCaller,
@@ -99,7 +100,6 @@ import {
   AssetService,
   type AssetServiceDeps,
 } from "./service.js";
-import { withAssetGuardrailScreening } from "./guardrail-screener.js";
 import { type SignaturePolicyBindings, withSignatureVerification } from "./signature-screener.js";
 import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
 import { SigV4Presigner } from "./sigv4.js";
@@ -166,9 +166,9 @@ function parseEntitlements(raw: unknown): AssetEntitlements {
   const number = (value: unknown): number | undefined =>
     typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
   return {
-    assetStorageQuotaBytes: number(row["asset_storage_quota_bytes"]),
-    assetMaxObjectBytes: number(row["asset_max_object_bytes"]),
-    assetHostingEnabled: row["asset_hosting_enabled"] === true,
+    assetStorageQuotaBytes: number(row.asset_storage_quota_bytes),
+    assetMaxObjectBytes: number(row.asset_max_object_bytes),
+    assetHostingEnabled: row.asset_hosting_enabled === true,
   };
 }
 

@@ -23,7 +23,15 @@
  * `handlers.ts` renders it into the gateway error envelope. That is what keeps
  * the status/code taxonomy assertable without a Worker.
  */
-import { bundlePathRejection, expandBundle, isBundlePush, normalizeBundlePath } from "./bundle.js";
+import {
+  bundlePathRejection,
+  detectArchiveFormat,
+  expandBundle,
+  isBundleArchiveContentType,
+  isBundlePush,
+  normalizeBundlePath,
+  textBundleFileContentType,
+} from "./bundle.js";
 import {
   ASSET_REJECTED_CODE,
   ASSET_REJECTED_STATUS,
@@ -688,6 +696,50 @@ export class AssetService {
       : fail(ASSET_REJECTED_STATUS, ASSET_REJECTED_CODE, rejection);
   }
 
+  /** Screen text members of a `skill_bundle` archive without publishing rows. */
+  async #screenSkillBundleFiles(
+    caller: AssetCaller,
+    assetType: string,
+    assetId: string,
+    archive: Uint8Array,
+    contentType: string,
+    context: AssetRequestContext,
+  ): Promise<AssetResult<AssetBundleScreeningVerdict | undefined>> {
+    if (assetType !== "skill_bundle" || this.#screener.screenBundleFiles === undefined) {
+      return { ok: true, status: 200, body: undefined };
+    }
+
+    // A skill publisher may use the permissive octet-stream entry from the
+    // content gate. Magic-byte detection keeps that declaration from becoming
+    // an archive-screening bypass while still admitting ordinary binaries.
+    if (!isBundleArchiveContentType(contentType) && detectArchiveFormat(archive) === undefined) {
+      return { ok: true, status: 200, body: undefined };
+    }
+    const expansion = await expandBundle(archive, undefined, {
+      fileContentType: textBundleFileContentType,
+      skipUnknownFileTypes: true,
+    });
+    if (!expansion.ok) {
+      return fail(
+        ASSET_REJECTED_STATUS,
+        ASSET_REJECTED_CODE,
+        `${expansion.message} (pushed as ${contentType})`,
+      );
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: await this.#screener.screenBundleFiles({
+        assetId,
+        tenantId: caller.tenantId,
+        assetType,
+        nowUnix: this.#now(),
+        requestId: context.requestId,
+        files: expansion.files,
+      }),
+    };
+  }
+
   /**
    * The fail-closed egress admission gate (Rust `asset_egress_quota_denial`,
    * finding D4). `sizeBytes` is the RESOLVED OBJECT SIZE, never a served slice.
@@ -942,6 +994,29 @@ export class AssetService {
       return fail(screening.status, screening.code, screening.message);
     }
 
+    // #740: a skill archive has no readable surface until it is expanded. The
+    // archive is screened before its object is stored, just like the inline
+    // text arm, but its opaque members are not published as bundle rows.
+    const skillBundleScreening = await this.#screenSkillBundleFiles(
+      caller,
+      ref.assetType,
+      id,
+      input.content,
+      contentType,
+      context,
+    );
+    if (!skillBundleScreening.ok) {
+      this.#record(
+        context,
+        caller,
+        "asset.push",
+        id,
+        "rejected_commit",
+        `asset ${id} rejected by skill bundle guardrail screening (${skillBundleScreening.code}): ${skillBundleScreening.message}`,
+      );
+      return skillBundleScreening;
+    }
+
     // Immutability (#260): a published `{name}/{version}` per variant is frozen.
     // The definitive arbiter is the atomic create below; this pre-check only
     // saves a needless object write on the common case.
@@ -999,7 +1074,12 @@ export class AssetService {
       // out of every read path. The screener's verdict is applied afterwards
       // through the existing CAS promotion, so a partial expansion cannot
       // reach `visible` — the promotion is the last step and never runs.
-      visibility: bundle ? "pending_scan" : screening.visibility,
+      visibility: bundle
+        ? "pending_scan"
+        : strictestVisibility(
+            screening.visibility,
+            skillBundleScreening.body?.visibility ?? "visible",
+          ),
       created_at_unix: now,
       updated_at_unix: now,
     };
@@ -1086,7 +1166,7 @@ export class AssetService {
         "asset.push",
         id,
         "committed",
-        `asset ${id} pushed (${asset.size_bytes} bytes); ${screening.auditDetail}; manifest=${JSON.stringify(screening.manifest)}`,
+        `asset ${id} pushed (${asset.size_bytes} bytes); ${screening.auditDetail}${skillBundleScreening.body === undefined ? "" : `; ${skillBundleScreening.body.auditDetail}`}; manifest=${JSON.stringify(screening.manifest)}`,
       );
     }
 
@@ -1183,8 +1263,7 @@ export class AssetService {
     if (resolved.yanked) {
       // An EXACT pull of a yanked version still succeeds — existing pins keep
       // working — but it says so, loudly and machine-readably.
-      headers["warning"] =
-        `299 ferrogate "asset ${ref.assetType}/${ref.name}/${resolved.version} is yanked"`;
+      headers.warning = `299 ferrogate "asset ${ref.assetType}/${ref.name}/${resolved.version} is yanked"`;
       headers["x-ferrogate-asset-yanked"] = "true";
     }
     return { ok: true, status: 200, body: { selected, version: resolved.version, headers } };
@@ -2021,6 +2100,29 @@ export class AssetService {
       return fail(screening.status, screening.code, screening.message);
     }
 
+    // #740: keep the presigned commit path in parity with the inline path for
+    // skill archives. The bytes are verified already, so the same expanded
+    // text members can be screened before the final object is copied.
+    const skillBundleScreening = await this.#screenSkillBundleFiles(
+      caller,
+      ref.assetType,
+      id,
+      bytes,
+      contentType,
+      context,
+    );
+    if (!skillBundleScreening.ok) {
+      await this.#bestEffortDelete(stagingKey, caller.tenantId);
+      return this.#rejectedCommit(
+        context,
+        caller,
+        id,
+        request.upload_id,
+        skillBundleScreening.code,
+        skillBundleScreening.message,
+      );
+    }
+
     // 4. Copy the VERIFIED bytes to a private immutable key nothing can
     // reference yet, so a replay of the client-facing staging URL cannot race a
     // different payload into the published object.
@@ -2048,7 +2150,12 @@ export class AssetService {
       // only promoted once every file is expanded. The presigned path is
       // exactly how a tenant would smuggle an unexpanded archive past an
       // inline-only bundle gate, so it runs the same lifecycle.
-      visibility: bundle ? "pending_scan" : screening.visibility,
+      visibility: bundle
+        ? "pending_scan"
+        : strictestVisibility(
+            screening.visibility,
+            skillBundleScreening.body?.visibility ?? "visible",
+          ),
       created_at_unix: now,
       updated_at_unix: now,
     };
@@ -2149,7 +2256,7 @@ export class AssetService {
       "asset.push",
       id,
       "committed",
-      `asset ${id} committed via presigned upload ${request.upload_id} (${asset.size_bytes} bytes); ${screening.auditDetail}${bundleScreening}; manifest=${JSON.stringify(screening.manifest)}`,
+      `asset ${id} committed via presigned upload ${request.upload_id} (${asset.size_bytes} bytes); ${screening.auditDetail}${skillBundleScreening.body === undefined ? "" : `; ${skillBundleScreening.body.auditDetail}`}${bundleScreening}; manifest=${JSON.stringify(screening.manifest)}`,
     );
     await this.#bestEffortDelete(stagingKey, caller.tenantId);
     return {

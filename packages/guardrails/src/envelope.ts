@@ -15,8 +15,8 @@
  */
 import { z } from "zod";
 import { byteLen, byteSlice, isCharBoundary } from "./bytes.js";
+import { type ContentPatch, DetectorError } from "./contract.js";
 import { sha256, toHex } from "./hash.js";
-import { DetectorError, type ContentPatch } from "./contract.js";
 
 export const guardrailProtocolSchema = z.enum([
   "chat_completions",
@@ -109,7 +109,7 @@ export const contentSegmentSchema = z.object({
 });
 export type ContentSegment = z.infer<typeof contentSegmentSchema>;
 
-import { detectorStageSchema, type DetectorStage } from "./contract.js";
+import { type DetectorStage, detectorStageSchema } from "./contract.js";
 
 export const guardrailEnvelopeSchema = z.object({
   protocol: guardrailProtocolSchema,
@@ -426,11 +426,11 @@ function extractAudioTranscriptionResponse(body: Uint8Array, builder: EnvelopeBu
     builder.push("text_attachment", "response.raw", "text_attachment", decoded);
     return;
   }
-  const text = asString(document["text"]);
+  const text = asString(document.text);
   if (text !== undefined) {
     builder.push("text_attachment", "response.text", "text_attachment", text);
   }
-  const segments = asArray(document["segments"]);
+  const segments = asArray(document.segments);
   if (segments !== undefined) {
     segments.forEach((segment, index) => {
       const segmentText = asString(get(segment, "text"));
@@ -1018,7 +1018,9 @@ export function parseProtocolPath(path: string): PathToken[] | undefined {
     while (i < path.length && path[i] === "[") {
       i++;
       const numberStart = i;
-      while (i < path.length && path[i]! >= "0" && path[i]! <= "9") {
+      while (i < path.length) {
+        const character = path[i];
+        if (character === undefined || character < "0" || character > "9") break;
         i++;
       }
       if (numberStart === i || path[i] !== "]") {

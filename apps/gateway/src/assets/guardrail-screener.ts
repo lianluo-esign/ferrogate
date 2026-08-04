@@ -19,12 +19,16 @@
  * opaque, but its TRANSCRIPT is not" — is **which asset types have a text
  * surface a detector can actually read**.
  *
- * SCREENED, because the whole object is text:
+ * SCREENED, because the whole object is text or its archive members are
+ * expanded into text surfaces:
  *  - `mcp_manifest` — a JSON document, and the most dangerous one on this
  *    surface: the consuming agent's MCP client reads it and acts on it.
  *  - `config_file` — JSON / YAML / TOML / plain text.
  *  - `skill_bundle` pushed as `text/plain` or `text/markdown` — a `SKILL.md` is
  *    literally a page of instructions for somebody else's agent.
+ *  - `skill_bundle` pushed as an archive — expanded under the same bounded
+ *    tar/zip parser, with valid UTF-8 text members screened per file and
+ *    opaque members excluded from the detector surface.
  *  - `static_site` — screened PER FILE after #736's expansion, over the
  *    text-bearing files only. See {@link GuardrailAssetScreener.screenBundleFiles}.
  *
@@ -38,17 +42,9 @@
  *  - images and fonts inside a `static_site` bundle — with ONE exception,
  *    `image/svg+xml`, which is an XML DOCUMENT that browsers execute script
  *    inside, so it is screened as text despite the `image/` prefix.
- *  - **a `skill_bundle` pushed as an ARCHIVE.** This is the real remaining gap
- *    and it is named here so it is not mistaken for coverage. #736 expands
- *    `static_site` archives and only those (`bundle.ts::isBundlePush` returns
- *    false for every other asset type), so a `skill_bundle` zip has no
- *    per-file text surface in this tree. Screening the compressed container
- *    would be the exact mistake #736 called out for content types: screening
- *    the archive is not screening its contents. A second expander for a
- *    lifecycle that does not expand belongs in its own slice, so this one
- *    records `guardrail=not_applicable(opaque_archive)` on the push audit line
- *    and admits. An operator can grep for that token; nothing claims the
- *    bundle was cleared.
+ *  - binary members (including images and fonts) inside a `skill_bundle`
+ *    archive. They count toward archive limits but contribute no detector
+ *    segment; a valid extensionless UTF-8 member is treated as text.
  *
  * ============================================================================
  * PUBLISH vs FETCH
@@ -318,8 +314,9 @@ export type AssetTextSurfaceOutcome =
  *
  * The size check is FIRST and the buffer is not touched above it — the #703
  * shape, applied to the one size that is already known here. A non-UTF-8
- * payload under a text content type is `opaque` and not a lossy decode: a
- * detector fed replacement characters reports on a document nobody published.
+ * payload under a text content type is `undecidable` and not a lossy decode:
+ * a detector fed replacement characters reports on a document nobody
+ * published, so `block` mode must withhold it rather than admit it as opaque.
  */
 export function assetTextSurface(
   contentType: string,
@@ -340,7 +337,7 @@ export function assetTextSurface(
   try {
     text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(content);
   } catch {
-    return { kind: "opaque", reason: "not_utf8" };
+    return { kind: "undecidable", reason: "not_utf8" };
   }
   return { kind: "text", surfaces: [{ path, text }] };
 }
@@ -475,7 +472,7 @@ export class GuardrailAssetScreener implements AssetScreener {
   }
 
   /**
-   * The per-FILE pass over an expanded `static_site` bundle.
+   * The per-FILE pass over an expanded `static_site` or `skill_bundle` archive.
    *
    * ONE evaluation with one SEGMENT per text-bearing file, rather than one
    * evaluation per file. Three reasons, all of them load-bearing:
