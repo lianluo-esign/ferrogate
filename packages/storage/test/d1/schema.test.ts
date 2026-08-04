@@ -61,9 +61,6 @@ const CONTROL_ONLY = [
   "billing_events",
   "guardrail_policy_revisions",
   "guardrail_policy_bindings",
-  "agent_runs",
-  "agent_run_events",
-  "request_logs",
   "audit_events",
   // Created AFTER `0001_init_control.sql`. A later migration is exactly when a
   // table gets filed under the wrong role — the author is editing one directory
@@ -75,6 +72,9 @@ const CONTROL_ONLY = [
   "semantic_cache_policies", // 0004
   "siem_export_cursors", // 0005
 ] as const;
+
+/** Evidence whose authority is tenant-local but whose compatibility projection remains in CONTROL. */
+const DERIVED_EVIDENCE = ["agent_runs", "agent_run_events", "request_logs"] as const;
 
 /** Families that must live ONLY in a tenant database. */
 const TENANT_ONLY = [
@@ -120,6 +120,15 @@ describe("control / tenant split", () => {
     for (const table of CONTROL_ONLY) {
       expect(control, `${table} must exist in the control database`).toContain(table);
       expect(tenant, `${table} must NOT exist in a tenant database`).not.toContain(table);
+    }
+  });
+
+  test("derived request evidence is present in both roles", async () => {
+    const control = await tableNames(env.CONTROL_DB);
+    const tenant = await tableNames(env.TENANT_DB_A);
+    for (const table of DERIVED_EVIDENCE) {
+      expect(control, `${table} compatibility projection must exist in CONTROL`).toContain(table);
+      expect(tenant, `${table} authority must exist in TENANT`).toContain(table);
     }
   });
 
