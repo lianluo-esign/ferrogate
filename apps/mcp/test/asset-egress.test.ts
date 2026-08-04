@@ -18,7 +18,7 @@ import {
 } from "./fixtures.js";
 
 const CONTENT = new TextEncoder().encode("echo hello");
-const ASSET_ID = `${TENANT}:cli_tool:deploy:1.0.0`;
+const ASSET_ID = "stored-assets-real-base-id";
 
 interface RpcBody {
   error?: { code: number; message: string };
@@ -64,6 +64,16 @@ beforeEach(() => {
 });
 
 describe("#801 MCP asset egress uses one billing path", () => {
+  it("refuses an in-memory asset without its durable stored_assets.id", () => {
+    expect(() =>
+      fixture.ports.assets.seed(
+        TENANT,
+        { ...asset(), id: undefined } as never,
+        CONTENT,
+      ),
+    ).toThrow("stored_assets.id");
+  });
+
   it("fails closed instead of deriving an audit target when stored_assets.id is missing", () => {
     expect(() =>
       assetEgressTargetId(

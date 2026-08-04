@@ -50,7 +50,7 @@ import {
   assetEgressQuotaDenial,
   assetEgressRpmCounterKey,
 } from "../../src/assets/egress.js";
-import { storedAssetVariantId } from "../../src/assets/keys.js";
+import { storedAssetId, storedAssetVariantId } from "../../src/assets/keys.js";
 import { billingDb, resetMeteringTables } from "../metering/d1-harness.js";
 import type { AssetEgressCounters } from "../../src/assets/egress.js";
 import { CTX, bytes, callerFor, harness } from "./helpers.js";
@@ -388,6 +388,27 @@ describe("D4 — getAsset enforces the budget and bills the bytes", () => {
     );
   });
 
+  it("fails closed before serving when the stored asset ID is empty", async () => {
+    const counters = new InMemoryAssetEgressCounters();
+    const meter = new InMemoryAssetEgressMeter();
+    const h = await published(64, { egress: { counters, meter } });
+    const id = storedAssetId(TENANT, "cli_tool", "installer", "1.0.0");
+    const stored = h.metadata.assets.get(id);
+    expect(stored).toBeDefined();
+    if (stored === undefined) return;
+    stored.id = "";
+
+    const result = await h.service.pullAsset(
+      egressCaller(),
+      { assetType: "cli_tool", name: "installer", reference: "1.0.0" },
+      { headers: new Headers() },
+      { requestId: "req_invalid_asset_id" },
+    );
+    expect(result).toMatchObject({ ok: false, status: 500, code: "asset_identity_invalid" });
+    expect(meter.charges).toHaveLength(0);
+    expect(counters.bytesUsed("egress:tenant:tenant-a")).toBe(0);
+  });
+
   it("persists gateway egress with the authenticated api key in D1", async () => {
     await resetMeteringTables();
     const db = billingDb();
@@ -589,6 +610,26 @@ describe("D4 — the presigned download bills at issuance", () => {
     if (result.ok) return;
     expect(result.status).toBe(429);
     expect(result.code).toBe("asset_egress_quota_exceeded");
+    expect(meter.charges).toHaveLength(0);
+  });
+
+  it("fails closed before issuing a presigned URL with an empty stored asset ID", async () => {
+    const counters = new InMemoryAssetEgressCounters();
+    const meter = new InMemoryAssetEgressMeter();
+    const h = await published(2_048, { egress: { counters, meter } });
+    const id = storedAssetId(TENANT, "cli_tool", "installer", "1.0.0");
+    const stored = h.metadata.assets.get(id);
+    expect(stored).toBeDefined();
+    if (stored === undefined) return;
+    stored.id = "";
+
+    const result = await h.service.downloadUrl(
+      egressCaller(),
+      { assetType: "cli_tool", name: "installer", version: "1.0.0" },
+      CTX,
+    );
+    expect(result).toMatchObject({ ok: false, status: 500, code: "asset_identity_invalid" });
+    expect(h.presigner.gets).toHaveLength(0);
     expect(meter.charges).toHaveLength(0);
   });
 });

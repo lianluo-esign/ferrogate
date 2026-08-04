@@ -111,5 +111,7 @@ describe("#801 MCP non-dev D1 asset egress", () => {
     expect(ledger.results?.[0]?.api_key_id).toBe(API_KEY_ID);
     expect(JSON.parse(ledger.results?.[0]?.entry_json ?? "{}").tenant.api_key_id).toBe(API_KEY_ID);
     expect(JSON.parse(events.results?.[0]?.event_json ?? "{}").tenant.api_key_id).toBe(API_KEY_ID);
+    const pull = ports.audit.events().find((event) => event.action === "asset.pull");
+    expect(pull?.target).toBe(ASSET_ID);
   });
 });
