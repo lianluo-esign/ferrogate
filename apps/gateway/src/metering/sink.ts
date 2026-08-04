@@ -117,13 +117,13 @@ import {
   systemClock,
 } from "./ports.js";
 import { InMemoryBillingReportPublisher, QueueBillingReportPublisher } from "./publisher.js";
+import type { MeteringBindingResolver } from "./runtime.js";
 import {
   type MeteringAttribution,
   type MeteringDrainContext,
   d1UsageAggregateSink,
   usageWriteFor,
 } from "./usage-ledger.js";
-import type { MeteringBindingResolver } from "./runtime.js";
 
 /**
  * The two durable seams a drain writes through, resolved together.
@@ -505,8 +505,7 @@ export class MeteringUsageSink implements UsageSink {
       this.#recordUnpriced(
         event,
         id,
-        `serving offering for provider '${event.provider}' model '${event.provider_model}' ` +
-          "did not provide a usable settled cost; wildcard rate-card settlement is disabled",
+        `serving offering for provider '${event.provider}' model '${event.provider_model}' did not provide a usable settled cost; wildcard rate-card settlement is disabled`,
       );
       this.#scheduleDrain(rc);
       return;
@@ -660,8 +659,7 @@ export class MeteringUsageSink implements UsageSink {
           this.#diagnostics.onError?.(
             "unpriced_event_dropped",
             new Error(
-              `pending unpriced metering events exceeded ${MAX_PENDING_UNPRICED_EVENTS}; ` +
-                "the durable write is failing and the oldest trace was discarded",
+              `pending unpriced metering events exceeded ${MAX_PENDING_UNPRICED_EVENTS}; the durable write is failing and the oldest trace was discarded`,
             ),
           ),
         "unpriced_event_dropped",

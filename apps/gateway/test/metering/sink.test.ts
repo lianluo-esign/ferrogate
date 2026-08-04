@@ -188,9 +188,7 @@ describe("MeteringUsageSink — FAIL CLOSED on an unknown price (#129)", () => {
       settledCostUsd: () => undefined,
     });
 
-    h.sink.record(
-      usageFixture({ provider: "fallback-channel", providerModel: "served-model" }),
-    );
+    h.sink.record(usageFixture({ provider: "fallback-channel", providerModel: "served-model" }));
     await h.scheduler.idle();
 
     expect(h.ledger.size).toBe(0);
@@ -209,9 +207,7 @@ describe("MeteringUsageSink — FAIL CLOSED on an unknown price (#129)", () => {
       settledCostUsd: () => 0,
     });
 
-    h.sink.record(
-      usageFixture({ provider: "free-channel", providerModel: "free-model" }),
-    );
+    h.sink.record(usageFixture({ provider: "free-channel", providerModel: "free-model" }));
     await h.scheduler.idle();
 
     expect(h.ledger.size).toBe(1);
