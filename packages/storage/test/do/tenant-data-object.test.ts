@@ -53,6 +53,7 @@ const TENANT_TABLES = [
   "api_keys",
   "asset_bundle_files",
   "asset_channels",
+  "catalog_audit_outbox",
   "catalog_model_offerings",
   "catalog_models",
   "catalog_revisions",
@@ -180,10 +181,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 9,
-      statements: 84,
-      createTable: 30,
-      createIndex: 33,
+      files: 10,
+      statements: 86,
+      createTable: 31,
+      createIndex: 34,
       createUniqueIndex: 5,
       alterTable: 9,
       insert: 6,
@@ -230,7 +231,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(9);
+    expect(TENANT_MIGRATIONS.length).toBe(10);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({

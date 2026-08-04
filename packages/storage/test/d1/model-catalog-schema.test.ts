@@ -15,6 +15,7 @@ async function resetCatalog(): Promise<void> {
     db().prepare("DELETE FROM catalog_model_offerings"),
     db().prepare("DELETE FROM catalog_models"),
     db().prepare("DELETE FROM provider_channels"),
+    db().prepare("DELETE FROM catalog_audit_outbox"),
     db().prepare("DELETE FROM catalog_revisions"),
     db().prepare("DELETE FROM tenant_database_identity"),
   ]);

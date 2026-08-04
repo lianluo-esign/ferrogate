@@ -46,11 +46,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 281 operations", () => {
+  it("carries exactly 297 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 281 unique operation ids", () => {
+  it("has 297 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -113,8 +113,10 @@ describe("contract table", () => {
     // has 267, which is neither. RE-COUNTED with
     // `Counter(o["auth"]["kind"] for o in operations)` over the merged
     // `docs/openapi/runtime-api-contract.json`, never summed.
+    // #813 adds fifteen bearer-guarded tenant model catalog operations: five
+    // provider operations, five model operations and five offering operations.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 267,
+      bearer: 283,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -142,7 +144,8 @@ describe("contract table", () => {
       // and main wrote 212 and NEITHER is the merged truth: 214 is what
       // `Counter(o["visibility"] for o in operations)` returns over the merged
       // `docs/openapi/runtime-api-contract.json`.
-      admin: 214,
+      // #813 adds fifteen admin-visible catalog operations.
+      admin: 230,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -212,16 +215,17 @@ describe("contract table", () => {
       // GET-moving slice in a row: this branch stood at 129 and main at 128,
       // and the merged document has GET 130 — again no parent's number, again
       // `Counter(o["method"] for o in operations)` over the merged JSON.
-      GET: 130,
+      // #813 adds three reads: provider/model item reads and offering lists.
+      GET: 134,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
       // #743's `POST /admin/v1/assets/quarantine/{asset_id}`. Re-counted off
       // the merged document, never summed.
-      POST: 86,
-      DELETE: 29,
-      PUT: 20,
-      PATCH: 16,
+      POST: 89,
+      DELETE: 32,
+      PUT: 23,
+      PATCH: 19,
     });
   });
 

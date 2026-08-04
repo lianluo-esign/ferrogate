@@ -8,9 +8,9 @@
  * `test/schedule-wiring.test.ts` proves each of those mounts by removal. The
  * TICK is the exception: on Cloudflare a periodic tick is a Cron Trigger, which
  * means a `scheduled` handler on the module `wrangler.toml`'s `main` points at
- * (`src/worker.ts`) plus a `[triggers] crons` stanza. **This slice may not edit
- * either file** (the integrate step owns every composition root), so the two
- * lines below are stated exactly and left for it:
+ * (`src/worker.ts`) plus a `[triggers] crons` stanza. Both halves are already
+ * wired in this Worker, and the entrypoint test drives the same default export
+ * that Cloudflare invokes:
  *
  * ```ts
  * // apps/control-plane/src/worker.ts
@@ -31,20 +31,22 @@
  * ask for, so nothing is lost — a sub-minute schedule would need a Durable
  * Object alarm instead.)
  *
- * **Until those two lines land, schedules do not fire on their own.** That is
- * stated plainly rather than hidden behind a green suite, because a scheduler
- * whose tick is never invoked is exactly the defect
- * `docs/rewrite/parity-audit-storage.md` §4.2 recorded, one layer further out.
- * `test/schedule-wiring.test.ts` drives {@link scheduled} directly against the
- * real bindings, so the handler itself is proven; what is unproven is only that
- * the platform calls it.
+ * `test/cron-trigger.test.ts` checks the committed trigger and
+ * `test/worker-entry.test.ts` invokes the default export through the same shape
+ * workerd uses. A scheduler whose tick is never invoked is exactly the defect
+ * `docs/rewrite/parity-audit-storage.md` §4.2 recorded, so both wiring halves
+ * stay under test here.
  */
 
 import { resolveAuditAnchorBucket, resolveControlDatabase, resolveDeps } from "../adapters.js";
 import { anchorAuditChains } from "../audit/anchor.js";
 import { type SpendAnomalyReport, runSpendAnomalyPass } from "../finops/pass.js";
-import type { ControlPlaneBindings } from "../ports.js";
+import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
+import {
+  reconcileProvisionedTenantCatalogAudits,
+  type TenantCatalogAuditSweepReport,
+} from "../store/tenant-model-catalog.js";
 import { type ScheduleTickSummary, runScheduleTick } from "./engine.js";
 
 /** What `scheduled` reports back, so a tail log says something useful. */
@@ -79,6 +81,8 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
    * answer on 59 of every 60 ticks.
    */
   readonly spendAnomaly: SpendAnomalyReport;
+  /** What the scheduled tenant-catalog audit pass delivered or retained for retry. */
+  readonly tenantCatalogAudit: TenantCatalogAuditSweepReport;
 }
 
 /**
@@ -100,6 +104,7 @@ export async function runScheduledTick(
   now: number = Math.floor(Date.now() / 1000),
 ): Promise<ScheduledTickReport> {
   const deps = resolveDeps(env, { requestId: `cron-${now}` });
+  const tenantCatalogAudit = await catalogAuditPass(deps);
   const summary = await runScheduleTick(
     { store: deps.store, lifecycle: deps.lifecycle, nodeId: "control-plane-cron" },
     now,
@@ -118,7 +123,22 @@ export async function runScheduledTick(
     // report, so it cannot make the platform retry this tick and re-dispatch
     // the schedules above.
     spendAnomaly: await runSpendAnomalyPass(env, now),
+    tenantCatalogAudit,
   };
+}
+
+async function catalogAuditPass(
+  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases">,
+): Promise<TenantCatalogAuditSweepReport> {
+  if (deps.controlDatabase === null) {
+    return {
+      scanned: 0,
+      reconciled: 0,
+      failed: 0,
+      skipped: "control_database_unavailable",
+    };
+  }
+  return reconcileProvisionedTenantCatalogAudits(deps.tenantDatabases, deps.controlDatabase);
 }
 
 /**

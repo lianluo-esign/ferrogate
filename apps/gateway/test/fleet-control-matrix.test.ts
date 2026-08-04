@@ -984,6 +984,23 @@ const CONTROLS: readonly FleetControl[] = [
     enforcement: /"asset_version_referenced"/,
     authorityTables: ["asset_channels"],
   },
+  {
+    /**
+     * Tenant model catalog routing and its operator CRUD surface (#811, #812,
+     * #813). The control plane writes the tenant catalog and the gateway reads
+     * the same four tables before resolving model candidates.
+     */
+    id: "tenant-model-catalog",
+    title: "the tenant-owned provider, model and offering catalog",
+    required: "self",
+    enforcement: /TenantModelCatalogStore|tenantModelCatalogFromD1/,
+    authorityTables: [
+      "provider_channels",
+      "catalog_models",
+      "catalog_model_offerings",
+      "catalog_revisions",
+    ],
+  },
 ];
 
 /** The Workers that ENFORCE a control. */
