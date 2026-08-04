@@ -142,6 +142,15 @@ describe("the runtime contract at the top of the file", () => {
     // "the Worker will not boot" to "a test fails".
     expect(wranglerToml()).toMatch(/^main\s*=\s*"src\/worker\.ts"/m);
   });
+
+  it("commits Durable Object tenant routing as the production default", () => {
+    // The tenancy harness deliberately uses `binding_strict` to exercise the
+    // legacy D1 mode, so its green tests cannot prove that the deploy config
+    // actually turns the DO topology on. This gate reads the committed
+    // wrangler.toml itself; changing the production value back to `off` or a
+    // D1 mode must fail here even while the harness remains green.
+    expect(wranglerToml()).toMatch(/^GATEWAY_TENANT_DB_ROUTING\s*=\s*"durable_object"\s*$/m);
+  });
 });
 
 describe("every Durable Object binding is deployable", () => {
