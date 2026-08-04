@@ -18,7 +18,7 @@
  *   3. the comparison actually detects a difference (so the gate cannot pass
  *      vacuously), and one command regenerates all of it.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -167,12 +167,6 @@ describe("generated clients", () => {
   });
 });
 
-/** `git check-ignore` as a predicate: true when the path is not (and cannot be) committed. */
-function isGitIgnored(absolutePath) {
-  const result = spawnSync("git", ["check-ignore", "-q", absolutePath], { cwd: REPO_ROOT });
-  return result.status === 0;
-}
-
 describe("generation is one command", () => {
   /** Every tracked package.json, as [relative path, parsed]. */
   function trackedPackageJson() {
@@ -186,6 +180,7 @@ describe("generation is one command", () => {
     )
       .split("\n")
       .filter(Boolean)
+      .filter((relative) => existsSync(path.join(REPO_ROOT, relative)))
       .map((relative) => [
         relative,
         JSON.parse(readFileSync(path.join(REPO_ROOT, relative), "utf8")),
@@ -208,17 +203,13 @@ describe("generation is one command", () => {
     // regenerated and the other forgotten. Any npm script that invokes
     // openapi-typescript directly is a third pipeline in the making.
     //
-    // Exempt: a script whose `-o` output is git-ignored. Such a script cannot
-    // go stale, because nothing of it is committed — `tools/openapi-client-smoke`
-    // regenerates into a scratch file and type-checks it on every run. The rule
-    // is derived rather than allow-listed so a new scratch generator needs no
-    // edit here, and a new COMMITTED one still fails.
+    // Every package must go through the root generator, including scratch
+    // checks. A second generator invocation is a second version pin and a
+    // second path that can silently diverge from the committed artifacts.
     const offenders = [];
     for (const [file, pkg] of trackedPackageJson()) {
       for (const [name, command] of Object.entries(pkg.scripts ?? {})) {
         if (typeof command !== "string" || !command.includes("openapi-typescript")) continue;
-        const output = /-o\s+(\S+)/.exec(command)?.[1];
-        if (output && isGitIgnored(path.join(REPO_ROOT, path.dirname(file), output))) continue;
         offenders.push(`${file} -> ${name}: ${command}`);
       }
     }
