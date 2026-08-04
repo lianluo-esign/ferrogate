@@ -16,9 +16,29 @@ const ENV = {
       tenant_id: "tenant_files",
       scopes: ["assets.read", "assets.write"],
     },
+    {
+      key: "fg_files_ro",
+      id: "key_files_ro",
+      tenant_id: "tenant_files",
+      scopes: ["assets.read"],
+    },
+    {
+      key: "fg_files_no_host",
+      id: "key_files_no_host",
+      tenant_id: "tenant_files_no_host",
+      scopes: ["assets.read", "assets.write"],
+    },
+    {
+      key: "fg_files_other",
+      id: "key_files_other",
+      tenant_id: "tenant_files_other",
+      scopes: ["assets.read", "assets.write"],
+    },
   ]),
   ASSET_ENTITLEMENTS: JSON.stringify({
     tenant_files: { asset_hosting_enabled: true },
+    tenant_files_no_host: { asset_hosting_enabled: false },
+    tenant_files_other: { asset_hosting_enabled: true },
   }),
 };
 
@@ -117,5 +137,55 @@ describe("OpenAI-compatible Files API", () => {
 
     const missing = await call(`/v1/files/${file.id}`);
     expect(missing.status).toBe(404);
+  });
+
+  test("preserves asset scope and hosting gates for file writes", async () => {
+    const { call } = gateway();
+
+    const missingWriteScope = await call("/v1/files", {
+      method: "POST",
+      token: "fg_files_ro",
+      body: fileForm(),
+    });
+    expect(missingWriteScope.status).toBe(403);
+    expect((await missingWriteScope.json() as { error: { code: string } }).error.code).toBe(
+      "scope_denied",
+    );
+
+    const missingHosting = await call("/v1/files", {
+      method: "POST",
+      token: "fg_files_no_host",
+      body: fileForm(),
+    });
+    expect(missingHosting.status).toBe(403);
+    expect((await missingHosting.json() as { error: { code: string } }).error.code).toBe(
+      "asset_hosting_disabled",
+    );
+  });
+
+  test("keeps file content and deletion tenant-scoped", async () => {
+    const { call } = gateway();
+
+    const created = await call("/v1/files", {
+      method: "POST",
+      body: fileForm("tenant-owned content"),
+    });
+    expect(created.status).toBe(200);
+    const file = (await created.json()) as FileObject;
+
+    const otherContent = await call(`/v1/files/${file.id}/content`, {
+      token: "fg_files_other",
+    });
+    expect(otherContent.status).toBe(404);
+
+    const otherDelete = await call(`/v1/files/${file.id}`, {
+      method: "DELETE",
+      token: "fg_files_other",
+    });
+    expect(otherDelete.status).toBe(404);
+
+    const ownerContent = await call(`/v1/files/${file.id}/content`);
+    expect(ownerContent.status).toBe(200);
+    expect(await ownerContent.text()).toBe("tenant-owned content");
   });
 });
