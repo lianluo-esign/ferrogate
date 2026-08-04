@@ -45,7 +45,7 @@ import {
   assetEgressQuotaDenial,
   assetPullAuditMessage,
   recordAssetEgress,
-} from "./egress.js";
+} from "@ferrogate/billing";
 import { sha256Hex } from "./hash.js";
 import {
   type AssetObjectRef,
