@@ -240,7 +240,7 @@ describe("catalog seeding is best effort", () => {
     await handle.db
       .prepare(
         "INSERT INTO tenant_provisioning_marks (tenant_id, mark, detail, applied_at_unix) " +
-          "VALUES (?, ?, 'legacy-empty-seed', ?)",
+          "VALUES (?, ?, 'entries=0', ?)",
       )
       .bind(TENANT_A, MODEL_CATALOG_SEED_MARK, NOW)
       .run();
@@ -256,6 +256,31 @@ describe("catalog seeding is best effort", () => {
         .bind(TENANT_A)
         .first<{ count: number }>(),
     ).toEqual({ count: DEFAULT_TENANT_MODEL_CATALOG.length });
+  });
+
+  test("does not resurrect a tenant that intentionally deletes every model", async () => {
+    await registerTenant(TENANT_A);
+    await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW });
+
+    const handle = await router.forTenant(TENANT_A);
+    await handle.db.prepare("DELETE FROM model_catalog WHERE tenant_id = ?").bind(TENANT_A).run();
+
+    const rerun = await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW + 60 });
+
+    expect(rerun.status).toBe("incomplete");
+    expect(rerun.catalogSeeded).toBe(false);
+    expect(rerun.catalogEntries).toBe(0);
+    expect(await listTenantModelCatalog(handle.db, TENANT_A)).toHaveLength(0);
+    expect(
+      await handle.db
+        .prepare("SELECT mark FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+        .bind(TENANT_A, MODEL_CATALOG_SEED_MARK)
+        .first(),
+    ).not.toBeNull();
+
+    const registration = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).get(TENANT_A);
+    expect(registration?.status).toBe("incomplete");
+    expect(registration?.catalogSeededAtUnix).toBeUndefined();
   });
 });
 

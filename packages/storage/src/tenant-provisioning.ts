@@ -298,9 +298,9 @@ export async function provisionTenantStorage(
       );
       const catalog = await listTenantModelCatalog(handle.db, tenantId);
       if (catalog.length === 0) {
-        // The seed helper normally prevents this state and repairs an empty mark.
-        // Keep the roster incomplete if the catalog is still empty after that
-        // recovery attempt; the next provisioning run can retry it.
+        // The seed helper repairs only the known legacy empty-seed mark. Keep
+        // the roster incomplete if a tenant-owned catalog is still empty after
+        // a rerun; reseeding would resurrect models the tenant deleted.
         throw StorageError.runtime(
           [
             `tenant ${tenantId} catalog seeding completed without any rows; retry provisioning`,
@@ -332,9 +332,11 @@ export async function provisionTenantStorage(
     } catch (error) {
       if (catalogStepComplete) throw error;
       const message = error instanceof Error ? error.message : String(error);
+      const incompleteBase: TenantDatabaseRegistration = { ...base };
+      incompleteBase.catalogSeededAtUnix = undefined;
       await registry.upsert(
         {
-          ...base,
+          ...incompleteBase,
           schemaVersion,
           storageBackend: handle.source,
           status: "incomplete",
