@@ -27,6 +27,7 @@ import {
   ARTIFACTS,
   BANNER,
   GENERATE_COMMAND,
+  PYTHON_BANNER,
   REPO_ROOT,
   checkArtifact,
   render,
@@ -41,17 +42,23 @@ function discoverGeneratedClients() {
   // not "files named *.generated.ts": the next generated client may be named
   // anything, and the failure mode being guarded is precisely "nobody
   // remembered to register it".
-  const marker = "// GENERATED FILE — DO NOT EDIT.";
-  const listed = execFileSync("git", ["grep", "-l", "--fixed-strings", marker, "--", "."], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  })
-    .split("\n")
-    .filter(Boolean);
+  const markers = ["// GENERATED FILE — DO NOT EDIT.", "# GENERATED FILE - DO NOT EDIT."];
+  const listed = new Set();
+  for (const marker of markers) {
+    for (const relative of execFileSync(
+      "git",
+      ["grep", "-l", "--fixed-strings", marker, "--", "."],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    )
+      .split("\n")
+      .filter(Boolean)) {
+      listed.add(relative);
+    }
+  }
 
-  return listed.filter((relative) => {
+  return [...listed].filter((relative) => {
     const first = readFileSync(path.join(REPO_ROOT, relative), "utf8").split("\n", 1)[0];
-    return first === marker;
+    return markers.includes(first);
   });
 }
 
@@ -150,8 +157,9 @@ describe("generated clients", () => {
   it("banners every artifact with the one root regeneration command", () => {
     for (const artifact of ARTIFACTS) {
       const committed = readFileSync(path.join(REPO_ROOT, artifact.output), "utf8");
+      const banner = artifact.format === "python" ? PYTHON_BANNER : BANNER;
       expect(
-        committed.startsWith(BANNER),
+        committed.startsWith(banner),
         `${artifact.output} does not carry the shared banner`,
       ).toBe(true);
     }

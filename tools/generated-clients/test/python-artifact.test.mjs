@@ -7,7 +7,7 @@ describe("Python admin SDK artifact", () => {
       expect.objectContaining({
         slug: "sdks/python",
         spec: "docs/openapi/admin-api.openapi.json",
-        output: "sdks/python/ferrogate_admin/api.generated.py",
+        output: "sdks/python/ferrogate_admin/api/generated.py",
       }),
     );
   });

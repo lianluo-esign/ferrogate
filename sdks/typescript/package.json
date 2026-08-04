@@ -1,16 +1,33 @@
 {
   "name": "@ferrogate/admin-sdk",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "description": "Thin typed TypeScript client for the FerroGate Control Plane API, generated from docs/openapi/admin-api.openapi.json.",
+  "license": "Apache-2.0",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
-  "types": "./src/index.ts",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "pack:check": "bun ../../tools/sdk-packaging/check.mjs typescript",
     "generate": "bun ../../tools/generated-clients/generate.mjs --only sdks/typescript"
   },
   "dependencies": {

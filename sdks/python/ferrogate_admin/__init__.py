@@ -18,6 +18,7 @@ from .client import (
     Transport,
     urllib_transport,
 )
+from .api import ADMIN_OPERATION_IDS, OPENAPI_OPERATION_COUNT, OPERATIONS, Operation
 from .errors import (
     ERROR_ENVELOPE_FIELDS,
     FerrogateApiError,
@@ -32,11 +33,15 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "ERROR_ENVELOPE_FIELDS",
     "AdminClient",
+    "ADMIN_OPERATION_IDS",
     "FerrogateApiError",
     "FerrogateError",
     "FerrogateTransportError",
     "HttpRequest",
     "HttpResponse",
+    "OPENAPI_OPERATION_COUNT",
+    "OPERATIONS",
+    "Operation",
     "Transport",
     "api_error_from",
     "default_code_for_status",
