@@ -244,7 +244,6 @@ function parseScope(record: StoreRecord): PolicyScopeSelector | null {
     project_ids: [],
     workspace_ids: [],
     api_key_ids: [],
-    service_account_ids: [],
     gateway_config_ids: [],
     models: [],
     providers: [],

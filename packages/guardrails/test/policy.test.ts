@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
+  type CheckBinding,
+  type PolicyRevision,
+  type PolicyScopeSelector,
   admitPolicyRevision,
   aggregateCheckOutcomes,
   administrativeRank,
@@ -9,9 +12,6 @@ import {
   scopeMatches,
   selectPolicyRevisions,
   validatePolicyRevision,
-  type CheckBinding,
-  type PolicyRevision,
-  type PolicyScopeSelector,
 } from "../src/index.js";
 
 function emptyScope(overrides: Partial<PolicyScopeSelector> = {}): PolicyScopeSelector {
