@@ -360,15 +360,14 @@ migrations_dir = "../../sql/d1-ts/tenant"
 # deploy, pass every test, and hand this Worker its own full quota: a quieter
 # version of the admission bypass wave 16 closed.
 #
-# NO `[[migrations]]` stanza belongs to it. A migration INTRODUCES a class and
-# the class is introduced by the script that DEFINES it — `apps/gateway`, whose
-# `new_sqlite_classes = ["RateLimiterDurableObject"]` already exists. A second
-# `new_sqlite_classes` here would claim to define a class this script does not
+# NO lifecycle declaration belongs to it. The class is introduced by the script
+# that DEFINES it — `apps/gateway`, whose `[exports.RateLimiterDurableObject]`
+# SQLite declaration already exists. A second lifecycle declaration here would
+# claim to define a class this script does not
 # export and `wrangler deploy` rejects it. For the same reason there is no
 # `src/worker.ts` re-export: this Worker BINDS the class, it does not define
 # it. (If the class is ever MOVED into this app, the stanza must be
-# `new_sqlite_classes`, never `new_classes` — the latter deploys cleanly and
-# silently swaps SQLite for the key-value storage backend.)
+# an SQLite `exports` declaration, never a legacy key-value declaration.)
 #
 # DEPLOY ORDER: `ferrogate-gateway` FIRST. A `script_name` binding to a script
 # that does not exist yet FAILS THE DEPLOY — which is the point. That refusal

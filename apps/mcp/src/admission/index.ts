@@ -33,14 +33,13 @@
  *   private one. `idFromName("key:k1")` then addresses the SAME instance the
  *   gateway addresses, so a credential at 60 rpm is charged one window across
  *   `/v1/chat/completions`, `/v1/mcp` and `/v1/mcp/tool/execute`.
- * * **NO `[[migrations]]` stanza is added to `apps/mcp/wrangler.toml`.** A
- *   migration belongs to the script that DEFINES the class, and that is
- *   `apps/gateway`, whose `new_sqlite_classes = ["RateLimiterDurableObject"]`
- *   already exists. Adding a second migration here would try to re-define a
- *   class this script does not own and the deploy would fail. (If a future
- *   change ever does move the class into this app, the stanza must be
- *   `new_sqlite_classes`, never `new_classes` — the latter deploys cleanly and
- *   silently gives the key-value storage backend instead of SQLite.)
+ * * **NO lifecycle declaration is added to `apps/mcp/wrangler.toml`.** The
+ *   class belongs to the script that DEFINES it, `apps/gateway`, whose
+ *   `[exports.RateLimiterDurableObject]` SQLite declaration already exists.
+ *   Adding a second lifecycle declaration here would try to re-define a class
+ *   this script does not own and the deploy would fail. (If a future change
+ *   ever does move the class into this app, the stanza must be an SQLite
+ *   `exports` declaration, never a legacy key-value declaration.)
  * * No `src/worker.ts` export line is needed here for the same reason: this
  *   Worker binds the class, it does not define it.
  *
