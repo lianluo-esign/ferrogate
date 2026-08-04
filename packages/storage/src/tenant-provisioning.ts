@@ -46,7 +46,7 @@
  * | 1. verify the `tenants` row | nothing; no object addressed, no row written | — |
  * | 2. write `pending` | a roster row that says "started, never finished" | `listUnfinished()` |
  * | 3. observe the schema version | the same | `listUnfinished()` |
- * | 4. seed the catalog | a seeded tenant still marked `pending` | `listUnfinished()`; the resume re-reads the object's own seed mark and does NOT re-seed |
+ * | 4. seed the catalog | a tenant marked `incomplete` with the seed error | `listUnfinished()`; the resume re-reads the object's own seed mark and does NOT re-seed |
  * | 5. write `ready` | a healthy tenant | — |
  *
  * The inverse ordering is the tempting one and it is wrong: writing `ready`
@@ -54,11 +54,12 @@
  * indistinguishable from a finished one, which is precisely the shape of "some
  * tenants mysteriously have no models".
  *
- * Every failure is also RECORDED, not just thrown: {@link provisionTenantStorage}
- * writes `failed` with the refusal's own message before re-raising, so the state
- * an operator finds names the step that stopped. A tenant that failed because it
- * had no `tenants` row and a tenant that failed because the schema apply threw
- * get different fixes, and a bare `pending` cannot tell them apart.
+ * Every failure is also RECORDED. Structural failures write `failed` with the
+ * refusal's own message before re-raising; a catalog-only failure writes
+ * `incomplete` and returns normally because the gateway's current env catalog
+ * remains usable. A tenant that failed because it had no `tenants` row, one that
+ * failed because schema apply threw, and one waiting for a seed retry get
+ * different fixes.
  *
  * ## Idempotent, by construction rather than by convention
  *
@@ -72,7 +73,6 @@ import { StorageError } from "./errors.js";
 import { parseLifecycleStatus } from "./lifecycle-status.js";
 import {
   DEFAULT_TENANT_MODEL_CATALOG,
-  MODEL_CATALOG_SEED_MARK,
   type TenantModelCatalogEntry,
   listTenantModelCatalog,
   seedTenantModelCatalog,
@@ -88,7 +88,7 @@ import {
 /** What one provisioning run did. Every field is an observation, not a plan. */
 export interface TenantProvisioningOutcome {
   readonly tenantId: string;
-  /** `ready` on success. The failure path throws rather than returning `failed`. */
+  /** `ready` on success; `incomplete` when only catalog seeding needs a retry. */
   readonly status: TenantProvisioningStatus;
   /** Where this tenant's data physically lives, taken from the resolved handle. */
   readonly storageBackend: TenantDatabaseSource;
@@ -227,10 +227,11 @@ export async function assertTenantRegistered(
 /**
  * Provision (or resume, or re-run) one tenant's storage. Idempotent.
  *
- * Returns the observed state on success. On failure it records `failed` and the
- * refusal's own message on the roster row and then re-raises: the caller's error
- * handling is unchanged, and the operator gets a durable, greppable record of
- * which step stopped.
+ * Returns the observed state on success. A catalog seed failure records
+ * `incomplete` and returns normally because the gateway's current model source
+ * is independent of this future per-tenant catalog. Schema, routing, and
+ * control-database failures still record `failed` and re-raise, so onboarding
+ * cannot report storage as ready when the object itself is unavailable.
  *
  * @throws {@link StorageError} `notFound` for an unregistered tenant (nothing is
  *   written and no object is addressed), or whatever the storage layer raised
@@ -284,61 +285,80 @@ export async function provisionTenantStorage(
     const handle = await router.forTenant(tenantId);
     const schemaVersion = await observedSchemaVersion(handle.db, tenantId);
 
-    // (4) Seed, at most once ever, gated inside the tenant's own storage.
-    const seed = await seedTenantModelCatalog(
-      handle.db,
-      tenantId,
-      nowUnix,
-      options.catalog ?? DEFAULT_TENANT_MODEL_CATALOG,
-    );
-    const catalog = await listTenantModelCatalog(handle.db, tenantId);
-    if (catalog.length === 0) {
-      // Reached only if the seed reported "already done" against a catalog that
-      // is empty — i.e. a mark committed without its rows, which the seeder's
-      // single `transactionSync` is designed to make impossible. The refusal is
-      // about the SEEDER, not about inference: it says the one-shot mark and the
-      // rows it vouches for disagree, so the mark will suppress every future
-      // seed of a table that is empty and no later run will repair it. Reporting
-      // `ready` on that would make the roster's own integrity claim false. (It
-      // used to say "because a tenant with no catalog answers 400
-      // model_not_found", which nothing in the tree does — see
-      // `./tenant-model-catalog.ts`.)
-      throw StorageError.runtime(
-        [
-          `tenant ${tenantId} carries the ${MODEL_CATALOG_SEED_MARK} mark but has an EMPTY model`,
-          "catalog. The seed mark and its rows are written in one transaction, so this state",
-          "should be unreachable; refusing to report the tenant ready, because the mark will now",
-          "suppress every later seed of a table that has nothing in it.",
-        ].join(" "),
+    // (4) Seed, at most once ever, gated inside the tenant's own storage. A
+    // catalog failure is recoverable and must not turn a tenant creation into a
+    // failed document write.
+    let catalogStepComplete = false;
+    try {
+      const seed = await seedTenantModelCatalog(
+        handle.db,
+        tenantId,
+        nowUnix,
+        options.catalog ?? DEFAULT_TENANT_MODEL_CATALOG,
       );
+      const catalog = await listTenantModelCatalog(handle.db, tenantId);
+      if (catalog.length === 0) {
+        // The seed helper repairs only the known legacy empty-seed mark. Keep
+        // the roster incomplete if a tenant-owned catalog is still empty after
+        // a rerun; reseeding would resurrect models the tenant deleted.
+        throw StorageError.runtime(
+          [
+            `tenant ${tenantId} catalog seeding completed without any rows; retry provisioning`,
+          ].join(" "),
+        );
+      }
+      catalogStepComplete = true;
+
+      // (5) Only now is the tenant healthy.
+      const ready: TenantDatabaseRegistration = {
+        ...base,
+        schemaVersion,
+        storageBackend: handle.source,
+        status: "ready",
+        catalogSeededAtUnix: seed.seededAtUnix,
+        lastError: undefined,
+      };
+      await registry.upsert(ready, nowUnix);
+
+      return {
+        tenantId,
+        status: "ready",
+        storageBackend: handle.source,
+        schemaVersion,
+        catalogSeeded: seed.seeded,
+        catalogEntries: catalog.length,
+        resumed,
+      };
+    } catch (error) {
+      if (catalogStepComplete) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      const incompleteBase: TenantDatabaseRegistration = { ...base };
+      incompleteBase.catalogSeededAtUnix = undefined;
+      await registry.upsert(
+        {
+          ...incompleteBase,
+          schemaVersion,
+          storageBackend: handle.source,
+          status: "incomplete",
+          lastError: message,
+        },
+        nowUnix,
+      );
+      return {
+        tenantId,
+        status: "incomplete",
+        storageBackend: handle.source,
+        schemaVersion,
+        catalogSeeded: false,
+        catalogEntries: 0,
+        resumed,
+      };
     }
-
-    // (5) Only now is the tenant healthy.
-    const ready: TenantDatabaseRegistration = {
-      ...base,
-      schemaVersion,
-      storageBackend: handle.source,
-      status: "ready",
-      catalogSeededAtUnix: seed.seededAtUnix,
-      lastError: undefined,
-    };
-    await registry.upsert(ready, nowUnix);
-
-    return {
-      tenantId,
-      status: "ready",
-      storageBackend: handle.source,
-      schemaVersion,
-      catalogSeeded: seed.seeded,
-      catalogEntries: catalog.length,
-      resumed,
-    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    // Recorded, then re-raised. Swallowing here would give the caller a
-    // successful-looking onboarding, which is the one outcome this module exists
-    // to make impossible; recording nothing would give the operator a tenant
-    // stuck at `pending` with no cause.
+    // Structural failures are recorded, then re-raised. Catalog failures are
+    // handled by the nested block above because they do not make storage
+    // unreachable.
     await registry.upsert({ ...base, status: "failed", lastError: message }, nowUnix).catch(() => {
       // The control database is the thing that just failed, plausibly. There
       // is nowhere else to put this, and masking the ORIGINAL refusal with a

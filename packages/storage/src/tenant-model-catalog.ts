@@ -251,11 +251,11 @@ export interface TenantModelCatalogSeedOutcome {
  * Everything happens in ONE `batch()`, which is one transaction on every backend
  * this repo routes a tenant through (`native_binding` and `durable_object`;
  * `rest` reports `supportsAtomicBatch: false` and is not a tenant backend any
- * more). That matters because the mark and the rows must land together: a mark
- * without rows is a tenant permanently stuck at an empty catalog that no resume
- * will ever fill, and rows without a mark is a catalog that gets re-seeded over
- * the tenant's edits on the next resume. Both failure modes are silent, and both
- * are removed by the same transaction.
+ * more). That matters because the mark and the rows must land together: rows
+ * without a mark are re-seeded over the tenant's edits on the next resume, while
+ * a known legacy empty-seed mark is repaired before a new seed is attempted. An
+ * empty seed is rejected before the mark is written, so a failed catalog step
+ * never turns into a permanent onboarding gate.
  *
  * ## The mark is read BEFORE the batch, and that read is not redundant
  *
@@ -267,11 +267,11 @@ export interface TenantModelCatalogSeedOutcome {
  * removed one, which is exactly the asymmetry this function is built around.
  *
  * So the mark is read first, and an already-marked tenant returns without
- * writing anything at all. What the transaction is still for is the OTHER
- * direction: on the seeding path the claim and the rows must land together, or a
- * crash between them leaves a mark with no rows — a tenant permanently stuck at
- * an empty catalog that no resume will ever fill, because every resume reads the
- * mark and stops.
+ * writing anything at all when its catalog is present. If a restored or older
+ * database has an empty catalog, the mark is treated as authoritative unless its
+ * detail explicitly says the old empty-seed path ran; only that known malformed
+ * mark is removed when the same transaction proves the catalog is still empty.
+ * On the seeding path the claim and the rows must land together.
  *
  * Two provisioners racing on a FRESH tenant both pass the pre-read and both run
  * the batch; one wins the claim and the other's inserts are `OR IGNORE` no-ops
@@ -289,9 +289,39 @@ export async function seedTenantModelCatalog(
   nowUnix: number,
   entries: readonly TenantModelCatalogEntry[] = DEFAULT_TENANT_MODEL_CATALOG,
 ): Promise<TenantModelCatalogSeedOutcome> {
+  if (entries.length === 0) {
+    throw StorageError.runtime(
+      "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
+    );
+  }
+
   const already = await readSeedMark(db, tenantId);
   if (already !== undefined) {
-    return { seeded: false, inserted: 0, seededAtUnix: already };
+    const catalog = await listTenantModelCatalog(db, tenantId);
+    if (catalog.length > 0) {
+      return { seeded: false, inserted: 0, seededAtUnix: already };
+    }
+
+    // A tenant may intentionally delete every seeded model. Only the old
+    // entries=0 marker is unambiguously a failed seed; every other existing
+    // mark is authoritative and must not resurrect tenant-owned deletions.
+    if ((await readSeedMarkDetail(db, tenantId)) !== "entries=0") {
+      return { seeded: false, inserted: 0, seededAtUnix: already };
+    }
+
+    // This conditional delete repairs the known empty-seed state without
+    // deleting a concurrent seed that has already inserted rows.
+    const repaired = await clearEmptySeedMark(db, tenantId);
+    if (!repaired) {
+      const concurrentCatalog = await listTenantModelCatalog(db, tenantId);
+      const concurrentMark = await readSeedMark(db, tenantId);
+      if (concurrentMark !== undefined && concurrentCatalog.length > 0) {
+        return { seeded: false, inserted: 0, seededAtUnix: concurrentMark };
+      }
+      throw StorageError.runtime(
+        `tenant ${tenantId} has a model catalog seed mark but no catalog rows, and the empty mark could not be repaired safely; retry provisioning`,
+      );
+    }
   }
 
   const claim = db
@@ -367,6 +397,30 @@ async function readSeedMark(db: D1Database, tenantId: string): Promise<number | 
     .bind(tenantId, MODEL_CATALOG_SEED_MARK)
     .first<{ applied_at_unix: number }>();
   return row?.applied_at_unix;
+}
+
+/** Detail recorded by the seed claim, or undefined when no mark exists. */
+async function readSeedMarkDetail(db: D1Database, tenantId: string): Promise<string | undefined> {
+  const row = await db
+    .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+    .bind(tenantId, MODEL_CATALOG_SEED_MARK)
+    .first<{ detail: string | null }>();
+  return row?.detail ?? undefined;
+}
+
+/** Remove only a known empty-seed mark whose tenant catalog is still empty. */
+async function clearEmptySeedMark(db: D1Database, tenantId: string): Promise<boolean> {
+  const results = await db.batch([
+    db
+      .prepare(
+        "DELETE FROM tenant_provisioning_marks " +
+          "WHERE tenant_id = ? AND mark = ? " +
+          "AND detail = 'entries=0' " +
+          "AND NOT EXISTS (SELECT 1 FROM model_catalog WHERE tenant_id = ?) RETURNING mark",
+      )
+      .bind(tenantId, MODEL_CATALOG_SEED_MARK, tenantId),
+  ]);
+  return (results[0]?.results ?? []).length > 0;
 }
 
 /** Every catalog row this tenant holds, by model name ascending. */

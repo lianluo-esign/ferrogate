@@ -25,6 +25,7 @@ import { StorageError } from "../../src/errors.js";
 import {
   ControlDatabaseTenantRegistry,
   DEFAULT_TENANT_MODEL_CATALOG,
+  MODEL_CATALOG_SEED_MARK,
   type TenantDatabaseRouter,
   describeTenantStorage,
   listTenantModelCatalog,
@@ -197,6 +198,89 @@ describe("provisioning a tenant end to end", () => {
     await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW });
     const handle = await router.forTenant(TENANT_A);
     expect(await resolveTenantModel(handle.db, TENANT_A, "no-such-model")).toBeUndefined();
+  });
+});
+
+describe("catalog seeding is best effort", () => {
+  test("a failed seed is recoverable and does not throw from provisioning", async () => {
+    await registerTenant(TENANT_A);
+
+    const incomplete = await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalog: [],
+    });
+
+    expect(incomplete.status).toBe("incomplete");
+    expect(incomplete.catalogSeeded).toBe(false);
+    expect(incomplete.catalogEntries).toBe(0);
+
+    const handle = await router.forTenant(TENANT_A);
+    const mark = await handle.db
+      .prepare("SELECT mark FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+      .bind(TENANT_A, MODEL_CATALOG_SEED_MARK)
+      .first();
+    expect(mark).toBeNull();
+
+    const registry = new ControlDatabaseTenantRegistry(env.CONTROL_DB);
+    const registration = await registry.get(TENANT_A);
+    expect(registration?.status).toBe("incomplete");
+    expect(registration?.lastError).toMatch(/catalog seed requires at least one entry/);
+    expect((await registry.listUnfinished()).map((row) => row.tenantId)).toContain(TENANT_A);
+
+    const recovered = await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW + 60 });
+    expect(recovered.status).toBe("ready");
+    expect(recovered.catalogSeeded).toBe(true);
+    expect(recovered.catalogEntries).toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
+    expect((await registry.get(TENANT_A))?.lastError).toBeUndefined();
+  });
+
+  test("repairs a stale seed mark before retrying the catalog", async () => {
+    await registerTenant(TENANT_A);
+    const handle = await router.forTenant(TENANT_A);
+    await handle.db
+      .prepare(
+        "INSERT INTO tenant_provisioning_marks (tenant_id, mark, detail, applied_at_unix) " +
+          "VALUES (?, ?, 'entries=0', ?)",
+      )
+      .bind(TENANT_A, MODEL_CATALOG_SEED_MARK, NOW)
+      .run();
+
+    const recovered = await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW + 60 });
+
+    expect(recovered.status).toBe("ready");
+    expect(recovered.catalogSeeded).toBe(true);
+    expect(recovered.catalogEntries).toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
+    expect(
+      await handle.db
+        .prepare("SELECT COUNT(*) AS count FROM model_catalog WHERE tenant_id = ?")
+        .bind(TENANT_A)
+        .first<{ count: number }>(),
+    ).toEqual({ count: DEFAULT_TENANT_MODEL_CATALOG.length });
+  });
+
+  test("does not resurrect a tenant that intentionally deletes every model", async () => {
+    await registerTenant(TENANT_A);
+    await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW });
+
+    const handle = await router.forTenant(TENANT_A);
+    await handle.db.prepare("DELETE FROM model_catalog WHERE tenant_id = ?").bind(TENANT_A).run();
+
+    const rerun = await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW + 60 });
+
+    expect(rerun.status).toBe("incomplete");
+    expect(rerun.catalogSeeded).toBe(false);
+    expect(rerun.catalogEntries).toBe(0);
+    expect(await listTenantModelCatalog(handle.db, TENANT_A)).toHaveLength(0);
+    expect(
+      await handle.db
+        .prepare("SELECT mark FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+        .bind(TENANT_A, MODEL_CATALOG_SEED_MARK)
+        .first(),
+    ).not.toBeNull();
+
+    const registration = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).get(TENANT_A);
+    expect(registration?.status).toBe("incomplete");
+    expect(registration?.catalogSeededAtUnix).toBeUndefined();
   });
 });
 
