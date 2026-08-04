@@ -230,4 +230,17 @@ describe("OpenAI-compatible Files API", () => {
     const content = await call(`/v1/files/${file.id}/content`);
     expect(content.status).toBe(404);
   });
+
+  test("rejects a multipart file field that is not a File", async () => {
+    const { call } = gateway();
+    const form = new FormData();
+    form.set("purpose", "assistants");
+    form.set("file", "not-a-file");
+
+    const response = await call("/v1/files", { method: "POST", body: form });
+    expect(response.status).toBe(400);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe(
+      "invalid_request",
+    );
+  });
 });

@@ -456,6 +456,18 @@ async function controlBody<T extends z.ZodTypeAny>(
   return parsed.data;
 }
 
+interface MultipartUploadFile {
+  readonly name: string;
+  readonly type: string;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+function isMultipartUploadFile(value: unknown): value is MultipartUploadFile {
+  if (typeof value !== "object" || value === null) return false;
+  const file = value as Partial<MultipartUploadFile>;
+  return typeof file.name === "string" && typeof file.arrayBuffer === "function";
+}
+
 /** Decode the OpenAI multipart upload into the asset service's narrow input. */
 async function fileUploadBody(
   c: Context<AssetEnv>,
@@ -471,13 +483,12 @@ async function fileUploadBody(
     );
   }
   const purpose = form.get("purpose");
-  const upload = form.get("file");
+  const upload = form.get("file") as unknown;
   if (
     typeof purpose !== "string" ||
     purpose.trim() === "" ||
     purpose.length > 64 ||
-    upload === null ||
-    typeof upload === "string"
+    !isMultipartUploadFile(upload)
   ) {
     throw new HttpError(
       400,
@@ -485,7 +496,7 @@ async function fileUploadBody(
       "multipart uploads require a non-empty purpose and a file field",
     );
   }
-  const filename = upload.name?.trim() ?? "";
+  const filename = upload.name.trim();
   if (filename === "" || filename.length > 512) {
     throw new HttpError(400, "invalid_request", "file must have a filename of 1-512 characters");
   }
