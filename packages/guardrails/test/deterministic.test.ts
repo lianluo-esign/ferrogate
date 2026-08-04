@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   DetectorError,
   type DetectorInput,
@@ -11,6 +11,15 @@ import {
 const AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"; // valid AKIA + 16 chars
 const DEADLINE = () => Date.now() + 5_000;
 
+interface ComplexitySample {
+  size: number;
+  encodeCalls: number;
+  overlapChecks: number;
+  elapsedMs: number;
+  findings: number;
+  patches: number;
+}
+
 function inputFrom(body: unknown): DetectorInput {
   const env = normalizeRequest("chat_completions", body);
   return {
@@ -20,6 +29,43 @@ function inputFrom(body: unknown): DetectorInput {
     text: "",
     segments: env.segments,
   };
+}
+
+async function measureRepetitiveInput(detector: DeterministicDetector, size: number): Promise<ComplexitySample> {
+  const input = inputFrom({ messages: [{ role: "user", content: "x".repeat(size) }] });
+  let encodeCalls = 0;
+  let overlapChecks = 0;
+  const originalEncode = TextEncoder.prototype.encode;
+  const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode").mockImplementation(function (value) {
+    encodeCalls += 1;
+    return originalEncode.call(this, value);
+  });
+  const originalSome = Array.prototype.some;
+  const someSpy = vi.spyOn(Array.prototype, "some").mockImplementation(function (callback, thisArg) {
+    return originalSome.call(
+      this,
+      (value, index, array) => {
+        overlapChecks += 1;
+        return callback.call(thisArg, value, index, array);
+      },
+      thisArg,
+    );
+  });
+  const started = performance.now();
+  try {
+    const result = await detector.evaluate(input, DEADLINE());
+    return {
+      size,
+      encodeCalls,
+      overlapChecks,
+      elapsedMs: performance.now() - started,
+      findings: result.findings.length,
+      patches: result.patches.length,
+    };
+  } finally {
+    encodeSpy.mockRestore();
+    someSpy.mockRestore();
+  }
 }
 
 describe("DeterministicDetector secret scanning", () => {
@@ -298,5 +344,33 @@ describe("config validation", () => {
     const result = await detector.evaluate(input, Date.now() + 30_000);
     expect(result.findings.some((f) => f.category === "detector.truncated")).toBe(false);
     expect(result.findings).toHaveLength(10);
+  });
+});
+
+describe("repetitive input complexity", () => {
+  test("keeps byte encoding and overlap checks bounded across three input sizes", async () => {
+    const detector = DeterministicDetector.new({
+      id: "complexity",
+      supported_sources: ["user"],
+      keywords: ["x"],
+      regex: [],
+      secret_patterns: [],
+    });
+    const samples = [];
+    for (const size of [1_250, 2_500, 5_000]) {
+      samples.push(await measureRepetitiveInput(detector, size));
+    }
+
+    expect(samples.map((sample) => sample.size)).toEqual([1_250, 2_500, 5_000]);
+    for (const sample of samples) {
+      expect(sample.findings).toBe(sample.size);
+      expect(sample.patches).toBe(sample.size);
+      // One cached segment encoding is enough; a small allowance permits one
+      // encode per scan while still rejecting one encode per match.
+      expect(sample.encodeCalls).toBeLessThanOrEqual(2);
+      // A linear scan over all prior intervals would exceed this bound by the
+      // largest input size; the matcher must answer overlap without O(k^2).
+      expect(sample.overlapChecks).toBeLessThanOrEqual(sample.size * 4);
+    }
   });
 });
