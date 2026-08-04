@@ -109,12 +109,13 @@ const LEAF = {
 
 const EXPECTED_PATH = "user:u_alice>agent:planner>agent:writer";
 
+let requestSequence = 0;
+
 function incrementingRequestIds(): RequestIdFactory {
-  let next = 0;
   return {
     next: (): string => {
-      next += 1;
-      return `fg-${next.toString(16).padStart(16, "0")}`;
+      requestSequence += 1;
+      return `fg-${requestSequence.toString(16).padStart(16, "0")}`;
     },
   };
 }
@@ -130,6 +131,10 @@ function gateway(options: { readonly signingKey?: string | null } = {}): Harness
     // The REAL control database: the request-log row and the revocation lookup
     // both go through the same D1 the deployed Worker uses.
     CONTROL_DB: bindings["CONTROL_DB"],
+    // Tenant-attributed request evidence is authoritative in the tenant object;
+    // keep this composition-root harness on the same binding path as the
+    // deployed gateway so its projection assertions remain meaningful.
+    TENANT_DATA: bindings["TENANT_DATA"],
     ...(options.signingKey === null
       ? {}
       : { DELEGATION_SIGNING_KEY: options.signingKey ?? SIGNING_SECRET }),
@@ -199,12 +204,14 @@ function nowUnix(): number {
  */
 async function loggedRow(response: Response): Promise<Record<string, unknown>> {
   const requestId = response.headers.get("x-request-id");
-  const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
-  const row = rows.find((candidate) => candidate["request_id"] === requestId);
-  if (row === undefined) {
-    throw new Error(`no request_logs row for ${String(requestId)} (${rows.length} rows present)`);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
+    const row = rows.find((candidate) => candidate["request_id"] === requestId);
+    if (row !== undefined) return row;
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  return row;
+  const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
+  throw new Error(`no request_logs row for ${String(requestId)} (${rows.length} rows present)`);
 }
 
 async function errorCode(response: Response): Promise<string | undefined> {

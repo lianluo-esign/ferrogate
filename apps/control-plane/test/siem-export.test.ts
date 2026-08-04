@@ -39,6 +39,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControlPlaneBindings } from "../src/ports.js";
+import { resolveTenantDatabases } from "../src/adapters.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { SIEM_EXPORT_SINKS_VAR, parseSiemSinks } from "../src/siem/config.js";
 import { advanceSiemCursor, readSiemCursor } from "../src/siem/cursor.js";
@@ -153,8 +154,49 @@ function rows(tenant: string, prefix: string, count: number, from = OLD) {
     completedAtUnix: from + index,
     route: "openai.chat.completions",
     statusCode: 200,
+    guardrailVerdict: "not_screened",
     document: { object: "request_log" },
   }));
+}
+
+type RequestLogSeed = ReturnType<typeof rows>[number];
+
+/** Register the tenant and mirror the SIEM fixture into its authoritative object. */
+async function seedTenantRequestLogs(tenantId: string, records: readonly RequestLogSeed[]): Promise<void> {
+  await db()
+    .prepare(
+      `INSERT INTO tenant_databases
+         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+          storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, NULL, 12, 'durable_object', 'ready', 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         storage_backend = 'durable_object', provisioning_status = 'ready'`,
+    )
+    .bind(tenantId, `uuid-${tenantId}`, `db-${tenantId}`)
+    .run();
+  const tenant = (await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)).db;
+  await tenant.prepare("DELETE FROM request_logs").run();
+  await tenant.batch(
+    records.map((record) =>
+      tenant
+        .prepare(
+          `INSERT INTO request_logs
+             (request_id, tenant, started_at_unix, completed_at_unix, route, status_code,
+              guardrail_verdict, request_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          record.requestId,
+          tenantId,
+          record.startedAtUnix,
+          record.completedAtUnix ?? null,
+          record.route ?? null,
+          record.statusCode ?? null,
+          "not_screened",
+          JSON.stringify(record.document ?? {}),
+        ),
+    ),
+  );
 }
 
 beforeAll(applySchema);
@@ -519,8 +561,10 @@ describe("the customer sink credential", () => {
 
 describe("the pump is not a second read path over the same tables", () => {
   it("delivers exactly the documents the JSONL export serves that tenant", async () => {
-    await seedRequestLogs(rows("acme", "acme", 3));
+    const acmeRows = rows("acme", "acme", 3);
+    await seedRequestLogs(acmeRows);
     await seedRequestLogs(rows("globex", "globex", 2));
+    await seedTenantRequestLogs("acme", acmeRows);
 
     await runSiemExportPass(bindings(), NOW);
 
@@ -535,8 +579,11 @@ describe("the pump is not a second read path over the same tables", () => {
 
     const byId = (records: Record<string, unknown>[]) =>
       [...records].sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    // Same fence, same projection: the SIEM and the console must never be able
-    // to disagree about what happened.
+    // The SIEM is a bounded fleet reader and remains on the control-D1 derived
+    // projection until #825 supplies the common freshness/as-of contract. The
+    // tenant list/export path is separately pinned to TenantDataObject in the
+    // request-log reader tests; this test keeps the projection-backed SIEM and
+    // its own JSONL control projection in lockstep.
     expect(byId(deliveredDocuments())).toEqual(byId(served));
   });
 });

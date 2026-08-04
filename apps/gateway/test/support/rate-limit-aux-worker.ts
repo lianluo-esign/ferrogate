@@ -85,8 +85,12 @@ function gatewayIdentity(gatewayAppRoot: URL): { name: string; compatibilityDate
  *   `vitest.config.ts` into a sibling temp file, so `import.meta.url` is only
  *   trustworthy in the config file itself.
  */
-export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
+export function gatewayRateLimiterAuxWorker(
+  gatewayAppRoot: URL,
+  options: { readonly tenantData?: boolean } = {},
+) {
   const { name, compatibilityDate } = gatewayIdentity(gatewayAppRoot);
+  const includeTenantData = options.tenantData === true;
 
   // `stdin` rather than a checked-in entry file: the entry is two lines and
   // keeping it here means there is no second place for the export list to rot.
@@ -96,6 +100,9 @@ export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
     stdin: {
       contents: [
         'export { RateLimiterDurableObject } from "./src/ratelimit/durable-object.js";',
+        ...(includeTenantData
+          ? ['export { TenantDataObject } from "@ferrogate/storage/durable-objects";']
+          : []),
         "export default {",
         "  fetch() {",
         '    return new Response("ferrogate-gateway test aux worker: RPC only", { status: 404 });',
@@ -126,6 +133,13 @@ export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
     throw new Error("rate-limit aux worker: bundle does not contain RateLimiterDurableObject");
   }
 
+  const durableObjects: Record<string, { className: string; useSQLite: boolean }> = {
+    RATE_LIMIT: { className: "RateLimiterDurableObject", useSQLite: true },
+  };
+  if (includeTenantData) {
+    durableObjects.TENANT_DATA = { className: "TenantDataObject", useSQLite: true };
+  }
+
   return {
     name,
     compatibilityDate,
@@ -138,9 +152,7 @@ export function gatewayRateLimiterAuxWorker(gatewayAppRoot: URL) {
     // defines, and its SQLite export means `useSQLite` here. Getting
     // this wrong locally would exercise the key-value backend the real
     // namespace does not use.
-    durableObjects: {
-      RATE_LIMIT: { className: "RateLimiterDurableObject", useSQLite: true },
-    },
+    durableObjects,
   };
 }
 

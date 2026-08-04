@@ -294,7 +294,11 @@ export default defineConfig({
         // configuration. The auxiliary worker carries the gateway's REAL
         // `RateLimiterDurableObject`, so `test/shared-rate-limit.test.ts` can
         // charge a window as the gateway and watch THIS Worker find it spent.
-        workers: [gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url))],
+        workers: [
+          gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url), {
+            tenantData: true,
+          }),
+        ],
         bindings: {
           TEST_WRANGLER_TOML: WRANGLER_TOML,
           FG_DEV_IN_MEMORY_PORTS: "1",

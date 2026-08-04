@@ -170,26 +170,28 @@ describe("every Durable Object binding is deployable", () => {
   });
 });
 
-describe("the BORROWED counter namespace (#666)", () => {
+describe("the BORROWED gateway namespaces (#666, #859)", () => {
   const borrowed = stanzas("durable_objects.bindings").filter((body) => !LOCAL(body));
 
-  it("binds RATE_LIMIT from apps/gateway and nothing else cross-script", () => {
-    // Not vacuous, and the count is pinned: a second borrowed namespace is a
-    // second deploy-order dependency and deserves its own decision.
-    expect(borrowed.length).toBe(1);
-    const body = borrowed[0] as string[];
-    expect(value(body, "name")).toBe("RATE_LIMIT");
-    expect(value(body, "class_name")).toBe("RateLimiterDurableObject");
-    expect(value(body, "script_name")).toBe("ferrogate-gateway");
+  it("binds RATE_LIMIT and TENANT_DATA from apps/gateway", () => {
+    expect(borrowed.length).toBe(2);
+    const byName = new Map(borrowed.map((body) => [value(body, "name"), body]));
+    expect(value(byName.get("RATE_LIMIT") as string[], "class_name")).toBe(
+      "RateLimiterDurableObject",
+    );
+    expect(value(byName.get("TENANT_DATA") as string[], "class_name")).toBe("TenantDataObject");
+    expect(value(byName.get("RATE_LIMIT") as string[], "script_name")).toBe("ferrogate-gateway");
+    expect(value(byName.get("TENANT_DATA") as string[], "script_name")).toBe("ferrogate-gateway");
   });
 
-  it("neither migrates nor exports the borrowed class", () => {
+  it("does not locally migrate the borrowed classes", () => {
     // Both are deploy-time refusals from Cloudflare ("Cannot create binding for
     // class … because it is not currently defined" for the migration side), and
     // an export here would be the start of a SECOND, private namespace — the
     // per-Worker quota multiplier this issue exists to close.
     const { sqlite, legacy } = migratedClasses();
     expect([...sqlite, ...legacy]).not.toContain("RateLimiterDurableObject");
+    expect([...sqlite, ...legacy]).not.toContain("TenantDataObject");
     expect((entry as unknown as Record<string, unknown>).RateLimiterDurableObject).toBeUndefined();
     expect(
       (compositionRoot as unknown as Record<string, unknown>).RateLimiterDurableObject,
