@@ -53,6 +53,7 @@ import { type GuardrailProtocol, normalizeRequest, normalizeResponse } from "@fe
  *   evaluates once at the end (`not_enforced`).
  */
 import type { Context, MiddlewareHandler, Next } from "hono";
+import { GATEWAY_CONFIG_HEADER } from "../middleware/response-cache.js";
 import { contributeRequestLogFacts, requestLogFactsFor } from "../requestlog/facts.js";
 import type { GuardrailVerdict } from "../requestlog/record.js";
 import { publishConversationReplayScreener } from "./conversation-replay.js";
@@ -871,7 +872,7 @@ export function tenantFrom(c: Context): GuardrailTenant {
 
 /** The authenticated request's gateway profile, when one was selected. */
 export function gatewayConfigIdFrom(c: Context): string | undefined {
-  const value = c.req.header("x-ferrogate-config")?.trim();
+  const value = c.req.header(GATEWAY_CONFIG_HEADER)?.trim();
   return value === undefined || value === "" ? undefined : value;
 }
 

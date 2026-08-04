@@ -38,7 +38,6 @@ export function policyRevision(overrides: Partial<Revision> = {}): Revision {
       project_ids: [],
       workspace_ids: [],
       api_key_ids: [],
-      service_account_ids: [],
       gateway_config_ids: [],
       models: [],
       providers: [],

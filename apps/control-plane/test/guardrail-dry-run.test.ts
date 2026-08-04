@@ -298,6 +298,33 @@ describe("guardrail dry-run: selection is computed from the revision scope", () 
     expect(body.selected).toBe(true);
     expect(body.policy_revision).toBe("gp_noscope@1");
   });
+
+  it("rejects a retired service-account selector instead of treating it as inert", async () => {
+    await seedPolicy("gp_service_account_dry_run", { checks: [] });
+
+    const response = await dryRun("gp_service_account_dry_run", {
+      stage: "request",
+      text: "",
+      service_account_id: "service-account-1",
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: "invalid_request_body" },
+    });
+  });
+
+  it("fails closed for a legacy persisted service-account scope", async () => {
+    await seedPolicy("gp_legacy_service_account", {
+      scope: { service_account_ids: ["service-account-1"] },
+      checks: [localCheck("kw", { keywords: ["boom"] })],
+    });
+
+    const body = (await (
+      await dryRun("gp_legacy_service_account", { stage: "request", text: "boom" })
+    ).json()) as DryRunBody;
+    expect(body.selected).toBe(false);
+    expect(body.checks).toEqual([]);
+  });
 });
 
 describe("guardrail dry-run: #515 — the body may not re-point the tenant", () => {

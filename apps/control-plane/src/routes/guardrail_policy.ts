@@ -112,7 +112,6 @@ export const dryRunRequestSchema = z
     project_id: z.string().optional(),
     workspace_id: z.string().optional(),
     api_key_id: z.string().optional(),
-    service_account_id: z.string().optional(),
     gateway_config_id: z.string().optional(),
     model: z.string().optional(),
     provider: z.string().optional(),
@@ -744,9 +743,6 @@ export const guardrailPolicyRoutes: GroupModule = crudGroup("guardrail_policy", 
       ...(request.project_id === undefined ? {} : { project_id: request.project_id }),
       ...(request.workspace_id === undefined ? {} : { workspace_id: request.workspace_id }),
       ...(request.api_key_id === undefined ? {} : { api_key_id: request.api_key_id }),
-      ...(request.service_account_id === undefined
-        ? {}
-        : { service_account_id: request.service_account_id }),
       ...(request.gateway_config_id === undefined
         ? {}
         : { gateway_config_id: request.gateway_config_id }),

@@ -8403,8 +8403,6 @@ export interface components {
             /** @default [] */
             api_key_ids: string[];
             /** @default [] */
-            service_account_ids: string[];
-            /** @default [] */
             gateway_config_ids: string[];
             /** @default [] */
             models: string[];
@@ -8586,7 +8584,6 @@ export interface components {
             project_id?: string | null;
             workspace_id?: string | null;
             api_key_id?: string | null;
-            service_account_id?: string | null;
             gateway_config_id?: string | null;
             model?: string | null;
             provider?: string | null;
