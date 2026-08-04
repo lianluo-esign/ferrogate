@@ -764,8 +764,9 @@ export interface Usage {
    * that answered is not the route that was planned).
    *
    * Consumed by `metering/route-price.ts::routePriceSettledCostUsd`, which
-   * `src/index.ts` passes as `MeteringSinkOptions.settledCostUsd`. Absent ⇒ the
-   * rate card decides, exactly as before.
+   * `src/index.ts` passes as `MeteringSinkOptions.settledCostUsd`. Production
+   * inference also selects `serving_offering`, so an absent result is recorded
+   * as unpriced and cannot fall through to a wildcard rate card.
    */
   readonly inputPricePer1m?: number | undefined;
   /** See {@link Usage.inputPricePer1m} — USD per 1M completion tokens. */

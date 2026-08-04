@@ -109,13 +109,12 @@ describe("composition root — durable metering is mounted", () => {
 /** Logical model the fake registry publishes to clients. */
 const LOGICAL_MODEL = "wiring-probe";
 /**
- * PHYSICAL model put on the wire — and it must be one the DEPLOYED price book
- * knows. `src/index.ts` builds the sink with no `priceBook`, so it gets
- * `PriceBook.withDefaultRateCard()`; a pair that is priced NOWHERE (neither on
- * the card nor on its own `[[models]]` row) still writes no LEDGER row, which
- * would be indistinguishable from an unmounted drain. Pricing the pair is what
- * makes a missing row mean exactly one thing — this file is a mount gate, not a
- * pricing test.
+ * PHYSICAL model put on the wire — and its served offering must carry a price.
+ * `src/index.ts` settles production traffic from the route that actually
+ * served it, so this row is deliberately priced here. A pair that is priced
+ * NOWHERE still writes no LEDGER row, which would be indistinguishable from
+ * an unmounted drain. Pricing the pair is what makes a missing row mean
+ * exactly one thing — this file is a mount gate, not a pricing test.
  *
  * That unpriced case is NOT out of scope for the suite, it just belongs
  * elsewhere: `test/metering/unpriced.test.ts` drives this same deployed article
@@ -157,6 +156,8 @@ beforeAll(() => {
       provider: "wiring-probe-provider",
       provider_model: PROVIDER_MODEL,
       capabilities: ["chat"],
+      input_price_per_1m: 0.15,
+      output_price_per_1m: 0.6,
     },
   ]);
 });

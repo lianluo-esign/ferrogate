@@ -15,6 +15,7 @@
  * it; and a client that hangs up mid-stream must still be billed for what it
  * consumed.
  */
+import { PriceBook, modelPriceUsd, priceEntry } from "@ferrogate/billing";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
@@ -26,6 +27,7 @@ import {
   type MeteredCharge,
   MeteringUsageSink,
   TrackingScheduler,
+  routePriceSettledCostUsd,
 } from "../../src/metering/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
@@ -66,13 +68,22 @@ interface Harness {
 }
 
 function gateway(
-  options: { ledger?: LedgerStore; routes?: readonly PhysicalRoute[] } = {},
+  options: {
+    ledger?: LedgerStore;
+    routes?: readonly PhysicalRoute[];
+    priceBook?: PriceBook;
+    settlementMode?: "rate_card" | "serving_offering";
+  } = {},
 ): Harness {
   const ledger = new InMemoryLedgerStore();
   const outbox = new InMemoryMeteringOutbox();
   const scheduler = new TrackingScheduler();
   const sink = new MeteringUsageSink({
-    priceBook: pricedBook(),
+    priceBook: options.priceBook ?? pricedBook(),
+    ...(options.settlementMode === undefined ? {} : { settlementMode: options.settlementMode }),
+    ...(options.settlementMode === "serving_offering"
+      ? { settledCostUsd: routePriceSettledCostUsd }
+      : {}),
     ledger: options.ledger ?? ledger,
     outbox,
     scheduler,
@@ -501,7 +512,8 @@ describe("the provider-attempt index reaches the ledger key", () => {
     await h.scheduler.idle();
 
     expect(h.ledger.size).toBe(1);
-    const charge = h.ledger.charges[0]!;
+    const charge = h.ledger.charges[0];
+    if (charge === undefined) throw new Error("expected a recorded charge");
     // The key that partitions a retried request from its first attempt.
     expect(charge.entry.provider_attempt).toEqual({
       provider_attempt_id: "fg-0000000000000001:provider-attempt:1",
@@ -540,5 +552,139 @@ describe("the provider-attempt index reaches the ledger key", () => {
       provider_attempt_id: "fg-0000000000000001:provider-attempt:0",
       provider_attempt_index: 0,
     });
+  });
+});
+
+describe("serving offering settlement (#814)", () => {
+  const MODEL = "offering-priced-model";
+  const PRIMARY: PhysicalRoute = {
+    ...OPENAI_ROUTE,
+    logicalModel: MODEL,
+    provider: "primary-channel",
+    providerModel: "primary-upstream",
+    baseUrl: "https://api.primary-offering.example/v1/",
+    priority: 0,
+    inputPricePer1m: 1,
+    outputPricePer1m: 2,
+  };
+  const FALLBACK: PhysicalRoute = {
+    ...OPENAI_ROUTE,
+    logicalModel: MODEL,
+    provider: "fallback-channel",
+    providerModel: "fallback-upstream",
+    baseUrl: "https://api.fallback-offering.example/v1/",
+    priority: 1,
+    inputPricePer1m: 10,
+    outputPricePer1m: 20,
+  };
+  const CANARY: PhysicalRoute = {
+    ...OPENAI_ROUTE,
+    logicalModel: MODEL,
+    provider: "canary-channel",
+    providerModel: "canary-upstream",
+    baseUrl: "https://api.canary-offering.example/v1/",
+    priority: 5,
+    canaryPercent: 100,
+    inputPricePer1m: 7,
+    outputPricePer1m: 11,
+  };
+  const WILDCARD_CARD = PriceBook.new([priceEntry("*", "*", modelPriceUsd(99, 99))]);
+
+  it("settles a fallback response from the fallback offering, then moves on input-price mutation", async () => {
+    provider = interceptProviderFetch((request) =>
+      request.url.includes("fallback-offering")
+        ? providerJson({
+            id: "chatcmpl-fallback",
+            object: "chat.completion",
+            model: FALLBACK.providerModel,
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+            usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+          })
+        : providerJson({ error: "primary unavailable" }, 503),
+    );
+    const h = gateway({
+      routes: [PRIMARY, FALLBACK],
+      priceBook: WILDCARD_CARD,
+      settlementMode: "serving_offering",
+    });
+
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTHED,
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(provider.requests.map((request) => request.url)).toEqual([
+      `${PRIMARY.baseUrl}chat/completions`,
+      `${FALLBACK.baseUrl}chat/completions`,
+    ]);
+    await h.scheduler.idle();
+
+    const settled = (11 / 1_000_000) * 10 + (4 / 1_000_000) * 20;
+    expect(h.ledger.charges[0]?.entry.provider).toBe("fallback-channel");
+    expect(h.ledger.charges[0]?.entry.provider_model).toBe("fallback-upstream");
+    expect(h.ledger.charges[0]?.entry.cost.total_cost).toBeCloseTo(settled, 12);
+    expect(h.sink.stats.divergences).toBe(0);
+
+    const mutatedFallback = { ...FALLBACK, inputPricePer1m: 20 };
+    const mutated = gateway({
+      routes: [PRIMARY, mutatedFallback],
+      priceBook: WILDCARD_CARD,
+      settlementMode: "serving_offering",
+    });
+    const mutatedResponse = await mutated.call("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTHED,
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    expect(mutatedResponse.status).toBe(200);
+    await mutated.scheduler.idle();
+    const mutatedCost = mutated.ledger.charges[0]?.entry.cost.total_cost ?? 0;
+    expect(mutatedCost - settled).toBeCloseTo((11 / 1_000_000) * 10, 12);
+  });
+
+  it("settles a canary response from the canary offering and identifies its channel", async () => {
+    provider = interceptProviderFetch((request) =>
+      request.url.includes("canary-offering")
+        ? providerJson({
+            id: "chatcmpl-canary",
+            object: "chat.completion",
+            model: CANARY.providerModel,
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+            usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+          })
+        : providerJson({ error: "unexpected stable route" }, 503),
+    );
+    const h = gateway({
+      routes: [PRIMARY, CANARY],
+      priceBook: WILDCARD_CARD,
+      settlementMode: "serving_offering",
+    });
+
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTHED,
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]?.url).toContain("canary-offering");
+    await h.scheduler.idle();
+
+    expect(h.ledger.charges[0]?.entry.provider).toBe("canary-channel");
+    expect(h.ledger.charges[0]?.entry.provider_model).toBe("canary-upstream");
+    expect(h.ledger.charges[0]?.entry.cost.total_cost).toBeCloseTo(
+      (11 / 1_000_000) * 7 + (4 / 1_000_000) * 11,
+      12,
+    );
   });
 });

@@ -66,20 +66,36 @@ const PROVIDERS = JSON.stringify([
 ]);
 
 /**
- * Two logical models, each pointed at a `provider_model` the DEPLOYED default
- * rate card prices (`PriceBook.withDefaultRateCard()`), so settlement runs the
- * shipped numbers rather than a card this file invented:
+ * Two logical models, each with the serving offering prices used by the
+ * assertions below. The values mirror the former default card entries, but
+ * they are stated on the route so this production test does not depend on a
+ * wildcard rate card:
  *
  *  - `claude-sonnet-4` — $3.00 / $15.00, cache read 0.1x, cache write 1.25x;
  *  - `gpt-4o`          — $2.50 / $10.00, cache read 0.5x.
  *
- * No `[[models]]` price fields are set, on purpose: a row price would settle
- * through `routePriceSettledCostUsd` instead and the assertion would be about a
- * number this file supplied.
+ * The cache/read, cache/write and reasoning prices are explicit too; otherwise
+ * the serving route would conservatively use its ordinary input/output rate.
  */
 const MODELS = JSON.stringify([
-  { name: "cache-probe", provider: "anthropic-probe", provider_model: "claude-sonnet-4" },
-  { name: "reasoning-probe", provider: "openai-probe", provider_model: "gpt-4o" },
+  {
+    name: "cache-probe",
+    provider: "anthropic-probe",
+    provider_model: "claude-sonnet-4",
+    input_price_per_1m: 3.0,
+    output_price_per_1m: 15.0,
+    cached_input_price_per_1m: 0.3,
+    cache_write_price_per_1m: 3.75,
+  },
+  {
+    name: "reasoning-probe",
+    provider: "openai-probe",
+    provider_model: "gpt-4o",
+    input_price_per_1m: 2.5,
+    output_price_per_1m: 10.0,
+    cached_input_price_per_1m: 1.25,
+    reasoning_price_per_1m: 10.0,
+  },
 ]);
 
 /**

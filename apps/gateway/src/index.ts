@@ -89,6 +89,8 @@ import { tenantDatabase } from "./tenancy/index.js";
  * no `diagnostics` were supplied — logged nothing either. It was found on the
  * live account, not by a test.
  *
+ * - `settlementMode: "serving_offering"` prevents the inference sink from
+ *   using the legacy wildcard rate card as a second source of truth.
  * - `settledCostUsd: routePriceSettledCostUsd` carries the SERVED route's own
  *   `[[models]].input_price_per_1m` / `output_price_per_1m` into settlement, so
  *   an operator who priced a model on its registry row gets that model billed
@@ -101,6 +103,7 @@ import { tenantDatabase } from "./tenancy/index.js";
  */
 const usage = createMeteringUsageSink({
   bindings: meteringBindingsFromEnv,
+  settlementMode: "serving_offering",
   settledCostUsd: routePriceSettledCostUsd,
   diagnostics: {
     onPriceNotFound: ({ requestId, provider, providerModel, message }) => {
