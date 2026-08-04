@@ -459,19 +459,31 @@ async function controlBody<T extends z.ZodTypeAny>(
 interface MultipartUploadFile {
   readonly name: string;
   readonly type: string;
-  arrayBuffer(): Promise<ArrayBuffer>;
+  readonly size: number;
+  stream(): ReadableStream<Uint8Array>;
 }
 
 function isMultipartUploadFile(value: unknown): value is MultipartUploadFile {
   if (typeof value !== "object" || value === null) return false;
   const file = value as Partial<MultipartUploadFile>;
-  return typeof file.name === "string" && typeof file.arrayBuffer === "function";
+  return (
+    typeof file.name === "string" &&
+    typeof file.size === "number" &&
+    Number.isSafeInteger(file.size) &&
+    file.size >= 0 &&
+    typeof file.stream === "function"
+  );
 }
 
 /** Decode the OpenAI multipart upload into the asset service's narrow input. */
 async function fileUploadBody(
   c: Context<AssetEnv>,
-): Promise<{ content: Uint8Array; contentType: string; metadata: { filename: string; purpose: string } }> {
+): Promise<{
+  size_bytes: number;
+  stream: () => ReadableStream<Uint8Array>;
+  contentType: string;
+  metadata: { filename: string; purpose: string };
+}> {
   let form: FormData;
   try {
     form = await c.req.formData();
@@ -502,7 +514,8 @@ async function fileUploadBody(
   }
   try {
     return {
-      content: new Uint8Array(await upload.arrayBuffer()),
+      size_bytes: upload.size,
+      stream: () => upload.stream(),
       contentType: upload.type || "application/octet-stream",
       metadata: { filename, purpose: purpose.trim() },
     };

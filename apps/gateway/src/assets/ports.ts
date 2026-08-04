@@ -57,7 +57,7 @@ export interface AssetObjectPutOptions {
 export interface AssetObjectStore {
   put(
     key: string,
-    value: ArrayBuffer | ArrayBufferView | string | null,
+    value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string | null,
     options?: AssetObjectPutOptions,
   ): Promise<AssetObjectMetadata | null>;
   get(key: string): Promise<AssetObjectBody | null>;
@@ -71,7 +71,7 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
 
   async put(
     key: string,
-    value: ArrayBuffer | ArrayBufferView | string | null,
+    value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string | null,
     options?: AssetObjectPutOptions,
   ): Promise<AssetObjectMetadata | null> {
     if (value === null) {
@@ -81,6 +81,30 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
     let bytes: Uint8Array;
     if (typeof value === "string") {
       bytes = new TextEncoder().encode(value);
+    } else if (isReadableByteStream(value)) {
+      const reader = value.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          const chunk = next.value;
+          const copy = new Uint8Array(
+            chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength),
+          );
+          chunks.push(copy);
+          total += copy.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
     } else if (value instanceof ArrayBuffer) {
       bytes = new Uint8Array(value.slice(0));
     } else {
@@ -123,6 +147,15 @@ export class InMemoryAssetObjectStore implements AssetObjectStore {
       this.objects.delete(one);
     }
   }
+}
+
+function isReadableByteStream(value: unknown): value is ReadableStream<Uint8Array> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "getReader" in value &&
+    typeof (value as { getReader?: unknown }).getReader === "function"
+  );
 }
 
 // ---------------------------------------------------------------------------

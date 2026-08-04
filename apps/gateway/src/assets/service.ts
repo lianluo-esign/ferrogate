@@ -47,7 +47,7 @@ import {
   assetPullAuditMessage,
   recordAssetEgress,
 } from "@ferrogate/billing";
-import { randomHex128, sha256Hex } from "./hash.js";
+import { randomHex128, sha256Hex, StreamingSha256, toHex } from "./hash.js";
 import {
   type AssetObjectRef,
   CrossTenantKeyError,
@@ -379,6 +379,14 @@ export interface AssetPushInput {
   readonly signature?: AssetScreeningRequest["signature"];
   /** Metadata projection used by the OpenAI Files adapter. */
   readonly metadata?: StoredAssetMetadata | undefined;
+}
+
+/** Replayable multipart file input; the stream factory is used twice on the large path. */
+export interface FileUploadInput {
+  readonly size_bytes: number;
+  readonly stream: () => ReadableStream<Uint8Array>;
+  readonly contentType: string;
+  readonly metadata: { readonly filename: string; readonly purpose: string };
 }
 
 export interface AssetPullInput {
@@ -875,11 +883,7 @@ export class AssetService {
 
   async createFile(
     caller: AssetCaller,
-    input: {
-      readonly content: Uint8Array;
-      readonly contentType: string;
-      readonly metadata: { readonly filename: string; readonly purpose: string };
-    },
+    input: FileUploadInput,
     context: AssetRequestContext,
   ): Promise<AssetResult<FileObject>> {
     const fileId = `file-${randomHex128()}`;
@@ -895,12 +899,18 @@ export class AssetService {
     );
 
     let status: number;
-    if (input.content.byteLength <= inlineLimit) {
+    if (input.size_bytes <= inlineLimit) {
+      let content: Uint8Array;
+      try {
+        content = await readUploadBytes(input.stream(), inlineLimit);
+      } catch (error) {
+        return fileUploadReadFailure(error, inlineLimit);
+      }
       const pushed = await this.putAsset(
         caller,
         ref,
         {
-          content: input.content,
+          content,
           contentType: input.contentType,
           metadata: input.metadata,
         },
@@ -909,14 +919,24 @@ export class AssetService {
       if (!pushed.ok) return pushed;
       status = pushed.status;
     } else {
-      // Large Files uploads use the same intent/commit lifecycle as assets. The
-      // object store receives the staged bytes under the intent-derived key;
-      // commit then reuses its hash, screening, quota, and immutable-row gates.
-      const sha256 = await sha256Hex(input.content);
+      // A multipart File is replayable, so the first pass only measures and
+      // hashes chunks. The second pass is handed directly to R2 under the
+      // intent-derived staging key; no large Uint8Array is created in Worker.
+      const maxObjectBytes = effectiveMaxObjectBytes(
+        this.#limits.presignMaxObjectBytes,
+        caller.assetMaxObjectBytes,
+        caller.assetStorageQuotaBytes,
+      );
+      let measured: { size_bytes: number; sha256: string };
+      try {
+        measured = await measureUpload(input.stream(), maxObjectBytes);
+      } catch (error) {
+        return fileUploadReadFailure(error, maxObjectBytes);
+      }
       const intent = await this.createUploadIntent(
         caller,
         ref,
-        { size_bytes: input.content.byteLength, sha256 },
+        { size_bytes: measured.size_bytes, sha256: measured.sha256 },
         context,
       );
       if (!intent.ok) return intent;
@@ -927,13 +947,13 @@ export class AssetService {
       const stagingKey = stagingObjectKey(
         this.#ref(caller, { ...ref, variant: "" }),
         uploadId,
-        input.content.byteLength,
-        sha256,
+        measured.size_bytes,
+        measured.sha256,
       );
       const guard = this.#guardKey(stagingKey, caller.tenantId);
       if (guard) return guard;
       try {
-        await this.#objects.put(stagingKey, bufferOf(input.content), {
+        await this.#objects.put(stagingKey, input.stream(), {
           httpMetadata: { contentType: input.contentType },
         });
       } catch (error) {
@@ -949,8 +969,8 @@ export class AssetService {
         ref,
         {
           upload_id: uploadId,
-          size_bytes: input.content.byteLength,
-          sha256,
+          size_bytes: measured.size_bytes,
+          sha256: measured.sha256,
           content_type: input.contentType,
           metadata: input.metadata,
         },
@@ -3014,6 +3034,103 @@ export class AssetService {
       return false;
     }
   }
+}
+
+class FileUploadTooLargeError extends Error {
+  constructor() {
+    super("file upload exceeds the configured inline or object-size limit");
+    this.name = "FileUploadTooLargeError";
+  }
+}
+
+class FileUploadReadError extends Error {
+  constructor() {
+    super("the uploaded file stream could not be read");
+    this.name = "FileUploadReadError";
+  }
+}
+
+function uploadChunk(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  throw new FileUploadReadError();
+}
+
+async function readUploadBytes(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = uploadChunk(next.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new FileUploadTooLargeError();
+      }
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    if (error instanceof FileUploadTooLargeError || error instanceof FileUploadReadError) {
+      throw error;
+    }
+    throw new FileUploadReadError();
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function measureUpload(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<{ size_bytes: number; sha256: string }> {
+  const reader = stream.getReader();
+  const digest = new StreamingSha256();
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = uploadChunk(next.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new FileUploadTooLargeError();
+      }
+      digest.update(chunk);
+    }
+  } catch (error) {
+    if (error instanceof FileUploadTooLargeError || error instanceof FileUploadReadError) {
+      throw error;
+    }
+    throw new FileUploadReadError();
+  } finally {
+    reader.releaseLock();
+  }
+  return { size_bytes: total, sha256: toHex(digest.digest()) };
+}
+
+function fileUploadReadFailure(error: unknown, maxBytes: number): AssetFailure {
+  if (error instanceof FileUploadTooLargeError) {
+    return fail(
+      413,
+      "payload_too_large",
+      `file size exceeds the configured ${maxBytes}-byte upload ceiling`,
+    );
+  }
+  return fail(400, "invalid_request", "could not read the uploaded file");
 }
 
 /** Rust `asset_bucket_unavailable`. */

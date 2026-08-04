@@ -5,6 +5,7 @@
 import { describe, expect, test } from "vitest";
 
 import { assetRouteModule } from "../src/assets/handlers.js";
+import { InMemoryAssetObjectStore } from "../src/assets/ports.js";
 import { createGatewayApp } from "../src/routes/index.js";
 import { harness } from "./assets/helpers.js";
 
@@ -60,8 +61,24 @@ function fileForm(
   return form;
 }
 
-function gateway(limits: { inlineMaxBytes?: number } = {}) {
-  const h = harness();
+class RecordingObjectStore extends InMemoryAssetObjectStore {
+  readonly putValues: unknown[] = [];
+
+  override async put(
+    key: string,
+    value: Parameters<InMemoryAssetObjectStore["put"]>[1],
+    options?: Parameters<InMemoryAssetObjectStore["put"]>[2],
+  ) {
+    this.putValues.push(value);
+    return super.put(key, value, options);
+  }
+}
+
+function gateway(
+  limits: { inlineMaxBytes?: number } = {},
+  objects?: InMemoryAssetObjectStore,
+) {
+  const h = harness(objects === undefined ? {} : { objects });
   const { app } = createGatewayApp({
     modules: [
       assetRouteModule({
@@ -86,7 +103,7 @@ function gateway(limits: { inlineMaxBytes?: number } = {}) {
     return Promise.resolve(app.request(`https://gw.test${path}`, { ...rest, headers: merged }, ENV));
   };
 
-  return { call, presigner: h.presigner };
+  return { call, presigner: h.presigner, objects: h.objects };
 }
 
 interface FileObject {
@@ -231,6 +248,20 @@ describe("OpenAI-compatible Files API", () => {
     expect(content.status).toBe(404);
   });
 
+  test("does not expose the Files asset type through generic asset routes", async () => {
+    const { call } = gateway();
+
+    const write = await call("/v1/assets/openai_file/manual/1", {
+      method: "PUT",
+      headers: { "content-type": "text/plain" },
+      body: "projection pollution",
+    });
+    expect(write.status).toBe(400);
+
+    const read = await call("/v1/assets/openai_file/manual/1");
+    expect(read.status).toBe(400);
+  });
+
   test("rejects a multipart file field that is not a File", async () => {
     const { call } = gateway();
     const form = new FormData();
@@ -245,7 +276,8 @@ describe("OpenAI-compatible Files API", () => {
   });
 
   test("uses the existing presign lifecycle above the inline cap", async () => {
-    const { call, presigner } = gateway({ inlineMaxBytes: 4 });
+    const objects = new RecordingObjectStore();
+    const { call, presigner } = gateway({ inlineMaxBytes: 4 }, objects);
     const created = await call("/v1/files", {
       method: "POST",
       body: fileForm("large file", "large.txt"),
@@ -255,6 +287,14 @@ describe("OpenAI-compatible Files API", () => {
     const file = (await created.json()) as FileObject;
     expect(file.filename).toBe("large.txt");
     expect(presigner.puts).toHaveLength(1);
+    expect(
+      objects.putValues.some(
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { getReader?: unknown }).getReader === "function",
+      ),
+    ).toBe(true);
 
     const content = await call(`/v1/files/${file.id}/content`);
     expect(content.status).toBe(413);

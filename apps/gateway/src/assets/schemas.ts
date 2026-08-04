@@ -37,7 +37,7 @@ const addressSegment = z
   });
 
 /** Reserved literals that can never be an `{asset_type}` family. */
-export const RESERVED_ASSET_TYPE_SEGMENTS = ["storage", "withheld", "presign"] as const;
+export const RESERVED_ASSET_TYPE_SEGMENTS = ["storage", "withheld", "presign", "openai_file"] as const;
 
 export const assetTypeSchema = addressSegment.refine(
   (value) => !(RESERVED_ASSET_TYPE_SEGMENTS as readonly string[]).includes(value),
