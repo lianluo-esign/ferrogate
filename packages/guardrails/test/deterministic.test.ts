@@ -14,6 +14,7 @@ const DEADLINE = () => Date.now() + 5_000;
 interface ComplexitySample {
   size: number;
   encodeCalls: number;
+  codePointAtCalls: number;
   overlapChecks: number;
   elapsedMs: number;
   findings: number;
@@ -31,17 +32,27 @@ function inputFrom(body: unknown): DetectorInput {
   };
 }
 
-async function measureRepetitiveInput(detector: DeterministicDetector, size: number): Promise<ComplexitySample> {
+async function measureRepetitiveInput(
+  detector: DeterministicDetector,
+  size: number,
+): Promise<ComplexitySample> {
   const input = inputFrom({ messages: [{ role: "user", content: "x".repeat(size) }] });
   let encodeCalls = 0;
   let overlapChecks = 0;
   const originalEncode = TextEncoder.prototype.encode;
-  const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode").mockImplementation(function (this: TextEncoder, value) {
+  const encodeSpy = vi.spyOn(TextEncoder.prototype, "encode").mockImplementation(function (
+    this: TextEncoder,
+    value,
+  ) {
     encodeCalls += 1;
     return originalEncode.call(this, value);
   });
   const originalSome = Array.prototype.some;
-    const someSpy = vi.spyOn(Array.prototype, "some").mockImplementation(function (this: unknown[], callback, thisArg) {
+  const someSpy = vi.spyOn(Array.prototype, "some").mockImplementation(function (
+    this: unknown[],
+    callback,
+    thisArg,
+  ) {
     return originalSome.call(
       this,
       (value, index, array) => {
@@ -51,12 +62,22 @@ async function measureRepetitiveInput(detector: DeterministicDetector, size: num
       thisArg,
     );
   });
+  let codePointAtCalls = 0;
+  const originalCodePointAt = String.prototype.codePointAt;
+  const codePointAtSpy = vi.spyOn(String.prototype, "codePointAt").mockImplementation(function (
+    this: string,
+    index?: number,
+  ) {
+    codePointAtCalls += 1;
+    return originalCodePointAt.call(this, index ?? 0);
+  });
   const started = performance.now();
   try {
     const result = await detector.evaluate(input, DEADLINE());
     return {
       size,
       encodeCalls,
+      codePointAtCalls,
       overlapChecks,
       elapsedMs: performance.now() - started,
       findings: result.findings.length,
@@ -65,6 +86,7 @@ async function measureRepetitiveInput(detector: DeterministicDetector, size: num
   } finally {
     encodeSpy.mockRestore();
     someSpy.mockRestore();
+    codePointAtSpy.mockRestore();
   }
 }
 
@@ -167,7 +189,10 @@ describe("coalesced + per-segment scanning", () => {
       regex: [],
       secret_patterns: [],
     });
-    const result = await detector.evaluate(inputFrom({ messages: [{ role: "user", content: "earlier later" }] }), DEADLINE());
+    const result = await detector.evaluate(
+      inputFrom({ messages: [{ role: "user", content: "earlier later" }] }),
+      DEADLINE(),
+    );
 
     expect(result.findings).toHaveLength(2);
     expect(result.patches.map((patch) => [patch.byte_start, patch.byte_end])).toEqual([
@@ -363,6 +388,28 @@ describe("config validation", () => {
     expect(result.findings.some((f) => f.category === "detector.truncated")).toBe(false);
     expect(result.findings).toHaveLength(10);
   });
+
+  test("the finding cap also covers structured findings", async () => {
+    const detector = DeterministicDetector.new({
+      id: "json-flood",
+      supported_sources: ["user"],
+      keywords: [],
+      regex: [],
+      secret_patterns: [],
+      json: { required_keys: ["/required"], forbidden_keys: [] },
+    });
+    const input = inputFrom({
+      messages: Array.from({ length: MAX_FINDINGS_PER_EVALUATION + 1 }, () => ({
+        role: "user",
+        content: "not-json",
+      })),
+    });
+    const result = await detector.evaluate(input, Date.now() + 30_000);
+
+    expect(result.findings).toHaveLength(MAX_FINDINGS_PER_EVALUATION + 1);
+    expect(result.findings.filter((f) => f.category === "detector.truncated")).toHaveLength(1);
+    expect(result.findings.at(-1)?.category).toBe("detector.truncated");
+  });
 });
 
 describe("repetitive input complexity", () => {
@@ -386,6 +433,9 @@ describe("repetitive input complexity", () => {
       // One cached segment encoding is enough; a small allowance permits one
       // encode per scan while still rejecting one encode per match.
       expect(sample.encodeCalls).toBeLessThanOrEqual(2);
+      // `byteLen(segment.text)` must not run once per match. Counting the
+      // underlying code-point visits keeps this assertion deterministic.
+      expect(sample.codePointAtCalls).toBeLessThanOrEqual(sample.size * 10);
       // A linear scan over all prior intervals would exceed this bound by the
       // largest input size; the matcher must answer overlap without O(k^2).
       expect(sample.overlapChecks).toBeLessThanOrEqual(sample.size * 4);

@@ -682,7 +682,7 @@ export class PiiDetector implements GuardrailDetector {
   #addGroupMatch(sink: PiiSink, group: CoalescedGroup, match: EntityMatch): void {
     group.segments.forEach((segment, index) => {
       const segmentStart = group.starts[index] as number;
-      const segmentEnd = segmentStart + byteLen(segment.text);
+      const segmentEnd = group.ends[index] as number;
       const overlapStart = Math.max(match.start, segmentStart);
       const overlapEnd = Math.min(match.end, segmentEnd);
       if (overlapStart < overlapEnd) {
