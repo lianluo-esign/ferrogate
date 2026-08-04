@@ -41,12 +41,12 @@
  * ## Where the policy comes from
  *
  * NOT from `retention_policies`, and this is worth being explicit about because
- * that table exists. It is a TENANT-database table, `request_logs` is a CONTROL
- * one, and D1 has no read spanning the two — `packages/storage`'s own note says
- * the cross-scope decision "belongs to the control plane, not to a per-tenant
- * sweep". Rather than invent a cross-database read on the data plane, the
- * policy is an OPERATOR CONFIG TABLE in `[vars]`, which is the device this
- * gateway already uses for every other fleet-wide operator table
+ * that table exists. It is a TENANT-database table, while this gateway's
+ * `request_logs` control table is only a derived compatibility projection.
+ * Retention therefore resolves the policy from `[vars]`, discovers a bounded
+ * tenant set through that projection, and deletes each authoritative object
+ * before deleting its mirror. The operator config is the device this gateway
+ * already uses for every other fleet-wide operator table
  * (`GATEWAY_PROVIDERS`, `TENANCY_LIFECYCLE`, `TENANT_RBAC_ACTIONS`).
  *
  * Two vars:
@@ -68,6 +68,7 @@ import {
   planLogRetention,
 } from "@ferrogate/storage";
 import { REQUEST_LOG_TABLE, type RequestLogDatabase } from "./d1.js";
+import { requestLogTenantDatabaseFromEnv } from "./sink.js";
 
 /** `[vars] REQUEST_LOG_RETENTION_DAYS` — the fleet-wide window. */
 export const REQUEST_LOG_RETENTION_DAYS_VAR = "REQUEST_LOG_RETENTION_DAYS";
@@ -169,37 +170,40 @@ export interface RequestLogSweepResult {
   readonly pruned: number;
 }
 
-/**
- * Apply one scope's rule to `request_logs`.
- *
- * The candidate window is the OLDEST rows in the scope, because those are the
- * only ones an age rule can select; ordering ascending means the sweep does
- * useful work on its first tick against a large table instead of paging through
- * rows it will certainly keep.
- *
- * A tenant-scoped rule uses STRICT equality, so the fleet default — and only
- * the fleet default — governs the un-attributed (platform) rows. An operator
- * who narrows one tenant's window must not thereby narrow everyone's.
- *
- * Never throws: a retention failure is an unpruned table, which is safe.
- */
-export async function sweepRequestLogRetention(
-  db: RequestLogDatabase,
-  scope: RequestLogRetentionScope,
-  nowUnix: number,
-  maxRows: number = REQUEST_LOG_SWEEP_MAX_ROWS,
-): Promise<RequestLogSweepResult> {
-  const fence = scope.tenantId === undefined ? "" : " WHERE tenant = ?";
-  const params = scope.tenantId === undefined ? [] : [scope.tenantId];
+interface RetentionFence {
+  readonly sql: string;
+  readonly params: readonly (string | number | null)[];
+}
 
+/** `?` placeholders for the bounded projection discovery queries. */
+function placeholders(count: number): string {
+  return new Array(count).fill("?").join(", ");
+}
+
+/**
+ * Plan and delete one bounded candidate window.
+ *
+ * `authoritativeDb` is always deleted FIRST. `projectionDb` is optional so
+ * this primitive remains useful for the old unit-level projection tests, but
+ * the scheduled tenant path always supplies the control projection explicitly
+ * and therefore enforces object-first ordering.
+ */
+async function sweepCandidates(
+  authoritativeDb: RequestLogDatabase,
+  policy: RetentionPolicy,
+  nowUnix: number,
+  maxRows: number,
+  fence: RetentionFence,
+  projectionDb?: RequestLogDatabase,
+): Promise<RequestLogSweepResult> {
   let rows: CandidateRow[];
   try {
-    const result = (await db
+    const result = (await authoritativeDb
       .prepare(
-        `SELECT request_id, started_at_unix FROM ${REQUEST_LOG_TABLE}${fence}
+        `SELECT request_id, started_at_unix FROM ${REQUEST_LOG_TABLE}${fence.sql}
           ORDER BY started_at_unix ASC LIMIT ?`,
       )
-      .bind(...params, maxRows)
+      .bind(...fence.params, maxRows)
       .all()) as { results?: CandidateRow[] };
     rows = result.results ?? [];
   } catch {
@@ -210,16 +214,101 @@ export async function sweepRequestLogRetention(
     id: row.request_id,
     createdAtUnix: row.started_at_unix,
   }));
-  const doomed = planLogRetention(candidates, nowUnix, scope.policy);
+  const doomed = planLogRetention(candidates, nowUnix, policy);
   if (doomed.length === 0) return { scanned: rows.length, pruned: 0 };
 
   try {
-    const statement = db.prepare(`DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`);
-    await db.batch(doomed.map((id) => statement.bind(id)));
+    const statement = authoritativeDb.prepare(
+      `DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`,
+    );
+    await authoritativeDb.batch(doomed.map((id) => statement.bind(id)));
   } catch {
     return { scanned: rows.length, pruned: 0 };
   }
+
+  // D1 has no cross-database transaction. Once the object has committed, a
+  // projection failure leaves stale discovery state, never a missing authority.
+  if (projectionDb !== undefined && projectionDb !== authoritativeDb) {
+    try {
+      const statement = projectionDb.prepare(
+        `DELETE FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`,
+      );
+      await projectionDb.batch(doomed.map((id) => statement.bind(id)));
+    } catch {
+      return { scanned: rows.length, pruned: doomed.length };
+    }
+  }
   return { scanned: rows.length, pruned: doomed.length };
+}
+
+/**
+ * Apply one scope's rule to one authoritative database.
+ *
+ * The candidate window is the OLDEST rows in the scope, because those are the
+ * only ones an age rule can select; ordering ascending means the sweep does
+ * useful work on its first tick against a large table instead of paging through
+ * rows it will certainly keep. The caller must pass the authoritative database
+ * for a tenant scope; this function never chooses a shared fallback.
+ *
+ * Never throws: a retention failure is an unpruned table, which is safe.
+ */
+export async function sweepRequestLogRetention(
+  authoritativeDb: RequestLogDatabase,
+  scope: RequestLogRetentionScope,
+  nowUnix: number,
+  maxRows: number = REQUEST_LOG_SWEEP_MAX_ROWS,
+  projectionDb?: RequestLogDatabase,
+): Promise<RequestLogSweepResult> {
+  const fence =
+    scope.tenantId === undefined
+      ? { sql: "", params: [] }
+      : { sql: " WHERE tenant = ?", params: [scope.tenantId] };
+  return sweepCandidates(authoritativeDb, scope.policy, nowUnix, maxRows, fence, projectionDb);
+}
+
+/** Sweep only unattributed platform rows, which have no tenant object. */
+async function sweepUnscopedProjection(
+  projectionDb: RequestLogDatabase,
+  policy: RetentionPolicy,
+  nowUnix: number,
+): Promise<RequestLogSweepResult> {
+  return sweepCandidates(
+    projectionDb,
+    policy,
+    nowUnix,
+    REQUEST_LOG_SWEEP_MAX_ROWS,
+    { sql: " WHERE tenant IS NULL OR tenant = ''", params: [] },
+  );
+}
+
+/**
+ * Discover a bounded set of attributed tenants from the derived projection.
+ *
+ * This is the unavoidable fleet limitation until #825 defines the general
+ * bounded/as-of fan-out and freshness contract. The query discovers tenant ids
+ * only; every deletion still targets that tenant's authoritative object.
+ */
+async function tenantIdsFromProjection(
+  projectionDb: RequestLogDatabase,
+  maxRows: number,
+  excluded: readonly string[],
+): Promise<string[]> {
+  const exclusion = excluded.length === 0 ? "" : ` AND tenant NOT IN (${placeholders(excluded.length)})`;
+  try {
+    const result = (await projectionDb
+      .prepare(
+        `SELECT tenant FROM ${REQUEST_LOG_TABLE}
+          WHERE tenant IS NOT NULL AND tenant <> ''${exclusion}
+          GROUP BY tenant ORDER BY tenant ASC LIMIT ?`,
+      )
+      .bind(...excluded, maxRows)
+      .all()) as { results?: { tenant?: unknown }[] };
+    return (result.results ?? [])
+      .map((row) => (typeof row.tenant === "string" ? row.tenant : ""))
+      .filter((tenantId) => tenantId !== "");
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -236,10 +325,50 @@ export async function sweepRequestLogs(
 ): Promise<RequestLogSweepResult> {
   let scanned = 0;
   let pruned = 0;
-  for (const scope of requestLogRetentionFromEnv(env)) {
-    const result = await sweepRequestLogRetention(db, scope, nowUnix);
+  const scopes = requestLogRetentionFromEnv(env);
+  const overrides = new Map<string, RetentionPolicy>();
+  for (const scope of scopes) {
+    if (scope.tenantId !== undefined) overrides.set(scope.tenantId, scope.policy);
+  }
+
+  for (const [tenantId, policy] of overrides) {
+    const authoritative = requestLogTenantDatabaseFromEnv(env, tenantId);
+    if (authoritative === undefined) continue;
+    const result = await sweepRequestLogRetention(
+      authoritative,
+      { tenantId, policy },
+      nowUnix,
+      REQUEST_LOG_SWEEP_MAX_ROWS,
+      db,
+    );
     scanned += result.scanned;
     pruned += result.pruned;
+  }
+
+  const fleet = scopes.find((scope) => scope.tenantId === undefined);
+  if (fleet !== undefined) {
+    const unscoped = await sweepUnscopedProjection(db, fleet.policy, nowUnix);
+    scanned += unscoped.scanned;
+    pruned += unscoped.pruned;
+
+    const tenantIds = await tenantIdsFromProjection(
+      db,
+      REQUEST_LOG_SWEEP_MAX_ROWS,
+      [...overrides.keys()],
+    );
+    for (const tenantId of tenantIds) {
+      const authoritative = requestLogTenantDatabaseFromEnv(env, tenantId);
+      if (authoritative === undefined) continue;
+      const result = await sweepRequestLogRetention(
+        authoritative,
+        { tenantId, policy: fleet.policy },
+        nowUnix,
+        REQUEST_LOG_SWEEP_MAX_ROWS,
+        db,
+      );
+      scanned += result.scanned;
+      pruned += result.pruned;
+    }
   }
   return { scanned, pruned };
 }

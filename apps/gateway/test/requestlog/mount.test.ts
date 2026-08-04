@@ -30,7 +30,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
 import {
   REQUEST_LOG_TABLE,
+  REQUEST_LOG_RETENTION_POLICIES_VAR,
   requestLogRetentionFromEnv,
+  requestLogTenantDatabaseFromEnv,
   sweepRequestLogRetention,
   sweepRequestLogs,
   writeRequestLogs,
@@ -270,6 +272,47 @@ describe("policy-driven retention", () => {
     const result = await sweepRequestLogs(controlDb(), {}, NOW);
     expect(result).toEqual({ scanned: 0, pruned: 0 });
     expect(await storedRequestLogs()).toHaveLength(1);
+  });
+
+  it("deletes the tenant object before its control projection", async () => {
+    const tenantId = "retention-order-tenant";
+    const old = record("retention-order-old", NOW - 10 * DAY, tenantId);
+    const objectDb = requestLogTenantDatabaseFromEnv(env, tenantId);
+    expect(objectDb).toBeDefined();
+    await objectDb?.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
+    await writeRequestLogs(controlDb(), [old]);
+    await writeRequestLogs(objectDb!, [old]);
+
+    // A failing projection batch is a mutation-backed ordering probe: if the
+    // implementation deletes control first, the object row would still exist.
+    const failingProjection = {
+      prepare: (query: string) => controlDb().prepare(query),
+      batch: async () => {
+        throw new Error("control projection unavailable");
+      },
+    };
+    const result = await sweepRequestLogs(
+      failingProjection,
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        [REQUEST_LOG_RETENTION_POLICIES_VAR]: JSON.stringify({ [tenantId]: { days: 1 } }),
+      },
+      NOW,
+    );
+
+    expect(result.pruned).toBe(1);
+    expect(
+      await objectDb
+        ?.prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+        .bind(old.requestId)
+        .first(),
+    ).toBeNull();
+    expect(
+      await controlDb()
+        .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+        .bind(old.requestId)
+        .first(),
+    ).not.toBeNull();
   });
 
   it("reads the fleet default and the per-tenant overrides off env", () => {

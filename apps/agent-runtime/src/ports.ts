@@ -64,6 +64,8 @@ export interface AgentRuntimeBindings {
   readonly AGENT_RUN_STATE: DurableObjectNamespace;
   /** Per-`${tenant_id}:${workspace_id}` self-hosted dispatch queue. */
   readonly WORKER_PLANE: DurableObjectNamespace;
+  /** One authoritative SQLite-backed tenant database per tenant (#859). */
+  readonly TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
   /**
    * The TENANT database (`sql/d1-ts/tenant`), holding `api_keys`.
    *

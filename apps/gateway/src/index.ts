@@ -128,9 +128,9 @@ const usage = createMeteringUsageSink({
  * per request, and workerd refuses I/O started on behalf of a different
  * request, so a captured `env` is a correctness bug that only shows up under
  * concurrency. `requestLogBindingsFromEnv` reads `env.REQUEST_LOG` (the Queue
- * producer) and `env.CONTROL_DB` (the CONTROL database that owns
- * `request_logs` — NOT the tenant `DB`, whose migration has no such table) off
- * whichever request is being served.
+ * producer), `env.TENANT_DATA` (the authoritative tenant object), and
+ * `env.CONTROL_DB` (the derived fleet compatibility projection) off whichever
+ * request is being served. Unattributed platform rows remain control-only.
  */
 const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 

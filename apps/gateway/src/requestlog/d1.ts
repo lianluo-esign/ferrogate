@@ -1,18 +1,23 @@
 /**
- * `request_logs` in the CONTROL database — the durable half of the evidence
- * trail (#664).
+ * Request-log persistence for the tenant-authoritative evidence trail (#664,
+ * #859).
  *
- * The table is defined by `sql/d1-ts/control/0001_init_control.sql` (the
- * correlation keys) plus `0003_request_log_columns.sql` (the queryable decision
- * columns). `apps/control-plane` READS it; this module is the only writer in
- * the tree, and it deliberately lives on the gateway because that is the only
- * Worker on the inference path.
+ * `TenantDataObject` owns the authoritative table from
+ * `sql/d1-ts/tenant/0012_request_logs_agent_runs.sql`. The same table in
+ * `sql/d1-ts/control` is a derived compatibility projection for existing fleet
+ * joins. The control copy is never a fallback for a tenant object and may be
+ * stale.
  */
+import { DurableObjectD1Database } from "@ferrogate/storage";
+import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
 
 /** The table `apps/control-plane/src/store/d1.ts::REQUEST_LOG_TABLE` reads. */
 export const REQUEST_LOG_TABLE = "request_logs";
+
+/** The control-D1 table is a derived compatibility projection, never authority. */
+export const REQUEST_LOG_PROJECTION_TABLE = REQUEST_LOG_TABLE;
 
 /**
  * The upsert every write goes through.
@@ -141,6 +146,17 @@ export interface RequestLogDatabase {
   batch(statements: unknown[]): Promise<unknown[]>;
 }
 
+/** Resolve the authoritative object-backed database for one tenant. */
+export function requestLogTenantDatabaseFrom(
+  env: unknown,
+  tenantId: string,
+): RequestLogDatabase | undefined {
+  if (tenantId.trim() === "") return undefined;
+  if (typeof env !== "object" || env === null) return undefined;
+  const stub = tenantDataObjectFor(env as TenantDataBindings, tenantId);
+  return new DurableObjectD1Database(tenantId, stub).asD1Database() as RequestLogDatabase;
+}
+
 /**
  * Persist a batch of records in ONE D1 round trip.
  *
@@ -160,4 +176,12 @@ export async function writeRequestLogs(
   if (records.length === 0) return;
   const statement = db.prepare(REQUEST_LOG_UPSERT_SQL);
   await db.batch(records.map((record) => statement.bind(...requestLogBindings(record))));
+}
+
+/** Persist tenant-attributed rows through their authoritative object. */
+export async function writeTenantRequestLogs(
+  db: RequestLogDatabase,
+  records: readonly RequestLogRecord[],
+): Promise<void> {
+  await writeRequestLogs(db, records);
 }

@@ -104,6 +104,29 @@ export async function tenantDatabaseFor(
 }
 
 /**
+ * Resolve the authoritative request/agent evidence database for one tenant.
+ *
+ * #859 deliberately does not use the generic tenant database fallback here.
+ * These tables are authoritative only in the SQLite-backed TenantDataObject;
+ * a native/shared handle or a missing object is an unavailable evidence path,
+ * never permission to read the control-D1 projection instead.
+ */
+export async function tenantEvidenceDatabaseFor(
+  router: TenantDatabaseRouter,
+  tenantId: string,
+): Promise<D1Database> {
+  const handle = await tenantDatabaseFor(router, tenantId);
+  if (handle === null || handle.source !== "durable_object") {
+    throw new HttpError(
+      503,
+      "tenant_evidence_unavailable",
+      `tenant ${tenantId} has no reachable authoritative TenantDataObject evidence database`,
+    );
+  }
+  return handle.db;
+}
+
+/**
  * The tenant a stored admin document belongs to.
  *
  * The row's own `tenant_id` is authoritative — the store stamps it on create and

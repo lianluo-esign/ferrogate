@@ -40,9 +40,13 @@ class_name = "AgentRunState"
 name = "WORKER_PLANE"
 class_name = "WorkerPlane"
 
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
+new_sqlite_classes = ["AgentRunState", "WorkerPlane", "TenantDataObject"]
 
 # ===========================================================================
 # COPY THIS SHAPE INTO apps/agent-runtime/wrangler.toml (integrate step).

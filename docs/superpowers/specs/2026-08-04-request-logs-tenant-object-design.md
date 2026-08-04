@@ -57,6 +57,14 @@ projection authoritative.
 | Gateway request-log queue/direct sink | Tenant-grouped object write followed by derived control projection; unattributed rows are control-D1-only. |
 | `AgentRunState` lifecycle writer | Exact tenant object write plus derived control projection. |
 
+The complete #825 fan-out inventory is also recorded here so an unchanged
+reader is not mistaken for an accidental omission: `admin_agent_cost_burn`
+continues its existing tenant-store reads/fan-out; `asset_fleet` continues its
+bounded stored-asset fan-out; `billing` and `admin_spend_anomaly` continue to
+read control-owned billing/anomaly state. Those four surfaces do not read the
+three moved evidence tables as their authority and are outside the #859
+cutover. Their general bounded/freshness contract remains #825.
+
 ## Explicit #825 boundary
 
 #859 does not implement a general cross-tenant query service, Analytics Engine,
@@ -77,4 +85,3 @@ Mutation-backed tests must prove:
 4. event reads are ordered by append sequence/time within a run; and
 5. investigation reads route to the exact tenant object and cannot satisfy an
    agent leg from another tenant's matching request id.
-

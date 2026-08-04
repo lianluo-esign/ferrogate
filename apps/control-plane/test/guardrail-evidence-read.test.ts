@@ -33,10 +33,13 @@
  * from the deployed migration directory rather than from a fixture, so a column
  * rename breaks both.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { resolveTenantDatabases } from "../src/adapters.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
 import {
   applySchema,
+  db,
   resetD1,
   seedAuditEvents,
   seedGuardrailEvaluations,
@@ -68,6 +71,50 @@ async function investigate(
     headers: bearer(secret),
   });
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+}
+
+async function exactTenantDatabase(tenantId: string): Promise<D1Database> {
+  await db()
+    .prepare(
+      `INSERT INTO tenant_databases
+         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+          storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, NULL, 12, 'durable_object', 'ready', 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         storage_backend = 'durable_object', provisioning_status = 'ready'`,
+    )
+    .bind(tenantId, `uuid-${tenantId}`, `db-${tenantId}`)
+    .run();
+  return (
+    await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
+  ).db;
+}
+
+async function clearExactTenantEvidence(): Promise<void> {
+  for (const tenantId of ["t-1", "t-2"]) {
+    const tenant = await exactTenantDatabase(tenantId);
+    await tenant.batch([
+      tenant.prepare("DELETE FROM agent_run_events"),
+      tenant.prepare("DELETE FROM agent_runs"),
+      tenant.prepare("DELETE FROM request_logs"),
+    ]);
+  }
+}
+
+async function seedExactTenantRequestLog(
+  requestId: string,
+  tenantId: string,
+  startedAtUnix: number,
+): Promise<void> {
+  const tenant = await exactTenantDatabase(tenantId);
+  await tenant
+    .prepare(
+      `INSERT INTO request_logs
+         (request_id, tenant, status_code, guardrail_verdict, started_at_unix, request_json)
+       VALUES (?, ?, 403, 'blocked', ?, '{}')`,
+    )
+    .bind(requestId, tenantId, startedAtUnix)
+    .run();
 }
 
 /** One complete evaluation row, carrying every fact #665's "Done when" names. */
@@ -142,6 +189,7 @@ beforeEach(async () => {
       "t-2": ["guardrails.evidence.read"],
     },
   });
+  await clearExactTenantEvidence();
 });
 
 describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables hold", () => {
@@ -309,6 +357,7 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
         guardrailVerdict: "blocked",
       },
     ]);
+    await seedExactTenantRequestLog("fg-block-1", "t-1", 1_700_000_100);
     await seedAuditEvents([
       {
         id: "audit-1",

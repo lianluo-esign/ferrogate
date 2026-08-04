@@ -38,7 +38,12 @@
  * context. A gateway that returns 500 because its audit log was full has
  * turned a compliance feature into an outage.
  */
-import { type RequestLogDatabase, writeRequestLogs } from "./d1.js";
+import {
+  requestLogTenantDatabaseFrom,
+  type RequestLogDatabase,
+  writeRequestLogs,
+  writeTenantRequestLogs,
+} from "./d1.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
 
@@ -71,13 +76,12 @@ export interface RequestLogBindings {
   /** `[[queues.producers]] binding = "REQUEST_LOG"`. */
   readonly REQUEST_LOG?: unknown;
   /**
-   * `[[d1_databases]] binding = "CONTROL_DB"` — the CONTROL database that owns
-   * `request_logs`.
-   *
-   * NOT `DB`: that is the TENANT database, whose migration does not contain
-   * this table. Writing there would create nothing and read back nothing.
+   * `[[d1_databases]] binding = "CONTROL_DB"` — the derived compatibility
+   * projection for fleet joins. It is not authoritative for tenant rows.
    */
   readonly CONTROL_DB?: unknown;
+  /** `TENANT_DATA` — one authoritative request-log database per tenant. */
+  readonly TENANT_DATA?: unknown;
 }
 
 /** The `ExecutionContext` slice this module needs. */
@@ -112,11 +116,19 @@ export function requestLogQueueFrom(env: unknown): RequestLogQueue | undefined {
   return isQueue(candidate) ? candidate : undefined;
 }
 
-/** `env.CONTROL_DB`, when it really is a D1 binding. */
+/** `env.CONTROL_DB`, when it really is the derived projection D1 binding. */
 export function requestLogDatabaseFrom(env: unknown): RequestLogDatabase | undefined {
   if (typeof env !== "object" || env === null) return undefined;
   const candidate = (env as RequestLogBindings).CONTROL_DB;
   return isDatabase(candidate) ? candidate : undefined;
+}
+
+/** Resolve the authoritative object-backed database for one tenant. */
+export function requestLogTenantDatabaseFromEnv(
+  env: unknown,
+  tenantId: string,
+): RequestLogDatabase | undefined {
+  return requestLogTenantDatabaseFrom(env, tenantId);
 }
 
 /** Told about every failure, so a degraded evidence path is observable. */
@@ -127,6 +139,7 @@ export interface RequestLogDiagnostics {
 export interface RequestLogSinkOptions {
   readonly queue?: (env: unknown) => RequestLogQueue | undefined;
   readonly database?: (env: unknown) => RequestLogDatabase | undefined;
+  readonly tenantDatabase?: (env: unknown, tenantId: string) => RequestLogDatabase | undefined;
   readonly diagnostics?: RequestLogDiagnostics | undefined;
 }
 
@@ -140,15 +153,20 @@ export interface RequestLogSinkOptions {
  * length, and the same conclusion.
  */
 export const requestLogBindingsFromEnv: Required<
-  Pick<RequestLogSinkOptions, "queue" | "database">
+  Pick<RequestLogSinkOptions, "queue" | "database" | "tenantDatabase">
 > = {
   queue: requestLogQueueFrom,
   database: requestLogDatabaseFrom,
+  tenantDatabase: requestLogTenantDatabaseFromEnv,
 };
 
 export class RequestLogSink {
   readonly #queueOf: (env: unknown) => RequestLogQueue | undefined;
   readonly #databaseOf: (env: unknown) => RequestLogDatabase | undefined;
+  readonly #tenantDatabaseOf: (
+    env: unknown,
+    tenantId: string,
+  ) => RequestLogDatabase | undefined;
   readonly #diagnostics: RequestLogDiagnostics | undefined;
   #queued = 0;
   #written = 0;
@@ -158,6 +176,7 @@ export class RequestLogSink {
   constructor(options: RequestLogSinkOptions = {}) {
     this.#queueOf = options.queue ?? requestLogQueueFrom;
     this.#databaseOf = options.database ?? requestLogDatabaseFrom;
+    this.#tenantDatabaseOf = options.tenantDatabase ?? requestLogTenantDatabaseFromEnv;
     this.#diagnostics = options.diagnostics;
   }
 
@@ -193,13 +212,29 @@ export class RequestLogSink {
       }
     }
 
-    const db = this.#databaseOf(runtime.env);
-    if (db === undefined) {
-      this.#dropped += 1;
-      return;
-    }
     try {
-      await writeRequestLogs(db, [record]);
+      if (record.tenantId !== undefined && record.tenantId !== "") {
+        const tenantDb = this.#tenantDatabaseOf(runtime.env, record.tenantId);
+        if (tenantDb === undefined) {
+          throw new Error(
+            `authoritative TenantDataObject is unavailable for tenant ${record.tenantId}`,
+          );
+        }
+        await writeTenantRequestLogs(tenantDb, [record]);
+
+        // Projection second: a projection failure is visible, but it cannot
+        // make a successful object write non-authoritative.
+        const projection = this.#databaseOf(runtime.env);
+        if (projection !== undefined) await writeRequestLogs(projection, [record]);
+      } else {
+        // Platform/unattributed rows have no tenant object by definition.
+        const projection = this.#databaseOf(runtime.env);
+        if (projection === undefined) {
+          this.#dropped += 1;
+          return;
+        }
+        await writeRequestLogs(projection, [record]);
+      }
       this.#written += 1;
     } catch (error) {
       this.#failed += 1;

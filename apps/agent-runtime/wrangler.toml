@@ -51,6 +51,13 @@ class_name = "AgentRunState"
 name = "WORKER_PLANE"
 class_name = "WorkerPlane"
 
+# AgentRunState writes authoritative request/run evidence through this
+# cross-script TenantDataObject. It is deliberately not a fallback to CONTROL_DB.
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
 # DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`,
 # NOT `new_classes`) — same requirement the Agents SDK has.
 [[migrations]]

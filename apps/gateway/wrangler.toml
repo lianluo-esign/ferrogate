@@ -1106,7 +1106,7 @@ id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 [[d1_databases]]
 binding = "DB"
 database_name = "ferrogate-tenant"
-database_id = "replace-at-deploy"
+database_id = "replace-at-deploy-tenant"
 migrations_dir = "../../sql/d1-ts/tenant"
 
 # ---------------------------------------------------------------------------

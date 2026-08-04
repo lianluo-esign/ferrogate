@@ -113,6 +113,7 @@ function gateway(
   const queue = options.queue ?? new RecordingQueue();
   const bindings: Record<string, unknown> = {
     ...(env as unknown as Record<string, unknown>),
+    TENANT_DATA: env.TENANT_DATA,
     // Only bound when the test asked for the queue arm; otherwise the sink
     // takes the direct-D1 arm, which is the `wrangler dev --local` posture.
     ...(options.queue === undefined ? { REQUEST_LOG: undefined } : { REQUEST_LOG: queue }),

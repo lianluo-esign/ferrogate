@@ -4,9 +4,11 @@
  *
  * The planners in `../retention.ts` were already ported, pure and tested; what
  * was missing was that nothing read or wrote `retention_policies` and nothing
- * ever CALLED a planner, so `request_logs`, `audit_events`, `agent_run_events`
- * and R2 asset blobs were append-only forever and a retention contract an
- * operator configured had no effect.
+ * ever CALLED a planner, so request evidence and R2 asset blobs were append-only
+ * forever and a retention contract an operator configured had no effect. The
+ * #859 gateway sweep now owns request-log cleanup at the composition root: it
+ * deletes the tenant-object authority first and the derived control projection
+ * second. This tenant-handle executor remains responsible for asset retention.
  *
  * ## The order of operations is the safety property
  *

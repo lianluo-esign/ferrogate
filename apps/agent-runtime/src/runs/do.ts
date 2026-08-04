@@ -70,6 +70,7 @@ import {
   type WorkerReportedRunState,
   isTerminalStatus,
 } from "./model.js";
+import { persistAgentRunEvidence, persistAgentRunEventEvidence } from "./evidence.js";
 
 /** Heartbeat cadence for an idle SSE stream. */
 const SSE_HEARTBEAT_MS = 15_000;
@@ -223,6 +224,12 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
   /** Live SSE subscribers. In-memory: they are, by definition, connected now. */
   readonly #subscribers = new Set<WritableStreamDefaultWriter<Uint8Array>>();
   readonly #encoder = new TextEncoder();
+  readonly #env: AgentRuntimeBindings;
+
+  constructor(ctx: DurableObjectState, env: AgentRuntimeBindings) {
+    super(ctx, env);
+    this.#env = env;
+  }
 
   // -------------------------------------------------------------------------
   // Reads
@@ -438,6 +445,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       cancel_requested: false,
     };
     await this.ctx.storage.put(RUN_KEY, run);
+    await persistAgentRunEvidence(this.#env, run);
     await this.ctx.storage.put(SEQ_KEY, 0);
     await this.#append({
       kind: "job_submitted",
@@ -480,6 +488,10 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
     };
     await this.ctx.storage.put(eventKey(seq), event);
     await this.ctx.storage.put(SEQ_KEY, seq);
+
+    if (run !== undefined) {
+      await persistAgentRunEventEvidence(this.#env, run.tenant_id, event);
+    }
 
     if (seq > MAX_RETAINED_EVENTS) {
       // Prune the oldest row so the timeline stays bounded. The cursor feed
@@ -612,6 +624,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       runtime_reported_event_count: run.runtime_reported_event_count + 1,
     };
     await this.ctx.storage.put(RUN_KEY, next);
+    await persistAgentRunEvidence(this.#env, next);
     await this.#append({
       kind: `run.${report.status}`,
       body: {
@@ -667,6 +680,7 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       completed_at_unix: context.nowUnix,
     };
     await this.ctx.storage.put(RUN_KEY, next);
+    await persistAgentRunEvidence(this.#env, next);
     await this.#append({
       kind: "job_cancelled",
       body: { state: "cancelled", reason: "cancelled by caller" },

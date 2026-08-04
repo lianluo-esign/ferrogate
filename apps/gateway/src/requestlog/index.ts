@@ -45,10 +45,10 @@
  * };
  * ```
  *
- * `wrangler.toml` declares the two bindings those read:
+ * `wrangler.toml` declares the bindings those read:
  * `[[queues.producers]] binding = "REQUEST_LOG"` with the matching
- * `[[queues.consumers]]`, and the already-present `[[d1_databases]] binding =
- * "CONTROL_DB"`.
+ * `[[queues.consumers]]`, the `TENANT_DATA` Durable Object, and the
+ * `[[d1_databases]] binding = "CONTROL_DB"` compatibility projection.
  *
  * ============================================================================
  * THE SHAPE, AND THE ONE RULE
@@ -62,8 +62,9 @@
  *                     │                         └── facts.ts (WeakMap by Request)
  *                     └── ctx.waitUntil(sink.write(record))
  *                                │
- *                                ├── Queue REQUEST_LOG ─→ queue() ─→ D1 batch upsert
- *                                └── (no queue) ────────────────────→ D1 upsert
+ *                                ├── Queue REQUEST_LOG ─→ queue() ─→ tenant object batch
+ *                                │                                      └→ D1 projection
+ *                                └── (no queue) ────────────────→ tenant object → projection
  * ```
  *
  * **THE HOT PATH IS NEVER ON THE WRITE, AND A LOGGING FAILURE IS NEVER A
@@ -101,10 +102,13 @@ export {
 export type { GuardrailVerdict, RequestLogRecord, RequestLogWire } from "./record.js";
 
 export {
+  REQUEST_LOG_PROJECTION_TABLE,
   REQUEST_LOG_TABLE,
   REQUEST_LOG_UPSERT_SQL,
   requestLogBindings,
+  requestLogTenantDatabaseFrom,
   writeRequestLogs,
+  writeTenantRequestLogs,
 } from "./d1.js";
 export type { RequestLogDatabase } from "./d1.js";
 
@@ -114,6 +118,7 @@ export {
   requestLogBindingsFromEnv,
   requestLogDatabaseFrom,
   requestLogQueueFrom,
+  requestLogTenantDatabaseFromEnv,
 } from "./sink.js";
 export type {
   RequestLogBindings,

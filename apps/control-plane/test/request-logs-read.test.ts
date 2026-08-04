@@ -34,9 +34,11 @@
  * The seeded rows here are therefore honest fixtures for a cross-Worker seam,
  * not a substitute for the write path — see `test/d1.ts::seedRequestLogs`.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, resetD1, seedRequestLogs } from "./d1.js";
+import { resolveTenantDatabases } from "../src/adapters.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
+import { applySchema, db, resetD1, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 interface ListBody {
@@ -92,6 +94,47 @@ const FULL_ROW = {
   document: { object: "request_log", streamed: false, prompt_tokens: 11, completion_tokens: 4 },
 } as const;
 
+async function exactTenantDatabase(tenantId: string): Promise<D1Database> {
+  await db()
+    .prepare(
+      `INSERT INTO tenant_databases
+         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+          storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, NULL, 12, 'durable_object', 'ready', 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         storage_backend = 'durable_object', provisioning_status = 'ready'`,
+    )
+    .bind(tenantId, `uuid-${tenantId}`, `db-${tenantId}`)
+    .run();
+  return (
+    await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
+  ).db;
+}
+
+async function clearExactTenantRequestLogs(): Promise<void> {
+  for (const tenantId of ["t-1", "t-2"]) {
+    const tenant = await exactTenantDatabase(tenantId);
+    await tenant.prepare("DELETE FROM request_logs").run();
+  }
+}
+
+async function seedExactTenantRequestLogs(
+  rows: readonly { requestId: string; tenant: string | null; startedAtUnix: number }[],
+): Promise<void> {
+  for (const row of rows) {
+    if (row.tenant === null) continue;
+    const tenant = await exactTenantDatabase(row.tenant);
+    await tenant
+      .prepare(
+        `INSERT INTO request_logs
+           (request_id, tenant, guardrail_verdict, started_at_unix, request_json)
+         VALUES (?, ?, 'allowed', ?, '{}')`,
+      )
+      .bind(row.requestId, row.tenant, row.startedAtUnix)
+      .run();
+  }
+}
+
 beforeAll(applySchema);
 
 beforeEach(async () => {
@@ -102,6 +145,7 @@ beforeEach(async () => {
     nativeKeys: [tenantKey("k-tenant", "t-1"), tenantKey("k-other", "t-2")],
     rbac: {},
   });
+  await clearExactTenantRequestLogs();
 });
 
 describe("GET /admin/v1/request-logs returns the evidence the table holds", () => {
@@ -176,6 +220,10 @@ describe("the tenant fence on request logs", () => {
       // An UNATTRIBUTED row: a request whose credential resolved no tenant, i.e.
       // a platform-operator call. It is nobody's tenant data.
       { ...FULL_ROW, requestId: "fg-none", tenant: null },
+    ]);
+    await seedExactTenantRequestLogs([
+      { requestId: "fg-t1", tenant: "t-1", startedAtUnix: FULL_ROW.startedAtUnix },
+      { requestId: "fg-t2", tenant: "t-2", startedAtUnix: FULL_ROW.startedAtUnix },
     ]);
   });
 

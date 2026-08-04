@@ -107,6 +107,7 @@ function gateway(options: { requestId?: string; queue?: RecordingQueue } = {}): 
   const queue = options.queue ?? new RecordingQueue();
   const bindings: Record<string, unknown> = {
     ...(env as unknown as Record<string, unknown>),
+    TENANT_DATA: env.TENANT_DATA,
     // Only bound when the test asked for the queue arm; otherwise the sink
     // takes the direct-D1 arm, which is the `wrangler dev --local` posture.
     ...(options.queue === undefined ? { REQUEST_LOG: undefined } : { REQUEST_LOG: queue }),
@@ -457,7 +458,7 @@ describe("the Queue producer/consumer pair", () => {
 // ---------------------------------------------------------------------------
 
 describe("the data plane does not depend on the evidence path", () => {
-  it("serves the request normally with NO queue and NO control database", async () => {
+  it("serves normally and keeps the authoritative object when the projection is absent", async () => {
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
     const sink = createRequestLogSink(requestLogBindingsFromEnv);
     const { app } = createGatewayApp({
@@ -484,10 +485,18 @@ describe("the data plane does not depend on the evidence path", () => {
     expect(response.status).toBe(200);
     await waitOnExecutionContext(ctx);
 
-    // Counted, never silent: "no rows" and "no writer" are indistinguishable
-    // from the admin API, which is the whole defect this issue closes.
-    expect(sink.stats).toMatchObject({ dropped: 1, queued: 0, written: 0 });
+    // The tenant object is authoritative, so removing the fleet projection
+    // must not turn a tenant write into a control-D1 fallback or a drop.
+    expect(sink.stats).toMatchObject({ dropped: 0, queued: 0, written: 1 });
     expect(await storedRequestLogs()).toHaveLength(0);
+    const requestId = response.headers.get("x-request-id");
+    expect(requestId).not.toBeNull();
+    const objectRows = await env.TENANT_DATA.get(env.TENANT_DATA.idFromName("tenant_a")).query({
+      tenantId: "tenant_a",
+      sql: "SELECT request_id, tenant FROM request_logs WHERE request_id = ?",
+      params: [requestId],
+    });
+    expect(objectRows.results).toEqual([{ request_id: requestId, tenant: "tenant_a" }]);
   });
 
   it("serves the request normally when the D1 write itself fails", async () => {
