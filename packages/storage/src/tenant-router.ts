@@ -194,6 +194,8 @@ export type TenantProvisioningStatus =
   | "pending"
   /** Every provisioning step confirmed: schema applied, catalog seeded. */
   | "ready"
+  /** The tenant storage is usable, but catalog seeding needs a retry. */
+  | "incomplete"
   /** A step refused. `lastError` says which; re-running resumes from there. */
   | "failed";
 
@@ -583,7 +585,12 @@ interface TenantDatabaseRow {
 }
 
 /** The legal `provisioning_status` spellings. Anything else decodes to ABSENT. */
-const PROVISIONING_STATUSES: readonly TenantProvisioningStatus[] = ["pending", "ready", "failed"];
+const PROVISIONING_STATUSES: readonly TenantProvisioningStatus[] = [
+  "pending",
+  "ready",
+  "incomplete",
+  "failed",
+];
 
 /**
  * Row → registration.
