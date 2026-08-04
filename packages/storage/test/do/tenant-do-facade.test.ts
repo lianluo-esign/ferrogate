@@ -583,7 +583,7 @@ describe("type fidelity across the RPC boundary", () => {
     expect(() => db.prepare("SELECT ?").bind(undefined)).toThrow(/bindOptional/);
   });
 
-  test("NULL round-trips as null, and an ArrayBuffer round-trips as bytes", async () => {
+  test("NULL and a real BLOB column round-trip through the RPC boundary", async () => {
     const db = facadeFor(ACME);
     await db
       .prepare(
@@ -597,13 +597,29 @@ describe("type fidelity across the RPC boundary", () => {
       .first<{ t: number | null }>();
     expect(row?.t).toBeNull();
 
-    // No column in `sql/d1-ts/tenant/` is a BLOB today (grep: zero hits), so
-    // this asserts the CARRIER rather than a schema column: the value crosses
-    // the RPC boundary structured-cloneable and comes back as bytes. The first
-    // BLOB column must not also be the first bug.
-    const bytes = new Uint8Array([1, 2, 3, 250]);
-    const echoed = await db.prepare("SELECT ? AS b").bind(bytes).first<{ b: ArrayBuffer }>();
-    expect(new Uint8Array(echoed?.b as ArrayBuffer)).toEqual(bytes);
+    // The production tenant migrations have no BLOB column yet, so create a
+    // real SQLite BLOB column here rather than only selecting a bound value.
+    // Use a view into a larger buffer: passing `.buffer` instead of the view's
+    // selected window would include the two sentinel bytes and fail this test.
+    const source = new Uint8Array([99, 1, 2, 3, 250, 100]);
+    const bytes = source.subarray(1, 5);
+    await db
+      .prepare(
+        "CREATE TABLE IF NOT EXISTS facade_blob_probe (id TEXT PRIMARY KEY, payload BLOB NOT NULL)",
+      )
+      .run();
+    await db.prepare("DELETE FROM facade_blob_probe").run();
+    await db
+      .prepare("INSERT INTO facade_blob_probe (id, payload) VALUES (?, ?)")
+      .bind("bytes", bytes)
+      .run();
+
+    const stored = await db
+      .prepare("SELECT payload FROM facade_blob_probe WHERE id = ?")
+      .bind("bytes")
+      .first<{ payload: ArrayBuffer }>();
+    expect(stored?.payload).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(stored?.payload as ArrayBuffer)).toEqual(bytes);
   });
 });
 

@@ -6,8 +6,8 @@
  *
  * ## Why this is a FACADE and not a port
  *
- * There are ~362 `.prepare(` call sites in this repo and eight tenant-plane
- * modules under `./d1/` written against `D1Database`. Every one of them is a
+ * There are ~362 `.prepare(` call sites in this repo and tenant-plane modules
+ * under `./d1/` written against `D1Database`. Every one of them is a
  * money path or feeds one: the wallet no-oversell reserve, the workflow-budget
  * CAS, the asset quota admission, the at-most-once schedule fire. Porting them
  * by hand to a new client would be a rewrite of every guard with no mechanical
