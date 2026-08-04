@@ -5,6 +5,7 @@
  */
 import { applyCommand } from "./commands/apply.js";
 import { assetsCommand } from "./commands/assets.js";
+import { modelCommand, providerCommand } from "./commands/catalog.js";
 import { completionsCommand } from "./commands/completions.js";
 import { hashKeyCommand, reloadCommand, validateCommand } from "./commands/config-commands.js";
 import { contextCommand } from "./commands/context.js";
@@ -37,6 +38,8 @@ export const COMMANDS: readonly CommandNode[] = [
   assetsCommand,
   siteCommand,
   plansCommand,
+  providerCommand,
+  modelCommand,
   contextCommand,
   opsCommand,
   completionsCommand,
