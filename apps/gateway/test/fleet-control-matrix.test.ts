@@ -400,6 +400,24 @@ const STRINGS: Record<string, ReadonlyMap<string, string>> = Object.fromEntries(
   FLEET.map((app) => [app, stringConstants(app)]),
 );
 
+const SHARED_BILLING_ASSET_EGRESS = import.meta.glob(
+  "../../../packages/billing/src/asset-egress.ts",
+  { query: "?raw", import: "default", eager: true },
+);
+
+/** Workers that actually call the shared asset-egress surface. */
+const SHARED_ASSET_EGRESS_CONSUMERS = FLEET.filter((app) =>
+  (CODE[app] ?? []).some((module) =>
+    /assetEgressQuotaDenial|recordAssetEgress|readAssetWithEgress|assetEgressTargetId/.test(
+      module.code,
+    ),
+  ),
+);
+
+const SHARED_ASSET_EGRESS_MODULES: readonly Module[] = Object.entries(
+  SHARED_BILLING_ASSET_EGRESS,
+).map(([path, raw]) => ({ path, code: stripComments(raw), raw }));
+
 /** `code` ↦ Worker ↦ the statuses that Worker spells it with. */
 const STATUS_INDEX = new Map<string, Map<string, Set<number>>>();
 /** `code` ↦ Worker ↦ the message texts that Worker uses for it. */
@@ -418,25 +436,30 @@ function record<T>(
   index.set(code, byApp);
 }
 
-for (const app of FLEET) {
-  for (const module of CODE[app] ?? []) {
-    for (const m of module.code.matchAll(new RegExp(STATUS_SHAPE.source, "g"))) {
-      record(STATUS_INDEX, m[2] as string, app, Number(m[1]));
-    }
-    for (const m of module.code.matchAll(new RegExp(MESSAGE_SHAPE.source, "g"))) {
-      record(MESSAGE_INDEX, m[1] as string, app, (m[2] as string).slice(1, -1));
-    }
-    for (const m of module.code.matchAll(new RegExp(THROW_SHAPE.source, "g"))) {
-      const code = m[2] as string;
-      record(STATUS_INDEX, code, app, Number(m[1]));
-      const literal = m[3] as string;
-      const text =
-        literal.startsWith('"') || literal.startsWith("`")
-          ? literal.slice(1, -1)
-          : STRINGS[app]?.get(literal);
-      if (text !== undefined) record(MESSAGE_INDEX, code, app, text);
-    }
+function indexRefusals(app: string, module: Module): void {
+  for (const m of module.code.matchAll(new RegExp(STATUS_SHAPE.source, "g"))) {
+    record(STATUS_INDEX, m[2] as string, app, Number(m[1]));
   }
+  for (const m of module.code.matchAll(new RegExp(MESSAGE_SHAPE.source, "g"))) {
+    record(MESSAGE_INDEX, m[1] as string, app, (m[2] as string).slice(1, -1));
+  }
+  for (const m of module.code.matchAll(new RegExp(THROW_SHAPE.source, "g"))) {
+    const code = m[2] as string;
+    record(STATUS_INDEX, code, app, Number(m[1]));
+    const literal = m[3] as string;
+    const text =
+      literal.startsWith('"') || literal.startsWith("`")
+        ? literal.slice(1, -1)
+        : STRINGS[app]?.get(literal);
+    if (text !== undefined) record(MESSAGE_INDEX, code, app, text);
+  }
+}
+
+for (const app of FLEET) {
+  for (const module of CODE[app] ?? []) indexRefusals(app, module);
+}
+for (const module of SHARED_ASSET_EGRESS_MODULES) {
+  for (const app of SHARED_ASSET_EGRESS_CONSUMERS) indexRefusals(app, module);
 }
 
 const REFUSAL_INDEX: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>> = STATUS_INDEX;
@@ -446,6 +469,19 @@ const REFUSAL_COUNT = [...STATUS_INDEX.values()].reduce(
   (n, byApp) => n + [...byApp.values()].reduce((m, s) => m + s.size, 0),
   0,
 );
+
+describe("§0.2 shared package refusal evidence", () => {
+  it("models billing asset-egress's 429 for its gateway and MCP consumers", () => {
+    const sources = Object.values(SHARED_BILLING_ASSET_EGRESS);
+    expect(sources).toHaveLength(1);
+    expect(SHARED_ASSET_EGRESS_CONSUMERS).toEqual(["gateway", "mcp"]);
+    expect(sources[0]).toMatch(
+      /status:\s*429,\s*code:\s*"governance_counter_unavailable"/,
+    );
+    expect(REFUSAL_INDEX.get("governance_counter_unavailable")?.get("gateway")).toContain(429);
+    expect(REFUSAL_INDEX.get("governance_counter_unavailable")?.get("mcp")).toContain(429);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // §1  THE SCAN IS REAL — non-vacuity, with no hand-written canary list
