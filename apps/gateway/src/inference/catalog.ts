@@ -432,6 +432,17 @@ export type ModelCatalogResult =
   | { readonly ok: true; readonly routes: readonly PhysicalRoute[] }
   | { readonly ok: false; readonly reason: string };
 
+/** Parsed catalog inputs shared by env-only and tenant-D1 loading. */
+export interface ModelCatalogInputs {
+  readonly providers: readonly ProviderRecord[];
+  readonly models: readonly ModelRecord[];
+  readonly cloudflare?: CloudflareAccountRecord;
+}
+
+export type ModelCatalogInputsResult =
+  | { readonly ok: true; readonly inputs: ModelCatalogInputs }
+  | { readonly ok: false; readonly reason: string };
+
 // ---------------------------------------------------------------------------
 // Building
 // ---------------------------------------------------------------------------
@@ -984,6 +995,22 @@ function cloudflareAccountFromEnv(
  * {@link ModelCatalogResult}.
  */
 export function modelCatalogFromEnv(env: InferenceBindings): ModelCatalogResult {
+  const inputs = modelCatalogInputsFromEnv(env);
+  if (!inputs.ok) {
+    return inputs;
+  }
+  return buildModelCatalog(
+    inputs.inputs.providers,
+    inputs.inputs.models,
+    env,
+    inputs.inputs.cloudflare,
+  );
+}
+
+/** Parse the env tables without flattening them into physical routes. */
+export function modelCatalogInputsFromEnv(
+  env: InferenceBindings,
+): ModelCatalogInputsResult {
   const providers = parseTable(
     typeof env.GATEWAY_PROVIDERS === "string" ? env.GATEWAY_PROVIDERS : undefined,
     providerRecordSchema,
@@ -1006,7 +1033,14 @@ export function modelCatalogFromEnv(env: InferenceBindings): ModelCatalogResult 
   if (!cloudflare.ok) {
     return { ok: false, reason: cloudflare.reason };
   }
-  return buildModelCatalog(providers.rows, models.rows, env, cloudflare.cloudflare);
+  return {
+    ok: true,
+    inputs: {
+      providers: providers.rows,
+      models: models.rows,
+      ...(cloudflare.cloudflare === undefined ? {} : { cloudflare: cloudflare.cloudflare }),
+    },
+  };
 }
 
 /**

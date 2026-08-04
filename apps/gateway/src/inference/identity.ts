@@ -45,11 +45,11 @@
  * it in the identity middleware, which runs BEFORE `readInferenceBody()`
  * replaces `c.req.raw`.
  */
-import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AuthContext } from "../ports.js";
 import { callerScope } from "../ports.js";
+import type { ResidencyPolicy } from "../residency/policy.js";
 import type { InferenceRejection } from "./errors.js";
-import type { Caller } from "./ports.js";
+import type { Caller, ModelResolver } from "./ports.js";
 
 /**
  * Rust `auth::finalize_auth` → the slice of `AuthContext` the inference
@@ -188,6 +188,8 @@ export const unmeteredTokenGovernor: TokenGovernor = {
 export interface InferenceRequestScope {
   /** The caller derived from `c.get("auth")` by the outer guard. */
   readonly caller?: Caller | undefined;
+  /** The catalog resolved by the outer route module for this tenant/request. */
+  readonly models?: ModelResolver | undefined;
   /** The TPM window `rateLimit()` resolved on the outer context. */
   readonly tokens?: TokenGovernor | undefined;
   /**

@@ -49,8 +49,8 @@ import type { ExperimentObserver } from "../experiments/index.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
-import type { ResponseStoreMode } from "./conversation.js";
 import type { ConversationStore } from "./conversation-store.js";
+import type { ResponseStoreMode } from "./conversation.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
 import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
@@ -452,6 +452,21 @@ export interface InferenceBindings {
  * `DepsResolver`.
  */
 export type ModelResolverFactory = (env: InferenceBindings) => ModelResolver;
+
+/** The asynchronous tenant catalog source used by the outer route module. */
+export interface TenantModelCatalogSource {
+  load(input: {
+    tenantId: string;
+    db: D1Database;
+    env: InferenceBindings;
+    fallback: ModelResolver;
+  }): Promise<TenantModelCatalogLoadResult>;
+}
+
+/** A tenant catalog load either produces a resolver or refuses the request. */
+export type TenantModelCatalogLoadResult =
+  | { readonly ok: true; readonly models: ModelResolver; readonly revision?: number }
+  | { readonly ok: false; readonly reason: string };
 
 // ---------------------------------------------------------------------------
 // Provider adapters
@@ -1108,6 +1123,8 @@ export interface InferenceDeps {
    * `env`. Absent = the empty registry, i.e. every model is `model_not_found`.
    */
   readonly models?: ModelResolver | ModelResolverFactory;
+  /** The per-tenant D1 catalog source, mounted by the deployed route module. */
+  readonly tenantCatalog?: TenantModelCatalogSource;
   readonly adapters?: AdapterRegistry;
   /**
    * The provider egress, or a factory resolved per Worker `env` — the same

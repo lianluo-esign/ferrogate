@@ -465,8 +465,8 @@ export async function describeTenantStorage(
       problems.push(
         "the model catalog is EMPTY: the seed step either never ran or ran against a mark " +
           "that suppressed it, so per-tenant model visibility and pricing have no rows. " +
-          "Inference is NOT affected — the gateway resolves models from GATEWAY_MODELS / " +
-          "GATEWAY_PROVIDERS, not from this table",
+          "Inference falls back to GATEWAY_MODELS / GATEWAY_PROVIDERS until this catalog " +
+          "is populated",
       );
     }
   } catch (error) {

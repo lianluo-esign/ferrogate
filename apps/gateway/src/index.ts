@@ -35,6 +35,7 @@ import {
   modelsFromEnv,
   responseStateCommit,
   sweepResponseConversations,
+  tenantModelCatalogFromD1,
 } from "./inference/index.js";
 import {
   createMeteringUsageSink,
@@ -157,13 +158,14 @@ const onlineEvals = createOnlineEvalSink();
  *
  * The inference module is wired to the REAL data plane here:
  *
- *  - `models: modelsFromEnv` — the config-driven registry built from the
- *    `GATEWAY_PROVIDERS` / `GATEWAY_MODELS` vars (`src/inference/catalog.ts`),
- *    which is the port of the Rust `[[providers]]` + `[[models]]` tables. It is
- *    passed as a FACTORY, not a value, because a Worker's bindings only exist
- *    per request while this array is built at module scope; the router calls it
- *    once per `env` and memoizes. With neither var set the registry is empty and
- *    every model answers `400 model_not_found`, which is the old behavior.
+ *  - `tenantCatalog: tenantModelCatalogFromD1()` — authenticated tenant
+ *    requests read one joined catalog graph from that tenant's D1/DO database,
+ *    keyed by `catalog_revisions.revision` and cached per tenant in the Worker
+ *    isolate. `models: modelsFromEnv` remains the explicit fallback for
+ *    platform-operator requests, `GATEWAY_TENANT_DB_ROUTING = "off"`, and an
+ *    empty tenant catalog; a D1 read failure is a 503 and never widens scope.
+ *    `platform-default` rows use env provider metadata only because the seed
+ *    rate card intentionally carries no provider credential or endpoint.
  *  - `dispatcher: dispatcherFromEnv` — the provider egress
  *    (`server/dispatch.rs`): `redirect: "manual"`, no transparent content
  *    re-encoding, the streaming body handed back untouched, and the inbound
@@ -192,7 +194,12 @@ const onlineEvals = createOnlineEvalSink();
  * authenticated and scope-checked.
  */
 export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
-  inferenceRouteModule({ models: modelsFromEnv, dispatcher: dispatcherFromEnv, usage }),
+  inferenceRouteModule({
+    models: modelsFromEnv,
+    tenantCatalog: tenantModelCatalogFromD1(),
+    dispatcher: dispatcherFromEnv,
+    usage,
+  }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
   // The static-site serve mode (issue #737), wired to the SAME `env.ASSETS`
   // bucket and the same tenant D1 bundle index the asset module is: it serves

@@ -13,10 +13,12 @@
  * `(providers, models, secrets, cloudflare)` parsed from the `GATEWAY_PROVIDERS`
  * / `GATEWAY_MODELS` / `GATEWAY_CLOUDFLARE` **config vars** by
  * `modelCatalogFromEnv`; it never opens a database. Its fail-closed posture is
- * real, and it is about the env registry. Nothing in `apps/<app>/src` reads
- * THIS catalog yet; the only non-test callers of {@link listTenantModelCatalog} /
- * {@link resolveTenantModel} are `./tenant-provisioning.ts`'s own seed check and
- * health report. An unseeded tenant serves inference exactly like a seeded one.
+ * real, and it is about the env registry. The gateway's
+ * `inference/tenant-catalog.ts` now reads THIS graph directly with one joined
+ * query and keeps the flattened resolver warm per tenant/revision. The
+ * compatibility-shaped {@link listTenantModelCatalog} /
+ * {@link resolveTenantModel} helpers remain for provisioning and health
+ * surfaces; they are deliberately not the full routing ladder.
  *
  * So the real reason to seed is FORWARD-LOOKING, and saying so is the point:
  * per-tenant model visibility and per-tenant pricing need a per-tenant row, and
