@@ -275,6 +275,10 @@
       "group": "admin_provider"
     },
     {
+      "pattern": "/admin/v1/providers/{id}",
+      "group": "admin_provider"
+    },
+    {
       "pattern": "/admin/v1/provider-health",
       "group": "admin_provider"
     },
@@ -352,6 +356,18 @@
     },
     {
       "pattern": "/admin/v1/models",
+      "group": "admin_model"
+    },
+    {
+      "pattern": "/admin/v1/models/{id}",
+      "group": "admin_model"
+    },
+    {
+      "pattern": "/admin/v1/models/{model_id}/offerings",
+      "group": "admin_model"
+    },
+    {
+      "pattern": "/admin/v1/models/{model_id}/offerings/{offering_id}",
       "group": "admin_model"
     },
     {
@@ -867,6 +883,61 @@
       "rbac_action": null
     },
     {
+      "path": "/admin/v1/providers",
+      "method": "post",
+      "operation_id": "createAdminProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/providers/{id}",
+      "method": "get",
+      "operation_id": "getAdminProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/providers/{id}",
+      "method": "put",
+      "operation_id": "replaceAdminProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/providers/{id}",
+      "method": "patch",
+      "operation_id": "patchAdminProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/providers/{id}",
+      "method": "delete",
+      "operation_id": "deleteAdminProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/admin/v1/provider-health",
       "method": "get",
       "operation_id": "listAdminProviderHealth",
@@ -1215,6 +1286,127 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models",
+      "method": "post",
+      "operation_id": "createAdminModel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{id}",
+      "method": "get",
+      "operation_id": "getAdminModel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{id}",
+      "method": "put",
+      "operation_id": "replaceAdminModel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{id}",
+      "method": "patch",
+      "operation_id": "patchAdminModel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{id}",
+      "method": "delete",
+      "operation_id": "deleteAdminModel",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{model_id}/offerings",
+      "method": "get",
+      "operation_id": "listAdminModelOfferings",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{model_id}/offerings",
+      "method": "post",
+      "operation_id": "createAdminModelOffering",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{model_id}/offerings/{offering_id}",
+      "method": "get",
+      "operation_id": "getAdminModelOffering",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{model_id}/offerings/{offering_id}",
+      "method": "put",
+      "operation_id": "replaceAdminModelOffering",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{model_id}/offerings/{offering_id}",
+      "method": "patch",
+      "operation_id": "patchAdminModelOffering",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/models/{model_id}/offerings/{offering_id}",
+      "method": "delete",
+      "operation_id": "deleteAdminModelOffering",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     },

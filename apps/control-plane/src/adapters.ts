@@ -413,10 +413,16 @@ export const SERVICE_NAME = "ferrogate-control-plane";
 export class StoreRuntimeStatus implements RuntimeStatusPort {
   readonly #store: ControlPlaneStore;
   readonly #version: string;
+  readonly #tenantDatabases: TenantDatabaseRouter | null;
 
-  constructor(store: ControlPlaneStore, version = "0.0.0") {
+  constructor(
+    store: ControlPlaneStore,
+    version = "0.0.0",
+    tenantDatabases: TenantDatabaseRouter | null = null,
+  ) {
     this.#store = store;
     this.#version = version;
+    this.#tenantDatabases = tenantDatabases;
   }
 
   /**
@@ -451,17 +457,53 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
     return page.total;
   }
 
+  async #catalogProviderCount(): Promise<number | null> {
+    if (this.#tenantDatabases === null) return null;
+    try {
+      const tenants = await this.#tenantDatabases.provisionedTenants();
+      const counts = await Promise.all(
+        tenants.map(async (tenantId) => {
+          try {
+            const handle = await this.#tenantDatabases?.forTenant(tenantId);
+            if (handle === undefined) return 0;
+            const row = await handle.db
+              .prepare("SELECT COUNT(*) AS total FROM provider_channels WHERE tenant_id = ?")
+              .bind(tenantId)
+              .first<{ total: number | string }>();
+            return Number(row?.total ?? 0);
+          } catch {
+            // Status is a debugging surface; one unreachable tenant must not
+            // hide counts from the rest of the fleet.
+            return 0;
+          }
+        }),
+      );
+      return tenants.length === 0 ? null : counts.reduce((total, count) => total + count, 0);
+    } catch {
+      return null;
+    }
+  }
+
   async status(): Promise<RuntimeStatus> {
-    const [providers, models, apiKeys, promptTemplates, plugins, tools, snapshot] =
-      await Promise.all([
-        this.#count("providers"),
-        this.#count("models"),
-        this.#count("api-keys"),
-        this.#count("prompt-templates"),
-        this.#count("plugins"),
-        this.#count("tools"),
-        this.#activeSnapshot(),
-      ]);
+    const [
+      legacyProviders,
+      catalogProviders,
+      models,
+      apiKeys,
+      promptTemplates,
+      plugins,
+      tools,
+      snapshot,
+    ] = await Promise.all([
+      this.#count("providers"),
+      this.#catalogProviderCount(),
+      this.#count("models"),
+      this.#count("api-keys"),
+      this.#count("prompt-templates"),
+      this.#count("plugins"),
+      this.#count("tools"),
+      this.#activeSnapshot(),
+    ]);
     return {
       service: SERVICE_NAME,
       version: this.#version,
@@ -469,7 +511,7 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
       // reporting otherwise would be a lie an operator could act on.
       runtime: "workers",
       snapshot,
-      providers,
+      providers: catalogProviders === null ? legacyProviders : catalogProviders,
       models,
       api_keys: apiKeys,
       prompt_templates: promptTemplates,
@@ -887,6 +929,7 @@ export function resolveDeps(
   context: RequestContext = {},
 ): ControlPlaneDeps {
   const store = resolveStore(env, context);
+  const tenantDatabases = resolveTenantDatabases(env);
 
   const corsAllowedOrigin = env.ADMIN_CONSOLE_ALLOWED_ORIGIN?.trim();
   return {
@@ -894,13 +937,13 @@ export function resolveDeps(
     lifecycle: resolveLifecycle(env, store),
     rbac: resolveRbac(env),
     store,
-    tenantDatabases: resolveTenantDatabases(env),
+    tenantDatabases,
     tenantStorage: resolveTenantStorage(env),
     controlDatabase: resolveControlDatabase(env),
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.
     assetObjects: resolveAssetObjects(env),
-    runtime: new StoreRuntimeStatus(store),
+    runtime: new StoreRuntimeStatus(store, "0.0.0", tenantDatabases),
     txtResolver: resolveTxtResolver(env),
     // The certificate seam (#738). Its default answers `unconfigured` and makes
     // no outbound call, so a deployment that has not opted in gains no traffic.

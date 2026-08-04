@@ -1105,6 +1105,84 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
   }
 }
 
+/** The request context needed by a mutation writer outside the document store. */
+export interface ControlPlaneAuditOptions {
+  readonly action: AuditAction;
+  readonly collection: string;
+  readonly record: StoreRecord;
+  readonly revision: number;
+  readonly scope: CallerScope;
+  readonly requestId?: string | null;
+  readonly now?: () => number;
+  readonly newId?: () => string;
+}
+
+/** Append one hash-chained audit row for a mutation outside the document store. */
+export async function appendControlPlaneAudit(
+  db: D1Database,
+  options: ControlPlaneAuditOptions,
+): Promise<void> {
+  const tenantId = typeof options.record.tenant_id === "string" ? options.record.tenant_id : null;
+  const auditJson = JSON.stringify({
+    object: AUDIT_OBJECT,
+    action: options.action,
+    collection: options.collection,
+    resource_id: options.record.id,
+    revision: options.revision,
+    actor_scope: options.scope.kind,
+    actor_tenant_id: options.scope.kind === "tenant" ? options.scope.tenantId : null,
+    resource_tenant_id: tenantId,
+  });
+  const chainKey = auditChainKey(tenantId);
+  const id = options.newId?.() ?? crypto.randomUUID();
+  const requestId = options.requestId ?? "";
+  const occurredAt = options.now?.() ?? Math.floor(Date.now() / 1000);
+
+  for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
+    try {
+      const head = await db
+        .prepare(
+          `SELECT seq, row_hash FROM ${AUDIT_TABLE}
+            WHERE chain_key = ? AND seq IS NOT NULL
+            ORDER BY seq DESC LIMIT 1`,
+        )
+        .bind(chainKey)
+        .first<{ seq: number; row_hash: string | null }>();
+      const seq = (head?.seq ?? 0) + 1;
+      const prevHash = head?.row_hash ?? AUDIT_CHAIN_GENESIS_HASH;
+      const rowHash = await auditRowHash({
+        chain_key: chainKey,
+        seq,
+        prev_hash: prevHash,
+        id,
+        request_id: requestId,
+        agent_run_id: null,
+        tenant: tenantId,
+        occurred_at_unix: occurredAt,
+        audit_json: auditJson,
+      });
+
+      await db
+        .prepare(
+          `INSERT INTO ${AUDIT_TABLE}
+             (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+              chain_key, seq, prev_hash, row_hash)
+           VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(id, requestId, tenantId, occurredAt, auditJson, chainKey, seq, prevHash, rowHash)
+        .run();
+      return;
+    } catch (error) {
+      if (attempt === AUDIT_APPEND_ATTEMPTS) {
+        throw new Error(
+          `control-plane: audit append failed for ${options.action} ${options.collection}/${String(options.record.id)}`,
+          { cause: error },
+        );
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Schema notes (reported rather than invented — see the slice report)
 // ---------------------------------------------------------------------------

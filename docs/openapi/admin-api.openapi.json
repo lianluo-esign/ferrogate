@@ -1515,6 +1515,16 @@
         },
         {
           "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "description": "Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       ],
       "get": {
@@ -1580,6 +1590,203 @@
           "auth": {
             "kind": "bearer",
             "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "createAdminProvider",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a tenant-owned provider channel.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminProviderChannelMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminProviderMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/providers/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAdminProvider",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one tenant-owned provider channel without secrets.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminProviderMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "put": {
+        "operationId": "replaceAdminProvider",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace a tenant-owned provider channel.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminProviderChannelMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminProviderMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminProvider",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Partially update a tenant-owned provider channel.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminProviderChannelPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminProviderMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminProvider",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete a provider channel when no offering references it.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
           },
           "rbac_action": null
         }
@@ -3723,6 +3930,16 @@
         },
         {
           "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "description": "Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       ],
       "get": {
@@ -3789,6 +4006,462 @@
           "auth": {
             "kind": "bearer",
             "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "createAdminModel",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a tenant-owned logical model.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminModelCatalogMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminModelMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/models/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAdminModel",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one tenant-owned logical model.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminModelMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "put": {
+        "operationId": "replaceAdminModel",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace a tenant-owned logical model.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminModelCatalogMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminModelMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminModel",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Partially update a tenant-owned logical model.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminModelCatalogPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminModelMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminModel",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete a tenant-owned logical model and its offerings.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}/offerings": {
+      "parameters": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "operationId": "listAdminModelOfferings",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List offerings attached to a tenant-owned model.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminOfferingListOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "createAdminModelOffering",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Attach a provider channel and price to a model.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminModelOfferingMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminOfferingMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/models/{model_id}/offerings/{offering_id}": {
+      "parameters": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "offering_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAdminModelOffering",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one offering attached to a tenant-owned model.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminOfferingMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "put": {
+        "operationId": "replaceAdminModelOffering",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace a model offering.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminModelOfferingMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminOfferingMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminModelOffering",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Partially update a model offering.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminModelOfferingPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminOfferingMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminModelOffering",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete a model offering.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
           },
           "rbac_action": null
         }
@@ -20746,9 +21419,119 @@
             }
           }
         }
+      },
+      "AdminProviderChannelMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminProviderChannelMutation"
+            }
+          }
+        }
+      },
+      "AdminProviderChannelPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminProviderChannelPatch"
+            }
+          }
+        }
+      },
+      "AdminModelCatalogMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminModelCatalogMutation"
+            }
+          }
+        }
+      },
+      "AdminModelCatalogPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminModelCatalogPatch"
+            }
+          }
+        }
+      },
+      "AdminModelOfferingMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminModelOfferingMutation"
+            }
+          }
+        }
+      },
+      "AdminModelOfferingPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminModelOfferingPatch"
+            }
+          }
+        }
       }
     },
     "responses": {
+      "AdminProviderMutationOk": {
+        "description": "Provider channel mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminProviderMutationResponse"
+            }
+          }
+        }
+      },
+      "AdminModelMutationOk": {
+        "description": "Logical model mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminModelMutationResponse"
+            }
+          }
+        }
+      },
+      "AdminOfferingMutationOk": {
+        "description": "Model offering mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminOfferingMutationResponse"
+            }
+          }
+        }
+      },
+      "AdminOfferingListOk": {
+        "description": "Model offering list response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminOfferingList"
+            }
+          }
+        }
+      },
+      "DeleteMutationOk": {
+        "description": "Catalog deletion response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteResponse"
+            }
+          }
+        }
+      },
       "AdminApiKeyMutationOk": {
         "description": "API key mutation response.",
         "content": {
@@ -21885,7 +22668,7 @@
             "type": "boolean"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
       "AdminProviderModelCatalog": {
         "type": "object",
@@ -22830,10 +23613,16 @@
             "type": "string"
           },
           "provider": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider_model": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "routing_strategy": {
             "type": "string",
@@ -22896,7 +23685,7 @@
             "type": "boolean"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
       "ModelFallback": {
         "type": "object",
@@ -24399,6 +25188,796 @@
         "items": {
           "type": "string"
         }
+      },
+      "AdminProviderChannelMutation": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "base_url"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "api_key_var": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of a secret binding, never the credential value.",
+            "writeOnly": true
+          },
+          "byok_alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth_scheme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "bearer",
+              "x-api-key",
+              null
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zero_data_retention": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "openrouter_http_referer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "openrouter_x_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cloudflare_ai_gateway": {},
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProviderChannelPatch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "api_key_var": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of a secret binding, never the credential value.",
+            "writeOnly": true
+          },
+          "byok_alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth_scheme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "bearer",
+              "x-api-key",
+              null
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zero_data_retention": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "openrouter_http_referer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "openrouter_x_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cloudflare_ai_gateway": {},
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProviderMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "provider"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "provider"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/AdminProvider"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminModelCatalogMutation": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owned_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "routing_strategy": {
+            "type": "string",
+            "enum": [
+              "priority",
+              "lowest_cost",
+              "lowest_latency",
+              "balanced"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminModelCatalogPatch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owned_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "routing_strategy": {
+            "type": "string",
+            "enum": [
+              "priority",
+              "lowest_cost",
+              "lowest_latency",
+              "balanced"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminModelMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "model"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "model"
+          },
+          "model": {
+            "$ref": "#/components/schemas/Model"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminModelOfferingMutation": {
+        "type": "object",
+        "required": [
+          "provider_id",
+          "upstream_model_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "upstream_model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "fallback",
+              "canary",
+              "shadow"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "canary_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "shadow_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "shadow_max_requests": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "capabilities": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zero_data_retention": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "output_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cached_input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cache_write_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reasoning_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_second_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_character_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminModelOfferingPatch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "upstream_model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "fallback",
+              "canary",
+              "shadow"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "canary_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "shadow_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "shadow_max_requests": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "capabilities": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zero_data_retention": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "output_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cached_input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cache_write_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reasoning_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_second_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_character_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminOffering": {
+        "type": "object",
+        "required": [
+          "id",
+          "model_id",
+          "provider_id",
+          "upstream_model_id",
+          "role",
+          "enabled"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream_model_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "weight": {
+            "type": "integer"
+          },
+          "canary_percent": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "shadow_percent": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "shadow_max_requests": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zero_data_retention": {
+            "type": "boolean"
+          },
+          "input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cached_input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_write_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "reasoning_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "audio_second_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "audio_character_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AdminOfferingMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "offering"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "offering"
+          },
+          "offering": {
+            "$ref": "#/components/schemas/AdminOffering"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminOfferingList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminOffering"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
       },
       "AdminProviderList": {
         "$ref": "#/components/schemas/AdminList_AdminProvider"

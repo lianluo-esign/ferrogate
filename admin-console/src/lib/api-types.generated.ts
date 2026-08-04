@@ -516,7 +516,10 @@ export interface paths {
     };
     "/admin/v1/providers": {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
             header?: {
                 /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
                 "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
@@ -535,11 +538,37 @@ export interface paths {
         /** List configured providers without exposing provider secrets. */
         get: operations["listAdminProviders"];
         put?: never;
-        post?: never;
+        /** Create a tenant-owned provider channel. */
+        post: operations["createAdminProvider"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/providers/{id}": {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Get one tenant-owned provider channel without secrets. */
+        get: operations["getAdminProvider"];
+        /** Replace a tenant-owned provider channel. */
+        put: operations["replaceAdminProvider"];
+        post?: never;
+        /** Delete a provider channel when no offering references it. */
+        delete: operations["deleteAdminProvider"];
+        options?: never;
+        head?: never;
+        /** Partially update a tenant-owned provider channel. */
+        patch: operations["patchAdminProvider"];
         trace?: never;
     };
     "/admin/v1/provider-health": {
@@ -1290,7 +1319,10 @@ export interface paths {
     };
     "/admin/v1/models": {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
             header?: {
                 /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
                 "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
@@ -1312,11 +1344,86 @@ export interface paths {
          */
         get: operations["listAdminModels"];
         put?: never;
-        post?: never;
+        /** Create a tenant-owned logical model. */
+        post: operations["createAdminModel"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/models/{id}": {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Get one tenant-owned logical model. */
+        get: operations["getAdminModel"];
+        /** Replace a tenant-owned logical model. */
+        put: operations["replaceAdminModel"];
+        post?: never;
+        /** Delete a tenant-owned logical model and its offerings. */
+        delete: operations["deleteAdminModel"];
+        options?: never;
+        head?: never;
+        /** Partially update a tenant-owned logical model. */
+        patch: operations["patchAdminModel"];
+        trace?: never;
+    };
+    "/admin/v1/models/{model_id}/offerings": {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        /** List offerings attached to a tenant-owned model. */
+        get: operations["listAdminModelOfferings"];
+        put?: never;
+        /** Attach a provider channel and price to a model. */
+        post: operations["createAdminModelOffering"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/models/{model_id}/offerings/{offering_id}": {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+                offering_id: string;
+            };
+            cookie?: never;
+        };
+        /** Get one offering attached to a tenant-owned model. */
+        get: operations["getAdminModelOffering"];
+        /** Replace a model offering. */
+        put: operations["replaceAdminModelOffering"];
+        post?: never;
+        /** Delete a model offering. */
+        delete: operations["deleteAdminModelOffering"];
+        options?: never;
+        head?: never;
+        /** Partially update a model offering. */
+        patch: operations["patchAdminModelOffering"];
         trace?: never;
     };
     "/admin/v1/api-keys": {
@@ -6059,6 +6166,8 @@ export interface components {
             base_url: string;
             has_api_key: boolean;
             enabled: boolean;
+        } & {
+            [key: string]: unknown;
         };
         AdminProviderModelCatalog: {
             provider: string;
@@ -6280,8 +6389,8 @@ export interface components {
         ModelCapability: "chat" | "streaming" | "vision" | "images" | "embeddings" | "tools" | "structured_output";
         Model: {
             name: string;
-            provider: string;
-            provider_model: string;
+            provider: string | null;
+            provider_model: string | null;
             /** @default priority */
             routing_strategy: string;
             fallbacks: components["schemas"]["ModelFallback"][];
@@ -6293,6 +6402,8 @@ export interface components {
             input_price_per_1m?: number | null;
             output_price_per_1m?: number | null;
             enabled: boolean;
+        } & {
+            [key: string]: unknown;
         };
         ModelFallback: {
             provider: string;
@@ -6669,6 +6780,174 @@ export interface components {
             total_tokens: number;
         };
         StringList: string[];
+        AdminProviderChannelMutation: {
+            id?: string;
+            tenant_id?: string;
+            name: string;
+            kind: string;
+            /** Format: uri */
+            base_url: string;
+            /** @description The name of a secret binding, never the credential value. */
+            api_key_var?: string | null;
+            byok_alias?: string | null;
+            /** @enum {string|null} */
+            auth_scheme?: "bearer" | "x-api-key" | null;
+            region?: string | null;
+            zero_data_retention?: boolean | null;
+            openrouter_http_referer?: string | null;
+            openrouter_x_title?: string | null;
+            cloudflare_ai_gateway?: unknown;
+            enabled?: boolean;
+        };
+        AdminProviderChannelPatch: {
+            id?: string;
+            tenant_id?: string;
+            name?: string;
+            kind?: string;
+            /** Format: uri */
+            base_url?: string;
+            /** @description The name of a secret binding, never the credential value. */
+            api_key_var?: string | null;
+            byok_alias?: string | null;
+            /** @enum {string|null} */
+            auth_scheme?: "bearer" | "x-api-key" | null;
+            region?: string | null;
+            zero_data_retention?: boolean | null;
+            openrouter_http_referer?: string | null;
+            openrouter_x_title?: string | null;
+            cloudflare_ai_gateway?: unknown;
+            enabled?: boolean;
+        };
+        AdminProviderMutationResponse: {
+            /** @constant */
+            object: "provider";
+            provider: components["schemas"]["AdminProvider"];
+        };
+        AdminModelCatalogMutation: {
+            id?: string;
+            tenant_id?: string;
+            name: string;
+            family?: string | null;
+            owned_by?: string | null;
+            capabilities?: string[];
+            context_window?: number | null;
+            /** @enum {string} */
+            routing_strategy?: "priority" | "lowest_cost" | "lowest_latency" | "balanced";
+            enabled?: boolean;
+        };
+        AdminModelCatalogPatch: {
+            id?: string;
+            tenant_id?: string;
+            name?: string;
+            family?: string | null;
+            owned_by?: string | null;
+            capabilities?: string[];
+            context_window?: number | null;
+            /** @enum {string} */
+            routing_strategy?: "priority" | "lowest_cost" | "lowest_latency" | "balanced";
+            enabled?: boolean;
+        };
+        AdminModelMutationResponse: {
+            /** @constant */
+            object: "model";
+            model: components["schemas"]["Model"];
+        };
+        AdminModelOfferingMutation: {
+            id?: string;
+            tenant_id?: string;
+            provider_id: string;
+            upstream_model_id: string;
+            /** @enum {string} */
+            role?: "primary" | "fallback" | "canary" | "shadow";
+            priority?: number;
+            weight?: number;
+            canary_percent?: number | null;
+            shadow_percent?: number | null;
+            shadow_max_requests?: number | null;
+            capabilities?: string[] | null;
+            context_window?: number | null;
+            region?: string | null;
+            zero_data_retention?: boolean | null;
+            input_price_per_1m?: number | null;
+            output_price_per_1m?: number | null;
+            cached_input_price_per_1m?: number | null;
+            cache_write_price_per_1m?: number | null;
+            reasoning_price_per_1m?: number | null;
+            audio_second_price_per_1m?: number | null;
+            audio_character_price_per_1m?: number | null;
+            currency?: string;
+            source?: string;
+            enabled?: boolean;
+        };
+        AdminModelOfferingPatch: {
+            id?: string;
+            tenant_id?: string;
+            provider_id?: string;
+            upstream_model_id?: string;
+            /** @enum {string} */
+            role?: "primary" | "fallback" | "canary" | "shadow";
+            priority?: number;
+            weight?: number;
+            canary_percent?: number | null;
+            shadow_percent?: number | null;
+            shadow_max_requests?: number | null;
+            capabilities?: string[] | null;
+            context_window?: number | null;
+            region?: string | null;
+            zero_data_retention?: boolean | null;
+            input_price_per_1m?: number | null;
+            output_price_per_1m?: number | null;
+            cached_input_price_per_1m?: number | null;
+            cache_write_price_per_1m?: number | null;
+            reasoning_price_per_1m?: number | null;
+            audio_second_price_per_1m?: number | null;
+            audio_character_price_per_1m?: number | null;
+            currency?: string;
+            source?: string;
+            enabled?: boolean;
+        };
+        AdminOffering: {
+            id: string;
+            model_id: string;
+            provider_id: string;
+            provider?: string | null;
+            upstream_model_id: string;
+            role: string;
+            priority?: number;
+            weight?: number;
+            canary_percent?: number | null;
+            shadow_percent?: number | null;
+            shadow_max_requests?: number | null;
+            capabilities?: string[];
+            context_window?: number | null;
+            region?: string | null;
+            zero_data_retention?: boolean;
+            input_price_per_1m?: number | null;
+            output_price_per_1m?: number | null;
+            cached_input_price_per_1m?: number | null;
+            cache_write_price_per_1m?: number | null;
+            reasoning_price_per_1m?: number | null;
+            audio_second_price_per_1m?: number | null;
+            audio_character_price_per_1m?: number | null;
+            currency?: string;
+            source?: string;
+            enabled: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        AdminOfferingMutationResponse: {
+            /** @constant */
+            object: "offering";
+            offering: components["schemas"]["AdminOffering"];
+        };
+        AdminOfferingList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminOffering"][];
+            total?: number;
+            offset?: number;
+            limit?: number;
+        };
         AdminProviderList: components["schemas"]["AdminList_AdminProvider"];
         ProviderHealthList: components["schemas"]["AdminList_ProviderHealthCheck"];
         AdminProviderModelCatalogList: components["schemas"]["AdminList_AdminProviderModelCatalog"];
@@ -10653,6 +10932,51 @@ export interface components {
         };
     };
     responses: {
+        /** @description Provider channel mutation response. */
+        AdminProviderMutationOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AdminProviderMutationResponse"];
+            };
+        };
+        /** @description Logical model mutation response. */
+        AdminModelMutationOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AdminModelMutationResponse"];
+            };
+        };
+        /** @description Model offering mutation response. */
+        AdminOfferingMutationOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AdminOfferingMutationResponse"];
+            };
+        };
+        /** @description Model offering list response. */
+        AdminOfferingListOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AdminOfferingList"];
+            };
+        };
+        /** @description Catalog deletion response. */
+        DeleteMutationOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["DeleteResponse"];
+            };
+        };
         /** @description API key mutation response. */
         AdminApiKeyMutationOk: {
             headers: {
@@ -11102,6 +11426,36 @@ export interface components {
         AdminSkillPackageMutation: {
             content: {
                 "application/json": components["schemas"]["SkillPackage"];
+            };
+        };
+        AdminProviderChannelMutation: {
+            content: {
+                "application/json": components["schemas"]["AdminProviderChannelMutation"];
+            };
+        };
+        AdminProviderChannelPatch: {
+            content: {
+                "application/json": components["schemas"]["AdminProviderChannelPatch"];
+            };
+        };
+        AdminModelCatalogMutation: {
+            content: {
+                "application/json": components["schemas"]["AdminModelCatalogMutation"];
+            };
+        };
+        AdminModelCatalogPatch: {
+            content: {
+                "application/json": components["schemas"]["AdminModelCatalogPatch"];
+            };
+        };
+        AdminModelOfferingMutation: {
+            content: {
+                "application/json": components["schemas"]["AdminModelOfferingMutation"];
+            };
+        };
+        AdminModelOfferingPatch: {
+            content: {
+                "application/json": components["schemas"]["AdminModelOfferingPatch"];
             };
         };
     };
@@ -11894,6 +12248,8 @@ export interface operations {
     listAdminProviders: {
         parameters: {
             query?: {
+                /** @description Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
                 /** @description Case-insensitive match against provider name or kind. */
                 search?: string;
                 offset?: number;
@@ -11928,6 +12284,122 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    createAdminProvider: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminProviderChannelMutation"];
+        responses: {
+            201: components["responses"]["AdminProviderMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    getAdminProvider: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["AdminProviderMutationOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    replaceAdminProvider: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminProviderChannelMutation"];
+        responses: {
+            200: components["responses"]["AdminProviderMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteAdminProvider: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["DeleteMutationOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    patchAdminProvider: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminProviderChannelPatch"];
+        responses: {
+            200: components["responses"]["AdminProviderMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listAdminProviderHealth: {
@@ -13212,6 +13684,8 @@ export interface operations {
     listAdminModels: {
         parameters: {
             query?: {
+                /** @description Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
                 /** @description Case-insensitive match against model name, provider, or provider model. */
                 search?: string;
                 offset?: number;
@@ -13246,6 +13720,254 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    createAdminModel: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminModelCatalogMutation"];
+        responses: {
+            201: components["responses"]["AdminModelMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    getAdminModel: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["AdminModelMutationOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    replaceAdminModel: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminModelCatalogMutation"];
+        responses: {
+            200: components["responses"]["AdminModelMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteAdminModel: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["DeleteMutationOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    patchAdminModel: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminModelCatalogPatch"];
+        responses: {
+            200: components["responses"]["AdminModelMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listAdminModelOfferings: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["AdminOfferingListOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createAdminModelOffering: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminModelOfferingMutation"];
+        responses: {
+            201: components["responses"]["AdminOfferingMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    getAdminModelOffering: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+                offering_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["AdminOfferingMutationOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    replaceAdminModelOffering: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+                offering_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminModelOfferingMutation"];
+        responses: {
+            200: components["responses"]["AdminOfferingMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteAdminModelOffering: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+                offering_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["DeleteMutationOk"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    patchAdminModelOffering: {
+        parameters: {
+            query?: {
+                /** @description Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant. */
+                tenant_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+                offering_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["AdminModelOfferingPatch"];
+        responses: {
+            200: components["responses"]["AdminOfferingMutationOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listAdminApiKeys: {

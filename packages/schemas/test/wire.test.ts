@@ -125,7 +125,7 @@ describe("jsonValueSchema", () => {
 });
 
 /**
- * ANTI-DRIFT GATE for the third copy of 281.
+ * ANTI-DRIFT GATE for the third copy of 297.
  *
  * `OPENAPI_OPERATION_COUNT` here, `EXPECTED_OPERATION_COUNT` in
  * `apps/gateway/src/contract.ts` and `EXPECTED_TOTAL_OPERATION_COUNT` in
@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(281);
+    expect(OPENAPI_OPERATION_COUNT).toBe(297);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -323,10 +323,10 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 281 - 10 = 271. The running sum is narrative, and
+    // `seeded`, i.e. 297 - 10 = 287. The running sum is narrative, and
     // #703/#737, then #743/#689, then #743/#693, and now #693/#697 landing in
     // parallel is exactly why it must not be the source: this branch wrote 270
     // and main wrote 269, and 271 is the value the merged document produces.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(271);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(287);
   });
 });
