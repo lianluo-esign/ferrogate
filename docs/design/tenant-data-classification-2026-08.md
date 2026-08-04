@@ -800,8 +800,12 @@ The issue was written against a 78-table census. The live schema is now **81 tab
 22 tables from `sql/d1-ts/tenant/`. The three runtime-created tables are included as C57-C59
 above; the issue title keeps the original 78-table wording for history.
 
-The classification is deliberately separate from the moves. Each move below has one PR-sized
-scope, an explicit reader disposition, and a dependency order that follows Part 4:
+The classification is deliberately separate from the moves. These are the nine PR-sized
+scopes attached to #831. Their order preserves the risk order in Part 4, while some scopes
+group or split Part 4 steps: #859 includes the investigation-linked `agent_runs`, #852 carries
+the worker telemetry and usage projections, and #861-#863/#856 divide the control-plane, MCP,
+configuration, worker, and schedule work. The Part 4 step sections remain authoritative for
+each table's transactional coupling and reader prerequisite:
 
 | step | scope | sub-issue |
 |---|---|---|
