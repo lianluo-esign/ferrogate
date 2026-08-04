@@ -5,31 +5,29 @@ Companion to `docs/design/per-tenant-durable-object-storage-2026-08.md`, which d
 *that* tenant storage becomes one SQLite-backed Durable Object per tenant. This document
 decides *what goes in it*.
 
-Scope: all **81** tables that exist in the two D1 roles today — **59** control, **22**
-tenant. Verified by enumeration, not by trusting the migration headers:
+Scope: the **86 live tables** in the current two D1 roles — **57** control and **29**
+tenant. Control has 54 tables left after the sorted SQL migrations plus the three
+runtime-created MCP identity tables. The tenant count includes the model-catalog and
+catalog-audit migrations that landed after the original issue was written.
 
-```
-$ cd sql/d1-ts && grep -ciE '^\s*CREATE TABLE' control/*.sql tenant/*.sql
-control/0001_init_control.sql:44   control/0003_tenant_provider_credentials.sql:1
-control/0004_guardrail_evaluations.sql:2   control/0004_semantic_cache_policies.sql:1
-control/0005_siem_export_cursors.sql:1     control/0008_delegation_chain.sql:1
-control/0009_online_eval.sql:2             control/0010_spend_anomaly.sql:3
-control/0011_experiment_outcomes.sql:1                          → 56
-tenant/0001_init_tenant.sql:20             tenant/0004_asset_bundle_files.sql:1
-tenant/0005_responses_conversations.sql:1                       → 22
-```
+The issue title's 78-table count is historical. The first version of this document counted
+81 by counting migration CREATE statements and the three runtime MCP tables; that was not a
+live-schema count. The final-state count below excludes the transient `model_catalog` table
+that migration 0009 drops and the `gateway_providers`/`gateway_models` tables retired by
+control migration 0013. It is checked against the final table lists in
+`packages/storage/test/d1/schema.test.ts` and `packages/storage/test/do/tenant-data-object.test.ts`.
 
 `storage_schema_migrations` is byte-identical DDL in both roles and is therefore counted
-once per role — two of the 81, not one.
+once per role — two of the 86, not one.
 
 ### Correction: the migrations directory is not the schema
 
 A first draft of this document scoped itself to `sql/d1-ts/` and called the result complete.
 It was not, and the failure is instructive enough to leave in rather than quietly fix: **three
 control tables are created at runtime from TypeScript and never appear in a migration file
-at all.** The enumeration above was `grep CREATE TABLE sql/d1-ts/`, which cannot see them —
-exactly the grep artifact Part 3 warns its *own* collection list might be, without the
-caution having been applied here. The second sweep that found them:
+at all.** A raw `grep CREATE TABLE` also counts transient migration definitions and tables
+later retired, so it cannot be used as the live-table total without applying the migrations.
+The runtime sweep that found the MCP tables was:
 
 ```
 $ grep -rn "CREATE TABLE" --include="*.ts" apps packages | grep -v /test/
@@ -171,7 +169,7 @@ a policy the governed tenant cannot see or edit cannot live in that tenant's obj
 
 ---
 
-## Part 1 — the 22 tenant tables
+## Part 1 — the 29 tenant tables
 
 These are already per-tenant by construction. The classification question here is not *whether*
 they move but whether anything outside the tenant reads them, which decides tenant-private vs
@@ -196,7 +194,7 @@ So the *complete* set of cross-tenant readers of tenant tables is
 (burn). Everything else named "tenant-private" below has no cross-tenant reader, by that
 enumeration rather than by per-table assertion.
 
-**This enumeration is valid for the 22 tenant tables and for nothing else.** Its premise is
+**This enumeration is valid for the 29 tenant tables and for nothing else.** Its premise is
 that a tenant table already sits behind a routed handle, so the only way to read two tenants'
 rows is a fan-out. That premise does not hold for a *control* table labelled tenant-private:
 those rows share one database today, so a plain `SELECT` with no tenant predicate is already a
@@ -227,17 +225,25 @@ and is swept separately in Part 2.
 | T20 | `agent_cost_burn` | tenant-private | **has a cross-tenant reader**: `apps/control-plane/src/routes/admin_agent_cost_burn.ts:101` inside the fan-out at `:127`, whose own docblock (`:119-125`) already says it "must never appear on a request path" |
 | T21 | `asset_bundle_files` | tenant-private | composite PK `(asset_id, path)` under T13; no independent reader |
 | T22 | `responses_conversations` | tenant-private | composite PK leads `(tenant_id, project_id, …)` **precisely because** that prefix is the cross-tenant fence for caller-supplied `previous_response_id`; inside one object the fence becomes structural. The sweep `DELETE … WHERE expires_at_unix <= ?` (`conversation-store.ts:448`) becomes a per-object alarm |
+| T23 | `tenant_provisioning_marks` | tenant-private | one-shot seed ledger for this tenant's object; read and written through the routed handle, with no cross-tenant reader |
+| T24 | `tenant_database_identity` | tenant-private | the object's single-row identity tripwire; it is read only through the tenant handle and cannot answer a cross-tenant query |
+| T25 | `provider_channels` | tenant-private | the tenant's provider endpoint catalog, joined only by tenant-scoped catalog reads; no cross-tenant reader |
+| T26 | `catalog_models` | tenant-private | per-tenant logical model visibility and routing metadata; the platform seed is copied, not shared, and no cross-tenant reader exists |
+| T27 | `catalog_model_offerings` | tenant-private | per-tenant priced provider offerings and routing legs, constrained by tenant-qualified keys; no cross-tenant reader |
+| T28 | `catalog_revisions` | tenant-private | one tenant's catalog cache stamp; read by the tenant resolver through its routed handle, with no cross-tenant reader |
+| T29 | `catalog_audit_outbox` | tenant-private | durable delivery state committed with a tenant catalog mutation; reconciliation names one tenant and does not read another tenant's rows |
 
-Tenant totals: **18 tenant-private, 4 derived, 0 platform-shared.** No tenant table earns
+Tenant totals: **25 tenant-private, 4 derived, 0 platform-shared.** No tenant table earns
 platform-shared, which is the expected result — a table that is already inside a per-tenant
 database has by construction never been read before its tenant was known.
 
 ---
 
-## Part 2 — the 59 control tables
+## Part 2 — the 57 live control tables
 
-C1–C56 are the `sql/d1-ts/control/` migrations; C57–C59 are the three the migrations directory
-does not contain (see the correction at the top).
+C1–C56 are the historical control migration rows; C7 and C8 are retained in the table as
+retired records because control migration 0013 drops them. C1–C6 and C9–C56 are the 54 live
+SQL-migration tables; C57–C59 are the three runtime MCP tables (see the correction at the top).
 
 | # | table | label | reason (one line) |
 |---|---|---|---|
@@ -247,8 +253,8 @@ does not contain (see the correction at the top).
 | C4 | `tenant_databases` | platform-shared | the storage registry; loses `binding_name`/`database_uuid` and gains `location_hint`/`jurisdiction`, which the design doc's cost #1 requires be *recorded* rather than accidental |
 | C5 | `api_key_directory` | **derived** | read before the tenant is known, so a copy must be here — but `store/api_keys.ts:315` says it "duplicates four lifecycle columns across two databases with no transaction spanning them" and the master is T4. The existing ordering rule is already the derived-projection discipline and must survive verbatim: **create** writes the tenant row then the directory, **revoke** writes the directory then the tenant row (`:316-318`), so a crash in either direction fails closed |
 | C6 | `static_api_keys` | platform-shared | keyed by `key_hash` with no tenant in the signature, and `tenant_id` is NULLable precisely because platform-operator grants belong to no tenant |
-| C7 | `gateway_providers` | platform-shared | platform provider catalog — **and it is dead**: zero readers and zero writers in non-test source (`store/d1.ts:1160` says so itself). Delete rather than migrate |
-| C8 | `gateway_models` | platform-shared | same; `tenant_id` NULLable for a tenant catalog overlay that nothing writes. Delete rather than migrate |
+| C7 | `gateway_providers` | platform-shared | retired by `sql/d1-ts/control/0013_retire_gateway_registry.sql` after the zero-reader/zero-writer proof; retained here as a historical classification, not a live table |
+| C8 | `gateway_models` | platform-shared | retired by the same migration after the zero-reader/zero-writer proof; retained here as a historical classification, not a live table |
 | C9 | `quota_policies` | **derived** | reclassified — see the refutation log; authoritative in the object, `scope_type='tenant'` budget columns projected up for `finops/pass.ts:414`, with operator-only writes as a privileged RPC |
 | C10 | `plans` | platform-shared | billing catalog joined by tenant id (`… FROM plans p JOIN tenants t ON t.plan_id = p.id`, 4 apps); a plan the tenant could author is not a plan |
 | C11 | `permissions` | platform-shared | the RBAC vocabulary; `routes/rbac.ts:196` refuses tenant authorship in so many words |
@@ -301,8 +307,8 @@ does not contain (see the correction at the top).
 | C58 | `mcp_identity_generations` | tenant-private | `PRIMARY KEY (tenant_id, workspace_id, user_id, server_name)` (`durable.ts:85-92`) — the revocation generation counter for exactly the C57 tuple; moves with C57 or a revoked credential's generation is stranded |
 | C59 | `mcp_servers` | tenant-private | `PRIMARY KEY (tenant_id, name)` (`durable.ts:93-108`), read `WHERE tenant_id = ?` by `loadServerCatalog` (`:788-794`); the tenant's own authored MCP server catalog including per-server auth material |
 
-Control totals (counting C2 as its own category): **26 tenant-private, 20 platform-shared,
-12 derived, 1 must-split.**
+Control totals (counting C2 as its own category and excluding retired C7/C8 from live totals):
+**26 tenant-private, 18 platform-shared, 12 derived, 1 must-split, 2 retired.**
 
 ### The sweep the first draft skipped: tenant-anonymous reads of control tables
 
@@ -333,14 +339,14 @@ Everything else checked is fenced by a key that carries the tenant: C13
 
 | label | tables |
 |---|---|
-| tenant-private | 44 (18 tenant + 26 control) |
+| tenant-private | 51 (25 tenant + 26 control) |
 | derived | 16 (4 tenant + 12 control) |
-| platform-shared | 20 (all control) |
+| platform-shared | 18 (all control, including no retired rows) |
 | must split | 1 (`control_plane_resources`) |
-| **total** | **81** |
+| retired historical rows | 2 (`gateway_providers`, `gateway_models`) |
+| **total live** | **86** |
 
-Of the 20 platform-shared, two (`gateway_providers`, `gateway_models`) are dead tables that
-should be dropped rather than migrated, and three (`admin_user_refresh_tokens`,
+Of the 18 live platform-shared tables, three (`admin_user_refresh_tokens`,
 `sso_pending_flows`, `spend_anomaly_runs`) survive only contingently. The **durable
 platform-shared core is 15 tables**:
 
@@ -349,7 +355,7 @@ platform-shared core is 15 tables**:
 `site_domains` + `site_domain_verifications` · `guardrail_policy_revisions` +
 `guardrail_policy_bindings` · `self_hosted_worker_registrations` · `siem_export_cursors`
 
-That is the honest size of the shared control plane: **15 of 81 tables, none of which contain
+That is the honest size of the shared control plane: **15 of 86 live tables, none of which contain
 a tenant's own content** — they contain the tenant's *name*, its *plan*, the *grants imposed on
 it*, the three hash→tenant indexes (credential, hostname, worker id) that exist only to
 answer "which object?", and one export bookmark whose key is global on purpose.
@@ -785,8 +791,9 @@ that; it makes the gap wider and puts a network hop in the middle of it.
 
 ### Step 9 — retire the shared halves
 
-Drop **C7 `gateway_providers`** and **C8 `gateway_models`** (dead: zero readers, zero writers —
-`store/d1.ts:1160` already says so). Re-evaluate **C54 `spend_anomaly_runs`** (no subject if
+**C7 `gateway_providers`** and **C8 `gateway_models`** are already retired by
+`sql/d1-ts/control/0013_retire_gateway_registry.sql` (dead: zero readers, zero writers —
+`store/d1.ts:1160` says so). Re-evaluate **C54 `spend_anomaly_runs`** (no subject if
 detection moved into alarms in step 4) and **C16/C18** (both flip to tenant-private with a
 token/state format change, which is a smaller diff than the migration would be). Split
 `control_plane_resources` per Part 3 and delete `tenantScopeSql`'s tenant branch.
@@ -795,10 +802,11 @@ token/state format change, which is a smaller diff than the migration would be).
 
 ## Execution sub-issues (ordered)
 
-The issue was written against a 78-table census. The live schema is now **81 tables**:
-56 tables from `sql/d1-ts/control/`, 3 MCP identity tables created by application code, and
-22 tables from `sql/d1-ts/tenant/`. The three runtime-created tables are included as C57-C59
-above; the issue title keeps the original 78-table wording for history.
+The issue was written against a 78-table census. The live schema is now **86 tables**:
+54 tables remain after the control migrations, 3 MCP identity tables are created by
+application code, and 29 tables remain after the tenant migrations. The transient
+`model_catalog` and retired `gateway_providers`/`gateway_models` definitions are not counted;
+the issue title keeps the original 78-table wording for history.
 
 The classification is deliberately separate from the moves. These are the nine PR-sized
 scopes attached to #831. Their order preserves the risk order in Part 4, while some scopes
