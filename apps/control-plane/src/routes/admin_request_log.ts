@@ -22,8 +22,8 @@
  * `getGuardrailInvestigation`) — that second gate is applied by the table-driven
  * auth middleware from the contract, so it is not repeated here.
  */
-import { HttpError } from "../middleware/errors.js";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import {
   adminListPaginated,
@@ -38,6 +38,8 @@ import {
   GUARDRAIL_EVALUATION_TABLE,
   REQUEST_LOG_TABLE,
 } from "../store/d1.js";
+import { ensureTenantGuardrailEvidenceBackfill } from "../store/guardrail_evidence_backfill.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
   type Handler,
@@ -48,7 +50,6 @@ import {
   readOnlyCollection,
   scopeOf,
 } from "./resource.js";
-import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 
 /**
  * The tenant fence for `audit_events`, which is NARROWER than the document
@@ -845,6 +846,7 @@ function listGuardrailEvaluationsHandler(): Handler {
     if (scope.kind === "tenant") {
       // Tenant scope is an authority read. CONTROL is only a fleet projection,
       // so its absence or staleness must not change the tenant answer.
+      await ensureTenantGuardrailEvidenceBackfill(db, deps.tenantDatabases, scope.tenantId);
       const page = await tenantGuardrailEvaluationPage(
         deps.tenantDatabases,
         scope.tenantId,
@@ -962,6 +964,9 @@ function getGuardrailInvestigationHandler(): Handler {
       scope.kind === "tenant"
         ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, scope.tenantId)
         : null;
+    if (scope.kind === "tenant") {
+      await ensureTenantGuardrailEvidenceBackfill(db, deps.tenantDatabases, scope.tenantId);
+    }
     if (scope.kind === "platform_operator" && db === null) {
       // Nothing writes the control projection in a memory-store deployment, so
       // there is nothing for a fleet operator to investigate.

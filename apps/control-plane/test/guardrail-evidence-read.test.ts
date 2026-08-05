@@ -37,6 +37,7 @@ import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
+import { GUARDRAIL_EVIDENCE_BACKFILL_MARK } from "../src/store/guardrail_evidence_backfill.js";
 import {
   type GuardrailEvaluationSeed,
   applySchema,
@@ -100,6 +101,9 @@ async function clearExactTenantEvidence(): Promise<void> {
       tenant.prepare("DELETE FROM agent_run_events"),
       tenant.prepare("DELETE FROM agent_runs"),
       tenant.prepare("DELETE FROM request_logs"),
+      tenant
+        .prepare("DELETE FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+        .bind(tenantId, GUARDRAIL_EVIDENCE_BACKFILL_MARK),
     ]);
   }
 }
@@ -349,6 +353,43 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
     expect(page.data).toHaveLength(2);
     expect(page.total).toBe(5);
   });
+
+  it("backfills pre-cutover control evidence before the tenant authority read", async () => {
+    await seedGuardrailEvaluations([BLOCKED]);
+    expect(
+      await (await exactTenantDatabase("t-1"))
+        .prepare("SELECT id FROM guardrail_evaluations")
+        .all(),
+    ).toMatchObject({ results: [] });
+
+    const page = await readEvaluations("k-tenant");
+    expect(page.data.map((row) => row.id)).toEqual([BLOCKED.id]);
+
+    const tenant = await exactTenantDatabase("t-1");
+    expect(
+      await tenant
+        .prepare("SELECT id, tenant FROM guardrail_evaluations WHERE id = ?")
+        .bind(BLOCKED.id)
+        .first(),
+    ).toMatchObject({ id: BLOCKED.id, tenant: "t-1" });
+    expect(
+      await tenant
+        .prepare(
+          "SELECT id, evaluation_id FROM guardrail_check_evaluations WHERE evaluation_id = ?",
+        )
+        .bind(BLOCKED.id)
+        .first(),
+    ).toMatchObject({ id: BLOCKED.checks[0]?.id, evaluation_id: BLOCKED.id });
+    const mark = await tenant
+      .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+      .bind("t-1", GUARDRAIL_EVIDENCE_BACKFILL_MARK)
+      .first<{ detail: string }>();
+    expect(JSON.parse(mark?.detail ?? "{}")).toMatchObject({
+      state: "complete",
+      evaluations: 1,
+      checks: 1,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -379,6 +420,9 @@ describe("the tenant fence on guardrail evidence", () => {
   });
 
   it("does not use a control-only row as a tenant authority fallback", async () => {
+    // The first read completes the one-time pre-cutover copy. A later row that
+    // exists only in CONTROL is projection lag, not migration input.
+    await readEvaluations("k-tenant");
     await seedGuardrailEvaluations([
       {
         ...BLOCKED,

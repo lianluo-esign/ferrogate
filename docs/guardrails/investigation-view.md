@@ -114,6 +114,14 @@ tenant-qualified CONTROL projection from
 `sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql` for bounded
 operator/fleet reads. Unscoped platform evidence remains CONTROL-owned.
 
+Rows written before this cutover are copied lazily, per tenant, by the control
+plane before the first tenant-scoped list or investigation read. The copy is
+paged, idempotent, and records its cursor in the object's
+`tenant_provisioning_marks` table under `guardrail_evidence_backfill_v1`; a
+completed mark prevents later projection lag from being copied back into the
+authority. A partial copy fails closed with a retryable response, while the
+tenant response itself is always read from the object.
+
 Tenant-scoped list and investigation reads use the exact object; platform
 operators read the projection as an explicitly derived/as-of view until #825
 defines the general bounded fan-out freshness contract. Both evidence and

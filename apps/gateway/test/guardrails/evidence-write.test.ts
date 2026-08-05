@@ -669,6 +669,38 @@ describe("the data plane does not depend on the evidence path", () => {
     expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(1);
   });
 
+  it("retains a failed direct projection batch and persists it after recovery", async () => {
+    const envelope = manualEnvelope("tenant_a");
+    const authoritative = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
+    if (authoritative === undefined) throw new Error("TENANT_DATA binding is required");
+
+    let projectionAvailable = false;
+    const failingProjection = {
+      prepare: (query: string) => controlDb().prepare(query),
+      batch: async () => {
+        throw new Error("control projection unavailable");
+      },
+    };
+    const evidence = new DurableGuardrailEvidenceSink({
+      queue: () => undefined,
+      database: () => (projectionAvailable ? controlDb() : failingProjection),
+      tenantDatabase: () => authoritative,
+    });
+
+    expect(evidence.append(envelope.evaluation, envelope.checks)).toBe(true);
+    await evidence.flush({ env: {} });
+    expect(evidence.pending).toBe(1);
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(1);
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+
+    projectionAvailable = true;
+    await evidence.flush({ env: {} });
+    expect(evidence.pending).toBe(0);
+    expect(await storedGuardrailEvaluations()).toEqual([
+      expect.objectContaining({ id: envelope.evaluation.id, tenant: "tenant_a" }),
+    ]);
+  });
+
   /**
    * With NO queue and NO control database the sink counts a `dropped` and the
    * request is served. Counted rather than silent: "no rows" and "no writer"
