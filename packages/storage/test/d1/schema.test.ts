@@ -43,16 +43,12 @@ const CONTROL_ONLY = [
   "quota_policies",
   "permissions",
   "roles",
-  "tenant_role_bindings",
   "admin_users",
   "admin_user_tenant_memberships",
   "admin_user_refresh_tokens",
-  "sso_provider_configs",
   "sso_pending_flows",
   "site_domains",
   "site_domain_verifications",
-  "budget_alert_notifications",
-  "control_plane_replay_floors",
   "control_plane_resources",
   "api_key_directory",
   "static_api_keys",
@@ -62,13 +58,18 @@ const CONTROL_ONLY = [
   "guardrail_policy_revisions",
   "guardrail_policy_bindings",
   "audit_events",
-  // Created AFTER `0001_init_control.sql`. A later migration is exactly when a
-  // table gets filed under the wrong role — the author is editing one directory
-  // and the split is enforced by nothing but which directory the file sits in —
-  // so every `CREATE TABLE` a control migration adds belongs on this list.
-  "tenant_provider_credentials", // 0003
-  "semantic_cache_policies", // 0004
   "siem_export_cursors", // 0005
+] as const;
+
+/** Retained only as migration input for tenant-object backfill. */
+const CONTROL_LEGACY = [
+  "tenant_provider_credentials_legacy",
+  "sso_provider_configs_legacy",
+  "tenant_role_bindings_legacy",
+  "semantic_cache_policies_legacy",
+  "delegation_revocations_legacy",
+  "control_plane_replay_floors_legacy",
+  "budget_alert_notifications_legacy",
 ] as const;
 
 /** Evidence whose authority is tenant-local but whose compatibility projection remains in CONTROL. */
@@ -115,6 +116,14 @@ const TENANT_ONLY = [
   "catalog_audit_outbox",
   "catalog_revisions",
   "tenant_provisioning_marks",
+  "tenant_provider_credentials",
+  "sso_provider_configs",
+  "tenant_role_catalog",
+  "tenant_role_bindings",
+  "semantic_cache_policies",
+  "delegation_revocations",
+  "control_plane_replay_floors",
+  "budget_alert_notifications",
 ] as const;
 
 describe("control / tenant split", () => {
@@ -133,6 +142,15 @@ describe("control / tenant split", () => {
     for (const table of DERIVED_EVIDENCE) {
       expect(control, `${table} compatibility projection must exist in CONTROL`).toContain(table);
       expect(tenant, `${table} authority must exist in TENANT`).toContain(table);
+    }
+  });
+
+  test("moved control tables remain only as explicit backfill input", async () => {
+    const control = await tableNames(env.CONTROL_DB);
+    const tenant = await tableNames(env.TENANT_DB_A);
+    for (const table of CONTROL_LEGACY) {
+      expect(control, `${table} must remain in CONTROL for backfill`).toContain(table);
+      expect(tenant, `${table} must NOT exist in a tenant database`).not.toContain(table);
     }
   });
 

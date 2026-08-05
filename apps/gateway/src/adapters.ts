@@ -33,11 +33,15 @@
  * comparison itself.
  */
 import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
   type LifecycleStatus as LifecycleStatusValue,
+  type TenantDatabaseRouter,
   lifecycleStatusAllowsRecovery,
   lifecycleStatusAllowsRequests,
   parseLifecycleStatus,
 } from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
 import type {
@@ -925,19 +929,37 @@ function isRbacDatabase(value: unknown): value is RbacDatabase {
 export class D1RbacAuthorizer implements RbacAuthorizerPort {
   readonly #db: RbacDatabase;
   readonly #fallback: RbacAuthorizerPort | undefined;
+  readonly #tenantDatabases: TenantDatabaseRouter | undefined;
 
-  constructor(db: RbacDatabase, options: { fallback?: RbacAuthorizerPort | undefined } = {}) {
+  constructor(
+    db: RbacDatabase,
+    options: {
+      fallback?: RbacAuthorizerPort | undefined;
+      tenantDatabases?: TenantDatabaseRouter | undefined;
+    } = {},
+  ) {
     this.#db = db;
     this.#fallback = options.fallback;
+    this.#tenantDatabases = options.tenantDatabases;
   }
 
   /** `null` when `CONTROL_DB` is unbound, so the caller keeps its config path. */
   static fromEnv(
     env: Record<string, unknown>,
-    options: { fallback?: RbacAuthorizerPort | undefined } = {},
+    options: {
+      fallback?: RbacAuthorizerPort | undefined;
+      tenantDatabases?: TenantDatabaseRouter | undefined;
+    } = {},
   ): D1RbacAuthorizer | null {
     const binding = env[CONTROL_DATABASE_BINDING];
-    return isRbacDatabase(binding) ? new D1RbacAuthorizer(binding, options) : null;
+    if (!isRbacDatabase(binding)) return null;
+    const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
+    const tenantDatabases =
+      options.tenantDatabases ??
+      (namespace === undefined
+        ? undefined
+        : new DurableObjectTenantDatabaseRouter(namespace, binding as D1Database));
+    return new D1RbacAuthorizer(binding, { ...options, tenantDatabases });
   }
 
   async authorize(auth: AuthContext, rbacAction: string): Promise<RbacDecision> {
@@ -970,7 +992,10 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
     if ((declared.results ?? []).length === 0) {
       return false;
     }
-    const grants = await this.#db.prepare(RBAC_TENANT_ROLE_GRANTS_SQL).bind(tenantId).all();
+    const grants =
+      this.#tenantDatabases === undefined
+        ? await this.#db.prepare(RBAC_TENANT_ROLE_GRANTS_SQL).bind(tenantId).all()
+        : await this.#tenantRoleGrants(tenantId);
     for (const row of grants.results ?? []) {
       const raw = (row as { permission_keys_json?: unknown }).permission_keys_json;
       if (typeof raw !== "string") continue;
@@ -988,6 +1013,38 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
       }
     }
     return false;
+  }
+
+  /**
+   * The tenant-local binding is authoritative after #863. The shared roles
+   * catalog is still checked in CONTROL so a stale object snapshot can never
+   * mint a grant after an operator deletes the role.
+   */
+  async #tenantRoleGrants(
+    tenantId: string,
+  ): Promise<{ results: unknown[] }> {
+    const router = this.#tenantDatabases;
+    if (router === undefined) throw new Error("tenant object router is not configured");
+    await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
+    const handle = await router.forTenant(tenantId);
+    const local = await handle.db
+      .prepare(
+        `SELECT b.role_id, c.permission_keys_json AS permission_keys_json
+           FROM tenant_role_bindings AS b
+           JOIN tenant_role_catalog AS c ON c.role_id = b.role_id
+          WHERE b.tenant_id = ?1`,
+      )
+      .bind(tenantId)
+      .all<{ role_id: string; permission_keys_json: string | null }>();
+    const valid: unknown[] = [];
+    for (const row of local.results) {
+      const shared = await this.#db
+        .prepare("SELECT 1 AS present FROM roles WHERE id = ?1")
+        .bind(row.role_id)
+        .all();
+      if ((shared.results ?? []).length > 0) valid.push(row);
+    }
+    return { results: valid };
   }
 }
 

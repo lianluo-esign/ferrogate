@@ -76,7 +76,11 @@ import {
   flattenedText,
 } from "@ferrogate/guardrails";
 import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
-import { EnvBindingTenantDatabaseRouter } from "@ferrogate/storage";
+import {
+  DurableObjectTenantDatabaseRouter,
+  EnvBindingTenantDatabaseRouter,
+  type TenantDatabaseRouter,
+} from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 // `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
@@ -2317,7 +2321,7 @@ function durableApprovals(env: McpEnv): ApprovalPort {
 function durableAuth(env: McpEnv): AuthPort {
   if (env.DB === undefined) return new UnboundAuth();
   const options: D1McpAuthOptions = {
-    router: new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
+    router: tenantDatabaseRouter(env, env.DB),
   };
   return new D1McpAuth(
     env.DB,
@@ -2370,18 +2374,18 @@ function durableAuth(env: McpEnv): AuthPort {
  */
 function durableLifecycle(env: McpEnv): TenancyLifecycleGatePort {
   if (env.DB === undefined) return new UnboundLifecycleGate();
-  return new D1McpTenancyLifecycleGate(
-    env.DB,
-    new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
-  );
+  return new D1McpTenancyLifecycleGate(env.DB, tenantDatabaseRouter(env, env.DB));
 }
 
 function durableAdmission(env: McpEnv): AdmissionPort {
   if (env.DB === undefined) return ADMIT_ALL;
-  return admissionFromEnv(
-    env,
-    new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
-  );
+  return admissionFromEnv(env, tenantDatabaseRouter(env, env.DB));
+}
+
+function tenantDatabaseRouter(env: McpEnv, controlDb: D1Database): TenantDatabaseRouter {
+  return env.TENANT_DATA === undefined
+    ? new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, controlDb)
+    : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
 }
 
 /**
@@ -2413,6 +2417,9 @@ function durableEntitlements(env: McpEnv): EntitlementPort {
   if (env.DB === undefined) return inMemoryPorts().entitlements;
   return new D1ToolEntitlements(
     env.DB,
-    env.FG_DEV_IN_MEMORY_PORTS === "1" ? { fallback: inMemoryPorts().entitlements } : {},
+    {
+      tenantDatabases: tenantDatabaseRouter(env, env.DB),
+      ...(env.FG_DEV_IN_MEMORY_PORTS === "1" ? { fallback: inMemoryPorts().entitlements } : {}),
+    },
   );
 }

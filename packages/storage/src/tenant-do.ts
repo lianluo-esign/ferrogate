@@ -99,7 +99,8 @@ import {
 export interface TenantDataStub {
   query(request: TenantDataQueryRequest): Promise<TenantDataResult>;
   batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
-  privilegedBatch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
+  /** Optional for stale test/deployment stubs; callers fail closed if absent. */
+  privilegedBatch?(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
 }
 
 /**
@@ -767,6 +768,11 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
       throw StorageError.runtime("privileged tenant writes require a non-empty tenant id");
     }
     const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.privilegedBatch === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the privileged tenant-write RPC`,
+      );
+    }
     return stub.privilegedBatch({ tenantId, statements });
   }
 

@@ -41,6 +41,12 @@
  * and the config leg never widens a durable decision).
  */
 import type { AssetEntitlements, AssetEntitlementsPort } from "./handlers.js";
+import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
+  type TenantDatabaseRouter,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 /** Rust permission key for the role half of `tenant_can_host` (issue #182). */
 export const ASSET_HOST_PERMISSION = "assets.host";
@@ -104,22 +110,37 @@ interface PlanRow {
 export class D1AssetEntitlements implements AssetEntitlementsPort {
   readonly #db: EntitlementsDatabase;
   readonly #fallback: AssetEntitlementsPort | undefined;
+  readonly #tenantDatabases: TenantDatabaseRouter | undefined;
 
   constructor(
     db: EntitlementsDatabase,
-    options: { fallback?: AssetEntitlementsPort | undefined } = {},
+    options: {
+      fallback?: AssetEntitlementsPort | undefined;
+      tenantDatabases?: TenantDatabaseRouter | undefined;
+    } = {},
   ) {
     this.#db = db;
     this.#fallback = options.fallback;
+    this.#tenantDatabases = options.tenantDatabases;
   }
 
   /** `null` when `CONTROL_DB` is unbound, so the caller keeps its var path. */
   static fromEnv(
     env: Record<string, unknown>,
-    options: { fallback?: AssetEntitlementsPort | undefined } = {},
+    options: {
+      fallback?: AssetEntitlementsPort | undefined;
+      tenantDatabases?: TenantDatabaseRouter | undefined;
+    } = {},
   ): D1AssetEntitlements | null {
     const binding = env[CONTROL_DATABASE_BINDING];
-    return isEntitlementsDatabase(binding) ? new D1AssetEntitlements(binding, options) : null;
+    if (!isEntitlementsDatabase(binding)) return null;
+    const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
+    const tenantDatabases =
+      options.tenantDatabases ??
+      (namespace === undefined
+        ? undefined
+        : new DurableObjectTenantDatabaseRouter(namespace, binding as D1Database));
+    return new D1AssetEntitlements(binding, { ...options, tenantDatabases });
   }
 
   async resolve(tenantId: string): Promise<AssetEntitlements> {
@@ -171,7 +192,10 @@ export class D1AssetEntitlements implements AssetEntitlementsPort {
         // however many roles happen to name it.
         return false;
       }
-      const grants = await this.#db.prepare(ASSET_HOST_ROLE_SQL).bind(tenantId).all();
+      const grants =
+        this.#tenantDatabases === undefined
+          ? await this.#db.prepare(ASSET_HOST_ROLE_SQL).bind(tenantId).all()
+          : await this.#tenantRoleGrantsHosting(tenantId);
       for (const row of grants.results ?? []) {
         const raw = (row as { permission_keys_json?: unknown }).permission_keys_json;
         if (typeof raw !== "string") continue;
@@ -190,5 +214,32 @@ export class D1AssetEntitlements implements AssetEntitlementsPort {
       // `tenant_has_permission` is `…_result(..).unwrap_or(false)`.
       return false;
     }
+  }
+
+  async #tenantRoleGrantsHosting(
+    tenantId: string,
+  ): Promise<{ results: { role_id: string; permission_keys_json: string | null }[] }> {
+    const router = this.#tenantDatabases;
+    if (router === undefined) throw new Error("tenant object router is not configured");
+    await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
+    const handle = await router.forTenant(tenantId);
+    const local = await handle.db
+      .prepare(
+        `SELECT b.role_id, c.permission_keys_json AS permission_keys_json
+           FROM tenant_role_bindings AS b
+           JOIN tenant_role_catalog AS c ON c.role_id = b.role_id
+          WHERE b.tenant_id = ?1`,
+      )
+      .bind(tenantId)
+      .all<{ role_id: string; permission_keys_json: string | null }>();
+    const valid: { role_id: string; permission_keys_json: string | null }[] = [];
+    for (const row of local.results) {
+      const shared = await this.#db
+        .prepare("SELECT 1 AS present FROM roles WHERE id = ?1")
+        .bind(row.role_id)
+        .all();
+      if ((shared.results ?? []).length > 0) valid.push(row);
+    }
+    return { results: valid };
   }
 }

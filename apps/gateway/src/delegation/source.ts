@@ -37,11 +37,15 @@
  */
 import {
   type DelegationRevocationSource,
-  NO_DELEGATION_REVOCATIONS,
   cachedDelegationRevocationSource,
   d1DelegationRevocationSource,
   importDelegationKey,
 } from "@ferrogate/identity";
+import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 /** The Worker vars/bindings this slice reads. */
 export interface DelegationBindings {
@@ -51,10 +55,12 @@ export interface DelegationBindings {
    * committed var.
    */
   readonly DELEGATION_SIGNING_KEY?: string | undefined;
-  /** The CONTROL database that owns `delegation_revocations`. */
+  /** The CONTROL database used only as legacy backfill input. */
   readonly CONTROL_DB?: D1Database | undefined;
   /** The alias the metering/quota/attribution readers already accept. */
   readonly BILLING_DB?: D1Database | undefined;
+  /** The tenant object namespace that owns revocations after M9 Step 5. */
+  readonly TENANT_DATA?: TenantDataNamespace | undefined;
 }
 
 /**
@@ -96,15 +102,29 @@ async function resolveVerifier(env: DelegationBindings): Promise<DelegationVerif
   if (!imported.ok) return { state: "misconfigured", detail: imported.detail };
 
   const db = env.CONTROL_DB ?? env.BILLING_DB;
-  // A deployment with no control database has nowhere to hold a revocation, so
-  // "nothing is revoked" is a complete reading of a known state rather than a
-  // guess — the same argument `attribution/source.ts` makes for a schema that
-  // predates its columns. It is NOT the same as a database that is bound and
-  // unreadable, which is a 503.
-  const revocations =
-    db === undefined
-      ? NO_DELEGATION_REVOCATIONS
-      : cachedDelegationRevocationSource(d1DelegationRevocationSource(db));
+  const namespace = env.TENANT_DATA;
+  if (db === undefined || namespace === undefined) {
+    return {
+      state: "ready",
+      key: imported.key,
+      revocations: {
+        async revoked(_tenant, _subjects) {
+          return {
+            ok: false,
+            detail: "tenant object storage is not configured for delegation revocations",
+          };
+        },
+      },
+    };
+  }
+  const router = new DurableObjectTenantDatabaseRouter(namespace, db);
+  const revocations = cachedDelegationRevocationSource({
+    async revoked(tenant, subjects) {
+      await backfillTenantConfigurationPolicy(db, router, tenant);
+      const handle = await router.forTenant(tenant);
+      return d1DelegationRevocationSource(handle.db).revoked(tenant, subjects);
+    },
+  });
 
   return { state: "ready", key: imported.key, revocations };
 }

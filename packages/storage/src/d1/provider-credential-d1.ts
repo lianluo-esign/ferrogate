@@ -1,6 +1,6 @@
 /**
  * `D1TenantProviderCredentialStore` — the durable half of per-tenant BYOK
- * (issue #682), on the CONTROL database.
+ * (issue #682), against the addressed tenant database.
  *
  * Read `packages/secrets/src/byok.ts` first: it owns the envelope, the alias
  * grammar and the reason the tenant is a property of the RESOLVER rather than of
@@ -150,8 +150,9 @@ function decode(row: CredentialRow): StoredTenantProviderCredential {
 /**
  * Control-D1-backed alias store.
  *
- * Satisfies `@ferrogate/secrets`' `TenantCredentialStore` structurally, so the
- * gateway can hand it straight to a `TenantByokResolver`.
+ * Satisfies `@ferrogate/secrets`' `TenantCredentialStore` structurally. The
+ * composition roots pass the database returned by the tenant object router;
+ * this class has no control-D1 compatibility fallback.
  */
 export class D1TenantProviderCredentialStore {
   private readonly db: D1Database;
@@ -281,6 +282,13 @@ export class D1TenantProviderCredentialStore {
   private wrap(operation: string, error: unknown): StorageError {
     return d1Error(operation, error);
   }
+}
+
+/** Construct the BYOK store only after the tenant router has resolved its object. */
+export function tenantProviderCredentialStoreFor(
+  handle: import("../tenant-router.js").TenantDatabaseHandle,
+): D1TenantProviderCredentialStore {
+  return new D1TenantProviderCredentialStore(handle.db);
 }
 
 /**

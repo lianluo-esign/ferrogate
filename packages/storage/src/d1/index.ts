@@ -14,7 +14,7 @@
  * | `MemoryWalletStore`           | `D1WalletStore`               |
  * | `MemoryWorkflowBudgetStore`   | `D1WorkflowBudgetStore`       |
  * | `presence.ts`, `agent-cost-burn.ts` | `TenantMonotonicUpserts`|
- * | (control-plane replay floors) | `ControlMonotonicUpserts`     |
+ * | replay floors (tenant object) | `TenantMonotonicUpserts`      |
  * | `quota.ts` rollup DTOs        | `D1UsageLedger`               |
  * | `MemoryReferenceGuardedDeletes` | `D1ReferenceGuardedDeletes` |
  * | `MemoryBudgetAlertStore`      | `D1BudgetAlertStore`          |
@@ -40,6 +40,6 @@ export * from "./assets-d1.js";
 export * from "./site-domain-d1.js";
 export * from "./retention-d1.js";
 export * from "./agent-schedule-d1.js";
-// Per-tenant BYOK alias rows (issue #682). Control database; the credential
-// value never passes through this module — only the sealed envelope.
+// Per-tenant BYOK alias rows (issue #682). The caller supplies the tenant
+// object's database; the credential value never passes through this module.
 export * from "./provider-credential-d1.js";

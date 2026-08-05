@@ -196,6 +196,7 @@ export async function resetTenantData(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM workflow_run_budgets"),
     db.prepare("DELETE FROM observed_agent_presence"),
     db.prepare("DELETE FROM agent_cost_burn"),
+    db.prepare("DELETE FROM control_plane_replay_floors"),
     db.prepare("DELETE FROM usage_monthly_rollups"),
     db.prepare("DELETE FROM usage_metadata_rollups"),
     db.prepare("DELETE FROM usage_aggregate_rollups"),

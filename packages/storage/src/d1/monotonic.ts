@@ -41,7 +41,7 @@
 import { d1Error } from "./rows.js";
 import type { StoredAgentCostBurn } from "../agent-cost-burn.js";
 import type { ObservedAgentPresenceTouch, StoredObservedAgentPresence } from "../presence.js";
-import type { TenantDatabaseHandle } from "../tenant-router.js";
+import type { TenantDatabaseHandle, TenantDatabaseRouter } from "../tenant-router.js";
 
 // The DTOs are the SAME types the in-memory stores use (`../presence.js`,
 // `../agent-cost-burn.js`) rather than D1-local copies. That is deliberate: a
@@ -49,8 +49,8 @@ import type { TenantDatabaseHandle } from "../tenant-router.js";
 // apart without a single compile error.
 
 /**
- * Monotonic upserts against one TENANT database (presence, cost burn).
- * Replay floors live in CONTROL and are on {@link ControlMonotonicUpserts}.
+ * Monotonic upserts against one TENANT database (presence, cost burn, replay
+ * floors). Replay floors are tenant-private after #863.
  */
 export class TenantMonotonicUpserts {
   private readonly db: D1Database;
@@ -194,18 +194,8 @@ export class TenantMonotonicUpserts {
       throw d1Error("get_agent_cost_burn", error);
     }
   }
-}
 
-/** Monotonic upserts against the CONTROL database (replay floors, #206). */
-export class ControlMonotonicUpserts {
-  constructor(private readonly db: D1Database) {}
-
-  /**
-   * Raise a deployment's accepted-revision high-water mark. Returns the floor
-   * AFTER the merge, which is `max(existing, revision)` — so a caller that
-   * re-announces an older revision reads back the newer one and can detect that
-   * its snapshot is superseded.
-   */
+  /** Raise the tenant-private replay floor. */
   async raiseReplayFloor(
     tenantId: string,
     deploymentId: string,
@@ -227,10 +217,7 @@ export class ControlMonotonicUpserts {
         )
         .bind(tenantId, deploymentId, revision, nowUnix)
         .first<{ last_accepted_revision: number }>();
-      if (!row) {
-        // Unreachable: an upsert with RETURNING always yields the merged row.
-        throw d1Error("raise_replay_floor", new Error("upsert returned no row"));
-      }
+      if (!row) throw d1Error("raise_replay_floor", new Error("upsert returned no row"));
       return row.last_accepted_revision;
     } catch (error) {
       throw d1Error("raise_replay_floor", error);
@@ -250,5 +237,41 @@ export class ControlMonotonicUpserts {
     } catch (error) {
       throw d1Error("get_replay_floor", error);
     }
+  }
+}
+
+/**
+ * Compatibility façade for callers that still own a "control" dependency.
+ * Replay floors are tenant-private after #863, so every operation resolves the
+ * tenant object and delegates to {@link TenantMonotonicUpserts}. There is no
+ * control-D1 SQL or fallback path here.
+ */
+export class ControlMonotonicUpserts {
+  constructor(private readonly router: TenantDatabaseRouter) {}
+
+  /**
+   * Raise a deployment's accepted-revision high-water mark. Returns the floor
+   * AFTER the merge, which is `max(existing, revision)` — so a caller that
+   * re-announces an older revision reads back the newer one and can detect that
+   * its snapshot is superseded.
+   */
+  async raiseReplayFloor(
+    tenantId: string,
+    deploymentId: string,
+    revision: number,
+    nowUnix: number,
+  ): Promise<number> {
+    const handle = await this.router.forTenant(tenantId);
+    return new TenantMonotonicUpserts(handle).raiseReplayFloor(
+      tenantId,
+      deploymentId,
+      revision,
+      nowUnix,
+    );
+  }
+
+  async getReplayFloor(tenantId: string, deploymentId: string): Promise<number | undefined> {
+    const handle = await this.router.forTenant(tenantId);
+    return new TenantMonotonicUpserts(handle).getReplayFloor(tenantId, deploymentId);
   }
 }

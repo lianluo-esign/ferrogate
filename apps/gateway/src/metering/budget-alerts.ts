@@ -127,7 +127,14 @@ import {
   crossedBudgetThresholds,
   dispatchBudgetAlertWebhook,
 } from "@ferrogate/billing";
-import { D1BudgetAlertStore, type QuotaScopeKind } from "@ferrogate/storage";
+import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
+  type QuotaScopeKind,
+  type TenantDatabaseHandle,
+  budgetAlertStoreForTenant,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import {
   type QuotaPolicySource,
   type SpendSource,
@@ -208,6 +215,7 @@ export function budgetAlertConfigFromEnv(env: unknown): BudgetAlertConfig | unde
 /** The idempotency arbiter, narrowed to the one method this path uses. */
 export interface BudgetAlertClaimStore {
   claimBudgetAlertNotification(claim: {
+    tenantId: string;
     scopeType: QuotaScopeKind;
     scopeId: string;
     periodMonth: string;
@@ -258,12 +266,29 @@ export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined
   const config = budgetAlertConfigFromEnv(env);
   if (config === undefined) return undefined;
   const controlDb = controlDatabaseFrom(env);
-  if (controlDb === undefined) return undefined;
+  if (controlDb === undefined || typeof env !== "object" || env === null) return undefined;
+  const namespace = (env as { TENANT_DATA?: TenantDataNamespace }).TENANT_DATA;
+  if (namespace === undefined) return undefined;
+  const router = new DurableObjectTenantDatabaseRouter(namespace, controlDb);
+  const tenantDbs = new Map<string, Promise<TenantDatabaseHandle>>();
   return {
     config,
     policies: quotaPolicySourceFromEnv(env as Parameters<typeof quotaPolicySourceFromEnv>[0]),
     spend: spendSourceFromEnv(env as Parameters<typeof spendSourceFromEnv>[0]),
-    claims: new D1BudgetAlertStore(controlDb),
+    claims: {
+      async claimBudgetAlertNotification(claim) {
+        if (claim.tenantId.trim() === "") return false;
+        let tenantDb = tenantDbs.get(claim.tenantId);
+        if (tenantDb === undefined) {
+          tenantDb = (async () => {
+            await backfillTenantConfigurationPolicy(controlDb, router, claim.tenantId);
+            return router.forTenant(claim.tenantId);
+          })();
+          tenantDbs.set(claim.tenantId, tenantDb);
+        }
+        return budgetAlertStoreForTenant(await tenantDb).claimBudgetAlertNotification(claim);
+      },
+    },
   };
 }
 
@@ -292,6 +317,7 @@ export function budgetAlertScopesFor(
 
 /** One settled request's alert pass. */
 export interface BudgetAlertPassInput {
+  readonly tenantId: string;
   readonly scopes: readonly { scopeType: QuotaScopeKind; scopeId: string }[];
   readonly periodMonth?: string | undefined;
   readonly nowUnixSeconds: number;
@@ -328,6 +354,11 @@ export async function dispatchBudgetThresholdAlerts(
       // become the reason a settled charge is reported twice.
     }
   };
+
+  if (input.tenantId.trim() === "") {
+    report("budget_alert_tenant", new Error("budget alert requires a tenant id"));
+    return 0;
+  }
 
   if (input.scopes.length === 0) return 0;
 
@@ -403,6 +434,7 @@ export async function dispatchBudgetThresholdAlerts(
         // RETURNING id`. `false` means an earlier request (or another isolate
         // in the same millisecond) already notified this tier this period.
         won = await ports.claims.claimBudgetAlertNotification({
+          tenantId: input.tenantId,
           scopeType: scope.scopeType,
           scopeId: scope.scopeId,
           periodMonth,

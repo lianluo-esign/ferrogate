@@ -398,6 +398,15 @@ name = "RATE_LIMIT"
 class_name = "RateLimiterDurableObject"
 script_name = "ferrogate-gateway"
 
+# Tenant configuration, policy and private state live in the gateway-owned
+# TenantDataObject after M9 Step 5 (#863). Deploy ferrogate-gateway first; this
+# binding deliberately has no local migration because the gateway owns the
+# class and its SQLite lifecycle.
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
 # ---------------------------------------------------------------------------
 # HOW THE OFFLINE HARNESS RESOLVES THE LINE ABOVE
 #

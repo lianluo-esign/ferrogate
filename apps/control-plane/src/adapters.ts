@@ -43,6 +43,7 @@ import {
   type BindingEnvironment,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
 import type {
@@ -312,10 +313,16 @@ export class JsonRbacAuthorizer implements RbacAuthorizerPort {
 export class D1RbacAuthorizer implements RbacAuthorizerPort {
   readonly #db: D1Database;
   readonly #fallback: RbacAuthorizerPort;
+  readonly #tenantDatabases: TenantDatabaseRouter | null;
 
-  constructor(db: D1Database, fallback: RbacAuthorizerPort) {
+  constructor(
+    db: D1Database,
+    fallback: RbacAuthorizerPort,
+    tenantDatabases: TenantDatabaseRouter | null = null,
+  ) {
     this.#db = db;
     this.#fallback = fallback;
+    this.#tenantDatabases = tenantDatabases;
   }
 
   async authorize(auth: AuthContext, rbacAction: string): Promise<RbacDecision> {
@@ -324,15 +331,18 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
 
     let rows: { permission_keys_json: string }[];
     try {
-      const result = await this.#db
-        .prepare(
-          `SELECT roles.permission_keys_json AS permission_keys_json
-             FROM tenant_role_bindings
-             JOIN roles ON roles.id = tenant_role_bindings.role_id
-            WHERE tenant_role_bindings.tenant_id = ?`,
-        )
-        .bind(tenantId)
-        .all<{ permission_keys_json: string }>();
+      const result =
+        this.#tenantDatabases === null
+          ? await this.#db
+              .prepare(
+                `SELECT roles.permission_keys_json AS permission_keys_json
+                 FROM tenant_role_bindings
+                 JOIN roles ON roles.id = tenant_role_bindings.role_id
+                WHERE tenant_role_bindings.tenant_id = ?`,
+              )
+              .bind(tenantId)
+              .all<{ permission_keys_json: string }>()
+          : await this.#tenantRoleGrants(tenantId);
       rows = result.results;
     } catch (error) {
       // The one thing this must never do is guess.
@@ -367,6 +377,33 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
       code: "guardrail_rbac_denied",
       message: `tenant roles do not grant required action ${rbacAction}`,
     };
+  }
+
+  async #tenantRoleGrants(
+    tenantId: string,
+  ): Promise<{ results: { permission_keys_json: string }[] }> {
+    const tenantDatabases = this.#tenantDatabases;
+    if (tenantDatabases === null) throw new Error("tenant RBAC router is unavailable");
+    await backfillTenantConfigurationPolicy(this.#db, tenantDatabases, tenantId);
+    const handle = await tenantDatabases.forTenant(tenantId);
+    const result = await handle.db
+      .prepare(
+        `SELECT b.role_id, c.permission_keys_json AS permission_keys_json
+           FROM tenant_role_bindings AS b
+           JOIN tenant_role_catalog AS c ON c.role_id = b.role_id
+          WHERE b.tenant_id = ?`,
+      )
+      .bind(tenantId)
+      .all<{ role_id: string; permission_keys_json: string }>();
+    const valid: { permission_keys_json: string }[] = [];
+    for (const row of result.results) {
+      const shared = await this.#db
+        .prepare("SELECT 1 AS present FROM roles WHERE id = ?")
+        .bind(row.role_id)
+        .all<{ present: number }>();
+      if (shared.results.length > 0) valid.push(row);
+    }
+    return { results: valid };
   }
 }
 
@@ -657,7 +694,11 @@ export function resolveRbac(env: ControlPlaneBindings): RbacAuthorizerPort {
   );
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
   if (env.DB === undefined || env.DB === null) return declarative;
-  return new D1RbacAuthorizer(env.DB, declarative);
+  const tenantDatabases =
+    env.TENANT_DATA === undefined
+      ? null
+      : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+  return new D1RbacAuthorizer(env.DB, declarative, tenantDatabases);
 }
 
 /**

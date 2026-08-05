@@ -38,10 +38,9 @@
  *
  * ## Which database
  *
- * CONTROL, not tenant: `quota_policies` and the thresholds
- * (`alert_threshold_pcts_json`) live there, and an alert is an account-level
- * billing fact. The store therefore takes a plain `D1Database` — the control
- * handle — the same shape {@link ControlMonotonicUpserts} takes.
+ * Threshold policy definitions remain in CONTROL, but the idempotency state is
+ * tenant-private. The store therefore takes the addressed tenant object's
+ * `D1Database`; every claim and read carries `tenant_id` explicitly.
  *
  * PORT-TODO(P: inventory-data-billing §1.4.3, #170) — CROSS-SCOPE, NOT CLOSABLE
  * HERE. What remains is the COMPARISON: nothing yet measures committed spend
@@ -54,18 +53,20 @@
 import type { StoredBudgetAlertNotification } from "../budget-alerts.js";
 import { budgetAlertNotificationId } from "../ids.js";
 import type { QuotaScopeKind } from "../quota.js";
+import type { TenantDatabaseHandle } from "../tenant-router.js";
 import { d1Error } from "./rows.js";
 
 /** The idempotent claim. Exported so a test can assert the exact statement. */
 export const CLAIM_BUDGET_ALERT_SQL =
   "INSERT INTO budget_alert_notifications " +
-  "(id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) " +
-  "VALUES (?, ?, ?, ?, ?, ?) " +
+  "(id, tenant_id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) " +
+  "VALUES (?, ?, ?, ?, ?, ?, ?) " +
   "ON CONFLICT DO NOTHING " +
   "RETURNING id";
 
 /** One threshold crossing, as the caller describes it. */
 export interface BudgetAlertClaim {
+  tenantId: string;
   scopeType: QuotaScopeKind;
   scopeId: string;
   periodMonth: string;
@@ -73,7 +74,7 @@ export interface BudgetAlertClaim {
   notifiedAtUnix: number;
 }
 
-/** Durable, race-free budget-alert idempotency against the CONTROL database. */
+/** Durable, race-free budget-alert idempotency against one tenant object. */
 export class D1BudgetAlertStore {
   constructor(private readonly db: D1Database) {}
 
@@ -98,6 +99,7 @@ export class D1BudgetAlertStore {
         .prepare(CLAIM_BUDGET_ALERT_SQL)
         .bind(
           id,
+          claim.tenantId,
           claim.scopeType,
           claim.scopeId,
           claim.periodMonth,
@@ -112,11 +114,11 @@ export class D1BudgetAlertStore {
   }
 
   /** Whether a `(scope, period, threshold)` has already fired. */
-  async budgetAlertAlreadyNotified(id: string): Promise<boolean> {
+  async budgetAlertAlreadyNotified(tenantId: string, id: string): Promise<boolean> {
     try {
       const row = await this.db
-        .prepare("SELECT id FROM budget_alert_notifications WHERE id = ?")
-        .bind(id)
+        .prepare("SELECT id FROM budget_alert_notifications WHERE tenant_id = ? AND id = ?")
+        .bind(tenantId, id)
         .first<{ id: string }>();
       return row !== null && row !== undefined;
     } catch (error) {
@@ -130,6 +132,7 @@ export class D1BudgetAlertStore {
    * so the two backends are interchangeable in an assertion.
    */
   async listBudgetAlertNotifications(
+    tenantId: string,
     scopeType: QuotaScopeKind,
     scopeId: string,
     periodMonth: string,
@@ -139,10 +142,10 @@ export class D1BudgetAlertStore {
         .prepare(
           "SELECT id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix " +
             "FROM budget_alert_notifications " +
-            "WHERE scope_type = ? AND scope_id = ? AND period_month = ? " +
+            "WHERE tenant_id = ? AND scope_type = ? AND scope_id = ? AND period_month = ? " +
             "ORDER BY threshold_pct ASC",
         )
-        .bind(scopeType, scopeId, periodMonth)
+        .bind(tenantId, scopeType, scopeId, periodMonth)
         .all<{
           id: string;
           scope_type: string;
@@ -163,4 +166,9 @@ export class D1BudgetAlertStore {
       throw d1Error("list_budget_alert_notifications", error);
     }
   }
+}
+
+/** Construct the alert ledger from the resolved tenant object, never CONTROL. */
+export function budgetAlertStoreForTenant(handle: TenantDatabaseHandle): D1BudgetAlertStore {
+  return new D1BudgetAlertStore(handle.db);
 }
