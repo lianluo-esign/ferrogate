@@ -36,7 +36,15 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
  */
 import type { GuardrailDetector } from "@ferrogate/guardrails";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DurableGuardrailEvidenceSink, guardrails } from "../../src/guardrails/index.js";
+import type { GuardrailEvidenceEnvelope } from "../../src/guardrails/evidence-wire.js";
+import {
+  DurableGuardrailEvidenceSink,
+  guardrailEvidenceTenantDatabaseFromEnv,
+  guardrails,
+  sweepGuardrailEvidence,
+  writeGuardrailEvidence,
+  writeTenantGuardrailEvidence,
+} from "../../src/guardrails/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { RequestIdFactory } from "../../src/inference/index.js";
 import { consumeRequestLogBatch } from "../../src/requestlog/index.js";
@@ -50,6 +58,7 @@ import {
 import {
   RecordingQueue,
   applyControlMigrations,
+  controlDb,
   resetGuardrailEvidence,
   storedGuardrailChecks,
   storedGuardrailEvaluations,
@@ -158,12 +167,69 @@ function chatBody(body: Record<string, unknown>): string {
   return JSON.stringify({ ...body, model: "gpt-4o-mini" });
 }
 
+function manualEnvelope(tenantId: string): GuardrailEvidenceEnvelope {
+  return {
+    evaluation: {
+      id: "same-evaluation-id",
+      requestId: `request-${tenantId}`,
+      tenant: { organizationId: tenantId },
+      scopeType: "organization",
+      scopeId: tenantId,
+      target: "gpt-4o-mini/openai",
+      protocol: "chat_completions",
+      stage: "request",
+      mode: "enforce",
+      policyId: "secret-scan",
+      policyRevision: 1,
+      verdict: "pass",
+      action: "allow",
+      enforcementStatus: "enforced",
+      latencyMs: 1,
+      findingCategoryCounts: {},
+      findingCount: 0,
+      transformed: false,
+      inputFingerprint: `hmac-sha256:${tenantId}`,
+      occurredAtUnix: 1_700_000_200,
+    },
+    checks: [],
+  };
+}
+
+async function tenantGuardrailRows(tenantId: string): Promise<{
+  evaluations: Record<string, unknown>[];
+  checks: Record<string, unknown>[];
+}> {
+  const object = env.TENANT_DATA.get(env.TENANT_DATA.idFromName(tenantId));
+  const evaluations = await object.query({
+    tenantId,
+    sql: "SELECT id, request_id, tenant FROM guardrail_evaluations ORDER BY id",
+  });
+  const checks = await object.query({
+    tenantId,
+    sql: "SELECT id, evaluation_id, tenant FROM guardrail_check_evaluations ORDER BY id",
+  });
+  return { evaluations: evaluations.results, checks: checks.results };
+}
+
+async function resetTenantGuardrailEvidence(tenantId: string): Promise<void> {
+  const object = env.TENANT_DATA.get(env.TENANT_DATA.idFromName(tenantId));
+  await object.batch({
+    tenantId,
+    statements: [
+      { sql: "DELETE FROM guardrail_check_evaluations" },
+      { sql: "DELETE FROM guardrail_evaluations" },
+    ],
+  });
+}
+
 let provider: ProviderInterceptor | undefined;
 
 beforeAll(applyControlMigrations);
 
 beforeEach(async () => {
   await resetGuardrailEvidence();
+  await resetTenantGuardrailEvidence("tenant_a");
+  await resetTenantGuardrailEvidence("tenant_b");
   provider?.restore();
   provider = undefined;
 });
@@ -189,6 +255,17 @@ describe("a BLOCKED request produces durable evidence", () => {
     const rows = await storedGuardrailEvaluations();
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
+
+    // The control row is only the fleet projection. The same evidence must
+    // exist in the owning object, where a tenant-scoped reader can get it
+    // without trusting a shared-D1 fallback.
+    const authoritative = await tenantGuardrailRows("tenant_a");
+    expect(authoritative.evaluations).toEqual([
+      expect.objectContaining({ id: row.id, request_id: row.request_id, tenant: "tenant_a" }),
+    ]);
+    expect(authoritative.checks).toEqual([
+      expect.objectContaining({ evaluation_id: row.id, tenant: "tenant_a" }),
+    ]);
 
     // The join key an incident report carries: the id the CLIENT was told.
     //
@@ -436,6 +513,9 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
     const rows = await storedGuardrailEvaluations();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.request_id).toBe(response.headers.get("x-request-id"));
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toEqual([
+      expect.objectContaining({ id: rows[0]?.id, tenant: "tenant_a" }),
+    ]);
   });
 
   /** At-least-once delivery: the second copy must not fail, and must not double. */
@@ -455,6 +535,35 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
 
     expect(await storedGuardrailEvaluations()).toHaveLength(1);
     expect(await storedGuardrailChecks()).toHaveLength(1);
+  });
+});
+
+describe("tenant-qualified evidence identity", () => {
+  it("does not overwrite same logical ids across tenant objects or projections", async () => {
+    await resetTenantGuardrailEvidence("tenant_b");
+    const sink = new DurableGuardrailEvidenceSink();
+    expect(sink.append(manualEnvelope("tenant_a").evaluation, [])).toBe(true);
+    expect(sink.append(manualEnvelope("tenant_b").evaluation, [])).toBe(true);
+
+    await sink.flush({
+      env: {
+        ...(env as unknown as Record<string, unknown>),
+        REQUEST_LOG: undefined,
+      },
+    });
+
+    const tenantA = await tenantGuardrailRows("tenant_a");
+    const tenantB = await tenantGuardrailRows("tenant_b");
+    expect(tenantA.evaluations).toEqual([
+      expect.objectContaining({ id: "same-evaluation-id", tenant: "tenant_a" }),
+    ]);
+    expect(tenantB.evaluations).toEqual([
+      expect.objectContaining({ id: "same-evaluation-id", tenant: "tenant_b" }),
+    ]);
+
+    const projectionRows = await storedGuardrailEvaluations();
+    expect(projectionRows).toHaveLength(2);
+    expect(projectionRows.map((row) => row.tenant).sort()).toEqual(["tenant_a", "tenant_b"]);
   });
 });
 
@@ -563,11 +672,106 @@ describe("the data plane does not depend on the evidence path", () => {
         GATEWAY_NATIVE_API_KEYS: GUARDRAIL_TENANT_KEY,
         REQUEST_LOG: undefined,
         CONTROL_DB: undefined,
+        TENANT_DATA: undefined,
       },
       ctx,
     );
     expect(response.status).toBe(200);
     await waitOnExecutionContext(ctx);
     expect(evidence.stats.dropped).toBeGreaterThan(0);
+  });
+});
+
+describe("guardrail evidence retention", () => {
+  const NOW = 1_800_000_000;
+
+  it("sweeps a tenant object before its shared projection", async () => {
+    const tenantA = manualEnvelope("tenant_a");
+    const tenantB = {
+      ...tenantA,
+      evaluation: {
+        ...tenantA.evaluation,
+        requestId: "request-tenant_b",
+        tenant: { organizationId: "tenant_b" },
+      },
+    };
+    const objectA = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
+    const objectB = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_b");
+    if (objectA === undefined || objectB === undefined) {
+      throw new Error("TENANT_DATA binding is required");
+    }
+    await writeTenantGuardrailEvidence(objectA, [tenantA]);
+    await writeTenantGuardrailEvidence(objectB, [tenantB]);
+    await writeGuardrailEvidence(controlDb(), [tenantA, tenantB]);
+
+    const result = await sweepGuardrailEvidence(
+      controlDb(),
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
+      },
+      NOW,
+    );
+
+    expect(result.pruned).toBe(1);
+    const objectRowsA = await tenantGuardrailRows("tenant_a");
+    const objectRowsB = await tenantGuardrailRows("tenant_b");
+    expect(objectRowsA.evaluations).toHaveLength(0);
+    expect(objectRowsB.evaluations).toHaveLength(1);
+    const projectionRows = await storedGuardrailEvaluations();
+    expect(projectionRows).toEqual([
+      expect.objectContaining({ id: tenantB.evaluation.id, tenant: "tenant_b" }),
+    ]);
+  });
+
+  it("discovers old tenant objects from the fleet projection", async () => {
+    const tenantA = manualEnvelope("tenant_a");
+    const tenantB = manualEnvelope("tenant_b");
+    const objectA = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
+    const objectB = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_b");
+    if (objectA === undefined || objectB === undefined) {
+      throw new Error("TENANT_DATA binding is required");
+    }
+    await writeTenantGuardrailEvidence(objectA, [tenantA]);
+    await writeTenantGuardrailEvidence(objectB, [tenantB]);
+    await writeGuardrailEvidence(controlDb(), [tenantA, tenantB]);
+
+    const result = await sweepGuardrailEvidence(
+      controlDb(),
+      { TENANT_DATA: env.TENANT_DATA, REQUEST_LOG_RETENTION_DAYS: "30" },
+      NOW,
+    );
+
+    expect(result.pruned).toBe(2);
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
+    expect((await tenantGuardrailRows("tenant_b")).evaluations).toHaveLength(0);
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+  });
+
+  it("keeps the projection when it fails after the object was pruned", async () => {
+    const envelope = manualEnvelope("tenant_a");
+    const object = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
+    if (object === undefined) throw new Error("TENANT_DATA binding is required");
+    await writeTenantGuardrailEvidence(object, [envelope]);
+    await writeGuardrailEvidence(controlDb(), [envelope]);
+
+    const failingProjection = {
+      prepare: (query: string) => controlDb().prepare(query),
+      batch: async () => {
+        throw new Error("control projection unavailable");
+      },
+    };
+    const result = await sweepGuardrailEvidence(
+      failingProjection,
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
+      },
+      NOW,
+    );
+
+    expect(result.pruned).toBe(1);
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
+    expect(await storedGuardrailEvaluations()).toHaveLength(1);
   });
 });

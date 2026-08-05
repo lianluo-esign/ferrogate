@@ -10,9 +10,9 @@
  *    choice, never as a SQL surface);
  *  * that `transactionSync` really rolls back, so `batch()` is genuinely atomic
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
- *  * that the version gate really stops the 98-statement apply re-running on
+ *  * that the version gate really stops the 109-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
- *    twelve tenant migrations are ALTER-only;
+ *    thirteen tenant migrations are ALTER-only;
  *  * that two `idFromName` objects really hold physically different databases.
  *
  * A fake namespace would agree with all four because the fake was written to
@@ -37,7 +37,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0012.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0013.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -59,6 +59,8 @@ const TENANT_TABLES = [
   "catalog_model_offerings",
   "catalog_models",
   "catalog_revisions",
+  "guardrail_check_evaluations",
+  "guardrail_evaluations",
   "observed_agent_presence",
   "payment_methods",
   "projects",
@@ -158,7 +160,7 @@ describe("the statement splitter", () => {
 
   test("the census `sqlStatements`' own docblock states is still the census", () => {
     // WHY A TEST AND NOT A COMMENT. `sqlStatements`' header carries a safety
-    // ARGUMENT ("measured over all twelve files, every non-comment `;` is at
+    // ARGUMENT ("measured over all thirteen files, every non-comment `;` is at
     // end-of-line…") and `#migrate`'s header carries the statement breakdown
     // that justifies the version gate. Both are measurements, and a measurement
     // in a comment rots: a migration can land after the last census and
@@ -170,7 +172,7 @@ describe("the statement splitter", () => {
     //
     // If this fails, do NOT change the numbers here alone. Update the four
     // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
-    // count and "all TWELVE files" in the `sqlStatements` docblock, the
+    // count and "all THIRTEEN files" in the `sqlStatements` docblock, the
     // "N statements" in the constructor comment, and the breakdown in
     // `#migrate`'s docblock.
     const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
@@ -184,10 +186,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 12,
-      statements: 98,
-      createTable: 34,
-      createIndex: 42,
+      files: 13,
+      statements: 109,
+      createTable: 36,
+      createIndex: 51,
       createUniqueIndex: 5,
       alterTable: 10,
       insert: 6,
@@ -212,8 +214,9 @@ describe("the statement splitter", () => {
       "0009_model_catalog": 2,
       "0011_asset_file_metadata": 1,
       "0012_request_logs_agent_runs": 1,
+      "0013_guardrail_evaluations": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(31);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(32);
 
     // The claim those two counts exist to support, asserted rather than
     // restated: NO statement the splitter produces still carries a `;`, i.e.
@@ -236,7 +239,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(12);
+    expect(TENANT_MIGRATIONS.length).toBe(13);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -355,9 +358,7 @@ describe("tenant-private request evidence", () => {
     });
     const eventsA = await objectFor(tenantA).query({
       tenantId: tenantA,
-      sql:
-        "SELECT id FROM agent_run_events WHERE run_id = ? " +
-        "ORDER BY occurred_at_unix, id",
+      sql: "SELECT id FROM agent_run_events WHERE run_id = ? " + "ORDER BY occurred_at_unix, id",
       params: ["run_a"],
     });
     const logsB = await objectFor(tenantB).query({
@@ -371,6 +372,104 @@ describe("tenant-private request evidence", () => {
   });
 });
 
+describe("tenant-private guardrail evidence", () => {
+  test("keeps reused evaluation/check ids isolated and cascades checks", async () => {
+    const tenantA = "tenant_guardrail_red_a";
+    const tenantB = "tenant_guardrail_red_b";
+    const evaluationId = "evaluation_same_id";
+    const checkId = "check_same_id";
+
+    const parent = (tenant: string) => ({
+      sql:
+        "INSERT INTO guardrail_evaluations " +
+        "(id, request_id, tenant, scope_type, target, protocol, stage, mode, " +
+        "policy_id, policy_revision, verdict, action, enforcement_status, " +
+        "occurred_at_unix, input_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      params: [
+        evaluationId,
+        `request_${tenant}`,
+        tenant,
+        "organization",
+        "gpt-4o-mini/openai",
+        "chat_completions",
+        "request",
+        "enforce",
+        "secret-scan",
+        1,
+        "fail",
+        "block",
+        "enforced",
+        1_700_000_100,
+        `hmac-sha256:${tenant}`,
+      ],
+    });
+    const child = (tenant: string) => ({
+      sql:
+        "INSERT INTO guardrail_check_evaluations " +
+        "(id, evaluation_id, tenant, check_id, detector_id, detector_version, " +
+        "config_digest, verdict, action, enforcement_status) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      params: [
+        checkId,
+        evaluationId,
+        tenant,
+        "deterministic",
+        "deterministic",
+        "deterministic-1",
+        "sha256:test",
+        "fail",
+        "block",
+        "enforced",
+      ],
+    });
+
+    await objectFor(tenantA).batch({
+      tenantId: tenantA,
+      statements: [parent(tenantA), child(tenantA)],
+    });
+    await objectFor(tenantB).batch({
+      tenantId: tenantB,
+      statements: [parent(tenantB), child(tenantB)],
+    });
+
+    for (const tenant of [tenantA, tenantB]) {
+      const rows = await objectFor(tenant).query({
+        tenantId: tenant,
+        sql:
+          "SELECT e.tenant, e.id, c.tenant AS check_tenant, c.id AS check_id " +
+          "FROM guardrail_evaluations e " +
+          "JOIN guardrail_check_evaluations c ON c.evaluation_id = e.id " +
+          "WHERE e.id = ?",
+        params: [evaluationId],
+      });
+      expect(rows.results).toEqual([
+        {
+          tenant,
+          id: evaluationId,
+          check_tenant: tenant,
+          check_id: checkId,
+        },
+      ]);
+    }
+
+    await objectFor(tenantA).query({
+      tenantId: tenantA,
+      sql: "DELETE FROM guardrail_evaluations WHERE id = ?",
+      params: [evaluationId],
+    });
+    const deletedChild = await objectFor(tenantA).query({
+      tenantId: tenantA,
+      sql: "SELECT COUNT(*) AS count FROM guardrail_check_evaluations",
+    });
+    const survivingChild = await objectFor(tenantB).query({
+      tenantId: tenantB,
+      sql: "SELECT COUNT(*) AS count FROM guardrail_check_evaluations",
+    });
+    expect(deletedChild.results).toEqual([{ count: 0 }]);
+    expect(survivingChild.results).toEqual([{ count: 1 }]);
+  });
+});
+
 describe("the second wake", () => {
   test("does a version read and NOTHING more", async () => {
     const first = await objectFor(ACME).schemaVersion();
@@ -381,14 +480,14 @@ describe("the second wake", () => {
     const second = await objectFor(ACME).schemaVersion();
     // The assertion is on what the applier DID, not on how long it took: a
     // wall-time test would be a timing guess, and a test that only checked the
-    // version would pass against an applier that re-ran all 98 statements.
+    // version would pass against an applier that re-ran all 109 statements.
     expect(second.appliedThisWake).toEqual([]);
     expect(second.version).toBe(TENANT_SCHEMA_VERSION);
     expect(second.failure).toBeNull();
   });
 
   test("survives at all, which is itself the ALTER-idempotence proof", async () => {
-    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the twelve tenant
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the thirteen tenant
     // migrations are ALTER-only, so an applier that re-ran them would throw
     // `duplicate column name` and this object would come back refusing.
     await evict(ACME);

@@ -24,6 +24,7 @@ import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_ch
 import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
 import experimentOutcomesSql from "../../../../sql/d1-ts/control/0011_experiment_outcomes.sql?raw";
 import evidenceProjectionKeysSql from "../../../../sql/d1-ts/control/0014_tenant_evidence_projection_keys.sql?raw";
+import guardrailProjectionKeysSql from "../../../../sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 
@@ -125,6 +126,17 @@ export async function applyControlMigrations(): Promise<void> {
   }
   if (!names.has("projection_key")) {
     for (const statement of sqlStatements(evidenceProjectionKeysSql)) {
+      await db.prepare(statement).run();
+    }
+  }
+  const guardrailColumns = await db
+    .prepare(`PRAGMA table_info(${GUARDRAIL_EVALUATION_TABLE})`)
+    .all();
+  const guardrailNames = new Set(
+    (guardrailColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
+  );
+  if (!guardrailNames.has("projection_key")) {
+    for (const statement of sqlStatements(guardrailProjectionKeysSql)) {
       await db.prepare(statement).run();
     }
   }
