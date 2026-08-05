@@ -34,10 +34,14 @@
  * rename breaks both.
  */
 import { SELF, env } from "cloudflare:test";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { GUARDRAIL_EVIDENCE_BACKFILL_MARK } from "../src/store/guardrail_evidence_backfill.js";
+import {
+  GUARDRAIL_EVIDENCE_BACKFILL_MARK,
+  ensureTenantGuardrailEvidenceBackfill,
+} from "../src/store/guardrail_evidence_backfill.js";
 import {
   type GuardrailEvaluationSeed,
   applySchema,
@@ -389,6 +393,90 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
       evaluations: 1,
       checks: 1,
     });
+  });
+
+  it("does not let a stale concurrent backfill write after completion", async () => {
+    await seedGuardrailEvaluations([BLOCKED]);
+    const realRouter = resolveTenantDatabases(env as unknown as ControlPlaneBindings);
+    const realHandle = await realRouter.forTenant("t-1");
+
+    let releaseFirstEvaluationRead!: () => void;
+    const firstEvaluationReadReleased = new Promise<void>((resolve) => {
+      releaseFirstEvaluationRead = resolve;
+    });
+    let firstEvaluationReadReady!: () => void;
+    const firstEvaluationReadReached = new Promise<void>((resolve) => {
+      firstEvaluationReadReady = resolve;
+    });
+    let evaluationReads = 0;
+    const controlDb = {
+      prepare(sql: string) {
+        const prepared = db().prepare(sql);
+        return {
+          bind(...values: unknown[]) {
+            const bound = prepared.bind(...values);
+            return {
+              async all<T>() {
+                if (
+                  sql.includes("FROM guardrail_evaluations") &&
+                  sql.includes("ORDER BY projection_key ASC")
+                ) {
+                  evaluationReads += 1;
+                  if (evaluationReads === 1) {
+                    firstEvaluationReadReady();
+                    await firstEvaluationReadReleased;
+                  }
+                }
+                return bound.all<T>();
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    let tenantBatches = 0;
+    let secondBatchFinished!: () => void;
+    const secondBatchDone = new Promise<void>((resolve) => {
+      secondBatchFinished = resolve;
+    });
+    const gatedTenantDb = {
+      prepare: realHandle.db.prepare.bind(realHandle.db),
+      async batch(statements: D1PreparedStatement[]) {
+        const result = await realHandle.db.batch(statements);
+        tenantBatches += 1;
+        // The first object batch belongs to the second call because the first
+        // call is still paused before its CONTROL page query executes.
+        if (tenantBatches === 1) secondBatchFinished();
+        return result;
+      },
+    } as unknown as D1Database;
+    const router = {
+      backend: realRouter.backend,
+      control: () => realRouter.control(),
+      provisionedTenants: () => realRouter.provisionedTenants(),
+      forTenant: async () => ({ ...realHandle, db: gatedTenantDb }),
+    } as TenantDatabaseRouter;
+
+    const first = ensureTenantGuardrailEvidenceBackfill(controlDb, router, "t-1");
+    await firstEvaluationReadReached;
+    const second = ensureTenantGuardrailEvidenceBackfill(controlDb, router, "t-1");
+    await secondBatchDone;
+
+    // The second call completed the marker before this late projection row
+    // existed. The first call has already read the page, but its object writes
+    // must be guarded by the completed marker when it is released.
+    await seedGuardrailEvaluations([
+      { ...BLOCKED, id: "ev-late", requestId: "req-late", checks: [] },
+    ]);
+    releaseFirstEvaluationRead();
+    await Promise.all([first, second]);
+
+    const tenant = await exactTenantDatabase("t-1");
+    const rows = await tenant
+      .prepare("SELECT id FROM guardrail_evaluations ORDER BY id ASC")
+      .all<{ id: string }>();
+    expect(rows.results.map((row) => row.id)).toEqual([BLOCKED.id]);
   });
 });
 

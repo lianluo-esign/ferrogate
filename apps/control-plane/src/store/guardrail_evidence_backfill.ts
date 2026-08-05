@@ -190,21 +190,47 @@ export async function ensureTenantGuardrailEvidenceBackfill(
     checks += checkRows.length;
     const complete = evaluationRows.length < PAGE_SIZE;
 
+    // Claim the marker in the SAME transaction as the page writes. Every data
+    // insert below also checks this row, so an older call that read the page
+    // before another call completed the backfill becomes a no-op rather than
+    // copying a later projection row into an already-authoritative object.
+    const claimDetail = markDetail("in_progress", cursor, evaluations, checks);
+    const claimStatement = tenantDb
+      .prepare(
+        `INSERT OR IGNORE INTO tenant_provisioning_marks
+           (tenant_id, mark, detail, applied_at_unix)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .bind(
+        normalizedTenantId,
+        GUARDRAIL_EVIDENCE_BACKFILL_MARK,
+        claimDetail,
+        Math.floor(Date.now() / 1000),
+      );
     const parentStatement = tenantDb.prepare(
       `INSERT OR IGNORE INTO guardrail_evaluations
          (id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id,
           target, protocol, stage, mode, policy_id, policy_revision, verdict, action,
           enforcement_status, latency_ms, finding_count, input_fingerprint,
           action_fingerprint, occurred_at_unix, evaluation_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM tenant_provisioning_marks
+           WHERE tenant_id = ? AND mark = ? AND detail NOT LIKE '%"state":"complete"%'
+        )`,
     );
     const childStatement = tenantDb.prepare(
       `INSERT OR IGNORE INTO guardrail_check_evaluations
          (id, evaluation_id, tenant, check_id, detector_id, detector_version,
           config_digest, verdict, action, enforcement_status, error_kind, check_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM tenant_provisioning_marks
+           WHERE tenant_id = ? AND mark = ? AND detail NOT LIKE '%"state":"complete"%'
+        )`,
     );
     const statements: D1PreparedStatement[] = [];
+    statements.push(claimStatement);
     for (const row of evaluationRows) {
       statements.push(
         parentStatement.bind(
@@ -231,6 +257,8 @@ export async function ensureTenantGuardrailEvidenceBackfill(
           row.action_fingerprint ?? null,
           row.occurred_at_unix,
           row.evaluation_json,
+          normalizedTenantId,
+          GUARDRAIL_EVIDENCE_BACKFILL_MARK,
         ),
       );
     }
@@ -249,6 +277,8 @@ export async function ensureTenantGuardrailEvidenceBackfill(
           row.enforcement_status,
           row.error_kind ?? null,
           row.check_json,
+          normalizedTenantId,
+          GUARDRAIL_EVIDENCE_BACKFILL_MARK,
         ),
       );
     }
