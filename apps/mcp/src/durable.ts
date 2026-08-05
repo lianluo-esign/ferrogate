@@ -22,11 +22,13 @@
  *    that binds the namespace but not the DO; it is retained (and still
  *    tested) but is no longer what `resolvePorts` prefers, precisely because
  *    KV has no compare-and-swap.
- *  - **Grants + generations + the server catalog → D1** (`DB`). These must be
- *    read-modify-written transactionally (a revocation must not race a
- *    refresh), which SQLite gives and KV does not.
+ *  - **Grants + generations + the server catalog → `TenantDataObject`**. The
+ *    object is addressed by the authenticated tenant and supplies the same
+ *    SQLite transaction semantics without a flat identity database or an
+ *    isolate-local schema cache.
  */
-import { loadAdminServerCatalog } from "./catalog.js";
+import { DurableObjectD1Database } from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import {
   type IdentityCipherPort,
   type McpCredentialStorePort,
@@ -42,116 +44,18 @@ import {
 } from "./ports.js";
 
 // ---------------------------------------------------------------------------
-// Schema
+// Tenant object database
 // ---------------------------------------------------------------------------
 
-/**
- * The D1 translation of the Postgres tables `state_mcp_identity.rs` owns.
- *
- * Postgres→D1 per PORT-PLAN.md: `JSONB`→`TEXT` (JSON), `BYTEA`→base64 `TEXT`
- * (D1 can hold BLOBs, but base64 keeps the row printable in `wrangler d1
- * execute` and survives the JSON transport the D1 HTTP API uses), `BIGINT`→
- * `INTEGER`, and RLS→the `tenant_id` column carried in every key (the physical
- * per-tenant database separation is a control-plane deployment decision, not
- * this Worker's).
- */
-export const MCP_IDENTITY_SCHEMA: readonly string[] = [
-  `CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
-     id                       TEXT PRIMARY KEY,
-     tenant_id                TEXT    NOT NULL,
-     workspace_id             TEXT    NOT NULL,
-     user_id                  TEXT    NOT NULL,
-     server_name              TEXT    NOT NULL,
-     issuer                   TEXT    NOT NULL,
-     subject                  TEXT    NOT NULL,
-     token_type               TEXT    NOT NULL,
-     scopes                   TEXT    NOT NULL,
-     access_token_nonce       TEXT    NOT NULL,
-     access_token_ciphertext  TEXT    NOT NULL,
-     refresh_token_nonce      TEXT,
-     refresh_token_ciphertext TEXT,
-     expires_at_unix          INTEGER NOT NULL,
-     key_version              INTEGER NOT NULL,
-     version                  INTEGER NOT NULL,
-     authorization_generation INTEGER NOT NULL,
-     created_at_unix          INTEGER NOT NULL,
-     updated_at_unix          INTEGER NOT NULL,
-     revoked_at_unix          INTEGER,
-     last_refresh_outcome     TEXT,
-     last_revocation_outcome  TEXT
-   )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS mcp_oauth_credentials_actor
-     ON mcp_oauth_credentials (tenant_id, workspace_id, user_id, server_name)`,
-  `CREATE TABLE IF NOT EXISTS mcp_identity_generations (
-     tenant_id    TEXT    NOT NULL,
-     workspace_id TEXT    NOT NULL,
-     user_id      TEXT    NOT NULL,
-     server_name  TEXT    NOT NULL,
-     generation   INTEGER NOT NULL,
-     PRIMARY KEY (tenant_id, workspace_id, user_id, server_name)
-   )`,
-  `CREATE TABLE IF NOT EXISTS mcp_servers (
-     tenant_id             TEXT    NOT NULL,
-     name                  TEXT    NOT NULL,
-     transport             TEXT    NOT NULL,
-     url                   TEXT,
-     auth_type             TEXT    NOT NULL,
-     tools_to_execute      TEXT    NOT NULL,
-     tools_to_auto_execute TEXT    NOT NULL,
-     tools_to_exclude      TEXT,
-     headers               TEXT,
-     oauth                 TEXT,
-     signed_jwt_audience   TEXT,
-     timeout_ms            INTEGER NOT NULL,
-     PRIMARY KEY (tenant_id, name)
-   )`,
-];
-
-/**
- * Columns added to a table {@link MCP_IDENTITY_SCHEMA} already creates.
- *
- * `CREATE TABLE IF NOT EXISTS` is a NO-OP against a database that already has
- * the table, so adding a column to the literal above reaches new databases only
- * — and every deployed one would then fail `SELECT … tools_to_exclude` with
- * `no such column`. SQLite has no `ADD COLUMN IF NOT EXISTS`, so the statement
- * runs unconditionally and a `duplicate column name` error is the SUCCESS case
- * (the column is already there). Any OTHER error is re-raised: swallowing it
- * would leave the reader querying a column that does not exist.
- *
- * Additive only, and every added column is NULLABLE. That is what keeps this
- * idempotent, race-safe between two isolates, and reversible by a rollback of
- * the code alone.
- */
-export const MCP_IDENTITY_ADDED_COLUMNS: readonly string[] = [
-  "ALTER TABLE mcp_servers ADD COLUMN tools_to_exclude TEXT",
-];
-
-const migrated = new WeakSet<D1Database>();
-
-/**
- * Apply {@link MCP_IDENTITY_SCHEMA} once per isolate per database.
- *
- * Every statement is `IF NOT EXISTS`, so this is idempotent and safe to race:
- * two isolates applying it concurrently converge. It is NOT a substitute for a
- * versioned migration — a column CHANGE still goes through
- * `wrangler d1 migrations` — it exists so the Worker cannot serve traffic
- * against a database that is missing its tables entirely.
- */
-export async function ensureMcpIdentitySchema(db: D1Database): Promise<void> {
-  if (migrated.has(db)) return;
-  await db.batch(MCP_IDENTITY_SCHEMA.map((sql) => db.prepare(sql)));
-  // Run OUTSIDE the batch: `db.batch` is one transaction, and the expected
-  // `duplicate column name` failure of an already-applied ALTER would roll the
-  // whole schema back.
-  for (const sql of MCP_IDENTITY_ADDED_COLUMNS) {
-    try {
-      await db.prepare(sql).run();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/duplicate column name/i.test(message)) throw error;
-    }
+/** Resolve exactly one tenant object; schema application happens in its ledger. */
+function tenantDatabase(namespace: TenantDataNamespace, tenantId: string): D1Database {
+  if (typeof tenantId !== "string" || tenantId.trim() === "") {
+    throw new Error("MCP tenant storage requires a non-empty tenant id");
   }
-  migrated.add(db);
+  return new DurableObjectD1Database(
+    tenantId,
+    namespace.get(namespace.idFromName(tenantId)),
+  ).asD1Database();
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +164,7 @@ export function decodeFlow(raw: string): StoredMcpOauthFlow {
  * DO, and it still narrows the exposure the same way it always did: both
  * racers must already hold the state secret, the record still expires, and the
  * second commit is refused downstream by the `authorizationGeneration` guard
- * in {@link D1CredentialGrants}.
+ * in {@link TenantObjectCredentialGrants}.
  */
 export class KvOauthFlowStore {
   readonly #kv: KVNamespace;
@@ -298,7 +202,7 @@ export class KvOauthFlowStore {
 }
 
 // ---------------------------------------------------------------------------
-// Grant half — D1
+// Grant half — TenantDataObject
 // ---------------------------------------------------------------------------
 
 interface CredentialRow {
@@ -416,17 +320,17 @@ const CREDENTIAL_COLUMNS = `id, tenant_id, workspace_id, user_id, server_name, i
 
 const CREDENTIAL_PLACEHOLDERS = Array.from({ length: 22 }, () => "?").join(", ");
 
-/** The per-user grant half of {@link McpCredentialStorePort}, over D1. */
-export class D1CredentialGrants {
-  readonly #db: D1Database;
+/** The per-user grant half of {@link McpCredentialStorePort}, over a tenant object. */
+export class TenantObjectCredentialGrants {
+  readonly #namespace: TenantDataNamespace;
 
-  constructor(db: D1Database) {
-    this.#db = db;
+  constructor(namespace: TenantDataNamespace) {
+    this.#namespace = namespace;
   }
 
   async authorizationGeneration(actor: McpIdentityActor, serverName: string): Promise<number> {
-    await ensureMcpIdentitySchema(this.#db);
-    const row = await this.#db
+    const db = tenantDatabase(this.#namespace, actor.tenantId);
+    const row = await db
       .prepare(
         `SELECT generation FROM mcp_identity_generations
           WHERE tenant_id = ? AND workspace_id = ? AND user_id = ? AND server_name = ?`,
@@ -438,8 +342,8 @@ export class D1CredentialGrants {
 
   /** Record an access change. Port of the Rust generation bump. */
   async bumpGeneration(actor: McpIdentityActor, serverName: string): Promise<void> {
-    await ensureMcpIdentitySchema(this.#db);
-    await this.#db
+    const db = tenantDatabase(this.#namespace, actor.tenantId);
+    await db
       .prepare(
         `INSERT INTO mcp_identity_generations
            (tenant_id, workspace_id, user_id, server_name, generation)
@@ -455,8 +359,8 @@ export class D1CredentialGrants {
     actor: McpIdentityActor,
     serverName: string,
   ): Promise<StoredMcpOauthCredential | undefined> {
-    await ensureMcpIdentitySchema(this.#db);
-    const row = await this.#db
+    const db = tenantDatabase(this.#namespace, actor.tenantId);
+    const row = await db
       .prepare(
         `SELECT * FROM mcp_oauth_credentials
           WHERE tenant_id = ? AND workspace_id = ? AND user_id = ? AND server_name = ?`,
@@ -467,8 +371,8 @@ export class D1CredentialGrants {
   }
 
   async put(credential: StoredMcpOauthCredential): Promise<void> {
-    await ensureMcpIdentitySchema(this.#db);
-    await this.#db
+    const db = tenantDatabase(this.#namespace, credential.actor.tenantId);
+    await db
       .prepare(
         `INSERT INTO mcp_oauth_credentials (${CREDENTIAL_COLUMNS})
          VALUES (${CREDENTIAL_PLACEHOLDERS})
@@ -493,8 +397,16 @@ export class D1CredentialGrants {
     flow: StoredMcpOauthFlow,
     credential: StoredMcpOauthCredential,
   ): Promise<boolean> {
-    await ensureMcpIdentitySchema(this.#db);
-    const result = await this.#db
+    if (
+      flow.serverName !== credential.serverName ||
+      flow.actor.tenantId !== credential.actor.tenantId ||
+      flow.actor.workspaceId !== credential.actor.workspaceId ||
+      flow.actor.userId !== credential.actor.userId
+    ) {
+      return false;
+    }
+    const db = tenantDatabase(this.#namespace, flow.actor.tenantId);
+    const result = await db
       .prepare(
         `INSERT INTO mcp_oauth_credentials (${CREDENTIAL_COLUMNS})
          SELECT ${CREDENTIAL_PLACEHOLDERS}
@@ -528,8 +440,8 @@ export class D1CredentialGrants {
     nowUnix: number,
     outcome: string,
   ): Promise<StoredMcpOauthCredential | undefined> {
-    await ensureMcpIdentitySchema(this.#db);
-    const row = await this.#db
+    const db = tenantDatabase(this.#namespace, actor.tenantId);
+    const row = await db
       .prepare(
         `UPDATE mcp_oauth_credentials
             SET revoked_at_unix = ?, updated_at_unix = ?, last_revocation_outcome = ?
@@ -555,8 +467,8 @@ export class D1CredentialGrants {
     serverName: string,
     outcome: string,
   ): Promise<void> {
-    await ensureMcpIdentitySchema(this.#db);
-    await this.#db
+    const db = tenantDatabase(this.#namespace, actor.tenantId);
+    await db
       .prepare(
         `UPDATE mcp_oauth_credentials SET last_revocation_outcome = ?
           WHERE tenant_id = ? AND workspace_id = ? AND user_id = ? AND server_name = ?`,
@@ -580,7 +492,7 @@ export interface OauthFlowStore {
 }
 
 /**
- * The durable {@link McpCredentialStorePort}: D1 for grants, and for flows
+ * The durable {@link McpCredentialStorePort}: TenantDataObject for grants, and for flows
  * whichever {@link OauthFlowStore} the deployment bound.
  *
  * This is the implementation `resolvePorts` binds when the Worker is NOT
@@ -593,11 +505,11 @@ export interface OauthFlowStore {
  */
 export class DurableCredentialStore implements McpCredentialStorePort {
   readonly #flows: OauthFlowStore;
-  readonly #grants: D1CredentialGrants;
+  readonly #grants: TenantObjectCredentialGrants;
 
-  constructor(kv: KVNamespace, db: D1Database, flows?: OauthFlowStore) {
+  constructor(kv: KVNamespace, namespace: TenantDataNamespace, flows?: OauthFlowStore) {
     this.#flows = flows ?? new KvOauthFlowStore(kv);
-    this.#grants = new D1CredentialGrants(db);
+    this.#grants = new TenantObjectCredentialGrants(namespace);
   }
 
   beginOauthFlow(flow: StoredMcpOauthFlow): Promise<void> {
@@ -654,7 +566,7 @@ export class DurableCredentialStore implements McpCredentialStorePort {
 }
 
 // ---------------------------------------------------------------------------
-// Upstream server catalog — D1
+// Upstream server catalog — TenantDataObject
 // ---------------------------------------------------------------------------
 
 interface ServerRow {
@@ -749,43 +661,17 @@ function decodeExcludeColumn(
  * because a tenant must never see another tenant's upstreams, and the filter is
  * a bound parameter rather than a caller-supplied SQL fragment.
  *
- * ## The former `PORT_TODO(inventory-edge-control §MCP "server catalog")` — CLOSED
- *
- * The marker read: **nothing in this repo writes a `mcp_servers` row.** The
- * reader, `decodeServerRow`, `resolveUpstreams` and the `MCP_SESSION` Durable
- * Object were all implemented and mounted, and tested against rows the TESTS
- * insert — so a deployed Worker read an empty typed table for every tenant and
- * the durable MCP tool plane served ZERO upstream tools. The code was mounted;
- * the DATA path into it was not.
- *
- * It is closed by {@link loadAdminServerCatalog} (`src/catalog.ts`), which reads
- * the `/admin/v1/mcp-servers` documents `apps/control-plane` writes into the
- * `control_plane_resources` table of the CONTROL database — the very database
- * this Worker already binds as `env.DB`. No new binding, no new service: the
- * same move `src/approvals.ts` made for the approval queue. The four decisions
- * the marker demanded (tenant-scope only, explicit `http → streamable_http`
- * mapping with `stdio` never coerced, deny-by-default allowlists, unknown enum
- * values refuse the row) are made there and documented there.
- *
- * ## TWO SOURCES, and which one wins
- *
- * The typed `mcp_servers` row is authoritative for a name held by both: it is
- * the native shape (it can express every field without a decode), so a
- * deployment that provisions one deliberately is not overridden by a document.
- * Admin documents fill in every OTHER name. The merge only ever ADDS upstreams
- * to what the typed read produced, so the pre-existing behaviour of a
- * deployment with typed rows is unchanged.
- *
- * Both halves stay fail-CLOSED: a tenant with neither source gets an EMPTY
- * catalog (every `tools/call` refused, no fall-back to the in-memory dev host,
- * no widening to another tenant's rows), and every decode failure on either
- * side SKIPS a server rather than substituting a default.
+ * The catalog is authoritative in the tenant object. The control plane writes
+ * the same row when an admin resource changes and the cutover helper copies
+ * legacy control documents once, so request-time reads never consult the flat
+ * control database. Typed rows remain fail-closed: malformed transport, auth,
+ * allowlist or JSON values are skipped rather than coerced.
  */
 export async function loadServerCatalog(
-  db: D1Database,
+  namespace: TenantDataNamespace,
   tenantId: string,
 ): Promise<McpServerConfig[]> {
-  await ensureMcpIdentitySchema(db);
+  const db = tenantDatabase(namespace, tenantId);
   const rows = await db
     .prepare(
       `SELECT name, transport, url, auth_type, tools_to_execute, tools_to_auto_execute,
@@ -795,20 +681,10 @@ export async function loadServerCatalog(
     .bind(tenantId)
     .all<ServerRow>();
   const configs: McpServerConfig[] = [];
-  const seen = new Set<string>();
   for (const row of rows.results) {
     const config = decodeServerRow(row);
     if (config === undefined) continue;
     configs.push(config);
-    seen.add(config.name);
-  }
-  // MOUNT: the operator surface feeding the durable catalog. Deleting this loop
-  // restores the gap the marker described — `test/server-catalog.test.ts` is the
-  // gate that goes red when it goes.
-  for (const config of await loadAdminServerCatalog(db, tenantId)) {
-    if (seen.has(config.name)) continue;
-    configs.push(config);
-    seen.add(config.name);
   }
   return configs;
 }

@@ -11,6 +11,7 @@ import type {
   McpIdentityActor,
   McpServerConfig,
   StoredMcpOauthCredential,
+  StoredMcpOauthFlow,
 } from "../src/ports.js";
 
 interface TenantBindings {
@@ -47,6 +48,20 @@ function credential(actor: McpIdentityActor): StoredMcpOauthCredential {
     authorizationGeneration: 0,
     createdAtUnix: 1_000,
     updatedAtUnix: 1_000,
+  };
+}
+
+function flow(actor: McpIdentityActor, serverName: string): StoredMcpOauthFlow {
+  return {
+    id: "state-1",
+    actor,
+    serverName,
+    pkceNonce: new Uint8Array([1, 2]),
+    pkceCiphertext: new Uint8Array([3, 4]),
+    oidcNonce: "oidc-1",
+    authorizationGeneration: 0,
+    createdAtUnix: 1_000,
+    expiresAtUnix: 2_000,
   };
 }
 
@@ -136,7 +151,7 @@ describe("MCP identity state in TenantDataObject", () => {
     expect(await grants.authorizationGeneration(ACTOR_A, "search")).toBe(1);
     expect(
       await grants.commit(
-        { actor: ACTOR_A, serverName: "search", authorizationGeneration: 0 },
+        flow(ACTOR_A, "search"),
         credential(ACTOR_A),
       ),
     ).toBe(false);

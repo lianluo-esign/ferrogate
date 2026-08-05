@@ -189,10 +189,10 @@ tag = "v3"
 new_sqlite_classes = ["FerroGateMcpUnifiedSession"]
 
 # ---------------------------------------------------------------------------
-# D1 — per-user MCP identity grants + the upstream server catalog
+# Durable Object — per-user MCP identity grants + the upstream server catalog
 #
-# Read as `env.DB`. The D1 twin of the Postgres tables the Rust
-# `McpCredentialRepository` owns (PORT-PLAN.md "Postgres→D1"):
+# Read as `env.TENANT_DATA`. The object-local SQLite translation of the Postgres
+# tables the Rust `McpCredentialRepository` owns:
 #
 #   mcp_oauth_credentials  the sealed per-(tenant, workspace, user, server)
 #                          grant — refresh/access token ciphertext + nonce +
@@ -204,11 +204,11 @@ new_sqlite_classes = ["FerroGateMcpUnifiedSession"]
 #                          allowlists (`McpServerConfig`), today reachable only
 #                          through `InMemoryUpstreams.register`.
 #
-# WIRING STATE — LIVE. `src/durable.ts` owns the schema (`MCP_IDENTITY_SCHEMA`,
-# applied idempotently by `ensureMcpIdentitySchema`), `D1CredentialGrants`
-# implements the grant half, and `loadServerCatalog` reads `mcp_servers` for one
-# tenant. `resolvePorts` binds them. `database_id` remains a documented
-# placeholder — the real id comes from whoever provisions the database.
+# WIRING STATE — LIVE. `sql/d1-ts/tenant/0014_mcp_identity.sql` owns the schema,
+# `TenantDataObject` applies it through the object migration ledger,
+# `TenantObjectCredentialGrants` implements the grant half, and
+# `loadServerCatalog` reads one tenant object. `resolvePorts` binds them; the
+# control D1 remains only the control/authentication database.
 #
 # Two guards worth not losing in a refactor, both pinned by
 # `test/durable-identity.test.ts`:

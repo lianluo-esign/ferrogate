@@ -26,7 +26,7 @@ import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { decodeServerDocument } from "../src/catalog.js";
-import { decodeServerRow, ensureMcpIdentitySchema, loadServerCatalog } from "../src/durable.js";
+import { decodeServerRow, loadServerCatalog } from "../src/durable.js";
 import {
   McpDispatchHeaders,
   type McpServerConfig,
@@ -39,8 +39,9 @@ import { MCP_PROTOCOL_VERSION } from "../src/protocol.js";
 import { DurableMcpSessionStore } from "../src/session.js";
 import { HttpMcpUpstreams } from "../src/transport.js";
 import { EXEC_KEY, READ_KEY, TENANT, rpcRequest, tenantAuth, upstreamConfig } from "./fixtures.js";
+import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
-const DB = env.DB as unknown as D1Database;
+const TENANT_DATA = tenantDataNamespace(env);
 
 const context = { requestId: "req-filters", auth: tenantAuth() };
 
@@ -411,9 +412,8 @@ describe("the exclude list survives the D1 catalogue round trip", () => {
   });
 
   it("reaches the tenant's host through loadServerCatalog", async () => {
-    await ensureMcpIdentitySchema(DB);
-    await DB.prepare("DELETE FROM mcp_servers").run();
-    await DB.prepare(
+    await clearMcpIdentityTables(TENANT_DATA, TENANT);
+    await tenantDatabase(TENANT_DATA, TENANT).prepare(
       `INSERT INTO mcp_servers
          (tenant_id, name, transport, url, auth_type, tools_to_execute,
           tools_to_auto_execute, tools_to_exclude, headers, oauth,
@@ -429,7 +429,7 @@ describe("the exclude list survives the D1 catalogue round trip", () => {
       )
       .run();
 
-    const configs = await loadServerCatalog(DB, TENANT);
+    const configs = await loadServerCatalog(TENANT_DATA, TENANT);
     expect(configs).toHaveLength(1);
     expect(configs[0]?.toolsToExecute).toEqual(["search", "write"]);
     expect(configs[0]?.toolsToExclude).toEqual(["write"]);

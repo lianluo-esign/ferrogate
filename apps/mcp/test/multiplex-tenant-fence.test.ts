@@ -41,19 +41,19 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureMcpIdentitySchema } from "../src/durable.js";
 import { inMemoryPorts } from "../src/ports.js";
 import { parseSseEvents } from "../src/transport.js";
 import { EXEC_KEY, TENANT, rpcRequest, seedFixture, setMcpEnvVar, tenantAuth } from "./fixtures.js";
+import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
-const DB = env.DB as unknown as D1Database;
+const TENANT_DATA = tenantDataNamespace(env);
 
 const OTHER_TENANT = "tenant-fence-b";
 const OTHER_KEY = "fg_test_fence_b_key";
 
 /** One `mcp_servers` row. `stdio` needs no network to be LISTED. */
 async function seedServerRow(tenantId: string, name: string): Promise<void> {
-  await DB.prepare(
+  await tenantDatabase(TENANT_DATA, tenantId).prepare(
     `INSERT OR REPLACE INTO mcp_servers
        (tenant_id, name, transport, url, auth_type, tools_to_execute,
         tools_to_auto_execute, tools_to_exclude, headers, oauth,
@@ -84,8 +84,10 @@ async function sessionUpstreams(key: string): Promise<string[] | undefined> {
 beforeEach(async () => {
   seedFixture();
   inMemoryPorts().auth.register(OTHER_KEY, tenantAuth({ organizationId: OTHER_TENANT }));
-  await ensureMcpIdentitySchema(DB);
-  await DB.prepare("DELETE FROM mcp_servers").run();
+  await Promise.all([
+    clearMcpIdentityTables(TENANT_DATA, TENANT),
+    clearMcpIdentityTables(TENANT_DATA, OTHER_TENANT),
+  ]);
   await seedServerRow(TENANT, "alpha-owned-by-a");
   await seedServerRow(OTHER_TENANT, "beta-owned-by-b");
 });

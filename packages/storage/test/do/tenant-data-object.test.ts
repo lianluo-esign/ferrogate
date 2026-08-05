@@ -12,7 +12,7 @@
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
  *  * that the version gate really stops the 109-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
- *    thirteen tenant migrations are ALTER-only;
+ *    fourteen tenant migrations are covered by the census below;
  *  * that two `idFromName` objects really hold physically different databases.
  *
  * A fake namespace would agree with all four because the fake was written to
@@ -37,7 +37,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0013.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0014.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -61,6 +61,9 @@ const TENANT_TABLES = [
   "catalog_revisions",
   "guardrail_check_evaluations",
   "guardrail_evaluations",
+  "mcp_identity_generations",
+  "mcp_oauth_credentials",
+  "mcp_servers",
   "observed_agent_presence",
   "payment_methods",
   "projects",
@@ -160,7 +163,7 @@ describe("the statement splitter", () => {
 
   test("the census `sqlStatements`' own docblock states is still the census", () => {
     // WHY A TEST AND NOT A COMMENT. `sqlStatements`' header carries a safety
-    // ARGUMENT ("measured over all thirteen files, every non-comment `;` is at
+    // ARGUMENT ("measured over all fourteen files, every non-comment `;` is at
     // end-of-line…") and `#migrate`'s header carries the statement breakdown
     // that justifies the version gate. Both are measurements, and a measurement
     // in a comment rots: a migration can land after the last census and
@@ -172,7 +175,7 @@ describe("the statement splitter", () => {
     //
     // If this fails, do NOT change the numbers here alone. Update the four
     // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
-    // count and "all THIRTEEN files" in the `sqlStatements` docblock, the
+    // count and "all FOURTEEN files" in the `sqlStatements` docblock, the
     // "N statements" in the constructor comment, and the breakdown in
     // `#migrate`'s docblock.
     const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
@@ -186,10 +189,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 13,
-      statements: 109,
-      createTable: 36,
-      createIndex: 51,
+      files: 14,
+      statements: 115,
+      createTable: 39,
+      createIndex: 54,
       createUniqueIndex: 5,
       alterTable: 10,
       insert: 6,
@@ -239,7 +242,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(13);
+    expect(TENANT_MIGRATIONS.length).toBe(14);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -480,14 +483,14 @@ describe("the second wake", () => {
     const second = await objectFor(ACME).schemaVersion();
     // The assertion is on what the applier DID, not on how long it took: a
     // wall-time test would be a timing guess, and a test that only checked the
-    // version would pass against an applier that re-ran all 109 statements.
+    // version would pass against an applier that re-ran all 115 statements.
     expect(second.appliedThisWake).toEqual([]);
     expect(second.version).toBe(TENANT_SCHEMA_VERSION);
     expect(second.failure).toBeNull();
   });
 
   test("survives at all, which is itself the ALTER-idempotence proof", async () => {
-    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the thirteen tenant
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the fourteen tenant
     // migrations are ALTER-only, so an applier that re-ran them would throw
     // `duplicate column name` and this object would come back refusing.
     await evict(ACME);

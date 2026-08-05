@@ -177,9 +177,9 @@ function parseStringArray(raw: string): readonly string[] {
 
 /**
  * The credential tables belong to the MIGRATIONS slice (`sql/d1-ts/control/`),
- * not to this app — `ensureMcpIdentitySchema` creates the `mcp_*` tables and
- * deliberately creates nothing else, because a Worker that invented the control
- * plane's own key tables would let a typo'd table name silently become an empty
+ * not to this app — the MCP identity tables live in `TenantDataObject` and are
+ * applied by its migration ledger. This Worker deliberately creates no control
+ * plane key tables, because a typo'd table name would silently become an empty
  * (and therefore permanently unauthenticable) credential store.
  *
  * So "the table is not there" is a real, distinguishable state, and it is
