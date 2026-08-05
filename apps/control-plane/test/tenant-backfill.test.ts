@@ -147,6 +147,16 @@ describe("tenant storage backfill", () => {
         .bind(TENANT, "project_other")
         .run(),
     ).rejects.toThrow(/frozen/);
+    await expect(
+      bindings.LEGACY_TENANT_DB
+        .prepare(
+          `INSERT INTO asset_bundle_files
+             (asset_id, tenant_id, path, storage_uri, content_type, content_hash, size_bytes, created_at_unix)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind("asset_without_owner", TENANT, "index.html", "r2://asset", "text/html", "hash", 1, NOW)
+        .run(),
+    ).rejects.toThrow(/frozen/);
 
     await expect(migration("resume", interruptedRouter())).rejects.toThrow(/interruption/);
     const progress = await db()

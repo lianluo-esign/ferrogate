@@ -207,6 +207,10 @@ BEGIN SELECT RAISE(ABORT, 'tenant data writes are frozen for backfill'); END;
 CREATE TRIGGER IF NOT EXISTS tenant_backfill_fence_asset_bundle_files_insert
 BEFORE INSERT ON asset_bundle_files
 WHEN EXISTS (
+  SELECT 1 FROM tenant_write_fences
+  WHERE tenant_id = NEW.tenant_id AND mode = 'frozen'
+)
+OR EXISTS (
   SELECT 1 FROM tenant_write_fences f
   JOIN stored_assets a ON a.id = NEW.asset_id
   WHERE f.tenant_id = a.tenant_id AND f.mode = 'frozen'
@@ -215,14 +219,31 @@ BEGIN SELECT RAISE(ABORT, 'tenant data writes are frozen for backfill'); END;
 CREATE TRIGGER IF NOT EXISTS tenant_backfill_fence_asset_bundle_files_update
 BEFORE UPDATE ON asset_bundle_files
 WHEN EXISTS (
+  SELECT 1 FROM tenant_write_fences
+  WHERE tenant_id = OLD.tenant_id AND mode = 'frozen'
+)
+OR EXISTS (
+  SELECT 1 FROM tenant_write_fences
+  WHERE tenant_id = NEW.tenant_id AND mode = 'frozen'
+)
+OR EXISTS (
   SELECT 1 FROM tenant_write_fences f
   JOIN stored_assets a ON a.id = OLD.asset_id
+  WHERE f.tenant_id = a.tenant_id AND f.mode = 'frozen'
+)
+OR EXISTS (
+  SELECT 1 FROM tenant_write_fences f
+  JOIN stored_assets a ON a.id = NEW.asset_id
   WHERE f.tenant_id = a.tenant_id AND f.mode = 'frozen'
 )
 BEGIN SELECT RAISE(ABORT, 'tenant data writes are frozen for backfill'); END;
 CREATE TRIGGER IF NOT EXISTS tenant_backfill_fence_asset_bundle_files_delete
 BEFORE DELETE ON asset_bundle_files
 WHEN EXISTS (
+  SELECT 1 FROM tenant_write_fences
+  WHERE tenant_id = OLD.tenant_id AND mode = 'frozen'
+)
+OR EXISTS (
   SELECT 1 FROM tenant_write_fences f
   JOIN stored_assets a ON a.id = OLD.asset_id
   WHERE f.tenant_id = a.tenant_id AND f.mode = 'frozen'
