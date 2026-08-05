@@ -1673,9 +1673,10 @@ export interface McpEnv {
 
   /**
    * The authoritative per-tenant Durable Object database for MCP identity
-   * grants, authorization generations and the upstream server catalog. The
-   * object migration ledger applies these tables before RPC, so no request path
-   * creates schema or consults the control D1.
+   * grants, authorization generations, upstream server catalog and tenant
+   * private control-plane resources. The object migration ledger applies these
+   * tables before RPC, so no request path creates schema or consults the
+   * control D1.
    */
   TENANT_DATA?: TenantDataNamespace;
 
@@ -1724,9 +1725,6 @@ export interface McpEnv {
    * offline / test environments continue to work with the in-memory store.
    */
   TENANT_DB?: D1Database;
-
-  /** TenantDataObject namespace for tenant-private control-plane documents. */
-  TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
 
   /**
    * The SHARED rate-limit counter namespace — `apps/gateway`'s
