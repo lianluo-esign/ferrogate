@@ -48,6 +48,7 @@
 import type { AuthContext } from "../ports.js";
 import { callerScope } from "../ports.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
+import type { AudioObjectSource } from "./audio-objects.js";
 import type { InferenceRejection } from "./errors.js";
 import type { Caller, ModelResolver } from "./ports.js";
 
@@ -190,6 +191,8 @@ export interface InferenceRequestScope {
   readonly caller?: Caller | undefined;
   /** The catalog resolved by the outer route module for this tenant/request. */
   readonly models?: ModelResolver | undefined;
+  /** The asset registry source resolved for this tenant/request. */
+  readonly audioObjects?: AudioObjectSource | undefined;
   /** The TPM window `rateLimit()` resolved on the outer context. */
   readonly tokens?: TokenGovernor | undefined;
   /**

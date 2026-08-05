@@ -1707,8 +1707,11 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // Request — the scope is keyed by the object `route-module.ts` published.
     const scope = inferenceRequestScope(c.req.raw);
     const requestModels = scope?.models ?? resolved.models;
-    const requestDeps =
-      requestModels === resolved.models ? resolved : { ...resolved, models: requestModels };
+    const requestDeps = {
+      ...resolved,
+      ...(requestModels === resolved.models ? {} : { models: requestModels }),
+      ...(scope?.audioObjects === undefined ? {} : { audioObjects: scope.audioObjects }),
+    };
     c.set("inferenceDeps", requestDeps);
     c.set("inferenceClientSignal", inboundSignal(c.req.raw));
     // Same "before the body reader swaps it" rule as the signal above — see

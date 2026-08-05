@@ -30,6 +30,8 @@
  * per-request rebuild would throw away the isolate's warm state.
  */
 import type { Context, Hono } from "hono";
+import { assetDatabaseFromTenantResolver, D1AssetMetadataStore } from "../assets/d1.js";
+import { assetDepsFromEnv } from "../assets/handlers.js";
 import { attributionDefaultsFor } from "../attribution/index.js";
 import { publishShadowEvalLeg, shadowEvalRetentionRequested } from "../evals/shadow-leg.js";
 import { HttpError } from "../middleware/errors.js";
@@ -45,7 +47,9 @@ import { residencyPolicyFor } from "../residency/carrier.js";
 import { GatewayRouter, INFERENCE_OPERATION_IDS, type RouteModule } from "../routes/index.js";
 import { emitRequestTelemetry, genAiInvocationFor } from "../telemetry/index.js";
 import { tenantDatabaseOf } from "../tenancy/middleware.js";
+import { TENANT_DATABASE_VAR, type TenantDatabaseAccessor } from "../tenancy/ports.js";
 import { parseTenantDatabaseRoutingMode } from "../tenancy/resolver.js";
+import { storedAssetAudioObjects } from "./audio-objects.js";
 import { emptyModelResolver } from "./defaults.js";
 import { errorResponse, reject } from "./errors.js";
 import { createInferenceRouter } from "./handlers.js";
@@ -229,8 +233,10 @@ function emitInferenceTelemetry(
 function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): void {
   const auth = c.get("auth");
   const request = c.req.raw;
+  const audioObjects = audioObjectsForRequest(c);
   setInferenceRequestScope(request, {
     ...(models === undefined ? {} : { models }),
+    ...(audioObjects === undefined ? {} : { audioObjects }),
     // `auth` is absent only for a contract-`anonymous` operation, which none of
     // the fourteen inference operations is; leaving it undefined keeps the injected
     // `deps.caller` in charge rather than fabricating an identity.
@@ -267,6 +273,24 @@ function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): vo
     ...(shadowEvalRetentionRequested(request)
       ? { scoreShadowLeg: (leg) => publishShadowEvalLeg(request, leg) }
       : {}),
+  });
+}
+
+/**
+ * The inference inner app needs the same request-scoped asset registry as the
+ * outer `/v1/assets` routes. The R2 binding is still environment-scoped; only
+ * the metadata facade follows the authenticated tenant object.
+ */
+function audioObjectsForRequest(c: Context<GatewayEnv>) {
+  const accessor = (c as unknown as { get(name: string): unknown }).get(TENANT_DATABASE_VAR) as
+    | TenantDatabaseAccessor
+    | undefined;
+  if (accessor === undefined || accessor.tenantId === null) return undefined;
+  const objects = assetDepsFromEnv(c.env as unknown as Record<string, unknown>).objects;
+  if (objects === undefined) return undefined;
+  return storedAssetAudioObjects({
+    objects,
+    metadata: new D1AssetMetadataStore(assetDatabaseFromTenantResolver(() => accessor.handle())),
   });
 }
 

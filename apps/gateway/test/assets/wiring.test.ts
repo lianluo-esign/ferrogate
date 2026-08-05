@@ -11,10 +11,11 @@
  *
  * So this file drives the REAL exported Worker over `SELF.fetch` — real
  * contract router, real auth middleware, real R2 binding, real D1 — pushes an
- * asset, and then reads `stored_assets` out of the `DB` binding DIRECTLY. If
- * `assetDepsFromEnv` stops supplying `metadata`, the push still answers 200
- * (the in-memory fallback accepts it) and the row is simply not there: the
- * assertion below goes red for the right reason.
+ * asset, and then reads `stored_assets` out of the authenticated tenant's
+ * Durable Object DIRECTLY. If the route stops replacing its standalone D1
+ * store with the tenant facade, the push still answers 200 (the shared or
+ * in-memory fallback accepts it) but the object row is absent: the assertion
+ * below goes red for the right reason.
  *
  * The same gate covers the durable AUDIT sink, which has one extra way to be
  * unmounted: the sink buffers and is committed by `await
@@ -29,11 +30,24 @@
  *   3. delete `await serviceFor(context).flushAudit()` from `on()`
  */
 import { SELF, env } from "cloudflare:test";
+import {
+  D1RetentionPolicyStore,
+  RETENTION_RESOURCE_ASSET,
+  RETENTION_SCOPE_DEFAULT,
+  type StoredRetentionPolicy,
+  retentionPolicyId,
+} from "@ferrogate/storage";
 import { beforeEach, describe, expect, test } from "vitest";
-import { D1AssetAuditSink, D1AssetMetadataStore, isAssetDatabase } from "../../src/assets/d1.js";
+import {
+  D1AssetAuditSink,
+  D1AssetBundleIndexStore,
+  D1AssetMetadataStore,
+  isAssetDatabase,
+} from "../../src/assets/d1.js";
 import { assetDepsFromEnv } from "../../src/assets/handlers.js";
-import { InMemoryAssetMetadataStore } from "../../src/assets/ports.js";
+import { InMemoryAssetMetadataStore, type StoredBundleFile } from "../../src/assets/ports.js";
 import { seedApiKey } from "../keys/seed.js";
+import { tenantObjectDb, tenantObjectHandle } from "../tenant-object.js";
 
 const TENANT = "tenant_asset_wiring";
 const PLAN = "plan_asset_wiring";
@@ -65,8 +79,17 @@ async function provision(): Promise<void> {
   const { db, control } = bindings();
   await db.prepare("DELETE FROM stored_assets").run();
   await db.prepare("DELETE FROM asset_channels").run();
+  await db.prepare("DELETE FROM asset_bundle_files").run();
+  await db.prepare("DELETE FROM retention_policies").run();
   await db.prepare("DELETE FROM api_keys WHERE tenant_id = ?1").bind(TENANT).run();
   await control.prepare("DELETE FROM audit_events WHERE tenant = ?1").bind(TENANT).run();
+  const tenant = tenantObjectDb(TENANT);
+  await tenant.batch([
+    tenant.prepare("DELETE FROM asset_bundle_files"),
+    tenant.prepare("DELETE FROM asset_channels"),
+    tenant.prepare("DELETE FROM stored_assets"),
+    tenant.prepare("DELETE FROM retention_policies"),
+  ]);
 
   // The SAME seeder `test/keys/` uses, so the row is hashed by the function the
   // resolver verifies against — a test can never prove auth against a hash only
@@ -107,12 +130,11 @@ async function push(name: string, version: string, body: string): Promise<Respon
 describe("the deployed Worker persists asset metadata to D1", () => {
   beforeEach(provision);
 
-  test("a push over SELF lands a row in `stored_assets` on the DB binding", async () => {
+  test("a push over SELF lands a row in the tenant Durable Object", async () => {
     const response = await push("cli", "1.0.0", "hello-ferrogate");
     expect(response.status).toBe(200);
 
-    const { db } = bindings();
-    const rows = await db
+    const rows = await tenantObjectDb(TENANT)
       .prepare("SELECT id, tenant_id, name, version, size_bytes, visibility FROM stored_assets")
       .all<Record<string, unknown>>();
     expect(rows.results).toEqual([
@@ -125,6 +147,19 @@ describe("the deployed Worker persists asset metadata to D1", () => {
         visibility: "visible",
       },
     ]);
+
+    const shared = await bindings()
+      .db.prepare("SELECT id FROM stored_assets WHERE tenant_id = ?1")
+      .bind(TENANT)
+      .all<Record<string, unknown>>();
+    expect(shared.results).toEqual([]);
+  });
+
+  test("a tenant object cannot read another tenant's asset row", async () => {
+    await push("cli", "1.1.0", "tenant-a-only");
+
+    const other = new D1AssetMetadataStore(tenantObjectDb("tenant_asset_other") as never);
+    expect(await other.getAsset(`${TENANT}:binaries:cli:1.1.0`)).toBeNull();
   });
 
   test("a yank pushed over SELF is durable — the kill switch survives the isolate", async () => {
@@ -137,12 +172,11 @@ describe("the deployed Worker persists asset metadata to D1", () => {
     });
     expect(yank.status).toBe(200);
 
-    const { db } = bindings();
-    const fresh = new D1AssetMetadataStore(db as never);
+    const fresh = new D1AssetMetadataStore(tenantObjectDb(TENANT) as never);
     expect((await fresh.getAsset(`${TENANT}:binaries:cli:2.0.0`))?.yanked).toBe(true);
   });
 
-  test("a channel move over SELF lands a row in `asset_channels`", async () => {
+  test("a channel move over SELF lands a row in the tenant Durable Object", async () => {
     await push("cli", "3.0.0", "payload");
     const move = await SELF.fetch(
       "https://gateway.test/v1/assets/binaries/cli/channels/latest?version=3.0.0",
@@ -150,12 +184,17 @@ describe("the deployed Worker persists asset metadata to D1", () => {
     );
     expect(move.status).toBe(200);
 
-    const { db } = bindings();
-    const rows = await db
+    const rows = await tenantObjectDb(TENANT)
       .prepare("SELECT channel, version FROM asset_channels WHERE tenant_id = ?1")
       .bind(TENANT)
       .all<Record<string, unknown>>();
     expect(rows.results).toEqual([{ channel: "latest", version: "3.0.0" }]);
+
+    const shared = await bindings()
+      .db.prepare("SELECT id FROM asset_channels WHERE tenant_id = ?1")
+      .bind(TENANT)
+      .all<Record<string, unknown>>();
+    expect(shared.results).toEqual([]);
   });
 
   test("a republish is refused by the DURABLE row, not by isolate state", async () => {
@@ -169,12 +208,72 @@ describe("the deployed Worker persists asset metadata to D1", () => {
       error: { code: "asset_version_immutable" },
     });
 
-    const { db } = bindings();
-    const rows = await db
+    const rows = await tenantObjectDb(TENANT)
       .prepare("SELECT content_hash FROM stored_assets WHERE id = ?1")
       .bind(`${TENANT}:binaries:cli:4.0.0`)
       .all<Record<string, unknown>>();
     expect(rows.results).toHaveLength(1);
+  });
+
+  test("retention policy state is stored in the tenant Durable Object", async () => {
+    const policy: StoredRetentionPolicy = {
+      id: retentionPolicyId(TENANT, RETENTION_RESOURCE_ASSET, RETENTION_SCOPE_DEFAULT),
+      tenantId: TENANT,
+      resourceType: RETENTION_RESOURCE_ASSET,
+      scope: RETENTION_SCOPE_DEFAULT,
+      keepLastN: 2,
+      maxAgeSecs: undefined,
+      minAgeSecs: 0,
+      createdAtUnix: 1_800_000_000,
+      updatedAtUnix: 1_800_000_000,
+    };
+    await new D1RetentionPolicyStore(await tenantObjectHandle(TENANT)).setRetentionPolicy(policy);
+
+    expect(
+      await new D1RetentionPolicyStore(await tenantObjectHandle(TENANT)).getRetentionPolicy(
+        TENANT,
+        RETENTION_RESOURCE_ASSET,
+        RETENTION_SCOPE_DEFAULT,
+      ),
+    ).toEqual(policy);
+    expect(
+      await new D1RetentionPolicyStore(
+        await tenantObjectHandle("tenant_asset_other"),
+      ).listRetentionPolicies(TENANT),
+    ).toEqual([]);
+    expect(
+      await bindings()
+        .db.prepare("SELECT id FROM retention_policies WHERE tenant_id = ?1")
+        .bind(TENANT)
+        .all<Record<string, unknown>>(),
+    ).toMatchObject({ results: [] });
+  });
+
+  test("static-site bundle files use the tenant Durable Object", async () => {
+    const file: StoredBundleFile = {
+      asset_id: `${TENANT}:static_site:docs:1.0.0`,
+      tenant_id: TENANT,
+      path: "index.html",
+      storage_uri: `assets/${TENANT}/static_site/docs/1.0.0/index.html`,
+      content_type: "text/html; charset=utf-8",
+      content_hash: "hash-index",
+      size_bytes: 12,
+      created_at_unix: 1_800_000_000,
+    };
+    const bundles = new D1AssetBundleIndexStore(tenantObjectDb(TENANT) as never);
+    await bundles.putBundleFiles([file]);
+    expect(await bundles.listBundleFiles(file.asset_id)).toEqual([file]);
+    expect(
+      await new D1AssetBundleIndexStore(
+        tenantObjectDb("tenant_asset_other") as never,
+      ).listBundleFiles(file.asset_id),
+    ).toEqual([]);
+    expect(
+      await bindings()
+        .db.prepare("SELECT asset_id FROM asset_bundle_files WHERE tenant_id = ?1")
+        .bind(TENANT)
+        .all<Record<string, unknown>>(),
+    ).toMatchObject({ results: [] });
   });
 });
 
@@ -225,13 +324,13 @@ describe("the deployed Worker persists the asset audit trail to D1", () => {
     // from "absent" on every read surface (#366).
     expect((await push("cli", "7.0.0", eicar)).status).toBe(202);
 
-    const { control, db } = bindings();
+    const { control } = bindings();
     const evidence = await new D1AssetAuditSink(control as never).screeningEvidence(TENANT);
     expect(evidence.get(`${TENANT}:binaries:cli:7.0.0`)).toContain("scan=");
 
     // And the row itself is withheld, so the evidence is explaining something
     // the read surfaces really refuse to serve.
-    const withheld = await db
+    const withheld = await tenantObjectDb(TENANT)
       .prepare("SELECT visibility FROM stored_assets WHERE id = ?1")
       .bind(`${TENANT}:binaries:cli:7.0.0`)
       .all<Record<string, unknown>>();
