@@ -40,3 +40,18 @@ export async function resetTenantObjectState(tenantIds: readonly string[]): Prom
     ]);
   }
 }
+
+/** Clear tenant-authoritative billing state between gateway metering tests. */
+export async function resetTenantBillingState(tenantIds: readonly string[]): Promise<void> {
+  for (const tenantId of tenantIds) {
+    const tenant = tenantObjectDb(tenantId);
+    await tenant.batch([
+      tenant.prepare("DELETE FROM billing_report_outbox"),
+      tenant.prepare("DELETE FROM billing_ledger"),
+      tenant.prepare("DELETE FROM billing_events"),
+      tenant.prepare("DELETE FROM wallet_settlements"),
+      tenant.prepare("DELETE FROM wallet_reservations"),
+      tenant.prepare("DELETE FROM wallets"),
+    ]);
+  }
+}

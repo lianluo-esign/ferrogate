@@ -17,20 +17,23 @@
  * DIFFERENT settlement data surfaces as `conflict` rather than being silently
  * absorbed (issue #213).
  *
- * ## Schema — owned by the DEPLOYED migration, mirrored here
+ * ## Schema — owned by the DEPLOYED migration, mirrored for compatibility here
  *
- * The three tables are defined by `sql/d1-ts/control/0001_init_control.sql`,
- * which is the D1 reduction the inventory prescribes (§1.4.4) and is itself the
- * verbatim port of the Rust `sql/d1/001_init_d1.sql`: Postgres' wide
- * `billing_ledger` / `billing_metering_events` collapse to the #447 document
- * pattern — a `*_json` TEXT document plus only the projection columns the
- * filter/order/paginate SQL needs.
+ * The compatibility constructor uses the three tables defined by
+ * `sql/d1-ts/control/0001_init_control.sql`, which is the D1 reduction the
+ * inventory prescribes (§1.4.4) and is itself the verbatim port of the Rust
+ * `sql/d1/001_init_d1.sql`: Postgres' wide `billing_ledger` /
+ * `billing_metering_events` collapse to the #447 document pattern — a `*_json`
+ * TEXT document plus only the projection columns the filter/order/paginate SQL
+ * needs. The tenant constructor uses the explicit-column copies added by
+ * `sql/d1-ts/tenant/0020_billing_wallet_consistency.sql`.
  *
- * They live in the CONTROL database, not the tenant one — the tenant migration
- * says so in as many words ("billing ledger/outbox/events -> CONTROL") — so the
- * binding this store takes is `env.BILLING_DB` (`wrangler.toml`), never
- * `env.DB`. All three tables being in the SAME database is what makes the
- * single-`batch()` atomicity below real rather than aspirational.
+ * The default constructor remains CONTROL-compatible and uses
+ * `env.BILLING_DB`. A tenant-mounted constructor uses the same store contract
+ * against the tenant Durable Object's D1-shaped facade. In that mode the
+ * billing tables and wallet tables share one database, so the single
+ * `batch()` atomicity below covers the full money movement rather than only the
+ * report intent.
  *
  * {@link METERING_SCHEMA_SQL} is a VERBATIM MIRROR of those statements, kept
  * only so an offline harness can provision the tables without a migration
@@ -63,6 +66,7 @@ import type {
   MeteredCharge,
   MeteredTotals,
   MeteringDatabase,
+  MeteringStatement,
   OutboxRecord,
 } from "./ports.js";
 import { creditsFromWire, creditsToWire } from "./wire.js";
@@ -82,6 +86,17 @@ import {
  * elsewhere.
  */
 export const CREDITS_EXACT_FIELD = "credits_exact";
+
+const SQLITE_INT64_MIN = -(1n << 63n);
+const SQLITE_INT64_MAX = (1n << 63n) - 1n;
+
+/** SQLite INTEGER is signed int64; never let a wallet delta saturate silently. */
+function sqliteIntegerString(value: bigint): string {
+  if (value < SQLITE_INT64_MIN || value > SQLITE_INT64_MAX) {
+    throw new RangeError(`wallet settlement credits exceed SQLite int64: ${value.toString()}`);
+  }
+  return value.toString();
+}
 
 /**
  * D1 (SQLite) DDL for the three metering tables — a VERBATIM MIRROR of the
@@ -163,6 +178,48 @@ export const BILLING_OUTBOX_INSERT_SQL =
   "VALUES (?, 0, CAST(? AS INTEGER), NULL, CAST(? AS INTEGER), CAST(? AS INTEGER), ?) " +
   "ON CONFLICT (id) DO NOTHING";
 
+/** The same three writes, addressed inside one tenant Durable Object. */
+const TENANT_BILLING_EVENT_INSERT_SQL =
+  "INSERT INTO billing_events " +
+  "(billing_event_id, tenant_id, request_id, provider_attempt_index, occurred_at_unix, event_json) " +
+  "VALUES (?, ?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), ?) " +
+  "ON CONFLICT (billing_event_id) DO NOTHING " +
+  "RETURNING billing_event_id";
+
+const TENANT_BILLING_LEDGER_INSERT_SQL =
+  "INSERT INTO billing_ledger " +
+  "(id, tenant_id, organization_id, project_id, api_key_id, created_at_unix, entry_json) " +
+  "VALUES (?, ?, ?, ?, ?, CAST(? AS INTEGER), ?) " +
+  "ON CONFLICT (id) DO NOTHING";
+
+const TENANT_BILLING_OUTBOX_INSERT_SQL =
+  "INSERT INTO billing_report_outbox " +
+  "(id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix, created_at_unix, " +
+  "updated_at_unix, event_json) " +
+  "VALUES (?, ?, 0, CAST(? AS INTEGER), NULL, CAST(? AS INTEGER), CAST(? AS INTEGER), ?) " +
+  "ON CONFLICT (id) DO NOTHING";
+
+const TENANT_WALLET_SETTLEMENT_CLAIM_SQL =
+  "INSERT INTO wallet_settlements " +
+  "(id, tenant_id, delta_credits, balance_after_credits, created_at_unix) " +
+  "SELECT ?, ?, CAST(? AS INTEGER), NULL, CAST(? AS INTEGER) " +
+  "WHERE changes() > 0 " +
+  "AND EXISTS (SELECT 1 FROM wallets WHERE id = ? AND tenant_id = ?) " +
+  "ON CONFLICT (id) DO NOTHING";
+
+const TENANT_WALLET_SETTLEMENT_APPLY_SQL =
+  "UPDATE wallets SET balance_credits = balance_credits + CAST(? AS INTEGER), " +
+  "updated_at_unix = CAST(? AS INTEGER) " +
+  "WHERE id = ? AND tenant_id = ? " +
+  "AND changes() > 0 " +
+  "AND EXISTS (SELECT 1 FROM wallet_settlements " +
+  "WHERE id = ? AND tenant_id = ? AND balance_after_credits IS NULL)";
+
+const TENANT_WALLET_SETTLEMENT_FINALIZE_SQL =
+  "UPDATE wallet_settlements SET balance_after_credits = " +
+  "(SELECT balance_credits FROM wallets WHERE id = ? AND tenant_id = ?) " +
+  "WHERE id = ? AND tenant_id = ? AND changes() > 0 AND balance_after_credits IS NULL";
+
 const BILLING_LEDGER_SELECT_SQL =
   "SELECT billing_ledger.id AS id, entry_json, event_json FROM billing_ledger " +
   "JOIN billing_events ON billing_events.billing_event_id = billing_ledger.id " +
@@ -172,6 +229,21 @@ const BILLING_LEDGER_LIST_SQL =
   "SELECT billing_ledger.id AS id, entry_json, event_json FROM billing_ledger " +
   "JOIN billing_events ON billing_events.billing_event_id = billing_ledger.id " +
   "ORDER BY created_at_unix ASC, billing_ledger.id ASC";
+
+const TENANT_BILLING_LEDGER_SELECT_SQL =
+  "SELECT billing_ledger.id AS id, billing_ledger.entry_json AS entry_json, " +
+  "billing_events.event_json AS event_json FROM billing_ledger " +
+  "JOIN billing_events ON billing_events.billing_event_id = billing_ledger.id " +
+  "AND billing_events.tenant_id = billing_ledger.tenant_id " +
+  "WHERE billing_ledger.id = ? AND billing_ledger.tenant_id = ?";
+
+const TENANT_BILLING_LEDGER_LIST_SQL =
+  "SELECT billing_ledger.id AS id, billing_ledger.entry_json AS entry_json, " +
+  "billing_events.event_json AS event_json FROM billing_ledger " +
+  "JOIN billing_events ON billing_events.billing_event_id = billing_ledger.id " +
+  "AND billing_events.tenant_id = billing_ledger.tenant_id " +
+  "WHERE billing_ledger.tenant_id = ? " +
+  "ORDER BY billing_ledger.created_at_unix ASC, billing_ledger.id ASC";
 
 /** `delete_billing_report` — the report was delivered, drop the intent. */
 export const BILLING_OUTBOX_DELETE_SQL = "DELETE FROM billing_report_outbox WHERE id = ?";
@@ -204,6 +276,31 @@ export const BILLING_OUTBOX_RESCHEDULE_SQL =
 export const BILLING_OUTBOX_DEAD_LETTER_SQL =
   "UPDATE billing_report_outbox SET dead_lettered_at_unix = CAST(? AS INTEGER), " +
   "updated_at_unix = CAST(? AS INTEGER) WHERE id = ?";
+
+const TENANT_BILLING_OUTBOX_LIST_DUE_SQL =
+  "SELECT billing_report_outbox.id AS id, billing_report_outbox.attempts AS attempts, " +
+  "billing_report_outbox.next_attempt_unix AS next_attempt_unix, " +
+  "billing_ledger.entry_json AS entry_json, billing_report_outbox.event_json AS event_json " +
+  "FROM billing_report_outbox " +
+  "JOIN billing_ledger ON billing_ledger.id = billing_report_outbox.id " +
+  "AND billing_ledger.tenant_id = billing_report_outbox.tenant_id " +
+  "WHERE billing_report_outbox.tenant_id = ? " +
+  "AND billing_report_outbox.dead_lettered_at_unix IS NULL " +
+  "AND billing_report_outbox.next_attempt_unix <= CAST(? AS INTEGER) " +
+  "ORDER BY billing_report_outbox.next_attempt_unix ASC, billing_report_outbox.id ASC " +
+  "LIMIT CAST(? AS INTEGER)";
+
+const TENANT_BILLING_OUTBOX_DELETE_SQL =
+  "DELETE FROM billing_report_outbox WHERE id = ? AND tenant_id = ?";
+
+const TENANT_BILLING_OUTBOX_RESCHEDULE_SQL =
+  "UPDATE billing_report_outbox SET attempts = CAST(? AS INTEGER), " +
+  "next_attempt_unix = CAST(? AS INTEGER), updated_at_unix = CAST(? AS INTEGER) " +
+  "WHERE id = ? AND tenant_id = ?";
+
+const TENANT_BILLING_OUTBOX_DEAD_LETTER_SQL =
+  "UPDATE billing_report_outbox SET dead_lettered_at_unix = CAST(? AS INTEGER), " +
+  "updated_at_unix = CAST(? AS INTEGER) WHERE id = ? AND tenant_id = ?";
 
 /** A row shape the two selects return. */
 interface LedgerRow {
@@ -297,14 +394,30 @@ function isOutboxRow(value: unknown): value is OutboxRow {
   return typeof row.attempts === "number" && typeof row.next_attempt_unix === "number";
 }
 
+/** Options for a control-compatible or tenant-authoritative D1 ledger. */
+export interface D1LedgerStoreOptions {
+  /** The tenant database this store is mounted on. */
+  readonly tenantId?: string | undefined;
+  /** Compatibility escape hatch for a read-only tenant adapter. */
+  readonly settleWallet?: boolean | undefined;
+}
+
 /** {@link LedgerStore} over a native D1 binding. */
 export class D1LedgerStore implements LedgerStore {
   readonly #db: MeteringDatabase;
   readonly #outbox: DurableOutboxStore;
+  readonly #tenantId: string | undefined;
+  readonly #settleWallet: boolean;
 
-  constructor(db: MeteringDatabase) {
+  constructor(db: MeteringDatabase, options: D1LedgerStoreOptions = {}) {
     this.#db = db;
-    this.#outbox = new D1DurableOutbox(db);
+    const tenantId = options.tenantId?.trim();
+    if (options.tenantId !== undefined && tenantId === "") {
+      throw new TypeError("D1LedgerStore tenantId must not be empty");
+    }
+    this.#tenantId = tenantId;
+    this.#settleWallet = this.#tenantId !== undefined && options.settleWallet !== false;
+    this.#outbox = new D1DurableOutbox(db, this.#tenantId);
   }
 
   /**
@@ -326,31 +439,91 @@ export class D1LedgerStore implements LedgerStore {
     const entryJson = JSON.stringify(ledgerDocument(charge));
     const tenant = charge.entry.tenant;
     const occurredAt = charge.occurredAtUnix;
+    const tenantId = this.#tenantId;
+    if (
+      tenantId !== undefined &&
+      [tenant.organization_id, charge.event.tenant.organization_id].some(
+        (candidate) => candidate !== undefined && candidate !== tenantId,
+      )
+    ) {
+      throw new Error(`billing charge ${charge.id} is routed to the wrong tenant`);
+    }
 
-    const results = await this.#db.batch([
-      this.#db
-        .prepare(BILLING_EVENT_INSERT_SQL)
-        .bind(
-          charge.id,
-          charge.requestId,
-          charge.entry.provider_attempt.provider_attempt_index,
-          occurredAt,
-          eventJson,
-        ),
-      this.#db
-        .prepare(BILLING_LEDGER_INSERT_SQL)
-        .bind(
-          charge.id,
-          tenant.organization_id ?? null,
-          tenant.project_id ?? null,
-          tenant.api_key_id ?? null,
-          occurredAt,
-          entryJson,
-        ),
-      this.#db
-        .prepare(BILLING_OUTBOX_INSERT_SQL)
-        .bind(charge.id, occurredAt, occurredAt, occurredAt, eventJson),
-    ]);
+    const eventStatement =
+      tenantId === undefined
+        ? this.#db
+            .prepare(BILLING_EVENT_INSERT_SQL)
+            .bind(
+              charge.id,
+              charge.requestId,
+              charge.entry.provider_attempt.provider_attempt_index,
+              occurredAt,
+              eventJson,
+            )
+        : this.#db
+            .prepare(TENANT_BILLING_EVENT_INSERT_SQL)
+            .bind(
+              charge.id,
+              tenantId,
+              charge.requestId,
+              charge.entry.provider_attempt.provider_attempt_index,
+              occurredAt,
+              eventJson,
+            );
+    const ledgerStatement =
+      tenantId === undefined
+        ? this.#db
+            .prepare(BILLING_LEDGER_INSERT_SQL)
+            .bind(
+              charge.id,
+              tenant.organization_id ?? null,
+              tenant.project_id ?? null,
+              tenant.api_key_id ?? null,
+              occurredAt,
+              entryJson,
+            )
+        : this.#db
+            .prepare(TENANT_BILLING_LEDGER_INSERT_SQL)
+            .bind(
+              charge.id,
+              tenantId,
+              tenant.organization_id ?? null,
+              tenant.project_id ?? null,
+              tenant.api_key_id ?? null,
+              occurredAt,
+              entryJson,
+            );
+    const outboxStatement =
+      tenantId === undefined
+        ? this.#db
+            .prepare(BILLING_OUTBOX_INSERT_SQL)
+            .bind(charge.id, occurredAt, occurredAt, occurredAt, eventJson)
+        : this.#db
+            .prepare(TENANT_BILLING_OUTBOX_INSERT_SQL)
+            .bind(charge.id, tenantId, occurredAt, occurredAt, occurredAt, eventJson);
+
+    // The wallet claim follows the event INSERT immediately. `changes() > 0`
+    // therefore means this transaction won the billing idempotency race. A
+    // divergent replay cannot debit a wallet before the later conflict check,
+    // while a successful first write still settles in the same batch.
+    const statements: MeteringStatement[] = [eventStatement];
+    if (this.#settleWallet && tenantId !== undefined && charge.credits > 0n) {
+      const walletDelta = sqliteIntegerString(-charge.credits);
+      statements.push(
+        this.#db
+          .prepare(TENANT_WALLET_SETTLEMENT_CLAIM_SQL)
+          .bind(charge.id, tenantId, walletDelta, occurredAt, tenantId, tenantId),
+        this.#db
+          .prepare(TENANT_WALLET_SETTLEMENT_APPLY_SQL)
+          .bind(walletDelta, occurredAt, tenantId, tenantId, charge.id, tenantId),
+        this.#db
+          .prepare(TENANT_WALLET_SETTLEMENT_FINALIZE_SQL)
+          .bind(tenantId, tenantId, charge.id, tenantId),
+      );
+    }
+    statements.push(ledgerStatement, outboxStatement);
+
+    const results = await this.#db.batch(statements);
 
     const metering = results[0];
     if (metering === undefined) {
@@ -392,20 +565,45 @@ export class D1LedgerStore implements LedgerStore {
    * apart from its `cost_usd`, and therefore re-priceable in place.
    */
   async recordEvent(event: BillingEvent, id: string, occurredAtUnix: number): Promise<void> {
+    const eventJson = JSON.stringify(billingEventToWire(event));
+    if (this.#tenantId === undefined) {
+      await this.#db
+        .prepare(BILLING_EVENT_INSERT_SQL)
+        .bind(
+          id,
+          event.request_id,
+          event.provider_attempt.provider_attempt_index,
+          occurredAtUnix,
+          eventJson,
+        )
+        .all();
+      return;
+    }
+    const eventTenant = event.tenant.organization_id;
+    if (eventTenant !== undefined && eventTenant !== this.#tenantId) {
+      throw new Error(`billing event ${id} is routed to the wrong tenant`);
+    }
     await this.#db
-      .prepare(BILLING_EVENT_INSERT_SQL)
+      .prepare(TENANT_BILLING_EVENT_INSERT_SQL)
       .bind(
         id,
+        this.#tenantId,
         event.request_id,
         event.provider_attempt.provider_attempt_index,
         occurredAtUnix,
-        JSON.stringify(billingEventToWire(event)),
+        eventJson,
       )
       .all();
   }
 
   async get(id: string): Promise<MeteredCharge | undefined> {
-    const result = await this.#db.prepare(BILLING_LEDGER_SELECT_SQL).bind(id).all();
+    const result =
+      this.#tenantId === undefined
+        ? await this.#db.prepare(BILLING_LEDGER_SELECT_SQL).bind(id).all()
+        : await this.#db
+            .prepare(TENANT_BILLING_LEDGER_SELECT_SQL)
+            .bind(id, this.#tenantId)
+            .all();
     const row = result.results?.[0];
     return row !== undefined && isLedgerRow(row) ? rowToCharge(row) : undefined;
   }
@@ -427,7 +625,10 @@ export class D1LedgerStore implements LedgerStore {
   }
 
   async #all(filter: LedgerListFilter): Promise<MeteredCharge[]> {
-    const result = await this.#db.prepare(BILLING_LEDGER_LIST_SQL).all();
+    const result =
+      this.#tenantId === undefined
+        ? await this.#db.prepare(BILLING_LEDGER_LIST_SQL).all()
+        : await this.#db.prepare(TENANT_BILLING_LEDGER_LIST_SQL).bind(this.#tenantId).all();
     const charges = (result.results ?? []).filter(isLedgerRow).map(rowToCharge);
     return charges.filter((charge) => matchesFilter(filter, charge));
   }
@@ -444,17 +645,29 @@ export class D1LedgerStore implements LedgerStore {
  */
 class D1DurableOutbox implements DurableOutboxStore {
   readonly #db: MeteringDatabase;
+  readonly #tenantId: string | undefined;
 
-  constructor(db: MeteringDatabase) {
+  constructor(db: MeteringDatabase, tenantId: string | undefined) {
     this.#db = db;
+    this.#tenantId = tenantId;
   }
 
   async reap(id: string): Promise<void> {
-    await this.#db.prepare(BILLING_OUTBOX_DELETE_SQL).bind(id).run();
+    if (this.#tenantId === undefined) {
+      await this.#db.prepare(BILLING_OUTBOX_DELETE_SQL).bind(id).run();
+      return;
+    }
+    await this.#db.prepare(TENANT_BILLING_OUTBOX_DELETE_SQL).bind(id, this.#tenantId).run();
   }
 
   async listDue(nowUnix: number, limit: number): Promise<OutboxRecord[]> {
-    const result = await this.#db.prepare(BILLING_OUTBOX_LIST_DUE_SQL).bind(nowUnix, limit).all();
+    const result =
+      this.#tenantId === undefined
+        ? await this.#db.prepare(BILLING_OUTBOX_LIST_DUE_SQL).bind(nowUnix, limit).all()
+        : await this.#db
+            .prepare(TENANT_BILLING_OUTBOX_LIST_DUE_SQL)
+            .bind(this.#tenantId, nowUnix, limit)
+            .all();
     return (result.results ?? []).filter(isOutboxRow).map((row) => ({
       id: row.id,
       charge: rowToCharge(row),
@@ -473,14 +686,28 @@ class D1DurableOutbox implements DurableOutboxStore {
     nextAttemptUnix: number,
     nowUnix: number,
   ): Promise<void> {
+    if (this.#tenantId === undefined) {
+      await this.#db
+        .prepare(BILLING_OUTBOX_RESCHEDULE_SQL)
+        .bind(attempts, nextAttemptUnix, nowUnix, id)
+        .run();
+      return;
+    }
     await this.#db
-      .prepare(BILLING_OUTBOX_RESCHEDULE_SQL)
-      .bind(attempts, nextAttemptUnix, nowUnix, id)
+      .prepare(TENANT_BILLING_OUTBOX_RESCHEDULE_SQL)
+      .bind(attempts, nextAttemptUnix, nowUnix, id, this.#tenantId)
       .run();
   }
 
   async deadLetter(id: string, nowUnix: number): Promise<void> {
-    await this.#db.prepare(BILLING_OUTBOX_DEAD_LETTER_SQL).bind(nowUnix, nowUnix, id).run();
+    if (this.#tenantId === undefined) {
+      await this.#db.prepare(BILLING_OUTBOX_DEAD_LETTER_SQL).bind(nowUnix, nowUnix, id).run();
+      return;
+    }
+    await this.#db
+      .prepare(TENANT_BILLING_OUTBOX_DEAD_LETTER_SQL)
+      .bind(nowUnix, nowUnix, id, this.#tenantId)
+      .run();
   }
 }
 

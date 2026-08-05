@@ -8,8 +8,9 @@
  * the monthly USD budget, and `apps/gateway/src/ratelimit/token-budget.ts` reads
  * `usage_aggregate_rollups` (via `sumApiKeyCommittedTokens`) to decide
  * `api_keys.monthly_token_budget`. **Nothing in `apps/` wrote either table.**
- * The gateway's metering path settled into the CONTROL database's
- * `billing_events` / `billing_ledger` / `billing_report_outbox` and stopped.
+ * The gateway's metering path now settles billing events, ledger, wallet, and
+ * report outbox rows in the tenant object. This module writes the separate
+ * usage rollup batch that follows that settlement.
  *
  * So both budgets read a table that stayed empty forever: the USD budget could
  * never trip, and the token budget had no `committed` operand at all. This
@@ -20,11 +21,11 @@
  * ## Ordering: claim first, accumulate second
  *
  * `packages/storage/src/d1/usage-d1.ts` states the contract this module obeys,
- * and states why it cannot be a single commit:
+ * and states why the billing and usage batches cannot be one commit:
  *
- * > **D1 has no transaction spanning two databases.** … `billing_events` is in
- * > the CONTROL database and this accumulate is on a TENANT database … So: the
- * > CALLER still owns ordering (claim first, accumulate only on a win).
+ * > **D1 has no transaction spanning independent batches.** … tenant billing
+ * > settlement and this accumulate are separate writes … So: the CALLER still
+ * > owns ordering and retry safety.
  *
  * The claim is `LedgerStore.record` returning `recorded` — the idempotent
  * `ON CONFLICT (billing_event_id) DO NOTHING` write keyed on
@@ -32,9 +33,8 @@
  * recorded branch, and may also retry the tenant object on a duplicate branch;
  * `usage_event_claims` keeps that repair from incrementing counters twice.
  *
- * The tenant-local claim closes the old crash window after the control claim:
- * replaying the object batch is safe, but it still cannot make the control
- * claim and object batch one commit.
+ * The tenant-local usage claim makes replay of this additive batch safe, but it
+ * still cannot make billing settlement and usage accumulation one commit.
  *
  * ## Attribution, and the one case it is dropped
  *
@@ -44,13 +44,13 @@
  * authenticated credential by `meteringDrain`, which holds `c.get("auth")`, and
  * travels on the drain's own {@link MeteringAttribution}.
  *
- * It is applied to a charge ONLY when `charge.requestId` matches the attribution's
- * request id. That guard is not decoration: one drain pass can pick up an outbox
- * row left behind by an EARLIER request whose drain failed, and stamping this
- * request's credential onto that charge would attribute one key's spend to
- * another. The unmatched case writes the tenant/project rollup with no api-key
- * id — the spend is still counted against the tenant's USD budget, it is only
- * the per-key token attribution that is dropped. Under-attribution, never
+ * It is applied to a charge or cost-less event ONLY when its request id matches
+ * the attribution's request id. That guard is not decoration: one drain pass can
+ * pick up an outbox row left behind by an EARLIER request whose drain failed, and
+ * stamping this request's credential onto that row would attribute one key's
+ * spend to another. The unmatched case writes the tenant/project rollup with no
+ * api-key id — the spend is still counted against the tenant's USD budget, it is
+ * only the per-key token attribution that is dropped. Under-attribution, never
  * mis-attribution.
  */
 import {
@@ -59,6 +59,7 @@ import {
   periodMonthFromUnix,
   type UsageAggregateWrite,
 } from "@ferrogate/storage";
+import type { BillingEvent } from "@ferrogate/billing";
 import type { QuotaScopeKind } from "@ferrogate/storage";
 import type { UsageRecordContext } from "../inference/ports.js";
 import { gatewayTenantHandle } from "../ratelimit/wallet.js";
@@ -110,10 +111,10 @@ export interface UsageLedgerBindings {
    * The TENANT database (`sql/d1-ts/tenant/`), holding `tenant_contexts`,
    * `usage_aggregate_rollups` and `usage_monthly_rollups`.
    *
-   * NOT `BILLING_DB`: that is the CONTROL database, whose migration carries the
-   * billing tables and NOT these. The two halves of a settled request really do
-   * live in two databases — that is the cross-database limit above, not a
-   * misconfiguration.
+   * Billing settlement has already committed its tenant-local event, ledger,
+   * wallet, and outbox rows before this usage batch runs. `BILLING_DB` remains
+   * only the compatibility/projection surface for unscoped traffic; tenant
+   * calls resolve through `TENANT_DATA`.
    */
   readonly DB?: D1Database | undefined;
   readonly TENANT_DATA?: TenantDataBindings["TENANT_DATA"] | undefined;
@@ -177,14 +178,14 @@ export function withUsageProjectionRetry(
   };
 }
 
-/** Persist request attribution on the charge for context-free outbox repair. */
-export function chargeWithTenantAttribution(
-  charge: MeteredCharge,
+/** Apply request attribution to an event only when it belongs to this request. */
+export function eventWithTenantAttribution(
+  event: BillingEvent,
   attribution: MeteringAttribution | undefined,
-): MeteredCharge {
-  if (attribution === undefined || attribution.requestId !== charge.requestId) return charge;
+): BillingEvent {
+  if (attribution === undefined || attribution.requestId !== event.request_id) return event;
   const tenant = {
-    ...charge.event.tenant,
+    ...event.tenant,
     ...(attribution.tenantId === undefined || attribution.tenantId === ""
       ? {}
       : { organization_id: attribution.tenantId }),
@@ -198,7 +199,21 @@ export function chargeWithTenantAttribution(
       ? {}
       : { api_key_id: attribution.apiKeyId }),
   };
-  return { ...charge, event: { ...charge.event, tenant } };
+  return { ...event, tenant };
+}
+
+/** Persist request attribution on the charge for context-free outbox repair. */
+export function chargeWithTenantAttribution(
+  charge: MeteredCharge,
+  attribution: MeteringAttribution | undefined,
+): MeteredCharge {
+  const event = eventWithTenantAttribution(charge.event, attribution);
+  if (event === charge.event) return charge;
+  return {
+    ...charge,
+    event,
+    entry: { ...charge.entry, tenant: event.tenant },
+  };
 }
 
 /** Fold the object-owned monotonic rollups into the same tenant batch. */

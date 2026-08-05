@@ -57,9 +57,6 @@ const TENANT_PRIVATE_KINDS = [
   "experiments",
   "investigations",
   "workflow-run-steps",
-  "metering-events",
-  "billing-outbox-dead-letters",
-  "usage-reports",
   "cost-record-exports",
   "request-log-exports",
 ] as const;
@@ -93,6 +90,13 @@ const DERIVED_KINDS = [
   "managed-worker-sessions",
   "self-hosted-worker-records",
   "spend-anomalies",
+  // Billing feeds and dead-letter documents are legacy control-D1
+  // compatibility projections. The authoritative billing rows live in the
+  // tenant object's typed tables; these documents must remain readable by the
+  // platform fan-out and must not shadow a physical tenant outbox row.
+  "metering-events",
+  "billing-outbox-dead-letters",
+  "usage-reports",
   "metering-export-status",
   "observed-agent-activity",
   "tools",

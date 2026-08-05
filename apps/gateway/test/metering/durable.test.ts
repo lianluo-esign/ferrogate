@@ -35,6 +35,7 @@ import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference
 import type { RequestIdFactory } from "../../src/inference/index.js";
 import {
   CREDITS_EXACT_FIELD,
+  D1LedgerStore,
   InMemoryMeteringOutbox,
   MAX_BILLING_OUTBOX_ATTEMPTS,
   type MeteringUsageSink,
@@ -42,6 +43,8 @@ import {
   createMeteringUsageSink,
   meteringBindingsFromEnv,
   meteringDrain,
+  billingEventToWire,
+  ledgerDocument,
 } from "../../src/metering/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
@@ -61,9 +64,27 @@ import {
   rowCount,
 } from "./d1-harness.js";
 import { FIXTURE_CREDITS, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
+import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 const AUTHED = { authorization: "Bearer fg_root", "content-type": "application/json" };
+
+async function tenantRowCount(
+  table: "billing_events" | "billing_ledger" | "billing_report_outbox",
+): Promise<number> {
+  const row = await tenantObjectDb("tenant_a")
+    .prepare(`SELECT count(*) AS n FROM ${table}`)
+    .first<{ n: number }>();
+  return Number(row?.n ?? 0);
+}
+
+async function tenantLedgerEntryJson(id: string): Promise<string | undefined> {
+  const row = await tenantObjectDb("tenant_a")
+    .prepare("SELECT entry_json FROM billing_ledger WHERE id = ?")
+    .bind(id)
+    .first<{ entry_json: string }>();
+  return row?.entry_json;
+}
 
 /** Request ids the test controls, so "same id twice" is expressible. */
 function fixedRequestIds(id: string): RequestIdFactory {
@@ -189,6 +210,7 @@ let provider: ProviderInterceptor | undefined;
 
 beforeEach(async () => {
   await resetMeteringTables();
+  await resetTenantBillingState(["tenant_a", "tenant_b"]);
 });
 
 afterEach(() => {
@@ -206,6 +228,13 @@ async function storedCredits(id: string): Promise<string | undefined> {
   return typeof value === "string" ? value : undefined;
 }
 
+async function tenantStoredCredits(id: string): Promise<string | undefined> {
+  const json = await tenantLedgerEntryJson(id);
+  if (json === undefined) return undefined;
+  const value = (JSON.parse(json) as Record<string, unknown>)[CREDITS_EXACT_FIELD];
+  return typeof value === "string" ? value : undefined;
+}
+
 // ---------------------------------------------------------------------------
 
 describe("durable metering — the bindings are real", () => {
@@ -219,6 +248,172 @@ describe("durable metering — the bindings are real", () => {
     expect(second).not.toBe(first); // resolved per env object
     // …and an env with no bindings falls back rather than throwing.
     expect(h.sink.ledgerFor({})).toBe(h.sink.ledger);
+  });
+
+  it("records tenant billing and wallet settlement in one tenant batch", async () => {
+    const tenantDb = tenantObjectDb("tenant_a");
+    await tenantDb.batch([
+      tenantDb.prepare("DELETE FROM billing_report_outbox"),
+      tenantDb.prepare("DELETE FROM billing_ledger"),
+      tenantDb.prepare("DELETE FROM billing_events"),
+      tenantDb.prepare("DELETE FROM wallet_settlements"),
+      tenantDb.prepare("DELETE FROM wallets"),
+      tenantDb
+        .prepare(
+          "INSERT INTO wallets (id, tenant_id, balance_credits, dunning, created_at_unix, " +
+            "updated_at_unix) VALUES (?, ?, ?, 0, ?, ?)",
+        )
+        .bind("tenant_a", "tenant_a", 100, 1_700_000_000, 1_700_000_000),
+    ]);
+
+    const store = new D1LedgerStore(tenantDb, { tenantId: "tenant_a" });
+    const charge = chargeFixture("tenant-a-billing-1", FIXTURE_CREDITS);
+
+    expect(await store.record(charge)).toEqual({ status: "recorded" });
+    expect(
+      await tenantDb
+        .prepare("SELECT tenant_id, organization_id FROM billing_ledger WHERE id = ?")
+        .bind(charge.id)
+        .first(),
+    ).toEqual({ tenant_id: "tenant_a", organization_id: "tenant_a" });
+    expect(
+      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+    ).toEqual({ balance_credits: 96 });
+    expect(
+      await tenantDb
+        .prepare(
+          "SELECT tenant_id, delta_credits, balance_after_credits FROM wallet_settlements WHERE id = ?",
+        )
+        .bind(charge.id)
+        .first(),
+    ).toEqual({ tenant_id: "tenant_a", delta_credits: -4, balance_after_credits: 96 });
+
+    expect(await store.record(charge)).toEqual({ status: "duplicate" });
+    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+      count: 1,
+    });
+  });
+
+  it("does not debit a wallet when a divergent replay conflicts", async () => {
+    const tenantDb = tenantObjectDb("tenant_a");
+    const charge = chargeFixture("tenant-a-billing-conflict", FIXTURE_CREDITS);
+    await tenantDb.batch([
+      tenantDb
+        .prepare(
+          "INSERT INTO billing_events " +
+            "(billing_event_id, tenant_id, request_id, provider_attempt_index, occurred_at_unix, event_json) " +
+            "VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          charge.id,
+          "tenant_a",
+          charge.requestId,
+          charge.entry.provider_attempt.provider_attempt_index,
+          charge.occurredAtUnix,
+          JSON.stringify(billingEventToWire(charge.event)),
+        ),
+      tenantDb
+        .prepare(
+          "INSERT INTO billing_ledger " +
+            "(id, tenant_id, organization_id, project_id, api_key_id, created_at_unix, entry_json) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          charge.id,
+          "tenant_a",
+          "tenant_a",
+          "project_1",
+          null,
+          charge.occurredAtUnix,
+          JSON.stringify(ledgerDocument(charge)),
+        ),
+      tenantDb
+        .prepare(
+          "INSERT INTO billing_report_outbox " +
+            "(id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix, created_at_unix, updated_at_unix, event_json) " +
+            "VALUES (?, ?, 0, ?, NULL, ?, ?, ?)",
+        )
+        .bind(
+          charge.id,
+          "tenant_a",
+          charge.occurredAtUnix,
+          charge.occurredAtUnix,
+          charge.occurredAtUnix,
+          JSON.stringify(billingEventToWire(charge.event)),
+        ),
+      tenantDb
+        .prepare(
+          "INSERT INTO wallets (id, tenant_id, balance_credits, dunning, created_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, ?, 0, ?, ?)",
+        )
+        .bind("tenant_a", "tenant_a", 100, charge.occurredAtUnix, charge.occurredAtUnix),
+    ]);
+
+    const store = new D1LedgerStore(tenantDb, { tenantId: "tenant_a" });
+    const divergent = { ...charge, credits: FIXTURE_CREDITS + 1n };
+    const outcome = await store.record(divergent);
+
+    expect(outcome.status).toBe("conflict");
+    expect(
+      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+    ).toEqual({ balance_credits: 100 });
+    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+      count: 0,
+    });
+  });
+
+  it("rolls back billing, outbox, and wallet state when the tenant batch fails", async () => {
+    const tenantDb = tenantObjectDb("tenant_a");
+    const failingDb = new RecordingDatabase(tenantDb);
+    failingDb.failBatchIndex = 5;
+    const store = new D1LedgerStore(failingDb, { tenantId: "tenant_a" });
+    const charge = chargeFixture("tenant-a-billing-rollback", FIXTURE_CREDITS);
+
+    await tenantDb
+      .prepare(
+        "INSERT INTO wallets (id, tenant_id, balance_credits, dunning, created_at_unix, updated_at_unix) " +
+          "VALUES (?, ?, ?, 0, ?, ?)",
+      )
+      .bind("tenant_a", "tenant_a", 100, charge.occurredAtUnix, charge.occurredAtUnix)
+      .run();
+
+    await expect(store.record(charge)).rejects.toThrow();
+    expect(await tenantRowCount("billing_events")).toBe(0);
+    expect(await tenantRowCount("billing_ledger")).toBe(0);
+    expect(await tenantRowCount("billing_report_outbox")).toBe(0);
+    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+      count: 0,
+    });
+    expect(
+      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+    ).toEqual({ balance_credits: 100 });
+
+    failingDb.failBatchIndex = undefined;
+    expect(await store.record(charge)).toEqual({ status: "recorded" });
+  });
+
+  it("refuses wallet settlements outside SQLite int64 before the tenant batch", async () => {
+    const tenantDb = tenantObjectDb("tenant_a");
+    const charge = chargeFixture("tenant-a-billing-int64", FIXTURE_CREDITS);
+    await tenantDb
+      .prepare(
+        "INSERT INTO wallets (id, tenant_id, balance_credits, dunning, created_at_unix, updated_at_unix) " +
+          "VALUES (?, ?, ?, 0, ?, ?)",
+      )
+      .bind("tenant_a", "tenant_a", 100, charge.occurredAtUnix, charge.occurredAtUnix)
+      .run();
+
+    const store = new D1LedgerStore(tenantDb, { tenantId: "tenant_a" });
+    await expect(store.record({ ...charge, credits: (1n << 63n) + 1n })).rejects.toThrow("SQLite int64");
+    expect(await tenantRowCount("billing_events")).toBe(0);
+    expect(await tenantRowCount("billing_ledger")).toBe(0);
+    expect(await tenantRowCount("billing_report_outbox")).toBe(0);
+    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+      count: 0,
+    });
+    expect(
+      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+    ).toEqual({ balance_credits: 100 });
   });
 });
 
@@ -248,8 +443,8 @@ describe("durable metering — both shapes of the widened seam", () => {
     sink.record(usageFixture(), { env: bindings, ctx });
     await waitOnExecutionContext(ctx);
 
-    expect(await rowCount("billing_ledger")).toBe(1);
-    expect(await rowCount("billing_report_outbox")).toBe(0);
+    expect(await tenantRowCount("billing_ledger")).toBe(1);
+    expect(await tenantRowCount("billing_report_outbox")).toBe(0);
     expect(queue.sent).toHaveLength(1);
     expect(queue.sent[0]?.credits).toBe(FIXTURE_CREDITS.toString());
   });
@@ -485,6 +680,38 @@ describe("durable metering — fail closed (issue #129, corrected by #663)", () 
     expect(h.sink.stats.unpricedRecorded).toBe(1);
     expect(h.sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
   });
+
+  it("routes an unpriced event by matching request attribution", async () => {
+    const h = durableGateway();
+    const requestId = "fg-unpriced-tenant-attribution";
+    const context = createExecutionContext();
+
+    h.sink.record(
+      usageFixture({
+        requestId,
+        providerModel: "unpriced-model-9000",
+        tenantId: undefined,
+        projectId: undefined,
+      }),
+      {
+        env: h.env,
+        ctx: context,
+        attribution: { requestId, tenantId: "tenant_a" },
+      },
+    );
+    await waitOnExecutionContext(context);
+
+    expect(await rowCount("billing_events")).toBe(0);
+    expect(await tenantRowCount("billing_events")).toBe(1);
+    const row = await tenantObjectDb("tenant_a")
+      .prepare("SELECT tenant_id, event_json FROM billing_events")
+      .first<{ tenant_id: string; event_json: string }>();
+    expect(row?.tenant_id).toBe("tenant_a");
+    expect(JSON.parse(row?.event_json ?? "{}")).toMatchObject({
+      request_id: requestId,
+      tenant: { organization_id: "tenant_a" },
+    });
+  });
 });
 
 describe("durable metering — integer credits past 2^53", () => {
@@ -505,14 +732,14 @@ describe("durable metering — integer credits past 2^53", () => {
     });
 
     // D1: the decimal string SQLite really holds.
-    expect(await storedCredits(id)).toBe("9007199254740993");
+    expect(await tenantStoredCredits(id)).toBe("9007199254740993");
     // Queue: the same string, because a Queue body is JSON/structured-clone
     // encoded and a JSON number would arrive one credit short.
     expect(queue.sent[0]?.credits).toBe("9007199254740993");
     expect(BigInt(queue.sent[0]?.credits ?? "0")).toBe(huge);
     // …and it reads back through the store as the same bigint.
-    expect((await sink.ledgerFor({ ...env }).get(id))?.credits).toBe(huge);
-    expect((await sink.ledgerFor({ ...env }).totals()).credits).toBe(huge);
+    expect((await sink.ledgerFor({ ...env }, "tenant_a").get(id))?.credits).toBe(huge);
+    expect((await sink.ledgerFor({ ...env }, "tenant_a").totals()).credits).toBe(huge);
   });
 });
 

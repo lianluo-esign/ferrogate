@@ -13,7 +13,7 @@
  *     → integer credits (bigint)                       `credits.ts`
  *     → outbox.enqueue  (SYNCHRONOUS, id-keyed)        `outbox.ts`
  *     → ctx.waitUntil(flush(rc))                       `middleware.ts`
- *         → ledger.record  (idempotent)                `d1.ts` (env.BILLING_DB)
+ *         → ledger.record  (idempotent)                `d1.ts` (tenant DO; control compatibility fallback)
  *         → publisher.deliver → outbox.delete          `publisher.ts` (env.BILLING)
  *         → on failure: backoff, then dead-letter      (#143)
  *
@@ -123,6 +123,7 @@ import {
   type MeteringDrainContext,
   chargeWithTenantAttribution,
   d1UsageAggregateSink,
+  eventWithTenantAttribution,
   withUsageDerivedRollups,
   withUsageProjectionRetry,
   usageWriteFor,
@@ -149,6 +150,17 @@ async function projectWithRetry(work: () => Promise<void>): Promise<void> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+/** Resolve the billing authority from the charge, never from the draining request. */
+function tenantIdForCharge(
+  charge: MeteredCharge,
+  attribution: MeteringAttribution | undefined,
+): string | undefined {
+  const attributed = chargeWithTenantAttribution(charge, attribution);
+  const tenantId =
+    attributed.event.tenant.organization_id ?? attributed.entry.tenant.organization_id;
+  return tenantId === undefined || tenantId.trim() === "" ? undefined : tenantId;
+}
+
 /**
  * The two durable seams a drain writes through, resolved together.
  *
@@ -161,10 +173,10 @@ interface MeteringBackend {
   readonly ledger: LedgerStore;
   readonly publisher: BillingReportPublisher;
   /**
-   * The TENANT database the usage aggregates accumulate into, when one is
-   * bound. A THIRD seam, deliberately not folded into `ledger`: the billing
-   * ledger is on the CONTROL database and the aggregates are on the tenant one,
-   * and D1 has no cross-database transaction — see `./usage-ledger.ts`.
+   * The tenant database the usage aggregates accumulate into, when one is
+   * bound. A separate seam, deliberately not folded into `ledger`: billing
+   * settlement and usage aggregation have different idempotency claims even
+   * when both are backed by the same tenant Durable Object.
    */
   readonly usageDatabase?: D1Database | undefined;
   /** Control-D1 destination for replace-style tenant-derived usage views. */
@@ -342,7 +354,7 @@ export class MeteringUsageSink implements UsageSink {
    * `QueueBillingReportPublisher` wrappers are still built once per isolate
    * instead of once per request. It is the same device `modelsFromEnv` uses.
    */
-  readonly #backends = new WeakMap<object, MeteringBackend>();
+  readonly #backends = new WeakMap<object, Map<string, MeteringBackend>>();
   #draining: Promise<void> | undefined;
 
   constructor(options: MeteringSinkOptions = {}) {
@@ -407,9 +419,9 @@ export class MeteringUsageSink implements UsageSink {
    * the thing this whole module exists to prevent. Never rejects.
    *
    * `rc` selects the backend: with {@link MeteringSinkOptions.bindings}
-   * configured and `rc.env` carrying a live `BILLING_DB` / `BILLING`, the drain
-   * settles into D1 and publishes onto the Queue; otherwise it settles into the
-   * construction-time fallbacks.
+   * configured and `rc.env` carrying tenant storage plus `BILLING`, the drain
+   * settles into the tenant object and publishes onto the Queue; unscoped
+   * compatibility traffic may use `BILLING_DB`, otherwise it uses fallbacks.
    */
   async flush(rc?: MeteringDrainContext): Promise<void> {
     const chained = (this.#draining ?? Promise.resolve()).then(
@@ -444,7 +456,8 @@ export class MeteringUsageSink implements UsageSink {
    * The FALLBACK store, for the admin/read surface and for tests.
    *
    * With {@link MeteringSinkOptions.bindings} configured the durable store is
-   * resolved per request from `env.BILLING_DB` and is NOT this object; use
+   * resolved per request from the charge's tenant authority (or
+   * `env.BILLING_DB` for compatibility traffic) and is NOT this object; use
    * {@link ledgerFor} when an `env` is in hand.
    */
   get ledger(): LedgerStore {
@@ -452,8 +465,8 @@ export class MeteringUsageSink implements UsageSink {
   }
 
   /** The store a request with these bindings settles into. */
-  ledgerFor(env: unknown): LedgerStore {
-    return this.#backend(env).ledger;
+  ledgerFor(env: unknown, tenantId?: string): LedgerStore {
+    return this.#backend(env, tenantId).ledger;
   }
 
   /** The outbox, for the admin dead-letter surface (#143/#388). */
@@ -472,34 +485,43 @@ export class MeteringUsageSink implements UsageSink {
   /**
    * The durable backend for one request's bindings, memoized on the env object.
    *
-   * Falls back per-binding, not all-or-nothing: a deployment with `BILLING_DB`
-   * but no `BILLING` queue still persists the ledger, it just cannot report
-   * downstream. Silently substituting a working half for a missing one is how a
-   * partial misconfiguration turns into invisible data loss, so each half is
-   * decided on its own.
+   * Falls back per-binding, not all-or-nothing: a deployment with tenant
+   * storage but no `BILLING` queue still persists the tenant ledger, it just
+   * cannot report downstream. Silently substituting a working half for a
+   * missing one is how a partial misconfiguration turns into invisible data
+   * loss, so each half is decided on its own.
    */
-  #backend(env: unknown): MeteringBackend {
+  #backend(env: unknown, tenantId?: string): MeteringBackend {
     const fallback: MeteringBackend = { ledger: this.#ledger, publisher: this.#publisher };
     if (this.#bindings === undefined || typeof env !== "object" || env === null) {
       return fallback;
     }
-    const cached = this.#backends.get(env);
+    const key = tenantId === undefined || tenantId === "" ? "__control__" : tenantId;
+    let byTenant = this.#backends.get(env);
+    if (byTenant === undefined) {
+      byTenant = new Map<string, MeteringBackend>();
+      this.#backends.set(env, byTenant);
+    }
+    const cached = byTenant.get(key);
     if (cached !== undefined) {
       return cached;
     }
-    const database = this.#bindings.database(env);
+    const database = this.#bindings.database(env, tenantId);
     const queue = this.#bindings.queue(env);
-    const usageDatabase = this.#bindings.usageDatabase?.(env);
+    const usageDatabase = this.#bindings.usageDatabase?.(env, tenantId);
     const usageProjectionDatabase = this.#bindings.usageProjectionDatabase?.(env);
     const budgetAlerts = budgetAlertPortsFrom(env);
     const resolved: MeteringBackend = {
-      ledger: database === undefined ? fallback.ledger : new D1LedgerStore(database),
+      ledger:
+        database === undefined
+          ? fallback.ledger
+          : new D1LedgerStore(database, tenantId === undefined ? {} : { tenantId }),
       publisher: queue === undefined ? fallback.publisher : new QueueBillingReportPublisher(queue),
       ...(usageDatabase === undefined ? {} : { usageDatabase }),
       ...(usageProjectionDatabase === undefined ? {} : { usageProjectionDatabase }),
       ...(budgetAlerts === undefined ? {} : { budgetAlerts }),
     };
-    this.#backends.set(env, resolved);
+    byTenant.set(key, resolved);
     return resolved;
   }
 
@@ -643,13 +665,12 @@ export class MeteringUsageSink implements UsageSink {
    */
   async #drain(rc: MeteringDrainContext | undefined): Promise<void> {
     const attempted = new Set<string>();
-    const backend = this.#backend(rc?.env);
     const attribution = rc?.attribution;
     // #663 — FIRST, and outside the outbox loop, because an unpriced usage
     // produces no outbox row at all: it is not a charge and there is nothing to
     // deliver. A drain that only walked the outbox would return immediately on
     // `due.length === 0` and the trace would never be written.
-    await this.#persistUnpriced(backend);
+    await this.#persistUnpriced(rc);
     try {
       for (;;) {
         const now = this.#clock.nowUnixSeconds();
@@ -661,6 +682,7 @@ export class MeteringUsageSink implements UsageSink {
         }
         for (const record of due) {
           attempted.add(record.id);
+          const backend = this.#backend(rc?.env, tenantIdForCharge(record.charge, attribution));
           await this.#deliverOnce(record, now, backend, attribution, rc);
         }
       }
@@ -711,16 +733,30 @@ export class MeteringUsageSink implements UsageSink {
    * is: this runs inside `waitUntil` and a bookkeeping failure must not surface
    * on the request path. A failed write goes back on the queue.
    */
-  async #persistUnpriced(backend: MeteringBackend): Promise<void> {
-    const ledger = backend.ledger;
-    if (ledger.recordEvent === undefined || this.#pendingUnpriced.length === 0) {
+  async #persistUnpriced(rc: MeteringDrainContext | undefined): Promise<void> {
+    if (this.#pendingUnpriced.length === 0) {
       return;
     }
     const now = this.#clock.nowUnixSeconds();
     const pending = this.#pendingUnpriced.splice(0, this.#pendingUnpriced.length);
     for (const refused of pending) {
       try {
-        await ledger.recordEvent(refused.event, refused.id, refused.event.occurred_at_unix ?? now);
+        // Unpriced events do not have a MeteredCharge wrapper, so apply the
+        // same request-id guarded attribution directly before choosing the
+        // tenant backend. A public route can produce an event without a tenant
+        // field even though the authenticated request is tenant-scoped.
+        const event = eventWithTenantAttribution(refused.event, rc?.attribution);
+        const tenantId = event.tenant.organization_id;
+        const backend = this.#backend(
+          rc?.env,
+          tenantId === undefined || tenantId.trim() === "" ? undefined : tenantId,
+        );
+        const ledger = backend.ledger;
+        if (ledger.recordEvent === undefined) {
+          this.#queueUnpricedEvent(refused);
+          continue;
+        }
+        await ledger.recordEvent(event, refused.id, event.occurred_at_unix ?? now);
         this.#stats.unpricedRecorded += 1;
       } catch (error) {
         this.#queueUnpricedEvent(refused);
@@ -771,9 +807,9 @@ export class MeteringUsageSink implements UsageSink {
           return;
         }
         if (outcome.status === "duplicate") {
-          // A control claim may have won immediately before the tenant object
-          // became unavailable. Re-run the idempotent tenant batch so this
-          // retry can repair that gap, but never publish a second report for a
+          // The billing claim may have won before usage accumulation became
+          // available. Re-run the idempotent tenant usage batch so this retry
+          // can repair that gap, but never publish a second report for a
           // verified replay.
           this.#stats.duplicates += 1;
           await this.#accumulate(backend, charge, attribution, rc, false);
@@ -781,9 +817,9 @@ export class MeteringUsageSink implements UsageSink {
           return;
         }
         if (outcome.status === "recorded") this.#stats.recorded += 1;
-        // The control claim and the tenant object cannot share a D1
-        // transaction. The tenant batch has its own source-id claim and is
-        // safe to retry after a control claim has already won.
+        // Billing settlement and tenant usage accumulation are separate
+        // batches. The usage batch has its own source-id claim and is safe to
+        // retry after billing settlement has already won.
         await this.#accumulate(backend, charge, attribution, rc);
         this.#outbox.markSettled(id);
       }
@@ -1073,13 +1109,32 @@ export class MeteringUsageSink implements UsageSink {
    * still owned by the `waitUntil` of the request that created them, and racing
    * that would produce a duplicate report for no benefit. Never rejects.
    */
-  async sweep(rc: MeteringDrainContext, nowUnixSeconds?: number): Promise<void> {
-    const backend = this.#backend(rc.env);
+  async sweep(
+    rc: MeteringDrainContext,
+    nowUnixSeconds?: number,
+    tenantIds?: readonly string[],
+  ): Promise<void> {
+    const now = nowUnixSeconds ?? this.#clock.nowUnixSeconds();
+    const scopedTenants = tenantIds?.filter((tenantId) => tenantId.trim() !== "") ?? [];
+    if (scopedTenants.length > 0) {
+      for (const tenantId of scopedTenants) {
+        await this.#sweepBackend(rc, now, tenantId);
+      }
+      return;
+    }
+    await this.#sweepBackend(rc, now, undefined);
+  }
+
+  async #sweepBackend(
+    rc: MeteringDrainContext,
+    now: number,
+    tenantId: string | undefined,
+  ): Promise<void> {
+    const backend = this.#backend(rc.env, tenantId);
     const outbox = backend.ledger.outbox;
     if (outbox === undefined) {
       return;
     }
-    const now = nowUnixSeconds ?? this.#clock.nowUnixSeconds();
     try {
       const due = await outbox.listDue(now - OUTBOX_SWEEP_GRACE_SECONDS, BILLING_OUTBOX_BATCH);
       for (const record of due) {

@@ -25,30 +25,31 @@ import { StorageError } from "../errors.js";
  * every additive statement is guarded by the un-applied claim. A replay can
  * therefore repair a partially completed batch without counting it twice.
  *
- * The claim that makes it exactly-once IS now ported — see
- * {@link ../d1/billing-d1.js D1BillingEventLedger}, which claims
- * `billing_event_id` and enqueues the outbox row in one atomic
- * `controlDb.batch()` (inventory §1.5.8 item 8). Run it FIRST and accumulate
- * here only when it returns `recorded: true`.
+ * The tenant-local `usage_event_claims` row makes this aggregate exactly-once
+ * within its own batch. Billing settlement is a separate tenant-local batch in
+ * `packages/billing/src/metering/d1.ts`; the gateway records the billing event,
+ * ledger, wallet settlement, and report outbox there first, then accumulates
+ * usage here. The two batches remain separately replayable and additive only
+ * once.
  *
  * PORT-TODO(L: inventory-data-billing §1.5.8) — PLATFORM LIMIT, NOT CLOSED.
  * **D1 has no transaction spanning two databases.** `batch()` is scoped to the
  * one `D1Database` whose `prepare()` produced the statements; there is no
  * cross-database `BEGIN`, no two-phase commit, and no distributed-transaction
- * API on Workers. `billing_events` is in the CONTROL database and this
- * accumulate is on a TENANT database, so the claim and the accumulate CANNOT be
- * one commit no matter how they are arranged, and the Postgres single-transaction
- * shape is unreachable.
+ * API on Workers. Billing settlement and usage accumulation are separate
+ * batches even inside one tenant object, so they still cannot be one commit
+ * across the two storage abstractions and the Postgres single-transaction shape
+ * is unreachable.
  *
  * The approximation implemented instead is **claim-then-accumulate**: the
- * control-database claim is durable and atomic on its own, and it is the
- * *narrower* half — a crash after a won claim but before the accumulate
+ * billing claim is durable and atomic on its own, and it is the *narrower* half
+ * — a crash after a won claim but before the accumulate
  * UNDER-counts one call's tokens rather than double-billing it, which is the
  * correct direction to fail.
  *
- * The tenant-local claim closes the old crash window after the control claim:
- * replaying the object batch is safe, but it still cannot make the control
- * claim and object batch one commit. The cross-database limit below remains.
+ * The tenant-local usage claim closes the old additive replay window; it still
+ * cannot make billing settlement and usage accumulation one commit. The
+ * cross-batch limit below remains.
  *
  * So: the CALLER still owns ordering (claim first, accumulate only on a win),
  * and the gateway records once per settled request at the end of the stream.

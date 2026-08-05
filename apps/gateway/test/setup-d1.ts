@@ -58,6 +58,7 @@ import experimentOutcomesMigrationSql from "../../../sql/d1-ts/control/0011_expe
 import derivedProjectionKeysMigrationSql from "../../../sql/d1-ts/control/0017_tenant_derived_projection_keys.sql?raw";
 import derivedProjectionPrimaryKeysMigrationSql from "../../../sql/d1-ts/control/0018_tenant_derived_projection_primary_keys.sql?raw";
 import usagePresenceEvidenceProjectionsMigrationSql from "../../../sql/d1-ts/control/0019_usage_presence_evidence_projections.sql?raw";
+import billingCompatibilityMigrationSql from "../../../sql/d1-ts/control/0020_billing_compatibility_columns.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;
@@ -165,6 +166,9 @@ beforeAll(async () => {
       for (const statement of sqlStatements(usagePresenceEvidenceProjectionsMigrationSql)) {
         await CONTROL_DB.prepare(statement).run();
       }
+    }
+    for (const statement of sqlStatements(billingCompatibilityMigrationSql)) {
+      await applyIgnoringDuplicateColumn(CONTROL_DB, statement);
     }
   }
 });

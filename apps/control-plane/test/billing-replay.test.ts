@@ -168,8 +168,11 @@ describe("billing dead-letter replay: the outbox row is re-armed (real D1)", () 
     const future = Math.floor(Date.now() / 1000) + 600;
     await seedOutboxRow("rep_1", { attempts: 3, nextAttempt: future, deadLetteredAt: null });
 
-    const body = (await (await replay("rep_1")).json()) as { rearmed: boolean };
-    expect(body.rearmed).toBe(false);
+    const response = await replay("rep_1");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "dead_letter_not_replayable" },
+    });
 
     const row = await outboxRow("rep_1");
     expect(row?.attempts).toBe(3);

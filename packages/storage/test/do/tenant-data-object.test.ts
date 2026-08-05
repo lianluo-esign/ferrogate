@@ -46,7 +46,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0018.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0020.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -67,6 +67,9 @@ const TENANT_TABLES = [
   "asset_bundle_files",
   "asset_channels",
   "audit_events",
+  "billing_events",
+  "billing_ledger",
+  "billing_report_outbox",
   "budget_alert_notifications",
   "catalog_audit_outbox",
   "catalog_model_offerings",
@@ -245,10 +248,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 19,
-      statements: 175,
-      createTable: 68,
-      createIndex: 84,
+      files: 20,
+      statements: 183,
+      createTable: 71,
+      createIndex: 89,
       createUniqueIndex: 6,
       alterTable: 10,
       insert: 6,
@@ -302,7 +305,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(19);
+    expect(TENANT_MIGRATIONS.length).toBe(20);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({

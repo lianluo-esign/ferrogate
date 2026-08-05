@@ -412,9 +412,9 @@ export interface MeteringQueryResult {
 }
 
 /**
- * `D1Database`-shaped. A live `env.BILLING_DB` satisfies this with no adapter —
- * `wrangler.toml` declares that binding (the CONTROL database), and
- * `meteringBindingsFromEnv` resolves it per request.
+ * `D1Database`-shaped. A live tenant Durable Object facade or the compatibility
+ * `env.BILLING_DB` binding satisfies this with no adapter, and
+ * `meteringBindingsFromEnv` resolves the appropriate database per request.
  */
 export interface MeteringDatabase {
   prepare(sql: string): MeteringStatement;
@@ -520,9 +520,9 @@ export interface MeteringStats {
   /**
    * Charges accumulated into the TENANT database's usage rollups — the input
    * of both budget gates (`./usage-ledger.ts`). Distinct from `recorded`, which
-   * counts the CONTROL database's billing ledger: the two are separate
-   * databases and D1 cannot commit them together, so a gap between these two
-   * counters is the visible size of that window.
+   * counts the billing settlement batch (tenant authority or compatibility
+   * projection): usage aggregation is a separate batch, so a gap between these
+   * two counters is the visible size of that window.
    */
   aggregated: number;
   /**

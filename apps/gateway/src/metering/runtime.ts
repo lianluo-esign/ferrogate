@@ -49,11 +49,12 @@ import { usageDatabaseFrom } from "./usage-ledger.js";
  */
 export interface MeteringBindings {
   /**
-   * `[[d1_databases]] binding = "BILLING_DB"` — the CONTROL database holding
-   * `billing_events` / `billing_ledger` / `billing_report_outbox`.
+   * `[[d1_databases]] binding = "BILLING_DB"` — the CONTROL compatibility
+   * database. It retains legacy billing rows and receives derived projections;
+   * tenant-scoped billing authority is resolved through `TENANT_DATA` below.
    *
-   * NOT `DB`: that binding is the TENANT database, whose migration explicitly
-   * excludes the billing tables.
+   * `DB` is the legacy shared tenant-compatible binding. In the Durable Object
+   * deployment, tenant-scoped calls use `TENANT_DATA` instead.
    */
   readonly BILLING_DB?: MeteringDatabase | undefined;
   /** `env.CONTROL_DB`, the fleet projection database for derived usage views. */
@@ -88,7 +89,14 @@ function isMeteringQueue(value: unknown): value is MeteringQueue {
  * `D1LedgerStore`, which would fail on the first `prepare` — after the response
  * had already been served, i.e. in the one place nobody is watching.
  */
-export function meteringDatabaseFrom(env: unknown): MeteringDatabase | undefined {
+export function meteringDatabaseFrom(
+  env: unknown,
+  tenantId?: string,
+): MeteringDatabase | undefined {
+  if (tenantId !== undefined) {
+    const candidate = usageDatabaseFrom(env, tenantId);
+    return isMeteringDatabase(candidate) ? candidate : undefined;
+  }
   if (typeof env !== "object" || env === null) {
     return undefined;
   }
@@ -113,17 +121,17 @@ export function meteringQueueFrom(env: unknown): MeteringQueue | undefined {
  * drains me" mode — see `MeteringSinkOptions.bindings`.
  */
 export interface MeteringBindingResolver {
-  database(env: unknown): MeteringDatabase | undefined;
+  /** Resolve tenant authority when `tenantId` is supplied, or control compatibility otherwise. */
+  database(env: unknown, tenantId?: string): MeteringDatabase | undefined;
   queue(env: unknown): MeteringQueue | undefined;
   /**
-   * `env.DB` — the TENANT database the committed-token / monthly-spend
-   * aggregates accumulate into (`./usage-ledger.ts`).
+   * `env.DB`/`TENANT_DATA` — the tenant database the committed-token /
+   * monthly-spend aggregates accumulate into (`./usage-ledger.ts`).
    *
-   * A THIRD binding, not a rename of `database()`: `billing_ledger` is in the
-   * CONTROL database and `usage_aggregate_rollups` is in the tenant one, and D1
-   * has no transaction spanning the two. Optional so a resolver that only knows
-   * about the billing half (a test double) still satisfies the interface and
-   * simply accumulates nothing.
+   * A separate seam, not a rename of `database()`: billing settlement and usage
+   * aggregation are distinct batches even inside one tenant object. Optional so
+   * a resolver that only knows about the billing half (a test double) still
+   * satisfies the interface and simply accumulates nothing.
    */
   usageDatabase?(env: unknown, tenantId?: string): D1Database | undefined;
   /** `env.CONTROL_DB`/`env.BILLING_DB`, where derived usage snapshots project. */
@@ -141,7 +149,8 @@ export function meteringProjectionDatabaseFrom(env: unknown): D1Database | undef
 }
 
 /**
- * The production resolver: `env.BILLING_DB` + `env.BILLING` + `env.DB`.
+ * The production resolver: `TENANT_DATA`/`env.DB` + `env.BILLING_DB` fallback +
+ * `env.BILLING`.
  *
  * `usageDatabase` is what mounts `@ferrogate/storage`'s `D1UsageLedger` on the
  * drain, which is the only thing that makes `usage_monthly_rollups` (the

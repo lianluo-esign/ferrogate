@@ -52,12 +52,8 @@ const CONTROL_ONLY = [
   "control_plane_resources",
   "api_key_directory",
   "static_api_keys",
-  "billing_ledger",
-  "billing_report_outbox",
-  "billing_events",
   "guardrail_policy_revisions",
   "guardrail_policy_bindings",
-  "audit_events",
   "siem_export_cursors", // 0005
 ] as const;
 
@@ -79,6 +75,14 @@ const DERIVED_EVIDENCE = [
   "request_logs",
   "guardrail_evaluations",
   "guardrail_check_evaluations",
+  "audit_events",
+  "billing_ledger",
+  "billing_report_outbox",
+  "billing_events",
+  "usage_aggregate_rollups",
+  "usage_monthly_rollups",
+  "usage_metadata_rollups",
+  "observed_agent_presence",
 ] as const;
 
 /** Families that must live ONLY in a tenant database. */
@@ -91,16 +95,12 @@ const TENANT_ONLY = [
   "wallet_settlements",
   "payment_methods",
   "tenant_contexts",
-  "usage_aggregate_rollups",
-  "usage_monthly_rollups",
-  "usage_metadata_rollups",
   "stored_assets",
   "asset_channels",
   "retention_policies",
   "workflow_run_budgets",
   "agent_schedules",
   "agent_schedule_fires",
-  "observed_agent_presence",
   "agent_cost_burn",
   // Created AFTER `0001_init_tenant.sql`; see the note on CONTROL_ONLY. A
   // bundle's file index holds one tenant's paths and R2 keys, so landing it in

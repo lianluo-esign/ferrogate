@@ -2,9 +2,10 @@
  * The REAL D1 binding, for the metering suite.
  *
  * `apps/gateway/wrangler.toml` declares `[[d1_databases]] binding = "BILLING_DB"`
- * (the CONTROL database), so `@cloudflare/vitest-pool-workers` provisions a real
- * local SQLite for it and every statement `D1LedgerStore` issues is executed by
- * the same engine production runs. Nothing here doubles the database.
+ * (the control compatibility database), so `@cloudflare/vitest-pool-workers`
+ * provisions a real local SQLite for it and every statement `D1LedgerStore`
+ * issues is executed by the same engine production runs. Nothing here doubles
+ * the database.
  *
  * The schema applied is the DEPLOYED migration file, read with Vite's `?raw` —
  * never a fixture copy — for the reason `test/setup-d1.ts` gives for the tenant
@@ -30,7 +31,7 @@ import type {
 /** The deployed control migration, as text. */
 export const CONTROL_MIGRATION_SQL: string = controlMigrationSql;
 
-/** The three tables metering owns, in the deployed control schema. */
+/** The three legacy compatibility tables metering owns in the control schema. */
 export const METERING_TABLES = [
   "billing_events",
   "billing_ledger",
@@ -55,7 +56,7 @@ export function sqlStatements(migration: string): string[] {
     .filter((statement) => statement.length > 0);
 }
 
-/** The live `env.BILLING_DB` binding. */
+/** The live control compatibility `env.BILLING_DB` binding. */
 export function billingDb(): D1Database {
   const binding = (env as unknown as { BILLING_DB?: D1Database }).BILLING_DB;
   if (binding === undefined) {
@@ -64,7 +65,7 @@ export function billingDb(): D1Database {
     // prove something other than what it claims.
     throw new Error(
       "metering tests expect the `BILLING_DB` D1 binding (apps/gateway/wrangler.toml). " +
-        "See src/metering/runtime.ts for why the ledger is on the CONTROL database.",
+        "See src/metering/runtime.ts for the tenant-authority and compatibility paths.",
     );
   }
   return binding;
@@ -199,6 +200,9 @@ export class RecordingDatabase implements MeteringDatabase {
   /** Set to make every subsequent statement reject, as an outage would. */
   failure: Error | undefined;
 
+  /** Replace one statement inside the next batch with invalid SQL. */
+  failBatchIndex: number | undefined;
+
   constructor(inner: MeteringDatabase = billingDb()) {
     this.#inner = inner;
   }
@@ -215,9 +219,14 @@ export class RecordingDatabase implements MeteringDatabase {
     }
     this.throwIfFailing();
     return this.#inner.batch(
-      statements.map((statement) =>
-        statement instanceof RecordingStatement ? statement.inner : statement,
-      ),
+      statements.map((statement, index) => {
+        if (index === this.failBatchIndex) {
+          return this.#inner.prepare(
+            "SELECT * FROM billing_batch_statement_that_must_not_exist",
+          );
+        }
+        return statement instanceof RecordingStatement ? statement.inner : statement;
+      }),
     );
   }
 
