@@ -54,8 +54,8 @@
  *
  * | database | holds | why it cannot be per-tenant |
  * |---|---|---|
- * | **CONTROL** (`env.CONTROL_DB`, `sql/d1-ts/control/`) | `tenants`, `tenant_databases`, `api_key_directory`, `static_api_keys`, `plans`, `quota_policies`, RBAC (`permissions`/`roles`/`tenant_role_bindings`), guardrail policy revisions + bindings, site domains, budget alerts, `billing_events`/`billing_ledger`/`billing_report_outbox` | it is the thing that ANSWERS "which tenant?", so it cannot itself be tenant-routed (the chicken-and-egg §"split rule (b)" in the control migration). Account-global reporting also has to join across tenants |
- * | **TENANT** (one D1 per tenant, `sql/d1-ts/tenant/`) | the full `api_keys` rows, wallets + reservations + settlements, usage/metadata rollups, workflow budgets, `stored_assets` + `asset_channels`, retention, agent schedules + fires, presence, agent cost burn | this is the tenant's own money and content; it is what physical isolation must protect |
+ * | **CONTROL** (`env.CONTROL_DB`, `sql/d1-ts/control/`) | `tenants`, `tenant_databases`, `api_key_directory`, `static_api_keys`, `plans`, `quota_policies`, RBAC (`permissions`/`roles`/`tenant_role_bindings`), guardrail policy revisions + bindings, site domains, budget alerts, legacy/derived billing compatibility rows | it is the thing that ANSWERS "which tenant?", so it cannot itself be tenant-routed (the chicken-and-egg §"split rule (b)" in the control migration). Account-global reporting also consumes bounded projections or fans out over tenant authority |
+ * | **TENANT** (one Durable Object per tenant, `sql/d1-ts/tenant/`) | billing events + ledger + report outbox, wallets + reservations + settlements, full `api_keys` rows, usage/metadata rollups, workflow budgets, `stored_assets` + `asset_channels`, retention, agent schedules + fires, presence, agent cost burn | this is the tenant's own money and content; it is what physical isolation must protect |
  *
  * A credential is resolved to a tenant through the CONTROL `api_key_directory`
  * point lookup (`src/keys/`), and only then is exactly one routed call made.

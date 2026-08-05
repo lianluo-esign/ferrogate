@@ -363,6 +363,9 @@ export interface AssetEgressMeter {
   record(charge: AssetEgressCharge): void | Promise<void>;
 }
 
+/** Resolve a tenant-authoritative ledger for one served asset charge. */
+export type AssetEgressLedgerResolver = (tenantId: string) => LedgerStore | undefined;
+
 /** Asset metadata required by the shared read-side egress path. */
 export interface AssetEgressReadableAsset {
   readonly id?: string | undefined;
@@ -478,16 +481,21 @@ export function assetEgressBillingEvent(charge: AssetEgressCharge): BillingEvent
  * audit event.
  */
 export class LedgerAssetEgressMeter implements AssetEgressMeter {
-  readonly #ledger: LedgerStore;
+  readonly #ledger: LedgerStore | AssetEgressLedgerResolver;
   readonly #creditsPerUsd: number;
 
-  constructor(ledger: LedgerStore, priceBook: PriceBook = PriceBook.withDefaultRateCard()) {
+  constructor(
+    ledger: LedgerStore | AssetEgressLedgerResolver,
+    priceBook: PriceBook = PriceBook.withDefaultRateCard(),
+  ) {
     this.#ledger = ledger;
     this.#creditsPerUsd = priceBook.credits_per_usd;
   }
 
   async record(charge: AssetEgressCharge): Promise<void> {
     if (charge.costUsd === undefined) return;
+    const ledger = typeof this.#ledger === "function" ? this.#ledger(charge.tenantId) : this.#ledger;
+    if (ledger === undefined) return;
     const event = assetEgressBillingEvent(charge);
     const entry = chargeEvent(PriceBook.default(), event);
     const metered: MeteredCharge = {
@@ -498,7 +506,7 @@ export class LedgerAssetEgressMeter implements AssetEgressMeter {
       credits: usdToCredits(entry.cost.total_cost, this.#creditsPerUsd),
       occurredAtUnix: charge.occurredAtUnix,
     };
-    await this.#ledger.record(metered);
+    await ledger.record(metered);
   }
 }
 
@@ -670,10 +678,15 @@ export function assetEgressPricePerGb(
 
 /**
  * The durable egress meter for one `env`, or `null` when no billing database is
- * bound (`BILLING_DB` / `CONTROL_DB` — the same resolver the metering sink uses,
- * so egress and inference can never end up settling into different databases).
+ * bound. Tenant-aware callers supply a resolver so each charge uses its own
+ * tenant authority; without one this preserves the shared-D1 compatibility
+ * path through `BILLING_DB`.
  */
-export function assetEgressMeterFromEnv(env: unknown): AssetEgressMeter | null {
+export function assetEgressMeterFromEnv(
+  env: unknown,
+  tenantLedger?: AssetEgressLedgerResolver,
+): AssetEgressMeter | null {
+  if (tenantLedger !== undefined) return new LedgerAssetEgressMeter(tenantLedger);
   const db = meteringDatabaseFrom(env);
   return db === undefined ? null : new LedgerAssetEgressMeter(new D1LedgerStore(db));
 }

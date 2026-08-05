@@ -22,9 +22,9 @@
  * export const GATEWAY_MIDDLEWARE = [meteringDrain(usage), rateLimit(), guardrails(...)];
  * ```
  *
- * and `wrangler.toml` declares the two bindings that resolver reads:
- * `[[d1_databases]] binding = "BILLING_DB"` (the CONTROL database — the tenant
- * migration explicitly excludes the billing tables) and
+ * and `wrangler.toml` declares the bindings that resolver reads:
+ * `[[d1_databases]] binding = "BILLING_DB"` (the legacy CONTROL compatibility
+ * database), `TENANT_DATA` for tenant-authoritative billing, and
  * `[[queues.producers]] binding = "BILLING"`.
  *
  * ### How the per-request `env` and `ExecutionContext` reach a module-scoped sink

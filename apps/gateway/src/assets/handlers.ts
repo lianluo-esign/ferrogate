@@ -66,6 +66,7 @@ import {
   assetEgressMeterFromEnv,
   assetEgressPricePerGb,
 } from "@ferrogate/billing";
+import { D1LedgerStore, meteringDatabaseFrom } from "../metering/index.js";
 import { D1AssetEntitlements } from "./entitlements.js";
 import { withAssetGuardrailScreening } from "./guardrail-screener.js";
 import {
@@ -750,9 +751,18 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
   // billing gets unmetered AND uncapped bandwidth — the exact defect D4 named.
   // Only the METER degrades without a billing database.
   const pricePerGb = assetEgressPricePerGb();
+  const egressMeter =
+    env.TENANT_DATA === undefined
+      ? assetEgressMeterFromEnv(env)
+      : assetEgressMeterFromEnv(env, (tenantId) => {
+          const database = meteringDatabaseFrom(env, tenantId);
+          return database === undefined
+            ? undefined
+            : new D1LedgerStore(database, { tenantId });
+        });
   const egress = {
     counters: assetEgressCountersFromEnv(env),
-    meter: assetEgressMeterFromEnv(env) ?? NO_ASSET_EGRESS_METER,
+    meter: egressMeter ?? NO_ASSET_EGRESS_METER,
     ...(pricePerGb !== undefined ? { pricePerGb } : {}),
   };
   return {

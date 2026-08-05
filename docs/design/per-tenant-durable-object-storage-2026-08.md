@@ -123,10 +123,12 @@ already load-bearing here.
    regression — but the DO puts *all* of a tenant's storage behind one lock. The seam
    to keep open is splitting high-volume append-only tables (usage rollups, request
    logs) out of the tenant object into a sharded child namespace or Analytics Engine.
-3. **No cross-tenant SQL.** There is no `SELECT ... FROM all_tenants`. Platform
-   billing, fleet dashboards and the `usage_*_rollups` aggregate views must be fed by
-   push (alarm-driven flush from each DO into the control D1 or a Queue), not pull.
-   This is real work and it is the largest new surface in the migration.
+3. **No cross-tenant SQL.** There is no `SELECT ... FROM all_tenants`. Tenant
+   billing is authoritative in each DO. The current admin billing feed uses a
+   bounded fan-out over the provisioned roster, while fleet dashboards and the
+   `usage_*_rollups` aggregate views are fed by push (alarm-driven flush from
+   each DO into the control D1 or a Queue), not pull. The bounded billing fan-out
+   is an interim read path until the projection slice closes it.
 4. **No `wrangler d1 execute` for support.** Operator access to a tenant's data needs
    a purpose-built, audited admin RPC on the object. Treat that as a feature, not a
    gap — an audited seam beats an unaudited console.
@@ -147,12 +149,13 @@ already load-bearing here.
              │                                                 ctx.storage.sql
              │  control D1 (shared, unchanged):                 ├─ 0001_init_tenant
              └─ tenants, tenant_databases, plans, platform      ├─ …0007
-                catalog template, cross-tenant rollups          └─ tenant_database_identity
+                catalog template, compatibility/projections     └─ billing + wallet + usage
 ```
 
-- **Control plane stays on D1.** Account/tenant registry, plans, the catalog template
-  and cross-tenant aggregates are genuinely shared and genuinely need cross-row
-  queries. Nothing about this proposal moves them.
+- **Control plane stays on D1.** Account/tenant registry, plans, the catalog template,
+  compatibility billing rows, and derived cross-tenant aggregates are genuinely
+  shared and genuinely need cross-row queries. Tenant billing and wallet authority
+  live in the object; nothing in the control compatibility tables overrides it.
 - **`TenantDatabaseHandle` keeps its shape.** The 14 modules under
   `packages/storage/src/d1/` are written against the `D1Database` interface. The DO
   gets a D1-compatible facade — `prepare().bind().first()/all()/run()` and `batch()`

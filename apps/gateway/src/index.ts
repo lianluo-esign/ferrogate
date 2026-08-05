@@ -76,12 +76,12 @@ import { resolverForEnv, tenantDatabase, type TenancyBindings } from "./tenancy/
  * It is built ONCE, at module scope, because `UsageSink` is a construction-time
  * dependency of the route module while Worker bindings are per request. That is
  * why it takes a `bindings` RESOLVER rather than bindings: `meteringBindingsFromEnv`
- * reads `env.BILLING_DB` (the CONTROL D1 holding `billing_events` /
- * `billing_ledger` / `billing_report_outbox` — NOT the tenant `DB`, whose
- * migration excludes those tables) and `env.BILLING` (the Queue producer) from
- * whichever request is being served, and memoizes the wrappers on the env
- * object itself. Nothing is ambient, so nothing can leak between concurrent
- * requests.
+ * resolves tenant-scoped billing events, ledger, wallet settlement, and outbox
+ * rows through `TENANT_DATA`; it uses `env.BILLING_DB` as the legacy control
+ * compatibility/projection surface and `env.BILLING` as the Queue producer.
+ * Resolution happens from whichever request is being served, and wrappers are
+ * memoized on the env object itself. Nothing is ambient, so nothing can leak
+ * between concurrent requests.
  *
  * With a resolver configured the sink does not drain itself — see
  * `GATEWAY_MIDDLEWARE` below.
@@ -536,15 +536,19 @@ export async function gatewayScheduled(
   env: unknown,
   ctx: { waitUntil(work: Promise<unknown>): void },
 ): Promise<void> {
-  await usage.sweep({ env, ctx });
   try {
     const tenantRouter = resolverForEnv(env as TenancyBindings).router;
     const tenantIds = await tenantRouter.provisionedTenants();
+    await usage.sweep({ env, ctx }, undefined, tenantIds);
     await usage.sweepUsageProjections({ env, ctx }, tenantIds);
     await sweepExperimentProjections(env, tenantIds);
     await sweepManagedIsolationEvidence(env, tenantRouter, tenantIds);
     await sweepAssetAuditProjections(env, tenantRouter, tenantIds);
   } catch (error) {
+    // Keep compatibility deployments recoverable when the tenant registry is
+    // unavailable; tenant-aware deployments enter the branch above and sweep
+    // each tenant object's billing outbox.
+    await usage.sweep({ env, ctx });
     console.warn(
       `[ferrogate] usage projection repair skipped: ${
         error instanceof Error ? error.message : String(error)

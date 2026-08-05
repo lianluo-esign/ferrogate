@@ -36,7 +36,6 @@ import {
   adminListPaginated,
   adminListPaginatedWithMetadata,
   derivedControlProjectionMetadata,
-  listResponse,
   parseListQuery,
 } from "../responses.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
@@ -52,6 +51,7 @@ import {
 const METERING_EVENTS = "metering-events";
 const DEAD_LETTERS = "billing-outbox-dead-letters";
 const USAGE_AGGREGATE_TABLE = "usage_aggregate_rollups";
+const BILLING_EVENTS_TABLE = "billing_events";
 
 interface UsageAggregateRow {
   readonly id: string;
@@ -74,6 +74,254 @@ const USAGE_AGGREGATE_COLUMNS =
 const TENANT_USAGE_AGGREGATE_COLUMNS =
   "r.id, r.tenant_context_id, c.organization_id, c.project_id, c.api_key_id, " +
   "r.logical_model, r.provider, r.prompt_tokens, r.completion_tokens, r.total_tokens";
+
+interface BillingEventAuthorityRow {
+  readonly billing_event_id: string;
+  readonly tenant_id: string;
+  readonly request_id: string;
+  readonly provider_attempt_index: number;
+  readonly occurred_at_unix: number;
+  readonly event_json: string;
+  readonly total?: number;
+}
+
+interface BillingOutboxAuthorityRow {
+  readonly id: string;
+  readonly tenant_id: string;
+  readonly attempts: number;
+  readonly next_attempt_unix: number;
+  readonly dead_lettered_at_unix: number;
+  readonly created_at_unix: number;
+  readonly updated_at_unix: number;
+  readonly event_json: string;
+  readonly total?: number;
+}
+
+function documentOf(raw: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function billingEventDocument(row: BillingEventAuthorityRow): StoreRecord {
+  return {
+    ...documentOf(row.event_json),
+    id: row.billing_event_id,
+    tenant_id: row.tenant_id,
+    request_id: row.request_id,
+    provider_attempt_index: row.provider_attempt_index,
+    occurred_at_unix: row.occurred_at_unix,
+  };
+}
+
+function billingOutboxDocument(row: BillingOutboxAuthorityRow): StoreRecord {
+  return {
+    ...documentOf(row.event_json),
+    id: row.id,
+    tenant_id: row.tenant_id,
+    attempts: row.attempts,
+    next_attempt_unix: row.next_attempt_unix,
+    dead_lettered_at_unix: row.dead_lettered_at_unix,
+    created_at_unix: row.created_at_unix,
+    updated_at_unix: row.updated_at_unix,
+    status: "dead_lettered",
+  };
+}
+
+function pageLimit(offset: number, limit: number): number {
+  return Math.min(Number.MAX_SAFE_INTEGER, offset + limit);
+}
+
+async function tenantBillingEventPage(
+  deps: ControlPlaneDeps,
+  tenantId: string,
+  limit: number,
+): Promise<{ items: StoreRecord[]; total: number }> {
+  if (deps.controlDatabase === null && deps.tenantStorage === undefined) {
+    const page = await deps.store.list(METERING_EVENTS, { kind: "tenant", tenantId }, {
+      offset: 0,
+      limit,
+      paginate: false,
+      search: null,
+      filters: {},
+    });
+    return { items: [...page.items], total: page.total };
+  }
+  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
+  const result = await db
+    .prepare(
+      `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
+              occurred_at_unix, event_json, count(*) OVER() AS total
+         FROM ${BILLING_EVENTS_TABLE}
+        WHERE tenant_id = ?
+        ORDER BY occurred_at_unix DESC, billing_event_id ASC
+        LIMIT ? OFFSET 0`,
+    )
+    .bind(tenantId, limit)
+    .all<BillingEventAuthorityRow>();
+  return {
+    items: result.results.map(billingEventDocument),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+async function controlBillingEventPage(
+  db: D1Database | null,
+  limit: number,
+): Promise<{ items: StoreRecord[]; total: number }> {
+  if (db === null) return { items: [], total: 0 };
+  const result = await db
+    .prepare(
+      `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
+              occurred_at_unix, event_json, count(*) OVER() AS total
+         FROM ${BILLING_EVENTS_TABLE}
+        ORDER BY occurred_at_unix DESC, billing_event_id ASC
+        LIMIT ? OFFSET 0`,
+    )
+    .bind(limit)
+    .all<BillingEventAuthorityRow>();
+  return {
+    items: result.results.map(billingEventDocument),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+async function tenantBillingOutboxPage(
+  deps: ControlPlaneDeps,
+  tenantId: string,
+  limit: number,
+): Promise<{ items: StoreRecord[]; total: number }> {
+  if (deps.controlDatabase === null && deps.tenantStorage === undefined) {
+    const page = await deps.store.list(DEAD_LETTERS, { kind: "tenant", tenantId }, {
+      offset: 0,
+      limit,
+      paginate: false,
+      search: null,
+      filters: {},
+    });
+    return { items: [...page.items], total: page.total };
+  }
+  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
+  const result = await db
+    .prepare(
+      `SELECT id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
+              created_at_unix, updated_at_unix, event_json, count(*) OVER() AS total
+         FROM ${BILLING_OUTBOX_TABLE}
+        WHERE tenant_id = ? AND dead_lettered_at_unix IS NOT NULL
+        ORDER BY dead_lettered_at_unix DESC, id ASC
+        LIMIT ? OFFSET 0`,
+    )
+    .bind(tenantId, limit)
+    .all<BillingOutboxAuthorityRow>();
+  return {
+    items: result.results.map(billingOutboxDocument),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+async function controlBillingOutboxPage(
+  db: D1Database | null,
+  limit: number,
+): Promise<{ items: StoreRecord[]; total: number }> {
+  if (db === null) return { items: [], total: 0 };
+  const result = await db
+    .prepare(
+      `SELECT id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
+              created_at_unix, updated_at_unix, event_json, count(*) OVER() AS total
+         FROM ${BILLING_OUTBOX_TABLE}
+        WHERE dead_lettered_at_unix IS NOT NULL
+        ORDER BY dead_lettered_at_unix DESC, id ASC
+        LIMIT ? OFFSET 0`,
+    )
+    .bind(limit)
+    .all<BillingOutboxAuthorityRow>();
+  return {
+    items: result.results.map(billingOutboxDocument),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+function byBillingTime(left: StoreRecord, right: StoreRecord): number {
+  const leftTime = Number(left.occurred_at_unix ?? left.dead_lettered_at_unix ?? 0);
+  const rightTime = Number(right.occurred_at_unix ?? right.dead_lettered_at_unix ?? 0);
+  return rightTime - leftTime || String(left.id).localeCompare(String(right.id));
+}
+
+async function listBillingAuthority(
+  deps: ControlPlaneDeps,
+  scope: CallerScope,
+  query: ReturnType<typeof parseListQuery>,
+  kind: "events" | "outbox",
+): Promise<{ items: StoreRecord[]; total: number }> {
+  const fetchLimit = pageLimit(query.offset, query.limit);
+  if (scope.kind === "tenant") {
+    const page = kind === "events"
+      ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit)
+      : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
+    return page.then(async (result) => {
+      if (result.total > 0) {
+        return {
+          items: result.items.slice(query.offset, query.offset + query.limit),
+          total: result.total,
+        };
+      }
+      // Legacy documents remain a compatibility read only while the tenant
+      // authority has no row. The store applies the tenant fence to the
+      // control projection, so this cannot expose another tenant's document.
+      const compatibility = await deps.store.list(
+        kind === "events" ? METERING_EVENTS : DEAD_LETTERS,
+        scope,
+        query,
+      );
+      return { items: [...compatibility.items], total: compatibility.total };
+    });
+  }
+
+  const rowsById = new Map<string, StoreRecord>();
+  const legacy = await deps.store.list(
+    kind === "events" ? METERING_EVENTS : DEAD_LETTERS,
+    scope,
+    { ...query, offset: 0, limit: fetchLimit, paginate: false },
+  );
+  for (const item of legacy.items) rowsById.set(String(item.id), item);
+
+  const control =
+    kind === "events"
+      ? await controlBillingEventPage(deps.controlDatabase, fetchLimit)
+      : await controlBillingOutboxPage(deps.controlDatabase, fetchLimit);
+  for (const item of control.items) rowsById.set(String(item.id), item);
+
+  for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
+    const page =
+      kind === "events"
+        ? await tenantBillingEventPage(deps, tenantId, fetchLimit)
+        : await tenantBillingOutboxPage(deps, tenantId, fetchLimit);
+    for (const item of page.items) rowsById.set(String(item.id), item);
+  }
+
+  const items = [...rowsById.values()].sort(byBillingTime);
+  return {
+    items: items.slice(query.offset, query.offset + query.limit),
+    total: items.length,
+  };
+}
+
+function listBillingAuthorityHandler(
+  kind: "events" | "outbox",
+): (c: Context<ControlPlaneEnv>) => Promise<Response> {
+  return async (c) => {
+    const deps = c.get("deps");
+    const scope = scopeOf(c);
+    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const page = await listBillingAuthority(deps, scope, query, kind);
+    return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
+  };
+}
 
 function usageAggregateDocument(row: UsageAggregateRow): StoreRecord {
   return {
@@ -171,7 +419,7 @@ function listAdminUsageAggregates(): (c: Context<ControlPlaneEnv>) => Promise<Re
   };
 }
 
-/** The shared gateway→billing outbox (`sql/d1-ts/control/0001_init_control.sql`). */
+/** Billing outbox table in tenant authority and the legacy control projection. */
 export const BILLING_OUTBOX_TABLE = "billing_report_outbox";
 
 /**
@@ -274,8 +522,14 @@ async function casReplayOutboxRow(
   db: D1Database,
   reportId: string,
   now: number,
+  tenantId?: string,
 ): Promise<RearmedRow | null> {
   try {
+    const tenantPredicate = tenantId === undefined ? "" : " AND tenant_id = ?";
+    const values =
+      tenantId === undefined
+        ? [now, now, reportId]
+        : [now, now, reportId, tenantId];
     return await db
       .prepare(
         `UPDATE ${BILLING_OUTBOX_TABLE}
@@ -283,10 +537,10 @@ async function casReplayOutboxRow(
                 attempts = 0,
                 next_attempt_unix = ?,
                 updated_at_unix = ?
-          WHERE id = ? AND dead_lettered_at_unix IS NOT NULL
+          WHERE id = ? AND dead_lettered_at_unix IS NOT NULL${tenantPredicate}
           RETURNING id, attempts, next_attempt_unix`,
       )
-      .bind(now, now, reportId)
+      .bind(...values)
       .first<RearmedRow>();
   } catch (error) {
     throw new HttpError(
@@ -301,8 +555,10 @@ async function casReplayOutboxRow(
 interface OutboxReportRow {
   readonly id: string;
   readonly deadLettered: boolean;
-  /** Rust `entry.event.tenant.organization_id.as_deref().unwrap_or("")`. */
+  /** Explicit tenant column on the tenant authority, with JSON fallback for legacy rows. */
   readonly tenantId: string;
+  readonly db: D1Database;
+  readonly tenantAuthoritative: boolean;
 }
 
 /**
@@ -317,7 +573,7 @@ interface OutboxReportRow {
  * control database" and "the billing families were never migrated". Both degrade
  * to the caller's 404, never to a fabricated success.
  */
-async function readOutboxReportRow(
+async function readControlOutboxReportRow(
   router: { control(): D1Database },
   reportId: string,
 ): Promise<OutboxReportRow | null> {
@@ -325,15 +581,25 @@ async function readOutboxReportRow(
   if (db === null) return null;
   if (!(await outboxProvisioned(db))) return null;
 
-  let row: { id: string; dead_lettered_at_unix: number | null; event_json: string } | null;
+  let row: {
+    id: string;
+    tenant_id: string | null;
+    dead_lettered_at_unix: number | null;
+    event_json: string;
+  } | null;
   try {
     row = await db
       .prepare(
-        `SELECT id, dead_lettered_at_unix, event_json
+        `SELECT id, tenant_id, dead_lettered_at_unix, event_json
            FROM ${BILLING_OUTBOX_TABLE} WHERE id = ?`,
       )
       .bind(reportId)
-      .first<{ id: string; dead_lettered_at_unix: number | null; event_json: string }>();
+      .first<{
+        id: string;
+        tenant_id: string | null;
+        dead_lettered_at_unix: number | null;
+        event_json: string;
+      }>();
   } catch (error) {
     throw new HttpError(
       503,
@@ -345,8 +611,64 @@ async function readOutboxReportRow(
   return {
     id: row.id,
     deadLettered: row.dead_lettered_at_unix !== null,
-    tenantId: reportTenantOf(row.event_json),
+    tenantId: row.tenant_id?.trim() || reportTenantOf(row.event_json),
+    db,
+    tenantAuthoritative: false,
   };
+}
+
+/** Read a tenant-authoritative dead-letter row from its own Durable Object. */
+async function readTenantOutboxReportRow(
+  deps: ControlPlaneDeps,
+  tenantId: string,
+  reportId: string,
+): Promise<OutboxReportRow | null> {
+  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
+  try {
+    const row = await db
+      .prepare(
+        `SELECT id, tenant_id, dead_lettered_at_unix
+           FROM ${BILLING_OUTBOX_TABLE}
+          WHERE id = ? AND tenant_id = ?`,
+      )
+      .bind(reportId, tenantId)
+      .first<{ id: string; tenant_id: string; dead_lettered_at_unix: number | null }>();
+    if (row === null) return null;
+    return {
+      id: row.id,
+      deadLettered: row.dead_lettered_at_unix !== null,
+      tenantId: row.tenant_id,
+      db,
+      tenantAuthoritative: true,
+    };
+  } catch (error) {
+    throw new HttpError(
+      503,
+      "storage_unavailable",
+      `the tenant billing outbox could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/** Locate tenant authority first, then the legacy control projection. */
+async function locateOutboxReport(
+  deps: ControlPlaneDeps,
+  scope: CallerScope,
+  reportId: string,
+): Promise<OutboxReportRow | null> {
+  if (scope.kind === "tenant") {
+    if (scope.tenantId.trim() === "") {
+      return readControlOutboxReportRow(deps.tenantDatabases, reportId);
+    }
+    const tenantRow = await readTenantOutboxReportRow(deps, scope.tenantId, reportId);
+    if (tenantRow !== null) return tenantRow;
+  } else {
+    for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
+      const tenantRow = await readTenantOutboxReportRow(deps, tenantId, reportId);
+      if (tenantRow !== null) return tenantRow;
+    }
+  }
+  return readControlOutboxReportRow(deps.tenantDatabases, reportId);
 }
 
 /**
@@ -435,11 +757,11 @@ function authorizeReportTenant(scope: CallerScope, reportTenantId: string): void
  */
 async function replayOutboxReportRow(
   c: Context<ControlPlaneEnv>,
-  router: { control(): D1Database },
+  deps: ControlPlaneDeps,
   scope: CallerScope,
   reportId: string,
 ): Promise<Response> {
-  const row = await readOutboxReportRow(router, reportId);
+  const row = await locateOutboxReport(deps, scope, reportId);
   if (row === null) {
     throw new HttpError(
       404,
@@ -452,19 +774,18 @@ async function replayOutboxReportRow(
   authorizeReportTenant(scope, row.tenantId);
 
   const now = Math.floor(Date.now() / 1000);
-  const db = controlDatabase(router);
-  if (db === null) {
-    // Unreachable — `readOutboxReportRow` just read a row through it — but a
-    // silent `false` here would report a re-arm that never happened.
-    throw new HttpError(503, "storage_unavailable", "the billing outbox is not reachable");
-  }
-  const rearmed = await casReplayOutboxRow(db, reportId, now);
+  const rearmed = await casReplayOutboxRow(
+    row.db,
+    reportId,
+    now,
+    row.tenantAuthoritative ? row.tenantId : undefined,
+  );
   if (rearmed === null) {
     if (row.deadLettered) {
       // Dead-lettered at the read, gone at the CAS: either a concurrent replay
       // won, or a concurrent successful delivery reaped the row. Both mean this
       // caller must not be told it re-armed anything.
-      const current = await readOutboxReportRow(router, reportId);
+      const current = await locateOutboxReport(deps, scope, reportId);
       if (current === null) {
         throw new HttpError(
           404,
@@ -497,34 +818,16 @@ async function replayOutboxReportRow(
 }
 
 /**
- * PORT-TODO(P: inventory-data-billing §2.5) — the remaining billing READ feeds
- * page document collections that their typed writers never populate.
+ * Billing feeds read typed authority first. Tenant-scoped calls address one
+ * tenant Durable Object; platform calls perform a bounded fan-out over the
+ * provisioned tenant roster and merge legacy control compatibility rows.
  *
- * `apps/gateway/src/metering/d1.ts` writes `billing_events`, `billing_ledger`
- * and `billing_report_outbox` (typed tables in the SAME control database this
- * Worker binds). This group lists `metering-events`, `usage-reports`,
- * `metering-export-status` and `billing-outbox-dead-letters` as
- * `control_plane_resources` documents — a disjoint set, empty on every
- * deployment. Rust `handle_admin_metering_events` pages
- * `state.metering_events_page(...)`, the real store.
+ * The document collections remain as a compatibility fallback for deployments
+ * that have not mounted the typed billing schema.
  *
- * Closing it: page the typed tables directly (`billing_events` for the metering
- * feed, `billing_report_outbox WHERE dead_lettered_at_unix IS NOT NULL` for the
- * dead-letter feed) with the caller's tenant fence applied to the row's own
- * tenant.
- *
- * WHAT IS NO LONGER PART OF THIS MARKER, and why it was the sharp half: the
- * marker used to end "…and that breaks `replay` for the only rows that can
- * actually need it — `replayBillingOutboxDeadLetter` requires a
- * `billing-outbox-dead-letters` DOCUMENT to exist before it will re-arm the
- * physical row, and no document is ever created (the sweeper dead-letters the
- * ROW), so a real dead letter answers 404 and can never be replayed". That is
- * closed: {@link replayOutboxReportRow} addresses the row, is the 1:1 port of
- * Rust `server/billing_outbox.rs`, and is driven end-to-end against a real D1
- * binding by `test/billing-replay.test.ts` ("a REAL dead letter"). The read
- * feeds being empty is a discoverability problem — an operator has to learn the
- * report id from the sweeper's logs or an alert rather than from this list —
- * while the replay itself being unreachable was an unrecoverable one.
+ * Both list and replay retain a strict row-level tenant fence. Control rows are
+ * compatibility data only; a tenant Durable Object row wins when both surfaces
+ * contain the same id.
  */
 export const billingRoutes: GroupModule = crudGroup(
   "billing",
@@ -537,18 +840,15 @@ export const billingRoutes: GroupModule = crudGroup(
   ],
   {
     listAdminUsageAggregates: listAdminUsageAggregates(),
+    listAdminMeteringEvents: listBillingAuthorityHandler("events"),
+    listBillingOutboxDeadLetters: listBillingAuthorityHandler("outbox"),
     /**
      * The legacy `/admin/v1/billing-events` spelling. Reads the SAME rows as
      * `/admin/v1/metering-events` — a separate collection would let the two
      * feeds drift, which is precisely the bug a "compat alias" is supposed to
      * prevent.
      */
-    listAdminBillingEventsCompat: async (c) => {
-      const deps = c.get("deps");
-      const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
-      const page = await deps.store.list(METERING_EVENTS, scopeOf(c), query);
-      return json(c, 200, listResponse(page, query));
-    },
+    listAdminBillingEventsCompat: listBillingAuthorityHandler("events"),
 
     replayBillingOutboxDeadLetter: async (c) => {
       const deps = c.get("deps");
@@ -560,7 +860,7 @@ export const billingRoutes: GroupModule = crudGroup(
         // No DOCUMENT — which is the state a REAL dead letter is always in, so
         // this is the path that actually matters. See
         // {@link replayOutboxReportRow}.
-        return await replayOutboxReportRow(c, deps.tenantDatabases, scope, reportId);
+        return await replayOutboxReportRow(c, deps, scope, reportId);
       }
       // Idempotence guard: re-emitting a settled report double-charges.
       if (record.replayed === true) {

@@ -1,7 +1,12 @@
 /**
- * `D1BillingEventLedger` — the CONTROL-database metering-event claim and its
+ * `D1BillingEventLedger` — the legacy CONTROL-D1 compatibility claim and its
  * durable billing-report outbox (inventory-data-billing §1.5.8 item 8, issues
  * #137 / #143 / #150 / #151 / #388).
+ *
+ * Tenant-authoritative settlement now lives in
+ * `packages/billing/src/metering/d1.ts`, which addresses the billing tables,
+ * wallet, and outbox inside one tenant Durable Object batch. This class remains
+ * for the shared-D1 compatibility path and older callers.
  *
  * ## Why this exists here and not next to `D1UsageLedger`
  *
@@ -13,10 +18,11 @@
  * enqueues the outbox row in ONE transaction, and only a claim that WON is
  * allowed to go on and move money.
  *
- * Both `billing_events` and `billing_report_outbox` live in the CONTROL
- * database (`sql/d1-ts/control/0001_init_control.sql`), so on D1 the Rust
- * transaction maps exactly onto one `controlDb.batch([claim, enqueue])`. There
- * is no cross-database coordination in this class and none is needed.
+ * The compatibility rows live in the CONTROL database
+ * (`sql/d1-ts/control/0001_init_control.sql` plus the compatibility columns),
+ * so on shared D1 the Rust transaction maps exactly onto one
+ * `controlDb.batch([claim, enqueue])`. Tenant-authoritative callers do not use
+ * this class.
  *
  * ## The claim token is the `RETURNING` row, not the row's existence
  *

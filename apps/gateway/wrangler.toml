@@ -1110,36 +1110,25 @@ database_id = "replace-at-deploy-tenant"
 migrations_dir = "../../sql/d1-ts/tenant"
 
 # ---------------------------------------------------------------------------
-# D1 — the CONTROL database holding the billing ledger / metering events /
-# report outbox
+# D1 — the CONTROL compatibility database for unscoped billing reads/writes
 #
 # Read as `env.BILLING_DB` by `meteringBindingsFromEnv` (src/metering/
-# runtime.ts), which `src/index.ts` hands to `MeteringUsageSink`; the store is
-# `D1LedgerStore` (src/metering/d1.ts) and it writes `billing_events`,
-# `billing_ledger` and `billing_report_outbox` in ONE `batch()`.
+# runtime.ts). Tenant-scoped requests use `TENANT_DATA` and settle billing plus
+# wallet state in that object's transaction; this binding remains the
+# compatibility/projection path for unscoped callers and legacy control rows.
 #
-# WHY A SECOND DATABASE, not `DB`. The three metering tables are defined in
-# `sql/d1-ts/control/0001_init_control.sql`, NOT in the tenant migration —
-# `sql/d1-ts/tenant/0001_init_tenant.sql`'s "WHAT IS *NOT* HERE" block says so
-# explicitly ("billing ledger/outbox/events -> CONTROL, split rule (d):
-# whole-table cross-tenant analytics reads"). Pointing this binding at the
-# tenant database would put the writes where the tables do not exist, and the
-# atomic `batch()` the outbox depends on only holds because all three tables
-# live in the SAME database. It is the same database `apps/control-plane`
-# binds as its `DB`.
+# WHY IT REMAINS: cross-tenant administration and older deployments still need
+# a bounded compatibility surface while rows are projected into tenant objects.
+# It is not a second tenant billing authority. The tenant migration defines the
+# authoritative billing events, ledger and outbox alongside wallet tables.
 #
-# What breaks without it: `MeteringUsageSink` falls back to its in-isolate
-# `InMemoryLedgerStore`, i.e. a settled charge is priced, deduplicated and
-# queued but never persisted, and dies with the isolate. Nothing else fails —
-# metering never touches the request path — which is exactly why the loss would
-# be silent, and why this binding is declared rather than optional in practice.
+# What breaks without it: only unscoped compatibility billing loses its durable
+# D1 target. Tenant-scoped settlement remains on `TENANT_DATA`; the sink records
+# the missing compatibility binding instead of treating it as a tenant store.
 #
-# THE MIGRATION MUST BE APPLIED FIRST (`wrangler d1 migrations apply
-# ferrogate-control [--local]`, `migrations_dir` below). With the binding
-# present but the tables absent every `batch()` rejects; the sink catches it,
-# counts a delivery failure and retries from the outbox with backoff, so the
-# symptom is a stalled outbox and `onDeliveryFailure` diagnostics, never a
-# failed client request.
+# The compatibility columns are additive and are applied by migration 0020.
+# Older rows may remain nullable until a tenant can be recovered from its
+# payload; new tenant-authoritative rows always carry an explicit tenant_id.
 #
 # `database_name` / `database_id` are DOCUMENTED PLACEHOLDERS, exactly as the
 # tenant block above. `wrangler dev --local` and `vitest-pool-workers` ignore

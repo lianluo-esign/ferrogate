@@ -66,9 +66,11 @@ import {
   InMemoryAssetEgressMeter,
   NO_ASSET_EGRESS_METER,
   type AssetEgressCounters,
+  type AssetEgressLedgerResolver,
   type AssetEgressMeter,
   type AssetEgressQuota,
 } from "@ferrogate/billing";
+import { D1LedgerStore } from "@ferrogate/billing/metering";
 import {
   DeterministicDetector,
   type SecretPattern,
@@ -77,6 +79,7 @@ import {
 } from "@ferrogate/guardrails";
 import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
 import {
+  DurableObjectD1Database,
   DurableObjectTenantDatabaseRouter,
   StorageError,
   type TenantDatabaseHandle,
@@ -1683,7 +1686,7 @@ export interface McpEnv {
   /** CONTROL D1 database used by authentication and other control-plane reads. */
   DB?: D1Database;
 
-  /** CONTROL D1 binding used by the shared billing egress meter. */
+  /** CONTROL compatibility D1 binding used when no tenant object is available. */
   BILLING_DB?: D1Database;
 
   /**
@@ -2242,12 +2245,26 @@ export function resolvePorts(env: McpEnv): McpPorts {
     env.ASSETS !== undefined && env.TENANT_DB !== undefined
       ? new D1R2AssetReader(env.TENANT_DB, env.ASSETS)
       : inMemoryPorts().assets;
+  const tenantLedger: AssetEgressLedgerResolver | undefined =
+    env.TENANT_DATA === undefined
+      ? undefined
+      : (tenantId) => {
+          const namespace = env.TENANT_DATA;
+          if (namespace === undefined) return undefined;
+          return new D1LedgerStore(
+            new DurableObjectD1Database(
+              tenantId,
+              namespace.get(namespace.idFromName(tenantId)) as never,
+            ).asD1Database(),
+            { tenantId },
+          );
+        };
   const assetEgress: McpAssetEgressPort =
     env.FG_DEV_IN_MEMORY_PORTS === "1"
       ? inMemoryPorts().assetEgress
       : {
           counters: assetEgressCountersFromEnv(env),
-          meter: assetEgressMeterFromEnv(env) ?? NO_ASSET_EGRESS_METER,
+          meter: assetEgressMeterFromEnv(env, tenantLedger) ?? NO_ASSET_EGRESS_METER,
           pricePerGb: assetEgressPricePerGb(),
         };
   if (env.FG_DEV_IN_MEMORY_PORTS === "1")

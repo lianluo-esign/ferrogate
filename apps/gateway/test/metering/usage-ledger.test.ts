@@ -39,9 +39,10 @@ import { createGatewayApp } from "../../src/routes/index.js";
 import { tenantDatabase } from "../../src/tenancy/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
-import { tenantObjectDb } from "../tenant-object.js";
+import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 import { RecordingDatabase, RecordingQueue, resetMeteringTables } from "./d1-harness.js";
 import { FIXTURE_COST_USD, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
+import { chargeWithTenantAttribution } from "../../src/metering/usage-ledger.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const controlDb = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
@@ -80,6 +81,7 @@ async function monthlyScopes(): Promise<{ scope_type: string; scope_id: string }
 
 beforeEach(async () => {
   await resetMeteringTables();
+  await resetTenantBillingState(["tenant_a", "tenant_b"]);
   await db.prepare("DELETE FROM usage_aggregate_rollups").run();
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM tenant_contexts").run();
@@ -154,6 +156,18 @@ describe("usageWriteFor — attribution belongs to ONE request", () => {
       { scopeType: "tenant", scopeId: "tenant_a" },
       { scopeType: "project", scopeId: "project_1" },
     ]);
+  });
+
+  test("tenant attribution is persisted on both event and ledger documents", () => {
+    const charge = chargeWithTenantAttribution(
+      chargeFixture(ATTRIBUTION.requestId, 4n),
+      ATTRIBUTION,
+    );
+
+    expect(charge.event.tenant.organization_id).toBe("tenant_a");
+    expect(charge.entry.tenant.organization_id).toBe("tenant_a");
+    expect(charge.entry.tenant.project_id).toBe("project_1");
+    expect(charge.entry.tenant.api_key_id).toBe("key_metered");
   });
 
   test("usageDatabaseFrom only accepts a real D1 binding", () => {
@@ -395,14 +409,15 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
 
   test("a context-free outbox sweep restores attribution-derived rollups", async () => {
     const queue = new RecordingQueue();
+    queue.failure = new Error("queue unavailable");
     const sink = sinkFor(queue);
     const attribution = { ...ATTRIBUTION, agentRunId: "agent_run_recovered" };
-    const { DB: _unbound, TENANT_DATA: _tenantDataUnbound, ...withoutObject } = bindings(queue);
 
     sink.record(usageFixture({ requestId: attribution.requestId }));
-    await sink.flush({ env: withoutObject, attribution });
+    await sink.flush({ env: bindings(queue), attribution });
 
-    await sink.sweep({ env: bindings(queue) }, 2_000_000_000);
+    queue.failure = undefined;
+    await sink.sweep({ env: bindings(queue) }, 2_000_000_000, ["tenant_a"]);
 
     const tenantDb = tenantObjectDb("tenant_a");
     const presence = await tenantDb

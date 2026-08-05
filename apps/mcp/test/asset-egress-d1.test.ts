@@ -11,6 +11,7 @@ import {
   inMemoryPorts,
 } from "../src/ports.js";
 import { TENANT } from "./fixtures.js";
+import { tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
 const API_KEY_ID = "key-mcp-asset-egress";
 const CONTENT = new TextEncoder().encode("durable mcp asset");
@@ -88,6 +89,15 @@ beforeEach(async () => {
   const rows = await TENANT_DB.prepare("SELECT storage_uri FROM stored_assets").all<{ storage_uri: string }>();
   for (const row of rows.results ?? []) await ASSETS.delete(row.storage_uri);
   await TENANT_DB.prepare("DELETE FROM stored_assets").run();
+
+  const tenant = tenantDatabase(tenantDataNamespace(env), TENANT);
+  await tenant.batch([
+    tenant.prepare("DELETE FROM billing_report_outbox"),
+    tenant.prepare("DELETE FROM billing_ledger"),
+    tenant.prepare("DELETE FROM billing_events"),
+    tenant.prepare("DELETE FROM wallet_settlements"),
+    tenant.prepare("DELETE FROM wallets"),
+  ]);
 });
 
 describe("#801 MCP non-dev D1 asset egress", () => {
@@ -113,5 +123,27 @@ describe("#801 MCP non-dev D1 asset egress", () => {
     expect(JSON.parse(events.results?.[0]?.event_json ?? "{}").tenant.api_key_id).toBe(API_KEY_ID);
     const pull = ports.audit.events().find((event) => event.action === "asset.pull");
     expect(pull?.target).toBe(ASSET_ID);
+  });
+
+  it("routes asset billing to the tenant Durable Object when it is bound", async () => {
+    const { ASSETS, BILLING_DB, TENANT_DB } = requireBindings();
+    await seedAsset(TENANT_DB, ASSETS);
+    const TENANT_DATA = tenantDataNamespace(env);
+
+    const ports = resolvePorts({
+      ASSETS,
+      BILLING_DB,
+      TENANT_DB,
+      TENANT_DATA,
+    } satisfies McpEnv);
+    const result = await readAssetForMcp(ports, context(), "cli_tool", "deploy", "1.0.0");
+    expect(result.ok).toBe(true);
+
+    const tenantRows = await tenantDatabase(TENANT_DATA, TENANT)
+      .prepare("SELECT tenant_id, api_key_id FROM billing_ledger")
+      .all<{ tenant_id: string; api_key_id: string | null }>();
+    expect(tenantRows.results).toEqual([{ tenant_id: TENANT, api_key_id: API_KEY_ID }]);
+    const controlRows = await BILLING_DB.prepare("SELECT id FROM billing_ledger").all();
+    expect(controlRows.results).toEqual([]);
   });
 });

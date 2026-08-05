@@ -8,8 +8,9 @@
  * the monthly USD budget, and `apps/gateway/src/ratelimit/token-budget.ts` reads
  * `usage_aggregate_rollups` (via `sumApiKeyCommittedTokens`) to decide
  * `api_keys.monthly_token_budget`. **Nothing in `apps/` wrote either table.**
- * The gateway's metering path settled into the CONTROL database's
- * `billing_events` / `billing_ledger` / `billing_report_outbox` and stopped.
+ * The gateway's metering path now settles billing events, ledger, wallet, and
+ * report outbox rows in the tenant object. This module writes the separate
+ * usage rollup batch that follows that settlement.
  *
  * So both budgets read a table that stayed empty forever: the USD budget could
  * never trip, and the token budget had no `committed` operand at all. This
@@ -20,11 +21,11 @@
  * ## Ordering: claim first, accumulate second
  *
  * `packages/storage/src/d1/usage-d1.ts` states the contract this module obeys,
- * and states why it cannot be a single commit:
+ * and states why the billing and usage batches cannot be one commit:
  *
- * > **D1 has no transaction spanning two databases.** … `billing_events` is in
- * > the CONTROL database and this accumulate is on a TENANT database … So: the
- * > CALLER still owns ordering (claim first, accumulate only on a win).
+ * > **D1 has no transaction spanning independent batches.** … tenant billing
+ * > settlement and this accumulate are separate writes … So: the CALLER still
+ * > owns ordering and retry safety.
  *
  * The claim is `LedgerStore.record` returning `recorded` — the idempotent
  * `ON CONFLICT (billing_event_id) DO NOTHING` write keyed on
@@ -32,9 +33,8 @@
  * recorded branch, and may also retry the tenant object on a duplicate branch;
  * `usage_event_claims` keeps that repair from incrementing counters twice.
  *
- * The tenant-local claim closes the old crash window after the control claim:
- * replaying the object batch is safe, but it still cannot make the control
- * claim and object batch one commit.
+ * The tenant-local usage claim makes replay of this additive batch safe, but it
+ * still cannot make billing settlement and usage accumulation one commit.
  *
  * ## Attribution, and the one case it is dropped
  *
@@ -110,10 +110,10 @@ export interface UsageLedgerBindings {
    * The TENANT database (`sql/d1-ts/tenant/`), holding `tenant_contexts`,
    * `usage_aggregate_rollups` and `usage_monthly_rollups`.
    *
-   * NOT `BILLING_DB`: that is the CONTROL database, whose migration carries the
-   * billing tables and NOT these. The two halves of a settled request really do
-   * live in two databases — that is the cross-database limit above, not a
-   * misconfiguration.
+   * Billing settlement has already committed its tenant-local event, ledger,
+   * wallet, and outbox rows before this usage batch runs. `BILLING_DB` remains
+   * only the compatibility/projection surface for unscoped traffic; tenant
+   * calls resolve through `TENANT_DATA`.
    */
   readonly DB?: D1Database | undefined;
   readonly TENANT_DATA?: TenantDataBindings["TENANT_DATA"] | undefined;
@@ -198,7 +198,11 @@ export function chargeWithTenantAttribution(
       ? {}
       : { api_key_id: attribution.apiKeyId }),
   };
-  return { ...charge, event: { ...charge.event, tenant } };
+  return {
+    ...charge,
+    event: { ...charge.event, tenant },
+    entry: { ...charge.entry, tenant },
+  };
 }
 
 /** Fold the object-owned monotonic rollups into the same tenant batch. */
