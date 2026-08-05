@@ -101,6 +101,12 @@ export interface TenantDataStub {
   batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
   /** Optional for stale test/deployment stubs; callers fail closed if absent. */
   privilegedBatch?(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
+  /** Optional schedule alarm RPC, present on the current TenantDataObject. */
+  setScheduleAlarm?(request: { tenantId: string; scheduledAtUnix: number }): Promise<void>;
+  /** Optional schedule alarm clear RPC, present on the current TenantDataObject. */
+  clearScheduleAlarm?(request: { tenantId: string }): Promise<void>;
+  /** Optional object-local schedule alarm rearm RPC. */
+  rearmScheduleAlarm?(request: { tenantId: string }): Promise<void>;
 }
 
 /**
@@ -774,6 +780,36 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
       );
     }
     await stub.privilegedBatch({ tenantId, statements });
+  }
+
+  async setScheduleAlarm(tenantId: string, scheduledAtUnix: number): Promise<void> {
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.setScheduleAlarm === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the schedule alarm RPC; refusing to fall back`,
+      );
+    }
+    await stub.setScheduleAlarm({ tenantId, scheduledAtUnix });
+  }
+
+  async clearScheduleAlarm(tenantId: string): Promise<void> {
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.clearScheduleAlarm === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the schedule alarm RPC; refusing to fall back`,
+      );
+    }
+    await stub.clearScheduleAlarm({ tenantId });
+  }
+
+  async rearmScheduleAlarm(tenantId: string): Promise<void> {
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.rearmScheduleAlarm === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the schedule alarm rearm RPC; refusing to use a stale snapshot`,
+      );
+    }
+    await stub.rearmScheduleAlarm({ tenantId });
   }
 
   async provisionedTenants(): Promise<readonly string[]> {

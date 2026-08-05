@@ -167,13 +167,15 @@ const MOUNTED: [symbol: string, app: string][] = [
   // which is precisely the failure class this file exists for.
   ["BackendDispatchingTenantDatabaseRouter", "control-plane"],
   ["DurableObjectTenantDatabaseRouter", "control-plane"],
+  // #856 — tenant-object schedules use the package store and its transaction
+  // backed at-most-once claim gate.
+  ["D1AgentScheduleStore", "control-plane"],
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
 const DEAD = [
   "D1BillingEventLedger",
   "D1RetentionPolicyStore",
-  "D1AgentScheduleStore",
   "TenantMonotonicUpserts",
   "ControlMonotonicUpserts",
   "R2AssetBlobStore",
@@ -193,13 +195,11 @@ describe("mount inventory (src/index.ts §1.7 marker)", () => {
     expect(importersOf(symbol)).toEqual([]);
   });
 
-  // The two duplications the marker calls out by name. These assert the RIVAL
-  // implementation exists and does NOT go through this package: if someone
-  // finally deletes the duplicate and imports the engine here, this reddens and
-  // the marker comes out with it.
+  // The native/compatibility path still has a rival scheduler. The typed
+  // tenant-object path is asserted as a real package-store mount above.
   test("apps/control-plane still carries a rival schedule engine", () => {
     expect(sourcesFor("control-plane")).toContain("parseCronExpression");
-    expect(importersOf("D1AgentScheduleStore")).toEqual([]);
+    expect(importersOf("D1AgentScheduleStore")).toContain("control-plane");
   });
 
   test("apps/gateway still carries an app-local asset metadata store", () => {

@@ -145,6 +145,12 @@ export interface TenantDatabaseRouter {
     tenantId: string,
     statements: readonly TenantDataStatement[],
   ): Promise<void>;
+  /** Arm the earliest schedule deadline in a tenant Durable Object. */
+  setScheduleAlarm?(tenantId: string, scheduledAtUnix: number): Promise<void>;
+  /** Clear a tenant Durable Object's schedule alarm when no schedule remains. */
+  clearScheduleAlarm?(tenantId: string): Promise<void>;
+  /** Recompute and arm the single alarm from current tenant-local schedule rows. */
+  rearmScheduleAlarm?(tenantId: string): Promise<void>;
   /**
    * Every provisioned tenant id, ascending.
    *

@@ -1327,6 +1327,17 @@ max_retries = 2
 dead_letter_queue = "replace-at-deploy-ferrogate-online-eval-dlq"
 
 # ---------------------------------------------------------------------------
+# Queues — tenant Durable Object schedule alarms (#856)
+#
+# TenantDataObject owns one native alarm per tenant and publishes only the
+# tenant wake-up envelope. The control-plane Worker consumes it, re-reads the
+# tenant-local schedule rows, and claims due slots in the object database.
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "SCHEDULE_ALARMS"
+queue = "replace-at-deploy-ferrogate-schedule-alarms"
+
+# ---------------------------------------------------------------------------
 # Durable Objects — the rate-limit / quota counters
 #
 # One DO instance per counter key replaces the Rust `ClusterCounterBackend`

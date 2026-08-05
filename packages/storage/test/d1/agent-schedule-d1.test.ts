@@ -13,6 +13,7 @@ import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   D1AgentScheduleStore,
+  CLAIM_AND_ADVANCE_SCHEDULE_SQL,
   INSERT_SCHEDULE_FIRE_SQL,
   type StoredAgentSchedule,
   type StoredAgentScheduleFire,
@@ -145,6 +146,26 @@ describe("D1AgentScheduleStore — THE at-most-once fire gate", () => {
     expect(await storeA.insertScheduleFire(fire({ fireId: "random-2" }))).toBe(false);
     const [row] = await storeA.listScheduleFires("sched_1", 10);
     expect(row?.fireId).toBe(agentScheduleFireId("sched_1", NOW));
+  });
+
+  test("claim and cursor advance commit together, and a duplicate does neither", async () => {
+    await storeA.upsertSchedule(schedule());
+    expect(CLAIM_AND_ADVANCE_SCHEDULE_SQL).toContain("RETURNING fire_id");
+
+    const [first, second] = await Promise.all([
+      storeA.claimAndAdvanceSchedule(fire({ outcome: "error" }), NOW + 86_400, NOW + 1),
+      new D1AgentScheduleStore(handleA).claimAndAdvanceSchedule(
+        fire({ outcome: "error" }),
+        NOW + 86_400,
+        NOW + 1,
+      ),
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    expect(await storeA.listScheduleFires("sched_1", 10)).toHaveLength(1);
+    expect(await storeA.getSchedule("sched_1")).toMatchObject({
+      lastFireAtUnix: NOW,
+      nextFireAtUnix: NOW + 86_400,
+    });
   });
 });
 

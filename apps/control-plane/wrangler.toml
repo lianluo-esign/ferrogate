@@ -479,17 +479,29 @@ run_worker_first = [
 ]
 
 # ---------------------------------------------------------------------------
-# The agent-schedule TICK (`src/schedule/scheduled.ts`, dispatched from the
-# `scheduled` handler on `src/worker.ts`'s default export).
+# The maintenance Cron (`src/schedule/scheduled.ts`, dispatched from the
+# `scheduled` handler on `src/worker.ts`'s default export). Agent schedules run
+# from TenantDataObject alarms and the queue consumer below.
 #
-# `* * * * *` is the finest granularity Cron Triggers offer, which is also the
-# finest granularity a 5-field cron expression can ask for, so nothing is lost:
-# a sub-minute schedule would need a Durable Object alarm instead. Without this
-# stanza `runScheduleTick` is reachable only through `run-now`, i.e. schedules
-# never fire on their own.
+# The minute cadence is retained for maintenance passes. It must not be used as
+# a fleet-wide schedule scan because that would create a second fire authority.
 # ---------------------------------------------------------------------------
 [triggers]
 crons = ["* * * * *"]
+
+# ---------------------------------------------------------------------------
+# Queue consumer — tenant Durable Object schedule alarms (#856)
+#
+# The queue is produced by the gateway's TenantDataObject alarm. This Worker
+# reads the wake-up envelope, addresses exactly one tenant object, and never
+# scans the fleet schedule collection from the Cron path.
+# ---------------------------------------------------------------------------
+[[queues.consumers]]
+queue = "replace-at-deploy-ferrogate-schedule-alarms"
+max_batch_size = 100
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "replace-at-deploy-ferrogate-schedule-alarms-dlq"
 # --- Workers Observability ---------------------------------------------------
 # Owner directive (2026-08-02): enable Workers Observability on the whole fleet
 # so production behaviour can be read back from the CLI (`wrangler tail`) and the

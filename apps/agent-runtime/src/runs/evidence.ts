@@ -8,8 +8,14 @@
  */
 import { DurableObjectD1Database } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
-import type { AgentRuntimeBindings } from "../ports.js";
+import type { AgentRuntimeBindings, IsolationGrant } from "../ports.js";
 import type { StoredAgentRun, StoredRunEvent } from "./model.js";
+
+export interface ManagedWorkerEvidenceContext {
+  readonly sessionId?: string | null;
+  readonly frameworkAdapter?: string | null;
+  readonly isolationGrant?: IsolationGrant | null;
+}
 
 /** Keep this key format identical to sql/d1-ts/control/0014. */
 function evidenceProjectionKey(tenantId: string, logicalId: string): string {
@@ -47,6 +53,44 @@ ON CONFLICT (id) DO UPDATE SET
   occurred_at_unix = excluded.occurred_at_unix,
   event_json = excluded.event_json`;
 
+const TENANT_MANAGED_INSTANCE_UPSERT_SQL = `INSERT INTO agent_worker_instances (
+  id, started_at_unix, instance_json
+) VALUES (?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  started_at_unix = COALESCE(agent_worker_instances.started_at_unix, excluded.started_at_unix),
+  instance_json = excluded.instance_json`;
+
+const TENANT_MANAGED_SESSION_UPSERT_SQL = `INSERT INTO managed_worker_sessions (
+  id, requested_at_unix, session_json
+) VALUES (?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  requested_at_unix = COALESCE(managed_worker_sessions.requested_at_unix, excluded.requested_at_unix),
+  session_json = excluded.session_json`;
+
+const TENANT_MANAGED_TEMPLATE_UPSERT_SQL = `INSERT INTO managed_worker_templates (
+  id, template_json
+) VALUES (?, ?)
+ON CONFLICT (id) DO UPDATE SET template_json = excluded.template_json`;
+
+const TENANT_MANAGED_SELECTION_UPSERT_SQL = `INSERT INTO managed_worker_isolation_selections (
+  session_id, selected_at_unix, selection_json
+) VALUES (?, ?, ?)
+ON CONFLICT (session_id) DO UPDATE SET
+  selected_at_unix = excluded.selected_at_unix,
+  selection_json = excluded.selection_json`;
+
+const TENANT_MANAGED_POLICY_UPSERT_SQL = `INSERT INTO managed_worker_isolation_policies (
+  session_id, policy_json
+) VALUES (?, ?)
+ON CONFLICT (session_id) DO UPDATE SET policy_json = excluded.policy_json`;
+
+const TENANT_MANAGED_EVENT_UPSERT_SQL = `INSERT INTO managed_worker_lifecycle_events (
+  id, occurred_at_unix, event_json
+) VALUES (?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  occurred_at_unix = excluded.occurred_at_unix,
+  event_json = excluded.event_json`;
+
 const CONTROL_AGENT_RUN_EVENT_UPSERT_SQL = `INSERT INTO agent_run_events (
   projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -75,6 +119,7 @@ function controlDatabase(env: AgentRuntimeBindings): D1Database | undefined {
 export async function persistAgentRunEvidence(
   env: AgentRuntimeBindings,
   run: StoredAgentRun,
+  managed?: ManagedWorkerEvidenceContext,
 ): Promise<void> {
   const params = [
     run.run_id,
@@ -85,8 +130,61 @@ export async function persistAgentRunEvidence(
     JSON.stringify(run),
   ] as const;
   const db = tenantDatabase(env, run.tenant_id);
-  const statement = db.prepare(TENANT_AGENT_RUN_UPSERT_SQL);
-  await db.batch([statement.bind(...params)]);
+  const frameworkAdapter = managed?.frameworkAdapter ?? run.framework_adapter;
+  const statements: D1PreparedStatement[] = [
+    db.prepare(TENANT_AGENT_RUN_UPSERT_SQL).bind(...params),
+    db
+      .prepare(TENANT_MANAGED_INSTANCE_UPSERT_SQL)
+      .bind(
+        run.run_id,
+        run.started_at_unix,
+        JSON.stringify({
+          run_id: run.run_id,
+          tenant_id: run.tenant_id,
+          workspace_id: run.workspace_id,
+          framework_adapter: run.framework_adapter,
+          required_capabilities: run.required_capabilities,
+          workload_ref: run.workload_ref,
+          status: run.status,
+        }),
+      ),
+  ];
+  if (frameworkAdapter !== null && frameworkAdapter.trim() !== "") {
+    statements.push(
+      db
+        .prepare(TENANT_MANAGED_TEMPLATE_UPSERT_SQL)
+        .bind(frameworkAdapter.trim(), JSON.stringify({ framework_adapter: frameworkAdapter.trim() })),
+    );
+  }
+  const sessionId = managed?.sessionId?.trim();
+  if (sessionId !== undefined && sessionId !== "") {
+    const isolation = managed?.isolationGrant ?? null;
+    statements.push(
+      db
+        .prepare(TENANT_MANAGED_SESSION_UPSERT_SQL)
+        .bind(
+          sessionId,
+          run.submitted_at_unix ?? 0,
+          JSON.stringify({
+            session_id: sessionId,
+            run_id: run.run_id,
+            workspace_id: run.workspace_id,
+            framework_adapter: run.framework_adapter,
+            status: run.status,
+          }),
+        ),
+    );
+    if (isolation !== null && isolation !== undefined) {
+      const isolationJson = JSON.stringify(isolation);
+      statements.push(
+        db
+          .prepare(TENANT_MANAGED_SELECTION_UPSERT_SQL)
+          .bind(sessionId, run.submitted_at_unix ?? 0, isolationJson),
+        db.prepare(TENANT_MANAGED_POLICY_UPSERT_SQL).bind(sessionId, isolationJson),
+      );
+    }
+  }
+  await db.batch(statements);
   await mirrorBestEffort(controlDatabase(env), CONTROL_AGENT_RUN_UPSERT_SQL, [
     evidenceProjectionKey(run.tenant_id, run.run_id),
     ...params,
@@ -108,8 +206,12 @@ export async function persistAgentRunEventEvidence(
     JSON.stringify(event),
   ] as const;
   const db = tenantDatabase(env, tenantId);
-  const statement = db.prepare(TENANT_AGENT_RUN_EVENT_UPSERT_SQL);
-  await db.batch([statement.bind(...params)]);
+  await db.batch([
+    db.prepare(TENANT_AGENT_RUN_EVENT_UPSERT_SQL).bind(...params),
+    db
+      .prepare(TENANT_MANAGED_EVENT_UPSERT_SQL)
+      .bind(event.id, event.occurred_at_unix, JSON.stringify(event)),
+  ]);
   await mirrorBestEffort(controlDatabase(env), CONTROL_AGENT_RUN_EVENT_UPSERT_SQL, [
     evidenceProjectionKey(tenantId, event.id),
     ...params,

@@ -167,6 +167,42 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
     await router.privilegedBatch(tenantId, statements);
   }
 
+  async setScheduleAlarm(tenantId: string, scheduledAtUnix: number): Promise<void> {
+    const registration = await this.#registry.get(tenantId);
+    const router =
+      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
+    if (router?.setScheduleAlarm === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} backend does not expose the schedule alarm RPC`,
+      );
+    }
+    await router.setScheduleAlarm(tenantId, scheduledAtUnix);
+  }
+
+  async clearScheduleAlarm(tenantId: string): Promise<void> {
+    const registration = await this.#registry.get(tenantId);
+    const router =
+      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
+    if (router?.clearScheduleAlarm === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} backend does not expose the schedule alarm RPC`,
+      );
+    }
+    await router.clearScheduleAlarm(tenantId);
+  }
+
+  async rearmScheduleAlarm(tenantId: string): Promise<void> {
+    const registration = await this.#registry.get(tenantId);
+    const router =
+      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
+    if (router?.rearmScheduleAlarm === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} backend does not expose the schedule alarm rearm RPC`,
+      );
+    }
+    await router.rearmScheduleAlarm(tenantId);
+  }
+
   async provisionedTenants(): Promise<readonly string[]> {
     return (await this.#registry.list()).map((row) => row.tenantId);
   }

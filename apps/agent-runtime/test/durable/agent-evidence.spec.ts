@@ -27,6 +27,14 @@ function createInput(tenantId: string, runId: string) {
     requestId: "request-evidence",
     traceId: "trace-evidence",
     parentActionFingerprint: null,
+    sessionId: `session-${runId}`,
+    isolationGrant: {
+      backend: "cloudflare_sandbox" as const,
+      enableInternet: false as const,
+      interceptHttps: true as const,
+      allowedHosts: [] as const,
+      snapshotSupported: false as const,
+    },
     initialStatus: "queued" as const,
   };
 }
@@ -79,6 +87,20 @@ describe("agent evidence source of truth", () => {
       sql: "SELECT id, tenant FROM agent_run_events WHERE run_id = ? ORDER BY occurred_at_unix, id",
       params: [RUN_ID],
     });
+    const managedA = await objectA.query({
+      tenantId: TENANT_A,
+      sql:
+        "SELECT i.id AS instance_id, s.id AS session_id, " +
+        "e.id AS event_id, x.session_id AS selection_session_id, " +
+        "p.session_id AS policy_session_id " +
+        "FROM agent_worker_instances i " +
+        "LEFT JOIN managed_worker_sessions s ON s.session_json LIKE ? " +
+        "LEFT JOIN managed_worker_lifecycle_events e ON e.id = ? " +
+        "LEFT JOIN managed_worker_isolation_selections x ON x.session_id = s.id " +
+        "LEFT JOIN managed_worker_isolation_policies p ON p.session_id = s.id " +
+        "WHERE i.id = ?",
+      params: [`%${RUN_ID}%`, `${RUN_ID}-evt-000001`, RUN_ID],
+    });
     const runsB = await objectB.query({
       tenantId: TENANT_B,
       sql: "SELECT id FROM agent_runs WHERE id = ?",
@@ -104,7 +126,22 @@ describe("agent evidence source of truth", () => {
       `${RUN_ID}-evt-000003`,
       `${RUN_ID}-evt-000002`,
     ]);
+    expect(managedA.results).toEqual([
+      {
+        instance_id: RUN_ID,
+        session_id: `session-${RUN_ID}`,
+        event_id: `${RUN_ID}-evt-000001`,
+        selection_session_id: `session-${RUN_ID}`,
+        policy_session_id: `session-${RUN_ID}`,
+      },
+    ]);
     expect(runsB.results).toHaveLength(1);
+    const managedB = await objectB.query({
+      tenantId: TENANT_B,
+      sql: "SELECT id FROM agent_worker_instances WHERE id = ?",
+      params: [RUN_ID],
+    });
+    expect(managedB.results).toEqual([{ id: RUN_ID }]);
     expect(controlRuns.results).toEqual([
       { projection_key: projectionKey(TENANT_A, RUN_ID), id: RUN_ID, tenant: TENANT_A },
       { projection_key: projectionKey(TENANT_B, RUN_ID), id: RUN_ID, tenant: TENANT_B },

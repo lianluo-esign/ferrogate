@@ -47,6 +47,7 @@
  * both re-check the tenancy lifecycle before dispatching.
  */
 import { z } from "zod";
+import type { StoredAgentSchedule } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { ControlPlaneDeps, StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
@@ -56,6 +57,17 @@ import {
   runScheduleNow,
 } from "../schedule/engine.js";
 import { ScheduleSpecError, normalizeScheduleSpec } from "../schedule/model.js";
+import {
+  listTenantSchedules,
+  openTenantScheduleRepository,
+  recordFromStoredFire,
+  recordFromStoredSchedule,
+  rearmTenantScheduleAlarm,
+  storedScheduleFromRecord,
+  type TenantScheduleRepository,
+  tenantForScheduleScope,
+} from "../schedule/tenant-schedule.js";
+import { runTenantScheduleNow } from "../schedule/alarm-queue.js";
 import {
   type CollectionSpec,
   type GroupModule,
@@ -144,6 +156,174 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function requestedTenantId(c: Parameters<Handler>[0]): string | null {
+  const raw = new URL(c.req.url).searchParams.get("tenant_id");
+  return raw === null || raw.trim() === "" ? null : raw.trim();
+}
+
+/**
+ * A tenant may not have a typed object yet during an in-place migration. Only
+ * the expected "no tenant database" errors fall back to the legacy document
+ * path; object admission/runtime failures remain errors and never fall through
+ * to another tenant's storage.
+ */
+function isUnprovisionedTenant(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no provisioned D1 database|no D1 database|has no control-registry row/i.test(message);
+}
+
+async function typedRepository(
+  deps: ControlPlaneDeps,
+  scope: ReturnType<typeof scopeOf>,
+  requested: unknown,
+): Promise<{ tenantId: string; repository: TenantScheduleRepository } | null> {
+  const tenantId = tenantForScheduleScope(scope, requested);
+  if (tenantId === null) return null;
+  try {
+    const repository = await openTenantScheduleRepository(
+      deps.tenantDatabases,
+      tenantId,
+      deps.controlDatabase,
+    );
+    if (repository === null) return null;
+    return { tenantId, repository };
+  } catch (error) {
+    if (isUnprovisionedTenant(error)) return null;
+    throw error;
+  }
+}
+
+interface TypedScheduleTarget {
+  readonly tenantId: string;
+  readonly repository: TenantScheduleRepository;
+  readonly schedule: StoredAgentSchedule | undefined;
+}
+
+/**
+ * Resolve an object-backed schedule for an id-only platform operation.
+ *
+ * Tenant operators already provide the tenant through their auth scope, and
+ * platform callers may provide `?tenant_id`. The remaining platform case is
+ * the ordinary REST shape (`/{schedule_id}`): fan out over the tenant roster to
+ * find the object row, then keep all subsequent work on that one object. This
+ * is an admin lookup, not the unattended scheduler; alarms still address one
+ * tenant directly and never use this roster walk.
+ */
+async function typedScheduleTarget(
+  deps: ControlPlaneDeps,
+  scope: ReturnType<typeof scopeOf>,
+  requested: unknown,
+  scheduleId: string,
+): Promise<TypedScheduleTarget | null> {
+  const selectedTenant = tenantForScheduleScope(scope, requested);
+  if (selectedTenant !== null) {
+    const typed = await typedRepository(deps, scope, selectedTenant);
+    if (typed === null) return null;
+    return {
+      tenantId: typed.tenantId,
+      repository: typed.repository,
+      schedule: await typed.repository.store.getSchedule(scheduleId),
+    };
+  }
+  if (scope.kind !== "platform_operator") return null;
+
+  let match: TypedScheduleTarget | null = null;
+  for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
+    const typed = await typedRepository(deps, scope, tenantId);
+    if (typed === null) continue;
+    const schedule = await typed.repository.store.getSchedule(scheduleId);
+    if (schedule === undefined) continue;
+    if (match !== null) {
+      throw new HttpError(
+        409,
+        "conflict",
+        `agent_schedule ${scheduleId} exists in multiple tenant objects`,
+      );
+    }
+    match = { tenantId: typed.tenantId, repository: typed.repository, schedule };
+  }
+  return match;
+}
+
+function scheduleWorkspaceFilter(query: ReturnType<typeof parseListQuery>): string | undefined {
+  const value = query.filters.workspace_id;
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+/** The typed list path, with a bounded roster fan-out for platform operators. */
+const listSchedules: Handler = async (c) => {
+  const deps = depsOf(c);
+  const scope = scopeOf(c);
+  const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+  const requested = requestedTenantId(c);
+  const selectedTenant = tenantForScheduleScope(scope, requested);
+
+  if (selectedTenant !== null) {
+    const typed = await typedRepository(deps, scope, selectedTenant);
+    if (typed !== null) {
+      const listed = await listTenantSchedules(
+        deps.tenantDatabases,
+        typed.tenantId,
+        scheduleWorkspaceFilter(query),
+        deps.controlDatabase,
+      );
+      if (listed !== null) {
+        const items = listed.schedules.map(recordFromStoredSchedule);
+        return json(c, 200, listResponse({ items, total: items.length }, query));
+      }
+    }
+  } else if (scope.kind === "platform_operator") {
+    const items: StoreRecord[] = [];
+    const typedTenantIds = new Set<string>();
+    for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
+      const listed = await listTenantSchedules(
+        deps.tenantDatabases,
+        tenantId,
+        scheduleWorkspaceFilter(query),
+        deps.controlDatabase,
+      );
+      if (listed === null) continue;
+      typedTenantIds.add(tenantId);
+      items.push(...listed.schedules.map(recordFromStoredSchedule));
+    }
+    if (typedTenantIds.size > 0) {
+      // The generic store remains the compatibility reader for native-binding
+      // tenants. Filter object tenants because their legacy rows are retained
+      // for backfill/repair and must not be returned alongside the authority.
+      const legacy = await deps.store.list(SCHEDULE_COLLECTION, scope, {
+        ...query,
+        offset: 0,
+        limit: Number.MAX_SAFE_INTEGER,
+        paginate: false,
+      });
+      items.push(
+        ...legacy.items.filter(
+          (record) =>
+            typeof record.tenant_id === "string" && !typedTenantIds.has(record.tenant_id),
+        ),
+      );
+      return json(c, 200, listResponse({ items, total: items.length }, query));
+    }
+  }
+
+  const page = await deps.store.list(SCHEDULE_COLLECTION, scope, query);
+  return json(c, 200, listResponse(page, query));
+};
+
+const getSchedule: Handler = async (c) => {
+  const deps = depsOf(c);
+  const scope = scopeOf(c);
+  const id = pathParam(c, "id");
+  const typed = await typedScheduleTarget(deps, scope, requestedTenantId(c), id);
+  if (typed !== null) {
+    if (typed.schedule === undefined) throw notFound(id);
+    return json(c, 200, adminItem("agent_schedule", recordFromStoredSchedule(typed.schedule)));
+  }
+  const record = await deps.store.get(SCHEDULE_COLLECTION, scope, id);
+  if (record === null) throw notFound(id);
+  return json(c, 200, adminItem("agent_schedule", record));
+};
+
 const createSchedule: Handler = async (c) => {
   const deps = depsOf(c);
   const scope = scopeOf(c);
@@ -153,7 +333,18 @@ const createSchedule: Handler = async (c) => {
     typeof declaredId === "string" && declaredId.trim() !== ""
       ? declaredId.trim()
       : crypto.randomUUID();
-  const record = { ...withFiringState(body, null, nowSeconds()), id } as StoreRecord;
+  const now = nowSeconds();
+  const typed = await typedRepository(deps, scope, body.tenant_id);
+  if (typed !== null) {
+    const record = { ...withFiringState({ ...body, id }, null, now), id, tenant_id: typed.tenantId };
+    const existing = await typed.repository.store.getSchedule(id);
+    if (existing !== undefined) throw new HttpError(409, "conflict", `agent_schedule ${id} already exists`);
+    const schedule = storedScheduleFromRecord(record, typed.tenantId, now);
+    await typed.repository.store.upsertSchedule(schedule);
+    await rearmTenantScheduleAlarm(deps.tenantDatabases, typed.tenantId, [schedule]);
+    return json(c, 201, adminItem("agent_schedule", recordFromStoredSchedule(schedule)));
+  }
+  const record = { ...withFiringState(body, null, now), id } as StoreRecord;
   try {
     const stored = await deps.store.create(SCHEDULE_COLLECTION, scope, record);
     return json(c, 201, adminItem("agent_schedule", stored));
@@ -170,6 +361,29 @@ const replaceSchedule: Handler = async (c) => {
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
   const body = (await readJson(c, agentScheduleSchema)) as Record<string, unknown>;
+  const typed = await typedScheduleTarget(
+    deps,
+    scope,
+    body.tenant_id ?? requestedTenantId(c),
+    id,
+  );
+  if (typed !== null) {
+    const existing = typed.schedule;
+    if (existing === undefined) throw notFound(id);
+    const now = nowSeconds();
+    const record = {
+      ...withFiringState({ ...body, id, tenant_id: typed.tenantId }, null, now),
+      id,
+      tenant_id: typed.tenantId,
+      created_at_unix: existing.createdAtUnix,
+      last_fire_at_unix: existing.lastFireAtUnix ?? null,
+      revision: existing.revision + 1,
+    };
+    const schedule = storedScheduleFromRecord(record, typed.tenantId, now);
+    await typed.repository.store.upsertSchedule(schedule);
+    await rearmTenantScheduleAlarm(deps.tenantDatabases, typed.tenantId, [schedule]);
+    return json(c, 200, adminItem("agent_schedule", recordFromStoredSchedule(schedule)));
+  }
   const existing = await deps.store.get(SCHEDULE_COLLECTION, scope, id);
   if (existing === null) throw notFound(id);
   // A PUT is a FULL replace, so the spec is derived from the body alone —
@@ -191,6 +405,30 @@ const mergeSchedule: Handler = async (c) => {
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
   const body = (await readJson(c, agentScheduleSchema)) as Record<string, unknown>;
+  const typed = await typedScheduleTarget(
+    deps,
+    scope,
+    body.tenant_id ?? requestedTenantId(c),
+    id,
+  );
+  if (typed !== null) {
+    const existing = typed.schedule;
+    if (existing === undefined) throw notFound(id);
+    const existingRecord = recordFromStoredSchedule(existing);
+    const now = nowSeconds();
+    const record = {
+      ...withFiringState({ ...body, id, tenant_id: typed.tenantId }, existingRecord, now),
+      id,
+      tenant_id: typed.tenantId,
+      created_at_unix: existing.createdAtUnix,
+      last_fire_at_unix: existing.lastFireAtUnix ?? null,
+      revision: existing.revision + 1,
+    };
+    const schedule = storedScheduleFromRecord(record, typed.tenantId, now);
+    await typed.repository.store.upsertSchedule(schedule);
+    await rearmTenantScheduleAlarm(deps.tenantDatabases, typed.tenantId, [schedule]);
+    return json(c, 200, adminItem("agent_schedule", recordFromStoredSchedule(schedule)));
+  }
   const existing = await deps.store.get(SCHEDULE_COLLECTION, scope, id);
   if (existing === null) throw notFound(id);
   const patch = withFiringState(body, existing, nowSeconds());
@@ -212,6 +450,17 @@ const deleteSchedule: Handler = async (c) => {
   const deps = depsOf(c);
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
+  const typed = await typedScheduleTarget(deps, scope, requestedTenantId(c), id);
+  if (typed !== null) {
+    if (typed.schedule === undefined) throw notFound(id);
+    if (!(await typed.repository.store.deleteSchedule(id))) throw notFound(id);
+    await rearmTenantScheduleAlarm(
+      deps.tenantDatabases,
+      typed.tenantId,
+      await typed.repository.store.listSchedules(typed.tenantId),
+    );
+    return json(c, 200, adminDeleted("agent_schedule", id));
+  }
   const removed = await deps.store.remove(SCHEDULE_COLLECTION, scope, id);
   if (!removed) throw notFound(id);
 
@@ -239,6 +488,14 @@ const listFires: Handler = async (c) => {
   const deps = depsOf(c);
   const scope = scopeOf(c);
   const scheduleId = pathParam(c, "id");
+  const typed = await typedScheduleTarget(deps, scope, requestedTenantId(c), scheduleId);
+  if (typed !== null) {
+    if (typed.schedule === undefined) throw notFound(scheduleId);
+    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const fires = await typed.repository.store.listScheduleFires(scheduleId, query.limit);
+    const items = fires.map(recordFromStoredFire);
+    return json(c, 200, listResponse({ items, total: items.length }, query));
+  }
   if ((await deps.store.get(SCHEDULE_COLLECTION, scope, scheduleId)) === null) {
     throw notFound(scheduleId);
   }
@@ -268,6 +525,12 @@ const runNow: Handler = async (c) => {
   const deps = depsOf(c);
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
+  const typed = await typedScheduleTarget(deps, scope, requestedTenantId(c), id);
+  if (typed !== null) {
+    if (typed.schedule === undefined) throw notFound(id);
+    const fire = await runTenantScheduleNow(deps, typed.repository, typed.schedule, nowSeconds());
+    return json(c, 202, { object: "agent_schedule_fire", fire: recordFromStoredFire(fire) });
+  }
   const schedule = await deps.store.get(SCHEDULE_COLLECTION, scope, id);
   if (schedule === null) throw notFound(id);
   const fire = await runScheduleNow(engineDeps(deps), schedule, nowSeconds());
@@ -282,7 +545,9 @@ export const adminAgentScheduleRoutes: GroupModule = crudGroup(
   "admin_agent_schedule",
   [AGENT_SCHEDULE_SPEC],
   {
+    listAdminAgentSchedules: listSchedules,
     createAdminAgentSchedule: createSchedule,
+    getAdminAgentSchedule: getSchedule,
     putAdminAgentSchedule: replaceSchedule,
     patchAdminAgentSchedule: mergeSchedule,
     deleteAdminAgentSchedule: deleteSchedule,
