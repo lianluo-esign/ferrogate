@@ -410,7 +410,24 @@ describe("the Queue producer/consumer pair", () => {
     const result = await consumeRequestLogBatch(
       {
         messages: [
-          { body: { not: "a request log" }, ack: () => { acked += 1; } },
+          {
+            body: { not: "a request log" },
+            ack: () => {
+              acked += 1;
+            },
+          },
+          {
+            // A malformed guardrail envelope must not fall through the
+            // permissive request-log decoder and become a fabricated log row.
+            body: {
+              object: "guardrail_evaluation",
+              request_id: "fg-not-guardrail",
+              started_at_unix: 1_700_000_001,
+            },
+            ack: () => {
+              acked += 1;
+            },
+          },
           {
             body: {
               object: "request_log",
@@ -432,8 +449,8 @@ describe("the Queue producer/consumer pair", () => {
       },
       env,
     );
-    expect(result).toMatchObject({ written: 1, malformed: 1, retried: false });
-    expect(acked).toBe(1);
+    expect(result).toMatchObject({ written: 1, malformed: 2, retried: false });
+    expect(acked).toBe(2);
     expect(retried).toBe(false);
     expect((await storedRequestLogs()).map((row) => row.request_id)).toEqual(["fg-good"]);
   });

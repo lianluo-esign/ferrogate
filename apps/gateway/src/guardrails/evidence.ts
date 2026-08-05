@@ -391,27 +391,12 @@ export function buildCheckEvidence(
  * returns `false` and the engine converts the request into
  * `guardrail_evidence_unavailable`.
  *
- * PORT-TODO(P: inventory-data-billing §guardrail_evaluations): durable evidence is
- * D1 (`guardrail_evaluations` + `guardrail_check_evaluations`); the Postgres
- * RLS scoping is replaced by per-tenant database separation. This sink is the
- * offline/local implementation and the one the suite asserts non-persistence
- * against.
- *
- * Blocked on the SCHEMA, not on the platform, and the schema is OUTSIDE this
- * app: both tables exist only in the legacy Postgres DDL
- * (`sql/001_init_postgres.sql:454`) and have not been translated into either D1
- * migration (`sql/d1-ts/{tenant,control}` carry the guardrail POLICY tables —
- * which `./d1.ts` now reads — but no evaluation tables). `sql/d1-ts/**` and
- * `packages/storage` are not this agent's to edit, so writing the sink here
- * would mean writing INSERTs against tables no migration creates: every append
- * would reject, and because the sink fails CLOSED on a refused append
- * (`guardrail_evidence_unavailable`) that would take every screened request
- * down. Hence the marker rather than a half-landing.
- *
- * The choice of database is a real decision the slice has to make, not a copy:
- * evidence is per-tenant append-only, so it belongs in the TENANT database
- * (split rule (a)), unlike the policy tables, which are control-plane authored
- * and live in CONTROL.
+ * The durable path is implemented by `DurableGuardrailEvidenceSink` in
+ * `evidence-sink.ts`: tenant-attributed evidence is authoritative in the
+ * tenant object's `guardrail_evaluations` tables, while CONTROL keeps the
+ * tenant-qualified fleet projection. This in-memory sink remains useful for
+ * offline/local callers and for tests that intentionally assert no durable
+ * write occurred; it is not the production storage authority.
  */
 export class InMemoryGuardrailEvidenceSink implements GuardrailEvidenceSink {
   readonly #evaluations: GuardrailEvidence[] = [];

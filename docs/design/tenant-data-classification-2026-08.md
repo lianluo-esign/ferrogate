@@ -292,8 +292,8 @@ SQL-migration tables; C57–C59 are the three runtime MCP tables (see the correc
 | C43 | `self_hosted_worker_checkpoints` | tenant-private | same |
 | C44 | `self_hosted_run_dispatches` | tenant-private | a dispatch is one tenant's run assigned to one of its own workers |
 | C45 | `tenant_provider_credentials` | tenant-private | the cleanest move in the schema: `PRIMARY KEY (tenant_id, alias)`, envelope-encrypted BYOK, **no cross-tenant reader anywhere**. Moving it is a security win (residency + blast radius), not just a topology change |
-| C46 | `guardrail_evaluations` | **derived** | has `tenant`, but the platform-operator investigation surface reads it with the `WHERE` omitted entirely (`admin_request_log.ts:684-691`) and SIEM exports it fleet-wide |
-| C47 | `guardrail_check_evaluations` | tenant-private | has **only** `evaluation_id` — no tenant reachable without its parent, so it moves with C46 or orphans; `guardrailChecksFor` (`admin_request_log.ts:655-666`) inherits C46's fence today |
+| C46 | `guardrail_evaluations` | **derived** | tenant-attributed rows are authoritative in `TenantDataObject`; CONTROL stores a tenant-qualified projection for platform-operator/fleet reads, while unscoped rows remain CONTROL-owned |
+| C47 | `guardrail_check_evaluations` | **derived** | moves with C46 into the tenant object and is projected with the parent's tenant-qualified key; the child cannot be authoritative separately because it has only `evaluation_id` |
 | C48 | `semantic_cache_policies` | tenant-private | `PRIMARY KEY (scope_type, scope_id)`, read with both bound (`cache/governance.ts:160`) |
 | C49 | `siem_export_cursors` | platform-shared | reclassified — see the refutation log. The key is `PRIMARY KEY (sink_id, stream)` (`0005_siem_export_cursors.sql:58`), **globally unique across tenants**, and that collision is the mis-edited-config detector the `tenant` column was added to serve (`:44-47`). Same structure as C19, same label. The bookmark stays on control D1; the rows it bookmarks move, which is a coupling the pump must handle explicitly rather than a reason to move the cursor |
 | C50 | `delegation_revocations` | tenant-private | `PRIMARY KEY (tenant, subject)`, checked inside an already-authenticated request; a revocation that could be read cross-tenant would be a leak, not a feature |
@@ -430,6 +430,22 @@ request-evidence authorities in #859. The remaining #825 work is the common
 bounded, paginated, freshness/as-of, and deletion/tombstone contract for these
 fleet surfaces. Analytics Engine is a future option, not an implementation in
 #859.
+
+### #860 implementation boundary
+
+#860 establishes the source-of-truth split for C46/C47: tenant-attributed
+guardrail evaluations and checks are written to and read from the exact
+`TenantDataObject`, while CONTROL stores only the tenant-qualified projection.
+The queue consumer and direct sink both write one tenant group to the object
+before projecting it. Tenant list/investigation reads use the object; operator
+reads use the projection and expose its derived/as-of status. Retention follows
+the same order, and a projection failure leaves the authoritative object row
+deleted only when the object delete itself succeeded, never the reverse.
+
+Because `billing_events` still has no tenant column, tenant investigations leave
+the billing leg empty rather than using a request-id-only CONTROL lookup. The
+cost leg can be restored after a later issue gives the billing projection an
+explicit tenant fence.
 
 ---
 

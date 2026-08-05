@@ -67,14 +67,18 @@ const CONTROL_ONLY = [
   // and the split is enforced by nothing but which directory the file sits in —
   // so every `CREATE TABLE` a control migration adds belongs on this list.
   "tenant_provider_credentials", // 0003
-  "guardrail_evaluations", // 0004
-  "guardrail_check_evaluations", // 0004
   "semantic_cache_policies", // 0004
   "siem_export_cursors", // 0005
 ] as const;
 
 /** Evidence whose authority is tenant-local but whose compatibility projection remains in CONTROL. */
-const DERIVED_EVIDENCE = ["agent_runs", "agent_run_events", "request_logs"] as const;
+const DERIVED_EVIDENCE = [
+  "agent_runs",
+  "agent_run_events",
+  "request_logs",
+  "guardrail_evaluations",
+  "guardrail_check_evaluations",
+] as const;
 
 /** Families that must live ONLY in a tenant database. */
 const TENANT_ONLY = [

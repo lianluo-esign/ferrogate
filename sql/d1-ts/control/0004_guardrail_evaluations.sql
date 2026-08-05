@@ -11,22 +11,21 @@
 -- cannot defend in a review, and the absence of a record is how an auditor
 -- concludes a control did not run.
 --
--- ## Why the CONTROL database and not the tenant one
+-- ## Current storage boundary
 --
--- `evidence.ts` used to argue for the TENANT database ("evidence is per-tenant
--- append-only"). That is reversed here deliberately, for the same reason
--- `0001_init_control.sql` gives for `request_logs` / `audit_events` under split
--- rule (d): these are single global tables scanned time-ordered ACROSS tenants,
--- their `tenant` column is a composite storage key rather than a routing key,
--- and the two reads that matter — the fleet-wide evidence list and the
--- investigation join onto `request_logs` / `audit_events` / `billing_events` —
--- are single-database queries here and cross-database fan-out merge-sorts
--- there. D1 has no read spanning two databases, so putting the evidence in the
--- tenant database would make the investigation view unimplementable.
+-- This migration is the original CONTROL-side shape retained for upgrade
+-- compatibility. Tenant-attributed evidence is authoritative in
+-- `sql/d1-ts/tenant/0013_guardrail_evaluations.sql`; the gateway writes that
+-- object first and projects a copy here for bounded fleet/operator reads.
+-- `sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql` rebuilds
+-- these tables with tenant-qualified `projection_key` values because the
+-- logical evaluation id is only unique inside one TenantDataObject. Unscoped
+-- platform evidence remains CONTROL-owned because it has no tenant object.
 --
--- It also puts the write on the SAME database the request-log writer already
--- targets (`CONTROL_DB`), which is what lets #665 share #664's Queue, its
--- consumer and its retention sweep instead of standing up a second pipeline.
+-- The split preserves one queue and one fleet reader without making CONTROL a
+-- fallback authority for a tenant. Tenant-scoped list/investigation reads use
+-- the exact object; operator reads use the projection until #825 defines the
+-- general bounded/as-of fan-out freshness contract.
 --
 -- ## Parity
 --

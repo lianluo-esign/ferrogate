@@ -1,18 +1,18 @@
 /**
- * `guardrail_evaluations` / `guardrail_check_evaluations` in the CONTROL
- * database — the durable half of guardrail screening evidence (#665).
+ * `guardrail_evaluations` / `guardrail_check_evaluations` persistence (#665,
+ * #860).
  *
- * The tables are defined by `sql/d1-ts/control/0004_guardrail_evaluations.sql`.
- * `apps/control-plane` READS them; this module is the only writer in the tree,
- * and it lives on the gateway because that is the only Worker on the screening
- * path.
+ * Tenant-attributed rows are authoritative in the owning TenantDataObject from
+ * `sql/d1-ts/tenant/0013_guardrail_evaluations.sql`. The control-D1 tables from
+ * `sql/d1-ts/control/0004_guardrail_evaluations.sql` remain a derived,
+ * tenant-qualified projection for platform/fleet readers until #825.
  *
- * Deliberately the same shape as `../requestlog/d1.ts`, statement for
- * statement: a COALESCE upsert keyed on the deterministic evidence id, written
- * through `db.batch` so one delivery is one round trip and one atomic unit.
- * Two writers against one database that disagreed about redelivery would be a
- * class of bug nobody would find until an incident.
+ * Both stores use the same COALESCE upsert semantics and parent-before-child
+ * batch ordering. The database-specific conflict key is the important split:
+ * a tenant object can use its local logical id, while the shared projection
+ * must use the tenant-qualified `evidenceProjectionKey`.
  */
+import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
 import { type GuardrailEvidenceEnvelope, guardrailEvidenceToWire } from "./evidence-wire.js";
 
 /** The tables `apps/control-plane/src/store/d1.ts` reads. */
@@ -47,14 +47,7 @@ export const GUARDRAIL_CHECK_TABLE = "guardrail_check_evaluations";
  * frame 9 was blocked, and a `COALESCE` there would preserve the `pass` and
  * report that the guardrail let it through.
  */
-export const GUARDRAIL_EVALUATION_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE} (
-  id, request_id, trace_id, agent_run_id, subject_id, tenant,
-  scope_type, scope_id, target, protocol, stage, mode,
-  policy_id, policy_revision, verdict, action, enforcement_status,
-  latency_ms, finding_count, input_fingerprint, action_fingerprint,
-  occurred_at_unix, evaluation_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (id) DO UPDATE SET
+const GUARDRAIL_EVALUATION_UPDATE_SET = `DO UPDATE SET
   trace_id = COALESCE(excluded.trace_id, ${GUARDRAIL_EVALUATION_TABLE}.trace_id),
   agent_run_id = COALESCE(excluded.agent_run_id, ${GUARDRAIL_EVALUATION_TABLE}.agent_run_id),
   subject_id = COALESCE(excluded.subject_id, ${GUARDRAIL_EVALUATION_TABLE}.subject_id),
@@ -77,6 +70,26 @@ ON CONFLICT (id) DO UPDATE SET
   occurred_at_unix = excluded.occurred_at_unix,
   evaluation_json = excluded.evaluation_json`;
 
+/** Control-D1 projection write; the tenant-qualified key is the conflict key. */
+export const GUARDRAIL_EVALUATION_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE} (
+  projection_key, id, request_id, trace_id, agent_run_id, subject_id, tenant,
+  scope_type, scope_id, target, protocol, stage, mode,
+  policy_id, policy_revision, verdict, action, enforcement_status,
+  latency_ms, finding_count, input_fingerprint, action_fingerprint,
+  occurred_at_unix, evaluation_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) ${GUARDRAIL_EVALUATION_UPDATE_SET}`;
+
+/** Tenant-object authoritative write; one object contains one tenant. */
+export const TENANT_GUARDRAIL_EVALUATION_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE} (
+  id, request_id, trace_id, agent_run_id, subject_id, tenant,
+  scope_type, scope_id, target, protocol, stage, mode,
+  policy_id, policy_revision, verdict, action, enforcement_status,
+  latency_ms, finding_count, input_fingerprint, action_fingerprint,
+  occurred_at_unix, evaluation_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) ${GUARDRAIL_EVALUATION_UPDATE_SET}`;
+
 /**
  * The check upsert.
  *
@@ -85,11 +98,7 @@ ON CONFLICT (id) DO UPDATE SET
  * reason: a detector that passed an early frame and failed a later one has
  * failed.
  */
-export const GUARDRAIL_CHECK_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_CHECK_TABLE} (
-  id, evaluation_id, check_id, detector_id, detector_version, config_digest,
-  verdict, action, enforcement_status, error_kind, check_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (id) DO UPDATE SET
+const GUARDRAIL_CHECK_UPDATE_SET = `DO UPDATE SET
   detector_id = excluded.detector_id,
   detector_version = excluded.detector_version,
   config_digest = excluded.config_digest,
@@ -98,6 +107,21 @@ ON CONFLICT (id) DO UPDATE SET
   enforcement_status = excluded.enforcement_status,
   error_kind = COALESCE(excluded.error_kind, ${GUARDRAIL_CHECK_TABLE}.error_kind),
   check_json = excluded.check_json`;
+
+/** Control-D1 projection child write; its parent key carries tenant scope. */
+export const GUARDRAIL_CHECK_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_CHECK_TABLE} (
+  projection_key, id, evaluation_projection_key, evaluation_id, tenant,
+  check_id, detector_id, detector_version, config_digest,
+  verdict, action, enforcement_status, error_kind, check_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) ${GUARDRAIL_CHECK_UPDATE_SET}`;
+
+/** Tenant-object authoritative child write. */
+export const TENANT_GUARDRAIL_CHECK_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_CHECK_TABLE} (
+  id, evaluation_id, tenant, check_id, detector_id, detector_version, config_digest,
+  verdict, action, enforcement_status, error_kind, check_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) ${GUARDRAIL_CHECK_UPDATE_SET}`;
 
 /** `undefined` → SQL NULL, so an unknown fact is stored as unknown. */
 function bindOptional(value: string | number | undefined): string | number | null {
@@ -116,6 +140,32 @@ export interface GuardrailEvidenceDatabase {
     bind(...values: unknown[]): { run(): Promise<unknown>; all(): Promise<unknown> };
   };
   batch(statements: unknown[]): Promise<unknown[]>;
+}
+
+/** Resolve the authoritative SQLite-backed TenantDataObject facade. */
+export function guardrailTenantDatabaseFromEnv(
+  env: unknown,
+  tenantId: string,
+): GuardrailEvidenceDatabase | undefined {
+  if (
+    typeof env !== "object" ||
+    env === null ||
+    (env as { TENANT_DATA?: unknown }).TENANT_DATA === undefined
+  ) {
+    return undefined;
+  }
+  return requestLogTenantDatabaseFrom(env, tenantId) as GuardrailEvidenceDatabase | undefined;
+}
+
+/** A non-empty authenticated tenant id is required for object-authoritative writes. */
+function tenantIdOf(envelope: GuardrailEvidenceEnvelope): string {
+  const tenantId = envelope.evaluation.tenant.organizationId;
+  if (typeof tenantId !== "string" || tenantId.trim() === "") {
+    throw new Error(
+      `guardrail evidence ${envelope.evaluation.id} has no tenant and cannot enter a TenantDataObject`,
+    );
+  }
+  return tenantId;
 }
 
 /**
@@ -138,6 +188,15 @@ export async function writeGuardrailEvidence(
   await db.batch(guardrailEvidenceStatements(db, envelopes));
 }
 
+/** Persist one same-tenant batch in its authoritative object. */
+export async function writeTenantGuardrailEvidence(
+  db: GuardrailEvidenceDatabase,
+  envelopes: readonly GuardrailEvidenceEnvelope[],
+): Promise<void> {
+  if (envelopes.length === 0) return;
+  await db.batch(tenantGuardrailEvidenceStatements(db, envelopes));
+}
+
 /**
  * The prepared statements for a batch, WITHOUT running them.
  *
@@ -156,8 +215,10 @@ export function guardrailEvidenceStatements(
   for (const envelope of envelopes) {
     const wire = guardrailEvidenceToWire(envelope);
     const evaluation = envelope.evaluation;
+    const tenantId = evaluation.tenant.organizationId;
     parents.push(
       evaluationStatement.bind(
+        evidenceProjectionKey(tenantId, evaluation.id),
         evaluation.id,
         evaluation.requestId,
         bindOptional(evaluation.traceId),
@@ -183,12 +244,86 @@ export function guardrailEvidenceStatements(
         JSON.stringify(wire),
       ),
     );
-    const checkWires = Array.isArray(wire["checks"]) ? (wire["checks"] as unknown[]) : [];
+    const checkWires = Array.isArray(wire.checks) ? (wire.checks as unknown[]) : [];
+    envelope.checks.forEach((check, index) => {
+      children.push(
+        checkStatement.bind(
+          evidenceProjectionKey(tenantId, check.id),
+          check.id,
+          evidenceProjectionKey(tenantId, evaluation.id),
+          evaluation.id,
+          tenantId ?? null,
+          check.checkId,
+          check.detectorId,
+          check.detectorVersion,
+          check.configDigest,
+          check.verdict,
+          check.action,
+          check.enforcementStatus,
+          bindOptional(check.errorKind),
+          JSON.stringify(checkWires[index] ?? {}),
+        ),
+      );
+    });
+  }
+  return [...parents, ...children];
+}
+
+/** Prepared parent-before-child statements for one same-tenant object batch. */
+export function tenantGuardrailEvidenceStatements(
+  db: GuardrailEvidenceDatabase,
+  envelopes: readonly GuardrailEvidenceEnvelope[],
+): unknown[] {
+  const evaluationStatement = db.prepare(TENANT_GUARDRAIL_EVALUATION_UPSERT_SQL);
+  const checkStatement = db.prepare(TENANT_GUARDRAIL_CHECK_UPSERT_SQL);
+  const parents: unknown[] = [];
+  const children: unknown[] = [];
+  let batchTenant: string | undefined;
+
+  for (const envelope of envelopes) {
+    const tenantId = tenantIdOf(envelope);
+    if (batchTenant === undefined) batchTenant = tenantId;
+    if (batchTenant !== tenantId) {
+      throw new Error(
+        `guardrail evidence batch mixes tenants ${batchTenant} and ${tenantId}; split by object`,
+      );
+    }
+    const wire = guardrailEvidenceToWire(envelope);
+    const evaluation = envelope.evaluation;
+    parents.push(
+      evaluationStatement.bind(
+        evaluation.id,
+        evaluation.requestId,
+        bindOptional(evaluation.traceId),
+        bindOptional(evaluation.agentRunId),
+        bindOptional(evaluation.subjectId),
+        tenantId,
+        evaluation.scopeType,
+        bindOptional(evaluation.scopeId),
+        evaluation.target,
+        evaluation.protocol,
+        evaluation.stage,
+        evaluation.mode,
+        evaluation.policyId,
+        evaluation.policyRevision,
+        evaluation.verdict,
+        evaluation.action,
+        evaluation.enforcementStatus,
+        evaluation.latencyMs,
+        evaluation.findingCount,
+        evaluation.inputFingerprint,
+        bindOptional(evaluation.actionFingerprint),
+        evaluation.occurredAtUnix,
+        JSON.stringify(wire),
+      ),
+    );
+    const checkWires = Array.isArray(wire.checks) ? (wire.checks as unknown[]) : [];
     envelope.checks.forEach((check, index) => {
       children.push(
         checkStatement.bind(
           check.id,
           evaluation.id,
+          tenantId,
           check.checkId,
           check.detectorId,
           check.detectorVersion,

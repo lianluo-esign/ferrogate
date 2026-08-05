@@ -182,8 +182,8 @@ export function guardrailDepsFromEnv(
 /**
  * The evidence sink for a Worker `env` (#665).
  *
- * DURABLE whenever a destination is bound — the `REQUEST_LOG` queue or the
- * `CONTROL_DB` D1 that owns `guardrail_evaluations` — and in-memory otherwise.
+ * DURABLE whenever a destination is bound — the `REQUEST_LOG` queue,
+ * `TENANT_DATA`, or the `CONTROL_DB` projection — and in-memory otherwise.
  *
  * The fork is on the BINDING rather than on a feature flag, deliberately. A
  * deployment with no evidence destination is `wrangler dev --local`, a unit
@@ -196,7 +196,8 @@ export function guardrailDepsFromEnv(
 function guardrailEvidenceSinkFor(env: Record<string, unknown>): GuardrailEvidenceSink {
   const durable =
     guardrailEvidenceQueueFrom(env) !== undefined ||
-    guardrailEvidenceDatabaseFrom(env) !== undefined;
+    guardrailEvidenceDatabaseFrom(env) !== undefined ||
+    env.TENANT_DATA !== undefined;
   return durable ? new DurableGuardrailEvidenceSink() : new InMemoryGuardrailEvidenceSink();
 }
 

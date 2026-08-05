@@ -244,9 +244,7 @@ function constantTable(app: string): ReadonlyMap<string, string> {
  */
 /** The SQL statements one module contains, as text. */
 function sqlLiteralsOf(code: string): readonly string[] {
-  const strings = [
-    ...code.matchAll(/"((?:SELECT|INSERT INTO|UPDATE|DELETE FROM)[^"]*)"/gi),
-  ];
+  const strings = [...code.matchAll(/"((?:SELECT|INSERT INTO|UPDATE|DELETE FROM)[^"]*)"/gi)];
   const joined: string[] = [];
   for (const first of strings) {
     let literal = first[1] as string;
@@ -260,10 +258,9 @@ function sqlLiteralsOf(code: string): readonly string[] {
     joined.push(literal);
   }
 
-  return [
-    ...[...code.matchAll(/`([^`]*)`/g)].map((m) => m[1] as string),
-    ...joined,
-  ].filter((literal) => /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(literal));
+  return [...[...code.matchAll(/`([^`]*)`/g)].map((m) => m[1] as string), ...joined].filter(
+    (literal) => /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(literal),
+  );
 }
 
 function tablesOf(app: string): ReadonlySet<string> {
@@ -475,9 +472,7 @@ describe("§0.2 shared package refusal evidence", () => {
     const sources = Object.values(SHARED_BILLING_ASSET_EGRESS);
     expect(sources).toHaveLength(1);
     expect(SHARED_ASSET_EGRESS_CONSUMERS).toEqual(["gateway", "mcp"]);
-    expect(sources[0]).toMatch(
-      /status:\s*429,\s*code:\s*"governance_counter_unavailable"/,
-    );
+    expect(sources[0]).toMatch(/status:\s*429,\s*code:\s*"governance_counter_unavailable"/);
     expect(REFUSAL_INDEX.get("governance_counter_unavailable")?.get("gateway")).toContain(429);
     expect(REFUSAL_INDEX.get("governance_counter_unavailable")?.get("mcp")).toContain(429);
   });
@@ -592,8 +587,8 @@ describe("§1 the scan is real", () => {
         "yanked, visibility FROM stored_assets WHERE tenant_id = ?1";
     `);
     const tables = literals.flatMap((literal) =>
-      [...literal.matchAll(/\bFROM\s+([a-z_][a-z0-9_]*)/gi)].map(
-        (match) => (match[1] as string).toLowerCase(),
+      [...literal.matchAll(/\bFROM\s+([a-z_][a-z0-9_]*)/gi)].map((match) =>
+        (match[1] as string).toLowerCase(),
       ),
     );
 
@@ -605,8 +600,8 @@ describe("§1 the scan is real", () => {
       const label = "UPDATE " + "the row FROM config";
     `);
     const tables = literals.flatMap((literal) =>
-      [...literal.matchAll(/\b(?:FROM|UPDATE)\s+([a-z_][a-z0-9_]*)/gi)].map(
-        (match) => (match[1] as string).toLowerCase(),
+      [...literal.matchAll(/\b(?:FROM|UPDATE)\s+([a-z_][a-z0-9_]*)/gi)].map((match) =>
+        (match[1] as string).toLowerCase(),
       ),
     );
 
@@ -619,8 +614,8 @@ describe("§1 the scan is real", () => {
       const statement = "SELECT a FROM real_table";
     `);
     const tables = literals.flatMap((literal) =>
-      [...literal.matchAll(/\bFROM\s+([a-z_][a-z0-9_]*)/gi)].map(
-        (match) => (match[1] as string).toLowerCase(),
+      [...literal.matchAll(/\bFROM\s+([a-z_][a-z0-9_]*)/gi)].map((match) =>
+        (match[1] as string).toLowerCase(),
       ),
     );
 
@@ -764,12 +759,7 @@ const CONTROLS: readonly FleetControl[] = [
     // rather than by an operator — is exactly why it may only ever NARROW and
     // why every row expires; both are held by
     // `apps/gateway/test/ratelimit/spend-throttle.test.ts`.
-    authorityTables: [
-      "quota_policies",
-      "wallets",
-      "usage_monthly_rollups",
-      "spend_throttles",
-    ],
+    authorityTables: ["quota_policies", "wallets", "usage_monthly_rollups", "spend_throttles"],
     deployVar: /FG_DEV_QUOTA_POLICIES|GATEWAY_QUOTA_POLICIES/,
     refusalCode: "quota_scope_disabled",
   },
@@ -1405,23 +1395,18 @@ describe("§4 fleet-wide ratchets", () => {
       // control-D1 copies are derived fleet projections.
       "agent_runs",
       "agent_run_events",
-      // #665 — guardrail screening evidence, newly SHARED on exactly the same
-      // terms as `request_logs` above (written by
-      // `apps/gateway/src/guardrails/`, read by
-      // `apps/control-plane/src/routes/admin_request_log.ts`) and classified
-      // the same way: they record what SCREENING DECIDED, and nothing consults
-      // them before deciding anything. The control here is the guardrail
-      // POLICY, which is a different pair of tables
-      // (`guardrail_policy_revisions` / `guardrail_policy_bindings`) and is
+      // #860 — guardrail screening evidence is tenant-object authoritative,
+      // with a tenant-qualified CONTROL projection for the operator fleet
+      // reader. It is a derived evidence stream rather than an enforcement
+      // control; the control here is the guardrail POLICY, a different pair of
+      // tables (`guardrail_policy_revisions` / `guardrail_policy_bindings`)
       // registered in §3.
       //
-      // Answering this ratchet's question explicitly — "does a change to these
-      // apply to both Workers?" — yes, and the schema enforces it rather than a
-      // registry entry: both Workers name the columns of
-      // `sql/d1-ts/control/0004_guardrail_evaluations.sql`, both suites apply
-      // the deployed migration rather than a fixture, and a column rename
-      // breaks `apps/gateway/test/guardrails/evidence-write.test.ts` and
-      // `apps/control-plane/test/guardrail-evidence-read.test.ts` together.
+      // Both Workers still share the projection schema and migration contract,
+      // while the gateway also applies the tenant schema and the control-plane
+      // tenant reader applies the same object schema through its router. A
+      // column rename breaks the gateway writer and control-plane reader suites
+      // together.
       //
       // The tenant FENCE on these tables is not shared — only the control plane
       // serves the read, and `guardrail-evidence-read.test.ts` proves it from

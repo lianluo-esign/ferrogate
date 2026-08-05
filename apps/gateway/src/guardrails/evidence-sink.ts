@@ -32,12 +32,14 @@
  *     └── ctx.waitUntil(evidence.flush({ env, ctx }))
  *            ├── env.REQUEST_LOG bound?  → Queue.send(wire)       ← preferred
  *            │      … later, on the consumer:
- *            │      queue(batch) → guardrailEvidenceFromWire → writeGuardrailEvidence
- *            └── else CONTROL_DB bound?  → writeGuardrailEvidence(CONTROL_DB)
+ *            │      queue(batch) → object batch → CONTROL_DB projection
+ *            └── no queue? → TenantDataObject first, then CONTROL_DB projection
+ *                 (unscoped platform evidence stays in CONTROL_DB)
  * ```
  *
- * Identical to `../requestlog/sink.ts` down to the binding names, and that is
- * the point: one queue, one consumer, one D1, one set of retry semantics.
+ * The queue path shares `../requestlog/queue.ts`: one delivery writes each
+ * tenant group to its object and then writes the derived CONTROL projection.
+ * The direct path uses the same object-first ordering without the queue.
  *
  * With NEITHER bound the sink counts a `dropped` and returns TRUE from
  * `append`. Refusing instead would take every screened request down on a
@@ -47,7 +49,12 @@
  * writer" look identical from the admin API and that confusion is the whole
  * defect #665 exists to close.
  */
-import { type GuardrailEvidenceDatabase, writeGuardrailEvidence } from "./evidence-d1.js";
+import {
+  type GuardrailEvidenceDatabase,
+  guardrailTenantDatabaseFromEnv,
+  writeGuardrailEvidence,
+  writeTenantGuardrailEvidence,
+} from "./evidence-d1.js";
 import type { GuardrailEvidenceEnvelope } from "./evidence-wire.js";
 import { guardrailEvidenceToWire } from "./evidence-wire.js";
 import type { GuardrailCheckEvidence, GuardrailEvidence, GuardrailEvidenceSink } from "./ports.js";
@@ -76,13 +83,12 @@ export interface GuardrailEvidenceStats {
 export interface GuardrailEvidenceBindings {
   readonly REQUEST_LOG?: unknown;
   /**
-   * `[[d1_databases]] binding = "CONTROL_DB"` — the CONTROL database that owns
-   * the evidence tables.
-   *
-   * NOT `DB`: that is the TENANT database, whose migration does not contain
-   * these tables. Writing there would create nothing and read back nothing.
+   * `[[d1_databases]] binding = "CONTROL_DB"` — the derived fleet projection.
+   * Tenant-attributed authority is `TENANT_DATA`, not this binding.
    */
   readonly CONTROL_DB?: unknown;
+  /** `[[durable_objects.bindings]] binding = "TENANT_DATA"`. */
+  readonly TENANT_DATA?: unknown;
 }
 
 export interface GuardrailEvidenceDiagnostics {
@@ -92,6 +98,10 @@ export interface GuardrailEvidenceDiagnostics {
 export interface GuardrailEvidenceSinkOptions {
   readonly queue?: (env: unknown) => GuardrailEvidenceQueue | undefined;
   readonly database?: (env: unknown) => GuardrailEvidenceDatabase | undefined;
+  readonly tenantDatabase?: (
+    env: unknown,
+    tenantId: string,
+  ) => GuardrailEvidenceDatabase | undefined;
   readonly diagnostics?: GuardrailEvidenceDiagnostics | undefined;
   /**
    * How many un-flushed evaluations may be buffered before `append` refuses.
@@ -116,6 +126,12 @@ function isDatabase(value: unknown): value is GuardrailEvidenceDatabase {
   return typeof candidate.prepare === "function" && typeof candidate.batch === "function";
 }
 
+/** Pending-buffer identity must match the shared projection's tenant boundary. */
+function evidenceBufferKey(evaluation: GuardrailEvidence): string {
+  const tenant = evaluation.tenant.organizationId ?? "";
+  return `${Array.from(tenant).length}:${tenant}:${evaluation.id}`;
+}
+
 /**
  * `env.REQUEST_LOG`, when it really is a Queue producer binding.
  *
@@ -137,6 +153,14 @@ export function guardrailEvidenceDatabaseFrom(env: unknown): GuardrailEvidenceDa
   return isDatabase(candidate) ? candidate : undefined;
 }
 
+/** Resolve one tenant's authoritative Durable Object database facade. */
+export function guardrailEvidenceTenantDatabaseFromEnv(
+  env: unknown,
+  tenantId: string,
+): GuardrailEvidenceDatabase | undefined {
+  return guardrailTenantDatabaseFromEnv(env, tenantId);
+}
+
 /**
  * The production binding resolver.
  *
@@ -147,15 +171,20 @@ export function guardrailEvidenceDatabaseFrom(env: unknown): GuardrailEvidenceDa
  * `../requestlog/sink.ts::requestLogBindingsFromEnv`.
  */
 export const guardrailEvidenceBindingsFromEnv: Required<
-  Pick<GuardrailEvidenceSinkOptions, "queue" | "database">
+  Pick<GuardrailEvidenceSinkOptions, "queue" | "database" | "tenantDatabase">
 > = {
   queue: guardrailEvidenceQueueFrom,
   database: guardrailEvidenceDatabaseFrom,
+  tenantDatabase: guardrailEvidenceTenantDatabaseFromEnv,
 };
 
 export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
   readonly #queueOf: (env: unknown) => GuardrailEvidenceQueue | undefined;
   readonly #databaseOf: (env: unknown) => GuardrailEvidenceDatabase | undefined;
+  readonly #tenantDatabaseOf: (
+    env: unknown,
+    tenantId: string,
+  ) => GuardrailEvidenceDatabase | undefined;
   readonly #diagnostics: GuardrailEvidenceDiagnostics | undefined;
   readonly #capacity: number;
   /**
@@ -177,6 +206,7 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
   constructor(options: GuardrailEvidenceSinkOptions = {}) {
     this.#queueOf = options.queue ?? guardrailEvidenceQueueFrom;
     this.#databaseOf = options.database ?? guardrailEvidenceDatabaseFrom;
+    this.#tenantDatabaseOf = options.tenantDatabase ?? guardrailEvidenceTenantDatabaseFromEnv;
     this.#diagnostics = options.diagnostics;
     this.#capacity = options.capacity ?? 1024;
   }
@@ -196,6 +226,14 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
     return this.#pending.size;
   }
 
+  /** Requeue failed delivery without replacing a newer concurrent append. */
+  #requeue(envelopes: readonly GuardrailEvidenceEnvelope[]): void {
+    for (const envelope of envelopes) {
+      const key = evidenceBufferKey(envelope.evaluation);
+      if (!this.#pending.has(key)) this.#pending.set(key, envelope);
+    }
+  }
+
   /**
    * Buffer one evaluation. SYNCHRONOUS, and the only thing that can make it
    * return `false` is capacity.
@@ -206,11 +244,12 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
    * than a refusal.
    */
   append(evaluation: GuardrailEvidence, checks: readonly GuardrailCheckEvidence[]): boolean {
-    if (!this.#pending.has(evaluation.id) && this.#pending.size >= this.#capacity) {
+    const key = evidenceBufferKey(evaluation);
+    if (!this.#pending.has(key) && this.#pending.size >= this.#capacity) {
       this.#refused += 1;
       return false;
     }
-    this.#pending.set(evaluation.id, { evaluation, checks });
+    this.#pending.set(key, { evaluation, checks });
     return true;
   }
 
@@ -232,7 +271,7 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
   recorrelate(previousRequestId: string, requestId: string): void {
     if (previousRequestId === requestId || this.#pending.size === 0) return;
     const moved: [string, GuardrailEvidenceEnvelope][] = [];
-    for (const [id, envelope] of this.#pending) {
+    for (const [key, envelope] of this.#pending) {
       if (envelope.evaluation.requestId !== previousRequestId) continue;
       const rekey = (value: string): string =>
         value.startsWith(`${previousRequestId}/`)
@@ -240,7 +279,7 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
           : value;
       const evaluationId = rekey(envelope.evaluation.id);
       moved.push([
-        id,
+        key,
         {
           evaluation: { ...envelope.evaluation, id: evaluationId, requestId },
           checks: envelope.checks.map((check) => ({
@@ -251,9 +290,9 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
         },
       ]);
     }
-    for (const [oldId, envelope] of moved) {
-      this.#pending.delete(oldId);
-      this.#pending.set(envelope.evaluation.id, envelope);
+    for (const [oldKey, envelope] of moved) {
+      this.#pending.delete(oldKey);
+      this.#pending.set(evidenceBufferKey(envelope.evaluation), envelope);
     }
   }
 
@@ -290,16 +329,82 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       }
     }
 
-    const db = this.#databaseOf(runtime.env);
+    // Write tenant-attributed evidence to each exact object first. A missing
+    // object is a failed authoritative path, never permission to use CONTROL_DB.
+    const objectWritten: GuardrailEvidenceEnvelope[] = [];
+    const unscoped: GuardrailEvidenceEnvelope[] = [];
+    const byTenant = new Map<string, GuardrailEvidenceEnvelope[]>();
+    for (const envelope of envelopes) {
+      const tenantId = envelope.evaluation.tenant.organizationId;
+      if (typeof tenantId !== "string" || tenantId.trim() === "") {
+        unscoped.push(envelope);
+        continue;
+      }
+      const group = byTenant.get(tenantId) ?? [];
+      group.push(envelope);
+      byTenant.set(tenantId, group);
+    }
+    for (const [tenantId, group] of byTenant) {
+      let tenantDb: GuardrailEvidenceDatabase | undefined;
+      try {
+        tenantDb = this.#tenantDatabaseOf(runtime.env, tenantId);
+      } catch (error) {
+        this.#failed += group.length;
+        this.#requeue(group);
+        this.#diagnostics?.onError?.("d1", error);
+        continue;
+      }
+      if (tenantDb === undefined) {
+        this.#failed += group.length;
+        let projectionAvailable = false;
+        try {
+          projectionAvailable = this.#databaseOf(runtime.env) !== undefined;
+        } catch {
+          // No usable destination is the same observable outcome as an absent
+          // binding; the diagnostics below still retain the failure signal.
+        }
+        if (projectionAvailable) this.#requeue(group);
+        else this.#dropped += group.length;
+        this.#diagnostics?.onError?.(
+          "d1",
+          new Error(`authoritative TenantDataObject is unavailable for tenant ${tenantId}`),
+        );
+        continue;
+      }
+      try {
+        await writeTenantGuardrailEvidence(tenantDb, group);
+        objectWritten.push(...group);
+        this.#written += group.length;
+      } catch (error) {
+        this.#failed += group.length;
+        this.#requeue(group);
+        this.#diagnostics?.onError?.("d1", error);
+      }
+    }
+
+    // The projection is best-effort compatibility state. It is written only
+    // for object rows that landed, plus unscoped rows which have no object.
+    const projectionEnvelopes = [...objectWritten, ...unscoped];
+    if (projectionEnvelopes.length === 0) return;
+    let db: GuardrailEvidenceDatabase | undefined;
+    try {
+      db = this.#databaseOf(runtime.env);
+    } catch (error) {
+      this.#failed += projectionEnvelopes.length;
+      this.#requeue(projectionEnvelopes);
+      this.#diagnostics?.onError?.("d1", error);
+      return;
+    }
     if (db === undefined) {
-      this.#dropped += envelopes.length;
+      this.#dropped += unscoped.length;
       return;
     }
     try {
-      await writeGuardrailEvidence(db, envelopes);
-      this.#written += envelopes.length;
+      await writeGuardrailEvidence(db, projectionEnvelopes);
+      this.#written += unscoped.length;
     } catch (error) {
-      this.#failed += envelopes.length;
+      this.#failed += projectionEnvelopes.length;
+      this.#requeue(projectionEnvelopes);
       this.#diagnostics?.onError?.("d1", error);
     }
   }

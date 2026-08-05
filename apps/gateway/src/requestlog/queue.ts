@@ -1,4 +1,3 @@
-import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
 /**
  * The CONSUMER half of the request-log queue — `export default { queue }` on
  * `src/worker.ts`.
@@ -31,20 +30,25 @@ import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
  * `requestLogFromWire` is total and returns `undefined` for exactly that case.
  *
  * Each tenant group is written in ONE object batch, and the compatibility rows
- * plus control-owned guardrail evidence are written in ONE projection batch.
+ * plus the derived guardrail projection are written in ONE CONTROL batch.
  * On failure the delivery is retried whole — with the upsert, rows that had
  * already landed are simply re-applied.
  */
 import {
+  guardrailEvidenceStatements,
+  tenantGuardrailEvidenceStatements,
+} from "../guardrails/evidence-d1.js";
+import {
+  GUARDRAIL_EVALUATION_OBJECT,
   type GuardrailEvidenceEnvelope,
   guardrailEvidenceFromWire,
 } from "../guardrails/evidence-wire.js";
 import {
-  TENANT_REQUEST_LOG_UPSERT_SQL,
   REQUEST_LOG_UPSERT_SQL,
+  type RequestLogDatabase,
+  TENANT_REQUEST_LOG_UPSERT_SQL,
   requestLogBindings,
   tenantRequestLogBindings,
-  type RequestLogDatabase,
 } from "./d1.js";
 import { requestLogFromWire } from "./record.js";
 import { requestLogDatabaseFrom, requestLogTenantDatabaseFromEnv } from "./sink.js";
@@ -64,6 +68,14 @@ export interface RequestLogConsumeResult {
   readonly malformed: number;
   /** True when the batch was handed back for redelivery. */
   readonly retried: boolean;
+}
+
+function isGuardrailEvidenceBody(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { object?: unknown }).object === GUARDRAIL_EVALUATION_OBJECT
+  );
 }
 
 /**
@@ -98,6 +110,13 @@ export async function consumeRequestLogBatch(
       evidence.push(envelope);
       continue;
     }
+    if (isGuardrailEvidenceBody(message.body)) {
+      malformed += 1;
+      // A guardrail discriminator with an invalid payload must not fall
+      // through to the permissive request-log decoder.
+      message.ack?.();
+      continue;
+    }
     const record = requestLogFromWire(message.body);
     if (record === undefined) {
       malformed += 1;
@@ -117,29 +136,44 @@ export async function consumeRequestLogBatch(
     // One object batch per tenant preserves append throughput and the
     // transaction boundary without pretending that two objects share a
     // transaction. Retries are safe because every row is an upsert.
-    const byTenant = new Map<string, typeof records>();
+    const byTenant = new Map<
+      string,
+      { records: typeof records; evidence: GuardrailEvidenceEnvelope[] }
+    >();
     for (const record of records) {
       if (record.tenantId === undefined || record.tenantId === "") continue;
-      const group = byTenant.get(record.tenantId) ?? [];
-      group.push(record);
+      const group = byTenant.get(record.tenantId) ?? { records: [], evidence: [] };
+      group.records.push(record);
       byTenant.set(record.tenantId, group);
     }
-    for (const [tenantId, tenantRecords] of byTenant) {
+    for (const envelope of evidence) {
+      const tenantId = envelope.evaluation.tenant.organizationId;
+      if (typeof tenantId !== "string" || tenantId.trim() === "") continue;
+      const group = byTenant.get(tenantId) ?? { records: [], evidence: [] };
+      group.evidence.push(envelope);
+      byTenant.set(tenantId, group);
+    }
+    for (const [tenantId, group] of byTenant) {
       const tenantDb = tenantDatabaseOf(env, tenantId);
       if (tenantDb === undefined) {
         throw new Error(`authoritative TenantDataObject is unavailable for tenant ${tenantId}`);
       }
-      const statement = tenantDb.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
-      await tenantDb.batch(
-        tenantRecords.map((record) => statement.bind(...tenantRequestLogBindings(record))),
-      );
+      const statements: unknown[] = [];
+      if (group.records.length > 0) {
+        const statement = tenantDb.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
+        statements.push(
+          ...group.records.map((record) => statement.bind(...tenantRequestLogBindings(record))),
+        );
+      }
+      statements.push(...tenantGuardrailEvidenceStatements(tenantDb, group.evidence));
+      await tenantDb.batch(statements);
     }
 
     const projection = databaseOf(env);
     if (projection === undefined) throw new Error("derived request-log projection is unavailable");
 
-    // The control batch is only the compatibility projection plus the existing
-    // control-owned guardrail evidence. It is not the source of truth for the
+    // The control batch is only the request-log compatibility projection plus
+    // the derived guardrail projection. It is not the source of truth for the
     // tenant rows above.
     const requestLogStatement = projection.prepare(REQUEST_LOG_UPSERT_SQL);
     const statements = [
