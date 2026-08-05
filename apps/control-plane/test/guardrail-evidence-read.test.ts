@@ -38,6 +38,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import {
+  type GuardrailEvaluationSeed,
   applySchema,
   db,
   resetD1,
@@ -80,25 +81,98 @@ async function exactTenantDatabase(tenantId: string): Promise<D1Database> {
       `INSERT INTO tenant_databases
          (tenant_id, database_uuid, database_name, binding_name, schema_version,
           storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, NULL, 12, 'durable_object', 'ready', 1, 1)
+       VALUES (?, ?, ?, NULL, 13, 'durable_object', 'ready', 1, 1)
        ON CONFLICT (tenant_id) DO UPDATE SET
          storage_backend = 'durable_object', provisioning_status = 'ready'`,
     )
     .bind(tenantId, `uuid-${tenantId}`, `db-${tenantId}`)
     .run();
-  return (
-    await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
-  ).db;
+  return (await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId))
+    .db;
 }
 
 async function clearExactTenantEvidence(): Promise<void> {
   for (const tenantId of ["t-1", "t-2"]) {
     const tenant = await exactTenantDatabase(tenantId);
     await tenant.batch([
+      tenant.prepare("DELETE FROM guardrail_check_evaluations"),
+      tenant.prepare("DELETE FROM guardrail_evaluations"),
       tenant.prepare("DELETE FROM agent_run_events"),
       tenant.prepare("DELETE FROM agent_runs"),
       tenant.prepare("DELETE FROM request_logs"),
     ]);
+  }
+}
+
+async function seedExactTenantGuardrailEvaluations(
+  rows: readonly GuardrailEvaluationSeed[],
+): Promise<void> {
+  for (const row of rows) {
+    if (row.tenant === undefined || row.tenant === null || row.tenant === "") continue;
+    const tenant = await exactTenantDatabase(row.tenant);
+    const statements = [
+      tenant
+        .prepare(
+          `INSERT INTO guardrail_evaluations
+             (id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id,
+              target, protocol, stage, mode, policy_id, policy_revision, verdict, action,
+              enforcement_status, latency_ms, finding_count, input_fingerprint,
+              action_fingerprint, occurred_at_unix, evaluation_json)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)`,
+        )
+        .bind(
+          row.id,
+          row.requestId,
+          row.traceId ?? null,
+          row.agentRunId ?? null,
+          row.subjectId ?? null,
+          row.tenant,
+          row.scopeType ?? "organization",
+          row.scopeId ?? null,
+          row.target ?? "unspecified",
+          row.protocol ?? "chat_completions",
+          row.stage ?? "request",
+          row.mode ?? "enforce",
+          row.policyId ?? "policy",
+          row.policyRevision ?? 1,
+          row.verdict ?? "fail",
+          row.action ?? "block",
+          row.enforcementStatus ?? "enforced",
+          row.latencyMs ?? 0,
+          row.findingCount ?? 0,
+          row.inputFingerprint ?? "hmac-sha256:unavailable",
+          row.actionFingerprint ?? null,
+          row.occurredAtUnix,
+          JSON.stringify(row.document ?? {}),
+        ),
+    ];
+    for (const check of row.checks ?? []) {
+      statements.push(
+        tenant
+          .prepare(
+            `INSERT INTO guardrail_check_evaluations
+               (id, evaluation_id, tenant, check_id, detector_id, detector_version,
+                config_digest, verdict, action, enforcement_status, error_kind, check_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+          )
+          .bind(
+            check.id,
+            row.id,
+            row.tenant,
+            check.checkId,
+            check.detectorId,
+            check.detectorVersion,
+            check.configDigest,
+            check.verdict,
+            check.action,
+            check.enforcementStatus,
+            check.errorKind ?? null,
+            JSON.stringify(check.document ?? {}),
+          ),
+      );
+    }
+    await tenant.batch(statements);
   }
 }
 
@@ -283,13 +357,15 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
 
 describe("the tenant fence on guardrail evidence", () => {
   beforeEach(async () => {
-    await seedGuardrailEvaluations([
+    const rows = [
       { ...BLOCKED, id: "ev-t1", requestId: "req-t1", tenant: "t-1", checks: [] },
       { ...BLOCKED, id: "ev-t2", requestId: "req-t2", tenant: "t-2", checks: [] },
       // An UNATTRIBUTED row: screening on a request whose credential resolved no
       // tenant, i.e. a platform-operator call. It is nobody's tenant data.
       { ...BLOCKED, id: "ev-none", requestId: "req-none", tenant: null, checks: [] },
-    ]);
+    ] as const;
+    await seedGuardrailEvaluations(rows);
+    await seedExactTenantGuardrailEvaluations(rows);
   });
 
   it("shows a tenant only its own evaluations", async () => {
@@ -300,6 +376,26 @@ describe("the tenant fence on guardrail evidence", () => {
   it("shows the OTHER tenant only its own evaluations", async () => {
     const page = await readEvaluations("k-other");
     expect(page.data.map((row) => row.id)).toEqual(["ev-t2"]);
+  });
+
+  it("does not use a control-only row as a tenant authority fallback", async () => {
+    await seedGuardrailEvaluations([
+      {
+        ...BLOCKED,
+        id: "projection-only",
+        requestId: "req-projection-only",
+        tenant: "t-1",
+        checks: [],
+      },
+    ]);
+    const page = await readEvaluations("k-tenant");
+    expect(page.data.map((row) => row.id)).toEqual(["ev-t1"]);
+
+    const investigation = await investigate("k-tenant", "?request_id=req-projection-only");
+    expect(investigation.status).toBe(404);
+    expect(investigation.body).toMatchObject({
+      error: { code: "guardrail_investigation_not_found" },
+    });
   });
 
   /**

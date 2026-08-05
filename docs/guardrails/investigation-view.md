@@ -107,13 +107,19 @@ detector volunteers it, which
 `apps/gateway/test/guardrails/evidence-write.test.ts` proves by scripting a
 detector that does.
 
-Storage is `sql/d1-ts/control/0004_guardrail_evaluations.sql`
-(`guardrail_evaluations` + `guardrail_check_evaluations`) in the CONTROL
-database, written by the gateway through the same Queue and the same retention
-window as the request log (`REQUEST_LOG_RETENTION_DAYS` /
-`REQUEST_LOG_RETENTION_POLICIES`). Evidence and traffic logs age out together on
-purpose: an investigation that can only half-answer is the failure this surface
-exists to remove.
+Tenant-attributed storage is `sql/d1-ts/tenant/0013_guardrail_evaluations.sql`
+(`guardrail_evaluations` + `guardrail_check_evaluations`) inside the owning
+TenantDataObject. The gateway writes that authority first and maintains the
+tenant-qualified CONTROL projection from
+`sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql` for bounded
+operator/fleet reads. Unscoped platform evidence remains CONTROL-owned.
+
+Tenant-scoped list and investigation reads use the exact object; platform
+operators read the projection as an explicitly derived/as-of view until #825
+defines the general bounded fan-out freshness contract. Both evidence and
+request-log retention use the same `REQUEST_LOG_RETENTION_DAYS` /
+`REQUEST_LOG_RETENTION_POLICIES` window and delete object rows before mirrors,
+so an investigation does not silently treat a stale projection as authority.
 
 ## RBAC: which key can read investigation evidence
 

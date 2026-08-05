@@ -573,6 +573,8 @@ const GUARDRAIL_EVALUATION_COLUMNS =
   "enforcement_status, latency_ms, finding_count, input_fingerprint, action_fingerprint, " +
   "occurred_at_unix, evaluation_json";
 
+const GUARDRAIL_PROJECTION_EVALUATION_COLUMNS = `projection_key, ${GUARDRAIL_EVALUATION_COLUMNS}`;
+
 /**
  * `ORDER BY occurred_at_unix DESC, id ASC` — newest first, like the request log
  * and unlike the audit trail, because guardrail evidence is read backwards from
@@ -587,6 +589,7 @@ const GUARDRAIL_EVALUATION_COLUMNS =
 const GUARDRAIL_EVALUATION_ORDER = "ORDER BY occurred_at_unix DESC, id ASC";
 
 interface GuardrailEvaluationRow {
+  readonly projection_key?: string;
   readonly id: string;
   readonly request_id: string;
   readonly trace_id: string | null;
@@ -615,6 +618,8 @@ interface GuardrailEvaluationRow {
 
 interface GuardrailCheckRow {
   readonly id: string;
+  readonly projection_key?: string;
+  readonly evaluation_projection_key?: string;
   readonly evaluation_id: string;
   readonly check_id: string;
   readonly detector_id: string;
@@ -714,23 +719,49 @@ function placeholders(count: number): string {
  */
 async function guardrailChecksFor(
   db: D1Database,
-  evaluationIds: readonly string[],
+  evaluations: readonly GuardrailEvaluationRow[],
+  source: "control" | "tenant",
+  tenantId?: string,
 ): Promise<Map<string, StoreRecord[]>> {
   const byEvaluation = new Map<string, StoreRecord[]>();
-  if (evaluationIds.length === 0) return byEvaluation;
+  if (evaluations.length === 0) return byEvaluation;
+  const lookupKeys = evaluations.map((row) => (source === "control" ? row.projection_key : row.id));
+  if (lookupKeys.some((key): key is undefined => key === undefined)) {
+    throw new HttpError(
+      500,
+      "guardrail_projection_key_missing",
+      "guardrail projection key is missing",
+    );
+  }
+  const query =
+    source === "control"
+      ? `SELECT projection_key, id, evaluation_projection_key, evaluation_id, tenant,
+                check_id, detector_id, detector_version, config_digest, verdict,
+                action, enforcement_status, error_kind, check_json
+           FROM ${GUARDRAIL_CHECK_TABLE}
+          WHERE evaluation_projection_key IN (${placeholders(lookupKeys.length)})
+          ORDER BY evaluation_projection_key ASC, check_id ASC`
+      : `SELECT id, evaluation_id, tenant, check_id, detector_id, detector_version,
+                config_digest, verdict, action, enforcement_status, error_kind, check_json
+           FROM ${GUARDRAIL_CHECK_TABLE}
+          WHERE tenant = ? AND evaluation_id IN (${placeholders(lookupKeys.length)})
+          ORDER BY evaluation_id ASC, check_id ASC`;
+  const params = source === "control" ? lookupKeys : [tenantId, ...lookupKeys];
   const rows = await db
-    .prepare(
-      `SELECT id, evaluation_id, check_id, detector_id, detector_version, config_digest,
-              verdict, action, enforcement_status, error_kind, check_json
-         FROM ${GUARDRAIL_CHECK_TABLE}
-        WHERE evaluation_id IN (${placeholders(evaluationIds.length)})
-        ORDER BY evaluation_id ASC, check_id ASC`,
-    )
-    .bind(...evaluationIds)
+    .prepare(query)
+    .bind(...params)
     .all<GuardrailCheckRow>();
   for (const row of rows.results) {
-    const bucket = byEvaluation.get(row.evaluation_id);
-    if (bucket === undefined) byEvaluation.set(row.evaluation_id, [guardrailCheckDocument(row)]);
+    const key = source === "control" ? row.evaluation_projection_key : row.evaluation_id;
+    if (key === undefined) {
+      throw new HttpError(
+        500,
+        "guardrail_projection_key_missing",
+        "guardrail child key is missing",
+      );
+    }
+    const bucket = byEvaluation.get(key);
+    if (bucket === undefined) byEvaluation.set(key, [guardrailCheckDocument(row)]);
     else bucket.push(guardrailCheckDocument(row));
   }
   return byEvaluation;
@@ -746,21 +777,45 @@ async function guardrailEvaluationPage(
   const fence = guardrailTenantFence(scope);
   const rows = await db
     .prepare(
-      `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}, count(*) OVER() AS total
+      `SELECT ${GUARDRAIL_PROJECTION_EVALUATION_COLUMNS}, count(*) OVER() AS total
          FROM ${GUARDRAIL_EVALUATION_TABLE}${fence.sql === "" ? "" : ` WHERE ${fence.sql}`}
         ${GUARDRAIL_EVALUATION_ORDER}
         LIMIT ? OFFSET ?`,
     )
     .bind(...fence.params, limit, offset)
     .all<GuardrailEvaluationRow>();
-  const checks = await guardrailChecksFor(
-    db,
-    rows.results.map((row) => row.id),
-  );
+  const checks = await guardrailChecksFor(db, rows.results, "control");
   return {
-    records: rows.results.map((row) => guardrailEvaluationDocument(row, checks.get(row.id) ?? [])),
+    records: rows.results.map((row) =>
+      guardrailEvaluationDocument(row, checks.get(row.projection_key ?? "") ?? []),
+    ),
     // `count(*) OVER()` is on every row and absent when there are none — the
     // same reading the two sibling readers take.
+    total: rows.results[0]?.total ?? 0,
+  };
+}
+
+/** One tenant-scoped page from authoritative guardrail evidence. */
+async function tenantGuardrailEvaluationPage(
+  router: TenantDatabaseRouter,
+  tenantId: string,
+  limit: number,
+  offset: number,
+): Promise<{ records: StoreRecord[]; total: number }> {
+  const db = await tenantEvidenceDatabaseFor(router, tenantId);
+  const rows = await db
+    .prepare(
+      `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}, count(*) OVER() AS total
+         FROM ${GUARDRAIL_EVALUATION_TABLE}
+        WHERE tenant = ?
+        ${GUARDRAIL_EVALUATION_ORDER}
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(tenantId, limit, offset)
+    .all<GuardrailEvaluationRow>();
+  const checks = await guardrailChecksFor(db, rows.results, "tenant", tenantId);
+  return {
+    records: rows.results.map((row) => guardrailEvaluationDocument(row, checks.get(row.id) ?? [])),
     total: rows.results[0]?.total ?? 0,
   };
 }
@@ -787,16 +842,37 @@ function listGuardrailEvaluationsHandler(): Handler {
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
 
+    if (scope.kind === "tenant") {
+      // Tenant scope is an authority read. CONTROL is only a fleet projection,
+      // so its absence or staleness must not change the tenant answer.
+      const page = await tenantGuardrailEvaluationPage(
+        deps.tenantDatabases,
+        scope.tenantId,
+        query.limit,
+        query.offset,
+      );
+      return json(c, 200, adminListPaginated(page.records, page.total, query.offset, query.limit));
+    }
+
     if (db === null) {
-      // No control database means no evidence tables AND no gateway writing
-      // them. The document collection is the only guardrail-evidence surface
-      // such a deployment has.
+      // No control database means no fleet projection. The document collection
+      // is the only operator evidence surface such a deployment has.
       const page = await deps.store.list("guardrail-evaluations", scope, query);
       return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
     }
 
     const page = await guardrailEvaluationPage(db, scope, query.limit, query.offset);
-    return json(c, 200, adminListPaginated(page.records, page.total, query.offset, query.limit));
+    return json(
+      c,
+      200,
+      adminListPaginatedWithMetadata(
+        page.records,
+        page.total,
+        query.offset,
+        query.limit,
+        derivedControlProjectionMetadata(),
+      ),
+    );
   };
 }
 
@@ -831,27 +907,25 @@ interface TimelineLeg {
  *
  * ## The order of operations is the fence
  *
- * The selector is resolved FIRST, against the tenant-fenced control projection
- * (`guardrail_evaluations` and the derived `request_logs` mirror). Those rows
- * discover candidate `(tenant, request_id)` pairs only. Attributed request,
- * agent-run and agent-event rows are then read from the exact TenantDataObject
- * for each candidate tenant. The control copy is never the authority for a
- * tenant-scoped answer. If neither the projection discovery nor the exact
- * object has evidence the answer is 404 — and that is what makes the remaining
- * un-fenced control legs safe: `billing_events` has no tenant column at all
- * (its rows are keyed by `request_id`), so it is only ever read for request ids
- * that exact tenant evidence or a tenant-fenced guardrail row has already
- * cleared. A reader that queried billing first and fenced afterwards would leak
- * the existence and the cost of another tenant's request through a 200/404
- * difference.
+ * The selector is resolved FIRST against the exact tenant object for a
+ * tenant-scoped caller, or against the tenant-qualified control projection for
+ * a platform operator. Operator projection rows discover candidate
+ * `(tenant, request_id)` pairs only; attributed request, agent-run and
+ * agent-event rows are then read from the exact TenantDataObject for each
+ * candidate tenant. The control copy is never the authority for a
+ * tenant-scoped answer. If neither the exact object nor the operator
+ * projection has evidence the answer is 404.
  *
  * ## What is joined, and what is honestly empty
  *
- * Guardrail evaluations/checks, audit events and billing remain control-owned.
- * Request logs, agent runs and agent events are object-authoritative; their
- * control tables are bounded discovery/projection state for fleet joins only.
- * A platform operator therefore sees an as-of projection for the fleet until
- * #825 supplies the general bounded fan-out/read-freshness contract.
+ * Guardrail evaluations/checks are tenant-object authoritative with a derived
+ * CONTROL projection. Audit events remain CONTROL-authoritative in this issue
+ * and are explicitly tenant-fenced below; billing is read only for operator or
+ * unscoped calls because its table has no tenant column. Request logs, agent
+ * runs and agent events are object-authoritative; their control tables are
+ * bounded discovery/projection state for fleet joins only. A platform operator
+ * therefore sees an as-of projection for the fleet until #825 supplies the
+ * general bounded fan-out/read-freshness contract.
  *
  * `approvals` is `[]` and stays `[]`: there is no approvals table in
  * `sql/d1-ts/control/`, and fabricating an empty array is the honest answer
@@ -884,38 +958,63 @@ function getGuardrailInvestigationHandler(): Handler {
     const selector = `${column}=${value}`;
 
     const db = deps.controlDatabase;
-    if (db === null) {
-      // Nothing writes the evidence tables in a memory-store deployment, so
-      // there is nothing to investigate and saying so is the truthful answer.
+    const authoritativeTenantDb =
+      scope.kind === "tenant"
+        ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, scope.tenantId)
+        : null;
+    if (scope.kind === "platform_operator" && db === null) {
+      // Nothing writes the control projection in a memory-store deployment, so
+      // there is nothing for a fleet operator to investigate.
       throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
     }
+    const tenantDb = authoritativeTenantDb as D1Database;
 
-    // ---- 1. The two FENCED evidence tables resolve the selector ------------
-    const evaluationFence = guardrailTenantFence(scope);
-    const evaluationRows = await db
-      .prepare(
-        `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
-           FROM ${GUARDRAIL_EVALUATION_TABLE}
-          WHERE ${column} = ?${evaluationFence.sql === "" ? "" : ` AND ${evaluationFence.sql}`}
-          ${GUARDRAIL_EVALUATION_ORDER}
-          LIMIT ?`,
-      )
-      .bind(value, ...evaluationFence.params, INVESTIGATION_MAX_REQUESTS)
-      .all<GuardrailEvaluationRow>();
+    // ---- 1. Exact tenant objects or the operator projection resolve the selector ----
+    const evaluationRows =
+      scope.kind === "tenant"
+        ? await tenantDb
+            .prepare(
+              `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
+                 FROM ${GUARDRAIL_EVALUATION_TABLE}
+                WHERE ${column} = ? AND tenant = ?
+                ${GUARDRAIL_EVALUATION_ORDER}
+                LIMIT ?`,
+            )
+            .bind(value, scope.tenantId, INVESTIGATION_MAX_REQUESTS)
+            .all<GuardrailEvaluationRow>()
+        : await (db as D1Database)
+            .prepare(
+              `SELECT ${GUARDRAIL_PROJECTION_EVALUATION_COLUMNS}
+                 FROM ${GUARDRAIL_EVALUATION_TABLE}
+                WHERE ${column} = ?
+                ${GUARDRAIL_EVALUATION_ORDER}
+                LIMIT ?`,
+            )
+            .bind(value, INVESTIGATION_MAX_REQUESTS)
+            .all<GuardrailEvaluationRow>();
 
-    const requestFence = requestLogTenantFence(scope);
-    const requestRows = await db
-      .prepare(
-        `SELECT ${REQUEST_LOG_COLUMNS}
-           FROM ${REQUEST_LOG_TABLE}
-          WHERE ${column} = ?${
-            requestFence.sql === "" ? "" : ` AND ${requestFence.sql.replace(/^ WHERE /, "")}`
-          }
-          ${REQUEST_LOG_ORDER}
-          LIMIT ?`,
-      )
-      .bind(value, ...requestFence.params, INVESTIGATION_MAX_REQUESTS)
-      .all<RequestLogRow>();
+    const requestRows =
+      scope.kind === "tenant"
+        ? await tenantDb
+            .prepare(
+              `SELECT ${REQUEST_LOG_COLUMNS}
+                 FROM ${REQUEST_LOG_TABLE}
+                WHERE ${column} = ? AND tenant = ?
+                ${REQUEST_LOG_ORDER}
+                LIMIT ?`,
+            )
+            .bind(value, scope.tenantId, INVESTIGATION_MAX_REQUESTS)
+            .all<RequestLogRow>()
+        : await (db as D1Database)
+            .prepare(
+              `SELECT ${REQUEST_LOG_COLUMNS}
+                 FROM ${REQUEST_LOG_TABLE}
+                WHERE ${column} = ?
+                ${REQUEST_LOG_ORDER}
+                LIMIT ?`,
+            )
+            .bind(value, INVESTIGATION_MAX_REQUESTS)
+            .all<RequestLogRow>();
 
     if (evaluationRows.results.length === 0 && requestRows.results.length === 0) {
       throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
@@ -929,16 +1028,24 @@ function getGuardrailInvestigationHandler(): Handler {
     ].slice(0, INVESTIGATION_MAX_REQUESTS);
 
     // ---- 2. Projection discovery becomes exact object reads ---------------
-    const tenantGroups = investigationTenantGroups(scope, evaluationRows.results, requestRows.results, requestIds);
-    const authoritativeRequestRows = await tenantEvidenceRows<RequestLogRow>(
-      deps.tenantDatabases,
-      tenantGroups,
-      (count) =>
-        `SELECT ${REQUEST_LOG_COLUMNS}
-           FROM ${REQUEST_LOG_TABLE}
-          WHERE tenant = ? AND request_id IN (${placeholders(count)})
-          ${REQUEST_LOG_ORDER}`,
+    const tenantGroups = investigationTenantGroups(
+      scope,
+      evaluationRows.results,
+      requestRows.results,
+      requestIds,
     );
+    const authoritativeRequestRows =
+      scope.kind === "tenant"
+        ? requestRows.results
+        : await tenantEvidenceRows<RequestLogRow>(
+            deps.tenantDatabases,
+            tenantGroups,
+            (count) =>
+              `SELECT ${REQUEST_LOG_COLUMNS}
+                 FROM ${REQUEST_LOG_TABLE}
+                WHERE tenant = ? AND request_id IN (${placeholders(count)})
+                ${REQUEST_LOG_ORDER}`,
+          );
     const unscopedRequestRows =
       scope.kind === "platform_operator"
         ? requestRows.results.filter((row) => row.tenant === null || row.tenant.trim() === "")
@@ -978,19 +1085,28 @@ function getGuardrailInvestigationHandler(): Handler {
 
     // ---- 3. Everything else hangs off ids cleared by exact evidence --------
     const checks = await guardrailChecksFor(
-      db,
-      evaluationRows.results.map((row) => row.id),
+      scope.kind === "tenant" ? tenantDb : (db as D1Database),
+      evaluationRows.results,
+      scope.kind === "tenant" ? "tenant" : "control",
+      scope.kind === "tenant" ? scope.tenantId : undefined,
     );
-    const audit = await investigationLeg(
-      db,
-      `SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
-              chain_key, seq, prev_hash, row_hash
-         FROM ${AUDIT_TABLE}
-        WHERE request_id IN (${placeholders(joinedRequestIds.length)})
-        ORDER BY occurred_at_unix ASC, id ASC`,
-      joinedRequestIds,
-      (row) => auditEventDocument(row as AuditEventRow),
-    );
+    const audit =
+      db === null
+        ? { records: [] }
+        : await investigationLeg(
+            db,
+            `SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+                    chain_key, seq, prev_hash, row_hash
+               FROM ${AUDIT_TABLE}
+              WHERE ${
+                scope.kind === "tenant"
+                  ? `tenant = ? AND request_id IN (${placeholders(joinedRequestIds.length)})`
+                  : `request_id IN (${placeholders(joinedRequestIds.length)})`
+              }
+              ORDER BY occurred_at_unix ASC, id ASC`,
+            scope.kind === "tenant" ? [scope.tenantId, ...joinedRequestIds] : joinedRequestIds,
+            (row) => auditEventDocument(row as AuditEventRow),
+          );
     const agentRuns = {
       records: objectAgentRunRows
         .sort(timelineRowOrder("started_at_unix"))
@@ -1001,21 +1117,24 @@ function getGuardrailInvestigationHandler(): Handler {
         .sort(timelineRowOrder("occurred_at_unix"))
         .map((row) => correlatedDocument(row, "event_json", "agent_run_event")),
     };
-    const billing = await investigationLeg(
-      db,
-      `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
-         FROM billing_events
-        WHERE request_id IN (${placeholders(joinedRequestIds.length)})
-        ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
-      joinedRequestIds,
-      (row) =>
-        correlatedDocument(
-          row as Record<string, unknown>,
-          "event_json",
-          "billing_event",
-          "billing_event_id",
-        ),
-    );
+    const billing =
+      scope.kind === "tenant" || db === null
+        ? { records: [] }
+        : await investigationLeg(
+            db,
+            `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
+               FROM billing_events
+              WHERE request_id IN (${placeholders(joinedRequestIds.length)})
+              ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
+            joinedRequestIds,
+            (row) =>
+              correlatedDocument(
+                row as Record<string, unknown>,
+                "event_json",
+                "billing_event",
+                "billing_event_id",
+              ),
+          );
 
     const totalCostUsd = billing.records.reduce((sum, record) => {
       const cost = record["cost_usd"];
@@ -1023,7 +1142,10 @@ function getGuardrailInvestigationHandler(): Handler {
     }, 0);
 
     const evaluations = evaluationRows.results.map((row) =>
-      guardrailEvaluationDocument(row, checks.get(row.id) ?? []),
+      guardrailEvaluationDocument(
+        row,
+        checks.get(scope.kind === "tenant" ? row.id : (row.projection_key ?? "")) ?? [],
+      ),
     );
     const requests = responseRequestRows.map(requestLogDocument);
 
@@ -1217,10 +1339,12 @@ function finalOutcome(
  * this group now reads a table with a writer: `audit-events` (see
  * {@link listAuditEventsHandler}), `request-logs` / `request-log-exports`
  * (#664, {@link listRequestLogsHandler}) and — with this change —
- * `guardrail-evaluations` / `investigations` (#665,
+ * `guardrail-evaluations` / `investigations` (#665, #860,
  * {@link listGuardrailEvaluationsHandler} and
  * {@link getGuardrailInvestigationHandler}) over
- * `sql/d1-ts/control/0004_guardrail_evaluations.sql`.
+ * the tenant-authoritative tables in
+ * `sql/d1-ts/tenant/0013_guardrail_evaluations.sql` and their
+ * `sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql` projection.
  *
  * The two `readOnlyCollection` declarations below are KEPT even though every
  * operation in them now has an override: they are what `crudGroup` matches the

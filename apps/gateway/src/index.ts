@@ -573,11 +573,12 @@ async function gatewayRequestLogRetention(env: unknown): Promise<void> {
   if (db === undefined) return;
   const nowUnix = Math.floor(Date.now() / 1000);
   await sweepRequestLogs(db, env, nowUnix);
-  // Guardrail screening evidence (#665) is swept on the SAME tick, with the
-  // SAME policy, against the same database. Deliberately not a separate
-  // retention window: a request log whose screening evidence has been deleted
-  // (or the reverse) makes the investigation view able to half-answer, which is
-  // the failure #665 exists to fix. See `guardrails/evidence-retention.ts`.
+  // Guardrail screening evidence (#665/#860) is swept on the SAME tick with
+  // the SAME policy. Tenant-attributed rows are deleted from their object first
+  // and the CONTROL rows here are removed only as derived mirrors. Deliberately
+  // not a separate retention window: a request log whose screening evidence has
+  // been deleted (or the reverse) makes the investigation view able to
+  // half-answer. See `guardrails/evidence-retention.ts`.
   await sweepGuardrailEvidence(db, env, nowUnix);
 }
 

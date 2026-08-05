@@ -153,6 +153,11 @@ export interface GuardrailEvaluationSeed {
   readonly checks?: readonly GuardrailCheckSeed[];
 }
 
+function evidenceProjectionKey(tenantId: string | null | undefined, logicalId: string): string {
+  const tenant = tenantId ?? "";
+  return `${Array.from(tenant).length}:${tenant}:${logicalId}`;
+}
+
 /** Seed the two evidence tables with raw SQL — see {@link GuardrailEvaluationSeed}. */
 export async function seedGuardrailEvaluations(
   rows: readonly GuardrailEvaluationSeed[],
@@ -164,13 +169,15 @@ export async function seedGuardrailEvaluations(
       db()
         .prepare(
           `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE}
-             (id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id,
+             (projection_key, id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id,
               target, protocol, stage, mode, policy_id, policy_revision, verdict, action,
               enforcement_status, latency_ms, finding_count, input_fingerprint,
               action_fingerprint, occurred_at_unix, evaluation_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)`,
         )
         .bind(
+          evidenceProjectionKey(row.tenant, row.id),
           row.id,
           row.requestId,
           row.traceId ?? null,
@@ -201,13 +208,17 @@ export async function seedGuardrailEvaluations(
         db()
           .prepare(
             `INSERT INTO ${GUARDRAIL_CHECK_TABLE}
-               (id, evaluation_id, check_id, detector_id, detector_version, config_digest,
+               (projection_key, id, evaluation_projection_key, evaluation_id, tenant, check_id,
+                detector_id, detector_version, config_digest,
                 verdict, action, enforcement_status, error_kind, check_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
           )
           .bind(
+            evidenceProjectionKey(row.tenant, check.id),
             check.id,
+            evidenceProjectionKey(row.tenant, row.id),
             row.id,
+            row.tenant ?? null,
             check.checkId,
             check.detectorId,
             check.detectorVersion,

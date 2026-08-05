@@ -36,7 +36,12 @@
  * would silently accumulate orphans; the child sweep below is issued
  * unconditionally for that reason and is a no-op when the cascade already ran.
  */
-import { type LogRetentionCandidate, planLogRetention } from "@ferrogate/storage";
+import {
+  type LogRetentionCandidate,
+  type RetentionPolicy,
+  planLogRetention,
+} from "@ferrogate/storage";
+import { evidenceProjectionKey } from "../requestlog/d1.js";
 import {
   REQUEST_LOG_SWEEP_MAX_ROWS,
   type RequestLogRetentionScope,
@@ -47,15 +52,42 @@ import {
   GUARDRAIL_CHECK_TABLE,
   GUARDRAIL_EVALUATION_TABLE,
   type GuardrailEvidenceDatabase,
+  guardrailTenantDatabaseFromEnv,
 } from "./evidence-d1.js";
 
-interface CandidateRow {
+interface ProjectionCandidateRow {
+  readonly projection_key: string;
   readonly id: string;
+  readonly tenant?: string | null;
   readonly occurred_at_unix: number;
 }
 
 /**
- * Apply one scope's rule to `guardrail_evaluations`.
+ * Delete a set of rows from the shared projection by its tenant-qualified
+ * keys. Logical evaluation ids are not unique in CONTROL, so deleting by
+ * `id` would remove another tenant's evidence when the same deterministic id
+ * is reused.
+ */
+function projectionDeleteStatements(
+  db: GuardrailEvidenceDatabase,
+  keys: readonly string[],
+): unknown[] {
+  const parents = db.prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE} WHERE projection_key = ?`);
+  const children = db.prepare(
+    `DELETE FROM ${GUARDRAIL_CHECK_TABLE} WHERE evaluation_projection_key = ?`,
+  );
+  return [...keys.map((key) => children.bind(key)), ...keys.map((key) => parents.bind(key))];
+}
+
+/** Delete authoritative object rows by their local logical ids. */
+function tenantDeleteStatements(db: GuardrailEvidenceDatabase, ids: readonly string[]): unknown[] {
+  const parents = db.prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE} WHERE id = ?`);
+  const children = db.prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE} WHERE evaluation_id = ?`);
+  return [...ids.map((id) => children.bind(id)), ...ids.map((id) => parents.bind(id))];
+}
+
+/**
+ * Apply one scope's rule to a bounded projection window.
  *
  * The candidate window is the OLDEST rows in the scope, because those are the
  * only ones an age rule can select; ascending order means the sweep does useful
@@ -68,6 +100,55 @@ interface CandidateRow {
  *
  * Never throws: a retention failure is an unpruned table, which is safe.
  */
+async function sweepGuardrailProjectionRows(
+  db: GuardrailEvidenceDatabase,
+  policy: RetentionPolicy,
+  nowUnix: number,
+  maxRows: number,
+  fence: string,
+  params: readonly (string | number)[],
+): Promise<RequestLogSweepResult> {
+  let rows: ProjectionCandidateRow[];
+  try {
+    const result = (await db
+      .prepare(
+        `SELECT projection_key, id, tenant, occurred_at_unix FROM ${GUARDRAIL_EVALUATION_TABLE}${fence}
+          ORDER BY occurred_at_unix ASC LIMIT ?`,
+      )
+      .bind(...params, maxRows)
+      .all()) as { results?: ProjectionCandidateRow[] };
+    rows = result.results ?? [];
+  } catch {
+    return { scanned: 0, pruned: 0 };
+  }
+
+  const candidates: LogRetentionCandidate[] = rows.map((row) => ({
+    id: row.projection_key,
+    createdAtUnix: row.occurred_at_unix,
+  }));
+  // The PLANNER is reused rather than restated as a SQL predicate. Its
+  // semantics — fail-safe KEEP on any doubt, `minAgeSecs` as an absolute floor,
+  // an inert policy pruning nothing — are the contract, and re-deriving them in
+  // a `DELETE ... WHERE occurred_at_unix < ?` here is how the two would come to
+  // disagree about a boundary case that only shows up as missing evidence.
+  const doomed = planLogRetention(candidates, nowUnix, policy);
+  if (doomed.length === 0) return { scanned: rows.length, pruned: 0 };
+
+  try {
+    await db.batch(projectionDeleteStatements(db, doomed));
+  } catch {
+    return { scanned: rows.length, pruned: 0 };
+  }
+  return { scanned: rows.length, pruned: doomed.length };
+}
+
+/**
+ * Apply one scope's rule to the CONTROL projection only.
+ *
+ * This remains exported for the small projection-level tests and for callers
+ * that intentionally operate on a single database. The scheduled sweep below
+ * uses the object-first path for tenant-attributed rows.
+ */
 export async function sweepGuardrailEvidenceRetention(
   db: GuardrailEvidenceDatabase,
   scope: RequestLogRetentionScope,
@@ -76,16 +157,38 @@ export async function sweepGuardrailEvidenceRetention(
 ): Promise<RequestLogSweepResult> {
   const fence = scope.tenantId === undefined ? "" : " WHERE tenant = ?";
   const params = scope.tenantId === undefined ? [] : [scope.tenantId];
+  return sweepGuardrailProjectionRows(db, scope.policy, nowUnix, maxRows, fence, params);
+}
 
-  let rows: CandidateRow[];
+interface TenantCandidateRow {
+  readonly id: string;
+  readonly occurred_at_unix: number;
+}
+
+/**
+ * Sweep one tenant object, then remove only the matching projection rows.
+ *
+ * D1 offers no cross-database transaction. Keeping the projection until the
+ * object delete succeeds preserves the authoritative evidence when either the
+ * object or the projection is temporarily unavailable.
+ */
+async function sweepTenantGuardrailEvidenceRetention(
+  authoritativeDb: GuardrailEvidenceDatabase,
+  tenantId: string,
+  policy: RetentionPolicy,
+  nowUnix: number,
+  maxRows: number,
+  projectionDb: GuardrailEvidenceDatabase,
+): Promise<RequestLogSweepResult> {
+  let rows: TenantCandidateRow[];
   try {
-    const result = (await db
+    const result = (await authoritativeDb
       .prepare(
-        `SELECT id, occurred_at_unix FROM ${GUARDRAIL_EVALUATION_TABLE}${fence}
-          ORDER BY occurred_at_unix ASC LIMIT ?`,
+        `SELECT id, occurred_at_unix FROM ${GUARDRAIL_EVALUATION_TABLE}
+          WHERE tenant = ? ORDER BY occurred_at_unix ASC LIMIT ?`,
       )
-      .bind(...params, maxRows)
-      .all()) as { results?: CandidateRow[] };
+      .bind(tenantId, maxRows)
+      .all()) as { results?: TenantCandidateRow[] };
     rows = result.results ?? [];
   } catch {
     return { scanned: 0, pruned: 0 };
@@ -95,28 +198,88 @@ export async function sweepGuardrailEvidenceRetention(
     id: row.id,
     createdAtUnix: row.occurred_at_unix,
   }));
-  // The PLANNER is reused rather than restated as a SQL predicate. Its
-  // semantics — fail-safe KEEP on any doubt, `minAgeSecs` as an absolute floor,
-  // an inert policy pruning nothing — are the contract, and re-deriving them in
-  // a `DELETE ... WHERE occurred_at_unix < ?` here is how the two would come to
-  // disagree about a boundary case that only shows up as missing evidence.
-  const doomed = planLogRetention(candidates, nowUnix, scope.policy);
+  const doomed = planLogRetention(candidates, nowUnix, policy);
   if (doomed.length === 0) return { scanned: rows.length, pruned: 0 };
 
   try {
-    const parents = db.prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE} WHERE id = ?`);
-    const children = db.prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE} WHERE evaluation_id = ?`);
-    // Children first, then parents: with the cascade on, the second delete is a
-    // no-op; without it, this is what stops the orphans. Doing it in the other
-    // order would leave a window in which the checks are unreachable.
-    await db.batch([
-      ...doomed.map((id) => children.bind(id)),
-      ...doomed.map((id) => parents.bind(id)),
-    ]);
+    await authoritativeDb.batch(tenantDeleteStatements(authoritativeDb, doomed));
   } catch {
     return { scanned: rows.length, pruned: 0 };
   }
+
+  const projectionKeys = doomed.map((id) => evidenceProjectionKey(tenantId, id));
+  if (projectionDb === authoritativeDb) return { scanned: rows.length, pruned: doomed.length };
+  try {
+    await projectionDb.batch(projectionDeleteStatements(projectionDb, projectionKeys));
+  } catch {
+    return { scanned: rows.length, pruned: doomed.length };
+  }
   return { scanned: rows.length, pruned: doomed.length };
+}
+
+/** Resolve an authoritative object without letting a Cron binding fault escape. */
+function tenantDatabaseForSweep(
+  env: unknown,
+  tenantId: string,
+): GuardrailEvidenceDatabase | undefined {
+  try {
+    return guardrailTenantDatabaseFromEnv(env, tenantId);
+  } catch {
+    // A missing/unreachable object leaves its evidence in place. The next tick
+    // can retry after the binding or object becomes available.
+    return undefined;
+  }
+}
+
+function placeholders(count: number): string {
+  return new Array(count).fill("?").join(", ");
+}
+
+/** Discover only tenants with rows old enough for the fleet policy. */
+async function tenantIdsFromProjection(
+  projectionDb: GuardrailEvidenceDatabase,
+  maxRows: number,
+  excluded: readonly string[],
+  policy: RetentionPolicy,
+  nowUnix: number,
+): Promise<string[]> {
+  const maxAgeSecs = policy.maxAgeSecs;
+  if (maxAgeSecs === undefined || !Number.isFinite(maxAgeSecs)) return [];
+  const eligibleBeforeUnix = nowUnix - maxAgeSecs;
+  const exclusion =
+    excluded.length === 0 ? "" : ` AND tenant NOT IN (${placeholders(excluded.length)})`;
+  try {
+    const result = (await projectionDb
+      .prepare(
+        `SELECT tenant FROM ${GUARDRAIL_EVALUATION_TABLE}
+          WHERE tenant IS NOT NULL AND tenant <> ''
+            AND occurred_at_unix < ?${exclusion}
+          GROUP BY tenant ORDER BY tenant ASC LIMIT ?`,
+      )
+      .bind(eligibleBeforeUnix, ...excluded, maxRows)
+      .all()) as { results?: { tenant?: unknown }[] };
+    return (result.results ?? [])
+      .map((row) => (typeof row.tenant === "string" ? row.tenant : ""))
+      .filter((tenantId) => tenantId !== "");
+  } catch {
+    return [];
+  }
+}
+
+/** Sweep platform/unattributed evidence, which has no tenant object. */
+async function sweepUnscopedProjection(
+  projectionDb: GuardrailEvidenceDatabase,
+  policy: RetentionPolicy,
+  nowUnix: number,
+): Promise<RequestLogSweepResult> {
+  return sweepGuardrailProjectionRows(
+    projectionDb,
+    policy,
+    nowUnix,
+    REQUEST_LOG_SWEEP_MAX_ROWS,
+    " WHERE tenant IS NULL OR tenant = ''",
+    [],
+  );
 }
 
 /**
@@ -133,10 +296,54 @@ export async function sweepGuardrailEvidence(
 ): Promise<RequestLogSweepResult> {
   let scanned = 0;
   let pruned = 0;
-  for (const scope of requestLogRetentionFromEnv(env)) {
-    const result = await sweepGuardrailEvidenceRetention(db, scope, nowUnix);
+  const scopes = requestLogRetentionFromEnv(env);
+  const overrides = new Map<string, RetentionPolicy>();
+  for (const scope of scopes) {
+    if (scope.tenantId !== undefined) overrides.set(scope.tenantId, scope.policy);
+  }
+
+  for (const [tenantId, policy] of overrides) {
+    const authoritative = tenantDatabaseForSweep(env, tenantId);
+    if (authoritative === undefined) continue;
+    const result = await sweepTenantGuardrailEvidenceRetention(
+      authoritative,
+      tenantId,
+      policy,
+      nowUnix,
+      REQUEST_LOG_SWEEP_MAX_ROWS,
+      db,
+    );
     scanned += result.scanned;
     pruned += result.pruned;
+  }
+
+  const fleet = scopes.find((scope) => scope.tenantId === undefined);
+  if (fleet !== undefined) {
+    const unscoped = await sweepUnscopedProjection(db, fleet.policy, nowUnix);
+    scanned += unscoped.scanned;
+    pruned += unscoped.pruned;
+
+    const tenantIds = await tenantIdsFromProjection(
+      db,
+      REQUEST_LOG_SWEEP_MAX_ROWS,
+      [...overrides.keys()],
+      fleet.policy,
+      nowUnix,
+    );
+    for (const tenantId of tenantIds) {
+      const authoritative = tenantDatabaseForSweep(env, tenantId);
+      if (authoritative === undefined) continue;
+      const result = await sweepTenantGuardrailEvidenceRetention(
+        authoritative,
+        tenantId,
+        fleet.policy,
+        nowUnix,
+        REQUEST_LOG_SWEEP_MAX_ROWS,
+        db,
+      );
+      scanned += result.scanned;
+      pruned += result.pruned;
+    }
   }
   return { scanned, pruned };
 }
