@@ -76,6 +76,9 @@ export async function resetTenantD1(): Promise<void> {
       handle.prepare("DELETE FROM wallets"),
       handle.prepare("DELETE FROM payment_methods"),
       handle.prepare("DELETE FROM tenant_resources"),
+      handle
+        .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
+        .bind("control_plane_resource_backfill_v1"),
     ]);
   }
   await db().batch([

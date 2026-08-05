@@ -118,7 +118,12 @@ export async function resetD1(): Promise<void> {
     await Promise.all(
       FIXTURE_OBJECT_TENANTS.map(async (tenantId) => {
         const handle = await router.forTenant(tenantId);
-        await handle.db.prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE}`).run();
+        await handle.db.batch([
+          handle.db.prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE}`),
+          handle.db
+            .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
+            .bind("control_plane_resource_backfill_v1"),
+        ]);
       }),
     );
   }

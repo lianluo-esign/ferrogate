@@ -32,6 +32,11 @@ interface TenantStoreMatch {
   readonly record: StoreRecord;
 }
 
+interface TenantStoreTarget {
+  readonly tenantId: string;
+  readonly store: D1ControlPlaneStore;
+}
+
 const UNPAGED_QUERY = (query: ListQuery): ListQuery => ({
   ...query,
   offset: 0,
@@ -129,20 +134,36 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (matches.length > 1) {
       throw new Error(`${collection}/${id} has multiple tenant destinations`);
     }
-    return matches[0] ?? null;
+    if (matches.length === 1) return matches[0] ?? null;
+
+    // MCP keeps a named control projection solely as a directory for a fresh
+    // tenant that has not entered the roster fan-out yet. The returned record
+    // must still come from the object; control D1 is never the resource reader.
+    if (collection === "mcp-servers") {
+      const directory = await this.#control.get(collection, { kind: "platform_operator" }, id);
+      if (directory !== null) {
+        const tenantId = this.#ownerForRecord(collection, directory);
+        const store = await this.#tenantStore(tenantId);
+        const record = await store.get(collection, { kind: "platform_operator" }, id);
+        if (record !== null) return { tenantId, store, record };
+      }
+    }
+    return null;
   }
 
   async #tenantMutationStore(
     collection: string,
     scope: CallerScope,
     id: string,
-  ): Promise<D1ControlPlaneStore | null> {
-    if (scope.kind === "tenant") return this.#tenantStore(scope.tenantId);
+  ): Promise<TenantStoreTarget | null> {
+    if (scope.kind === "tenant") {
+      if (!this.#hasTenantDestination(scope)) return null;
+      const tenantId = scope.tenantId.trim();
+      return { tenantId, store: await this.#tenantStore(tenantId) };
+    }
     const match = await this.#matchTenantResource(collection, id);
-    if (match !== null) return match.store;
-    const legacy = await this.#control.get(collection, { kind: "platform_operator" }, id);
-    if (legacy === null) return null;
-    return this.#tenantStore(this.#ownerForRecord(collection, legacy));
+    if (match !== null) return { tenantId: match.tenantId, store: match.store };
+    return null;
   }
 
   async #listTenantResources(collection: string, query: ListQuery): Promise<ListPage> {
@@ -161,19 +182,6 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       }
     }
 
-    // Compatibility rows are retained in control D1 until the backfill is
-    // complete. An object-local row wins on duplicate id, so a resumed copy can
-    // never make an older control document visible over a newer object write.
-    const legacy = await this.#control.list(
-      collection,
-      { kind: "platform_operator" },
-      UNPAGED_QUERY(query),
-    );
-    for (const record of legacy.items) {
-      if (seen.has(String(record.id))) continue;
-      seen.add(String(record.id));
-      records.push(record);
-    }
     return pageOf(records, query);
   }
 
@@ -186,7 +194,7 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       return this.#controlStore().list(collection, scope, query);
     if (scope.kind === "tenant") {
       if (!this.#hasTenantDestination(scope)) {
-        return this.#controlStore().list(collection, scope, query);
+        return pageOf([], query);
       }
       return (await this.#tenantStore(scope.tenantId)).list(collection, scope, query);
     }
@@ -197,10 +205,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (!this.#isTenantPrivate(collection)) return this.#controlStore().get(collection, scope, id);
     if (scope.kind === "tenant" && this.#hasTenantDestination(scope))
       return (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
-    if (scope.kind === "tenant") return this.#controlStore().get(collection, scope, id);
+    if (scope.kind === "tenant") return null;
     const match = await this.#matchTenantResource(collection, id);
-    if (match !== null) return match.record;
-    return this.#controlStore().get(collection, scope, id);
+    return match?.record ?? null;
   }
 
   async create(collection: string, scope: CallerScope, record: StoreRecord): Promise<StoreRecord> {
@@ -218,9 +225,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   ): Promise<StoreRecord | null> {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().replace(collection, scope, id, record);
-    const store = await this.#tenantMutationStore(collection, scope, id);
-    if (store === null) return null;
-    return store.replace(collection, scope, id, record);
+    const target = await this.#tenantMutationStore(collection, scope, id);
+    if (target === null) return null;
+    return target.store.replace(collection, scope, id, record);
   }
 
   async merge(
@@ -231,9 +238,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   ): Promise<StoreRecord | null> {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().merge(collection, scope, id, patch);
-    const store = await this.#tenantMutationStore(collection, scope, id);
-    if (store === null) return null;
-    return store.merge(collection, scope, id, patch);
+    const target = await this.#tenantMutationStore(collection, scope, id);
+    if (target === null) return null;
+    return target.store.merge(collection, scope, id, patch);
   }
 
   async mergeIf(
@@ -246,17 +253,27 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (!this.#isTenantPrivate(collection)) {
       return this.#controlStore().mergeIf(collection, scope, id, patch, precondition);
     }
-    const store = await this.#tenantMutationStore(collection, scope, id);
-    if (store === null) return { kind: "not_found" };
-    return store.mergeIf(collection, scope, id, patch, precondition);
+    const target = await this.#tenantMutationStore(collection, scope, id);
+    if (target === null) return { kind: "not_found" };
+    return target.store.mergeIf(collection, scope, id, patch, precondition);
   }
 
   async remove(collection: string, scope: CallerScope, id: string): Promise<boolean> {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().remove(collection, scope, id);
-    const store = await this.#tenantMutationStore(collection, scope, id);
-    if (store === null) return false;
-    return store.remove(collection, scope, id);
+    const target = await this.#tenantMutationStore(collection, scope, id);
+    if (target === null) return false;
+    const removed = await target.store.remove(collection, scope, id);
+    if (!removed) return false;
+    await this.#controlDb
+      .prepare(
+        `DELETE FROM ${RESOURCE_TABLE}
+          WHERE resource_kind = ? AND resource_id = ?
+            AND json_extract(document_json, '$.tenant_id') = ?`,
+      )
+      .bind(collection, id, target.tenantId)
+      .run();
+    return true;
   }
 
   async atomic(

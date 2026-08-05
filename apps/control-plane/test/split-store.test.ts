@@ -4,6 +4,10 @@ import type { ControlPlaneBindings } from "../src/ports.js";
 import { resolveTenantStorage } from "../src/adapters.js";
 import { SplitControlPlaneStore } from "../src/store/split.js";
 import { RESOURCE_TABLE, TENANT_RESOURCE_TABLE } from "../src/store/d1.js";
+import {
+  RESOURCE_BACKFILL_BATCH_SIZE,
+  backfillTenantResourceKinds,
+} from "../src/store/resource-backfill.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import {
   applyTenantSchema,
@@ -121,6 +125,63 @@ describe("SplitControlPlaneStore", () => {
       .bind("agent-workflows", "legacy-workflow")
       .first<{ revision: number; created_at_unix: number; updated_at_unix: number }>();
     expect(objectRow).toEqual({ revision: 3, created_at_unix: 10, updated_at_unix: 20 });
+  });
+
+  it("bounds each legacy backfill call and resumes from copied rows", async () => {
+    const rows = Array.from({ length: RESOURCE_BACKFILL_BATCH_SIZE + 1 }, (_, index) => [
+      `legacy-workflow-${String(index).padStart(3, "0")}`,
+      JSON.stringify({
+        id: `legacy-workflow-${String(index).padStart(3, "0")}`,
+        tenant_id: TENANT_A,
+      }),
+    ] as const);
+    for (let index = 0; index < rows.length; index += 50) {
+      await db().batch(
+        rows.slice(index, index + 50).map(([id, document]) =>
+          db()
+            .prepare(
+              `INSERT INTO ${RESOURCE_TABLE}
+                 (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+               VALUES (?, ?, ?, 1, 1, 1)`,
+            )
+            .bind("agent-workflows", id, document),
+        ),
+      );
+    }
+
+    const objectDb = (await router().forTenant(TENANT_A)).db;
+    const first = await backfillTenantResourceKinds(db(), objectDb, TENANT_A);
+    expect(first.scanned).toBe(RESOURCE_BACKFILL_BATCH_SIZE);
+    expect(
+      await objectDb
+        .prepare(`SELECT COUNT(*) AS total FROM ${TENANT_RESOURCE_TABLE}`)
+        .first<{ total: number }>(),
+    ).toEqual({ total: RESOURCE_BACKFILL_BATCH_SIZE });
+
+    const second = await backfillTenantResourceKinds(db(), objectDb, TENANT_A);
+    expect(second.scanned).toBe(1);
+    expect(
+      await objectDb
+        .prepare(`SELECT COUNT(*) AS total FROM ${TENANT_RESOURCE_TABLE}`)
+        .first<{ total: number }>(),
+    ).toEqual({ total: RESOURCE_BACKFILL_BATCH_SIZE + 1 });
+  });
+
+  it("does not return a legacy control row as a platform resource", async () => {
+    await db()
+      .prepare(
+        `INSERT INTO ${RESOURCE_TABLE}
+           (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, 1, 1, 1)`,
+      )
+      .bind(
+        "agent-workflows",
+        "control-only",
+        JSON.stringify({ id: "control-only", tenant_id: "tenant_unknown" }),
+      )
+      .run();
+
+    await expect(store().get("agent-workflows", PLATFORM, "control-only")).resolves.toBeNull();
   });
 
   it("derives a tenant-account owner from its id for platform creates", async () => {
