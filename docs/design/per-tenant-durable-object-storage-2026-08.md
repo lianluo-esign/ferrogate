@@ -1,24 +1,26 @@
 # Per-tenant storage on Durable Objects
 
-Status: accepted, 2026-08-04. Supersedes the "one D1 database per tenant" topology
-described in `docs/cloudflare-d1-backend.md`, `docs/cloudflare-integration.md:340`,
-`packages/storage/README.md:24` and `README.md:95`.
+**Status: implemented, 2026-08-05.** The multi-tenant production topology is
+one CONTROL D1 database plus one SQLite-backed Durable Object per tenant. The
+previous D1-per-tenant, REST, proxy and lifecycle apparatus is retired.
 
-## The problem with the current design
+> **Historical note (2026-08-05):** the following problem statement preserves
+> the reason for the change. References to `proxy_service`, `rest`, per-tenant
+> D1 bindings and future implementation work describe the superseded design,
+> not a supported deployment option.
 
-FerroGate's tenant data plane is specified as **one D1 database per tenant**. The
-implementation exists (`packages/storage/src/tenant-router.ts`) and is deliberately
-inert: `GATEWAY_TENANT_DB_ROUTING = "off"`, zero `TENANT_DB_*` stanzas, and
-`tenantDatabaseOf(c)` has no production call sites. The reason it never turned on is
-stated in the module's own docblock and in `D1_BINDING_STRATEGIES`
-(`tenant-router.ts:623`):
+## The retired design and why it changed
+
+Before 2026-08-05, FerroGate proposed **one D1 database per tenant**. That
+proposal could not provide a production multi-tenant onboarding path because
+Cloudflare D1 bindings are declared at deploy time:
 
 > Cloudflare bindings are declared at **deploy** time. There is no runtime
 > `env.openD1("<uuid>")`.
 
 That forces a three-way choice, none of which is a multi-tenant SaaS answer:
 
-| strategy | atomic `batch()` | onboarding cost | tenant ceiling |
+| retired strategy | atomic `batch()` | onboarding cost | tenant ceiling |
 |---|---|---|---|
 | `native_binding` | yes | a `wrangler deploy` per tenant | low hundreds |
 | `proxy_service` | yes | a deploy of the proxy per tenant | low hundreds per proxy |
@@ -31,15 +33,9 @@ The hard platform numbers (verified against Cloudflare docs, 2026-08-04):
 - 50,000 D1 databases per account (Workers Paid), raisable on request.
 - 10 GB per D1 database, 1 TB per account.
 
-So `native_binding` and `proxy_service` cap the product at a few hundred tenants and
-make signup a deploy. `rest` scales, but `TenantDatabaseHandle.supportsAtomicBatch`
-goes `false`, and `requireAtomicBatch()` — **13** call sites (`grep -rn
-"requireAtomicBatch(this.handle"`: 5 in `wallet-d1.ts`, 3 in `workflow-budget-d1.ts`,
-3 in `assets-d1.ts`, 1 in `agent-schedule-d1.ts`, 1 in `usage-d1.ts`) — refuses to run.
-An earlier revision of this doc said 17; the number was never re-counted and is
-corrected here. Those 13 are the money paths, so the argument is unchanged: **under
-`rest`, wallet reserve does not work at all.** Choosing `rest` was choosing to scale by
-giving up the ledger.
+This is why the retired D1 variants were not a valid multi-tenant SaaS answer:
+the binding options made signup a deployment, while the runtime query option
+could not provide the local atomic transaction required by money paths.
 
 ## The resolution: one Durable Object per tenant
 
@@ -98,6 +94,16 @@ we have available.
   constraint, not a hint, and it is what `docs/security` residency claims need.
 - **Per-tenant PITR.** 30 days of bookmarks per tenant, restorable without touching
   any other tenant.
+
+### Implemented strategy set
+
+| strategy | current use |
+|---|---|
+| `durable_object` | Default multi-tenant production storage, with one SQLite Durable Object per tenant. |
+| `native_binding` | Explicit single-tenant or self-hosted compatibility mode with a predeclared D1 binding. |
+| `shared_development` | Local or intentionally shared development storage. |
+
+No REST, proxy or D1 lifecycle strategy is supported for tenant data.
 
 ### The proven-in-repo argument
 
@@ -162,9 +168,10 @@ already load-bearing here.
   forwarded over RPC into `transactionSync` — so those modules port **unchanged** and
   `supportsAtomicBatch` becomes `true` again. This keeps the migration a storage-layer
   change rather than a rewrite of every call site.
-- **`durable_object` becomes a fourth `TenantDatabaseSource`** and then the default.
-  `native_binding` stays for single-tenant/self-hosted deploys; `rest` and
-  `proxy_service` are retired.
+- **`durable_object` is the default `TenantDatabaseSource`.**
+  `native_binding` remains for explicit single-tenant/self-hosted compatibility
+  deployments; `shared_development` is local-only. The old REST and proxy
+  options are retired.
 
 ## Deprovisioning: the data-retention decision (#820)
 

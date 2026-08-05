@@ -1,5 +1,12 @@
 # Legacy Inventory — DATA & BILLING cluster
 
+> **Historical inventory, superseded 2026-08-05 for tenant storage.** The
+> D1-per-tenant and proxy material below records the Rust-era reference design.
+> Current FerroGate uses one CONTROL D1 database and one SQLite Durable Object
+> per tenant; see
+> [`per-tenant-durable-object-storage-2026-08.md`](../design/per-tenant-durable-object-storage-2026-08.md).
+> This inventory is retained without rewriting its original evidence.
+
 Rust → TypeScript (Cloudflare Workers: Bun + Hono + Zod + full CF suite) 1:1 rewrite.
 Cluster crates: `ferrogate-storage`, `ferrogate-billing`, `ferrogate-payments`, `ferrogate-observability`.
 

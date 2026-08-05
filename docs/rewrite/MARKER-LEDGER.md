@@ -1,5 +1,11 @@
 # PORT-TODO marker ledger — the cutover residue, classified
 
+> **Historical marker record, superseded 2026-08-05 for tenant storage.** Any
+> D1-per-tenant, REST or proxy marker below describes the earlier cutover state.
+> The current design is CONTROL D1 plus a SQLite Durable Object per tenant;
+> see [`per-tenant-durable-object-storage-2026-08.md`](../design/per-tenant-durable-object-storage-2026-08.md).
+> The ledger entries remain unchanged as historical audit evidence.
+
 **Produced:** 2026-08-01, wave 15 (the "verdicts, not volume" wave).
 **Scope of authority:** this file classifies every `PORT-TODO(` occurrence in the
 repository. It does not close any of them.

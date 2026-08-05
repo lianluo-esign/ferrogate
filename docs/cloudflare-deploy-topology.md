@@ -10,6 +10,13 @@
 
 # Cloudflare Deploy Topology: hosting the FerroGate runtime ON Cloudflare (decision #424)
 
+> **Historical topology assessment, superseded for tenant storage on 2026-08-05.**
+> This document records the Rust/Containers decision context. The current
+> TypeScript Worker topology uses one CONTROL D1 database and one SQLite Durable
+> Object per tenant. It does not provision a D1 database for each tenant or use
+> REST/proxy paths for tenant data. See
+> [`per-tenant-durable-object-storage-2026-08.md`](design/per-tenant-durable-object-storage-2026-08.md).
+
 This document decides **where the FerroGate runtime itself runs** relative to
 Cloudflare (CF) compute. It compares three topologies:
 
@@ -211,15 +218,9 @@ For FerroGate this means:
   a hard prerequisite — **PoC step P6 (§9) verifies it first**. Mitigations if
   blocked: Postgres-over-WebSocket drivers, a TCP-over-HTTPS tunnel, or
   pgbouncer on 443.
-- **D1**: only after #419/#420 add a D1 `RuntimeControlPlaneBackend` variant
-  (seam: the `RuntimeControlPlaneBackend` enum in
-  `crates/ferrogate-storage/src/lib.rs`, plus the repository traits in the same
-  file) — a real porting effort (SQLite semantics, no `tokio-postgres`), and
-  per [`cloudflare-integration.md` §6](cloudflare-integration.md#6-d1) hot-path
-  access must go through a binding, not the rate-limited REST query API. From a
-  container, that binding is reached via the shim (§6).
-- **Verdict:** external Postgres for any near-term Containers deployment; D1
-  is a separate workstream for a CF-native tier.
+- **Current TypeScript topology:** the Worker fleet uses a CONTROL D1 binding
+  for shared control data and SQLite Durable Objects for tenant state. This
+  document's Rust Container alternatives do not change that storage boundary.
 
 **Egress.** NA/EU $0.025/GB after 1 TB included/mo (500 GB included elsewhere;
 $0.04–0.05/GB). LLM proxy egress (responses to clients + requests to
@@ -398,8 +399,9 @@ existing Dockerfile deploys as-is.
 3. **Managed/dev-tier FerroGate on Containers.** `basic`/`standard-1`
    per-tenant instances with `sleepAfter`, external Postgres, shim-based
    bindings, on-CF config profile (no ACME/TLS, `0.0.0.0:8080`).
-4. **CF-native tier (conditional).** D1 control-plane backend (#419/#420) and
-   deeper binding integration — only if phase 3 demonstrates demand.
+4. **Current Worker tier.** CONTROL D1 plus SQLite Durable Objects for tenant
+   storage; this is the implemented TypeScript topology rather than a future
+   Container migration.
 
 **On citations in this document (#484).** Roughly 30 code references here are
 still **line-anchored, and they will rot.** Treat any `file.rs:NNN` below as a

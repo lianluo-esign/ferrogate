@@ -64,8 +64,10 @@ order:
 10. **Durable metering** — the ledger row and the billing-outbox row commit in
     the same D1 `batch()`, then publish onto a Queue.
 
-Per-tenant D1 routing sits behind the auth step, so tenant state can live in an
-isolated database per tenant.
+After authentication, tenant-owned state is routed to a SQLite-backed Durable
+Object addressed by tenant id. The shared control plane remains in one CONTROL
+D1 database; this keeps tenant transactions isolated without provisioning or
+deploying a database for each tenant.
 
 ### Shared packages
 
@@ -86,19 +88,19 @@ no per-package build step.
 | `billing` | Rate cards, pricing, the idempotent ledger, outbox delivery. |
 | `payments` | The x402 / Solana client-side wire contract (deprioritized). |
 | `observability` | Logging, metrics and OTLP request construction. |
-| `cloudflare` | The Cloudflare account-management REST surface (R2 buckets, scoped tokens, D1 database lifecycle). |
+| `cloudflare` | Cloudflare account-management helpers for operator resources such as R2 buckets and scoped tokens. |
 | `sso` | SAML 2.0 service provider. |
 | `identity` | OIDC relying party and SCIM 2.0 provisioning. |
 
 ### Cloudflare products in use
 
-- **D1** — one control database plus per-tenant databases. Migrations in
-  `sql/d1-ts/{control,tenant}/`.
+- **D1** — the shared CONTROL database for account-wide configuration,
+  directories, compatibility data and cross-tenant projections.
 - **R2** — asset object storage.
 - **KV** — MCP OAuth state.
-- **Durable Objects** — 7 classes: rate limiter, provider circuit breaker,
-  shadow budget (gateway); MCP OAuth flow claim and MCP session (mcp); agent
-  run state and worker plane (agent-runtime).
+- **Durable Objects** — per-tenant SQLite storage plus rate limiter, provider
+  circuit breaker and shadow budget (gateway); MCP OAuth flow claim and MCP
+  session (mcp); agent run state and worker plane (agent-runtime).
 - **Queues** — the billing-report outbox producer.
 - **Cache API** — the response cache.
 - **Analytics Engine** — the telemetry sink.

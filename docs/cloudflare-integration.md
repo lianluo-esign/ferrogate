@@ -322,43 +322,21 @@ caps gate any per-tenant use until GA.
 
 ## 6. D1
 
-Cloudflare's managed SQLite (per-database) service.
+FerroGate uses one shared D1 database as the **CONTROL** store. It holds
+account-wide configuration, tenant directories, compatibility records and
+cross-tenant projections. Worker bindings serve this data directly; CONTROL D1
+is not a runtime tenant-database discovery mechanism.
 
-### Provision / query REST
+Tenant-owned data lives in a SQLite-backed Durable Object addressed by tenant
+id. The object owns local transactions for wallet, usage, asset, schedule and
+catalog state, and is created by address rather than by provisioning a database.
+This is the production multi-tenant topology.
 
-- Databases are provisioned and queried over REST (implemented in
-  `crates/ferrogate-cloudflare/src/d1.rs`):
-  - `POST /accounts/{account_id}/d1/database` — create; `GET .../d1/database` — list;
-    `GET|DELETE .../d1/database/{uuid}` — fetch/delete.
-  - `POST /accounts/{account_id}/d1/database/{uuid}/query` — run SQL, returning
-    result sets.
-- Requires the **D1** permission group (Read for query/read, Edit for
-  create/schema).
-
-### Per-tenant model
-
-- FerroGate uses **one D1 database per tenant** (isolation + independent limits).
-  Databases are cheap to create but each is a distinct `database_id` FerroGate
-  tracks in its control plane (`CloudflareD1StorageOptions`,
-  `crates/ferrogate-storage/src/control_plane_store_d1/client_config.rs:73`).
-
-### Limits
-
-- Per-database size and row-count ceilings, and per-query result-size limits (D1
-  is SQLite semantics behind a REST facade — large scans are not its strength).
-- The public HTTP query API has **no multi-statement-with-params transaction and
-  no `RETURNING`**, which blocks atomic control-plane transitions.
-
-### REST rate limit → proxy-Worker recommendation (implemented)
-
-The D1 REST query API is rate-limited, adds a round-trip per query, and lacks
-atomic multi-statement transactions. For hot / atomic paths FerroGate fronts D1
-with a **proxy Worker** (`workers/d1-proxy/`) that holds a **native D1 binding**
-and can run `prepare().bind()` / `batch()` (atomic) / `RETURNING`, exposed as a
-bearer-authenticated HTTP API. The Rust client for it is
-`crates/ferrogate-cloudflare/src/d1_proxy.rs` (issue #450); it decodes into the
-same `D1QueryResult` type as the REST client. This mirrors the DO/Container
-fronting-Worker pattern (§4).
+`native_binding` is retained only for an explicitly single-tenant or self-hosted
+compatibility deployment with a predeclared D1 binding. `shared_development` is
+restricted to local or intentionally shared development storage. The former
+D1-per-tenant, REST-query, proxy and lifecycle design is retired; see
+[`per-tenant-durable-object-storage-2026-08.md`](design/per-tenant-durable-object-storage-2026-08.md).
 
 ---
 
@@ -568,10 +546,9 @@ provider-adapter routing seam (§10.7).
   variant — `:10416` / `:10419`; provider kind `StorageProviderKind::CloudflareD1`
   — `:307`.
 - **Concrete store (exists today):** `D1ControlPlaneStore` —
-  `crates/ferrogate-storage/src/control_plane_store_d1/mod.rs:359`, reached over the
-  rate-limited REST client (`ferrogate-cloudflare/src/d1.rs`) and, for atomic hot
-  paths, the proxy-Worker client (`d1_proxy.rs`, §6). The Postgres reference impl
-  `PostgresControlPlaneStore` is at `crates/ferrogate-storage/src/lib.rs:1330`.
+  `crates/ferrogate-storage/src/control_plane_store_d1/mod.rs:359`. This
+  Rust-era reference is historical; current Workers use a CONTROL D1 binding,
+  while tenant state is stored in SQLite Durable Objects.
 
 ### 10.5 MCP → upstream registration seam
 
