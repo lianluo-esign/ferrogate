@@ -148,14 +148,17 @@ describe("every Durable Object binding is deployable", () => {
 describe("the BORROWED counter namespace (#666)", () => {
   const borrowed = stanzas("durable_objects.bindings").filter((body) => !LOCAL(body));
 
-  it("binds RATE_LIMIT from apps/gateway and nothing else cross-script", () => {
-    // Not vacuous, and the count is pinned: a second borrowed namespace is a
-    // second deploy-order dependency and deserves its own decision.
-    expect(borrowed.length).toBe(1);
-    const body = borrowed[0] as string[];
-    expect(value(body, "name")).toBe("RATE_LIMIT");
-    expect(value(body, "class_name")).toBe("RateLimiterDurableObject");
-    expect(value(body, "script_name")).toBe("ferrogate-gateway");
+  it("binds only gateway-owned RATE_LIMIT and TENANT_DATA namespaces", () => {
+    expect(borrowed.length).toBe(2);
+    const rateLimit = borrowed.find((body) => value(body, "name") === "RATE_LIMIT");
+    expect(rateLimit).toBeDefined();
+    expect(value(rateLimit as string[], "class_name")).toBe("RateLimiterDurableObject");
+    expect(value(rateLimit as string[], "script_name")).toBe("ferrogate-gateway");
+
+    const tenantData = borrowed.find((body) => value(body, "name") === "TENANT_DATA");
+    expect(tenantData).toBeDefined();
+    expect(value(tenantData as string[], "class_name")).toBe("TenantDataObject");
+    expect(value(tenantData as string[], "script_name")).toBe("ferrogate-gateway");
   });
 
   it("neither migrates nor exports the borrowed class", () => {
@@ -165,7 +168,9 @@ describe("the BORROWED counter namespace (#666)", () => {
     // per-Worker quota multiplier this issue exists to close.
     const { sqlite, legacy } = migratedClasses();
     expect([...sqlite, ...legacy]).not.toContain("RateLimiterDurableObject");
+    expect([...sqlite, ...legacy]).not.toContain("TenantDataObject");
     expect((entry as unknown as Record<string, unknown>).RateLimiterDurableObject).toBeUndefined();
+    expect((entry as unknown as Record<string, unknown>).TenantDataObject).toBeUndefined();
   });
 });
 

@@ -7,21 +7,11 @@
  * across the tool namespace. `idField: "name"` makes the create body's `name`
  * the store key so `POST` then `GET /{name}` round-trips.
  *
- * ## The former `PORT_TODO(inventory-edge-control §MCP "server catalog")` — CLOSED
- *
- * This was the OTHER HALF of the marker on `apps/mcp/src/durable.ts`'s
- * `loadServerCatalog`. These six operations store a `control_plane_resources`
- * document and nothing else; `apps/mcp` resolved a tenant's upstreams from a
- * TYPED `mcp_servers` table that **nothing in this repo wrote**, so a server
- * created here round-tripped through this CRUD surface perfectly while the
- * deployed MCP tool plane served zero tools.
- *
- * `apps/mcp/src/catalog.ts` now READS these documents out of the control
- * database — the same database that app already binds as `env.DB` — so a
- * `POST /admin/v1/mcp-servers` here becomes an upstream there. The reader owns
- * the bridge (it is the side that has to be fail-closed), and
- * `apps/mcp/test/server-catalog.test.ts` is the mount gate: deleting the merge
- * turns it red.
+ * The control document remains lossless and auditable, while the tenant
+ * object's `mcp_servers` row is the runtime authority. Mutations project the
+ * decoded document into that object, and tenant-scoped reads run the bounded
+ * legacy backfill before serving the control document. `apps/mcp` never opens
+ * this Worker's `DB` for its catalog.
  *
  * ## Two things this file's SCHEMA still under-declares, deliberately
  *
@@ -44,7 +34,23 @@
  *    document is skipped rather than becoming a mis-configured upstream.
  */
 import { z } from "zod";
-import { type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
+import {
+  ensureTenantMcpServerCatalogBackfill,
+  projectMcpServer,
+  unprojectMcpServer,
+} from "../store/mcp_server_catalog.js";
+import {
+  type CollectionSpec,
+  type GroupModule,
+  type Handler,
+  adminRecordSchema,
+  crudGroup,
+  depsOf,
+  listHandler,
+  readHandler,
+  resolveSpec,
+  scopeOf,
+} from "./resource.js";
 
 export const mcpServerSchema = adminRecordSchema.extend({
   name: z.string().trim().min(1),
@@ -53,6 +59,41 @@ export const mcpServerSchema = adminRecordSchema.extend({
   enabled: z.boolean().optional(),
 });
 
-export const adminMcpServerRoutes: GroupModule = crudGroup("admin_mcp_server", [
-  { segment: "mcp-servers", object: "mcp_server", idField: "name", body: mcpServerSchema },
-]);
+/** PATCH merges fields and keeps the natural-key resource id structural. */
+export const mcpServerPatchSchema = mcpServerSchema.partial();
+
+const mcpServerSpec: CollectionSpec = {
+  segment: "mcp-servers",
+  object: "mcp_server",
+  idField: "name",
+  body: mcpServerSchema,
+  patch: mcpServerPatchSchema,
+  tenantProject: projectMcpServer,
+  tenantUnproject: unprojectMcpServer,
+};
+
+const resolvedMcpServerSpec = resolveSpec(mcpServerSpec);
+
+async function backfillTenantRead(c: Parameters<Handler>[0]): Promise<void> {
+  const scope = scopeOf(c);
+  if (scope.kind === "tenant") {
+    await ensureTenantMcpServerCatalogBackfill(depsOf(c), scope.tenantId);
+  }
+}
+
+const readOverrides: Readonly<Record<string, Handler>> = {
+  listAdminMcpServers: async (c) => {
+    await backfillTenantRead(c);
+    return listHandler(resolvedMcpServerSpec)(c);
+  },
+  getAdminMcpServer: async (c) => {
+    await backfillTenantRead(c);
+    return readHandler(resolvedMcpServerSpec, "name")(c);
+  },
+};
+
+export const adminMcpServerRoutes: GroupModule = crudGroup(
+  "admin_mcp_server",
+  [mcpServerSpec],
+  readOverrides,
+);
