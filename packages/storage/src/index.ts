@@ -212,6 +212,8 @@ export * from "./tenant-do.js";
  * view report an empty fleet.
  */
 export * from "./tenant-dispatch.js";
+/** Resumable shared-D1 to Durable-Object backfill manifest and receipts. */
+export * from "./tenant-backfill.js";
 /**
  * TENANT ONBOARDING (#820): the tenant's own model catalog and the seeder that
  * fills it once, plus the provisioner that refuses an unregistered tenant BEFORE

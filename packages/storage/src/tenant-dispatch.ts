@@ -58,6 +58,7 @@
 import { StorageError } from "./errors.js";
 import {
   ControlDatabaseTenantRegistry,
+  PRE_CUTOVER_TENANT_MIGRATION_STATES,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
@@ -80,6 +81,12 @@ export interface TenantBackendArms {
    * tenant to a D1 database that holds none of its rows.
    */
   readonly durableObject?: TenantDatabaseRouter | undefined;
+  /**
+   * The legacy shared tenant database used while #824 is in `shared`,
+   * `copying`, or `verifying`. It is optional so deployments that have no
+   * migration source fail closed rather than silently using another arm.
+   */
+  readonly legacyShared?: TenantDatabaseRouter | undefined;
 }
 
 /**
@@ -123,6 +130,18 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
       throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
     }
     const registration = await this.#registry.get(tenantId);
+    if (
+      registration?.migrationState !== undefined &&
+      PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
+    ) {
+      const legacyShared = this.#arms.legacyShared;
+      if (legacyShared === undefined) {
+        throw StorageError.runtime(
+          `tenant ${tenantId} is in migration state ${registration.migrationState}, but this Worker binds no legacy shared tenant database`,
+        );
+      }
+      return legacyShared.forTenant(tenantId);
+    }
     if (registration?.storageBackend !== "durable_object") {
       // Includes "no row at all": a tenant nothing has provisioned is the
       // fallback's `not_found`, which callers already read as "no tenant
@@ -153,7 +172,12 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
     }
     const registration = await this.#registry.get(tenantId);
     const router =
-      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
+      registration?.migrationState !== undefined &&
+      PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
+        ? this.#arms.legacyShared
+        : registration?.storageBackend === "durable_object"
+          ? this.#arms.durableObject
+          : this.#arms.fallback;
     if (router === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} is provisioned on the durable_object backend, but this Worker binds no TENANT_DATA namespace`,
@@ -170,36 +194,57 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
   async setScheduleAlarm(tenantId: string, scheduledAtUnix: number): Promise<void> {
     const registration = await this.#registry.get(tenantId);
     const router =
-      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
-    if (router?.setScheduleAlarm === undefined) {
+      registration?.migrationState !== undefined &&
+      PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
+        ? this.#arms.legacyShared
+        : registration?.storageBackend === "durable_object"
+          ? this.#arms.durableObject
+          : this.#arms.fallback;
+    if (router === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} backend does not expose the schedule alarm RPC`,
       );
     }
+    // Native/shared D1 routers intentionally have no Durable Object alarm.
+    // Preserve the optional capability so legacy schedule paths keep using
+    // their existing control-plane tick.
+    if (router.setScheduleAlarm === undefined) return;
     await router.setScheduleAlarm(tenantId, scheduledAtUnix);
   }
 
   async clearScheduleAlarm(tenantId: string): Promise<void> {
     const registration = await this.#registry.get(tenantId);
     const router =
-      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
-    if (router?.clearScheduleAlarm === undefined) {
+      registration?.migrationState !== undefined &&
+      PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
+        ? this.#arms.legacyShared
+        : registration?.storageBackend === "durable_object"
+          ? this.#arms.durableObject
+          : this.#arms.fallback;
+    if (router === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} backend does not expose the schedule alarm RPC`,
       );
     }
+    if (router.clearScheduleAlarm === undefined) return;
     await router.clearScheduleAlarm(tenantId);
   }
 
   async rearmScheduleAlarm(tenantId: string): Promise<void> {
     const registration = await this.#registry.get(tenantId);
     const router =
-      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
-    if (router?.rearmScheduleAlarm === undefined) {
+      registration?.migrationState !== undefined &&
+      PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
+        ? this.#arms.legacyShared
+        : registration?.storageBackend === "durable_object"
+          ? this.#arms.durableObject
+          : this.#arms.fallback;
+    if (router === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} backend does not expose the schedule alarm rearm RPC`,
       );
     }
+    if (router.rearmScheduleAlarm === undefined) return;
     await router.rearmScheduleAlarm(tenantId);
   }
 

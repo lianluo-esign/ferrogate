@@ -242,6 +242,16 @@ database_name = "ferrogate-control"
 database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 migrations_dir = "../../sql/d1-ts/control"
 
+# LEGACY_TENANT_DB is the pre-M9 shared tenant database. It is retained only
+# while issue #824 runs its tenant-by-tenant backfill; the migration writes a
+# source-side fence before copying and never treats this binding as a fallback
+# for ordinary control-plane requests.
+[[d1_databases]]
+binding = "LEGACY_TENANT_DB"
+database_name = "ferrogate-tenant"
+database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+migrations_dir = "../../sql/d1-ts/tenant"
+
 # ---------------------------------------------------------------------------
 # PROMPT DEPLOYMENT LABELS — the `label -> revision` pointer (#694)
 # ---------------------------------------------------------------------------

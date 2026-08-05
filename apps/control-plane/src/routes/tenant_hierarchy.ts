@@ -50,6 +50,10 @@ import {
   tenantOf,
   workspaceTenantRow,
 } from "../store/tenancy.js";
+import {
+  runTenantStorageMigration,
+  TenantBackfillError,
+} from "../store/tenant-backfill.js";
 import { provisionTenantStorageFor } from "../store/tenant_storage.js";
 import {
   type GroupModule,
@@ -98,6 +102,12 @@ export const workspaceSchema = adminRecordSchema.extend({
 export const tenantPlanAssignmentSchema = z.object({
   plan_id: z.string().trim().min(1),
   effective_at: z.number().int().min(0).optional(),
+});
+
+export const tenantStorageMigrationSchema = z.object({
+  action: z.enum(["start", "resume", "verify", "cutover", "rollback", "status"]),
+  page_size: z.number().int().min(1).max(500).optional(),
+  retention_seconds: z.number().int().min(60).max(31_536_000).optional(),
 });
 
 const TENANT_ACCOUNTS = "tenant-accounts";
@@ -374,6 +384,53 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       // becomes provisionable, and repairing it here costs one idempotent call.
       await provisionTenantStorageFor(deps, tenantId);
       return json(c, 200, adminItem("tenant_account", stored));
+    },
+
+    migrateTenantStorage: async (c) => {
+      const auth = c.get("auth");
+      if (auth === null || auth === undefined || !auth.platformOperator) {
+        throw new HttpError(
+          403,
+          "platform_operator_required",
+          "tenant storage migration is restricted to platform operators",
+        );
+      }
+      const deps = c.get("deps");
+      const controlDatabase = deps.controlDatabase;
+      const legacyTenantDatabase = deps.legacyTenantDatabase;
+      const destinationRouter = deps.tenantStorage;
+      if (
+        controlDatabase === null ||
+        legacyTenantDatabase === null ||
+        legacyTenantDatabase === undefined ||
+        destinationRouter === undefined
+      ) {
+        throw new HttpError(
+          503,
+          "tenant_storage_migration_unavailable",
+          "tenant storage migration requires control, legacy shared-D1, and Durable Object bindings",
+        );
+      }
+      const tenantId = pathParam(c, "tenant_id");
+      const body = await readJson(c, tenantStorageMigrationSchema);
+      try {
+        const migrated = await runTenantStorageMigration({
+          controlDatabase,
+          legacyTenantDatabase,
+          destinationRouter,
+          tenantId,
+          action: body.action,
+          requestId: c.get("requestId"),
+          pageSize: body.page_size,
+          retentionSeconds: body.retention_seconds,
+        });
+        return json(c, 200, migrated);
+      } catch (error) {
+        if (error instanceof TenantBackfillError) {
+          throw new HttpError(error.statusCode, error.code, error.message);
+        }
+        throw error;
+      }
     },
 
     /**

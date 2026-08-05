@@ -46,7 +46,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0020.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0021.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -116,6 +116,7 @@ const TENANT_TABLES = [
   "tenant_resources",
   "tenant_role_bindings",
   "tenant_role_catalog",
+  "tenant_write_fences",
   "usage_aggregate_rollups",
   "usage_event_claims",
   "usage_metadata_rollups",
@@ -137,6 +138,14 @@ function objectFor(tenantId: string): DurableObjectStub<TenantDataObject> {
 
 type PrivilegedTenantObject = DurableObjectStub<TenantDataObject> & {
   privilegedBatch(request: TenantDataBatchRequest): Promise<unknown[]>;
+};
+
+type MigrationTenantObject = DurableObjectStub<TenantDataObject> & {
+  setMigrationMode(request: {
+    tenantId: string;
+    mode: "shared" | "copying" | "verifying" | "cut" | "done";
+    epoch: number;
+  }): Promise<unknown>;
 };
 
 function privilegedObjectFor(tenantId: string): PrivilegedTenantObject {
@@ -248,10 +257,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 20,
-      statements: 183,
-      createTable: 71,
-      createIndex: 89,
+      files: 21,
+      statements: 414,
+      createTable: 72,
+      createIndex: 90,
       createUniqueIndex: 6,
       alterTable: 10,
       insert: 6,
@@ -281,17 +290,15 @@ describe("the statement splitter", () => {
       "0016_control_plane_resources": 1,
       "0017_worker_schedule_state": 1,
       "0018_usage_evaluation_audit": 1,
+      "0021_tenant_backfill_fence": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(36);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(37);
 
-    // The claim those two counts exist to support, asserted rather than
-    // restated: NO statement the splitter produces still carries a `;`, i.e.
-    // nothing was cut inside a literal and no comment survived the strip.
-    expect(all.filter((statement) => statement.includes(";"))).toEqual([]);
-    // And the trigger case the docblock says would break it, so a future
-    // `CREATE TRIGGER` fails HERE — where the fix is described — rather than at
-    // a tenant's cold start.
-    expect(all.filter((statement) => /CREATE\s+TRIGGER/i.test(statement))).toEqual([]);
+    // Ordinary statements still have their terminator removed, while each
+    // trigger stays whole because its body contains internal terminators.
+    const triggers = all.filter((statement) => /CREATE\s+TRIGGER/i.test(statement));
+    expect(triggers).toHaveLength(229);
+    expect(all.filter((statement) => !/CREATE\s+TRIGGER/i.test(statement) && statement.includes(";"))).toEqual([]);
   });
 });
 
@@ -305,7 +312,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(20);
+    expect(TENANT_MIGRATIONS.length).toBe(21);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -500,6 +507,35 @@ describe("tenant configuration and policy state", () => {
     expect(rows.results).toEqual([
       { credentials: 0, cache_policies: 0, revocations: 0, replay_floors: 0, alerts: 0 },
     ]);
+  });
+});
+
+describe("tenant storage migration gate", () => {
+  test("keeps the object frozen during cut until control reaches done", async () => {
+    const tenant = "tenant_migration_gate_cut";
+    const object = objectFor(tenant) as MigrationTenantObject;
+    await object.setMigrationMode({ tenantId: tenant, mode: "shared", epoch: 1 });
+    await object.setMigrationMode({ tenantId: tenant, mode: "copying", epoch: 1 });
+    await object.setMigrationMode({ tenantId: tenant, mode: "verifying", epoch: 1 });
+    await object.setMigrationMode({ tenantId: tenant, mode: "cut", epoch: 1 });
+    expect(
+      await refusal(
+        object.query({
+          tenantId: tenant,
+          sql: "INSERT INTO projects (id, tenant_id, slug, name) VALUES (?, ?, ?, ?)",
+          params: ["cut_frozen", tenant, "cut-frozen", "Cut frozen"],
+        }),
+      ),
+    ).toMatch(/writes are frozen/);
+    expect(
+      await refusal(object.setScheduleAlarm({ tenantId: tenant, scheduledAtUnix: 1_800_000_500 })),
+    ).toMatch(/schedule alarm writes are frozen/);
+    await object.setMigrationMode({ tenantId: tenant, mode: "done", epoch: 1 });
+    await object.query({
+      tenantId: tenant,
+      sql: "INSERT INTO projects (id, tenant_id, slug, name) VALUES (?, ?, ?, ?)",
+      params: ["done_writable", tenant, "done-writable", "Done writable"],
+    });
   });
 });
 

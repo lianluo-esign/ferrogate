@@ -473,6 +473,13 @@ export interface ControlPlaneDeps {
    */
   readonly controlDatabase: D1Database | null;
   /**
+   * The legacy shared tenant database used only by the #824 backfill and by
+   * tenants whose migration state is still pre-cutover. It is deliberately
+   * separate from `controlDatabase`: the former contains tenant business rows,
+   * while the latter contains the account-global registry and audit chain.
+   */
+  readonly legacyTenantDatabase?: D1Database | null;
+  /**
    * The KV namespace `apps/gateway` resolves prompt deployment labels from
    * (`PROMPT_LABELS`), or `null` when this deployment binds none.
    *
@@ -648,6 +655,12 @@ export interface ControlPlaneBindings {
    * `CONTROL_PLANE_STORE = "memory"`.
    */
   readonly DB: D1Database;
+  /**
+   * The old shared tenant D1 (`apps/gateway`'s `DB`), exposed to the control
+   * plane only for the resumable #824 migration path. It must never be used as
+   * the control database or as an implicit fallback for an unregistered tenant.
+   */
+  readonly LEGACY_TENANT_DB?: D1Database;
   /**
    * The gateway's `TenantDataObject` namespace, bound CROSS-SCRIPT (#820).
    *

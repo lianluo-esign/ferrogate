@@ -67,17 +67,17 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 281 operations", () => {
+  it("is version 1 and carries all 303 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 218 operations to apps/control-plane", () => {
+  it("assigns exactly 235 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });
 
-  it("declares exactly 43 route groups", () => {
+  it("declares exactly 44 route groups", () => {
     // `ROUTE-MAP.md` line 4 designates itself the source of truth and states
     // the group count in PROSE, where nothing held it: it read "40 route
     // groups" for two merges after the 41st group appeared, because a group
@@ -89,7 +89,7 @@ describe("contract document", () => {
     // both landed: this assertion was written on a branch that only knew about
     // the first, so 43 is COUNTED off the merged `route_patterns`, not
     // incremented off the 42 this test first shipped with.
-    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(43);
+    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(44);
   });
 
   it("ownership predicate agrees with the raw document, path by path", () => {

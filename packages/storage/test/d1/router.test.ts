@@ -11,9 +11,11 @@
 import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
+  BackendDispatchingTenantDatabaseRouter,
   ControlDatabaseTenantRegistry,
   D1RestTenantDatabaseRouter,
   D1_BINDING_STRATEGIES,
+  DurableObjectTenantDatabaseRouter,
   type EnvBindingTenantDatabaseRouter,
   SharedDatabaseTenantRouter,
   type TenantDatabaseHandle,
@@ -67,6 +69,46 @@ describe("EnvBindingTenantDatabaseRouter — resolution", () => {
 
   test("provisionedTenants lists every registration, ascending", async () => {
     expect(await router.provisionedTenants()).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+  });
+});
+
+describe("BackendDispatchingTenantDatabaseRouter — migration routing", () => {
+  test("keeps pre-cutover tenants on the shared source until cutover", async () => {
+    await env.CONTROL_DB
+      .prepare(
+        "UPDATE tenant_databases SET storage_backend = 'durable_object', migration_state = 'copying', migration_epoch = 1 WHERE tenant_id = ?",
+      )
+      .bind(TENANT_A)
+      .run();
+    const dispatch = new BackendDispatchingTenantDatabaseRouter(env.CONTROL_DB, {
+      fallback: router,
+      durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.CONTROL_DB),
+      legacyShared: new SharedDatabaseTenantRouter(env.TENANT_DB_A),
+    });
+    try {
+      const preCutover = await dispatch.forTenant(TENANT_A);
+      expect(preCutover.source).toBe("shared_development");
+      expect(preCutover.db).toBe(env.TENANT_DB_A);
+      // Shared D1 has no native Durable Object alarm; the dispatcher must
+      // preserve that optional capability instead of turning legacy schedules
+      // into a runtime failure during the backfill window.
+      await expect(dispatch.rearmScheduleAlarm(TENANT_A)).resolves.toBeUndefined();
+
+      await env.CONTROL_DB
+        .prepare("UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id = ?")
+        .bind(TENANT_A)
+        .run();
+      const postCutover = await dispatch.forTenant(TENANT_A);
+      expect(postCutover.source).toBe("durable_object");
+      expect(postCutover.db).not.toBe(env.TENANT_DB_A);
+    } finally {
+      await env.CONTROL_DB
+        .prepare(
+          "UPDATE tenant_databases SET storage_backend = 'native_binding', migration_state = 'shared', migration_epoch = 0 WHERE tenant_id = ?",
+        )
+        .bind(TENANT_A)
+        .run();
+    }
   });
 });
 

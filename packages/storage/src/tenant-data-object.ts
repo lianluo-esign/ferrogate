@@ -105,6 +105,43 @@ export interface TenantDataBatchRequest {
   readonly statements: readonly TenantDataStatement[];
 }
 
+/**
+ * The persisted mode of the tenant migration gate.
+ *
+ * `done` is the compatibility default for objects created before this gate was
+ * deployed. A migration caller must explicitly move an object to `shared`
+ * before it can use the frozen import path.
+ */
+export type TenantMigrationMode = "shared" | "copying" | "verifying" | "cut" | "done";
+
+/** Trusted control-plane request to advance the object-side migration gate. */
+export interface TenantMigrationModeRequest {
+  readonly tenantId: string;
+  readonly mode: TenantMigrationMode;
+  /** Monotonic migration generation; retries with the same generation are idempotent. */
+  readonly epoch: number;
+}
+
+/** Tenant admission for a migration status read. */
+export interface TenantMigrationStatusRequest {
+  readonly tenantId: string;
+}
+
+/** Trusted, migration-only batch import while the object is frozen. */
+export interface TenantMigrationImportRequest extends TenantDataBatchRequest {
+  /** Must equal the currently persisted migration epoch. */
+  readonly epoch: number;
+}
+
+/** Object-side migration state used by cutover and rollback orchestration. */
+export interface TenantMigrationStatus {
+  readonly tenantId: string;
+  readonly mode: TenantMigrationMode;
+  readonly epoch: number;
+  /** Increases before every accepted tenant-data write attempt. */
+  readonly writeEpoch: number;
+}
+
 /** One tenant-authoritative append to the tamper-evident audit chain. */
 export interface TenantAuditAppendRequest {
   readonly tenantId: string;
@@ -226,6 +263,38 @@ export interface TenantScheduleAlarmClearRequest {
 /** Storage key for the adopted tenant id. See {@link TenantDataObject.query}. */
 const TENANT_ID_KEY = "tenant_data:tenant_id";
 
+/** Persisted migration gate and rollback witness. Kept in KV to avoid schema drift. */
+const TENANT_MIGRATION_STATE_KEY = "tenant_data:migration_state";
+
+interface PersistedTenantMigrationState {
+  readonly mode: TenantMigrationMode;
+  readonly epoch: number;
+  readonly writeEpoch: number;
+}
+
+const DEFAULT_TENANT_MIGRATION_STATE: PersistedTenantMigrationState = {
+  mode: "done",
+  epoch: 0,
+  writeEpoch: 0,
+};
+
+const TENANT_MIGRATION_MODES: readonly TenantMigrationMode[] = [
+  "shared",
+  "copying",
+  "verifying",
+  "cut",
+  "done",
+];
+
+const FROZEN_TENANT_MIGRATION_MODES: readonly TenantMigrationMode[] = [
+  "shared",
+  "copying",
+  "verifying",
+  // The control registry switches routing to the object at `cut`, but the
+  // object must remain read-only until the control row reaches `done`.
+  "cut",
+];
+
 /** The validated tenant-only payload retained until the native alarm fires. */
 const SCHEDULE_ALARM_KEY = "tenant_data:schedule_alarm";
 
@@ -330,10 +399,7 @@ function requiresPrivilegedWrite(sql: string): string | null {
   // schema-qualified names, and trigger bodies without trying to implement
   // SQLite's grammar here. The state machine matters: `--` and `/*` inside a
   // legal string must not hide SQL that follows that string.
-  const normalized = stripSqlCommentsAndStrings(sql);
-  const tokens = new Set(
-    (normalized.match(/[A-Za-z_][A-Za-z0-9_$]*/g) ?? []).map((token) => token.toLowerCase()),
-  );
+  const tokens = sqlTokens(sql);
   if (
     !["insert", "replace", "update", "delete", "create", "alter", "drop", "truncate"].some((verb) =>
       tokens.has(verb),
@@ -345,6 +411,106 @@ function requiresPrivilegedWrite(sql: string): string | null {
     if (tokens.has(table)) return table;
   }
   return null;
+}
+
+function sqlTokens(sql: string): Set<string> {
+  const normalized = stripSqlCommentsAndStrings(sql);
+  return new Set(
+    (normalized.match(/[A-Za-z_][A-Za-z0-9_$]*/g) ?? []).map((token) => token.toLowerCase()),
+  );
+}
+
+/**
+ * Conservative SQL write detection. The object owns its schema, so DDL and
+ * connection-level write pragmas are writes for the migration gate too. A
+ * token pass catches CTEs and trigger bodies without trusting a caller's first
+ * keyword.
+ */
+function isSqlWrite(sql: string): boolean {
+  const normalized = stripSqlCommentsAndStrings(sql).trim().toLowerCase();
+  if (
+    /^pragma\s+(?:main\.)?(?:table_info|index_info|index_list|foreign_key_list)\s*\(/.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  const tokens = sqlTokens(sql);
+  return [
+    "insert",
+    "replace",
+    "update",
+    "delete",
+    "create",
+    "alter",
+    "drop",
+    "truncate",
+    "vacuum",
+    "reindex",
+    "analyze",
+    "attach",
+    "detach",
+    "pragma",
+    "begin",
+    "commit",
+    "rollback",
+    "savepoint",
+    "release",
+  ].some((verb) => tokens.has(verb));
+}
+
+function isTenantMigrationMode(value: unknown): value is TenantMigrationMode {
+  return typeof value === "string" && TENANT_MIGRATION_MODES.includes(value as TenantMigrationMode);
+}
+
+function isFrozenTenantMigrationMode(mode: TenantMigrationMode): boolean {
+  return FROZEN_TENANT_MIGRATION_MODES.includes(mode);
+}
+
+function migrationTransitionAllowed(
+  current: PersistedTenantMigrationState,
+  next: TenantMigrationMode,
+): boolean {
+  if (current.mode === next) return true;
+  // An object that predates the gate starts in compatibility `done@0`; the
+  // first migration may claim it explicitly. A later `done` object may also
+  // be reopened only through the trusted control-plane rollback path; the
+  // control database supplies the retention and write-epoch checks.
+  if (current.mode === "done" && next === "shared") return true;
+  if (current.mode === "shared") return next === "copying";
+  if (current.mode === "copying") return next === "verifying";
+  if (current.mode === "verifying") return next === "cut";
+  if (current.mode === "cut") return next === "done" || next === "shared";
+  return false;
+}
+
+function decodeTenantMigrationState(value: unknown): PersistedTenantMigrationState {
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`${REFUSAL}: persisted migration state is not an object`);
+  }
+  const candidate = value as Record<string, unknown>;
+  if (!isTenantMigrationMode(candidate.mode)) {
+    throw new Error(`${REFUSAL}: persisted migration state has an unknown mode`);
+  }
+  if (
+    typeof candidate.epoch !== "number" ||
+    !Number.isSafeInteger(candidate.epoch) ||
+    candidate.epoch < 0
+  ) {
+    throw new Error(`${REFUSAL}: persisted migration state has an invalid epoch`);
+  }
+  if (
+    typeof candidate.writeEpoch !== "number" ||
+    !Number.isSafeInteger(candidate.writeEpoch) ||
+    candidate.writeEpoch < 0
+  ) {
+    throw new Error(`${REFUSAL}: persisted migration state has an invalid write epoch`);
+  }
+  return {
+    mode: candidate.mode,
+    epoch: candidate.epoch,
+    writeEpoch: candidate.writeEpoch,
+  };
 }
 
 /**
@@ -373,11 +539,11 @@ function requiresPrivilegedWrite(sql: string): string | null {
  *    lossless over `0005_responses_conversations.sql` — that file indents `--`
  *    comments BETWEEN columns, and a filter anchored at column 0 would corrupt
  *    the table.
- *  * It is safe today because, measured over all TWENTY files, every non-comment
- *    `;` is at end-of-line, there is no `;` inside any string literal in a live
- *    statement, and there are no trailing inline comments. **A migration that
- *    introduces a `CREATE TRIGGER`, or a `;` inside a quoted literal, breaks
- *    this** — such a migration must extend the splitter in the same commit.
+ *  * Trigger bodies are kept as one statement. Their `BEGIN` block contains
+ *    statement terminators by design; splitting those terminators would leave
+ *    the object with a permanently failed schema migration. The current SQL
+ *    convention puts `END;` on its own line, which is enforced by the parser
+ *    below rather than assumed by the caller.
  *
  * Splitting is mandatory, not stylistic: `sql.exec` applies bindings only to the
  * LAST statement of a multi-statement string, so handing a whole file to one
@@ -385,13 +551,40 @@ function requiresPrivilegedWrite(sql: string): string | null {
  * the wrong statement, silently. Splitting first makes that invariant free.
  */
 export function sqlStatements(migration: string): string[] {
-  return migration
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("--"))
-    .join("\n")
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
+  const lines = migration.split("\n").filter((line) => !line.trimStart().startsWith("--"));
+  const statements: string[] = [];
+  let current: string[] = [];
+  let inTrigger = false;
+
+  const flush = (keepTerminator = false) => {
+    let statement = current.join("\n").trim();
+    if (!keepTerminator) statement = statement.replace(/;\s*$/, "");
+    if (statement !== "") statements.push(statement);
+    current = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "") {
+      if (current.length > 0) current.push(line);
+      continue;
+    }
+    current.push(line);
+    if (!inTrigger && /^CREATE\s+(?:TEMP\s+)?TRIGGER\b/i.test(current.join("\n"))) {
+      inTrigger = true;
+    }
+    if (inTrigger) {
+      if (/(?:^|\s)END;\s*$/i.test(trimmed)) {
+        inTrigger = false;
+        flush(true);
+      }
+      continue;
+    }
+    if (trimmed.endsWith(";")) flush();
+  }
+  if (inTrigger) throw new Error("tenant schema migration has an unterminated CREATE TRIGGER block");
+  flush();
+  return statements;
 }
 
 /**
@@ -408,6 +601,7 @@ export class TenantDataObject extends DurableObject {
   #tenantId: string | null = null;
   #appliedThisWake: string[] = [];
   #failure: string | null = null;
+  #migrationState: PersistedTenantMigrationState = DEFAULT_TENANT_MIGRATION_STATE;
   readonly #scheduleAlarmQueue: TenantScheduleAlarmQueue | null;
   readonly [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback = async (message) => {
     if (this.#scheduleAlarmQueue === null) {
@@ -428,6 +622,7 @@ export class TenantDataObject extends DurableObject {
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
       try {
+        this.#migrationState = this.#loadMigrationState();
         this.#migrate();
       } catch (error) {
         // Caught, NOT swallowed. Throwing out of `blockConcurrencyWhile` aborts
@@ -471,7 +666,9 @@ export class TenantDataObject extends DurableObject {
    */
   async query(request: TenantDataQueryRequest): Promise<TenantDataResult> {
     await this.#admit(request.tenantId);
+    this.#refuseMigrationWrite(request.sql, "query");
     this.#refuseUnprivilegedWrite(request.sql);
+    this.#recordWriteAttempt(isSqlWrite(request.sql));
     // One statement is still a transaction: `changes` is measured as a
     // `total_changes()` delta, and a delta straddling a commit boundary could
     // be polluted by another statement. `transactionSync` also gives a bare
@@ -495,7 +692,11 @@ export class TenantDataObject extends DurableObject {
    */
   async batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]> {
     await this.#admit(request.tenantId);
-    for (const statement of request.statements) this.#refuseUnprivilegedWrite(statement.sql);
+    for (const statement of request.statements) {
+      this.#refuseMigrationWrite(statement.sql, "batch");
+      this.#refuseUnprivilegedWrite(statement.sql);
+    }
+    this.#recordWriteAttempt(request.statements.some((statement) => isSqlWrite(statement.sql)));
     return this.#state.storage.transactionSync(() => {
       const results: TenantDataResult[] = [];
       for (const statement of request.statements) {
@@ -512,11 +713,71 @@ export class TenantDataObject extends DurableObject {
    */
   async privilegedBatch(request: TenantDataBatchRequest): Promise<TenantDataResult[]> {
     await this.#admit(request.tenantId);
+    for (const statement of request.statements) {
+      this.#refuseMigrationWrite(statement.sql, "privilegedBatch");
+    }
+    this.#recordWriteAttempt(request.statements.some((statement) => isSqlWrite(statement.sql)));
     return this.#state.storage.transactionSync(() => {
       const results: TenantDataResult[] = [];
       for (const statement of request.statements) results.push(this.#exec(statement));
       return results;
     });
+  }
+
+  /**
+   * Trusted migration import path. It is deliberately separate from
+   * `privilegedBatch`: the latter is a normal operator projection path and is
+   * frozen with all other ordinary writes, while this path is the only write
+   * capability available during `copying`/`verifying`.
+   */
+  async migrationImport(request: TenantMigrationImportRequest): Promise<TenantDataResult[]> {
+    await this.#admit(request.tenantId);
+    this.#assertMigrationImport(request.epoch);
+    this.#recordWriteAttempt(request.statements.some((statement) => isSqlWrite(statement.sql)));
+    return this.#state.storage.transactionSync(() => {
+      const results: TenantDataResult[] = [];
+      for (const statement of request.statements) results.push(this.#exec(statement));
+      return results;
+    });
+  }
+
+  /** Set the persisted mode/generation through the trusted migration seam. */
+  async setMigrationMode(request: TenantMigrationModeRequest): Promise<TenantMigrationStatus> {
+    await this.#admit(request.tenantId);
+    if (!isTenantMigrationMode(request.mode)) {
+      throw new Error(`${REFUSAL}: unknown migration mode ${String(request.mode)}`);
+    }
+    if (!Number.isSafeInteger(request.epoch) || request.epoch < 0) {
+      throw new Error(`${REFUSAL}: migration epoch must be a non-negative safe integer`);
+    }
+    const current = this.#migrationState;
+    if (request.epoch < current.epoch) {
+      throw new Error(
+        `${REFUSAL}: stale migration epoch ${request.epoch}; current epoch is ${current.epoch}`,
+      );
+    }
+    if (!migrationTransitionAllowed(current, request.mode)) {
+      throw new Error(
+        `${REFUSAL}: migration transition ${current.mode} -> ${request.mode} is not allowed`,
+      );
+    }
+    if (request.mode === current.mode && request.epoch === current.epoch) {
+      return this.#migrationStatus(request.tenantId);
+    }
+    const next: PersistedTenantMigrationState = {
+      mode: request.mode,
+      epoch: request.epoch,
+      writeEpoch: current.writeEpoch,
+    };
+    this.#state.storage.kv.put(TENANT_MIGRATION_STATE_KEY, next);
+    this.#migrationState = next;
+    return this.#migrationStatus(request.tenantId);
+  }
+
+  /** Read mode and write epoch for cutover/rollback checks. */
+  async migrationStatus(request: TenantMigrationStatusRequest): Promise<TenantMigrationStatus> {
+    await this.#admit(request.tenantId);
+    return this.#migrationStatus(request.tenantId);
   }
 
   /**
@@ -539,6 +800,8 @@ export class TenantDataObject extends DurableObject {
     }
     const tenant = request.tenantId;
     const chainKey = auditChainKey(tenant);
+    this.#refuseMigrationWrite("INSERT INTO audit_events", "audit append");
+    this.#recordWriteAttempt(true);
 
     return this.#state.blockConcurrencyWhile(async () => {
       const existing = this.#state.storage.sql
@@ -660,6 +923,8 @@ export class TenantDataObject extends DurableObject {
   async setScheduleAlarm(request: TenantScheduleAlarmRequest): Promise<void> {
     const message = tenantScheduleAlarmMessage(request.tenantId, request.scheduledAtUnix);
     await this.#admit(message.tenant_id);
+    this.#refuseMigrationStorageWrite("set schedule alarm");
+    this.#recordWriteAttempt(true);
     await this.#state.blockConcurrencyWhile(async () => {
       // Keep the payload durable before arming the deadline. If the alarm
       // write fails, a retry still has a complete message to deliver.
@@ -672,6 +937,8 @@ export class TenantDataObject extends DurableObject {
   async clearScheduleAlarm(request: TenantScheduleAlarmClearRequest): Promise<void> {
     const tenantId = tenantScheduleAlarmMessage(request.tenantId, 0).tenant_id;
     await this.#admit(tenantId);
+    this.#refuseMigrationStorageWrite("clear schedule alarm");
+    this.#recordWriteAttempt(true);
     await this.#state.blockConcurrencyWhile(async () => {
       await this.#state.storage.deleteAlarm();
       await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
@@ -686,6 +953,8 @@ export class TenantDataObject extends DurableObject {
   async rearmScheduleAlarm(request: TenantScheduleAlarmClearRequest): Promise<void> {
     const tenantId = tenantScheduleAlarmMessage(request.tenantId, 0).tenant_id;
     await this.#admit(tenantId);
+    this.#refuseMigrationStorageWrite("rearm schedule alarm");
+    this.#recordWriteAttempt(true);
     await this.#state.blockConcurrencyWhile(async () => {
       let earliest: number | undefined;
       const rows = this.#state.storage.sql
@@ -778,6 +1047,79 @@ export class TenantDataObject extends DurableObject {
           `${tenantId}; refusing rather than serving one tenant's data to another`,
       );
     }
+  }
+
+  #loadMigrationState(): PersistedTenantMigrationState {
+    const stored = this.#state.storage.kv.get<unknown>(TENANT_MIGRATION_STATE_KEY);
+    if (stored === undefined) {
+      const initial = { ...DEFAULT_TENANT_MIGRATION_STATE };
+      this.#state.storage.kv.put(TENANT_MIGRATION_STATE_KEY, initial);
+      return initial;
+    }
+    return decodeTenantMigrationState(stored);
+  }
+
+  #migrationStatus(tenantId: string): TenantMigrationStatus {
+    return {
+      tenantId,
+      mode: this.#migrationState.mode,
+      epoch: this.#migrationState.epoch,
+      writeEpoch: this.#migrationState.writeEpoch,
+    };
+  }
+
+  #refuseMigrationWrite(sql: string, operation: string): void {
+    if (!isSqlWrite(sql) || !isFrozenTenantMigrationMode(this.#migrationState.mode)) return;
+    throw new Error(
+      `${REFUSAL}: ${operation} writes are frozen in migration mode ` +
+        `${this.#migrationState.mode}@${this.#migrationState.epoch}; use migrationImport`,
+    );
+  }
+
+  #refuseMigrationStorageWrite(operation: string): void {
+    if (!isFrozenTenantMigrationMode(this.#migrationState.mode)) return;
+    throw new Error(
+      `${REFUSAL}: ${operation} writes are frozen in migration mode ` +
+        `${this.#migrationState.mode}@${this.#migrationState.epoch}; resume after cutover`,
+    );
+  }
+
+  #assertMigrationImport(epoch: number): void {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) {
+      throw new Error(`${REFUSAL}: migration import epoch must be a non-negative safe integer`);
+    }
+    if (epoch !== this.#migrationState.epoch) {
+      throw new Error(
+        `${REFUSAL}: migration import epoch ${epoch} does not match current epoch ` +
+          `${this.#migrationState.epoch}`,
+      );
+    }
+    if (this.#migrationState.mode !== "copying" && this.#migrationState.mode !== "verifying") {
+      throw new Error(
+        `${REFUSAL}: migration import is only allowed in copying/verifying, current mode is ` +
+          this.#migrationState.mode,
+      );
+    }
+  }
+
+  /**
+   * Persist a write witness before running the SQL transaction. A failed SQL
+   * transaction may advance the witness, but can never make it lag a committed
+   * object write; rollback therefore fails closed instead of losing an object
+   * mutation because the KV write happened after SQLite committed.
+   */
+  #recordWriteAttempt(willWrite: boolean): void {
+    if (!willWrite) return;
+    if (this.#migrationState.writeEpoch === Number.MAX_SAFE_INTEGER) {
+      throw new Error(`${REFUSAL}: migration write epoch exhausted; refusing further writes`);
+    }
+    const next: PersistedTenantMigrationState = {
+      mode: this.#migrationState.mode,
+      epoch: this.#migrationState.epoch,
+      writeEpoch: this.#migrationState.writeEpoch + 1,
+    };
+    this.#state.storage.kv.put(TENANT_MIGRATION_STATE_KEY, next);
+    this.#migrationState = next;
   }
 
   #refuseUnprivilegedWrite(sql: string): void {

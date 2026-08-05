@@ -1363,6 +1363,92 @@ export async function appendControlPlaneAudit(
   }
 }
 
+/**
+ * Apply one control-plane mutation and append its audit row in one D1 batch.
+ *
+ * The mutation must be a single top-level UPDATE/INSERT/DELETE statement. The
+ * audit INSERT is guarded by SQLite's `changes()` value from that statement,
+ * so a failed CAS cannot leave an audit event for a transition that did not
+ * happen. A chain-sequence conflict rolls the batch back and retries from the
+ * new head.
+ */
+export async function runControlPlaneMutationWithAudit(
+  db: D1Database,
+  mutation: () => D1PreparedStatement,
+  options: ControlPlaneAuditOptions,
+): Promise<boolean> {
+  const tenantId = typeof options.record.tenant_id === "string" ? options.record.tenant_id : null;
+  const auditJson = options.auditJson ?? controlPlaneAuditJson(options);
+  const chainKey = auditChainKey(tenantId);
+  const id = options.newId?.() ?? crypto.randomUUID();
+  const requestId = options.requestId ?? "";
+  const occurredAt = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const projectionKey = auditProjectionKey(tenantId, id);
+
+  for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
+    try {
+      const head = await db
+        .prepare(
+          `SELECT seq, row_hash FROM ${AUDIT_TABLE}
+            WHERE chain_key = ? AND seq IS NOT NULL
+            ORDER BY seq DESC LIMIT 1`,
+        )
+        .bind(chainKey)
+        .first<{ seq: number; row_hash: string | null }>();
+      const seq = (head?.seq ?? 0) + 1;
+      const prevHash = head?.row_hash ?? AUDIT_CHAIN_GENESIS_HASH;
+      const rowHash = await auditRowHash({
+        chain_key: chainKey,
+        seq,
+        prev_hash: prevHash,
+        id,
+        request_id: requestId,
+        agent_run_id: null,
+        tenant: tenantId,
+        occurred_at_unix: occurredAt,
+        audit_json: auditJson,
+      });
+
+      const results = await db.batch([
+        mutation(),
+        db
+          .prepare(
+            `INSERT INTO ${AUDIT_TABLE}
+               (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+                chain_key, seq, prev_hash, row_hash)
+             SELECT ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?
+              WHERE changes() = 1
+                AND NOT EXISTS (
+                  SELECT 1 FROM ${AUDIT_TABLE} WHERE projection_key = ?
+                )`,
+          )
+          .bind(
+            projectionKey,
+            id,
+            requestId,
+            tenantId,
+            occurredAt,
+            auditJson,
+            chainKey,
+            seq,
+            prevHash,
+            rowHash,
+            projectionKey,
+          ),
+      ]);
+      return Number(results[0]?.meta.changes ?? 0) > 0;
+    } catch (error) {
+      if (attempt === AUDIT_APPEND_ATTEMPTS) {
+        throw new Error(
+          `control-plane: atomic audit mutation failed for ${options.action} ${options.collection}/${String(options.record.id)}`,
+          { cause: error },
+        );
+      }
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Schema notes (reported rather than invented — see the slice report)
 // ---------------------------------------------------------------------------
