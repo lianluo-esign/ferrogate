@@ -280,7 +280,6 @@ const SECRETS = [
   // the deploy path. A committed value would decrypt every tenant's key.
   "FERROGATE_BYOK_MASTER_KEY",
   "GATEWAY_DEV_API_KEY",
-  "GATEWAY_TENANT_DB_API_TOKEN",
   "GUARDRAIL_EVIDENCE_HMAC_KEY",
   "TELEMETRY_TOKEN",
 ] as const;

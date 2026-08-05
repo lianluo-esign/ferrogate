@@ -172,6 +172,29 @@ describe("control / tenant split", () => {
     }
   });
 
+  test("tenant registry no longer carries retired D1 identity columns", async () => {
+    expect(await columnNames(env.CONTROL_DB, "tenant_databases")).toEqual([
+      "tenant_id",
+      "storage_backend",
+      "provisioning_status",
+      "schema_version",
+      "catalog_seeded_at_unix",
+      "last_error",
+      "location_hint",
+      "binding_name",
+      "provisioned_at_unix",
+      "updated_at_unix",
+      "migration_state",
+      "migration_epoch",
+      "migration_frozen_at_unix",
+      "migration_cutover_at_unix",
+      "migration_retention_until_unix",
+      "migration_last_error",
+      "migration_receipt_json",
+      "migration_progress_json",
+    ]);
+  });
+
   test("both roles record their own migration version", async () => {
     const control = await env.CONTROL_DB.prepare(
       "SELECT name FROM storage_schema_migrations WHERE version = 1",

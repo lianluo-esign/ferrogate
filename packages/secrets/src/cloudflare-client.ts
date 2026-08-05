@@ -9,7 +9,8 @@
  * **UPDATE (wave 17): `@ferrogate/cloudflare` NOW EXISTS.** The whole crate is
  * ported — `errors.ts` (the typed taxonomy incl. the `10013`/`10058` traps),
  * `envelope.ts`, `retry.ts`, `scopes.ts` + `preflight()`, `r2.ts`,
- * `r2-token.ts`, `d1.ts` (lifecycle only) — with 146 tests. See
+ * `r2-token.ts`, and `custom-hostnames.ts` — with the account-management
+ * slices covered by package tests. See
  * `docs/rewrite/cf-crate-assessment.md` §0.0. **Do NOT write a third partial
  * client anywhere; import that package.**
  *
@@ -40,22 +41,19 @@
  * (`grep -rn 'api.cloudflare.com' packages/ apps/`) found TWO independent
  * envelope-decoding partial clients and no shared one:
  *   - this file (Secrets Store manage plane),
- *   - `@ferrogate/storage`'s `tenant-rest.ts` (the D1 query API — on the request
- *     path, as the fail-closed router for a tenant fleet larger than the
- *     binding budget).
- * (`@ferrogate/providers`' Cloudflare surface was once counted as a third; it
+ * (`@ferrogate/providers`' Cloudflare surface was once counted as a second; it
  * is a request-SHAPING layer that rewrites a URL and injects `cf-aig-*`
  * headers, and never decodes the envelope, so it is not a REST client.)
  *
- * **As of wave 17 there IS a shared one** — `@ferrogate/cloudflare` — and
- * `tenant-rest.ts` has adopted its retry schedule. This file has not yet.
+ * **As of wave 17 there IS a shared one** — `@ferrogate/cloudflare`. This file
+ * still carries its own envelope decoder pending the scoped package refactor.
  *
  * MOST of the Rust crate is CORRECTLY absent, and it is worth writing down why
  * so nobody "ports" it back: `ferrogate-cloudflare` exists because the Rust
  * gateway ran OUTSIDE Cloudflare and had to reach every product over REST. This
- * port runs INSIDE it, so `d1.rs`/`d1_proxy.rs` are superseded by the native D1
- * binding (and, where a runtime-addressed uuid is unavoidable, by
- * `tenant-rest.ts`), the Workers AI and AI Gateway calls by their bindings, and
+ * port runs INSIDE it, so the tenant data plane uses native Durable Objects
+ * (with native D1 bindings retained only for compatibility), the Workers AI and
+ * AI Gateway calls use their bindings, and
  * the agent memory/schedule/container REST hops by Durable Objects. Deleting a
  * REST hop in favour of a binding is the POINT of the rewrite, not a gap.
  *
@@ -77,8 +75,8 @@
  * **All five of those are now ported** into `packages/cloudflare` (wave 17),
  * so the list above is history, not a TODO. What REMAINS open, and why:
  *
- *   - S4 (retry + taxonomy) has a real consumer (`tenant-rest.ts`) and is
- *     genuinely closed. THIS file still carries its own envelope decoder;
+ *   - S4 (retry + taxonomy) is genuinely closed for account-management clients.
+ *     THIS file still carries its own envelope decoder;
  *     collapsing it is a `packages/secrets` refactor, not a port gap.
  *   - S1/S2/S3/S5 are ported but have NO CALL SITE. That is deliberate: the R2
  *     legs must land WITH their control-plane onboarding call site or not at

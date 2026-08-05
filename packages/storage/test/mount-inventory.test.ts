@@ -110,11 +110,7 @@ const MOUNTED: [symbol: string, app: string][] = [
   ["D1WorkflowBudgetStore", "gateway"],
   ["D1UsageLedger", "gateway"],
   ["D1ReferenceGuardedDeletes", "control-plane"],
-  // The two OTHER routers, both live in `apps/gateway/src/tenancy/resolver.ts`
-  // and both previously absent from this gate AND from the `src/index.ts`
-  // inventory — so they were neither claimed live nor claimed dead, which is
-  // the state in which a mount disappears without anything noticing.
-  ["NonAtomicD1RestTenantDatabaseRouter", "gateway"],
+  // The development-only router remains an explicit gateway mount.
   ["SharedDatabaseTenantRouter", "gateway"],
   // WAVE 20 — moved up from `DEAD`, which is this gate working in its "good
   // news" direction: `apps/gateway/src/metering/budget-alerts.ts` imports the

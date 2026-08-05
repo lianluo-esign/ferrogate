@@ -46,10 +46,10 @@ async function reset(): Promise<void> {
   await db()
     .prepare(
       `INSERT INTO tenant_databases
-        (tenant_id, database_uuid, database_name, storage_backend, provisioning_status, migration_state, migration_epoch)
-       VALUES (?, ?, ?, 'native_binding', 'ready', 'shared', 0)`,
+        (tenant_id, storage_backend, provisioning_status, migration_state, migration_epoch)
+       VALUES (?, 'native_binding', 'ready', 'shared', 0)`,
     )
-    .bind(TENANT, "uuid-backfill", "legacy-backfill")
+    .bind(TENANT)
     .run();
   await bindings.LEGACY_TENANT_DB
     .prepare(

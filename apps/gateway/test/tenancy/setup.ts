@@ -50,8 +50,6 @@ export async function setupTenancy(): Promise<void> {
   await registry.upsert(
     {
       tenantId: TENANT_ACME,
-      databaseUuid: "11111111-1111-4111-8111-111111111111",
-      databaseName: "ferrogate-tenant-acme",
       bindingName: "TENANT_DB_ACME",
       schemaVersion: 1,
     },
@@ -60,8 +58,6 @@ export async function setupTenancy(): Promise<void> {
   await registry.upsert(
     {
       tenantId: TENANT_GLOBEX,
-      databaseUuid: "22222222-2222-4222-8222-222222222222",
-      databaseName: "ferrogate-tenant-globex",
       bindingName: "TENANT_DB_GLOBEX",
       schemaVersion: 1,
     },
@@ -70,8 +66,6 @@ export async function setupTenancy(): Promise<void> {
   await registry.upsert(
     {
       tenantId: TENANT_INITECH,
-      databaseUuid: "33333333-3333-4333-8333-333333333333",
-      databaseName: "ferrogate-tenant-initech",
       bindingName: "TENANT_DB_INITECH",
       schemaVersion: 1,
     },
@@ -80,8 +74,6 @@ export async function setupTenancy(): Promise<void> {
   await registry.upsert(
     {
       tenantId: TENANT_UNBOUND,
-      databaseUuid: "44444444-4444-4444-8444-444444444444",
-      databaseName: "ferrogate-tenant-unbound",
       schemaVersion: 1,
     },
     NOW,
@@ -89,8 +81,6 @@ export async function setupTenancy(): Promise<void> {
   await registry.upsert(
     {
       tenantId: TENANT_NON_D1,
-      databaseUuid: "55555555-5555-4555-8555-555555555555",
-      databaseName: "ferrogate-tenant-non-d1",
       bindingName: "GATEWAY_TENANT_DB_ROUTING",
       schemaVersion: 1,
     },

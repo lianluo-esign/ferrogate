@@ -2,22 +2,19 @@
  * `TenantDataObject` — a SQLite-backed Durable Object that **is** one tenant's
  * database (issue #822, `docs/design/per-tenant-durable-object-storage-2026-08.md`).
  *
- * ## Why this exists instead of one D1 database per tenant
+ * ## Why this is the default tenant data plane
  *
- * The tenant data plane was specified as one D1 database per tenant and has
- * never been turned on. It cannot be: Cloudflare bindings resolve at DEPLOY
- * time, so `native_binding` makes signup a `wrangler deploy` and caps the
- * product at the ~5,000-binding-per-script ceiling, and the REST escape hatch
- * (`tenant-rest.ts`) has no transaction envelope, so it reports
- * `supportsAtomicBatch: false` and `requireAtomicBatch()` refuses all 13
- * money-path call sites. Choosing `rest` was choosing to scale by giving up the
- * ledger.
+ * A native D1 binding is retained for explicit single-tenant and self-hosted
+ * compatibility, but it requires deploy-time binding configuration. The
+ * Durable Object namespace is addressed at runtime by tenant id, has no
+ * per-tenant deploy step, and provides the transaction boundary required by
+ * the money paths.
  *
  * A SQLite-backed Durable Object carries its own embedded database.
  * `env.TENANT_DATA.idFromName(tenantId)` addresses a tenant's database at
  * RUNTIME — unlimited instances, no deploy, 10 GB each — and
  * `ctx.storage.transactionSync()` is a real SQLite transaction that rolls back
- * on throw, which is exactly what the REST path could not offer.
+ * on throw, which keeps every tenant-local guarded write atomic.
  *
  * ## This is the fleet's FIRST `ctx.storage.sql` user — read this before editing
  *
@@ -682,7 +679,7 @@ export class TenantDataObject extends DurableObject {
    * Every statement runs inside a single `transactionSync`, so a throw anywhere
    * rolls back everything before it. That is what restores
    * `supportsAtomicBatch: true` to the 13 `requireAtomicBatch()` money paths
-   * that the REST strategy had to refuse — the no-oversell wallet reserve, the
+   * that require a transaction — the no-oversell wallet reserve, the
    * workflow-budget debit, the asset quota admission.
    *
    * Exactly one result per submitted statement, in order. `wallet-d1.ts:377`

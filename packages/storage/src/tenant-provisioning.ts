@@ -3,9 +3,9 @@
  *
  * ## What onboarding used to be, and what is left of it
  *
- * Under one D1 database per tenant it was: call the D1 REST API to CREATE a
- * database, write a `[[d1_databases]]` stanza, `wrangler deploy`, then run a
- * migration runner that did not exist. Every one of those steps is gone. A
+ * Before the Durable Object backend it required creating a D1 database,
+ * writing a `[[d1_databases]]` stanza, deploying, and applying migrations.
+ * Every one of those steps is gone. A
  * Durable Object materialises the instant `idFromName(tenantId)` is addressed,
  * and `TenantDataObject` applies `sql/d1-ts/tenant/*.sql` to itself under
  * `blockConcurrencyWhile` on every cold start (#822). There is no database to
@@ -140,8 +140,8 @@ interface TenantRow {
  * typo, a probe or a long-deleted tenant id all name a perfectly valid object,
  * and the object is CREATED by the first write to it. A namespace cannot be
  * enumerated in production, so a junk object is unfindable and bills for its
- * storage indefinitely. Under the D1 topology the same mistake cost nothing,
- * because creating a database was an explicit REST call somebody had to make.
+ * storage indefinitely. Under the old D1 topology the same mistake did not
+ * materialize storage until an explicit provisioning call.
  *
  * The read is against the CONTROL database's typed `tenants` table rather than
  * the `tenant-accounts` document collection, because `tenants` is what the data

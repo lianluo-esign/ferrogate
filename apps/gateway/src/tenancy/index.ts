@@ -1,18 +1,18 @@
 /**
  * `apps/gateway/src/tenancy` — request-path routing to **one SQLite-backed
  * Durable Object per tenant** (`durable_object`, the default since #819), with
- * the D1-per-tenant modes kept for self-hosted single-tenant deploys.
+ * native-binding compatibility kept for self-hosted single-tenant deploys.
  *
  * Start at `./ports.ts`: it carries the deploy-time-binding constraint that
- * ruled out D1-per-tenant, the strategies and their atomicity costs, the
+ * explains the native-binding compatibility boundary, the strategies and their atomicity costs, the
  * CONTROL/TENANT split, and the fail-closed invariant. `./resolver.ts` builds
  * the router; `./middleware.ts` mounts it and exposes {@link tenantDatabaseOf}
  * to handlers; `./tenant-data.ts` is the one place `env.TENANT_DATA` is read.
  *
  * Nothing in this directory re-implements routing. Every mode delegates to
  * `@ferrogate/storage` (`DurableObjectTenantDatabaseRouter`,
- * `EnvBindingTenantDatabaseRouter`, `NonAtomicD1RestTenantDatabaseRouter`,
- * `SharedDatabaseTenantRouter`, `ControlDatabaseTenantRegistry`,
+ * `EnvBindingTenantDatabaseRouter`, `SharedDatabaseTenantRouter`,
+ * `ControlDatabaseTenantRegistry`,
  * `requireAtomicBatch`), and `packages/storage/test/mount-inventory.test.ts` is
  * the gate that keeps that true.
  *
@@ -36,7 +36,7 @@
  *
  * ```toml
  * [vars]
- * # durable_object | off | binding | binding_strict | rest | shared_development
+ * # durable_object | off | binding | binding_strict | shared_development
  * GATEWAY_TENANT_DB_ROUTING = "durable_object"
  *
  * [[durable_objects.bindings]]
@@ -73,7 +73,8 @@
  * provisioning/STATE record — who exists, where their data is homed — and is
  * read on admin paths only.
  *
- * The `binding` / `binding_strict` / `rest` modes still need the per-tenant D1
+ * The `binding` / `binding_strict` modes are retained for native-binding
+ * compatibility and still need the per-tenant D1
  * work (`wrangler d1 create`, `migrations apply`, a `[[d1_databases]]` stanza
  * whose `binding` matches `tenant_databases.binding_name`, a redeploy, then the
  * registry row). A row without `binding_name` is "provisioned but not yet

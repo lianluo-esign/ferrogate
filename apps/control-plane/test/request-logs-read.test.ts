@@ -107,13 +107,13 @@ async function exactTenantDatabase(tenantId: string): Promise<D1Database> {
   await db()
     .prepare(
       `INSERT INTO tenant_databases
-         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+         (tenant_id, binding_name, schema_version,
           storage_backend, provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, NULL, 12, 'durable_object', 'ready', 'done', 1, 1)
+       VALUES (?, NULL, 12, 'durable_object', 'ready', 'done', 1, 1)
        ON CONFLICT (tenant_id) DO UPDATE SET
          storage_backend = 'durable_object', provisioning_status = 'ready', migration_state = 'done'`,
     )
-    .bind(tenantId, `uuid-${tenantId}`, `db-${tenantId}`)
+    .bind(tenantId)
     .run();
   return (
     await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)

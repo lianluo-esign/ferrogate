@@ -101,8 +101,6 @@ export async function setupDatabases(): Promise<EnvBindingTenantDatabaseRouter> 
   await registry.upsert(
     {
       tenantId: TENANT_A,
-      databaseUuid: "uuid-a",
-      databaseName: "ferrogate-tenant-a",
       bindingName: "TENANT_DB_A",
       schemaVersion: 1,
     },
@@ -111,8 +109,6 @@ export async function setupDatabases(): Promise<EnvBindingTenantDatabaseRouter> 
   await registry.upsert(
     {
       tenantId: TENANT_B,
-      databaseUuid: "uuid-b",
-      databaseName: "ferrogate-tenant-b",
       bindingName: "TENANT_DB_B",
       schemaVersion: 1,
     },
@@ -121,8 +117,6 @@ export async function setupDatabases(): Promise<EnvBindingTenantDatabaseRouter> 
   await registry.upsert(
     {
       tenantId: TENANT_C,
-      databaseUuid: "uuid-c",
-      databaseName: "ferrogate-tenant-c",
       schemaVersion: 1,
     },
     1_700_000_000,

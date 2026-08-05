@@ -20,7 +20,6 @@ import {
   ControlDatabaseTenantRegistry,
   D1WalletStore,
   EnvBindingTenantDatabaseRouter,
-  NonAtomicD1RestTenantDatabaseRouter,
   SharedDatabaseTenantRouter,
   requireAtomicBatch,
 } from "@ferrogate/storage";
@@ -92,15 +91,7 @@ describe("the resolver is @ferrogate/storage's router, not a second implementati
     expect(resolver.eager).toBe(true);
   });
 
-  test('"rest" mode mounts the non-atomic REST router, "shared_development" the shared one', () => {
-    const rest = createTenantDatabaseResolver({
-      ...bindings(),
-      GATEWAY_TENANT_DB_ROUTING: "rest",
-      GATEWAY_TENANT_DB_ACCOUNT_ID: "acct_1",
-      GATEWAY_TENANT_DB_API_TOKEN: "token_1",
-    });
-    expect(rest.router).toBeInstanceOf(NonAtomicD1RestTenantDatabaseRouter);
-
+  test('"shared_development" mode mounts the shared router', () => {
     const shared = createTenantDatabaseResolver({
       ...bindings(),
       GATEWAY_TENANT_DB_ROUTING: "shared_development",
@@ -113,9 +104,6 @@ describe("the resolver is @ferrogate/storage's router, not a second implementati
     const registry = new ControlDatabaseTenantRegistry(env.CONTROL_DB);
     const acme = await registry.get(TENANT_ACME);
     expect(acme?.bindingName).toBe("TENANT_DB_ACME");
-    // The Rust-era identity of the database, still the row's primary payload —
-    // it is what the REST strategy addresses at runtime.
-    expect(acme?.databaseUuid).toBe("11111111-1111-4111-8111-111111111111");
     // `tenant_unbound` is provisioned but has no binding: the column is NULL,
     // not a guessed name.
     expect((await registry.get(TENANT_UNBOUND))?.bindingName).toBeUndefined();
@@ -291,7 +279,6 @@ describe("GATEWAY_TENANT_DB_ROUTING parsing", () => {
       "off",
       "binding",
       "binding_strict",
-      "rest",
       "shared_development",
     ]) {
       expect(parseTenantDatabaseRoutingMode(mode)).toBe(mode);
@@ -314,12 +301,6 @@ describe("GATEWAY_TENANT_DB_ROUTING parsing", () => {
         ...withoutControl,
         GATEWAY_TENANT_DB_ROUTING: "binding",
       } as TenancyBindings),
-    ).toThrow(expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED }));
-
-    // "rest" without its credentials likewise refuses rather than issuing
-    // unauthenticated calls to the D1 API.
-    expect(() =>
-      createTenantDatabaseResolver({ ...bindings(), GATEWAY_TENANT_DB_ROUTING: "rest" }),
     ).toThrow(expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED }));
 
     // "shared_development" without DB refuses too — the escape hatch cannot be

@@ -57,6 +57,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Check current storage topology
+        run: bun scripts/check-current-topology.mjs
+
       - name: Typecheck
         run: bun run typecheck
 

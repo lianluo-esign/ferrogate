@@ -35,7 +35,8 @@
  *
  * The operational consequence, stated plainly: onboarding a new `cf://` secret
  * requires a DEPLOY, the same coupling `EnvBindingTenantDatabaseRouter` has for
- * per-tenant D1. `test/platform-limits.test.ts` pins both the refusal and the
+ * native-binding compatibility path. `test/platform-limits.test.ts` pins the
+ * supported topology and the
  * `SecretsStoreSecret` read that now succeeds.
  */
 import {

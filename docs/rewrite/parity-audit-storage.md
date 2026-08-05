@@ -1,5 +1,10 @@
 # Parity audit — `ferrogate-storage` → `packages/storage`
 
+> **Historical record, superseded 2026-08-05 for tenant storage.** This audit
+> predates the implemented CONTROL D1 plus per-tenant SQLite Durable Object
+> topology. See [`per-tenant-durable-object-storage-2026-08.md`](../design/per-tenant-durable-object-storage-2026-08.md).
+> The findings below remain preserved as the evidence for that transition.
+
 **Scope:** the DATA cluster only (`crates/ferrogate-storage` and its D1 backend,
 `sql/001_init_postgres.sql` v59, `sql/d1/001_init_d1.sql`) against
 `packages/storage`, `sql/d1-ts/`, and the storage-shaped code that ended up

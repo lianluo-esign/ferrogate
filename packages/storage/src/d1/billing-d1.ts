@@ -333,9 +333,9 @@ export class D1BillingEventLedger {
   /**
    * Operator-driven replay of a dead-lettered row (issue #388), as a guarded
    * CAS: the UPDATE fires ONLY from the dead-lettered state, so a replay of a
-   * still-live row cannot silently reset its attempt schedule. Unlike the Rust
-   * REST path (which had no `UPDATE ... RETURNING` and needed a follow-up
-   * SELECT), the native binding returns the reloaded row in the same statement.
+   * still-live row cannot silently reset its attempt schedule. The native D1
+   * binding returns the reloaded row in the same statement, preserving the
+   * atomic readback required by the caller.
    */
   async replayDeadLetteredBillingReport(
     id: string,

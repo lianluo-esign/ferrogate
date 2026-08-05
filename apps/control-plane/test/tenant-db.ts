@@ -99,22 +99,22 @@ export async function resetTenantD1(): Promise<void> {
  * code under test reads what is actually in the table.
  */
 export async function registerTenantDatabases(): Promise<void> {
-  const rows: [string, string, string, string | null][] = [
-    [TENANT_A, "uuid-a", "ferrogate-tenant-a", "TENANT_DB_A"],
-    [TENANT_B, "uuid-b", "ferrogate-tenant-b", "TENANT_DB_B"],
+  const rows: [string, string | null][] = [
+    [TENANT_A, "TENANT_DB_A"],
+    [TENANT_B, "TENANT_DB_B"],
     // Names a binding that does not exist on this Worker.
-    [TENANT_UNROUTABLE, "uuid-x", "ferrogate-tenant-x", "TENANT_DB_NOT_DEPLOYED"],
+    [TENANT_UNROUTABLE, "TENANT_DB_NOT_DEPLOYED"],
   ];
   await db().batch(
-    rows.map(([tenantId, uuid, name, binding]) =>
+    rows.map(([tenantId, binding]) =>
       db()
         .prepare(
           `INSERT INTO tenant_databases
-             (tenant_id, database_uuid, database_name, binding_name, schema_version,
+             (tenant_id, binding_name, schema_version,
               migration_state, provisioned_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, 1, 'done', 1, 1)`,
+           VALUES (?, ?, 1, 'done', 1, 1)`,
         )
-        .bind(tenantId, uuid, name, binding),
+        .bind(tenantId, binding),
     ),
   );
 }

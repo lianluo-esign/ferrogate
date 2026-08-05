@@ -1,5 +1,11 @@
 # `ferrogate-cloudflare` — the 21st crate: assessment and verdict
 
+> **Historical record, superseded 2026-08-05 for tenant storage.** This audit
+> describes the earlier D1-per-tenant and Cloudflare REST/lifecycle assessment.
+> Current FerroGate uses CONTROL D1 plus one SQLite Durable Object per tenant;
+> see [`per-tenant-durable-object-storage-2026-08.md`](../design/per-tenant-durable-object-storage-2026-08.md).
+> The evidence and conclusions below are retained unchanged as audit history.
+
 **Date:** 2026-08-01 · **Wave 16**, implemented by **wave 17** · **Branch:** `main-ts`
 **Answers:** `cutover-parity-libraries.md` §6.1 and `CUTOVER-READINESS.md` §6 item 5
 — *"`ferrogate-cloudflare` appears in NO row of `PORT-PLAN.md` and has four

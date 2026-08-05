@@ -63,9 +63,8 @@
  * ## ONE round trip per `batch()`
  *
  * The whole statement array crosses the stub boundary once and runs inside one
- * `ctx.storage.transactionSync()`. Issuing N sequential stub calls would be the
- * `rest` strategy with extra steps: it would cost N hops AND lose the
- * transaction, which is the single thing this topology exists to restore.
+ * `ctx.storage.transactionSync()`. Issuing N sequential stub calls would cost
+ * N hops and lose the transaction, so the facade keeps the batch envelope intact.
  */
 import { StorageError } from "./errors.js";
 import type {
@@ -379,7 +378,7 @@ export function toD1Result<T = Record<string, unknown>>(result: TenantDataResult
  * One prepared statement over a tenant Durable Object.
  *
  * Deliberately NOT `implements D1PreparedStatement`, for the same reason
- * {@link D1RestPreparedStatement} is not: `D1PreparedStatement` is an ambient
+ * `D1PreparedStatement` is an ambient
  * ABSTRACT CLASS with overloaded `first`/`raw` signatures only workerd can
  * supply, so a hand-written class cannot satisfy it nominally. The structural
  * cast lives in {@link DurableObjectD1Database.prepare}, once, where it is
@@ -576,7 +575,7 @@ export class DurableObjectD1Database {
    * `TenantDataObject.batch()` runs it inside a single
    * `ctx.storage.transactionSync()`, so a throw at statement 3 rolls back 1 and
    * 2. That is what restores `supportsAtomicBatch: true` to the 13
-   * `requireAtomicBatch()` money paths the REST strategy had to refuse.
+   * `requireAtomicBatch()` money paths now execute through the object transaction.
    *
    * Two refusals, both fail-closed:
    *
@@ -641,7 +640,7 @@ export class DurableObjectD1Database {
    * only a statement count and a duration — a shape this facade cannot reproduce
    * (it has no duration; see {@link toD1Result}) and one nothing in this repo
    * calls (grep: zero non-test hits, and the sole `D1ExecResult` mention is the
-   * matching refusal in `./tenant-rest.ts`). Splitting SQL on newlines is also
+   * matching refusal in the facade contract). Splitting SQL on newlines is also
    * exactly the mistake `sqlStatements()` in `./tenant-data-object.ts` documents
    * at length, and re-implementing it here would give the repo a second,
    * weaker splitter.
@@ -749,11 +748,11 @@ export class DurableObjectD1Database {
  * PROVISIONING/STATE record — who exists, where their data is homed, what the
  * operator last did — and stops being a routing table.
  *
- * `database_uuid` and `schema_version` are not carried onto the handle: there is
- * no D1 database and therefore no uuid, and the schema version lives in the
- * object's own `storage_schema_migrations` ledger, which the object applies for
- * itself on every cold start. A `schemaVersion` copied off a control-plane row
- * would be a second source of truth that no writer updates.
+ * The retired D1 identity fields are not carried onto the handle. The schema
+ * version lives in the object's own `storage_schema_migrations` ledger, which
+ * the object applies for itself on every cold start. A `schemaVersion` copied
+ * off a control-plane row would be a second source of truth that no writer
+ * updates.
  */
 export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
   /**

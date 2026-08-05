@@ -17,15 +17,13 @@
  *  * that the durable leg's writes land in the Durable Object and NOT in the D1
  *    tenant database the same harness still migrates — the strongest available
  *    statement of "the suite is looking at the right place";
- *  * that `requireAtomicBatch()` admits the handle, which under `rest` it
- *    refused, on all 13 money paths;
+ *  * that `requireAtomicBatch()` admits the handle on all 13 money paths;
  *  * the one place the two topologies legitimately DISAGREE, so the difference
  *    is recorded rather than discovered.
  */
 import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
-  StorageError,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
   requireAtomicBatch,
@@ -60,9 +58,8 @@ describe("which backend this run is actually exercising", () => {
   });
 
   test("requireAtomicBatch ADMITS this handle on every money path", () => {
-    // All 13 call sites read exactly this. Under `rest` they refused, which is
-    // what made that strategy a read-only topology; the whole point of #822/#823
-    // is that they now run.
+    // All 13 call sites read exactly this. The object-backed topology makes
+    // those transaction-backed paths available.
     expect(handleA.supportsAtomicBatch).toBe(true);
     for (const operation of [
       "reserve_wallet_credits",
@@ -76,25 +73,6 @@ describe("which backend this run is actually exercising", () => {
     }
   });
 
-  test("a rest-sourced handle is STILL refused, on the same call", () => {
-    // The admission above must not be "requireAtomicBatch got easier". Same
-    // function, same operation name, opposite answer.
-    const restHandle: TenantDatabaseHandle = {
-      ...handleA,
-      source: "rest",
-      supportsAtomicBatch: false,
-    };
-    const error = (() => {
-      try {
-        requireAtomicBatch(restHandle, "reserve_wallet_credits");
-        return null;
-      } catch (thrown) {
-        return thrown;
-      }
-    })();
-    expect(error).toBeInstanceOf(StorageError);
-    expect((error as StorageError).message).toContain("refusing to run the guard non-atomically");
-  });
 });
 
 describe("the routed handle and the harness's direct database are the same place", () => {
@@ -187,7 +165,7 @@ describe("where the two topologies legitimately disagree", () => {
         .bind("c_ok", TENANT_C, "C", "c-ok")
         .run();
     } else {
-      await expect(router.forTenant(TENANT_C)).rejects.toThrow(/has no binding_name/);
+      await expect(router.forTenant(TENANT_C)).rejects.toThrow(/no native D1 binding_name/);
     }
   });
 

@@ -5,7 +5,7 @@
  * genuinely different databases, and every unresolvable tenant is an error and
  * never a fallback. A router that silently returned the control database on a
  * miss would put one tenant's money in the account-global ledger, which is the
- * exact failure the DB-per-tenant topology exists to prevent — so most of this
+ * exact failure the tenant storage topology exists to prevent — so most of this
  * file is about the refusals.
  */
 import { env } from "cloudflare:test";
@@ -13,12 +13,10 @@ import { beforeAll, describe, expect, test } from "vitest";
 import {
   BackendDispatchingTenantDatabaseRouter,
   ControlDatabaseTenantRegistry,
-  D1RestTenantDatabaseRouter,
   D1_BINDING_STRATEGIES,
   DurableObjectTenantDatabaseRouter,
   type EnvBindingTenantDatabaseRouter,
   SharedDatabaseTenantRouter,
-  type TenantDatabaseHandle,
   requireAtomicBatch,
 } from "../../src/index.js";
 import { TENANT_A, TENANT_B, TENANT_C, setupDatabases } from "./harness.js";
@@ -35,7 +33,6 @@ describe("EnvBindingTenantDatabaseRouter — resolution", () => {
     expect(handle.tenantId).toBe(TENANT_A);
     expect(handle.source).toBe("native_binding");
     expect(handle.supportsAtomicBatch).toBe(true);
-    expect(handle.databaseUuid).toBe("uuid-a");
     expect(handle.schemaVersion).toBe(1);
   });
 
@@ -120,9 +117,9 @@ describe("EnvBindingTenantDatabaseRouter — fail-closed refusals", () => {
   });
 
   test("a tenant registered WITHOUT a binding name is refused, not fallen back", async () => {
-    // tenant_c is provisioned (it has a uuid) but its Worker binding has not
-    // been deployed. This is the state a half-finished onboarding leaves.
-    await expect(router.forTenant(TENANT_C)).rejects.toThrow(/has no binding_name/);
+    // tenant_c is provisioned but its Worker binding has not been deployed.
+    // This is the state a half-finished native-binding onboarding leaves.
+    await expect(router.forTenant(TENANT_C)).rejects.toThrow(/no native D1 binding_name/);
   });
 
   test("a registration naming a binding this Worker does not have is refused", async () => {
@@ -130,8 +127,6 @@ describe("EnvBindingTenantDatabaseRouter — fail-closed refusals", () => {
     await registry.upsert(
       {
         tenantId: "tenant_ghost",
-        databaseUuid: "uuid-ghost",
-        databaseName: "ferrogate-tenant-ghost",
         bindingName: "TENANT_DB_UNBOUND",
         schemaVersion: 1,
       },
@@ -147,8 +142,6 @@ describe("EnvBindingTenantDatabaseRouter — fail-closed refusals", () => {
     await registry.upsert(
       {
         tenantId: "tenant_wrongkind",
-        databaseUuid: "uuid-wrongkind",
-        databaseName: "x",
         // A real binding on env, but it is a plain JSON var, not a database.
         bindingName: "TENANT_MIGRATIONS",
         schemaVersion: 1,
@@ -171,8 +164,6 @@ describe("Registry", () => {
     await registry.upsert(
       {
         tenantId: "tenant_late",
-        databaseUuid: "uuid-late",
-        databaseName: "ferrogate-tenant-late",
         schemaVersion: 1,
       },
       100,
@@ -182,8 +173,6 @@ describe("Registry", () => {
     await registry.upsert(
       {
         tenantId: "tenant_late",
-        databaseUuid: "uuid-late",
-        databaseName: "ferrogate-tenant-late",
         bindingName: "TENANT_DB_C",
         schemaVersion: 1,
       },
@@ -202,14 +191,9 @@ describe("Registry", () => {
 });
 
 describe("requireAtomicBatch", () => {
-  test("admits a native handle and refuses a REST-shaped one", async () => {
+  test("admits a native handle", async () => {
     const native = await router.forTenant(TENANT_A);
     expect(requireAtomicBatch(native, "op")).toBe(native);
-
-    const rest: TenantDatabaseHandle = { ...native, source: "rest", supportsAtomicBatch: false };
-    expect(() => requireAtomicBatch(rest, "reserve_wallet_credits")).toThrow(
-      /refusing to run the guard non-atomically/,
-    );
   });
 });
 
@@ -232,42 +216,16 @@ describe("SharedDatabaseTenantRouter", () => {
   });
 });
 
-describe("D1RestTenantDatabaseRouter", () => {
-  test("refuses to hand out a handle, naming the exact missing primitive", async () => {
-    const rest = new D1RestTenantDatabaseRouter(env.CONTROL_DB, {
-      accountId: "acct",
-      apiTokenRef: "secret://d1",
-    });
-    // Was `/neither atomic batch\(\) nor RETURNING/`. RETURNING is not missing
-    // over REST (see `test/d1/rest-transport.test.ts`), and naming it as if it
-    // were pushed a reader toward SELECT-then-UPDATE — the race.
-    await expect(rest.forTenant(TENANT_A)).rejects.toThrow(/no transaction envelope/);
-    await expect(rest.forTenant(TENANT_A)).rejects.toThrow(
-      /Single-statement guarded writes and their RETURNING rows DO\s+work/,
-    );
-  });
-
-  test("can still enumerate the registry, since that is a control-database read", async () => {
-    const rest = new D1RestTenantDatabaseRouter(env.CONTROL_DB, {
-      accountId: "acct",
-      apiTokenRef: "secret://d1",
-    });
-    expect(await rest.provisionedTenants()).toContain(TENANT_A);
-  });
-});
-
 describe("D1_BINDING_STRATEGIES", () => {
-  test("records that only native/proxy support the primitives the money paths need", () => {
+  test("records exactly the supported tenant storage sources", () => {
+    expect(Object.keys(D1_BINDING_STRATEGIES).sort()).toEqual([
+      "durable_object",
+      "native_binding",
+      "shared_development",
+    ]);
     expect(D1_BINDING_STRATEGIES.native_binding.atomicBatch).toBe(true);
     expect(D1_BINDING_STRATEGIES.native_binding.returning).toBe(true);
-    expect(D1_BINDING_STRATEGIES.proxy_service.atomicBatch).toBe(true);
-    // The honest half: REST is the only deploy-free strategy and the only one
-    // that cannot host a MULTI-STATEMENT guard. If this ever flips, the README
-    // claim and `D1RestTenantDatabaseRouter`'s refusal both need revisiting.
-    expect(D1_BINDING_STRATEGIES.rest.atomicBatch).toBe(false);
-    // CORRECTED from `false`: RETURNING survives the /query response's
-    // per-statement `results`, and this package's own transport reads it.
-    expect(D1_BINDING_STRATEGIES.rest.returning).toBe(true);
-    expect(D1_BINDING_STRATEGIES.rest.requiresDeployPerTenant).toBe(false);
+    expect(D1_BINDING_STRATEGIES.durable_object.atomicBatch).toBe(true);
+    expect(D1_BINDING_STRATEGIES.shared_development.atomicBatch).toBe(true);
   });
 });

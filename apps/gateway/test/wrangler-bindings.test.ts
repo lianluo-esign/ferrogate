@@ -151,6 +151,11 @@ describe("the runtime contract at the top of the file", () => {
     // D1 mode must fail here even while the harness remains green.
     expect(wranglerToml()).toMatch(/^GATEWAY_TENANT_DB_ROUTING\s*=\s*"durable_object"\s*$/m);
   });
+
+  it("does not declare the retired REST tenant routing surface", () => {
+    expect(wranglerToml()).not.toMatch(/\bGATEWAY_TENANT_DB_(?:ACCOUNT_ID|API_TOKEN)\b/);
+    expect(wranglerToml()).not.toMatch(/^\s*GATEWAY_TENANT_DB_ROUTING\s*=\s*"rest"\s*$/m);
+  });
 });
 
 describe("every Durable Object binding is deployable", () => {

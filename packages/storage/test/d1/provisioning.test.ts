@@ -459,16 +459,16 @@ describe("a half-provisioned tenant is detectable and resumable", () => {
       return;
     }
     await expect(provisionTenantStorage(router, TENANT_C, { nowUnix: NOW })).rejects.toThrow(
-      /has no binding_name/,
+      /no native D1 binding_name/,
     );
     const registration = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).get(TENANT_C);
     expect(registration?.status).toBe("failed");
-    expect(registration?.lastError).toMatch(/has no binding_name/);
+    expect(registration?.lastError).toMatch(/no native D1 binding_name/);
     // And the report says the same thing, so an operator sweeping the fleet sees
     // the cause rather than a bare "not ready".
     const report = await describeTenantStorage(router, TENANT_C);
     expect(report.healthy).toBe(false);
-    expect(report.problems.join(" ")).toMatch(/has no binding_name/);
+    expect(report.problems.join(" ")).toMatch(/no native D1 binding_name/);
   });
 });
 

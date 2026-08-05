@@ -17,13 +17,13 @@ async function tenantDatabase(): Promise<D1Database> {
   await db()
     .prepare(
       `INSERT INTO tenant_databases
-         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+         (tenant_id, binding_name, schema_version,
           storage_backend, provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, NULL, 18, 'durable_object', 'ready', 'done', 1, 1)
+       VALUES (?, NULL, 18, 'durable_object', 'ready', 'done', 1, 1)
        ON CONFLICT (tenant_id) DO UPDATE SET
          storage_backend = 'durable_object', provisioning_status = 'ready', migration_state = 'done'`,
     )
-    .bind(TENANT, `uuid-${TENANT}`, `db-${TENANT}`)
+    .bind(TENANT)
     .run();
   const handle = await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(TENANT);
   expect(handle.source).toBe("durable_object");

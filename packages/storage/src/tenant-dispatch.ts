@@ -69,8 +69,8 @@ export interface TenantBackendArms {
   /**
    * Every tenant whose roster row does NOT say `durable_object`, including
    * every tenant with no row at all. Ordinarily
-   * `EnvBindingTenantDatabaseRouter`, whose own refusals (no row → `not_found`,
-   * a `database_uuid` with no binding → `runtime`) are passed through unchanged.
+   * `EnvBindingTenantDatabaseRouter`, whose own refusals (no row or a missing
+   * binding name) are passed through unchanged.
    */
   readonly fallback: TenantDatabaseRouter;
   /**

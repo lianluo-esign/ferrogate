@@ -13,7 +13,6 @@ import {
   BackendDispatchingTenantDatabaseRouter,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
-  NonAtomicD1RestTenantDatabaseRouter,
   SharedDatabaseTenantRouter,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
@@ -184,9 +183,9 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
     return new RoutedTenantDatabaseResolver(mode, false, new SharedDatabaseTenantRouter(shared));
   }
 
-  // Every remaining mode needs the CONTROL database. For the three D1 modes it
-  // is the ROUTING TABLE (`tenant_databases.binding_name` / `database_uuid` is
-  // the answer). For `durable_object` it is NOT: routing needs nothing, and the
+  // Every remaining mode needs the CONTROL database. Native-binding modes use
+  // `tenant_databases.binding_name` for compatibility routing. For
+  // `durable_object` it is NOT a routing table: routing needs nothing, and the
   // binding is required only for `control()` and `provisionedTenants()` — both
   // account-global, neither on a request path. The requirement is kept for that
   // mode anyway, because a gateway with no CONTROL_DB cannot answer the fleet
@@ -239,26 +238,6 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
         durableObject,
         legacyShared: new SharedDatabaseTenantRouter(env.DB),
       }),
-    );
-  }
-
-  if (mode === "rest") {
-    const accountId = (env.GATEWAY_TENANT_DB_ACCOUNT_ID ?? "").trim();
-    const apiToken = (env.GATEWAY_TENANT_DB_API_TOKEN ?? "").trim();
-    if (accountId === "" || apiToken === "") {
-      throw misconfigured(
-        'GATEWAY_TENANT_DB_ROUTING = "rest" needs GATEWAY_TENANT_DB_ACCOUNT_ID and the ' +
-          "GATEWAY_TENANT_DB_API_TOKEN secret; refusing to route without them",
-      );
-    }
-    // Reads and single-statement writes only: handles report
-    // `supportsAtomicBatch: false`, so `requireAtomicBatch` refuses the wallet
-    // reserve, the workflow-budget CAS and the billing-outbox enqueue. See the
-    // atomicity table in `@ferrogate/storage`'s `tenant-rest.ts`.
-    return new RoutedTenantDatabaseResolver(
-      mode,
-      false,
-      new NonAtomicD1RestTenantDatabaseRouter(controlDb, { accountId, apiToken }),
     );
   }
 

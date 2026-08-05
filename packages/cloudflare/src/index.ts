@@ -20,13 +20,12 @@
  * | S2 | `r2-token.ts` | no binding mints a bucket-scoped S3 credential |
  * | S3 | `client.ts` `preflight` + `scopes.ts` | operability: NAME the missing permission group |
  * | S4 | `retry.ts` + `errors.ts` + `envelope.ts` | the shared retry/backoff + typed taxonomy the tree had two partial copies of |
- * | S5 | `d1.ts` | no binding creates a D1 database |
+ * | S5 | retired | Tenant data is now created by Durable Object addressing; no account-management client is needed |
  * | S6 | `custom-hostnames.ts` | no binding terminates TLS for a TENANT's hostname (#738) |
  *
  * ## What is deliberately ABSENT (do not "port it back")
  *
- * The D1 `/query` endpoint (native `env.DB`; `@ferrogate/storage`'s
- * `D1RestDatabase` for the runtime-uuid escape hatch), the `d1-proxy` client
+ * The D1 `/query` endpoint and the `d1-proxy` client
  * (native `batch()` behind a `[[services]]` binding), the Workers-AI /
  * AI-Gateway REST hops (`env.AI`), agent memory/schedule/container REST hops
  * (Durable Objects), and the `cf://` token resolver (inside a Worker a secret
@@ -35,9 +34,9 @@
  *
  * ## Mount status
  *
- * `retry.ts` has a real request-path consumer today:
- * `@ferrogate/storage`'s `D1RestDatabase`. `custom-hostnames.ts` (S6) has ONE
- * control-plane consumer, `GET /admin/v1/site-domains/{hostname}` (#738).
+ * `retry.ts` provides the shared account-management retry primitive.
+ * `custom-hostnames.ts` (S6) has ONE control-plane consumer,
+ * `GET /admin/v1/site-domains/{hostname}` (#738).
  * S1/S2/S5 are provisioning capabilities whose control-plane call sites are not
  * built yet; each module's docblock states the exact wiring line and the gate
  * that must open first. Nothing here may acquire a request-path consumer except
@@ -125,12 +124,6 @@ export {
   type R2ScopedTokenRequest,
   type R2TokenAccess,
 } from "./r2-token.js";
-
-export {
-  D1LifecycleClient,
-  type D1CreateDatabaseRequest,
-  type D1DatabaseDescriptor,
-} from "./d1.js";
 
 export {
   CUSTOM_HOSTNAME_DUPLICATE_CODES,

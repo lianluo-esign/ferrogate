@@ -43,8 +43,8 @@ async function provisionObjectTenant(tenantId: string): Promise<void> {
     .prepare(
       `INSERT INTO tenant_databases
          (tenant_id, storage_backend, provisioning_status, schema_version,
-          database_uuid, database_name, binding_name, migration_state, provisioned_at_unix, updated_at_unix)
-       VALUES (?, 'durable_object', 'ready', 17, NULL, NULL, NULL, 'done', 1, 1)`,
+          binding_name, migration_state, provisioned_at_unix, updated_at_unix)
+       VALUES (?, 'durable_object', 'ready', 17, NULL, 'done', 1, 1)`,
     )
     .bind(tenantId)
     .run();

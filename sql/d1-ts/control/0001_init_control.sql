@@ -119,7 +119,8 @@ CREATE TABLE IF NOT EXISTS tenants (
 -- it reached D1 over the HTTP API by uuid. In the TS port the router runs
 -- INSIDE a Worker where a database handle is a deploy-time BINDING NAME, so the
 -- registry has to carry that name too, and the hot path wants a point lookup
--- rather than deserializing a whole document. `database_uuid` is retained for
+-- rather than deserializing a whole document. This historical schema retained
+-- `database_uuid` for
 -- the REST/admin/provisioning path (`wrangler d1` + the D1 REST API address a
 -- database by uuid, not by binding name).
 --
