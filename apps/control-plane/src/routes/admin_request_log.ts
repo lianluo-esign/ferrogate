@@ -496,6 +496,7 @@ function listRequestLogsHandler(): Handler {
     const scope = scopeOf(c);
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     if (db === null && scope.kind === "platform_operator") {
       // No control database means no derived `request_logs` projection. The
@@ -508,7 +509,7 @@ function listRequestLogsHandler(): Handler {
     const page =
       scope.kind === "tenant"
         ? await requestLogTenantPage(
-            deps.tenantDatabases,
+            tenantRouter,
             scope.tenantId,
             query.limit,
             query.offset,
@@ -570,6 +571,7 @@ function exportRequestLogsHandler(): Handler {
       REQUEST_LOG_EXPORT_MAX_LIMIT,
     );
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     const metadata =
       db !== null && scope.kind === "platform_operator"
@@ -581,7 +583,7 @@ function exportRequestLogsHandler(): Handler {
         ? (await deps.store.list("request-log-exports", scope, query)).items
         : (await (scope.kind === "tenant"
             ? requestLogTenantPage(
-                deps.tenantDatabases,
+                tenantRouter,
                 scope.tenantId,
                 query.limit,
                 query.offset,
@@ -909,13 +911,14 @@ function listGuardrailEvaluationsHandler(): Handler {
     const scope = scopeOf(c);
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     if (scope.kind === "tenant") {
       // Tenant scope is an authority read. CONTROL is only a fleet projection,
       // so its absence or staleness must not change the tenant answer.
-      await ensureTenantGuardrailEvidenceBackfill(db, deps.tenantDatabases, scope.tenantId);
+      await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
       const page = await tenantGuardrailEvaluationPage(
-        deps.tenantDatabases,
+        tenantRouter,
         scope.tenantId,
         query.limit,
         query.offset,
@@ -1027,12 +1030,13 @@ function getGuardrailInvestigationHandler(): Handler {
     const selector = `${column}=${value}`;
 
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
     const authoritativeTenantDb =
       scope.kind === "tenant"
-        ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, scope.tenantId)
+        ? await tenantEvidenceDatabaseFor(tenantRouter, scope.tenantId)
         : null;
     if (scope.kind === "tenant") {
-      await ensureTenantGuardrailEvidenceBackfill(db, deps.tenantDatabases, scope.tenantId);
+      await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
     }
     if (scope.kind === "platform_operator" && db === null) {
       // Nothing writes the control projection in a memory-store deployment, so
@@ -1110,7 +1114,7 @@ function getGuardrailInvestigationHandler(): Handler {
       scope.kind === "tenant"
         ? requestRows.results
         : await tenantEvidenceRows<RequestLogRow>(
-            deps.tenantDatabases,
+            tenantRouter,
             tenantGroups,
             (count) =>
               `SELECT ${REQUEST_LOG_COLUMNS}
@@ -1137,7 +1141,7 @@ function getGuardrailInvestigationHandler(): Handler {
     ];
 
     const objectAgentRunRows = await tenantEvidenceRows<Record<string, unknown>>(
-      deps.tenantDatabases,
+      tenantRouter,
       tenantGroups,
       (count) =>
         `SELECT id, request_id, tenant, started_at_unix, completed_at_unix, run_json
@@ -1146,7 +1150,7 @@ function getGuardrailInvestigationHandler(): Handler {
           ORDER BY started_at_unix ASC, id ASC`,
     );
     const objectAgentEventRows = await tenantEvidenceRows<Record<string, unknown>>(
-      deps.tenantDatabases,
+      tenantRouter,
       tenantGroups,
       (count) =>
         `SELECT id, run_id, request_id, tenant, occurred_at_unix, event_json

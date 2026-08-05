@@ -871,6 +871,13 @@ export class MeteringUsageSink implements UsageSink {
     // request, so once the resolver is available the charge's own tenant is the
     // only admissible routing key. Falling back to `rc.usageDatabase` here would
     // let a tenant-B replay write into tenant A's object.
+    if (rc !== undefined && this.#bindings?.usageDatabase !== undefined && tenantId === "") {
+      // Reject only the tenant rollup leg. The central billing ledger/report is
+      // still authoritative for an unscoped platform charge and must not be
+      // lost just because there is no object it can be routed to.
+      this.#report("usage_tenant", new Error(`usage charge ${charge.id} has no tenant authority`));
+      return;
+    }
     const db = hasTenantResolver
       ? tenantDatabase
       : hasRequestDatabase
@@ -931,6 +938,7 @@ export class MeteringUsageSink implements UsageSink {
     rc: MeteringDrainContext,
     tenantIds: readonly string[],
     nowUnixSeconds?: number,
+    batchSize = BILLING_OUTBOX_BATCH,
   ): Promise<void> {
     const backend = this.#backend(rc.env);
     const projectionDatabase = backend.usageProjectionDatabase;
@@ -938,24 +946,40 @@ export class MeteringUsageSink implements UsageSink {
     const resolveTenantDatabase = bindings?.usageDatabase;
     if (projectionDatabase === undefined || resolveTenantDatabase === undefined) return;
     const now = nowUnixSeconds ?? this.#clock.nowUnixSeconds();
+    const pageSize = Math.max(1, Math.trunc(batchSize));
     for (const tenantId of tenantIds) {
       if (tenantId.trim() === "") continue;
       const tenantDatabase = resolveTenantDatabase(rc.env, tenantId);
       if (tenantDatabase === undefined) continue;
       try {
-        const rows = await listUsageProjectionRetries(tenantDatabase, now, BILLING_OUTBOX_BATCH);
-        for (const row of rows) {
-          try {
-            await projectWithRetry(() =>
-              projectUsageProjectionRetry(tenantDatabase, projectionDatabase, row),
-            );
-            await clearUsageProjectionRetry(tenantDatabase, row.sourceId);
-          } catch (error) {
-            await deferUsageProjectionRetry(tenantDatabase, row, now).catch((deferError) =>
-              this.#report("usage_projection_retry_defer", deferError),
-            );
-            this.#report("usage_projection_retry", error);
+        for (;;) {
+          const rows = await listUsageProjectionRetries(tenantDatabase, now, pageSize);
+          if (rows.length === 0) break;
+          let stateWriteFailed = false;
+          for (const row of rows) {
+            try {
+              if (row.tenantId.trim() !== tenantId) {
+                throw new Error(
+                  `usage projection retry ${row.sourceId} belongs to ${row.tenantId}, not ${tenantId}`,
+                );
+              }
+              await projectWithRetry(() =>
+                projectUsageProjectionRetry(tenantDatabase, projectionDatabase, row),
+              );
+              await clearUsageProjectionRetry(tenantDatabase, row.sourceId);
+            } catch (error) {
+              try {
+                await deferUsageProjectionRetry(tenantDatabase, row, now);
+              } catch (deferError) {
+                stateWriteFailed = true;
+                this.#report("usage_projection_retry_defer", deferError);
+              }
+              this.#report("usage_projection_retry", error);
+            }
           }
+          // A due row whose retry-state update also failed would be returned
+          // forever by the same page. Leave it for the next scheduled pass.
+          if (stateWriteFailed) break;
         }
       } catch (error) {
         this.#report("usage_projection_list", error);
@@ -1000,7 +1024,8 @@ export class MeteringUsageSink implements UsageSink {
     // the wrong operator.
     const owned = attribution !== undefined && attribution.requestId === charge.requestId;
     const scopes = budgetAlertScopesFor(owned ? attribution : undefined, charge.event.tenant);
-    const tenantId = charge.event.tenant.organization_id ?? attribution?.tenantId ?? "";
+    const tenantId =
+      charge.event.tenant.organization_id ?? (owned ? attribution?.tenantId : undefined) ?? "";
     if (tenantId.trim() === "") {
       this.#report("budget_alert_tenant", new Error(charge.requestId));
       return;

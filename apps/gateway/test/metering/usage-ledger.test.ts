@@ -443,6 +443,97 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
       { total_tokens: 15 },
     ]);
   });
+
+  test("a charge without tenant identity cannot borrow the request database", async () => {
+    const queue = new RecordingQueue();
+    const sink = sinkFor(queue);
+    const charge = usageFixture({
+      requestId: "fg-unattributed-replay",
+      tenantId: undefined,
+      projectId: "project_1",
+    });
+
+    sink.record(charge);
+    await sink.flush({
+      env: bindings(queue),
+      attribution: ATTRIBUTION,
+      usageDatabase: tenantObjectDb("tenant_a"),
+    });
+
+    expect(sink.stats.deliveryFailures).toBe(0);
+    expect(queue.sent).toHaveLength(1);
+    expect(await aggregateRows()).toEqual([]);
+  });
+
+  test("usage projection repair drains every due page", async () => {
+    const queue = new RecordingQueue();
+    const failingControl = new RecordingDatabase(controlDb);
+    failingControl.failure = new Error("control projection unavailable");
+    const sink = sinkFor(queue);
+    const tenantDb = tenantObjectDb("tenant_a");
+    const failedEnv = { ...bindings(queue), CONTROL_DB: failingControl };
+
+    for (let index = 0; index < 3; index += 1) {
+      const requestId = `fg-projection-page-${index}`;
+      sink.record(usageFixture({ requestId }));
+      await sink.flush({
+        env: failedEnv,
+        attribution: { ...ATTRIBUTION, requestId },
+        usageDatabase: tenantDb,
+      });
+    }
+    expect((await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results)
+      .toHaveLength(3);
+
+    failingControl.failure = undefined;
+    await sink.sweepUsageProjections(
+      { env: bindings(queue) },
+      ["tenant_a"],
+      2_000_000_000,
+      2,
+    );
+
+    expect((await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results)
+      .toEqual([]);
+    expect(
+      (await controlDb.prepare("SELECT tenant, total_tokens FROM usage_monthly_rollups").all())
+        .results,
+    ).toContainEqual({ tenant: "tenant_a", total_tokens: 45 });
+  });
+
+  test("usage projection repair rejects a row whose tenant disagrees with its payload", async () => {
+    const queue = new RecordingQueue();
+    const failingControl = new RecordingDatabase(controlDb);
+    failingControl.failure = new Error("control projection unavailable");
+    const sink = sinkFor(queue);
+    const tenantDb = tenantObjectDb("tenant_a");
+    const requestId = "fg-projection-tenant-mismatch";
+
+    sink.record(usageFixture({ requestId }));
+    await sink.flush({
+      env: { ...bindings(queue), CONTROL_DB: failingControl },
+      attribution: { ...ATTRIBUTION, requestId },
+      usageDatabase: tenantDb,
+    });
+    const sourceId = (
+      await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").first<{ source_id: string }>()
+    )?.source_id;
+    if (sourceId === undefined) throw new Error("expected a durable usage projection retry");
+    await tenantDb
+      .prepare("UPDATE usage_projection_retries SET tenant_id = 'tenant_b' WHERE source_id = ?")
+      .bind(sourceId)
+      .run();
+
+    failingControl.failure = undefined;
+    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000, 2);
+
+    expect(
+      (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
+    ).toEqual([{ source_id: sourceId }]);
+    expect((await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results).toEqual(
+      [],
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

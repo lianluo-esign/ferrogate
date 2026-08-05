@@ -406,10 +406,18 @@ export async function projectUsageProjectionRetry(
   projectionDatabase: ProjectionDatabase,
   row: UsageProjectionRetryRow,
 ): Promise<void> {
+  const request = usageProjectionRequestFromPayload(row.payloadJson);
+  const rowTenantId = row.tenantId.trim();
+  const payloadTenantId = request.context.organizationId?.trim() ?? "";
+  if (rowTenantId === "" || payloadTenantId !== rowTenantId) {
+    throw new Error(
+      `usage projection retry ${row.sourceId} tenant mismatch: row=${row.tenantId}, payload=${payloadTenantId}`,
+    );
+  }
   await projectUsageRollups(
     tenantDatabase,
     projectionDatabase,
-    usageProjectionRequestFromPayload(row.payloadJson),
+    request,
   );
 }
 
