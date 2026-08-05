@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
+import type { TenantDatabaseHandle } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 interface TenantObjectBindings {
@@ -15,11 +16,17 @@ function bindings(): TenantObjectBindings {
   return value as TenantObjectBindings;
 }
 
-export function tenantObjectDb(tenantId: string): D1Database {
+function router(): DurableObjectTenantDatabaseRouter {
   const value = bindings();
-  return new DurableObjectTenantDatabaseRouter(value.TENANT_DATA, value.CONTROL_DB).databaseFor(
-    tenantId,
-  );
+  return new DurableObjectTenantDatabaseRouter(value.TENANT_DATA, value.CONTROL_DB);
+}
+
+export function tenantObjectDb(tenantId: string): D1Database {
+  return router().databaseFor(tenantId);
+}
+
+export async function tenantObjectHandle(tenantId: string): Promise<TenantDatabaseHandle> {
+  return router().forTenant(tenantId);
 }
 
 export async function resetTenantObjectState(tenantIds: readonly string[]): Promise<void> {

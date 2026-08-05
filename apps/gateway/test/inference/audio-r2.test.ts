@@ -41,15 +41,21 @@ import { SELF, env } from "cloudflare:test";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { D1AssetMetadataStore } from "../../src/assets/d1.js";
 import { newAssetObjectKey, storedAssetId } from "../../src/assets/keys.js";
-import type { AssetObjectStore, AssetVisibility, StoredAsset } from "../../src/assets/ports.js";
+import type {
+  AssetMetadataStore,
+  AssetObjectStore,
+  AssetVisibility,
+  StoredAsset,
+} from "../../src/assets/ports.js";
 import {
   MAX_AUDIO_REFERENCE_BYTES,
   MAX_AUDIO_UPLOAD_BYTES,
+  type PhysicalRoute,
   fetchDispatcher,
   storedAssetAudioObjects,
   workersAiDispatcher,
-  type PhysicalRoute,
 } from "../../src/inference/index.js";
+import { tenantObjectDb } from "../tenant-object.js";
 import { ALL_ROUTES, errorBody, harness, tenantCaller } from "./fixtures.js";
 
 const BASE = "https://gw.test";
@@ -97,6 +103,7 @@ interface SeedOptions {
   readonly declaredSize?: number;
   readonly visibility?: AssetVisibility;
   readonly yanked?: boolean;
+  readonly metadataStore?: AssetMetadataStore;
 }
 
 /**
@@ -134,7 +141,7 @@ async function seedRecording(options: SeedOptions = {}): Promise<StoredAsset> {
     created_at_unix: 0,
     updated_at_unix: 0,
   };
-  await metadata.createAssetWithinQuota(asset, undefined);
+  await (options.metadataStore ?? metadata).createAssetWithinQuota(asset, undefined);
   return asset;
 }
 
@@ -194,6 +201,14 @@ beforeEach(async () => {
   ai = new RecordingAi();
   (env as unknown as Record<string, unknown>)["AI"] = ai;
   await bindings.DB.exec("DELETE FROM stored_assets");
+  for (const tenantId of [TENANT, OTHER_TENANT]) {
+    const tenant = tenantObjectDb(tenantId);
+    await tenant.batch([
+      tenant.prepare("DELETE FROM asset_bundle_files"),
+      tenant.prepare("DELETE FROM asset_channels"),
+      tenant.prepare("DELETE FROM stored_assets"),
+    ]);
+  }
 });
 
 describe("the by-reference ceiling is a different number for a different reason", () => {
@@ -419,9 +434,9 @@ describe("the two ingresses are exclusive and each is still validated", () => {
  * injected source, so it would all stay green on a Worker that never wires one
  * — which is exactly the "fully implemented, never reachable" defect this repo
  * keeps finding. This one goes through `SELF.fetch` → `src/worker.ts` →
- * `createGatewayApp` against the committed `wrangler.toml`, so what it proves is
- * that `audioObjectsFromEnv` really does find `env.ASSETS` and `env.DB` on the
- * deployed binding set.
+ * `createGatewayApp` against the committed `wrangler.toml`, so what it proves
+ * is that the request-scoped audio source finds `env.ASSETS` and the
+ * authenticated tenant object's metadata on the deployed binding set.
  */
 describe("the deployed Worker resolves a file_ref from its own bindings", () => {
   const KEYS = JSON.stringify([
@@ -473,8 +488,15 @@ describe("the deployed Worker resolves a file_ref from its own bindings", () => 
     });
   }
 
+  function productionMetadata(tenantId: string): AssetMetadataStore {
+    return new D1AssetMetadataStore(tenantObjectDb(tenantId) as never);
+  }
+
   it("transcribes a recording it was never sent the bytes of", async () => {
-    const asset = await seedRecording({ bytes: audioBytes(96) });
+    const asset = await seedRecording({
+      bytes: audioBytes(96),
+      metadataStore: productionMetadata(TENANT),
+    });
     const res = await post(`recording/${asset.name}/${asset.version}`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ text: "the transcript" });
@@ -484,7 +506,11 @@ describe("the deployed Worker resolves a file_ref from its own bindings", () => 
   });
 
   it("refuses another tenant's recording through the deployed guard too", async () => {
-    const asset = await seedRecording({ tenantId: OTHER_TENANT, bytes: audioBytes(96) });
+    const asset = await seedRecording({
+      tenantId: OTHER_TENANT,
+      bytes: audioBytes(96),
+      metadataStore: productionMetadata(OTHER_TENANT),
+    });
     const res = await post(`recording/${asset.name}/${asset.version}`);
     expect(res.status).toBe(404);
   });

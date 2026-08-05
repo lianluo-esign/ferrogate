@@ -65,6 +65,11 @@ import { resolveEffectiveQuota } from "@ferrogate/policy";
 import type { Context } from "hono";
 import { depsFromEnv } from "../adapters.js";
 import { bundleFileContentType } from "../assets/bundle.js";
+import {
+  D1AssetBundleIndexStore,
+  D1AssetMetadataStore,
+  assetDatabaseFromTenantResolver,
+} from "../assets/d1.js";
 import type { AssetEgressQuota } from "../assets/egress.js";
 import { buildAssetService } from "../assets/handlers.js";
 import type { AssetCaller } from "../assets/ports.js";
@@ -74,6 +79,12 @@ import { authenticateBearer, extractApiKey } from "../middleware/auth.js";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayBindings, GatewayDeps, GatewayEnv } from "../ports.js";
 import { type QuotaBindings, quotaPolicySourceFromEnv } from "../ratelimit/index.js";
+import {
+  TENANT_DATABASE_VAR,
+  type TenancyBindings,
+  type TenantDatabaseAccessor,
+  resolverForEnv,
+} from "../tenancy/index.js";
 import { type SiteDomainRoute, siteDomainBinding } from "./domains.js";
 import { planSiteDomainPath, planSitePath } from "./paths.js";
 import { SITE_VARY, siteCacheControl } from "./policy.js";
@@ -201,15 +212,16 @@ function bytesResponse(
  * The serve path, built once per mount and driven per request.
  *
  * A class rather than a closure because BOTH entry points need the same
- * per-environment `AssetService` memoization: the `/sites/*` route module and
- * the custom-domain middleware are two mounts of one server, and giving them
- * two services would mean two audit buffers and two chances for the two to
- * resolve differently.
+ * binding-resolved base ports: the `/sites/*` route module and the
+ * custom-domain middleware are two mounts of one server. The final service is
+ * request-scoped so both mounts can resolve their owning tenant object without
+ * sharing a tenant database across requests.
  */
 export class SiteServer {
   readonly #options: SiteServerOptions;
   readonly #fixed: AssetService | null;
-  readonly #byEnv = new WeakMap<object, AssetService>();
+  readonly #byEnv = new WeakMap<object, Partial<AssetServiceDeps>>();
+  readonly #byContext = new WeakMap<object, AssetService>();
 
   constructor(options: SiteServerOptions = {}) {
     this.#options = options;
@@ -218,13 +230,45 @@ export class SiteServer {
       (options.depsFromEnv === undefined ? buildAssetService(options.deps) : null);
   }
 
-  serviceFor(c: Context<SiteEnv>): AssetService {
-    if (this.#fixed !== null) return this.#fixed;
+  #baseDepsFor(c: Context<SiteEnv>): Partial<AssetServiceDeps> {
     const env = (c.env ?? {}) as Record<string, unknown>;
     const cached = this.#byEnv.get(env);
     if (cached !== undefined) return cached;
-    const built = buildAssetService({ ...this.#options.deps, ...this.#options.depsFromEnv?.(env) });
+    const built = { ...this.#options.deps, ...this.#options.depsFromEnv?.(env) };
     this.#byEnv.set(env, built);
+    return built;
+  }
+
+  #tenantAccessorFor(c: Context<SiteEnv>): TenantDatabaseAccessor | undefined {
+    return (c as unknown as { get(name: string): unknown }).get(TENANT_DATABASE_VAR) as
+      | TenantDatabaseAccessor
+      | undefined;
+  }
+
+  serviceFor(c: Context<SiteEnv>, tenantId?: string): AssetService {
+    if (this.#fixed !== null) return this.#fixed;
+    const context = c as unknown as object;
+    const cached = this.#byContext.get(context);
+    if (cached !== undefined) return cached;
+
+    const base = this.#baseDepsFor(c);
+    let scoped = base;
+    if (tenantId !== undefined) {
+      const accessor = this.#tenantAccessorFor(c);
+      const resolveHandle =
+        accessor !== undefined && accessor.tenantId === tenantId
+          ? () => accessor.handle()
+          : () => resolverForEnv(c.env as unknown as TenancyBindings).forTenant(tenantId);
+      scoped = {
+        ...base,
+        // Custom-domain requests do not pass through tenantDatabase(), so they
+        // resolve the owner explicitly. Slug requests reuse the request mount.
+        metadata: new D1AssetMetadataStore(assetDatabaseFromTenantResolver(resolveHandle)),
+        bundles: new D1AssetBundleIndexStore(assetDatabaseFromTenantResolver(resolveHandle)),
+      };
+    }
+    const built = buildAssetService(scoped);
+    this.#byContext.set(context, built);
     return built;
   }
 
@@ -242,11 +286,14 @@ export class SiteServer {
    * are the rows an operator most wants.
    */
   async flushAudit(c: Context<SiteEnv>): Promise<void> {
-    await this.serviceFor(c).flushAudit();
+    if (this.#fixed !== null) {
+      await this.#fixed.flushAudit();
+      return;
+    }
+    await this.#baseDepsFor(c).audit?.flush?.();
   }
 
   async serve(c: Context<SiteEnv>, entry: SiteEntry): Promise<Response> {
-    const service = this.serviceFor(c);
     const canonical = c.get("canonicalPath") ?? c.req.path;
     const queryAt = c.req.url.indexOf("?");
     const search = queryAt === -1 ? "" : c.req.url.slice(queryAt);
@@ -330,6 +377,7 @@ export class SiteServer {
       // even though an exact pin still serves one through `/v1/assets/**`.
       reference: binding?.channel ?? "latest",
     };
+    const service = this.serviceFor(c, tenantId);
 
     const candidates =
       plan.directoryProbe === null ? [plan.file] : [plan.file, plan.directoryProbe.file];

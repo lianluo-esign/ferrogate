@@ -52,8 +52,11 @@ import {
 } from "../ratelimit/index.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import {
+  D1AssetBundleIndexStore,
+  D1AssetMetadataStore,
   assetAuditSinkFromEnv,
   assetBundleIndexStoreFromEnv,
+  assetDatabaseFromTenantResolver,
   assetMetadataStoreFromEnv,
 } from "./d1.js";
 import {
@@ -106,6 +109,7 @@ import {
 import { type SignaturePolicyBindings, withSignatureVerification } from "./signature-screener.js";
 import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
 import { SigV4Presigner } from "./sigv4.js";
+import { TENANT_DATABASE_VAR, type TenantDatabaseAccessor } from "../tenancy/index.js";
 
 // ---------------------------------------------------------------------------
 // Caller resolution
@@ -689,9 +693,11 @@ export function sigV4PresignerFromEnv(env: AssetObjectBindings): SigV4Presigner 
  *    `null` for that case rather than re-supplying the default, so the
  *    fallback stays in exactly one place.
  *
- *  - `DB` bound (the TENANT D1) ⇒ {@link D1AssetMetadataStore}: the asset
- *    REGISTRY — `stored_assets` + `asset_channels` — is durable. Absent ⇒ the
- *    in-isolate `InMemoryAssetMetadataStore`, whose rows die with the isolate.
+ *  - `DB` bound (the standalone TENANT D1 path) ⇒ {@link D1AssetMetadataStore}:
+ *    the asset REGISTRY — `stored_assets` + `asset_channels` — is durable. The
+ *    deployed request path swaps this store for the same class over the
+ *    authenticated tenant's Durable Object. Absent ⇒ the in-isolate
+ *    `InMemoryAssetMetadataStore`, whose rows die with the isolate.
  *    This is the half `docs/rewrite/parity-audit-storage.md` §4.8 found
  *    missing, and it is the more dangerous half of the two: the BYTES were
  *    already durable in R2, so without it a published asset's object outlives
@@ -699,9 +705,9 @@ export function sigV4PresignerFromEnv(env: AssetObjectBindings): SigV4Presigner 
  *    switch for a bad artifact — does not survive a deploy. `test/assets/
  *    wiring.test.ts` fails if this line is removed.
  *
- * `DB` is the TENANT database because `stored_assets`/`asset_channels` are in
- * `sql/d1-ts/tenant/`; a store pointed at `CONTROL_DB` would fail loudly with
- * `no such table`, which is the migration split working as designed.
+ * The database is the TENANT database because `stored_assets`/`asset_channels`
+ * are in `sql/d1-ts/tenant/`; a store pointed at `CONTROL_DB` would fail loudly
+ * with `no such table`, which is the migration split working as designed.
  */
 export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetServiceDeps> {
   const bindings = env as AssetObjectBindings;
@@ -835,6 +841,13 @@ export function buildAssetService(deps?: Partial<AssetServiceDeps>): AssetServic
   });
 }
 
+/** Read the request-scoped tenant router mount without inventing a DB fallback. */
+function tenantAccessorFor(c: Context<AssetEnv>): TenantDatabaseAccessor | undefined {
+  return (c as unknown as { get(name: string): unknown }).get(TENANT_DATABASE_VAR) as
+    | TenantDatabaseAccessor
+    | undefined;
+}
+
 /** The `RouteModule` `createGatewayApp({ modules })` mounts. */
 export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteModule {
   /**
@@ -845,27 +858,47 @@ export function assetRouteModule(options: AssetRouteModuleOptions = {}): RouteMo
     options.service ?? (options.depsFromEnv === undefined ? buildAssetService(options.deps) : null);
 
   /**
-   * Otherwise: one service per `env` OBJECT, memoized on it. Same device as
-   * `modelsFromEnv` / the metering backend resolver, and for the same reason —
-   * a module-scoped "current env" slot would be last-write-wins under
-   * concurrency, which for an object store means one tenant's push landing in
-   * whatever bucket the other request was holding.
+   * Otherwise: base ports are memoized per `env` OBJECT, while the final asset
+   * service is request-scoped when `tenantDatabase()` is mounted. The base
+   * cache keeps binding-resolved ports warm; the request cache captures only
+   * the tenant accessor, so one tenant's push cannot land in another tenant's
+   * Durable Object under concurrency.
    */
-  const byEnv = new WeakMap<object, AssetService>();
+  const byEnv = new WeakMap<object, Partial<AssetServiceDeps>>();
+  const byContext = new WeakMap<object, AssetService>();
   const serviceFor = (c: Context<AssetEnv>): AssetService => {
     if (fixed !== null) {
       return fixed;
     }
     const env = (c.env ?? {}) as Record<string, unknown>;
-    const cached = byEnv.get(env);
-    if (cached !== undefined) {
-      return cached;
+    const context = c as unknown as object;
+    const cached = byContext.get(context);
+    if (cached !== undefined) return cached;
+
+    let base = byEnv.get(env);
+    if (base === undefined) {
+      base = { ...options.deps, ...options.depsFromEnv?.(env) };
+      byEnv.set(env, base);
     }
-    const built = buildAssetService({
-      ...options.deps,
-      ...options.depsFromEnv?.(env),
-    });
-    byEnv.set(env, built);
+
+    const accessor = tenantAccessorFor(c);
+    const scoped =
+      accessor === undefined
+        ? base
+        : {
+            ...base,
+            // The request accessor is captured by the facade, not the service.
+            // This keeps the service reusable while every statement still lands
+            // in the authenticated tenant's Durable Object.
+            metadata: new D1AssetMetadataStore(
+              assetDatabaseFromTenantResolver(() => accessor.handle()),
+            ),
+            bundles: new D1AssetBundleIndexStore(
+              assetDatabaseFromTenantResolver(() => accessor.handle()),
+            ),
+          };
+    const built = buildAssetService(scoped);
+    byContext.set(context, built);
     return built;
   };
 

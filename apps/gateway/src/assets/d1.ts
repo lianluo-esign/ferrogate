@@ -45,19 +45,16 @@
  *
  * ## Which database
  *
- * The tenant one (`env.DB`), because `stored_assets` / `asset_channels` are in
- * the TENANT migration, not the control one — a write against `CONTROL_DB`
- * would fail loudly with `no such table`, which is the split's whole point
- * (`src/tenancy/ports.ts`). Every method still takes `tenantId` and every
- * statement still filters on it: under `GATEWAY_TENANT_DB_ROUTING = "off"`
- * `DB` is one shared tenant database, so the `tenant_id` predicate is the
- * isolation, exactly as it is for `api_keys` in `src/keys/store.ts`. Under the
- * `durable_object` default (#819) `src/tenancy/` hands each request its own
- * physical object and the same predicate is redundant rather than wrong — but
- * this store still reads `env.DB`, so it is a KNOWN GAP, not a completed port:
- * a routed deployment writes assets to the shared database while its wallet
- * lives in the object. Keeping the predicate on every statement is what makes
- * that gap a correctness-preserving one rather than a leak.
+ * `stored_assets` / `asset_channels` are tenant tables, not control tables — a
+ * write against `CONTROL_DB` would fail loudly with `no such table`, which is
+ * the split's whole point (`src/tenancy/ports.ts`). The standalone binding
+ * factory below still uses `env.DB` for shared-development deployments and
+ * binding-free tests. The deployed request path replaces that database with
+ * {@link assetDatabaseFromTenantResolver}, which resolves the authenticated
+ * tenant's Durable Object for every statement. Every method still takes
+ * `tenantId` and every statement still filters on it: under shared development
+ * the predicate is the isolation, while under `durable_object` it is a
+ * redundant mis-routing tripwire rather than the physical boundary.
  *
  * ## Relationship to `packages/storage`
  *
@@ -69,6 +66,7 @@
  * when the whole durable half of `@ferrogate/storage` is mounted, not before.
  */
 import { randomHex128 } from "./hash.js";
+import { requireAtomicBatch, type TenantDatabaseHandle } from "@ferrogate/storage";
 import type {
   AssetAuditEvent,
   AssetAuditSink,
@@ -114,6 +112,72 @@ export interface AssetStatement {
 export interface AssetDatabase {
   prepare(sql: string): AssetStatement;
   batch(statements: AssetStatement[]): Promise<AssetQueryResult[]>;
+}
+
+/**
+ * A request-scoped database facade for the caller's tenant object.
+ *
+ * The asset route module is built at module scope, while the tenant database
+ * accessor is created per request. Capturing the accessor here keeps the
+ * service itself free of request context and resolves the object only when a
+ * statement is actually executed. `batch()` resolves once and then forwards
+ * every prepared statement through the same handle, preserving the channel
+ * move and bundle-index transaction boundaries.
+ */
+class TenantAssetStatement implements AssetStatement {
+  #values: unknown[] = [];
+
+  constructor(
+    private readonly sql: string,
+    private readonly resolve: () => Promise<TenantDatabaseHandle>,
+  ) {}
+
+  bind(...values: unknown[]): AssetStatement {
+    this.#values = values;
+    return this;
+  }
+
+  async all(): Promise<AssetQueryResult> {
+    const handle = await this.resolve();
+    const result = await handle.db
+      .prepare(this.sql)
+      .bind(...this.#values)
+      .all<Row>();
+    return { results: result.results ?? [] };
+  }
+
+  async prepare(handle: TenantDatabaseHandle): Promise<D1PreparedStatement> {
+    return handle.db.prepare(this.sql).bind(...this.#values);
+  }
+}
+
+/** The app-local AssetDatabase adapter over one request's tenant router. */
+class TenantAssetDatabase implements AssetDatabase {
+  constructor(private readonly resolve: () => Promise<TenantDatabaseHandle>) {}
+
+  prepare(sql: string): AssetStatement {
+    return new TenantAssetStatement(sql, this.resolve);
+  }
+
+  async batch(statements: AssetStatement[]): Promise<AssetQueryResult[]> {
+    const handle = requireAtomicBatch(await this.resolve(), "asset_metadata_batch");
+    const prepared: D1PreparedStatement[] = [];
+    for (const statement of statements) {
+      if (!(statement instanceof TenantAssetStatement)) {
+        throw new Error("tenant asset batch received a statement from another database facade");
+      }
+      prepared.push(await statement.prepare(handle));
+    }
+    const results = await handle.db.batch(prepared);
+    return results.map((result) => ({ results: (result.results ?? []) as Row[] }));
+  }
+}
+
+/** Build an AssetDatabase whose physical database is resolved per operation. */
+export function assetDatabaseFromTenantResolver(
+  resolve: () => Promise<TenantDatabaseHandle>,
+): AssetDatabase {
+  return new TenantAssetDatabase(resolve);
 }
 
 /** Binding name of the TENANT D1 (see `wrangler.toml`). */
