@@ -17,6 +17,7 @@
  * `control_plane_resources` here is the production table, not a fixture.
  */
 import { env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { WorkflowGraph, WorkflowRunFacts } from "@ferrogate/policy";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -40,6 +41,17 @@ import { errorBody, harness } from "./fixtures.js";
 import { interceptProviderFetch, providerJson } from "./provider-mock.js";
 
 const DB = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
+const TENANT_RESOURCE_TABLE = "tenant_resources";
+
+async function tenantDb(tenantId: string): Promise<D1Database> {
+  const namespace = (
+    env as unknown as {
+      TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
+    }
+  ).TENANT_DATA;
+  if (namespace === undefined) throw new Error("workflow ledger test expects TENANT_DATA");
+  return (await new DurableObjectTenantDatabaseRouter(namespace, DB).forTenant(tenantId)).db;
+}
 
 /**
  * Narrow a catalog read to its workflows, ASSERTING it succeeded.
@@ -48,7 +60,9 @@ const DB = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
  * loudly, not be reinterpreted as an empty table — the failure this gate's
  * whole 503 posture exists to prevent.
  */
-function workflowsOf(loaded: Awaited<ReturnType<WorkflowCatalogSource["forTenant"]>>): readonly WorkflowGraph[] {
+function workflowsOf(
+  loaded: Awaited<ReturnType<WorkflowCatalogSource["forTenant"]>>,
+): readonly WorkflowGraph[] {
   if (Array.isArray(loaded)) return loaded;
   const result = loaded as WorkflowCatalogResult;
   expect(result.ok).toBe(true);
@@ -84,12 +98,34 @@ async function seedWorkflow(id: string, document: Record<string, unknown>): Prom
   )
     .bind(AGENT_WORKFLOW_COLLECTION, id, JSON.stringify(document))
     .run();
+  const tenantId = document["tenant_id"];
+  if (typeof tenantId === "string" && tenantId.trim() !== "") {
+    await (await tenantDb(tenantId))
+      .prepare(
+        `INSERT INTO ${TENANT_RESOURCE_TABLE}
+           (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, 1, 0, 0)
+         ON CONFLICT (resource_kind, resource_id)
+           DO UPDATE SET document_json = excluded.document_json`,
+      )
+      .bind(AGENT_WORKFLOW_COLLECTION, id, JSON.stringify(document))
+      .run();
+  }
 }
 
 async function clearWorkflowRows(): Promise<void> {
-  await DB.prepare("DELETE FROM control_plane_resources WHERE resource_kind IN (?, ?)")
-    .bind(AGENT_WORKFLOW_COLLECTION, WORKFLOW_RUN_STEP_COLLECTION)
-    .run();
+  await Promise.all([
+    DB.prepare("DELETE FROM control_plane_resources WHERE resource_kind IN (?, ?)")
+      .bind(AGENT_WORKFLOW_COLLECTION, WORKFLOW_RUN_STEP_COLLECTION)
+      .run(),
+    (async () => {
+      const objectDb = await tenantDb("acme");
+      await objectDb
+        .prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind IN (?, ?)`)
+        .bind(AGENT_WORKFLOW_COLLECTION, WORKFLOW_RUN_STEP_COLLECTION)
+        .run();
+    })(),
+  ]);
 }
 
 const GRAPH_DOCUMENT = {
@@ -199,9 +235,7 @@ describe("decodeWorkflowDocument", () => {
   });
 
   it("refuses a malformed allowlist rather than filtering it down", () => {
-    expect(
-      decodeWorkflowDocument({ id: "w", nodes: [], api_key_ids: ["a", 7] }),
-    ).toBeUndefined();
+    expect(decodeWorkflowDocument({ id: "w", nodes: [], api_key_ids: ["a", 7] })).toBeUndefined();
   });
 
   it("defaults version to 1 and enabled to true, matching the config schema", () => {

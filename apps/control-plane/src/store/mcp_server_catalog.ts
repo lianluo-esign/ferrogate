@@ -149,6 +149,58 @@ async function catalogDatabaseFor(deps: ControlPlaneDeps, tenantId: string): Pro
   return handle.db;
 }
 
+/**
+ * Keep a bounded control-D1 compatibility projection for platform-operator
+ * lookup. The tenant object remains authoritative; this row is only the
+ * directory that lets an operator address a newly-created object resource by
+ * its id before the tenant appears in the roster fan-out.
+ */
+async function upsertControlProjection(
+  controlDb: D1Database,
+  record: StoreRecord,
+  nowUnix: number,
+): Promise<void> {
+  await controlDb
+    .prepare(
+      `INSERT INTO control_plane_resources
+         (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+       VALUES ('mcp-servers', ?, ?, 1, ?, ?)
+       ON CONFLICT (resource_kind, resource_id) DO UPDATE SET
+         document_json = excluded.document_json,
+         revision = control_plane_resources.revision + 1,
+         updated_at_unix = excluded.updated_at_unix`,
+    )
+    .bind(record.id, JSON.stringify(record), nowUnix, nowUnix)
+    .run();
+}
+
+async function removeControlProjection(controlDb: D1Database, id: string): Promise<void> {
+  await controlDb
+    .prepare("DELETE FROM control_plane_resources WHERE resource_kind = ? AND resource_id = ?")
+    .bind("mcp-servers", id)
+    .run();
+}
+
+/** Remove the operator lookup row after the tenant object's document is gone. */
+export async function removeMcpServerControlProjection(
+  deps: ControlPlaneDeps,
+  id: string,
+  _record: StoreRecord,
+): Promise<void> {
+  if (deps.controlDatabase === null) return;
+  try {
+    await removeControlProjection(deps.controlDatabase, id);
+  } catch (error) {
+    // The tenant object is authoritative and has already been deleted. A
+    // stale directory row is harmless to runtime reads and is repaired by the
+    // next platform lookup that finds no object record.
+    console.warn("control-plane: MCP compatibility projection cleanup failed", {
+      id,
+      error,
+    });
+  }
+}
+
 async function readMark(db: D1Database, tenantId: string): Promise<BackfillMark | undefined> {
   const row = await db
     .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
@@ -273,7 +325,6 @@ export async function projectMcpServer(
   record: StoreRecord,
   nowUnix: number,
 ): Promise<void> {
-  void nowUnix;
   if (deps.controlDatabase === null) return;
   const tenantId = tenantIdOf(record);
   if (tenantId === null) return;
@@ -304,6 +355,8 @@ export async function projectMcpServer(
     statements.push(insertCatalogStatement(tenantDb, tenantId, config, false));
   }
   await tenantDb.batch(statements);
+
+  await upsertControlProjection(deps.controlDatabase, record, nowUnix);
 
   // The current projection is already authoritative. Backfill only fills rows
   // that are absent, and its marker makes this repair path one-shot per tenant.

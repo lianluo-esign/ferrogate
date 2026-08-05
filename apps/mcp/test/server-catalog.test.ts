@@ -21,16 +21,17 @@
  *     which is exactly why `src/catalog.ts` has to map it by an explicit table
  *     entry. That assertion survives the close and is the reason it must.
  */
-import { SELF, env } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { RESOURCE_TABLE, TENANT_RESOURCE_TABLE } from "../src/approvals.js";
 import {
   ADMIN_TRANSPORTS,
   DEFAULT_UPSTREAM_TIMEOUT_MS,
   decodeServerDocument,
 } from "../src/catalog.js";
 import { decodeServerRow, loadServerCatalog } from "../src/durable.js";
-import type { McpServerConfig } from "../src/ports.js";
 import type { McpEnv } from "../src/ports.js";
 import { inMemoryPorts } from "../src/ports.js";
 import { resolveUpstreams, withTenantUpstreams } from "../src/upstreams.js";
@@ -38,6 +39,36 @@ import { READ_KEY, TENANT, rpcRequest, seedFixture, setMcpEnvVar, tenantAuth } f
 import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
 const TENANT_DATA = tenantDataNamespace(env);
+const DB = env.DB as unknown as D1Database;
+const TENANT_ROUTER = new DurableObjectTenantDatabaseRouter(TENANT_DATA, DB);
+
+async function loadCatalog(tenantId: string) {
+  return loadServerCatalog(TENANT_DATA, tenantId, DB, TENANT_ROUTER);
+}
+
+async function tenantDb(tenantId: string): Promise<D1Database> {
+  const namespace = (
+    env as unknown as {
+      TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
+    }
+  ).TENANT_DATA;
+  if (namespace === undefined) throw new Error("server catalog test expects TENANT_DATA");
+  return (await new DurableObjectTenantDatabaseRouter(namespace, DB).forTenant(tenantId)).db;
+}
+
+interface ControlSchemaBindings {
+  readonly DB: D1Database;
+  readonly TEST_CONTROL_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
+}
+
+// The CONTROL migrations own `control_plane_resources` — the table the admin
+// surface writes into. Applying the DEPLOYED migration (not a fixture copy) is
+// what makes "the document is written the way apps/control-plane writes it"
+// mean something.
+beforeAll(async () => {
+  const bindings = env as unknown as ControlSchemaBindings;
+  await applyD1Migrations(bindings.DB, bindings.TEST_CONTROL_D1_SCHEMA);
+});
 
 /**
  * The row `apps/control-plane` writes for `POST /admin/v1/mcp-servers`.
@@ -50,8 +81,8 @@ async function seedAdminMcpServerDocument(
   name: string,
   overrides: Record<string, unknown> = {},
 ): Promise<void> {
-  if (tenantId === null) return;
-  const config = decodeServerDocument({
+  const now = Math.floor(Date.now() / 1000);
+  const document = JSON.stringify({
     id: name,
     name,
     tenant_id: tenantId,
@@ -61,8 +92,34 @@ async function seedAdminMcpServerDocument(
     tools_to_execute: ["echo"],
     ...overrides,
   });
-  if (config === undefined) return;
-  await seedCatalogConfig(tenantId, config, true);
+  await DB.prepare(
+    `INSERT OR REPLACE INTO ${RESOURCE_TABLE}
+       (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+     VALUES ('mcp-servers', ?, ?, 1, ?, ?)`,
+  )
+    .bind(name, document, now, now)
+    .run();
+  if (tenantId !== null) {
+    await (await tenantDb(tenantId))
+      .prepare(
+        `INSERT OR REPLACE INTO ${TENANT_RESOURCE_TABLE}
+           (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, 1, ?, ?)`,
+      )
+      .bind("mcp-servers", name, document, now, now)
+      .run();
+  }
+}
+
+async function clearAdminDocuments(): Promise<void> {
+  await DB.prepare(`DELETE FROM ${RESOURCE_TABLE} WHERE resource_kind = 'mcp-servers'`).run();
+  await Promise.all(
+    [TENANT, "tenant-other"].map(async (tenantId) => {
+      await (await tenantDb(tenantId))
+        .prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind = 'mcp-servers'`)
+        .run();
+    }),
+  );
 }
 
 /** One typed catalog row, the native shape. */
@@ -74,37 +131,6 @@ async function seedTypedServerRow(tenantId: string, name: string): Promise<void>
      VALUES (?, ?, 'streamable_http', 'https://upstream.test/mcp', 'none', ?, ?, NULL, NULL, NULL, 5000)`,
   )
     .bind(tenantId, name, JSON.stringify(["echo"]), JSON.stringify([]))
-    .run();
-}
-
-async function seedCatalogConfig(
-  tenantId: string,
-  config: McpServerConfig,
-  ignoreExisting: boolean,
-): Promise<void> {
-  const db = tenantDatabase(TENANT_DATA, tenantId);
-  await db
-    .prepare(
-      `INSERT ${ignoreExisting ? "OR IGNORE " : ""}INTO mcp_servers
-         (tenant_id, name, transport, url, auth_type, tools_to_execute,
-          tools_to_auto_execute, tools_to_exclude, headers, oauth,
-          signed_jwt_audience, timeout_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      tenantId,
-      config.name,
-      config.transport,
-      config.url ?? null,
-      config.authType,
-      JSON.stringify(config.toolsToExecute),
-      JSON.stringify(config.toolsToAutoExecute),
-      config.toolsToExclude === undefined ? null : JSON.stringify(config.toolsToExclude),
-      config.headers === undefined ? null : JSON.stringify(config.headers),
-      config.oauth === undefined ? null : JSON.stringify(config.oauth),
-      config.signedJwtAudience ?? null,
-      config.timeoutMs,
-    )
     .run();
 }
 
@@ -121,6 +147,7 @@ describe("MOUNT: an /admin/v1/mcp-servers document feeds the durable catalog", (
   beforeEach(async () => {
     seedFixture();
     await clearMcpIdentityTables(TENANT_DATA, TENANT);
+    await clearAdminDocuments();
     setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", "1");
   });
 
@@ -178,7 +205,7 @@ describe("MOUNT: an /admin/v1/mcp-servers document feeds the durable catalog", (
     // surface was read at all, so "one `dup`" is de-duplication rather than the
     // documents being invisible.
     await seedAdminMcpServerDocument(TENANT, "docOnly");
-    const configs = await loadServerCatalog(TENANT_DATA, TENANT);
+    const configs = await loadCatalog(TENANT);
     expect(configs.map((config) => config.name).sort()).toEqual(["docOnly", "dup"]);
     expect(configs.find((config) => config.name === "dup")?.url).toBe("https://upstream.test/mcp");
   });
@@ -188,6 +215,7 @@ describe("the catalog stays fail-CLOSED after the close", () => {
   beforeEach(async () => {
     seedFixture();
     await clearMcpIdentityTables(TENANT_DATA, TENANT);
+    await clearAdminDocuments();
     setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", "1");
   });
 
@@ -218,7 +246,7 @@ describe("the catalog stays fail-CLOSED after the close", () => {
     await seedAdminMcpServerDocument("tenant-other", "neighbour");
     const host = await resolveUpstreams(env as McpEnv, inMemoryPorts(), TENANT);
     expect(host.getServer("neighbour")).toBeUndefined();
-    expect(await loadServerCatalog(TENANT_DATA, "tenant-other")).toHaveLength(1);
+    expect(await loadCatalog("tenant-other")).toHaveLength(1);
   });
 
   it("does NOT serve a PLATFORM-scoped document (null tenant_id) to a tenant", async () => {
@@ -235,14 +263,14 @@ describe("the catalog stays fail-CLOSED after the close", () => {
     // on the very gap it is meant to guard.
     await seedAdminMcpServerDocument(TENANT, "off", { enabled: false });
     await seedAdminMcpServerDocument(TENANT, "on");
-    expect((await loadServerCatalog(TENANT_DATA, TENANT)).map((config) => config.name)).toEqual(["on"]);
+    expect((await loadCatalog(TENANT)).map((config) => config.name)).toEqual(["on"]);
   });
 
   it("an unknown transport or auth_type REFUSES the document", async () => {
     await seedAdminMcpServerDocument(TENANT, "badtransport", { transport: "grpc" });
     await seedAdminMcpServerDocument(TENANT, "badauth", { auth_type: "mtls" });
     await seedAdminMcpServerDocument(TENANT, "good");
-    expect((await loadServerCatalog(TENANT_DATA, TENANT)).map((config) => config.name)).toEqual(["good"]);
+    expect((await loadCatalog(TENANT)).map((config) => config.name)).toEqual(["good"]);
   });
 });
 

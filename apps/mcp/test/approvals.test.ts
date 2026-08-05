@@ -19,6 +19,7 @@
  * the reader reads what is actually in the table.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -49,6 +50,16 @@ interface ApprovalBindings {
 
 const control = (): D1Database => (env as unknown as ApprovalBindings).DB;
 
+async function tenantDb(tenantId: string): Promise<D1Database> {
+  const namespace = (
+    env as unknown as {
+      TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
+    }
+  ).TENANT_DATA;
+  if (namespace === undefined) throw new Error("approval test expects TENANT_DATA");
+  return (await new DurableObjectTenantDatabaseRouter(namespace, control()).forTenant(tenantId)).db;
+}
+
 /** A key belonging to a DIFFERENT tenant, for the isolation test. */
 const OTHER_TENANT_KEY = "fg_other_tenant_key";
 const OTHER_TENANT = "tenant-other";
@@ -68,6 +79,15 @@ beforeEach(async () => {
     .prepare(`DELETE FROM ${RESOURCE_TABLE} WHERE resource_kind = ?`)
     .bind(TOOL_APPROVAL_COLLECTION)
     .run();
+  await Promise.all(
+    [TENANT, OTHER_TENANT].map(async (tenantId) => {
+      const db = await tenantDb(tenantId);
+      await db
+        .prepare(`DELETE FROM tenant_resources WHERE resource_kind = ?`)
+        .bind(TOOL_APPROVAL_COLLECTION)
+        .run();
+    }),
+  );
 
   fixture = seedFixture();
   // An upstream whose tool is allowlisted for EXECUTION but deliberately not
@@ -120,11 +140,17 @@ async function callRisky(
 }
 
 async function storedApprovals(): Promise<ToolApprovalDocument[]> {
-  const rows = await control()
-    .prepare(`SELECT document_json FROM ${RESOURCE_TABLE} WHERE resource_kind = ?`)
-    .bind(TOOL_APPROVAL_COLLECTION)
-    .all<{ document_json: string }>();
-  return rows.results.map((row) => JSON.parse(row.document_json) as ToolApprovalDocument);
+  const rows = await Promise.all(
+    [TENANT, OTHER_TENANT].map(async (tenantId) =>
+      (await tenantDb(tenantId))
+        .prepare(`SELECT document_json FROM tenant_resources WHERE resource_kind = ?`)
+        .bind(TOOL_APPROVAL_COLLECTION)
+        .all<{ document_json: string }>(),
+    ),
+  );
+  return rows.flatMap((result) =>
+    result.results.map((row) => JSON.parse(row.document_json) as ToolApprovalDocument),
+  );
 }
 
 /** Record a decision the way `routes/admin_tool.ts` records one. */
@@ -132,9 +158,9 @@ async function decide(fingerprint: string, patch: Partial<ToolApprovalDocument>)
   const [existing] = (await storedApprovals()).filter((row) => row.fingerprint === fingerprint);
   expect(existing, "the pending row must exist before it can be decided").toBeDefined();
   const updated = { ...(existing as ToolApprovalDocument), ...patch };
-  await control()
+  await (await tenantDb(existing?.tenant_id ?? TENANT))
     .prepare(
-      `UPDATE ${RESOURCE_TABLE} SET document_json = ?, revision = revision + 1
+      `UPDATE tenant_resources SET document_json = ?, revision = revision + 1
          WHERE resource_kind = ? AND resource_id = ?`,
     )
     .bind(JSON.stringify(updated), TOOL_APPROVAL_COLLECTION, updated.id)

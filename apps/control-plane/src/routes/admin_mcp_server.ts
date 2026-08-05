@@ -36,6 +36,7 @@
 import { z } from "zod";
 import {
   ensureTenantMcpServerCatalogBackfill,
+  removeMcpServerControlProjection,
   projectMcpServer,
   unprojectMcpServer,
 } from "../store/mcp_server_catalog.js";
@@ -70,6 +71,7 @@ const mcpServerSpec: CollectionSpec = {
   patch: mcpServerPatchSchema,
   tenantProject: projectMcpServer,
   tenantUnproject: unprojectMcpServer,
+  tenantUnprojectAfter: removeMcpServerControlProjection,
 };
 
 const resolvedMcpServerSpec = resolveSpec(mcpServerSpec);

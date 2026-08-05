@@ -72,7 +72,6 @@ import {
   UnboundTxtResolver,
 } from "./site_domain_txt.js";
 import { D1ApiKeyAuthenticator, D1NativeApiKeyAuthenticator } from "./store/api_keys.js";
-import { D1ControlPlaneStore } from "./store/d1.js";
 import {
   type LifecycleStatus,
   StoreTenancyLifecycleGate,
@@ -80,6 +79,7 @@ import {
   parseLifecycleStatus,
 } from "./store/lifecycle.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
+import { SplitControlPlaneStore } from "./store/split.js";
 import { UnprovisionedTenantDatabaseRouter } from "./store/tenancy.js";
 
 // ---------------------------------------------------------------------------
@@ -647,7 +647,9 @@ export function resolveStore(
       "control-plane: no `DB` binding is configured; add the [[d1_databases]] binding (migrations in sql/d1-ts/control/) or set CONTROL_PLANE_STORE=memory to run without durability",
     );
   }
-  return new D1ControlPlaneStore(env.DB, { requestId: context.requestId ?? null });
+  return new SplitControlPlaneStore(env.DB, resolveTenantStorage(env), {
+    requestId: context.requestId ?? null,
+  });
 }
 
 /**

@@ -19,7 +19,15 @@
  */
 import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { KEY_LIVE, bearer, errorCode, post, setupDurablePorts } from "./setup.js";
+import {
+  KEY_LIVE,
+  TENANT_RESOURCE_TABLE,
+  bearer,
+  errorCode,
+  post,
+  setupDurablePorts,
+  tenantResourceDb,
+} from "./setup.js";
 
 const AGENT_WORKFLOW_COLLECTION = "agent-workflows";
 
@@ -54,13 +62,15 @@ const OTHER_TENANT_DOCUMENT = {
 
 beforeAll(async () => {
   await setupDurablePorts();
-  const insert =
-    "INSERT OR REPLACE INTO control_plane_resources (resource_kind, resource_id, document_json) " +
-    "VALUES (?, ?, ?)";
-  await env.CONTROL_DB.prepare(insert)
+  const insert = `INSERT OR REPLACE INTO ${TENANT_RESOURCE_TABLE}
+       (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+     VALUES (?, ?, ?, 1, 0, 0)`;
+  await (await tenantResourceDb(DOCUMENT.tenant_id))
+    .prepare(insert)
     .bind(AGENT_WORKFLOW_COLLECTION, DOCUMENT.id, JSON.stringify(DOCUMENT))
     .run();
-  await env.CONTROL_DB.prepare(insert)
+  await (await tenantResourceDb(OTHER_TENANT_DOCUMENT.tenant_id))
+    .prepare(insert)
     .bind(
       AGENT_WORKFLOW_COLLECTION,
       OTHER_TENANT_DOCUMENT.id,

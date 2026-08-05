@@ -1673,9 +1673,10 @@ export interface McpEnv {
 
   /**
    * The authoritative per-tenant Durable Object database for MCP identity
-   * grants, authorization generations and the upstream server catalog. The
-   * object migration ledger applies these tables before RPC, so no request path
-   * creates schema or consults the control D1.
+   * grants, authorization generations, upstream server catalog and tenant
+   * private control-plane resources. The object migration ledger applies these
+   * tables before RPC, so no request path creates schema or consults the
+   * control D1.
    */
   TENANT_DATA?: TenantDataNamespace;
 
@@ -2316,7 +2317,13 @@ export function resolvePorts(env: McpEnv): McpPorts {
  */
 function durableApprovals(env: McpEnv): ApprovalPort {
   if (env.DB === undefined) return new AutoApproval();
-  return new D1ToolApprovals(env.DB);
+  const tenantRouter = tenantResourceRouter(env);
+  return new D1ToolApprovals(env.DB, tenantRouter === undefined ? {} : { tenantRouter });
+}
+
+function tenantResourceRouter(env: McpEnv): TenantDatabaseRouter | undefined {
+  if (env.DB === undefined || env.TENANT_DATA === undefined) return undefined;
+  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
 }
 
 function durableAuth(env: McpEnv): AuthPort {

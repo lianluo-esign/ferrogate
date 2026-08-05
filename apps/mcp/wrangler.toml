@@ -171,6 +171,8 @@ class_name = "FerroGateMcpUnifiedSession"
 # identity state address the same object the gateway uses; a locally-defined
 # class here would silently create a second namespace and split tenant data.
 # ---------------------------------------------------------------------------
+# Its SQLite schema includes `tenant_resources` from tenant migration 0016,
+# which is the object-local destination for tenant-private resource kinds.
 [[durable_objects.bindings]]
 name = "TENANT_DATA"
 class_name = "TenantDataObject"

@@ -71,6 +71,7 @@
  *    the approval no longer applies.
  */
 import type { JsonValue } from "@ferrogate/core";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 
 import type { ApprovalPort, AuthContext, DispatchContext, McpTool } from "./ports.js";
 
@@ -78,6 +79,8 @@ import type { ApprovalPort, AuthContext, DispatchContext, McpTool } from "./port
 export const TOOL_APPROVAL_COLLECTION = "tool-approvals";
 /** The document store this Worker shares with `apps/control-plane`. */
 export const RESOURCE_TABLE = "control_plane_resources";
+/** The object-local document table for tenant-private resource kinds. */
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
 
 /** Statuses `routes/admin_tool.ts` can record. Anything else refuses. */
 export type ToolApprovalStatus = "pending" | "approved" | "denied" | "expired";
@@ -175,17 +178,21 @@ export interface D1ToolApprovalsOptions {
   readonly now?: () => number;
   /** Review window written onto a newly created record. */
   readonly timeoutSecs?: number;
+  /** TenantDataObject router for the tenant-private approval queue. */
+  readonly tenantRouter?: TenantDatabaseRouter;
 }
 
 export class D1ToolApprovals implements ApprovalPort {
   readonly #db: D1Database;
   readonly #now: () => number;
   readonly #timeoutSecs: number;
+  readonly #tenantRouter: TenantDatabaseRouter | undefined;
 
   constructor(db: D1Database, options: D1ToolApprovalsOptions = {}) {
     this.#db = db;
     this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
     this.#timeoutSecs = options.timeoutSecs ?? DEFAULT_APPROVAL_TIMEOUT_SECS;
+    this.#tenantRouter = options.tenantRouter;
   }
 
   async require(
@@ -196,7 +203,7 @@ export class D1ToolApprovals implements ApprovalPort {
     const fingerprint = await approvalFingerprint(context.auth, tool, args);
     let record: ToolApprovalDocument | undefined;
     try {
-      record = await this.#load(fingerprint);
+      record = await this.#load(fingerprint, context.auth.organizationId ?? "");
     } catch (error) {
       // FAIL CLOSED. "Could not check" is not "approved".
       return {
@@ -260,19 +267,51 @@ export class D1ToolApprovals implements ApprovalPort {
    * ordering makes the newest decision win when a fingerprint has been through
    * more than one review cycle.
    */
-  async #load(fingerprint: string): Promise<ToolApprovalDocument | undefined> {
+  async #load(fingerprint: string, tenantId: string): Promise<ToolApprovalDocument | undefined> {
+    if (this.#tenantRouter !== undefined && tenantId.trim() !== "") {
+      const tenantDb = (await this.#tenantRouter.forTenant(tenantId)).db;
+      const objectRow = await tenantDb
+        .prepare(
+          `SELECT document_json FROM ${TENANT_RESOURCE_TABLE}
+             WHERE resource_kind = ?
+               AND json_extract(document_json, '$.fingerprint') = ?
+             ORDER BY updated_at_unix DESC, resource_id DESC
+             LIMIT 1`,
+        )
+        .bind(TOOL_APPROVAL_COLLECTION, fingerprint)
+        .first<{ document_json: string }>();
+      if (objectRow !== null) return this.#parse(objectRow.document_json);
+      return undefined;
+    }
+
+    const scope =
+      tenantId.trim() === "" ? "" : " AND json_extract(document_json, '$.tenant_id') = ?";
     const row = await this.#db
       .prepare(
         `SELECT document_json FROM ${RESOURCE_TABLE}
            WHERE resource_kind = ?
              AND json_extract(document_json, '$.fingerprint') = ?
+             ${scope}
            ORDER BY updated_at_unix DESC, resource_id DESC
            LIMIT 1`,
       )
-      .bind(TOOL_APPROVAL_COLLECTION, fingerprint)
+      .bind(
+        ...(tenantId.trim() === ""
+          ? [TOOL_APPROVAL_COLLECTION, fingerprint]
+          : [TOOL_APPROVAL_COLLECTION, fingerprint, tenantId]),
+      )
       .first<{ document_json: string }>();
     if (row === null) return undefined;
-    const parsed: unknown = JSON.parse(row.document_json);
+    return this.#parse(row.document_json);
+  }
+
+  #parse(documentJson: string): ToolApprovalDocument | undefined {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(documentJson);
+    } catch {
+      return undefined;
+    }
     if (parsed === null || typeof parsed !== "object") return undefined;
     return parsed as ToolApprovalDocument;
   }
@@ -316,9 +355,16 @@ export class D1ToolApprovals implements ApprovalPort {
     if (context.traceId !== undefined) document.trace_id = context.traceId;
     if (context.agentRunId !== undefined) document.agent_run_id = context.agentRunId;
 
-    await this.#db
+    const tenantId = context.auth.organizationId?.trim() ?? "";
+    let target = this.#db;
+    let table = RESOURCE_TABLE;
+    if (this.#tenantRouter !== undefined && tenantId !== "") {
+      target = (await this.#tenantRouter.forTenant(tenantId)).db;
+      table = TENANT_RESOURCE_TABLE;
+    }
+    await target
       .prepare(
-        `INSERT INTO ${RESOURCE_TABLE}
+        `INSERT INTO ${table}
            (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
          VALUES (?, ?, ?, 1, ?, ?)
          ON CONFLICT (resource_kind, resource_id) DO NOTHING`,

@@ -29,6 +29,8 @@
  */
 import { DurableObjectD1Database } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { loadAdminServerCatalog } from "./catalog.js";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import {
   type IdentityCipherPort,
   type McpCredentialStorePort,
@@ -449,15 +451,7 @@ export class TenantObjectCredentialGrants {
             AND revoked_at_unix IS NULL
         RETURNING *`,
       )
-      .bind(
-        nowUnix,
-        nowUnix,
-        outcome,
-        actor.tenantId,
-        actor.workspaceId,
-        actor.userId,
-        serverName,
-      )
+      .bind(nowUnix, nowUnix, outcome, actor.tenantId, actor.workspaceId, actor.userId, serverName)
       .first<CredentialRow>();
     return row === null ? undefined : rowToCredential(row);
   }
@@ -670,6 +664,8 @@ function decodeExcludeColumn(
 export async function loadServerCatalog(
   namespace: TenantDataNamespace,
   tenantId: string,
+  controlDb?: D1Database,
+  tenantRouter?: TenantDatabaseRouter,
 ): Promise<McpServerConfig[]> {
   const db = tenantDatabase(namespace, tenantId);
   const rows = await db
@@ -681,10 +677,22 @@ export async function loadServerCatalog(
     .bind(tenantId)
     .all<ServerRow>();
   const configs: McpServerConfig[] = [];
+  const seen = new Set<string>();
   for (const row of rows.results) {
     const config = decodeServerRow(row);
     if (config === undefined) continue;
     configs.push(config);
+    seen.add(config.name);
+  }
+  if (controlDb !== undefined) {
+    // The object-local document table is authoritative whenever the object
+    // router is present. A control-table read remains only for an explicitly
+    // un-routed compatibility/projection posture.
+    for (const config of await loadAdminServerCatalog(controlDb, tenantId, tenantRouter)) {
+      if (seen.has(config.name)) continue;
+      configs.push(config);
+      seen.add(config.name);
+    }
   }
   return configs;
 }

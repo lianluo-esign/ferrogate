@@ -309,6 +309,12 @@ export interface CollectionSpec {
     id: string,
     record: StoreRecord,
   ) => Promise<void>;
+  /** Remove a compatibility projection after the generic document is gone. */
+  readonly tenantUnprojectAfter?: (
+    deps: ControlPlaneDeps,
+    id: string,
+    record: StoreRecord,
+  ) => Promise<void>;
 }
 
 interface ResolvedSpec {
@@ -329,6 +335,9 @@ interface ResolvedSpec {
   readonly tenantUnproject:
     | ((deps: ControlPlaneDeps, id: string, record: StoreRecord) => Promise<void>)
     | null;
+  readonly tenantUnprojectAfter:
+    | ((deps: ControlPlaneDeps, id: string, record: StoreRecord) => Promise<void>)
+    | null;
 }
 
 function resolveSpec(spec: CollectionSpec): ResolvedSpec {
@@ -345,6 +354,7 @@ function resolveSpec(spec: CollectionSpec): ResolvedSpec {
     provision: spec.provision ?? null,
     unproject: spec.unproject ?? null,
     tenantUnproject: spec.tenantUnproject ?? null,
+    tenantUnprojectAfter: spec.tenantUnprojectAfter ?? null,
   };
 }
 
@@ -467,16 +477,22 @@ export function deleteHandler(spec: ResolvedSpec, param: string): Handler {
       await spec.unproject(db, id, visible);
     }
 
-    if (spec.tenantUnproject !== null) {
+    let tenantVisible: StoreRecord | null = null;
+    if (spec.tenantUnproject !== null || spec.tenantUnprojectAfter !== null) {
       // Resolve the visible document under the caller's fence before touching
       // the tenant authority row. A cross-tenant id therefore remains a 404.
-      const visible = await deps.store.get(spec.collection, scope, id);
-      if (visible === null) throw notFound(spec, id);
-      await spec.tenantUnproject(deps, id, visible);
+      tenantVisible = await deps.store.get(spec.collection, scope, id);
+      if (tenantVisible === null) throw notFound(spec, id);
+    }
+    if (spec.tenantUnproject !== null && tenantVisible !== null) {
+      await spec.tenantUnproject(deps, id, tenantVisible);
     }
 
     const removed = await deps.store.remove(spec.collection, scope, id);
     if (!removed) throw notFound(spec, id);
+    if (spec.tenantUnprojectAfter !== null && tenantVisible !== null) {
+      await spec.tenantUnprojectAfter(deps, id, tenantVisible);
+    }
     return json(c, 200, adminDeleted(spec.object, id));
   };
 }

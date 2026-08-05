@@ -107,6 +107,8 @@
  * `AgentUpstream.visibleToTenantIds` (the document's `tenant_ids`) is a SECOND,
  * independent filter applied on top by `ingress.ts::upstreamVisibleTo`.
  */
+import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
+
 // TYPE-ONLY, and it has to stay that way: `../ports.ts` imports the factories
 // below, so a VALUE import back into it would close a module cycle. Same rule
 // `durable/adapters.ts` follows.
@@ -128,6 +130,8 @@ export const AGENT_UPSTREAM_COLLECTION = "agent-upstreams";
 
 /** The generic control-plane document table, in the CONTROL database. */
 export const RESOURCE_TABLE = "control_plane_resources";
+/** The object-local document table for tenant-private resource kinds. */
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
 
 /**
  * Insertion order, byte for byte the control plane's own `LIST_ORDER`
@@ -151,6 +155,8 @@ const PROTOCOLS: ReadonlySet<string> = new Set(["a2a"]);
 export interface AgentUpstreamRegistryBindings {
   /** The CONTROL database: `control_plane_resources`. */
   readonly CONTROL_DB?: D1Database | undefined;
+  /** The shared TenantDataObject namespace for tenant-private documents. */
+  readonly TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -271,6 +277,116 @@ export function agentUpstreamScopeSql(tenantId: string | null): {
   };
 }
 
+async function controlAgentUpstream(
+  db: D1Database,
+  agentId: string,
+  tenantId: string | null,
+): Promise<AgentUpstreamLookup> {
+  const fence = agentUpstreamScopeSql(tenantId);
+  let rows: { results: { document_json: string }[] };
+  try {
+    rows = await db
+      .prepare(
+        `SELECT document_json FROM ${RESOURCE_TABLE}
+           WHERE resource_kind = ? AND resource_id = ?${fence.sql}
+           ${LIST_ORDER}`,
+      )
+      .bind(AGENT_UPSTREAM_COLLECTION, agentId, ...fence.params)
+      .all<{ document_json: string }>();
+  } catch (error) {
+    return {
+      outcome: "unavailable",
+      detail: `cloudflare d1: agent upstream lookup failed: ${String(error)}`,
+    };
+  }
+
+  for (const row of rows.results) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.document_json);
+    } catch {
+      continue;
+    }
+    const decoded = decodeAgentUpstreamDocument(parsed);
+    if (decoded !== undefined && decoded.id === agentId) {
+      return { outcome: "found", upstream: decoded };
+    }
+  }
+  return { outcome: "not_found" };
+}
+
+async function controlPlatformAgentUpstream(
+  db: D1Database,
+  agentId: string,
+): Promise<AgentUpstreamLookup> {
+  let rows: { results: { document_json: string }[] };
+  try {
+    rows = await db
+      .prepare(
+        `SELECT document_json FROM ${RESOURCE_TABLE}
+           WHERE resource_kind = ?
+             AND resource_id = ?
+             AND json_extract(document_json, '$.tenant_id') IS NULL
+           ${LIST_ORDER}`,
+      )
+      .bind(AGENT_UPSTREAM_COLLECTION, agentId)
+      .all<{ document_json: string }>();
+  } catch (error) {
+    return {
+      outcome: "unavailable",
+      detail: `cloudflare d1: platform agent upstream projection failed: ${String(error)}`,
+    };
+  }
+  for (const row of rows.results) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.document_json);
+    } catch {
+      continue;
+    }
+    const decoded = decodeAgentUpstreamDocument(parsed);
+    if (decoded !== undefined && decoded.id === agentId) {
+      return { outcome: "found", upstream: decoded };
+    }
+  }
+  return { outcome: "not_found" };
+}
+
+interface TenantObjectLookup {
+  readonly present: boolean;
+  readonly result: AgentUpstreamLookup;
+}
+
+async function tenantObjectAgentUpstream(
+  router: TenantDatabaseRouter,
+  tenantId: string,
+  agentId: string,
+): Promise<TenantObjectLookup> {
+  const handle = await router.forTenant(tenantId);
+  const rows = await handle.db
+    .prepare(
+      `SELECT document_json FROM ${TENANT_RESOURCE_TABLE}
+         WHERE resource_kind = ? AND resource_id = ?
+         ORDER BY resource_id`,
+    )
+    .bind(AGENT_UPSTREAM_COLLECTION, agentId)
+    .all<{ document_json: string }>();
+  for (const row of rows.results) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.document_json);
+    } catch {
+      continue;
+    }
+    if (!isObject(parsed) || parsed["tenant_id"] !== tenantId) continue;
+    const decoded = decodeAgentUpstreamDocument(parsed);
+    if (decoded !== undefined && decoded.id === agentId) {
+      return { present: true, result: { outcome: "found", upstream: decoded } };
+    }
+  }
+  return { present: rows.results.length > 0, result: { outcome: "not_found" } };
+}
+
 /**
  * The DURABLE {@link AgentUpstreamPort}: one indexed lookup per dispatch,
  * fenced to the caller, fail-closed on error.
@@ -279,44 +395,59 @@ export function agentUpstreamScopeSql(tenantId: string | null): {
  * against the DECODED `id` afterwards, so a document whose `resource_id` and
  * whose body disagree cannot route traffic under a name it does not carry.
  */
-export function d1AgentUpstreamPort(db: D1Database): AgentUpstreamPort {
+export function d1AgentUpstreamPort(
+  db: D1Database,
+  router?: TenantDatabaseRouter,
+): AgentUpstreamPort {
   return {
     async lookup(agentId: string, scope: AgentUpstreamScope): Promise<AgentUpstreamLookup> {
       if (agentId === "") return { outcome: "not_found" };
-      const fence = agentUpstreamScopeSql(scope.tenantId);
-      let rows: { results: { document_json: string }[] };
-      try {
-        rows = await db
-          .prepare(
-            `SELECT document_json FROM ${RESOURCE_TABLE}
-               WHERE resource_kind = ? AND resource_id = ?${fence.sql}
-               ${LIST_ORDER}`,
-          )
-          .bind(AGENT_UPSTREAM_COLLECTION, agentId, ...fence.params)
-          .all<{ document_json: string }>();
-      } catch (error) {
-        // FAIL CLOSED. See the failure-direction note at the top of this file:
-        // an unreadable registry must refuse the dispatch, never admit it and
-        // never fall back to the deploy-time var.
-        return {
-          outcome: "unavailable",
-          detail: `cloudflare d1: agent upstream lookup failed: ${String(error)}`,
-        };
-      }
-
-      for (const row of rows.results) {
-        let parsed: unknown;
+      if (router !== undefined && scope.tenantId !== null && scope.tenantId.trim() !== "") {
         try {
-          parsed = JSON.parse(row.document_json);
-        } catch {
-          continue;
+          const object = await tenantObjectAgentUpstream(router, scope.tenantId, agentId);
+          if (object.result.outcome !== "not_found") return object.result;
+          // Tenant callers inherit platform-global reach-set entries from the
+          // named control-D1 projection. This is a destination decision, not a
+          // fallback for an object read failure: the catch below remains
+          // unavailable, and tenant-owned rows never come from control D1.
+          return controlPlatformAgentUpstream(db, agentId);
+        } catch (error) {
+          return {
+            outcome: "unavailable",
+            detail: `tenant object: agent upstream lookup failed: ${String(error)}`,
+          };
         }
-        const decoded = decodeAgentUpstreamDocument(parsed);
-        if (decoded !== undefined && decoded.id === agentId) {
-          return { outcome: "found", upstream: decoded };
+      } else if (router !== undefined && scope.tenantId === null) {
+        const matches: AgentUpstream[] = [];
+        try {
+          for (const tenantId of await router.provisionedTenants()) {
+            const object = await tenantObjectAgentUpstream(router, tenantId, agentId);
+            if (object.result.outcome === "found") matches.push(object.result.upstream);
+          }
+        } catch (error) {
+          // Platform-global upstreams have a named control-D1 projection. A
+          // roster failure must not hide that projection; tenant-scoped
+          // lookups remain object-only and still fail closed above.
+          const projection = await controlPlatformAgentUpstream(db, agentId);
+          if (projection.outcome !== "not_found") return projection;
+          return {
+            outcome: "unavailable",
+            detail: `tenant object roster lookup failed: ${String(error)}`,
+          };
         }
+        if (matches.length > 1) {
+          return {
+            outcome: "unavailable",
+            detail: `agent upstream ${agentId} has multiple tenant destinations`,
+          };
+        }
+        if (matches[0] !== undefined) return { outcome: "found", upstream: matches[0] };
+        return controlPlatformAgentUpstream(db, agentId);
       }
-      return { outcome: "not_found" };
+      // CONTROL_DB is the compatibility reader only when this Worker has no
+      // TenantDataObject topology. A configured object topology must never
+      // resurrect a tenant-local row from the control database.
+      return controlAgentUpstream(db, agentId, scope.tenantId);
     },
   };
 }
@@ -345,5 +476,9 @@ export function agentUpstreamPortFromEnv(
   // binding present but not a D1 database (a stub env in a unit test) must fall
   // back rather than throw on the request path.
   if (db === undefined || typeof db.prepare !== "function") return varPort;
-  return d1AgentUpstreamPort(db);
+  const router =
+    env.TENANT_DATA === undefined
+      ? undefined
+      : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, db);
+  return d1AgentUpstreamPort(db, router);
 }

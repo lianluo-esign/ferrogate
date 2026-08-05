@@ -77,11 +77,13 @@
  */
 import type { AuthContext } from "../ports.js";
 import { callerScope } from "../ports.js";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type {
   AgentUpstreamCapability,
   AgentUpstreamProtocol,
   AgentUpstreamRecord,
 } from "./agent-discovery.js";
+import { resolverForEnv, type TenancyBindings } from "../tenancy/index.js";
 
 /**
  * `control_plane_resources.resource_kind` written by `apps/control-plane`'s
@@ -92,6 +94,8 @@ export const AGENT_UPSTREAM_COLLECTION = "agent-upstreams";
 
 /** The generic control-plane document table, in the CONTROL database. */
 export const RESOURCE_TABLE = "control_plane_resources";
+/** The object-local document table for tenant-private resource kinds. */
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
 
 /**
  * Insertion order, byte for byte the control plane's own `LIST_ORDER`
@@ -101,9 +105,7 @@ export const RESOURCE_TABLE = "control_plane_resources";
 const LIST_ORDER = "ORDER BY created_at_unix ASC, rowid ASC";
 
 /** Bindings this module reads. */
-export interface AgentUpstreamRegistryBindings {
-  /** The CONTROL database: `control_plane_resources`. */
-  readonly CONTROL_DB?: D1Database | undefined;
+export interface AgentUpstreamRegistryBindings extends TenancyBindings {
   /** `[[agent_upstreams]]`, the deploy-time table — see the precedence note. */
   readonly GATEWAY_AGENT_UPSTREAMS?: string | undefined;
 }
@@ -241,7 +243,31 @@ export function agentUpstreamScopeSql(tenantId: string | null): {
  *
  * `tenantId === null` means a platform operator (no predicate).
  */
-export async function durableAgentUpstreams(
+async function decodeRows(
+  rows: readonly { document_json: string }[],
+  expectedTenantId?: string,
+): Promise<AgentUpstreamRecord[]> {
+  const upstreams: AgentUpstreamRecord[] = [];
+  for (const row of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.document_json);
+    } catch {
+      continue;
+    }
+    if (
+      expectedTenantId !== undefined &&
+      (!isObject(parsed) || parsed["tenant_id"] !== expectedTenantId)
+    ) {
+      continue;
+    }
+    const decoded = decodeAgentUpstreamDocument(parsed);
+    if (decoded !== undefined) upstreams.push(decoded);
+  }
+  return upstreams;
+}
+
+async function controlAgentUpstreams(
   db: D1Database,
   tenantId: string | null,
 ): Promise<readonly AgentUpstreamRecord[]> {
@@ -262,18 +288,74 @@ export async function durableAgentUpstreams(
     return [];
   }
 
-  const upstreams: AgentUpstreamRecord[] = [];
-  for (const row of rows.results) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(row.document_json);
-    } catch {
-      continue;
-    }
-    const decoded = decodeAgentUpstreamDocument(parsed);
-    if (decoded !== undefined) upstreams.push(decoded);
+  return decodeRows(rows.results);
+}
+
+/** Platform projection for legacy/unattributed reach-set documents. */
+async function controlPlatformAgentUpstreams(
+  db: D1Database,
+): Promise<readonly AgentUpstreamRecord[]> {
+  let rows: { results: { document_json: string }[] };
+  try {
+    rows = await db
+      .prepare(
+        `SELECT document_json FROM ${RESOURCE_TABLE}
+           WHERE resource_kind = ?
+             AND json_extract(document_json, '$.tenant_id') IS NULL
+           ${LIST_ORDER}`,
+      )
+      .bind(AGENT_UPSTREAM_COLLECTION)
+      .all<{ document_json: string }>();
+  } catch {
+    return [];
   }
-  return upstreams;
+  return decodeRows(rows.results);
+}
+
+async function tenantObjectAgentUpstreams(
+  router: TenantDatabaseRouter,
+  tenantId: string,
+): Promise<readonly AgentUpstreamRecord[]> {
+  const handle = await router.forTenant(tenantId);
+  const rows = await handle.db
+    .prepare(
+      `SELECT document_json FROM ${TENANT_RESOURCE_TABLE}
+         WHERE resource_kind = ?
+         ORDER BY resource_id`,
+    )
+    .bind(AGENT_UPSTREAM_COLLECTION)
+    .all<{ document_json: string }>();
+  return decodeRows(rows.results, tenantId);
+}
+
+export async function durableAgentUpstreams(
+  db: D1Database,
+  tenantId: string | null,
+  router?: TenantDatabaseRouter,
+): Promise<readonly AgentUpstreamRecord[]> {
+  if (router === undefined) {
+    return controlAgentUpstreams(db, tenantId);
+  }
+  if (tenantId === null || tenantId.trim() === "") {
+    return controlPlatformAgentUpstreams(db);
+  }
+
+  let objectRows: readonly AgentUpstreamRecord[];
+  try {
+    objectRows = await tenantObjectAgentUpstreams(router, tenantId);
+  } catch {
+    // A tenant-object read failure must not resurrect a legacy control row or
+    // turn a discovery request into an unbounded error response.
+    return [];
+  }
+  const rows = [...objectRows];
+  const seen = new Set(rows.map((upstream) => upstream.id));
+  for (const upstream of await controlPlatformAgentUpstreams(db)) {
+    if (seen.has(upstream.id)) continue;
+    seen.add(upstream.id);
+    rows.push(upstream);
+  }
+  return rows;
 }
 
 /**
@@ -296,5 +378,39 @@ export async function agentUpstreamsForCaller(
   // only the un-attributed platform documents. Unreachable behind
   // `contractAuth` (this operation is `bearer`), and fail-closed if it ever is.
   const scope = auth === null ? { kind: "tenant" as const, tenantId: "" } : callerScope(auth);
-  return durableAgentUpstreams(db, scope.kind === "platform_operator" ? null : scope.tenantId);
+  let router: TenantDatabaseRouter | undefined;
+  if (env?.TENANT_DATA !== undefined || env?.GATEWAY_TENANT_DB_ROUTING !== undefined) {
+    try {
+      router = resolverForEnv(env).router;
+    } catch {
+      // A configured object topology with no resolvable binding is an outage,
+      // not a reason to publish a stale control-plane compatibility row.
+      return [];
+    }
+  }
+  if (scope.kind === "platform_operator" && router !== undefined) {
+    const objectRows: AgentUpstreamRecord[] = [];
+    try {
+      for (const tenantId of await router.provisionedTenants()) {
+        objectRows.push(...(await tenantObjectAgentUpstreams(router, tenantId)));
+      }
+    } catch {
+      // The platform projection has a named control-D1 destination and does
+      // not require tenant roster enumeration. Keep it available while the
+      // tenant roster is unavailable; tenant-local readers remain object-only.
+      return controlPlatformAgentUpstreams(db);
+    }
+    const seen = new Set(objectRows.map((upstream) => upstream.id));
+    for (const upstream of await controlPlatformAgentUpstreams(db)) {
+      if (seen.has(upstream.id)) continue;
+      seen.add(upstream.id);
+      objectRows.push(upstream);
+    }
+    return objectRows;
+  }
+  return durableAgentUpstreams(
+    db,
+    scope.kind === "platform_operator" ? null : scope.tenantId,
+    router,
+  );
 }

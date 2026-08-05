@@ -123,6 +123,14 @@ describe("MCP admin writes project into the tenant object", () => {
     ).toEqual({
       total: 0,
     });
+    expect(
+      await db()
+        .prepare(
+          "SELECT COUNT(*) AS total FROM control_plane_resources WHERE resource_kind = ? AND resource_id = ?",
+        )
+        .bind("mcp-servers", "search")
+        .first<{ total: number }>(),
+    ).toEqual({ total: 0 });
   });
 
   it("removes an invalidated server instead of leaving a serving row", async () => {
