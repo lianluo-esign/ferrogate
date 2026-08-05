@@ -289,9 +289,9 @@ function requiresPrivilegedWrite(sql: string): string | null {
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the FIFTEEN files have 33
+ *    comment lines containing a `;` mid-prose, and the SIXTEEN files have 34
  *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
- *    1 in 0011, 1 in 0012, 1 in 0013 and 1 in 0015) — 33, not 18,
+ *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015 and 1 in 0016) — 34, not 18,
  *    is the number that bounds this function's exposure. Splitting before
  *    stripping cuts statements in half at every one of them.
  *
@@ -304,7 +304,7 @@ function requiresPrivilegedWrite(sql: string): string | null {
  *    lossless over `0005_responses_conversations.sql` — that file indents `--`
  *    comments BETWEEN columns, and a filter anchored at column 0 would corrupt
  *    the table.
- *  * It is safe today because, measured over all FIFTEEN files, every non-comment
+ *  * It is safe today because, measured over all SIXTEEN files, every non-comment
  *    `;` is at end-of-line, there is no `;` inside any string literal in a live
  *    statement, and there are no trailing inline comments. **A migration that
  *    introduces a `CREATE TRIGGER`, or a `;` inside a quoted literal, breaks
@@ -346,7 +346,7 @@ export class TenantDataObject extends DurableObject {
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 128 statements
+    // gate inside `#migrate` is what keeps that from re-applying 130 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -554,8 +554,8 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 128 statements of the fifteen files — 47 `CREATE TABLE IF
-   * NOT EXISTS`, 59 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
+   * re-running the 130 statements of the sixteen files — 48 `CREATE TABLE IF
+   * NOT EXISTS`, 60 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
    * COLUMN` and the ledger `INSERT`. (Counted, not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
    * whole census then went stale again the moment `0013_guardrail_evaluations.sql`
