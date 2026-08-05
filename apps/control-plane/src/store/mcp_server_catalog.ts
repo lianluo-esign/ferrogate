@@ -188,7 +188,17 @@ export async function removeMcpServerControlProjection(
   _record: StoreRecord,
 ): Promise<void> {
   if (deps.controlDatabase === null) return;
-  await removeControlProjection(deps.controlDatabase, id);
+  try {
+    await removeControlProjection(deps.controlDatabase, id);
+  } catch (error) {
+    // The tenant object is authoritative and has already been deleted. A
+    // stale directory row is harmless to runtime reads and is repaired by the
+    // next platform lookup that finds no object record.
+    console.warn("control-plane: MCP compatibility projection cleanup failed", {
+      id,
+      error,
+    });
+  }
 }
 
 async function readMark(db: D1Database, tenantId: string): Promise<BackfillMark | undefined> {

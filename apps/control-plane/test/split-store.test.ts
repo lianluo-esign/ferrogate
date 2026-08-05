@@ -3,7 +3,13 @@ import { env } from "cloudflare:test";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { resolveTenantStorage } from "../src/adapters.js";
 import { SplitControlPlaneStore } from "../src/store/split.js";
-import { RESOURCE_TABLE, TENANT_RESOURCE_TABLE } from "../src/store/d1.js";
+import {
+  D1ControlPlaneStore,
+  RESOURCE_TABLE,
+  TENANT_RESOURCE_TABLE,
+  TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
+  tenantResourceTombstoneMark,
+} from "../src/store/d1.js";
 import {
   RESOURCE_BACKFILL_BATCH_SIZE,
   backfillTenantResourceKinds,
@@ -182,6 +188,55 @@ describe("SplitControlPlaneStore", () => {
       .run();
 
     await expect(store().get("agent-workflows", PLATFORM, "control-only")).resolves.toBeNull();
+  });
+
+  it("tombstones object deletes so legacy backfill cannot resurrect them", async () => {
+    const id = "delete-with-legacy-row";
+    await db()
+      .prepare(
+        `INSERT INTO ${RESOURCE_TABLE}
+           (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, 1, 1, 1)`,
+      )
+      .bind("agent-workflows", id, JSON.stringify({ id, tenant_id: TENANT_A }))
+      .run();
+
+    const objectDb = (await router().forTenant(TENANT_A)).db;
+    const objectStore = new D1ControlPlaneStore(objectDb, {
+      requestId: "split-tombstone-test",
+      resourceTable: TENANT_RESOURCE_TABLE,
+      isolation: "object",
+      objectTenantId: TENANT_A,
+      auditDatabase: db(),
+      tombstoneMarkPrefix: TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
+    });
+    await objectStore.create(
+      "agent-workflows",
+      { kind: "tenant", tenantId: TENANT_A },
+      { id, tenant_id: TENANT_A },
+    );
+    await expect(
+      objectStore.remove("agent-workflows", { kind: "tenant", tenantId: TENANT_A }, id),
+    ).resolves.toBe(true);
+
+    const tombstone = await objectDb
+      .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+      .bind(TENANT_A, tenantResourceTombstoneMark("agent-workflows", id))
+      .first<{ detail: string }>();
+    expect(tombstone).not.toBeNull();
+
+    const backfill = await backfillTenantResourceKinds(db(), objectDb, TENANT_A);
+    expect(backfill.scanned).toBe(1);
+    expect(backfill.copied).toBe(0);
+    await expect(
+      objectDb
+        .prepare(
+          `SELECT 1 AS present FROM ${TENANT_RESOURCE_TABLE}
+           WHERE resource_kind = ? AND resource_id = ?`,
+        )
+        .bind("agent-workflows", id)
+        .first(),
+    ).resolves.toBeNull();
   });
 
   it("derives a tenant-account owner from its id for platform creates", async () => {

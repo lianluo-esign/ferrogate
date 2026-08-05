@@ -9,7 +9,11 @@
  * in-memory cursor that a Worker eviction loses.
  */
 import { TENANT_RESOURCE_KINDS } from "./resource-kinds.js";
-import { RESOURCE_TABLE, TENANT_RESOURCE_TABLE } from "./d1.js";
+import {
+  RESOURCE_TABLE,
+  TENANT_RESOURCE_TABLE,
+  tenantResourceTombstoneMark,
+} from "./d1.js";
 
 /** The object-local mark that stores the generic resource backfill cursor. */
 export const RESOURCE_BACKFILL_MARK = "control_plane_resource_backfill_v1";
@@ -104,6 +108,7 @@ export async function backfillTenantResourceKinds(
 
   while (state.kindIndex < TENANT_RESOURCE_KINDS.length && remaining > 0) {
     const kind = TENANT_RESOURCE_KINDS[state.kindIndex];
+    if (kind === undefined) break;
     const predicate =
       state.cursor === null
         ? "resource_kind = ? AND json_extract(document_json, '$.tenant_id') = ?"
@@ -144,7 +149,11 @@ export async function backfillTenantResourceKinds(
           .prepare(
             `INSERT INTO ${TENANT_RESOURCE_TABLE}
                (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
-             VALUES (?, ?, ?, ?, ?, ?)
+             SELECT ?, ?, ?, ?, ?, ?
+              WHERE NOT EXISTS (
+                SELECT 1 FROM tenant_provisioning_marks
+                 WHERE tenant_id = ? AND mark = ?
+              )
              ON CONFLICT (resource_kind, resource_id) DO NOTHING`,
           )
           .bind(
@@ -154,6 +163,8 @@ export async function backfillTenantResourceKinds(
             row.revision,
             row.created_at_unix,
             row.updated_at_unix,
+            tenantId,
+            tenantResourceTombstoneMark(kind, row.resource_id),
           ),
       ),
       markStatement(tenantDb, tenantId, nextState),

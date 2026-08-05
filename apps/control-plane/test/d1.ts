@@ -123,6 +123,9 @@ export async function resetD1(): Promise<void> {
           handle.db
             .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
             .bind("control_plane_resource_backfill_v1"),
+          handle.db
+            .prepare("DELETE FROM tenant_provisioning_marks WHERE mark LIKE ?")
+            .bind("control_plane_resource_deleted_v1:%"),
         ]);
       }),
     );

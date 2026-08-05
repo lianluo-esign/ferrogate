@@ -21,6 +21,7 @@ import {
   type D1ControlPlaneStoreOptions,
   RESOURCE_TABLE,
   TENANT_RESOURCE_TABLE,
+  TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
 } from "./d1.js";
 import { pageOf } from "./query.js";
 import { backfillTenantResourceKinds } from "./resource-backfill.js";
@@ -87,6 +88,7 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       isolation: "object",
       objectTenantId: normalized,
       auditDatabase: this.#controlDb,
+      tombstoneMarkPrefix: TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
     };
     return new D1ControlPlaneStore(handle.db, options);
   }
@@ -146,6 +148,15 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
         const store = await this.#tenantStore(tenantId);
         const record = await store.get(collection, { kind: "platform_operator" }, id);
         if (record !== null) return { tenantId, store, record };
+        // A failed compatibility cleanup can leave only the directory row.
+        // It is not an authority row, so repair the stale pointer while the
+        // object remains the sole source of the returned resource.
+        await this.#controlDb
+          .prepare(
+            "DELETE FROM control_plane_resources WHERE resource_kind = ? AND resource_id = ?",
+          )
+          .bind(collection, id)
+          .run();
       }
     }
     return null;
@@ -265,14 +276,26 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (target === null) return false;
     const removed = await target.store.remove(collection, scope, id);
     if (!removed) return false;
-    await this.#controlDb
-      .prepare(
-        `DELETE FROM ${RESOURCE_TABLE}
-          WHERE resource_kind = ? AND resource_id = ?
-            AND json_extract(document_json, '$.tenant_id') = ?`,
-      )
-      .bind(collection, id, target.tenantId)
-      .run();
+    try {
+      await this.#controlDb
+        .prepare(
+          `DELETE FROM ${RESOURCE_TABLE}
+            WHERE resource_kind = ? AND resource_id = ?
+              AND json_extract(document_json, '$.tenant_id') = ?`,
+        )
+        .bind(collection, id, target.tenantId)
+        .run();
+    } catch (error) {
+      // The object delete is authoritative and already tombstoned. A stale
+      // compatibility row is harmless to runtime reads and is repaired by the
+      // next named-directory lookup; do not report a committed delete as 500.
+      console.warn("control-plane: tenant resource compatibility cleanup failed", {
+        collection,
+        id,
+        tenantId: target.tenantId,
+        error,
+      });
+    }
     return true;
   }
 

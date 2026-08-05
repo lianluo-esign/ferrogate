@@ -79,6 +79,9 @@ export async function resetTenantD1(): Promise<void> {
       handle
         .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
         .bind("control_plane_resource_backfill_v1"),
+      handle
+        .prepare("DELETE FROM tenant_provisioning_marks WHERE mark LIKE ?")
+        .bind("control_plane_resource_deleted_v1:%"),
     ]);
   }
   await db().batch([

@@ -94,6 +94,11 @@ export const RESOURCE_TABLE = "control_plane_resources";
 /** The tenant-local generic document table (`sql/d1-ts/tenant/0016_*`). */
 export const TENANT_RESOURCE_TABLE = "tenant_resources";
 export type ResourceTable = typeof RESOURCE_TABLE | typeof TENANT_RESOURCE_TABLE;
+/** Object-local tombstones prevent a stale compatibility copy from resurrecting a delete. */
+export const TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX = "control_plane_resource_deleted_v1:";
+export function tenantResourceTombstoneMark(collection: string, id: string): string {
+  return `${TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX}${collection}:${id}`;
+}
 /** The durable admin-mutation evidence table (`sql/d1-ts/control/`). */
 export const AUDIT_TABLE = "audit_events";
 /**
@@ -298,6 +303,8 @@ export interface D1ControlPlaneStoreOptions {
   readonly objectTenantId?: string;
   /** Audit evidence remains account-global even when the document is object-local. */
   readonly auditDatabase?: D1Database;
+  /** Object-local delete mark prefix; only valid with `isolation: "object"`. */
+  readonly tombstoneMarkPrefix?: string;
 }
 
 export class D1ControlPlaneStore implements ControlPlaneStore {
@@ -305,6 +312,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
   readonly #auditDb: D1Database;
   readonly #resourceTable: ResourceTable;
   readonly #objectTenantId: string | null;
+  readonly #tombstoneMarkPrefix: string | null;
   readonly #requestId: string;
   readonly #now: () => number;
   readonly #newId: () => string;
@@ -323,11 +331,16 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         throw new Error("object-local control-plane store requires objectTenantId");
       }
       this.#objectTenantId = tenantId;
+      this.#tombstoneMarkPrefix = options.tombstoneMarkPrefix ?? null;
     } else {
       if (options.objectTenantId !== undefined) {
         throw new Error("control-plane store cannot be given an objectTenantId");
       }
+      if (options.tombstoneMarkPrefix !== undefined) {
+        throw new Error("control-plane store cannot be given a tombstoneMarkPrefix");
+      }
       this.#objectTenantId = null;
+      this.#tombstoneMarkPrefix = null;
     }
     // `audit_events.request_id` is NOT NULL; an absent correlation id is the
     // empty string rather than a fabricated one, so a reader can tell the
@@ -649,12 +662,41 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // row, is not the caller's).
     const existing = await this.#load(collection, scope, id, "write");
     const tenant = this.#scopeFence(scope, "write");
-    const result = await this.#db
-      .prepare(
-        `DELETE FROM ${this.#resourceTable} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
-      )
-      .bind(collection, id, ...tenant.params)
-      .run();
+    const statements: D1PreparedStatement[] = [];
+    if (this.#tombstoneMarkPrefix !== null && this.#objectTenantId !== null) {
+      statements.push(
+        this.#db
+          .prepare(
+            `INSERT INTO tenant_provisioning_marks
+               (tenant_id, mark, detail, applied_at_unix)
+             SELECT ?, ?, ?, ?
+              WHERE EXISTS (
+                SELECT 1 FROM ${this.#resourceTable}
+                 WHERE resource_kind = ? AND resource_id = ?${tenant.sql}
+              )
+             ON CONFLICT (tenant_id, mark) DO NOTHING`,
+          )
+          .bind(
+            this.#objectTenantId,
+            tenantResourceTombstoneMark(collection, id),
+            JSON.stringify({ resource_kind: collection, resource_id: id }),
+            this.#now(),
+            collection,
+            id,
+            ...tenant.params,
+          ),
+      );
+    }
+    statements.push(
+      this.#db
+        .prepare(
+          `DELETE FROM ${this.#resourceTable} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
+        )
+        .bind(collection, id, ...tenant.params),
+    );
+    const results = await this.#db.batch(statements);
+    const result = results[results.length - 1];
+    if (result === undefined) return false;
     if ((result.meta.changes ?? 0) === 0) return false;
 
     await this.#audit(
