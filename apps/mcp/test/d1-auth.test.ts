@@ -43,7 +43,7 @@ import {
 } from "../src/auth.js";
 import { mcpRouter } from "../src/index.js";
 import { durableAuthBound, portsBound, resolvePorts } from "../src/ports.js";
-import { EXEC_KEY, type Fixture, TENANT, rpcRequest, seedFixture } from "./fixtures.js";
+import { EXEC_KEY, type Fixture, rpcRequest, seedFixture } from "./fixtures.js";
 import {
   registerDurableObjectTenant,
   resetTenantObjectState,
@@ -69,6 +69,8 @@ const tenantDb = (): D1Database => tenantObjectDb(ROUTED_TENANT);
 const ROUTED_TENANT = "tenant-routed";
 /** Registered naming a binding this Worker does NOT have. */
 const UNROUTABLE_TENANT = "tenant-not-deployed";
+/** This file must not reset the shared `fixtures.ts` tenant object. */
+const STATIC_TENANT = "tenant-mcp-d1-auth";
 
 const STATIC_KEY = "fg_static_operator_key";
 const VIRTUAL_KEY = "fg_virtual_tenant_key";
@@ -97,9 +99,9 @@ beforeEach(async () => {
     control().prepare("DELETE FROM roles"),
   ]);
   await resetTenantObjectState([ROUTED_TENANT]);
-  await resetTenantObjectState([TENANT]);
-  await registerDurableObjectTenant(TENANT);
-  fixture = seedFixture();
+  await resetTenantObjectState([STATIC_TENANT]);
+  await registerDurableObjectTenant(STATIC_TENANT);
+  fixture = seedFixture({ tenantId: STATIC_TENANT });
 });
 
 // ---------------------------------------------------------------------------
@@ -124,7 +126,7 @@ async function seedStaticKey(secret: string, seed: StaticSeed = {}): Promise<voi
     .bind(
       await hashApiKeySecret(secret),
       "static-key-1",
-      seed.tenantId === undefined ? TENANT : seed.tenantId,
+      seed.tenantId === undefined ? STATIC_TENANT : seed.tenantId,
       seed.platformOperator ?? 0,
       seed.scopesJson === undefined ? JSON.stringify(["tools.read"]) : seed.scopesJson,
       seed.enabled ?? 1,
@@ -400,7 +402,7 @@ describe("the durable row DECIDES — a dev key can never overrule it", () => {
     // revoked.
     fixture.ports.auth.register(STATIC_KEY, {
       apiKeyId: "dev",
-      organizationId: TENANT,
+      organizationId: STATIC_TENANT,
       scopes: ["*"],
       permissions: [],
       platformOperator: false,

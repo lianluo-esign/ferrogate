@@ -185,7 +185,7 @@ beforeEach(async () => {
     control().prepare("DELETE FROM api_key_directory"),
     control().prepare("DELETE FROM roles"),
   ]);
-  seedFixture();
+  seedFixture({ tenantId: "tenant-mcp-shared-rate-limit" });
 });
 
 describe("the committed config binds the gateway's counter, not a private one", () => {

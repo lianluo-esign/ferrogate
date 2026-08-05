@@ -81,13 +81,14 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import agentRuntimeApp from "../../agent-runtime/src/index.js";
 import gatewayApp from "../../gateway/src/index.js";
 import { hashApiKeySecret } from "../src/auth.js";
-import { rpcRequest, seedFixture } from "./fixtures.js";
+import { rpcRequest, seedFixture, setMcpEnvVar } from "./fixtures.js";
 import {
   registerDurableObjectTenant,
   resetTenantObjectState,
   seedTenantRoleProjection,
   tenantObjectDb,
   tenantObjectNamespace,
+  tenantObjectNamespaceWithQueryFailure,
 } from "./tenant-object.js";
 
 // ---------------------------------------------------------------------------
@@ -386,7 +387,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   // The MCP upstream catalog + the recorded-call sink `tools/call` needs.
-  seedFixture();
+  seedFixture({ tenantId: TENANT });
   await seedCredential();
 });
 
@@ -479,22 +480,28 @@ describe("the 401-vs-403 taxonomy survives the new gate", () => {
 describe("FAIL CLOSED — a lifecycle authority that cannot be read admits nobody", () => {
   it("answers 503 rather than admitting when a lifecycle row cannot be read", async () => {
     // "Flap the control plane" must not be a suspension bypass (Rust
-    // `LifecycleGateError::Unavailable`). Renaming a table the WALK reads is
-    // the cheapest real read failure available to an offline harness: the
-    // query raises exactly as it would against an unreachable database.
+    // `LifecycleGateError::Unavailable`). Reject only the target query at the
+    // namespace boundary: making the real object throw causes workerd to log
+    // the remote exception as uncaught even though every Worker converts it
+    // into the expected 503. All other object RPCs remain real.
     //
     // `projects` rather than `tenants` on purpose. `tenants` also carries
-    // `plan_id`, so hiding it takes the QUOTA chain down too and every Worker
+    // `plan_id`, so rejecting it takes the QUOTA chain down too and every Worker
     // then answers `503 quota_resolution_unavailable` — a fail-closed refusal
     // for the wrong reason, which would let this test pass against a fleet
     // with no lifecycle gate at all. `projects` is read by the lifecycle walk
     // and by nothing else on these three request paths, so the codes below can
     // only come from the gate under test.
-    await tenantDb().prepare("ALTER TABLE projects RENAME TO projects_hidden").run();
+    const originalTenantData = bindings().TENANT_DATA;
+    const brokenTenantData = tenantObjectNamespaceWithQueryFailure(
+      originalTenantData,
+      "FROM projects",
+    );
+    setMcpEnvVar("TENANT_DATA", brokenTenantData);
     try {
       expect(await fleet()).toEqual(UNAVAILABLE);
     } finally {
-      await tenantDb().prepare("ALTER TABLE projects_hidden RENAME TO projects").run();
+      setMcpEnvVar("TENANT_DATA", originalTenantData);
     }
   });
 });

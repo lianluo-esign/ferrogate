@@ -102,7 +102,7 @@ beforeEach(async () => {
     control().prepare("DELETE FROM tenants"),
     control().prepare("DELETE FROM plans"),
   ]);
-  fixture = seedFixture();
+  fixture = seedFixture({ tenantId: "tenant-mcp-admission" });
 });
 
 // ---------------------------------------------------------------------------

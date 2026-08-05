@@ -244,7 +244,7 @@ const ADMITTED_REST: Wire = { status: 200, code: undefined, message: undefined }
 let fixture: Fixture;
 
 beforeEach(async () => {
-  fixture = seedFixture();
+  fixture = seedFixture({ tenantId: TENANT });
   await seedCredential();
 });
 

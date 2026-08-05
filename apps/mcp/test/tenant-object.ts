@@ -47,6 +47,44 @@ export function tenantObjectNamespace(): TenantDataNamespace {
   return bindings().TENANT_DATA;
 }
 
+/**
+ * Inject one local read failure without asking the real object to throw.
+ *
+ * A rejected `TenantDataObject.query()` is a valid RPC failure, but workerd
+ * reports the remote exception as `uncaught` even when the caller converts it
+ * into the expected fail-closed 503. Tests that need an unreadable table must
+ * therefore reject at this namespace boundary and delegate every other call
+ * to the real object. This preserves the production reader path and keeps the
+ * test output free of transport-level noise.
+ */
+export function tenantObjectNamespaceWithQueryFailure(
+  namespace: TenantDataNamespace,
+  sqlFragment: string,
+): TenantDataNamespace {
+  return {
+    idFromName: (name: string) => namespace.idFromName(name),
+    get(id: DurableObjectId) {
+      const stub = namespace.get(id) as unknown as {
+        query(request: { sql: string; params?: readonly unknown[] }): Promise<unknown>;
+        batch(request: unknown): Promise<unknown>;
+        privilegedBatch?(request: unknown): Promise<unknown>;
+      };
+      return {
+        query(request: { sql: string; params?: readonly unknown[] }) {
+          if (request.sql.includes(sqlFragment)) {
+            return Promise.reject(new Error(`tenant object test fault: ${sqlFragment}`));
+          }
+          return stub.query(request);
+        },
+        batch: (request: unknown) => stub.batch(request),
+        ...(stub.privilegedBatch === undefined
+          ? {}
+          : { privilegedBatch: (request: unknown) => stub.privilegedBatch?.(request) }),
+      };
+    },
+  } as unknown as TenantDataNamespace;
+}
+
 export async function seedTenantRoleProjection(
   tenantId: string,
   roleId: string,
