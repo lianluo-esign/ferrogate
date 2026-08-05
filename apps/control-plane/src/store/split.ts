@@ -7,23 +7,22 @@
  * `D1ControlPlaneStore` whose only isolation boundary is the object identity.
  */
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
-import {
-  type CallerScope,
-  type ControlPlaneStore,
-  type ListPage,
-  type ListQuery,
-  type MergeIfOutcome,
-  type StoreMutation,
-  type StoreRecord,
-  StoreConflictError,
+import type {
+  CallerScope,
+  ControlPlaneStore,
+  ListPage,
+  ListQuery,
+  MergeIfOutcome,
+  StoreMutation,
+  StoreRecord,
 } from "../ports.js";
-import { pageOf } from "./query.js";
 import {
   D1ControlPlaneStore,
   type D1ControlPlaneStoreOptions,
   RESOURCE_TABLE,
   TENANT_RESOURCE_TABLE,
 } from "./d1.js";
+import { pageOf } from "./query.js";
 import { backfillTenantResourceKinds } from "./resource-backfill.js";
 import { resourceKindPlacement } from "./resource-kinds.js";
 
@@ -67,6 +66,10 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     return this.#control;
   }
 
+  #hasTenantDestination(scope: CallerScope): boolean {
+    return scope.kind === "tenant" && scope.tenantId.trim() !== "";
+  }
+
   async #tenantStore(tenantId: string): Promise<D1ControlPlaneStore> {
     const normalized = tenantId.trim();
     if (normalized === "")
@@ -100,7 +103,23 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     throw new Error(`${collection} platform operation requires a tenant destination`);
   }
 
+  async #knownTenantAccount(id: string): Promise<boolean> {
+    const row = await this.#controlDb
+      .prepare("SELECT 1 AS present FROM tenants WHERE id = ? LIMIT 1")
+      .bind(id)
+      .first<{ present: number }>();
+    return row !== null;
+  }
+
   async #matchTenantResource(collection: string, id: string): Promise<TenantStoreMatch | null> {
+    // The tenant-account document is addressed by its tenant id. Its typed
+    // projection remains the durable existence signal even if a provisioning
+    // repair test or an operator has removed the storage roster row.
+    if (collection === "tenant-accounts" && (await this.#knownTenantAccount(id))) {
+      const store = await this.#tenantStore(id);
+      const record = await store.get(collection, { kind: "platform_operator" }, id);
+      return record === null ? null : { tenantId: id, store, record };
+    }
     const matches: TenantStoreMatch[] = [];
     for (const tenantId of await this.#tenantRouter.provisionedTenants()) {
       const store = await this.#tenantStore(tenantId);
@@ -166,6 +185,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().list(collection, scope, query);
     if (scope.kind === "tenant") {
+      if (!this.#hasTenantDestination(scope)) {
+        return this.#controlStore().list(collection, scope, query);
+      }
       return (await this.#tenantStore(scope.tenantId)).list(collection, scope, query);
     }
     return this.#listTenantResources(collection, query);
@@ -173,8 +195,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
 
   async get(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
     if (!this.#isTenantPrivate(collection)) return this.#controlStore().get(collection, scope, id);
-    if (scope.kind === "tenant")
+    if (scope.kind === "tenant" && this.#hasTenantDestination(scope))
       return (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
+    if (scope.kind === "tenant") return this.#controlStore().get(collection, scope, id);
     const match = await this.#matchTenantResource(collection, id);
     if (match !== null) return match.record;
     return this.#controlStore().get(collection, scope, id);

@@ -14,7 +14,8 @@
  * does not do that for you.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
-import type { StoreRecord } from "../src/ports.js";
+import { resolveTenantStorage } from "../src/adapters.js";
+import type { ControlPlaneBindings, StoreRecord } from "../src/ports.js";
 import { SIEM_CURSOR_TABLE } from "../src/siem/cursor.js";
 import {
   AUDIT_TABLE,
@@ -23,7 +24,10 @@ import {
   GUARDRAIL_EVALUATION_TABLE,
   REQUEST_LOG_TABLE,
   RESOURCE_TABLE,
+  TENANT_RESOURCE_TABLE,
 } from "../src/store/d1.js";
+
+const FIXTURE_OBJECT_TENANTS = ["tenant_a", "tenant_b"] as const;
 
 interface D1TestBindings {
   readonly DB: D1Database;
@@ -100,6 +104,24 @@ export async function resetD1(): Promise<void> {
     db().prepare("DELETE FROM tenant_databases"),
     db().prepare("DELETE FROM tenants"),
   ]);
+
+  // `resetD1` is used by suites that do not also call `resetTenantD1`, while
+  // the split store now routes document kinds into the fixed test objects.
+  // Clear those objects here as well so a prior HTTP test cannot satisfy a
+  // later control-plane assertion through durable state.
+  const bindings = env as unknown as ControlPlaneBindings;
+  if (
+    bindings.TENANT_DATA !== undefined &&
+    bindings.CONTROL_PLANE_STORE?.trim().toLowerCase() !== "memory"
+  ) {
+    const router = resolveTenantStorage(bindings);
+    await Promise.all(
+      FIXTURE_OBJECT_TENANTS.map(async (tenantId) => {
+        const handle = await router.forTenant(tenantId);
+        await handle.db.prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE}`).run();
+      }),
+    );
+  }
 }
 
 /**
