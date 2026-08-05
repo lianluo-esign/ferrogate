@@ -35,6 +35,11 @@ import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 /** `GET /admin/v1/guardrail-policies` declares `rbac_action` = this. */
 const ACTION = "guardrails.policy.read";
@@ -83,7 +88,7 @@ function deletePermission(permissionId: string): Promise<Response> {
 }
 
 async function bindingRows(tenantId: string): Promise<readonly { role_id: string }[]> {
-  const rows = await db()
+  const rows = await tenantObjectDb(tenantId)
     .prepare("SELECT role_id FROM tenant_role_bindings WHERE tenant_id = ?")
     .bind(tenantId)
     .all<{ role_id: string }>();
@@ -98,17 +103,16 @@ async function roleRow(roleId: string): Promise<{ permission_keys_json: string }
 }
 
 async function clearRoleTables(): Promise<void> {
-  await db().batch([
-    db().prepare("DELETE FROM tenant_role_bindings"),
-    db().prepare("DELETE FROM roles"),
-    db().prepare("DELETE FROM permissions"),
-  ]);
+  await db().batch([db().prepare("DELETE FROM roles"), db().prepare("DELETE FROM permissions")]);
 }
 
 beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
+  await resetTenantObjectState(["t-1", "t-2"]);
+  await registerDurableObjectTenant("t-1");
+  await registerDurableObjectTenant("t-2");
   await clearRoleTables();
   arm({
     store: "d1",

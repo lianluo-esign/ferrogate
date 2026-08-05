@@ -44,6 +44,11 @@ import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 /** `GET /admin/v1/guardrail-policies` declares `rbac_action` = this. */
 const ACTION = "guardrails.policy.read";
@@ -59,7 +64,7 @@ function guarded(secret: string): Promise<Response> {
 }
 
 function roleIdsBoundTo(tenantId: string): Promise<readonly string[]> {
-  return db()
+  return tenantObjectDb(tenantId)
     .prepare("SELECT role_id FROM tenant_role_bindings WHERE tenant_id = ? ORDER BY role_id")
     .bind(tenantId)
     .all<{ role_id: string }>()
@@ -103,11 +108,10 @@ beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
-  await db().batch([
-    db().prepare("DELETE FROM tenant_role_bindings"),
-    db().prepare("DELETE FROM roles"),
-    db().prepare("DELETE FROM permissions"),
-  ]);
+  await resetTenantObjectState([TENANT, "t-2"]);
+  await registerDurableObjectTenant(TENANT);
+  await registerDurableObjectTenant("t-2");
+  await db().batch([db().prepare("DELETE FROM roles"), db().prepare("DELETE FROM permissions")]);
   arm({
     // The REAL store and the REAL authorizer: the escalation is a durable row,
     // and a memory-store world would prove nothing about the join that reads it.
@@ -384,7 +388,7 @@ describe("why the subset answer was refused, pinned as facts rather than prose",
     expect((await guarded(TENANT_KEY)).status).toBe(200);
 
     // And the durable row has nowhere to put a subject even if one were read.
-    const columns = await db()
+    const columns = await tenantObjectDb(TENANT)
       .prepare("SELECT name FROM pragma_table_info('tenant_role_bindings')")
       .all<{ name: string }>();
     expect(columns.results.map((column) => column.name)).toEqual([

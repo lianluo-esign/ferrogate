@@ -292,9 +292,8 @@ const ROLE_PERMISSIONS_SQL = `SELECT r.permission_keys_json AS permission_keys_j
    JOIN ${ROLE_TABLE} r ON r.id = b.role_id
    WHERE b.tenant_id = ?`;
 
-const TENANT_ROLE_PERMISSIONS_SQL = `SELECT b.role_id, c.permission_keys_json AS permission_keys_json
+const TENANT_ROLE_PERMISSIONS_SQL = `SELECT b.role_id
    FROM tenant_role_bindings AS b
-   JOIN tenant_role_catalog AS c ON c.role_id = b.role_id
   WHERE b.tenant_id = ?`;
 
 // ---------------------------------------------------------------------------
@@ -518,7 +517,7 @@ export class D1McpAuth implements AuthPort {
     tables: ReadonlySet<string>,
   ): Promise<readonly string[] | AuthError> {
     if (tenantId === undefined) return [];
-    if (this.#router !== undefined && this.#router.backend === "durable_object") {
+    if (this.#router !== undefined) {
       try {
         const registered = await this.#db
           .prepare("SELECT 1 AS present FROM tenant_databases WHERE tenant_id = ?1")
@@ -530,15 +529,16 @@ export class D1McpAuth implements AuthPort {
         const rows = await handle.db
           .prepare(TENANT_ROLE_PERMISSIONS_SQL)
           .bind(tenantId)
-          .all<{ role_id: string; permission_keys_json: string | null }>();
+          .all<{ role_id: string }>();
         const keys = new Set<string>();
         for (const row of rows.results) {
           const shared = await this.#db
-            .prepare("SELECT 1 AS present FROM roles WHERE id = ?1")
+            .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
             .bind(row.role_id)
-            .all();
-          if ((shared.results ?? []).length === 0) continue;
-          for (const key of parseVirtualKeyScopes(row.permission_keys_json)) keys.add(key);
+            .all<{ permission_keys_json: string | null }>();
+          const role = shared.results[0];
+          if (role === undefined) continue;
+          for (const key of parseVirtualKeyScopes(role.permission_keys_json)) keys.add(key);
         }
         return [...keys].sort();
       } catch (error) {

@@ -55,6 +55,7 @@ import { resetIdentityJwksCache } from "../src/identity/adapters.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm } from "./harness.js";
 import { applyTenantSchema, resetTenantD1 } from "./tenant-db.js";
+import { registerDurableObjectTenant, tenantObjectDb } from "./tenant-object.js";
 
 const JWT_SECRET = "identity-mount-console-signing-secret";
 const OIDC_SECRET_BINDING = "TEST_OIDC_CLIENT_SECRET";
@@ -146,22 +147,11 @@ async function login(email: string): Promise<Session> {
  * key. Without this the projection has nowhere to write the tenant leg and the
  * minted token would never authenticate.
  */
-async function provisionTenantDatabase(tenantId: string, binding: "TENANT_DB_A" | "TENANT_DB_B") {
-  await db()
-    .prepare(
-      `INSERT INTO tenant_databases
-         (tenant_id, database_uuid, database_name, binding_name, schema_version,
-          provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, ?, 1, 1, 1)
-       ON CONFLICT (tenant_id) DO UPDATE SET
-         database_uuid = excluded.database_uuid,
-         database_name = excluded.database_name,
-         binding_name = excluded.binding_name,
-         storage_backend = 'native_binding',
-         provisioning_status = 'ready'`,
-    )
-    .bind(tenantId, `uuid-${binding}`, `ferrogate-${binding}`, binding)
-    .run();
+async function provisionTenantDatabase(
+  tenantId: string,
+  _binding: "TENANT_DB_A" | "TENANT_DB_B",
+): Promise<void> {
+  await registerDurableObjectTenant(tenantId);
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +220,6 @@ beforeEach(async () => {
     db().prepare("DELETE FROM admin_user_tenant_memberships"),
     db().prepare("DELETE FROM admin_user_refresh_tokens"),
     db().prepare("DELETE FROM api_key_directory"),
-    db().prepare("DELETE FROM sso_provider_configs"),
     db().prepare("DELETE FROM sso_pending_flows"),
     db().prepare("DELETE FROM tenant_databases"),
   ]);
@@ -716,7 +705,7 @@ describe("§5 the shared /v1/admin/team/sso-config row is MOUNTED", () => {
       },
     });
     expect(reply.status, reply.text).toBe(403);
-    const row = await db()
+    const row = await tenantObjectDb(acme.tenant.id)
       .prepare("SELECT * FROM sso_provider_configs WHERE tenant_id = ?")
       .bind(acme.tenant.id)
       .first<Record<string, unknown>>();

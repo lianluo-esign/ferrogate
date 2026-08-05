@@ -30,6 +30,12 @@ import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
+import {
+  privilegedTenantBatch,
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 /** `GET /admin/v1/guardrail-policies` declares `rbac_action` = this. */
 const ACTION = "guardrails.policy.read";
@@ -72,17 +78,11 @@ async function grantRole(
       typeof permissionKeys === "string" ? permissionKeys : JSON.stringify(permissionKeys),
     )
     .run();
-  await db()
-    .prepare("INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, ?)")
-    .bind(`${tenantId}:${roleId}`, tenantId, roleId)
-    .run();
+  await seedTenantRoleProjection(tenantId, roleId, permissionKeys);
 }
 
 async function clearRoleTables(): Promise<void> {
-  await db().batch([
-    db().prepare("DELETE FROM tenant_role_bindings"),
-    db().prepare("DELETE FROM roles"),
-  ]);
+  await db().prepare("DELETE FROM roles").run();
 }
 
 beforeAll(async () => {
@@ -91,6 +91,19 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await resetD1();
+  await resetTenantObjectState([
+    "t-durable",
+    "t-star",
+    "t-union",
+    "t-corrupt",
+    "t-stale",
+    "t-revoke",
+    "t-a",
+    "t-b",
+    "t-fallback",
+    "t-other",
+    "t-none",
+  ]);
   await clearRoleTables();
 });
 
@@ -169,10 +182,9 @@ describe("durable rows overrule the declarative TENANT_RBAC_ACTIONS map", () => 
     await grantRole("t-revoke", "role_reader", [ACTION]);
     expect((await guarded("k-revoke")).status).toBe(200);
 
-    await db()
-      .prepare("DELETE FROM tenant_role_bindings WHERE tenant_id = ?")
-      .bind("t-revoke")
-      .run();
+    await privilegedTenantBatch("t-revoke", [
+      { sql: "DELETE FROM tenant_role_bindings WHERE tenant_id = ?", params: ["t-revoke"] },
+    ]);
 
     // No durable rows left ⇒ the declarative fallback answers, and it is empty.
     expect((await guarded("k-revoke")).status).toBe(403);

@@ -77,6 +77,7 @@ import {
 } from "@ferrogate/guardrails";
 import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
 import {
+  BackendDispatchingTenantDatabaseRouter,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
   type TenantDatabaseRouter,
@@ -2383,9 +2384,15 @@ function durableAdmission(env: McpEnv): AdmissionPort {
 }
 
 function tenantDatabaseRouter(env: McpEnv, controlDb: D1Database): TenantDatabaseRouter {
-  return env.TENANT_DATA === undefined
-    ? new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, controlDb)
-    : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
+  const fallback = new EnvBindingTenantDatabaseRouter(
+    env as unknown as Record<string, unknown>,
+    controlDb,
+  );
+  if (env.TENANT_DATA === undefined) return fallback;
+  return new BackendDispatchingTenantDatabaseRouter(controlDb, {
+    fallback,
+    durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb),
+  });
 }
 
 /**

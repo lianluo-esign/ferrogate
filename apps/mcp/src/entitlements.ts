@@ -291,20 +291,20 @@ export class D1ToolEntitlements implements EntitlementPort {
     const handle = await router.forTenant(tenantId);
     const local = await handle.db
       .prepare(
-        `SELECT b.role_id, c.permission_keys_json AS permission_keys_json
+        `SELECT b.role_id
            FROM tenant_role_bindings AS b
-           JOIN tenant_role_catalog AS c ON c.role_id = b.role_id
           WHERE b.tenant_id = ?1`,
       )
       .bind(tenantId)
-      .all<{ role_id: string; permission_keys_json: string | null }>();
+      .all<{ role_id: string }>();
     const valid: { permission_keys_json: string | null }[] = [];
     for (const row of local.results) {
       const shared = await this.#db
-        .prepare("SELECT 1 AS present FROM roles WHERE id = ?1")
+        .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
         .bind(row.role_id)
-        .all();
-      if ((shared.results ?? []).length > 0) valid.push(row);
+        .all<{ permission_keys_json: string | null }>();
+      const role = shared.results[0];
+      if (role !== undefined) valid.push(role);
     }
     return { results: valid };
   }

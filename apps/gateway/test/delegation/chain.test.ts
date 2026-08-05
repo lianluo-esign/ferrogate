@@ -51,6 +51,7 @@ import {
   storedRequestLogs,
 } from "../requestlog/harness.js";
 import { ATTACKER_SECRET, SIGNING_SECRET, chain, forge } from "./fixtures.js";
+import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 
@@ -222,7 +223,7 @@ async function errorCode(response: Response): Promise<string | undefined> {
 beforeEach(async () => {
   await applyControlMigrations();
   await resetRequestLogs();
-  await controlDb().prepare("DELETE FROM delegation_revocations").run();
+  await resetTenantObjectState(["tenant_a", "tenant_zzz"]);
 });
 
 afterEach(() => {
@@ -496,7 +497,7 @@ describe("#691 — the bounds that stop a chain being an attack", () => {
 
 describe("#691 — revocation", () => {
   async function revoke(subject: string): Promise<void> {
-    await controlDb()
+    await tenantObjectDb("tenant_a")
       .prepare(
         "INSERT INTO delegation_revocations (tenant, subject, reason, revoked_at_unix) VALUES (?, ?, ?, ?)",
       )
@@ -532,7 +533,7 @@ describe("#691 — revocation", () => {
 
   it("does not let one tenant's revocation break another tenant's chain", async () => {
     upstreamAnswers();
-    await controlDb()
+    await tenantObjectDb("tenant_zzz")
       .prepare(
         "INSERT INTO delegation_revocations (tenant, subject, reason, revoked_at_unix) VALUES (?, ?, ?, ?)",
       )

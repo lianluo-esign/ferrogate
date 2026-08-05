@@ -47,7 +47,7 @@ import type {
 import { JwksCache } from "@ferrogate/identity";
 import type { EnvLike } from "@ferrogate/secrets";
 import { EnvSecretResolver, parseSecretRef } from "@ferrogate/secrets";
-import { backfillTenantConfigurationPolicy } from "@ferrogate/storage";
+import { StorageError, backfillTenantConfigurationPolicy } from "@ferrogate/storage";
 import type {
   SamlPorts,
   StoredSsoProviderConfig as SamlStoredSsoProviderConfig,
@@ -324,10 +324,19 @@ export class ControlPlaneIdentityRepository implements IdentityRepository {
   }
 
   async getSsoProviderConfig(tenantId: string): Promise<FullSsoProviderConfig | null> {
-    const row = await (await this.#tenantDb(tenantId))
-      .prepare("SELECT * FROM sso_provider_configs WHERE tenant_id = ?")
-      .bind(tenantId)
-      .first<RawSsoConfig>();
+    let row: RawSsoConfig | null;
+    try {
+      row = await (await this.#tenantDb(tenantId))
+        .prepare("SELECT * FROM sso_provider_configs WHERE tenant_id = ?")
+        .bind(tenantId)
+        .first<RawSsoConfig>();
+    } catch (error) {
+      // An unregistered tenant has no configuration and must not materialize
+      // storage just to answer the mounted route's 404. Registered-but-
+      // unreachable object storage still propagates as an outage.
+      if (error instanceof StorageError && error.kind === "not_found") return null;
+      throw error;
+    }
     return row === null ? null : decodeSsoConfig(row);
   }
 

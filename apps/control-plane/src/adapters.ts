@@ -388,20 +388,21 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
     const handle = await tenantDatabases.forTenant(tenantId);
     const result = await handle.db
       .prepare(
-        `SELECT b.role_id, c.permission_keys_json AS permission_keys_json
+        `SELECT b.role_id
            FROM tenant_role_bindings AS b
-           JOIN tenant_role_catalog AS c ON c.role_id = b.role_id
           WHERE b.tenant_id = ?`,
       )
       .bind(tenantId)
-      .all<{ role_id: string; permission_keys_json: string }>();
+      .all<{ role_id: string }>();
     const valid: { permission_keys_json: string }[] = [];
     for (const row of result.results) {
       const shared = await this.#db
-        .prepare("SELECT 1 AS present FROM roles WHERE id = ?")
+        .prepare("SELECT permission_keys_json FROM roles WHERE id = ?")
         .bind(row.role_id)
-        .all<{ present: number }>();
-      if (shared.results.length > 0) valid.push(row);
+        .first<{ permission_keys_json: string }>();
+      // `roles` is the shared operator-authored catalog. A missing shared role
+      // invalidates the binding rather than trusting a stale reverse projection.
+      if (shared !== null) valid.push(shared);
     }
     return { results: valid };
   }

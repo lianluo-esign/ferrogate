@@ -44,6 +44,12 @@ import {
 import { mcpRouter } from "../src/index.js";
 import { durableAuthBound, portsBound, resolvePorts } from "../src/ports.js";
 import { EXEC_KEY, type Fixture, TENANT, rpcRequest, seedFixture } from "./fixtures.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 interface D1AuthBindings {
   readonly DB: D1Database;
@@ -57,7 +63,7 @@ function bindings(): D1AuthBindings {
 }
 
 const control = (): D1Database => bindings().DB;
-const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+const tenantDb = (): D1Database => tenantObjectDb(ROUTED_TENANT);
 
 /** The tenant whose database really is bound in `vitest.config.ts`. */
 const ROUTED_TENANT = "tenant-routed";
@@ -88,10 +94,11 @@ beforeEach(async () => {
     control().prepare(`DELETE FROM ${STATIC_API_KEY_TABLE}`),
     control().prepare(`DELETE FROM ${API_KEY_DIRECTORY_TABLE}`),
     control().prepare("DELETE FROM tenant_databases"),
-    control().prepare("DELETE FROM tenant_role_bindings"),
     control().prepare("DELETE FROM roles"),
   ]);
-  await tenantDb().prepare("DELETE FROM api_keys").run();
+  await resetTenantObjectState([ROUTED_TENANT]);
+  await resetTenantObjectState([TENANT]);
+  await registerDurableObjectTenant(TENANT);
   fixture = seedFixture();
 });
 
@@ -127,14 +134,22 @@ async function seedStaticKey(secret: string, seed: StaticSeed = {}): Promise<voi
 }
 
 async function registerTenantDatabase(tenantId: string, bindingName: string | null): Promise<void> {
+  const durableObject = bindingName === null;
   await control()
     .prepare(
       `INSERT INTO tenant_databases
          (tenant_id, database_uuid, database_name, binding_name, schema_version,
-          provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, ?, 1, 1, 1)`,
+          storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, ?, ?, ?, 'ready', 1, 1)`,
     )
-    .bind(tenantId, `uuid-${tenantId}`, `ferrogate-${tenantId}`, bindingName)
+    .bind(
+      tenantId,
+      `uuid-${tenantId}`,
+      `ferrogate-${tenantId}`,
+      durableObject ? null : bindingName,
+      durableObject ? 15 : 1,
+      durableObject ? "durable_object" : "native_binding",
+    )
     .run();
 }
 
@@ -200,10 +215,8 @@ async function seedRole(tenantId: string, permissionKeys: string[]): Promise<voi
          VALUES ('role-1', 'MCP', 'mcp', '', ?)`,
       )
       .bind(JSON.stringify(permissionKeys)),
-    control()
-      .prepare(`INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, 'role-1')`)
-      .bind(`${tenantId}:role-1`, tenantId),
   ]);
+  await seedTenantRoleProjection(tenantId, "role-1", permissionKeys);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +269,7 @@ describe("the durable AuthPort is MOUNTED on the app the Worker exports", () => 
   });
 
   it("authenticates a VIRTUAL key through the directory + the routed tenant database", async () => {
-    await registerTenantDatabase(ROUTED_TENANT, "TENANT_DB_A");
+    await registerTenantDatabase(ROUTED_TENANT, null);
     await seedDirectoryRow(VIRTUAL_KEY);
     await seedTenantKeyRow(VIRTUAL_KEY);
     await seedRole(ROUTED_TENANT, ["mcp.execute"]);
@@ -278,7 +291,7 @@ describe("the durable AuthPort is MOUNTED on the app the Worker exports", () => 
   });
 
   it("never lets a virtual key become platform root", async () => {
-    await registerTenantDatabase(ROUTED_TENANT, "TENANT_DB_A");
+    await registerTenantDatabase(ROUTED_TENANT, null);
     await seedDirectoryRow(VIRTUAL_KEY);
     // A hostile tenant row cannot declare it: the column does not exist, and
     // `virtualKeyContext` writes the literal `false`.
@@ -317,7 +330,7 @@ describe("the 401-vs-403 taxonomy, over the real Worker", () => {
   });
 
   it("a REVOKED directory row is 401 even though the tenant row is still live", async () => {
-    await registerTenantDatabase(ROUTED_TENANT, "TENANT_DB_A");
+    await registerTenantDatabase(ROUTED_TENANT, null);
     await seedDirectoryRow(VIRTUAL_KEY, { revokedAtUnix: 10 });
     await seedTenantKeyRow(VIRTUAL_KEY);
     const res = await toolsList(VIRTUAL_KEY);
@@ -326,7 +339,7 @@ describe("the 401-vs-403 taxonomy, over the real Worker", () => {
   });
 
   it("a DISABLED tenant row is 401 even though the directory still says enabled", async () => {
-    await registerTenantDatabase(ROUTED_TENANT, "TENANT_DB_A");
+    await registerTenantDatabase(ROUTED_TENANT, null);
     await seedDirectoryRow(VIRTUAL_KEY);
     await seedTenantKeyRow(VIRTUAL_KEY, { enabled: 0 });
     const res = await toolsList(VIRTUAL_KEY);
@@ -335,7 +348,7 @@ describe("the 401-vs-403 taxonomy, over the real Worker", () => {
   });
 
   it("a directory row whose tenant row is GONE is 401, not 500", async () => {
-    await registerTenantDatabase(ROUTED_TENANT, "TENANT_DB_A");
+    await registerTenantDatabase(ROUTED_TENANT, null);
     await seedDirectoryRow(VIRTUAL_KEY); // no tenant `api_keys` row at all
     const res = await toolsList(VIRTUAL_KEY);
     expect(res.status).toBe(401);

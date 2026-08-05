@@ -82,6 +82,13 @@ import agentRuntimeApp from "../../agent-runtime/src/index.js";
 import gatewayApp from "../../gateway/src/index.js";
 import { hashApiKeySecret } from "../src/auth.js";
 import { rpcRequest, seedFixture } from "./fixtures.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+  tenantObjectDb,
+  tenantObjectNamespace,
+} from "./tenant-object.js";
 
 // ---------------------------------------------------------------------------
 // Bindings
@@ -90,17 +97,16 @@ import { rpcRequest, seedFixture } from "./fixtures.js";
 interface FleetBindings {
   /** `apps/mcp`'s `DB` IS the CONTROL database (`wrangler.toml`). */
   readonly DB: D1Database;
-  /** A provisioned tenant database, declared in `vitest.config.ts`. */
-  readonly TENANT_DB_A: D1Database;
+  readonly TENANT_DATA: ReturnType<typeof tenantObjectNamespace>;
   readonly TEST_CONTROL_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
   readonly TEST_TENANT_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
 }
 
 function bindings(): FleetBindings {
   const b = env as unknown as Partial<FleetBindings>;
-  if (b.DB === undefined || b.TENANT_DB_A === undefined) {
+  if (b.DB === undefined || b.TENANT_DATA === undefined) {
     throw new Error(
-      "the FC-2 fleet gate needs both the `DB` (control) and `TENANT_DB_A` bindings; " +
+      "the FC-2 fleet gate needs both the `DB` (control) and `TENANT_DATA` bindings; " +
         "without them it would prove nothing about any Worker.",
     );
   }
@@ -108,7 +114,7 @@ function bindings(): FleetBindings {
 }
 
 const control = (): D1Database => bindings().DB;
-const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+const tenantDb = (): D1Database => tenantObjectDb(TENANT);
 
 /**
  * The env the other two Workers are invoked with.
@@ -123,6 +129,7 @@ const tenantDb = (): D1Database => bindings().TENANT_DB_A;
 const siblingEnv = (): Record<string, unknown> => ({
   DB: tenantDb(),
   CONTROL_DB: control(),
+  TENANT_DATA: bindings().TENANT_DATA,
 });
 
 // ---------------------------------------------------------------------------
@@ -157,10 +164,10 @@ async function seedCredential(): Promise<void> {
     control().prepare("DELETE FROM tenant_databases"),
     control().prepare("DELETE FROM api_key_directory"),
     control().prepare("DELETE FROM static_api_keys"),
-    control().prepare("DELETE FROM tenant_role_bindings"),
     control().prepare("DELETE FROM roles"),
     control().prepare("DELETE FROM permissions"),
   ]);
+  await resetTenantObjectState([TENANT]);
   await tenantDb().batch([
     tenantDb().prepare("DELETE FROM api_keys"),
     tenantDb().prepare("DELETE FROM workspaces"),
@@ -173,13 +180,6 @@ async function seedCredential(): Promise<void> {
       .prepare("INSERT INTO tenants (id, name, slug, status) VALUES (?, 'FC2', 'fc2', 'active')")
       .bind(TENANT),
     // `apps/mcp`'s NATIVE leg: hash -> tenant, then route to that tenant's db.
-    control()
-      .prepare(
-        `INSERT INTO tenant_databases (tenant_id, database_uuid, database_name, binding_name,
-           schema_version, provisioned_at_unix, updated_at_unix)
-         VALUES (?, 'uuid-fc2', 'ferrogate-fc2', 'TENANT_DB_A', 1, 1, 1)`,
-      )
-      .bind(TENANT),
     control()
       .prepare(
         `INSERT INTO api_key_directory (key_hash, id, tenant_id, project_id, workspace_id,
@@ -205,12 +205,10 @@ async function seedCredential(): Promise<void> {
          VALUES ('role-fc2', 'MCP', 'mcp', '', ?)`,
       )
       .bind(JSON.stringify(["mcp.execute"])),
-    control()
-      .prepare(
-        "INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, 'role-fc2')",
-      )
-      .bind(`${TENANT}:role-fc2`, TENANT),
   ]);
+
+  await registerDurableObjectTenant(TENANT);
+  await seedTenantRoleProjection(TENANT, "role-fc2", ["mcp.execute"]);
 
   await tenantDb().batch([
     tenantDb()
@@ -384,7 +382,6 @@ const UNAVAILABLE: Record<string, Wire> = {
 beforeAll(async () => {
   const b = bindings();
   await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
-  await applyD1Migrations(b.TENANT_DB_A, b.TEST_TENANT_D1_SCHEMA);
 });
 
 beforeEach(async () => {

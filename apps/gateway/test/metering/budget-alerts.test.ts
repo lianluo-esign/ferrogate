@@ -50,6 +50,7 @@ import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
 import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
 import { pricedBook, usageFixture } from "./fixtures.js";
+import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const controlDb = (env as unknown as { CONTROL_DB?: D1Database; BILLING_DB: D1Database })
@@ -203,7 +204,7 @@ function alertSink() {
 
 /** Every claimed `(scope, period, tier)`, ascending. */
 async function claimedThresholds(): Promise<{ id: string; threshold_pct: number }[]> {
-  const result = await controlDb
+  const result = await tenantObjectDb("tenant_a")
     .prepare(
       "SELECT id, threshold_pct FROM budget_alert_notifications ORDER BY threshold_pct ASC",
     )
@@ -217,7 +218,7 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM tenant_contexts").run();
   await controlDb.prepare("DELETE FROM quota_policies").run();
-  await controlDb.prepare("DELETE FROM budget_alert_notifications").run();
+  await resetTenantObjectState(["tenant_a"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -424,11 +425,11 @@ describe("A1: a threshold notifies ONCE per (scope, period, tier)", () => {
   test("a row already claimed by someone else suppresses the webhook entirely", async () => {
     await seedQuotaPolicy("tenant", "tenant_a", BUDGET_USD, [80]);
     // Another isolate got there first, this billing period.
-    await controlDb
+    await tenantObjectDb("tenant_a")
       .prepare(
         "INSERT INTO budget_alert_notifications " +
-          "(id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) " +
-          "VALUES (?, 'tenant', 'tenant_a', ?, 80, ?)",
+          "(id, tenant_id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) " +
+          "VALUES (?, 'tenant_a', 'tenant', 'tenant_a', ?, 80, ?)",
       )
       .bind(`tenant:tenant_a:${PERIOD_MONTH}:80`, PERIOD_MONTH, NOW_UNIX - 60)
       .run();

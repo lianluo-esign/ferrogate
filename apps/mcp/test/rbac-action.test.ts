@@ -47,6 +47,7 @@ import { type ApiOperation, operationById } from "../src/contract.js";
 import { type AuthOutcome, authenticateRequest, recordOperation } from "../src/http.js";
 import { type McpEnv, resolvePorts } from "../src/ports.js";
 import { EXEC_KEY, TENANT, seedFixture } from "./fixtures.js";
+import { resetTenantObjectState, seedTenantRoleProjection } from "./tenant-object.js";
 
 function controlDb(): D1Database {
   const binding = (env as unknown as { DB?: D1Database }).DB;
@@ -126,22 +127,17 @@ async function grantRole(
     )
     .bind(roleId, roleId, roleId, JSON.stringify(permissionKeys))
     .run();
-  await controlDb()
-    .prepare(
-      "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?1, ?2, ?3)",
-    )
-    .bind(`${tenantId}:${roleId}`, tenantId, roleId)
-    .run();
+  await seedTenantRoleProjection(tenantId, roleId, permissionKeys);
 }
 
 beforeEach(async () => {
   seedFixture();
   const db = controlDb();
   await db.batch([
-    db.prepare("DELETE FROM tenant_role_bindings"),
     db.prepare("DELETE FROM roles"),
     db.prepare("DELETE FROM permissions"),
   ]);
+  await resetTenantObjectState([TENANT, "tenant-somebody-else"]);
 });
 
 describe("FC-7 — the deployed MCP chokepoint consults the durable role graph", () => {

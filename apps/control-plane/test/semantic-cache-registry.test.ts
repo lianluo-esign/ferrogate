@@ -23,6 +23,11 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SEMANTIC_CACHE_POLICIES_TABLE } from "../src/store/semantic_cache_registry.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 /** A native key confined to `tenant_a`, with both admin scopes. */
 const TENANT_A_KEY = tenantKey("fg_tenant_a_admin", "tenant_a");
@@ -39,7 +44,7 @@ const GATEWAY_COLUMNS =
 const GATEWAY_SELECT = `SELECT ${GATEWAY_COLUMNS} FROM ${SEMANTIC_CACHE_POLICIES_TABLE} WHERE scope_type = ?1 AND scope_id = ?2`;
 
 async function gatewayRow(scopeId: string): Promise<Record<string, unknown> | null> {
-  return await db()
+  return await tenantObjectDb(scopeId)
     .prepare(GATEWAY_SELECT)
     .bind("tenant", scopeId)
     .first<Record<string, unknown>>();
@@ -54,7 +59,9 @@ beforeAll(applySchema);
 beforeEach(async () => {
   arm({ store: "d1", staticKeys: [operatorKey], nativeKeys: [TENANT_A_KEY] });
   await resetD1();
-  await db().prepare(`DELETE FROM ${SEMANTIC_CACHE_POLICIES_TABLE}`).run();
+  await resetTenantObjectState(["tenant_a", "tenant_b"]);
+  await registerDurableObjectTenant("tenant_a");
+  await registerDurableObjectTenant("tenant_b");
 });
 
 // ---------------------------------------------------------------------------

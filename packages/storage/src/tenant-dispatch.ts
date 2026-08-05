@@ -61,6 +61,7 @@ import {
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
+import type { TenantDataStatement, TenantDataResult } from "./tenant-data-object.js";
 
 /** The arms {@link BackendDispatchingTenantDatabaseRouter} dispatches between. */
 export interface TenantBackendArms {
@@ -140,6 +141,30 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
       );
     }
     return durableObject.forTenant(tenantId);
+  }
+
+  /** Route operator-only object writes by the same roster decision as reads. */
+  async privilegedBatch(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<readonly TenantDataResult[]> {
+    if (tenantId === "") {
+      throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
+    }
+    const registration = await this.#registry.get(tenantId);
+    const router =
+      registration?.storageBackend === "durable_object" ? this.#arms.durableObject : this.#arms.fallback;
+    if (router === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} is provisioned on the durable_object backend, but this Worker binds no TENANT_DATA namespace`,
+      );
+    }
+    if (router.privilegedBatch === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} backend does not expose the privileged tenant-write RPC`,
+      );
+    }
+    return router.privilegedBatch(tenantId, statements);
   }
 
   async provisionedTenants(): Promise<readonly string[]> {
