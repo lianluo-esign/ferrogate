@@ -353,6 +353,7 @@ describe("tenant configuration and policy state", () => {
       "DELETE FROM main.tenant_role_catalog",
       "WITH candidate AS (SELECT 1) INSERT INTO tenant_role_bindings (id) SELECT 'binding' FROM candidate",
       "CREATE TRIGGER role_projection_trigger AFTER INSERT ON projects BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
+      "CREATE TRIGGER role_projection_guard AFTER INSERT ON projects WHEN '--' = '--' BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
     ];
     for (const [index, sql] of statements.entries()) {
       const tenantId = `tenant_privileged_syntax_${index}`;

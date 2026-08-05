@@ -198,14 +198,71 @@ const REFUSAL = "tenant_data_object";
  */
 const PRIVILEGED_WRITE_TABLES = ["tenant_role_bindings", "tenant_role_catalog"] as const;
 
+function stripSqlCommentsAndStrings(sql: string): string {
+  let output = "";
+  let mode: "normal" | "line_comment" | "block_comment" | "string" = "normal";
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (mode === "line_comment") {
+      if (current === "\n") {
+        output += current;
+        mode = "normal";
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (mode === "block_comment") {
+      if (current === "*" && next === "/") {
+        output += "  ";
+        index += 1;
+        mode = "normal";
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (mode === "string") {
+      if (current === "'") {
+        if (next === "'") {
+          output += "  ";
+          index += 1;
+        } else {
+          output += " ";
+          mode = "normal";
+        }
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (current === "-" && next === "-") {
+      output += "  ";
+      index += 1;
+      mode = "line_comment";
+    } else if (current === "/" && next === "*") {
+      output += "  ";
+      index += 1;
+      mode = "block_comment";
+    } else if (current === "'") {
+      output += " ";
+      mode = "string";
+    } else {
+      output += current;
+    }
+  }
+  return output;
+}
+
 function requiresPrivilegedWrite(sql: string): string | null {
-  // This is deliberately conservative. Tokenising after removing comments and
-  // string literals catches CTEs, `UPDATE OR REPLACE`, schema-qualified names,
-  // and trigger bodies without trying to implement SQLite's grammar here.
-  const normalized = sql
-    .replace(/--[^\n]*/g, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/'(?:''|[^'])*'/g, " ");
+  // This is deliberately conservative. Tokenising after a stateful pass that
+  // removes comments and string literals catches CTEs, `UPDATE OR REPLACE`,
+  // schema-qualified names, and trigger bodies without trying to implement
+  // SQLite's grammar here. The state machine matters: `--` and `/*` inside a
+  // legal string must not hide SQL that follows that string.
+  const normalized = stripSqlCommentsAndStrings(sql);
   const tokens = new Set(
     (normalized.match(/[A-Za-z_][A-Za-z0-9_$]*/g) ?? []).map((token) => token.toLowerCase()),
   );
