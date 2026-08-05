@@ -29,6 +29,7 @@
  * value-level module cycle on the hot path. A leaf module that imports both
  * sides has none.
  */
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import { loadServerCatalog } from "./durable.js";
 import type { AuthContext, McpEnv, McpPorts, McpUpstreamPort } from "./ports.js";
 import { DurableMcpSessionStore } from "./session.js";
@@ -89,7 +90,9 @@ export async function resolveUpstreams(
   if (!durableUpstreamsBound(env)) return ports.upstreams;
   const namespace = env.TENANT_DATA;
   if (namespace === undefined) return ports.upstreams;
-  const configs = await loadServerCatalog(namespace, tenantId);
+  const controlDb = env.DB as D1Database;
+  const tenantRouter = new DurableObjectTenantDatabaseRouter(namespace, controlDb);
+  const configs = await loadServerCatalog(namespace, tenantId, controlDb, tenantRouter);
   if (env.MCP_SESSION === undefined) return new HttpMcpUpstreams(configs);
   return new HttpMcpUpstreams(configs, undefined, {
     sessions: new DurableMcpSessionStore(env.MCP_SESSION, tenantId),

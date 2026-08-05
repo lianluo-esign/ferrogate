@@ -79,6 +79,7 @@ import {
   selectAgentWorkflow,
   workflowEdgeTransitionError,
 } from "@ferrogate/policy";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 
 // ---------------------------------------------------------------------------
 // Headers — Rust's names, verbatim (`agent_runs.rs:45-47`)
@@ -563,6 +564,8 @@ export function enforceWorkflowToolPolicy(
 export const AGENT_WORKFLOW_COLLECTION = "agent-workflows";
 /** The generic document table, in the CONTROL database. */
 export const RESOURCE_TABLE = "control_plane_resources";
+/** The object-local document table for tenant-private resource kinds. */
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
 
 /** The seam the gate codes against. */
 export interface WorkflowCatalogPort {
@@ -738,6 +741,8 @@ export function mergeWorkflowTables(
 export interface WorkflowCatalogBindings {
   /** The CONTROL database: `control_plane_resources`. */
   readonly CONTROL_DB?: D1Database | undefined;
+  /** The shared TenantDataObject namespace for tenant-private documents. */
+  readonly TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
   /**
    * OPERATOR config: a JSON array of workflow documents.
    *
@@ -769,8 +774,95 @@ export function workflowCatalogFromEnv(env: WorkflowCatalogBindings): WorkflowCa
       },
     };
   }
+  const router =
+    env.TENANT_DATA === undefined
+      ? undefined
+      : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, db);
   return {
     async forTenant(tenantId: string | null): Promise<readonly ToolWorkflowGraph[]> {
+      if (router !== undefined && tenantId !== null && tenantId.trim() !== "") {
+        try {
+          const handle = await router.forTenant(tenantId);
+          const objectRows = await handle.db
+            .prepare(
+              `SELECT document_json FROM ${TENANT_RESOURCE_TABLE}
+                 WHERE resource_kind = ?
+                 ORDER BY resource_id`,
+            )
+            .bind(AGENT_WORKFLOW_COLLECTION)
+            .all<{ document_json: string }>();
+          const base: ToolWorkflowGraph[] = [];
+          const decode = (document: unknown): ToolWorkflowGraph | undefined => {
+            if (!isObject(document) || document["tenant_id"] !== tenantId) return undefined;
+            return decodeWorkflowDocument(document);
+          };
+          for (const row of objectRows.results) {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(row.document_json);
+            } catch {
+              continue;
+            }
+            const decoded = decode(parsed);
+            if (decoded !== undefined) {
+              base.push(decoded);
+            }
+          }
+          return mergeWorkflowTables(base, overlay);
+        } catch {
+          return overlay;
+        }
+      }
+      if (router !== undefined) {
+        const base: ToolWorkflowGraph[] = [];
+        try {
+          for (const provisionedTenant of await router.provisionedTenants()) {
+            const handle = await router.forTenant(provisionedTenant);
+            const rows = await handle.db
+              .prepare(
+                `SELECT document_json FROM ${TENANT_RESOURCE_TABLE}
+                   WHERE resource_kind = ?
+                   ORDER BY resource_id`,
+              )
+              .bind(AGENT_WORKFLOW_COLLECTION)
+              .all<{ document_json: string }>();
+            for (const row of rows.results) {
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(row.document_json);
+              } catch {
+                continue;
+              }
+              if (!isObject(parsed) || parsed["tenant_id"] !== provisionedTenant) continue;
+              const decoded = decodeWorkflowDocument(parsed);
+              if (decoded !== undefined) base.push(decoded);
+            }
+          }
+          const projectionRows = await db
+            .prepare(
+              `SELECT document_json FROM ${RESOURCE_TABLE}
+                 WHERE resource_kind = ?
+                   AND json_extract(document_json, '$.tenant_id') IS NULL
+                 ORDER BY resource_id`,
+            )
+            .bind(AGENT_WORKFLOW_COLLECTION)
+            .all<{ document_json: string }>();
+          const projection: ToolWorkflowGraph[] = [];
+          for (const row of projectionRows.results) {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(row.document_json);
+            } catch {
+              continue;
+            }
+            const decoded = decodeWorkflowDocument(parsed);
+            if (decoded !== undefined) projection.push(decoded);
+          }
+          return mergeWorkflowTables(mergeWorkflowTables(projection, base), overlay);
+        } catch {
+          return overlay;
+        }
+      }
       let rows: { results: { document_json: string }[] };
       try {
         rows = await db

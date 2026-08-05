@@ -1725,6 +1725,9 @@ export interface McpEnv {
    */
   TENANT_DB?: D1Database;
 
+  /** TenantDataObject namespace for tenant-private control-plane documents. */
+  TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
+
   /**
    * The SHARED rate-limit counter namespace — `apps/gateway`'s
    * `RateLimiterDurableObject`, bound here CROSS-SCRIPT.
@@ -2316,7 +2319,13 @@ export function resolvePorts(env: McpEnv): McpPorts {
  */
 function durableApprovals(env: McpEnv): ApprovalPort {
   if (env.DB === undefined) return new AutoApproval();
-  return new D1ToolApprovals(env.DB);
+  const tenantRouter = tenantResourceRouter(env);
+  return new D1ToolApprovals(env.DB, tenantRouter === undefined ? {} : { tenantRouter });
+}
+
+function tenantResourceRouter(env: McpEnv): TenantDatabaseRouter | undefined {
+  if (env.DB === undefined || env.TENANT_DATA === undefined) return undefined;
+  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
 }
 
 function durableAuth(env: McpEnv): AuthPort {

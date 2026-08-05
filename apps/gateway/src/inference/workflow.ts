@@ -151,6 +151,7 @@ import {
   applyWorkflowProviderConstraint,
   enforceWorkflowGraphPolicy,
 } from "@ferrogate/policy";
+import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
 import { reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import type { Caller } from "./ports.js";
@@ -256,10 +257,7 @@ const RUN_ID_MAX_LENGTH = 128;
  *
  * `null` = the supplied id is malformed (Rust `400 invalid_agent_run_id_header`).
  */
-export function resolveWorkflowRunId(
-  headers: Headers,
-  requestId: string,
-): string | null {
+export function resolveWorkflowRunId(headers: Headers, requestId: string): string | null {
   const supplied = workflowRunIdFrom(headers);
   if (supplied === null) return null;
   if (supplied === undefined) return `run-${requestId}`;
@@ -346,6 +344,8 @@ export const NO_WORKFLOWS: WorkflowCatalogSource = {
 export interface WorkflowGateBindings {
   /** The CONTROL database: `control_plane_resources`. */
   readonly CONTROL_DB?: D1Database | undefined;
+  /** The object namespace for tenant-private workflow documents. */
+  readonly TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
   /** `[[skill_packages]]`, whose `resources.agent_workflows` upsert over it. */
   readonly GATEWAY_SKILL_PACKAGES?: string | undefined;
 }
@@ -356,6 +356,8 @@ export const AGENT_WORKFLOW_COLLECTION = "agent-workflows";
 export const WORKFLOW_RUN_STEP_COLLECTION = "workflow-run-steps";
 /** The generic document table, in the CONTROL database. */
 export const RESOURCE_TABLE = "control_plane_resources";
+/** The object-local document table for tenant-private resource kinds. */
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -373,18 +375,10 @@ function stringList(value: unknown): readonly string[] | undefined {
 }
 
 function positiveInt(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-const NODE_KINDS: readonly WorkflowNodeKind[] = [
-  "model",
-  "tool",
-  "router",
-  "human",
-  "checkpoint",
-];
+const NODE_KINDS: readonly WorkflowNodeKind[] = ["model", "tool", "router", "human", "checkpoint"];
 
 /**
  * Decode one admin document into a {@link WorkflowGraph}.
@@ -480,9 +474,7 @@ export function decodeWorkflowDocument(value: unknown): WorkflowGraph | undefine
     ...(optional("timeout_millis") === undefined
       ? {}
       : { timeout_millis: optional("timeout_millis") }),
-    ...(optional("token_budget") === undefined
-      ? {}
-      : { token_budget: optional("token_budget") }),
+    ...(optional("token_budget") === undefined ? {} : { token_budget: optional("token_budget") }),
   };
 }
 
@@ -554,42 +546,135 @@ export function workflowsFromSkillPackages(raw: string | undefined): readonly Wo
 export function d1WorkflowCatalog(
   db: D1Database,
   skillPackagesVar: string | undefined,
+  router?: TenantDatabaseRouter,
 ): WorkflowCatalogSource {
+  const decodeRows = (
+    rows: readonly { document_json: string }[],
+    tenantId?: string,
+  ): WorkflowGraph[] => {
+    const workflows: WorkflowGraph[] = [];
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.document_json);
+      } catch {
+        continue;
+      }
+      if (tenantId !== undefined && (!isObject(parsed) || parsed["tenant_id"] !== tenantId)) {
+        continue;
+      }
+      const decoded = decodeWorkflowDocument(parsed);
+      if (decoded !== undefined) workflows.push(decoded);
+    }
+    return workflows;
+  };
+
+  const readControl = async (tenantId: string): Promise<WorkflowCatalogResult> => {
+    let rows: { results: Array<{ document_json: string }> };
+    try {
+      rows = await db
+        .prepare(
+          `SELECT document_json FROM ${RESOURCE_TABLE}
+             WHERE resource_kind = ?
+               AND json_extract(document_json, '$.tenant_id') = ?
+             ORDER BY resource_id`,
+        )
+        .bind(AGENT_WORKFLOW_COLLECTION, tenantId)
+        .all<{ document_json: string }>();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, detail };
+    }
+    return { ok: true, workflows: decodeRows(rows.results) };
+  };
+
+  const readControlProjection = async (): Promise<WorkflowCatalogResult> => {
+    let rows: { results: Array<{ document_json: string }> };
+    try {
+      rows = await db
+        .prepare(
+          `SELECT document_json FROM ${RESOURCE_TABLE}
+             WHERE resource_kind = ?
+               AND json_extract(document_json, '$.tenant_id') IS NULL
+             ORDER BY resource_id`,
+        )
+        .bind(AGENT_WORKFLOW_COLLECTION)
+        .all<{ document_json: string }>();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, detail };
+    }
+    return { ok: true, workflows: decodeRows(rows.results) };
+  };
+
+  const readObject = async (tenantId: string): Promise<WorkflowGraph[]> => {
+    const handle = await (router as TenantDatabaseRouter).forTenant(tenantId);
+    const rows = await handle.db
+      .prepare(
+        `SELECT document_json FROM ${TENANT_RESOURCE_TABLE}
+           WHERE resource_kind = ?
+           ORDER BY resource_id`,
+      )
+      .bind(AGENT_WORKFLOW_COLLECTION)
+      .all<{ document_json: string }>();
+    return decodeRows(rows.results, tenantId);
+  };
+
   return {
     async forTenant(tenantId: string | null): Promise<WorkflowCatalogResult> {
-      let rows: { results: Array<{ document_json: string }> };
-      try {
-        rows = await db
-          .prepare(
-            `SELECT document_json FROM ${RESOURCE_TABLE}
-               WHERE resource_kind = ?
-                 AND ${
-                   tenantId === null
-                     ? "json_extract(document_json, '$.tenant_id') IS NULL"
-                     : "json_extract(document_json, '$.tenant_id') = ?"
-                 }
-               ORDER BY resource_id`,
-          )
-          .bind(
-            ...(tenantId === null
-              ? [AGENT_WORKFLOW_COLLECTION]
-              : [AGENT_WORKFLOW_COLLECTION, tenantId]),
-          )
-          .all<{ document_json: string }>();
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        return { ok: false, detail };
-      }
-      const base: WorkflowGraph[] = [];
-      for (const row of rows.results) {
-        let parsed: unknown;
+      if (router !== undefined) {
         try {
-          parsed = JSON.parse(row.document_json);
-        } catch {
-          continue;
+          if (tenantId === null || tenantId.trim() === "") {
+            const objectRows: WorkflowGraph[] = [];
+            for (const provisionedTenant of await router.provisionedTenants()) {
+              objectRows.push(...(await readObject(provisionedTenant)));
+            }
+            const projection = await readControlProjection();
+            if (!projection.ok) return projection;
+            return {
+              ok: true,
+              workflows: mergeWorkflowTables(
+                mergeWorkflowTables(projection.workflows, objectRows),
+                workflowsFromSkillPackages(skillPackagesVar),
+              ),
+            };
+          }
+          const objectRows = await readObject(tenantId);
+          return {
+            ok: true,
+            workflows: mergeWorkflowTables(
+              objectRows,
+              workflowsFromSkillPackages(skillPackagesVar),
+            ),
+          };
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return { ok: false, detail };
         }
-        const decoded = decodeWorkflowDocument(parsed);
-        if (decoded !== undefined) base.push(decoded);
+      }
+
+      let base: readonly WorkflowGraph[];
+      if (tenantId === null) {
+        let rows: { results: Array<{ document_json: string }> };
+        try {
+          rows = await db
+            .prepare(
+              `SELECT document_json FROM ${RESOURCE_TABLE}
+                 WHERE resource_kind = ?
+                   AND json_extract(document_json, '$.tenant_id') IS NULL
+                 ORDER BY resource_id`,
+            )
+            .bind(AGENT_WORKFLOW_COLLECTION)
+            .all<{ document_json: string }>();
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return { ok: false, detail };
+        }
+        base = decodeRows(rows.results);
+      } else {
+        const control = await readControl(tenantId);
+        if (!control.ok) return control;
+        base = control.workflows;
       }
       return {
         ok: true,
@@ -617,7 +702,11 @@ export function workflowCatalogFromEnv(env: WorkflowGateBindings): WorkflowCatal
       },
     };
   }
-  return d1WorkflowCatalog(db, skillPackages);
+  const router =
+    env.TENANT_DATA === undefined
+      ? undefined
+      : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, db);
+  return d1WorkflowCatalog(db, skillPackages, router);
 }
 
 // ---------------------------------------------------------------------------
@@ -704,71 +793,101 @@ export function workflowStepDocumentId(step: WorkflowStepRecord): string {
  *  - `previousSuccessfulNodeId` counts only SUCCEEDED steps, so a step that was
  *    admitted and then failed upstream does not advance the graph.
  */
-export function d1WorkflowRunHistory(db: D1Database): WorkflowRunHistory {
-  const tenantClause = (tenantId: string | null): { sql: string; params: unknown[] } =>
-    tenantId === null
-      ? { sql: "json_extract(document_json, '$.tenant_id') IS NULL", params: [] }
-      : { sql: "json_extract(document_json, '$.tenant_id') = ?", params: [tenantId] };
+export function d1WorkflowRunHistory(
+  db: D1Database,
+  router?: TenantDatabaseRouter,
+): WorkflowRunHistory {
+  type Row = { resource_id: string; document_json: string };
+
+  const readRows = async (
+    source: D1Database,
+    table: string,
+    query: WorkflowRunQuery,
+    controlScope: boolean,
+  ): Promise<readonly Row[]> => {
+    const scope = controlScope
+      ? query.tenantId === null
+        ? { sql: "AND json_extract(document_json, '$.tenant_id') IS NULL", params: [] }
+        : { sql: "AND json_extract(document_json, '$.tenant_id') = ?", params: [query.tenantId] }
+      : { sql: "", params: [] };
+    const rows = await source
+      .prepare(
+        `SELECT resource_id, document_json FROM ${table}
+           WHERE resource_kind = ?
+             AND json_extract(document_json, '$.workflow_id') = ?
+             AND json_extract(document_json, '$.workflow_version') = ?
+             ${scope.sql}
+           ORDER BY resource_id`,
+      )
+      .bind(WORKFLOW_RUN_STEP_COLLECTION, query.workflowId, query.workflowVersion, ...scope.params)
+      .all<Row>();
+    return rows.results;
+  };
+
+  const factsFrom = (rows: readonly Row[], query: WorkflowRunQuery): WorkflowFactsResult => {
+    let previousSuccessfulNodeId: string | undefined;
+    let previousAt = -1;
+    let runStartedAtUnix: number | undefined;
+    let modelCallCount = 0;
+    let tokensUsed = 0;
+    let nodeTokensUsed = 0;
+    for (const row of rows) {
+      let document: StepDocument;
+      try {
+        document = JSON.parse(row.document_json) as StepDocument;
+      } catch {
+        continue;
+      }
+      if (query.tenantId !== null && document.tenant_id !== query.tenantId) continue;
+      modelCallCount += 1;
+      tokensUsed += document.total_tokens;
+      if (document.node_id === query.nodeId) nodeTokensUsed += document.total_tokens;
+      if (document.run_id !== query.runId) continue;
+      if (runStartedAtUnix === undefined || document.occurred_at_unix < runStartedAtUnix) {
+        runStartedAtUnix = document.occurred_at_unix;
+      }
+      if (document.succeeded && document.occurred_at_unix >= previousAt) {
+        previousAt = document.occurred_at_unix;
+        previousSuccessfulNodeId = document.node_id;
+      }
+    }
+    return {
+      ok: true,
+      facts: {
+        ...(previousSuccessfulNodeId === undefined ? {} : { previousSuccessfulNodeId }),
+        ...(runStartedAtUnix === undefined ? {} : { runStartedAtUnix }),
+        modelCallCount,
+        tokensUsed,
+        nodeTokensUsed,
+      },
+    };
+  };
 
   return {
     async factsFor(query: WorkflowRunQuery): Promise<WorkflowFactsResult> {
-      const tenant = tenantClause(query.tenantId);
       try {
-        const rows = await db
-          .prepare(
-            `SELECT document_json FROM ${RESOURCE_TABLE}
-               WHERE resource_kind = ?
-                 AND json_extract(document_json, '$.workflow_id') = ?
-                 AND json_extract(document_json, '$.workflow_version') = ?
-                 AND ${tenant.sql}`,
-          )
-          .bind(
-            WORKFLOW_RUN_STEP_COLLECTION,
-            query.workflowId,
-            query.workflowVersion,
-            ...tenant.params,
-          )
-          .all<{ document_json: string }>();
-
-        let previousSuccessfulNodeId: string | undefined;
-        let previousAt = -1;
-        let runStartedAtUnix: number | undefined;
-        let modelCallCount = 0;
-        let tokensUsed = 0;
-        let nodeTokensUsed = 0;
-
-        for (const row of rows.results) {
-          let document: StepDocument;
-          try {
-            document = JSON.parse(row.document_json) as StepDocument;
-          } catch {
-            continue;
+        let rows: readonly Row[];
+        if (router !== undefined) {
+          if (query.tenantId === null || query.tenantId.trim() === "") {
+            const objectRows: Row[] = [];
+            for (const provisionedTenant of await router.provisionedTenants()) {
+              const handle = await router.forTenant(provisionedTenant);
+              objectRows.push(...(await readRows(handle.db, TENANT_RESOURCE_TABLE, query, false)));
+            }
+            const projectionRows = await readRows(db, RESOURCE_TABLE, query, true);
+            const byId = new Map<string, Row>();
+            for (const row of [...projectionRows, ...objectRows]) {
+              if (!byId.has(row.resource_id)) byId.set(row.resource_id, row);
+            }
+            rows = [...byId.values()];
+          } else {
+            const handle = await router.forTenant(query.tenantId);
+            rows = await readRows(handle.db, TENANT_RESOURCE_TABLE, query, false);
           }
-          modelCallCount += 1;
-          tokensUsed += document.total_tokens;
-          if (document.node_id === query.nodeId) nodeTokensUsed += document.total_tokens;
-
-          const sameRun = document.run_id === query.runId;
-          if (!sameRun) continue;
-          if (runStartedAtUnix === undefined || document.occurred_at_unix < runStartedAtUnix) {
-            runStartedAtUnix = document.occurred_at_unix;
-          }
-          if (document.succeeded && document.occurred_at_unix >= previousAt) {
-            previousAt = document.occurred_at_unix;
-            previousSuccessfulNodeId = document.node_id;
-          }
+        } else {
+          rows = await readRows(db, RESOURCE_TABLE, query, true);
         }
-
-        return {
-          ok: true,
-          facts: {
-            ...(previousSuccessfulNodeId === undefined ? {} : { previousSuccessfulNodeId }),
-            ...(runStartedAtUnix === undefined ? {} : { runStartedAtUnix }),
-            modelCallCount,
-            tokensUsed,
-            nodeTokensUsed,
-          },
-        };
+        return factsFrom(rows, query);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return { ok: false, detail };
@@ -788,19 +907,26 @@ export function d1WorkflowRunHistory(db: D1Database): WorkflowRunHistory {
         succeeded: step.succeeded,
       };
       try {
-        // `DO UPDATE`, not `DO NOTHING`: the row is written once at admission
-        // with the token ESTIMATE and `succeeded: false`, and rewritten when the
-        // response settles with the real usage. Absorbing the second write would
-        // leave every step permanently unsucceeded, which would freeze the edge
-        // gate at the run's opening node.
-        await db
+        let target = db;
+        let table = RESOURCE_TABLE;
+        if (router !== undefined) {
+          if (step.tenantId === null || step.tenantId.trim() === "") {
+            console.warn("gateway: tenant workflow step missing tenant destination");
+            return;
+          }
+          target = (await router.forTenant(step.tenantId)).db;
+          table = TENANT_RESOURCE_TABLE;
+        }
+        // `DO UPDATE`, not `DO NOTHING`: admission writes an estimate and the
+        // response later rewrites the same row with settled usage.
+        await target
           .prepare(
-            `INSERT INTO ${RESOURCE_TABLE}
+            `INSERT INTO ${table}
                (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
              VALUES (?, ?, ?, 1, ?, ?)
              ON CONFLICT (resource_kind, resource_id)
                DO UPDATE SET document_json = excluded.document_json,
-                             revision = ${RESOURCE_TABLE}.revision + 1,
+                             revision = ${table}.revision + 1,
                              updated_at_unix = excluded.updated_at_unix`,
           )
           .bind(
@@ -812,10 +938,8 @@ export function d1WorkflowRunHistory(db: D1Database): WorkflowRunHistory {
           )
           .run();
       } catch (error) {
-        // A ledger write that fails must not fail the request the gate already
-        // ADMITTED: the caller is entitled to the call it was allowed to make.
-        // The cost is a counter that reads short, which can only ever admit —
-        // and that is recorded here rather than swallowed silently.
+        // A ledger write that fails must not fail a request already admitted by
+        // the gate; it is still logged so the missing counter is observable.
         console.warn("gateway: workflow step ledger write failed", error);
       }
     },
@@ -827,7 +951,12 @@ export function workflowHistoryFromEnv(env: WorkflowGateBindings): WorkflowRunHi
   const db = env.CONTROL_DB;
   return db === undefined || typeof db.prepare !== "function"
     ? NO_WORKFLOW_HISTORY
-    : d1WorkflowRunHistory(db);
+    : d1WorkflowRunHistory(
+        db,
+        env.TENANT_DATA === undefined
+          ? undefined
+          : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, db),
+      );
 }
 
 // ---------------------------------------------------------------------------
