@@ -146,6 +146,41 @@ async function seedObjectEvidence(tenantId: string, source: string, route: strin
   ]);
 }
 
+async function seedDuplicateControlProjection(): Promise<void> {
+  await db().batch([
+    db()
+      .prepare(
+        `INSERT INTO agent_runs
+           (projection_key, id, request_id, tenant, started_at_unix, completed_at_unix, run_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        `projection-${OTHER_TENANT}-${RUN_ID}`,
+        RUN_ID,
+        REQUEST_ID,
+        OTHER_TENANT,
+        100,
+        103,
+        JSON.stringify({ source: "other-control-projection" }),
+      ),
+    db()
+      .prepare(
+        `INSERT INTO agent_run_events
+           (projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        `projection-${OTHER_TENANT}-event`,
+        "evidence-event-other",
+        RUN_ID,
+        REQUEST_ID,
+        OTHER_TENANT,
+        101,
+        JSON.stringify({ source: "other-control-projection" }),
+      ),
+  ]);
+}
+
 beforeAll(applySchema);
 
 beforeEach(async () => {
@@ -292,5 +327,65 @@ describe("tenant-authoritative request evidence reads", () => {
     const timelineBody = (await timeline.json()) as Record<string, unknown>;
     expect(timelineBody.source).toBe("derived_control_projection");
     expect(timelineBody.as_of_unix).toEqual(expect.any(Number));
+  });
+
+  it("fences projection timeline events to the selected parent tenant", async () => {
+    await seedAuthoritativeEvidence();
+    await db()
+      .prepare(
+        `INSERT INTO agent_run_events
+           (projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        `projection-${OTHER_TENANT}-foreign-event`,
+        "foreign-event",
+        RUN_ID,
+        REQUEST_ID,
+        OTHER_TENANT,
+        101,
+        JSON.stringify({ source: "foreign-tenant" }),
+      )
+      .run();
+
+    const timeline = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(timeline.status, await timeline.clone().text()).toBe(200);
+    const body = (await timeline.json()) as { data: Record<string, unknown>[] };
+    expect(body.data).toEqual([
+      expect.objectContaining({ id: "evidence-event-1", tenant: TENANT }),
+    ]);
+    expect(body.data).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "foreign-event" })]),
+    );
+  });
+
+  it("rejects ambiguous platform timelines and supports an exact tenant selector", async () => {
+    await seedAuthoritativeEvidence();
+    await seedObjectEvidence(OTHER_TENANT, "other-tenant-object", "other-object-route");
+    await seedDuplicateControlProjection();
+
+    const ambiguous = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(ambiguous.status, await ambiguous.clone().text()).toBe(409);
+    const ambiguousBody = (await ambiguous.json()) as {
+      error: { code: string };
+    };
+    expect(ambiguousBody.error.code).toBe("ambiguous_agent_run_id");
+
+    const selected = await SELF.fetch(
+      `${BASE}/admin/v1/agent-runs/${RUN_ID}?tenant_id=${encodeURIComponent(OTHER_TENANT)}`,
+      { headers: bearer(operatorKey.secret) },
+    );
+    expect(selected.status, await selected.clone().text()).toBe(200);
+    const selectedBody = (await selected.json()) as {
+      data: Record<string, unknown>[];
+    };
+    expect(selectedBody.data).toEqual([
+      expect.objectContaining({ id: "evidence-event-1", source: "other-tenant-object" }),
+    ]);
+    expect((selectedBody as Record<string, unknown>).source).toBeUndefined();
   });
 });

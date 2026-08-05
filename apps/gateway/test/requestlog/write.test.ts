@@ -626,4 +626,34 @@ describe("a later write MERGES into the row rather than blanking it", () => {
       ["tenant_b", "b"],
     ]);
   });
+
+  it("uses SQLite code-point length for non-BMP tenant projection keys", async () => {
+    await applyControlMigrations();
+    const db = controlDb();
+    const { writeRequestLogs } = await import("../../src/requestlog/index.js");
+    const tenantId = "tenant-😀";
+
+    await writeRequestLogs(db, [
+      {
+        requestId: "fg-unicode-tenant",
+        method: "POST",
+        path: "/v1/chat/completions",
+        statusCode: 200,
+        startedAtUnix: 1_700_000_002,
+        completedAtUnix: 1_700_000_002,
+        latencyMs: 1,
+        guardrailVerdict: "allowed",
+        streamed: false,
+        tenantId,
+      },
+    ]);
+
+    const rows = await db
+      .prepare("SELECT projection_key FROM request_logs WHERE request_id = ?")
+      .bind("fg-unicode-tenant")
+      .all<{ projection_key: string }>();
+    expect(rows.results).toEqual([
+      { projection_key: `8:${tenantId}:fg-unicode-tenant` },
+    ]);
+  });
 });

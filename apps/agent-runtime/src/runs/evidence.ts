@@ -13,7 +13,8 @@ import type { StoredAgentRun, StoredRunEvent } from "./model.js";
 
 /** Keep this key format identical to sql/d1-ts/control/0014. */
 function evidenceProjectionKey(tenantId: string, logicalId: string): string {
-  return `${tenantId.length}:${tenantId}:${logicalId}`;
+  // SQLite length() counts Unicode code points; JS string.length counts UTF-16 units.
+  return `${Array.from(tenantId).length}:${tenantId}:${logicalId}`;
 }
 
 const TENANT_AGENT_RUN_UPSERT_SQL = `INSERT INTO agent_runs (

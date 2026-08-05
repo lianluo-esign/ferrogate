@@ -29,7 +29,8 @@ export function evidenceProjectionKey(
   logicalId: string,
 ): string {
   const tenant = tenantId ?? "";
-  return `${tenant.length}:${tenant}:${logicalId}`;
+  // SQLite length() counts Unicode code points; JS string.length counts UTF-16 units.
+  return `${Array.from(tenant).length}:${tenant}:${logicalId}`;
 }
 
 /**

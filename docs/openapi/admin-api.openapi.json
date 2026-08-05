@@ -5183,6 +5183,16 @@
           "description": "Agent run id from x-ferrogate-agent-run-id or the gateway-generated run id."
         },
         {
+          "name": "tenant_id",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Required for a platform operator when run_id is shared by multiple tenants; selects the authoritative TenantDataObject."
+        },
+        {
           "$ref": "#/components/parameters/ClientActionIdHeader"
         },
         {
@@ -5228,6 +5238,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
           }
         },
         "x-ferrogate-contract": {

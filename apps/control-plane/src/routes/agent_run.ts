@@ -171,25 +171,53 @@ function agentRunTimelineHandler(): Handler {
     const deps = depsOf(c);
     const scope = scopeOf(c);
     const runId = pathParam(c, "run_id");
+    const requestedTenantId =
+      scope.kind === "platform_operator"
+        ? new URL(c.req.url).searchParams.get("tenant_id")?.trim() || null
+        : null;
+    const selectedTenantId = scope.kind === "tenant" ? scope.tenantId : requestedTenantId;
+    const projectionBacked = scope.kind === "platform_operator" && selectedTenantId === null;
     const db =
-      scope.kind === "tenant"
-        ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, scope.tenantId)
+      selectedTenantId !== null
+        ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, selectedTenantId)
         : deps.controlDatabase;
     if (db === null) throw notFound("agent_run", runId);
 
-    const run = await db
-      .prepare(
-        `SELECT ${AGENT_RUN_COLUMNS}
-           FROM agent_runs
-          WHERE id = ?${scope.kind === "tenant" ? " AND tenant = ?" : ""}`,
-      )
-      .bind(...(scope.kind === "tenant" ? [runId, scope.tenantId] : [runId]))
-      .first<Record<string, unknown>>();
+    let run: Record<string, unknown> | null;
+    if (projectionBacked) {
+      const matches = await db
+        .prepare(
+          `SELECT ${AGENT_RUN_COLUMNS}
+             FROM agent_runs
+            WHERE id = ?
+            ORDER BY tenant ASC`,
+        )
+        .bind(runId)
+        .all<Record<string, unknown>>();
+      if (matches.results.length > 1) {
+        throw new HttpError(
+          409,
+          "ambiguous_agent_run_id",
+          `agent_run ${runId} belongs to multiple tenants; tenant_id is required`,
+        );
+      }
+      run = matches.results[0] ?? null;
+    } else {
+      run = await db
+        .prepare(
+          `SELECT ${AGENT_RUN_COLUMNS}
+             FROM agent_runs
+            WHERE id = ? AND tenant = ?`,
+        )
+        .bind(runId, selectedTenantId)
+        .first<Record<string, unknown>>();
+    }
     if (run === null) throw notFound("agent_run", runId);
 
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
-    const eventFence = scope.kind === "tenant" ? " AND tenant = ?" : "";
-    const eventParams = scope.kind === "tenant" ? [runId, scope.tenantId] : [runId];
+    const eventTenant = selectedTenantId ?? (typeof run.tenant === "string" ? run.tenant : null);
+    const eventFence = eventTenant === null ? " AND tenant IS NULL" : " AND tenant = ?";
+    const eventParams = eventTenant === null ? [runId] : [runId, eventTenant];
     const events = await db
       .prepare(
         `SELECT ${AGENT_RUN_EVENT_COLUMNS}, count(*) OVER() AS total
@@ -201,7 +229,7 @@ function agentRunTimelineHandler(): Handler {
       .bind(...eventParams, query.limit, query.offset)
       .all<Record<string, unknown> & { total?: number }>();
     const body =
-      scope.kind === "platform_operator"
+      projectionBacked
         ? adminListPaginatedWithMetadata(
             events.results.map(eventDocument),
             events.results[0]?.total ?? 0,

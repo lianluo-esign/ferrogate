@@ -10,7 +10,7 @@ const RETRY_TENANT = "tenant-evidence-retry";
 const RETRY_RUN_ID = "run-evidence-retry";
 
 function projectionKey(tenantId: string, logicalId: string): string {
-  return `${tenantId.length}:${tenantId}:${logicalId}`;
+  return `${Array.from(tenantId).length}:${tenantId}:${logicalId}`;
 }
 
 function createInput(tenantId: string, runId: string) {
@@ -206,6 +206,23 @@ describe("agent evidence source of truth", () => {
       "job_submitted",
       "event.first-attempt",
       "event.retry",
+    ]);
+  });
+
+  it("uses SQLite code-point length for non-BMP tenant projection keys", async () => {
+    const tenantId = "tenant-😀";
+    const runId = "run-evidence-unicode";
+    const run = runStateStub(env, tenantId, runId);
+
+    await run.create(createInput(tenantId, runId));
+
+    const rows = await env.CONTROL_DB.prepare(
+      "SELECT projection_key FROM agent_runs WHERE id = ? AND tenant = ?",
+    )
+      .bind(runId, tenantId)
+      .all<{ projection_key: string }>();
+    expect(rows.results).toEqual([
+      { projection_key: `8:${tenantId}:${runId}` },
     ]);
   });
 });
