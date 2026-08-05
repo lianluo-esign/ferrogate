@@ -121,6 +121,10 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
         schemaVersion: 1,
         storageBackend: "native_binding",
         status: "pending",
+        migrationState: "shared",
+        migrationEpoch: 0,
+        migrationReceiptJson: "{}",
+        migrationProgressJson: "{}",
       },
       {
         tenantId: "zeta",
@@ -129,6 +133,10 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
         schemaVersion: 1,
         storageBackend: "native_binding",
         status: "pending",
+        migrationState: "shared",
+        migrationEpoch: 0,
+        migrationReceiptJson: "{}",
+        migrationProgressJson: "{}",
       },
     ]);
   });
@@ -183,6 +191,10 @@ describe("migrateTenantDatabaseRegistryDocument", () => {
       schemaVersion: 3,
       storageBackend: "native_binding",
       status: "pending",
+      migrationState: "shared",
+      migrationEpoch: 0,
+      migrationReceiptJson: "{}",
+      migrationProgressJson: "{}",
     });
   });
 

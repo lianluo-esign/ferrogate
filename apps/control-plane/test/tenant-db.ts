@@ -111,8 +111,8 @@ export async function registerTenantDatabases(): Promise<void> {
         .prepare(
           `INSERT INTO tenant_databases
              (tenant_id, database_uuid, database_name, binding_name, schema_version,
-              provisioned_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, 1, 1, 1)`,
+              migration_state, provisioned_at_unix, updated_at_unix)
+           VALUES (?, ?, ?, ?, 1, 'done', 1, 1)`,
         )
         .bind(tenantId, uuid, name, binding),
     ),

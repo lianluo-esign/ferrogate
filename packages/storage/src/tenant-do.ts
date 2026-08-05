@@ -75,6 +75,11 @@ import type {
   TenantDataResult,
   TenantDataStatement,
   TenantDataValue,
+  TenantMigrationImportRequest,
+  TenantMigrationMode,
+  TenantMigrationModeRequest,
+  TenantMigrationStatus,
+  TenantMigrationStatusRequest,
 } from "./tenant-data-object.js";
 import {
   ControlDatabaseTenantRegistry,
@@ -82,12 +87,23 @@ import {
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
 
+export type {
+  TenantDataStatement,
+  TenantDataValue,
+  TenantMigrationImportRequest,
+  TenantMigrationMode,
+  TenantMigrationModeRequest,
+  TenantMigrationStatus,
+  TenantMigrationStatusRequest,
+} from "./tenant-data-object.js";
+
 // ---------------------------------------------------------------------------
 // The stub seam
 // ---------------------------------------------------------------------------
 
 /**
- * The two RPCs this facade calls on a `TenantDataObject` stub.
+ * The data RPCs this facade calls on a `TenantDataObject` stub, plus the
+ * optional trusted migration RPC seam kept off the D1 facade.
  *
  * Declared structurally rather than as `DurableObjectStub<TenantDataObject>`
  * because THIS module must stay importable from plain node: `src/index.ts` is
@@ -114,6 +130,12 @@ export interface TenantDataStub {
   }>;
   /** Optional for stale test/deployment stubs; callers fail closed if absent. */
   privilegedBatch?(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
+  /** Trusted migration import; absent on stale deployments and never used by the D1 facade. */
+  migrationImport?(request: TenantMigrationImportRequest): Promise<TenantDataResult[]>;
+  /** Trusted migration state transition; absent on stale deployments. */
+  setMigrationMode?(request: TenantMigrationModeRequest): Promise<TenantMigrationStatus>;
+  /** Object-local migration status and write epoch for rollback checks. */
+  migrationStatus?(request: TenantMigrationStatusRequest): Promise<TenantMigrationStatus>;
   /** Optional schedule alarm RPC, present on the current TenantDataObject. */
   setScheduleAlarm?(request: { tenantId: string; scheduledAtUnix: number }): Promise<void>;
   /** Optional schedule alarm clear RPC, present on the current TenantDataObject. */
@@ -793,6 +815,47 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
       );
     }
     await stub.privilegedBatch({ tenantId, statements });
+  }
+
+  /** Trusted control-plane migration import; never exposed by the D1 facade. */
+  async migrationImport(
+    tenantId: string,
+    epoch: number,
+    statements: readonly TenantDataStatement[],
+  ): Promise<void> {
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.migrationImport === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the trusted migration import RPC`,
+      );
+    }
+    await stub.migrationImport({ tenantId, epoch, statements });
+  }
+
+  /** Advance the object-local migration gate through the trusted RPC. */
+  async setMigrationMode(
+    tenantId: string,
+    mode: TenantMigrationMode,
+    epoch: number,
+  ): Promise<TenantMigrationStatus> {
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.setMigrationMode === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the trusted migration state RPC`,
+      );
+    }
+    return stub.setMigrationMode({ tenantId, mode, epoch });
+  }
+
+  /** Read the object-local migration state and rollback write witness. */
+  async migrationStatus(tenantId: string): Promise<TenantMigrationStatus> {
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.migrationStatus === undefined) {
+      throw StorageError.runtime(
+        `tenant ${tenantId} does not expose the trusted migration status RPC`,
+      );
+    }
+    return stub.migrationStatus({ tenantId });
   }
 
   async setScheduleAlarm(tenantId: string, scheduledAtUnix: number): Promise<void> {

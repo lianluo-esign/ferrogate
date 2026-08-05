@@ -34,7 +34,8 @@ describe("tenant backfill contract", () => {
 
     expect(() => assertTenantMigrationTransition("shared", "cut")).toThrow(/shared.*copying/);
     expect(() => assertTenantMigrationTransition("copying", "cut")).toThrow(/verifying/);
-    expect(() => assertTenantMigrationTransition("done", "shared")).toThrow(/terminal/);
+    expect(() => assertTenantMigrationTransition("done", "shared")).not.toThrow();
+    expect(() => assertTenantMigrationTransition("done", "copying")).toThrow(/terminal/);
   });
 
   test("checksum is deterministic over canonical row order and value types", async () => {

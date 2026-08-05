@@ -43,6 +43,7 @@ import {
   type BindingEnvironment,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
+  SharedDatabaseTenantRouter,
   backfillTenantConfigurationPolicy,
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
@@ -805,6 +806,10 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
   // provisioning write is therefore visible on the very next request, with no
   // cache to invalidate.
   const bindings = new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
+  const legacyShared =
+    env.LEGACY_TENANT_DB === undefined
+      ? undefined
+      : new SharedDatabaseTenantRouter(env.LEGACY_TENANT_DB);
   // PER TENANT, from the roster — not per Worker, from a var. See
   // `BackendDispatchingTenantDatabaseRouter`: since #820 every newly onboarded
   // tenant lives in a Durable Object that the binding router cannot reach, and
@@ -820,6 +825,7 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
   // D1 database holding none of its rows.
   return new BackendDispatchingTenantDatabaseRouter(env.DB, {
     fallback: bindings,
+    ...(legacyShared === undefined ? {} : { legacyShared }),
     ...(env.TENANT_DATA === undefined
       ? {}
       : { durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB) }),
@@ -980,6 +986,7 @@ export function resolveDeps(
     tenantDatabases,
     tenantStorage: resolveTenantStorage(env),
     controlDatabase: resolveControlDatabase(env),
+    legacyTenantDatabase: env.LEGACY_TENANT_DB ?? null,
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.
     assetObjects: resolveAssetObjects(env),

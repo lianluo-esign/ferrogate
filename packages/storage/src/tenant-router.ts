@@ -218,6 +218,16 @@ export type TenantProvisioningStatus =
   /** A step refused. `lastError` says which; re-running resumes from there. */
   | "failed";
 
+/** Independent data migration state for issue #824. */
+export type TenantMigrationState = "shared" | "copying" | "verifying" | "cut" | "done";
+
+/** States that must continue resolving to the legacy shared tenant database. */
+export const PRE_CUTOVER_TENANT_MIGRATION_STATES: readonly TenantMigrationState[] = [
+  "shared",
+  "copying",
+  "verifying",
+];
+
 /**
  * One `tenant_databases` row — the tenant's PROVISIONING STATE, since #820.
  *
@@ -269,6 +279,15 @@ export interface TenantDatabaseRegistration {
    * and recorded rather than inferred.
    */
   locationHint?: string;
+  /** The independent #824 data migration state. */
+  migrationState?: TenantMigrationState;
+  migrationEpoch?: number;
+  migrationFrozenAtUnix?: number;
+  migrationCutoverAtUnix?: number;
+  migrationRetentionUntilUnix?: number;
+  migrationLastError?: string;
+  migrationReceiptJson?: string;
+  migrationProgressJson?: string;
 }
 
 /**
@@ -480,7 +499,10 @@ export async function migrateTenantDatabaseRegistryDocument(
 /** Every column {@link registrationFromRow} decodes. One list, so the reads cannot drift. */
 const TENANT_DATABASE_COLUMNS =
   "tenant_id, database_uuid, database_name, binding_name, schema_version, " +
-  "storage_backend, provisioning_status, catalog_seeded_at_unix, last_error, location_hint";
+  "storage_backend, provisioning_status, catalog_seeded_at_unix, last_error, location_hint, " +
+  "migration_state, migration_epoch, migration_frozen_at_unix, migration_cutover_at_unix, " +
+  "migration_retention_until_unix, migration_last_error, migration_receipt_json, " +
+  "migration_progress_json";
 
 /** Reads and writes the tenant provisioning registry in the CONTROL database. */
 export class ControlDatabaseTenantRegistry {
@@ -551,11 +573,11 @@ export class ControlDatabaseTenantRegistry {
   async upsert(registration: TenantDatabaseRegistration, nowUnix: number): Promise<void> {
     await this.controlDb
       .prepare(
-        "INSERT INTO tenant_databases " +
+          "INSERT INTO tenant_databases " +
           "(tenant_id, database_uuid, database_name, binding_name, schema_version, " +
           " storage_backend, provisioning_status, catalog_seeded_at_unix, last_error, " +
-          " location_hint, provisioned_at_unix, updated_at_unix) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          " location_hint, migration_state, provisioned_at_unix, updated_at_unix) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT (tenant_id) DO UPDATE SET " +
           "database_uuid = excluded.database_uuid, " +
           "database_name = excluded.database_name, " +
@@ -583,6 +605,8 @@ export class ControlDatabaseTenantRegistry {
         registration.catalogSeededAtUnix ?? null,
         registration.lastError ?? null,
         registration.locationHint ?? null,
+        registration.migrationState ??
+          (registration.storageBackend === "durable_object" ? "done" : "shared"),
         nowUnix,
         nowUnix,
       )
@@ -601,6 +625,14 @@ interface TenantDatabaseRow {
   catalog_seeded_at_unix: number | null;
   last_error: string | null;
   location_hint: string | null;
+  migration_state: string | null;
+  migration_epoch: number | null;
+  migration_frozen_at_unix: number | null;
+  migration_cutover_at_unix: number | null;
+  migration_retention_until_unix: number | null;
+  migration_last_error: string | null;
+  migration_receipt_json: string | null;
+  migration_progress_json: string | null;
 }
 
 /** The legal `provisioning_status` spellings. Anything else decodes to ABSENT. */
@@ -609,6 +641,14 @@ const PROVISIONING_STATUSES: readonly TenantProvisioningStatus[] = [
   "ready",
   "incomplete",
   "failed",
+];
+
+const MIGRATION_STATES: readonly TenantMigrationState[] = [
+  "shared",
+  "copying",
+  "verifying",
+  "cut",
+  "done",
 ];
 
 /**
@@ -637,6 +677,28 @@ function registrationFromRow(row: TenantDatabaseRow): TenantDatabaseRegistration
       : { catalogSeededAtUnix: row.catalog_seeded_at_unix }),
     ...(row.last_error === null ? {} : { lastError: row.last_error }),
     ...(row.location_hint === null ? {} : { locationHint: row.location_hint }),
+    ...(MIGRATION_STATES.includes(row.migration_state as TenantMigrationState)
+      ? { migrationState: row.migration_state as TenantMigrationState }
+      : {}),
+    ...(row.migration_epoch === null ? {} : { migrationEpoch: row.migration_epoch }),
+    ...(row.migration_frozen_at_unix === null
+      ? {}
+      : { migrationFrozenAtUnix: row.migration_frozen_at_unix }),
+    ...(row.migration_cutover_at_unix === null
+      ? {}
+      : { migrationCutoverAtUnix: row.migration_cutover_at_unix }),
+    ...(row.migration_retention_until_unix === null
+      ? {}
+      : { migrationRetentionUntilUnix: row.migration_retention_until_unix }),
+    ...(row.migration_last_error === null
+      ? {}
+      : { migrationLastError: row.migration_last_error }),
+    ...(row.migration_receipt_json === null
+      ? {}
+      : { migrationReceiptJson: row.migration_receipt_json }),
+    ...(row.migration_progress_json === null
+      ? {}
+      : { migrationProgressJson: row.migration_progress_json }),
   };
 }
 

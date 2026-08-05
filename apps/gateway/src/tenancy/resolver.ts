@@ -10,6 +10,7 @@
  * three strategies, the control/tenant split, and the fail-closed invariant.
  */
 import {
+  BackendDispatchingTenantDatabaseRouter,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
   NonAtomicD1RestTenantDatabaseRouter,
@@ -219,10 +220,25 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
     // own admission refusal, which is observable at the first statement and
     // nowhere earlier, so an "eager" DO mode would have to issue a real RPC per
     // request to learn anything a lazy one does not.
+    const durableObject = new DurableObjectTenantDatabaseRouter(
+      tenantDataNamespace(env),
+      controlDb,
+    );
+    // The test harness intentionally has no shared `DB`, so it retains the
+    // zero-registry-read default DO router. Production binds the old shared
+    // tenant database during #824; in that posture the registry state is the
+    // routing fact and pre-cutover tenants must remain on that source.
+    if (env.DB === undefined) {
+      return new RoutedTenantDatabaseResolver(mode, false, durableObject);
+    }
     return new RoutedTenantDatabaseResolver(
       mode,
       false,
-      new DurableObjectTenantDatabaseRouter(tenantDataNamespace(env), controlDb),
+      new BackendDispatchingTenantDatabaseRouter(controlDb, {
+        fallback: new EnvBindingTenantDatabaseRouter(env as Record<string, unknown>, controlDb),
+        durableObject,
+        legacyShared: new SharedDatabaseTenantRouter(env.DB),
+      }),
     );
   }
 

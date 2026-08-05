@@ -34,7 +34,7 @@
  * Checked BOTH ways. Runtime → OpenAPI is the defect this issue names. OpenAPI →
  * runtime is the reverse failure: an operation described to SDK consumers that
  * no router serves, i.e. a generated client method that 404s. As of #734 the two
- * documents are exactly 1:1 at 265 operations, so neither direction has an
+ * documents are exactly 1:1 at 303 operations, so neither direction has an
  * allowance list, and adding one would be the beginning of the same problem.
  */
 import { describe, expect, it } from "vitest";
@@ -145,7 +145,7 @@ function openapiDrift(
 describe("published OpenAPI ⇄ runtime contract", () => {
   it("describes every routed operation, and describes nothing that is not routed", () => {
     const failures = openapiDrift(OPENAPI, CONTRACT.operations);
-    // The listing IS the message: "265 !== 253" tells an engineer nothing.
+    // The listing IS the message: "303 !== 303" tells an engineer nothing.
     expect(failures, failures.join("\n")).toEqual([]);
   });
 

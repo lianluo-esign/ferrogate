@@ -11736,6 +11736,187 @@
         ]
       }
     },
+    "/admin/v1/tenant-accounts/{tenant_id}/storage-migration": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "migrateTenantStorage",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Migrate one tenant from shared D1 to its Durable Object.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "start",
+                      "resume",
+                      "verify",
+                      "cutover",
+                      "rollback",
+                      "status"
+                    ]
+                  },
+                  "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                  },
+                  "retention_seconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 31536000
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current tenant storage migration state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "object",
+                    "tenant_id",
+                    "action",
+                    "migration_state",
+                    "migration_epoch",
+                    "progress",
+                    "receipt"
+                  ],
+                  "properties": {
+                    "object": {
+                      "const": "tenant_storage_migration"
+                    },
+                    "tenant_id": {
+                      "type": "string"
+                    },
+                    "action": {
+                      "type": "string"
+                    },
+                    "migration_state": {
+                      "type": "string",
+                      "enum": [
+                        "shared",
+                        "copying",
+                        "verifying",
+                        "cut",
+                        "done"
+                      ]
+                    },
+                    "migration_epoch": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "migration_frozen_at_unix": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "migration_cutover_at_unix": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "migration_retention_until_unix": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "progress": {
+                      "type": "object"
+                    },
+                    "receipt": {
+                      "type": "object"
+                    },
+                    "object_status": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/admin/v1/tenant-accounts/{tenant_id}/resolved-defaults": {
       "parameters": [
         {
