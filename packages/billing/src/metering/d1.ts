@@ -17,14 +17,16 @@
  * DIFFERENT settlement data surfaces as `conflict` rather than being silently
  * absorbed (issue #213).
  *
- * ## Schema — owned by the DEPLOYED migration, mirrored here
+ * ## Schema — owned by the DEPLOYED migration, mirrored for compatibility here
  *
- * The three tables are defined by `sql/d1-ts/control/0001_init_control.sql`,
- * which is the D1 reduction the inventory prescribes (§1.4.4) and is itself the
- * verbatim port of the Rust `sql/d1/001_init_d1.sql`: Postgres' wide
- * `billing_ledger` / `billing_metering_events` collapse to the #447 document
- * pattern — a `*_json` TEXT document plus only the projection columns the
- * filter/order/paginate SQL needs.
+ * The compatibility constructor uses the three tables defined by
+ * `sql/d1-ts/control/0001_init_control.sql`, which is the D1 reduction the
+ * inventory prescribes (§1.4.4) and is itself the verbatim port of the Rust
+ * `sql/d1/001_init_d1.sql`: Postgres' wide `billing_ledger` /
+ * `billing_metering_events` collapse to the #447 document pattern — a `*_json`
+ * TEXT document plus only the projection columns the filter/order/paginate SQL
+ * needs. The tenant constructor uses the explicit-column copies added by
+ * `sql/d1-ts/tenant/0020_billing_wallet_consistency.sql`.
  *
  * The default constructor remains CONTROL-compatible and uses
  * `env.BILLING_DB`. A tenant-mounted constructor uses the same store contract
