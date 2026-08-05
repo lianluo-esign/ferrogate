@@ -76,10 +76,15 @@ export { experimentAssignmentFor, servedArmFor } from "./assignment.js";
 export type { ExperimentAssignment } from "./assignment.js";
 export {
   EXPERIMENT_SHADOW_LEG_TABLE,
+  EXPERIMENT_SHADOW_LEG_PROJECTION_UPSERT_SQL,
   EXPERIMENT_SHADOW_LEG_UPSERT_SQL,
   experimentDatabaseFrom,
+  experimentTenantDatabaseFrom,
   shadowLegBindings,
+  shadowLegProjectionBindings,
+  sweepExperimentProjections,
   writeShadowLeg,
+  writeShadowLegProjection,
 } from "./d1.js";
 export type { ExperimentDatabase } from "./d1.js";
 export type { ShadowLegErrorCode, ShadowLegRecord } from "./record.js";

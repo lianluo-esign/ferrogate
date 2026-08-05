@@ -29,6 +29,7 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll } from "vitest";
 import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sql?raw";
+import auditChainMigrationSql from "../../../sql/d1-ts/control/0003_audit_chain.sql?raw";
 // Issue #695. Every control migration the gateway READS from has to be applied
 // here, not just the init one: `src/cache/governance.ts` queries
 // `semantic_cache_policies` on the request path of every cacheable call, and a
@@ -52,6 +53,11 @@ import attributionPolicyMigrationSql from "../../../sql/d1-ts/control/0006_attri
 // `ALTER TABLE`s as well as `CREATE … IF NOT EXISTS`, so it goes through
 // {@link applyIgnoringDuplicateColumn}.
 import spendAnomalyMigrationSql from "../../../sql/d1-ts/control/0010_spend_anomaly.sql?raw";
+import onlineEvalMigrationSql from "../../../sql/d1-ts/control/0009_online_eval.sql?raw";
+import experimentOutcomesMigrationSql from "../../../sql/d1-ts/control/0011_experiment_outcomes.sql?raw";
+import derivedProjectionKeysMigrationSql from "../../../sql/d1-ts/control/0017_tenant_derived_projection_keys.sql?raw";
+import derivedProjectionPrimaryKeysMigrationSql from "../../../sql/d1-ts/control/0018_tenant_derived_projection_primary_keys.sql?raw";
+import usagePresenceEvidenceProjectionsMigrationSql from "../../../sql/d1-ts/control/0019_usage_presence_evidence_projections.sql?raw";
 
 interface D1TestBindings {
   readonly DB?: D1Database;
@@ -118,8 +124,48 @@ beforeAll(async () => {
         await CONTROL_DB.prepare(statement).run();
       }
     }
+    await applyIgnoringDuplicateColumn(CONTROL_DB, auditChainMigrationSql);
     await applyIgnoringDuplicateColumn(CONTROL_DB, attributionPolicyMigrationSql);
+    await applyIgnoringDuplicateColumn(CONTROL_DB, onlineEvalMigrationSql);
     await applyIgnoringDuplicateColumn(CONTROL_DB, spendAnomalyMigrationSql);
+    await applyIgnoringDuplicateColumn(CONTROL_DB, experimentOutcomesMigrationSql);
+    await applyIgnoringDuplicateColumn(CONTROL_DB, derivedProjectionKeysMigrationSql);
+    const projectionTables = [
+      "audit_events",
+      "online_eval_scores",
+      "online_eval_regressions",
+      "experiment_shadow_legs",
+      "spend_anomaly_episodes",
+    ];
+    const projectionPrimaryKeys = await Promise.all(
+      projectionTables.map(async (table) => {
+        const result = await CONTROL_DB.prepare(`PRAGMA table_info(${table})`).all();
+        return (result.results as { name?: unknown; pk?: unknown }[]).some(
+          (row) => row.name === "projection_key" && Number(row.pk) === 1,
+        );
+      }),
+    );
+    if (!projectionPrimaryKeys.every(Boolean)) {
+      for (const statement of sqlStatements(derivedProjectionPrimaryKeysMigrationSql)) {
+        await CONTROL_DB.prepare(statement).run();
+      }
+    }
+    const managedEvidenceColumns = await CONTROL_DB
+      .prepare("PRAGMA table_info(managed_worker_isolation_evidence)")
+      .all();
+    const managedEvidenceProjectionReady = (
+      managedEvidenceColumns.results as { name?: unknown; pk?: unknown }[]
+    ).some((row) => row.name === "projection_key" && Number(row.pk) === 1);
+    const usageMonthlyTable = await CONTROL_DB
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_monthly_rollups'",
+      )
+      .first<{ name: string }>();
+    if (!managedEvidenceProjectionReady || usageMonthlyTable === null) {
+      for (const statement of sqlStatements(usagePresenceEvidenceProjectionsMigrationSql)) {
+        await CONTROL_DB.prepare(statement).run();
+      }
+    }
   }
 });
 

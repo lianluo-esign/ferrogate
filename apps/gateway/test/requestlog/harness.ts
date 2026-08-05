@@ -19,12 +19,17 @@ import { env } from "cloudflare:test";
 import controlInitSql from "../../../../sql/d1-ts/control/0001_init_control.sql?raw";
 import ssoNonceSql from "../../../../sql/d1-ts/control/0002_sso_flow_nonce.sql?raw";
 import requestLogColumnsSql from "../../../../sql/d1-ts/control/0003_request_log_columns.sql?raw";
+import auditChainSql from "../../../../sql/d1-ts/control/0003_audit_chain.sql?raw";
 import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_evaluations.sql?raw";
 import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_chain.sql?raw";
 import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
+import spendAnomalySql from "../../../../sql/d1-ts/control/0010_spend_anomaly.sql?raw";
 import experimentOutcomesSql from "../../../../sql/d1-ts/control/0011_experiment_outcomes.sql?raw";
 import evidenceProjectionKeysSql from "../../../../sql/d1-ts/control/0014_tenant_evidence_projection_keys.sql?raw";
 import guardrailProjectionKeysSql from "../../../../sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql?raw";
+import derivedProjectionKeysSql from "../../../../sql/d1-ts/control/0017_tenant_derived_projection_keys.sql?raw";
+import derivedProjectionPrimaryKeysSql from "../../../../sql/d1-ts/control/0018_tenant_derived_projection_primary_keys.sql?raw";
+import usagePresenceEvidenceProjectionsSql from "../../../../sql/d1-ts/control/0019_usage_presence_evidence_projections.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 
@@ -71,6 +76,15 @@ export async function applyControlMigrations(): Promise<void> {
   const db = controlDb();
   for (const statement of [...sqlStatements(controlInitSql), ...sqlStatements(ssoNonceSql)]) {
     await db.prepare(statement).run();
+  }
+  const auditChainColumns = await db.prepare("PRAGMA table_info(audit_events)").all();
+  const auditChainNames = new Set(
+    (auditChainColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
+  );
+  if (!auditChainNames.has("chain_key")) {
+    for (const statement of sqlStatements(auditChainSql)) {
+      await db.prepare(statement).run();
+    }
   }
 
   const columns = await db.prepare(`PRAGMA table_info(${REQUEST_LOG_TABLE})`).all();
@@ -119,6 +133,15 @@ export async function applyControlMigrations(): Promise<void> {
     if (quotaNames.has("online_eval_enabled") && statement.startsWith("ALTER TABLE")) continue;
     await db.prepare(statement).run();
   }
+  const spendColumns = await db.prepare("PRAGMA table_info(quota_policies)").all();
+  const spendNames = new Set(
+    (spendColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
+  );
+  for (const statement of sqlStatements(spendAnomalySql)) {
+    const column = /^ALTER TABLE quota_policies ADD COLUMN (\w+)/i.exec(statement)?.[1];
+    if (column !== undefined && spendNames.has(column)) continue;
+    await db.prepare(statement).run();
+  }
   if (!names.has("experiment_arm")) {
     for (const statement of sqlStatements(experimentOutcomesSql)) {
       await db.prepare(statement).run();
@@ -137,6 +160,51 @@ export async function applyControlMigrations(): Promise<void> {
   );
   if (!guardrailNames.has("projection_key")) {
     for (const statement of sqlStatements(guardrailProjectionKeysSql)) {
+      await db.prepare(statement).run();
+    }
+  }
+  const auditColumns = await db.prepare("PRAGMA table_info(audit_events)").all();
+  const auditNames = new Set(
+    (auditColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
+  );
+  if (!auditNames.has("projection_key")) {
+    for (const statement of sqlStatements(derivedProjectionKeysSql)) {
+      await db.prepare(statement).run();
+    }
+  }
+  const projectionTables = [
+    "audit_events",
+    "online_eval_scores",
+    "online_eval_regressions",
+    "experiment_shadow_legs",
+    "spend_anomaly_episodes",
+  ];
+  const projectionPrimaryKeys = await Promise.all(
+    projectionTables.map(async (table) => {
+      const result = await db.prepare(`PRAGMA table_info(${table})`).all();
+      return (result.results as { name?: unknown; pk?: unknown }[]).some(
+        (row) => row.name === "projection_key" && Number(row.pk) === 1,
+      );
+    }),
+  );
+  if (!projectionPrimaryKeys.every(Boolean)) {
+    for (const statement of sqlStatements(derivedProjectionPrimaryKeysSql)) {
+      await db.prepare(statement).run();
+    }
+  }
+  const managedEvidenceColumns = await db
+    .prepare("PRAGMA table_info(managed_worker_isolation_evidence)")
+    .all();
+  const managedEvidenceProjectionReady = (
+    managedEvidenceColumns.results as { name?: unknown; pk?: unknown }[]
+  ).some((row) => row.name === "projection_key" && Number(row.pk) === 1);
+  const usageMonthlyTable = await db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_monthly_rollups'",
+    )
+    .first<{ name: string }>();
+  if (!managedEvidenceProjectionReady || usageMonthlyTable === null) {
+    for (const statement of sqlStatements(usagePresenceEvidenceProjectionsSql)) {
       await db.prepare(statement).run();
     }
   }

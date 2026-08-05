@@ -16,7 +16,11 @@
  * `GATEWAY_ROUTE_MODULES` below; they need no change to the router, the guard,
  * or the contract table.
  */
-import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
+import {
+  assetDepsFromEnv,
+  assetRouteModule,
+  sweepAssetAuditProjections,
+} from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
 import { delegationChain } from "./delegation/index.js";
 import {
@@ -27,6 +31,7 @@ import {
   sweepAllOnlineEvalRegressions,
 } from "./evals/index.js";
 import type { OnlineEvalMessageBatch } from "./evals/index.js";
+import { sweepExperimentProjections } from "./experiments/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -44,6 +49,7 @@ import {
   routePriceSettledCostUsd,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
+import { sweepManagedIsolationEvidence } from "./managed-evidence-projection.js";
 import {
   consumeRequestLogBatch,
   createRequestLogSink,
@@ -57,7 +63,7 @@ import { residency } from "./residency/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 import { siteRouteModule } from "./sites/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
-import { tenantDatabase } from "./tenancy/index.js";
+import { resolverForEnv, tenantDatabase, type TenancyBindings } from "./tenancy/index.js";
 
 /**
  * The durable metering sink behind `UsageSink`.
@@ -531,6 +537,20 @@ export async function gatewayScheduled(
   ctx: { waitUntil(work: Promise<unknown>): void },
 ): Promise<void> {
   await usage.sweep({ env, ctx });
+  try {
+    const tenantRouter = resolverForEnv(env as TenancyBindings).router;
+    const tenantIds = await tenantRouter.provisionedTenants();
+    await usage.sweepUsageProjections({ env, ctx }, tenantIds);
+    await sweepExperimentProjections(env, tenantIds);
+    await sweepManagedIsolationEvidence(env, tenantRouter, tenantIds);
+    await sweepAssetAuditProjections(env, tenantRouter, tenantIds);
+  } catch (error) {
+    console.warn(
+      `[ferrogate] usage projection repair skipped: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
   await gatewayRequestLogRetention(env);
   // #689 — expired `/v1/responses` conversation state, on the SAME tick.
   //

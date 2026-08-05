@@ -28,17 +28,13 @@
  *
  * The claim is `LedgerStore.record` returning `recorded` — the idempotent
  * `ON CONFLICT (billing_event_id) DO NOTHING` write keyed on
- * `ledgerEntryId(event)`. This accumulate therefore runs from exactly one place:
- * `MeteringUsageSink.#deliverOnce`, on the `recorded` branch only. A `duplicate`
- * or `conflict` outcome accumulates NOTHING, which is what keeps a replayed
- * outbox row from counting a request's tokens twice — the accumulate itself is
- * `existing + excluded`, deliberately additive and deliberately not idempotent.
+ * `ledgerEntryId(event)`. `MeteringUsageSink.#deliverOnce` accumulates on the
+ * recorded branch, and may also retry the tenant object on a duplicate branch;
+ * `usage_event_claims` keeps that repair from incrementing counters twice.
  *
- * The residual window is the one the storage module names: a crash between a
- * won claim and this accumulate UNDER-counts one request's tokens. Under-count
- * is the correct direction — it can only fail to refuse, never wrongly refuse —
- * and closing it needs a `usage_event_claims` table in the tenant migration,
- * which is not this slice's file.
+ * The tenant-local claim closes the old crash window after the control claim:
+ * replaying the object batch is safe, but it still cannot make the control
+ * claim and object batch one commit.
  *
  * ## Attribution, and the one case it is dropped
  *
@@ -57,10 +53,16 @@
  * the per-key token attribution that is dropped. Under-attribution, never
  * mis-attribution.
  */
-import { D1UsageLedger, type UsageAggregateWrite } from "@ferrogate/storage";
+import {
+  D1UsageLedger,
+  DurableObjectD1Database,
+  periodMonthFromUnix,
+  type UsageAggregateWrite,
+} from "@ferrogate/storage";
 import type { QuotaScopeKind } from "@ferrogate/storage";
 import type { UsageRecordContext } from "../inference/ports.js";
 import { gatewayTenantHandle } from "../ratelimit/wallet.js";
+import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type { MeteredCharge } from "./ports.js";
 
 /**
@@ -99,6 +101,7 @@ export interface MeteringAttribution {
  */
 export interface MeteringDrainContext extends UsageRecordContext {
   readonly attribution?: MeteringAttribution | undefined;
+  readonly usageDatabase?: D1Database | null | undefined;
 }
 
 /** Bindings this module reads. */
@@ -113,6 +116,7 @@ export interface UsageLedgerBindings {
    * misconfiguration.
    */
   readonly DB?: D1Database | undefined;
+  readonly TENANT_DATA?: TenantDataBindings["TENANT_DATA"] | undefined;
 }
 
 /** The seam the sink writes the accumulate through. */
@@ -121,7 +125,15 @@ export interface UsageAggregateSink {
 }
 
 /** `env.DB`, when it is really a D1 binding (a `[vars]` `DB` is a string). */
-export function usageDatabaseFrom(env: unknown): D1Database | undefined {
+export function usageDatabaseFrom(env: unknown, tenantId?: string): D1Database | undefined {
+  if (tenantId !== undefined) {
+    if (tenantId.trim() === "") return undefined;
+    if (typeof env !== "object" || env === null) return undefined;
+    const namespace = (env as UsageLedgerBindings).TENANT_DATA;
+    if (namespace === undefined) return undefined;
+    const stub = tenantDataObjectFor({ TENANT_DATA: namespace }, tenantId);
+    return new DurableObjectD1Database(tenantId, stub).asD1Database();
+  }
   if (typeof env !== "object" || env === null) return undefined;
   const candidate = (env as UsageLedgerBindings).DB;
   return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
@@ -134,6 +146,95 @@ export function d1UsageAggregateSink(db: D1Database, tenantId: string): UsageAgg
     async accumulate(write: UsageAggregateWrite): Promise<void> {
       await ledger.persistUsageAggregate(write);
     },
+  };
+}
+
+/**
+ * Add the durable identity needed to repair a control projection after an
+ * isolate dies. The payload contains only projection lookup dimensions; the
+ * projection reader reloads all counters from the tenant object, so retrying
+ * never re-applies an additive delta.
+ */
+export function withUsageProjectionRetry(
+  write: UsageAggregateWrite,
+  sourceId: string,
+): UsageAggregateWrite {
+  return {
+    ...write,
+    projectionRetry: {
+      sourceId,
+      payloadJson: JSON.stringify({
+        context: write.context,
+        logicalModel: write.logicalModel,
+        provider: write.provider,
+        occurredAtUnix: write.occurredAtUnix,
+        metadata: [...(write.metadata?.entries() ?? [])],
+        ...(write.presenceTouch === undefined
+          ? {}
+          : { presenceApiKeyId: write.presenceTouch.apiKeyId }),
+      }),
+    },
+  };
+}
+
+/** Persist request attribution on the charge for context-free outbox repair. */
+export function chargeWithTenantAttribution(
+  charge: MeteredCharge,
+  attribution: MeteringAttribution | undefined,
+): MeteredCharge {
+  if (attribution === undefined || attribution.requestId !== charge.requestId) return charge;
+  const tenant = {
+    ...charge.event.tenant,
+    ...(attribution.tenantId === undefined || attribution.tenantId === ""
+      ? {}
+      : { organization_id: attribution.tenantId }),
+    ...(attribution.projectId === undefined || attribution.projectId === ""
+      ? {}
+      : { project_id: attribution.projectId }),
+    ...(attribution.workspaceId === undefined || attribution.workspaceId === ""
+      ? {}
+      : { workspace_id: attribution.workspaceId }),
+    ...(attribution.apiKeyId === undefined || attribution.apiKeyId === ""
+      ? {}
+      : { api_key_id: attribution.apiKeyId }),
+  };
+  return { ...charge, event: { ...charge.event, tenant } };
+}
+
+/** Fold the object-owned monotonic rollups into the same tenant batch. */
+export function withUsageDerivedRollups(
+  write: UsageAggregateWrite,
+  charge: MeteredCharge,
+  attribution: MeteringAttribution | undefined,
+): UsageAggregateWrite {
+  const owned = attribution !== undefined && attribution.requestId === charge.requestId;
+  const tenantId = write.context.organizationId ?? charge.event.tenant.organization_id ?? "";
+  if (tenantId === "") return write;
+  const apiKeyId = charge.event.tenant.api_key_id;
+  const agentRunId = charge.event.agent_run_id;
+  if (apiKeyId === undefined && agentRunId === undefined && !owned) return write;
+  return {
+    ...write,
+    ...(apiKeyId === undefined || apiKeyId === ""
+      ? {}
+      : {
+          presenceTouch: {
+            tenantId,
+            apiKeyId,
+            seenAtUnix: charge.occurredAtUnix,
+          },
+        }),
+    ...(agentRunId === undefined || agentRunId === ""
+      ? {}
+      : {
+          agentCostBurn: {
+            tenantId,
+            agentKey: agentRunId,
+            period: periodMonthFromUnix(charge.occurredAtUnix),
+            deltaUsd: charge.entry.cost.total_cost,
+            nowUnix: charge.occurredAtUnix,
+          },
+        }),
   };
 }
 
@@ -204,6 +305,7 @@ export function usageWriteFor(
   const apiKeyId = applied?.apiKeyId ?? charge.event.tenant.api_key_id;
 
   return {
+    sourceId: charge.id,
     context: {
       id: usageContextId([tenantId, projectId, workspaceId, apiKeyId]),
       ...(tenantId === undefined ? {} : { organizationId: tenantId }),
@@ -231,5 +333,8 @@ export function usageWriteFor(
     isError: charge.event.status_code >= 400,
     occurredAtUnix: charge.occurredAtUnix,
     scopes,
+    ...(Object.keys(charge.event.metadata ?? {}).length === 0
+      ? {}
+      : { metadata: new Map(Object.entries(charge.event.metadata)) }),
   };
 }

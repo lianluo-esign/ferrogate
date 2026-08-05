@@ -121,9 +121,33 @@ import type { MeteringBindingResolver } from "./runtime.js";
 import {
   type MeteringAttribution,
   type MeteringDrainContext,
+  chargeWithTenantAttribution,
   d1UsageAggregateSink,
+  withUsageDerivedRollups,
+  withUsageProjectionRetry,
   usageWriteFor,
 } from "./usage-ledger.js";
+import {
+  clearUsageProjectionRetry,
+  deferUsageProjectionRetry,
+  listUsageProjectionRetries,
+  projectUsageProjectionRetry,
+  projectUsageRollups,
+  usageProjectionRequestFor,
+} from "./usage-projection.js";
+
+async function projectWithRetry(work: () => Promise<void>): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await work();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
 /**
  * The two durable seams a drain writes through, resolved together.
@@ -143,6 +167,8 @@ interface MeteringBackend {
    * and D1 has no cross-database transaction — see `./usage-ledger.ts`.
    */
   readonly usageDatabase?: D1Database | undefined;
+  /** Control-D1 destination for replace-style tenant-derived usage views. */
+  readonly usageProjectionDatabase?: D1Database | undefined;
   /**
    * The proactive budget-threshold alerter (#170/#228), when this deployment
    * configures one — see `./budget-alerts.ts`.
@@ -464,11 +490,13 @@ export class MeteringUsageSink implements UsageSink {
     const database = this.#bindings.database(env);
     const queue = this.#bindings.queue(env);
     const usageDatabase = this.#bindings.usageDatabase?.(env);
+    const usageProjectionDatabase = this.#bindings.usageProjectionDatabase?.(env);
     const budgetAlerts = budgetAlertPortsFrom(env);
     const resolved: MeteringBackend = {
       ledger: database === undefined ? fallback.ledger : new D1LedgerStore(database),
       publisher: queue === undefined ? fallback.publisher : new QueueBillingReportPublisher(queue),
       ...(usageDatabase === undefined ? {} : { usageDatabase }),
+      ...(usageProjectionDatabase === undefined ? {} : { usageProjectionDatabase }),
       ...(budgetAlerts === undefined ? {} : { budgetAlerts }),
     };
     this.#backends.set(env, resolved);
@@ -633,7 +661,7 @@ export class MeteringUsageSink implements UsageSink {
         }
         for (const record of due) {
           attempted.add(record.id);
-          await this.#deliverOnce(record, now, backend, attribution);
+          await this.#deliverOnce(record, now, backend, attribution, rc);
         }
       }
     } catch (error) {
@@ -715,6 +743,7 @@ export class MeteringUsageSink implements UsageSink {
     now: number,
     backend: MeteringBackend,
     attribution: MeteringAttribution | undefined,
+    rc: MeteringDrainContext | undefined,
   ): Promise<void> {
     const { id, attempts } = record;
     // #305/#522 — stamp the agent run that caused this spend, when the drain's
@@ -722,7 +751,10 @@ export class MeteringUsageSink implements UsageSink {
     // never a change to `id`: see `./agent-run.ts`. Applied before BOTH the
     // durable write and the downstream report, so the ledger row and the
     // published event agree.
-    const charge = chargeWithAgentRun(record.charge, attribution);
+    const charge = chargeWithTenantAttribution(
+      chargeWithAgentRun(record.charge, attribution),
+      attribution,
+    );
     try {
       if (!record.settled) {
         const outcome = await backend.ledger.record(charge);
@@ -739,22 +771,21 @@ export class MeteringUsageSink implements UsageSink {
           return;
         }
         if (outcome.status === "duplicate") {
-          // Rust: `if !recorded { return Ok(()); }` — a replay skips the
-          // metrics, the counters and the downstream report entirely. Dropping
-          // the row is what stops a replay from producing a second report; the
-          // ORIGINAL row already delivered (or is still queued to).
+          // A control claim may have won immediately before the tenant object
+          // became unavailable. Re-run the idempotent tenant batch so this
+          // retry can repair that gap, but never publish a second report for a
+          // verified replay.
           this.#stats.duplicates += 1;
+          await this.#accumulate(backend, charge, attribution, rc, false);
           this.#outbox.delete(id);
           return;
         }
-        this.#stats.recorded += 1;
+        if (outcome.status === "recorded") this.#stats.recorded += 1;
+        // The control claim and the tenant object cannot share a D1
+        // transaction. The tenant batch has its own source-id claim and is
+        // safe to retry after a control claim has already won.
+        await this.#accumulate(backend, charge, attribution, rc);
         this.#outbox.markSettled(id);
-        // CLAIM FIRST, ACCUMULATE SECOND — and ONLY on `recorded`. The control
-        // database's `ON CONFLICT DO NOTHING` claim is the exactly-once gate;
-        // the tenant-database accumulate below is `existing + excluded`, i.e.
-        // additive and NOT idempotent, so running it on a `duplicate` would
-        // count one request's tokens twice. See `./usage-ledger.ts`.
-        await this.#accumulate(backend, charge, attribution);
       }
       await backend.publisher.deliver(charge);
       this.#stats.delivered += 1;
@@ -811,24 +842,57 @@ export class MeteringUsageSink implements UsageSink {
    * `ratelimit/quota.ts::d1SpendSource` (the monthly USD budget) and
    * `ratelimit/token-budget.ts` (`api_keys.monthly_token_budget`).
    *
-   * BEST-EFFORT by construction, and the failure direction is deliberate: an
-   * accumulate that fails leaves the budget UNDER-counted, which can only fail
-   * to refuse a caller, never wrongly refuse one. Rethrowing would run
-   * `#deliverOnce`'s `catch`, which counts a delivery failure and arms a retry —
-   * i.e. a bookkeeping failure would become a duplicate downstream REPORT of a
-   * charge that was already delivered.
+   * The tenant batch is authoritative and therefore fail-closed: a missing or
+   * unavailable tenant object leaves the billing outbox unsettled so a later
+   * drain can repair the under-count. The control projection is best-effort
+   * after that object commit because its durable tenant-local retry intent can
+   * rebuild the replace-style view without replaying additive usage.
    */
   async #accumulate(
     backend: MeteringBackend,
     charge: MeteredCharge,
     attribution: MeteringAttribution | undefined,
+    rc: MeteringDrainContext | undefined,
+    countStats = true,
   ): Promise<void> {
-    const db = backend.usageDatabase;
-    if (db === undefined) {
-      return; // no tenant database bound; nothing to accumulate into
+    const hasRequestDatabase =
+      rc !== undefined && Object.prototype.hasOwnProperty.call(rc, "usageDatabase");
+    const tenantId =
+      (attribution?.requestId === charge.requestId ? attribution.tenantId : undefined) ??
+      charge.event.tenant.organization_id ??
+      "";
+    const hasTenantResolver =
+      tenantId !== "" && rc !== undefined && this.#bindings?.usageDatabase;
+    const tenantDatabase = hasTenantResolver
+      ? this.#bindings?.usageDatabase?.(rc.env, tenantId)
+      : undefined;
+    // A request context's database is only a convenience for the request that
+    // created it. The durable outbox can be drained by a different tenant's
+    // request, so once the resolver is available the charge's own tenant is the
+    // only admissible routing key. Falling back to `rc.usageDatabase` here would
+    // let a tenant-B replay write into tenant A's object.
+    if (rc !== undefined && this.#bindings?.usageDatabase !== undefined && tenantId === "") {
+      // Reject only the tenant rollup leg. The central billing ledger/report is
+      // still authoritative for an unscoped platform charge and must not be
+      // lost just because there is no object it can be routed to.
+      this.#report("usage_tenant", new Error(`usage charge ${charge.id} has no tenant authority`));
+      return;
     }
-    const write = usageWriteFor(charge, attribution);
-    if (write === null) {
+    const db = hasTenantResolver
+      ? tenantDatabase
+      : hasRequestDatabase
+        ? (rc?.usageDatabase ?? undefined)
+        : backend.usageDatabase;
+    if (db === undefined && this.#bindings === undefined && !hasRequestDatabase) {
+      return; // legacy in-memory/shared-D1 mode has no tenant authority to write
+    }
+    if (db === undefined && tenantId !== "") {
+      throw new Error(`tenant usage database is unavailable for ${tenantId}`);
+    }
+    if (db === undefined) return;
+    const projectionDatabase = backend.usageProjectionDatabase;
+    const baseWrite = usageWriteFor(charge, attribution);
+    if (baseWrite === null) {
       // No scope at all: `persistUsageAggregate` would refuse this, and rightly
       // — "a call folded into no scope is spend that no budget check can ever
       // see". Counted so an attribution regression is visible rather than
@@ -838,20 +902,89 @@ export class MeteringUsageSink implements UsageSink {
         () => this.#diagnostics.onError?.("usage_unattributed", new Error(charge.requestId)),
         "usage_unattributed",
       );
-      return;
+      throw new Error(`usage charge ${charge.id} has no tenant/project scope`);
     }
+    const derivedWrite = withUsageDerivedRollups(baseWrite, charge, attribution);
+    const write =
+      projectionDatabase === undefined
+        ? derivedWrite
+        : withUsageProjectionRetry(derivedWrite, charge.id);
     try {
-      const tenantId = write.context.organizationId ?? "";
       await d1UsageAggregateSink(db, tenantId).accumulate(write);
-      this.#stats.aggregated += 1;
+      if (countStats) this.#stats.aggregated += 1;
     } catch (error) {
       this.#report("usage_aggregate", error);
-      // The alert reads the rollup this accumulate was supposed to write, so a
-      // failed accumulate has nothing fresh to evaluate against. Returning is
-      // what keeps a bookkeeping outage from firing a tier off a stale number.
-      return;
+      // The outbox remains unsettled and is rescheduled by the caller. The
+      // tenant claim makes the next attempt safe even if the control claim won.
+      throw error;
+    }
+    if (projectionDatabase !== undefined) {
+      try {
+        await projectWithRetry(() =>
+          projectUsageRollups(db, projectionDatabase, usageProjectionRequestFor(write)),
+        );
+        await clearUsageProjectionRetry(db, write.projectionRetry?.sourceId ?? charge.id);
+      } catch (error) {
+        // Object state is authoritative. The durable intent remains for the
+        // scheduled repair and must not hold billing delivery hostage.
+        this.#report("usage_projection", error);
+      }
     }
     await this.#budgetAlerts(backend, charge, attribution);
+  }
+
+  /** Repair tenant-local control projection intents without replaying usage. */
+  async sweepUsageProjections(
+    rc: MeteringDrainContext,
+    tenantIds: readonly string[],
+    nowUnixSeconds?: number,
+    batchSize = BILLING_OUTBOX_BATCH,
+  ): Promise<void> {
+    const backend = this.#backend(rc.env);
+    const projectionDatabase = backend.usageProjectionDatabase;
+    const bindings = this.#bindings;
+    const resolveTenantDatabase = bindings?.usageDatabase;
+    if (projectionDatabase === undefined || resolveTenantDatabase === undefined) return;
+    const now = nowUnixSeconds ?? this.#clock.nowUnixSeconds();
+    const pageSize = Math.max(1, Math.trunc(batchSize));
+    for (const tenantId of tenantIds) {
+      if (tenantId.trim() === "") continue;
+      const tenantDatabase = resolveTenantDatabase(rc.env, tenantId);
+      if (tenantDatabase === undefined) continue;
+      try {
+        for (;;) {
+          const rows = await listUsageProjectionRetries(tenantDatabase, now, pageSize);
+          if (rows.length === 0) break;
+          let stateWriteFailed = false;
+          for (const row of rows) {
+            try {
+              if (row.tenantId.trim() !== tenantId) {
+                throw new Error(
+                  `usage projection retry ${row.sourceId} belongs to ${row.tenantId}, not ${tenantId}`,
+                );
+              }
+              await projectWithRetry(() =>
+                projectUsageProjectionRetry(tenantDatabase, projectionDatabase, row),
+              );
+              await clearUsageProjectionRetry(tenantDatabase, row.sourceId);
+            } catch (error) {
+              try {
+                await deferUsageProjectionRetry(tenantDatabase, row, now);
+              } catch (deferError) {
+                stateWriteFailed = true;
+                this.#report("usage_projection_retry_defer", deferError);
+              }
+              this.#report("usage_projection_retry", error);
+            }
+          }
+          // A due row whose retry-state update also failed would be returned
+          // forever by the same page. Leave it for the next scheduled pass.
+          if (stateWriteFailed) break;
+        }
+      } catch (error) {
+        this.#report("usage_projection_list", error);
+      }
+    }
   }
 
   /**
@@ -891,7 +1024,8 @@ export class MeteringUsageSink implements UsageSink {
     // the wrong operator.
     const owned = attribution !== undefined && attribution.requestId === charge.requestId;
     const scopes = budgetAlertScopesFor(owned ? attribution : undefined, charge.event.tenant);
-    const tenantId = charge.event.tenant.organization_id ?? attribution?.tenantId ?? "";
+    const tenantId =
+      charge.event.tenant.organization_id ?? (owned ? attribution?.tenantId : undefined) ?? "";
     if (tenantId.trim() === "") {
       this.#report("budget_alert_tenant", new Error(charge.requestId));
       return;
@@ -950,6 +1084,9 @@ export class MeteringUsageSink implements UsageSink {
       const due = await outbox.listDue(now - OUTBOX_SWEEP_GRACE_SECONDS, BILLING_OUTBOX_BATCH);
       for (const record of due) {
         try {
+          if (this.#bindings !== undefined) {
+            await this.#accumulate(backend, record.charge, undefined, rc);
+          }
           await backend.publisher.deliver(record.charge);
           this.#stats.delivered += 1;
           await outbox.reap(record.id);

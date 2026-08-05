@@ -22,6 +22,7 @@
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
+import { periodMonthFromUnix } from "@ferrogate/storage";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import {
   type MeteringAttribution,
@@ -38,10 +39,12 @@ import { createGatewayApp } from "../../src/routes/index.js";
 import { tenantDatabase } from "../../src/tenancy/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
-import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
-import { chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
+import { tenantObjectDb } from "../tenant-object.js";
+import { RecordingDatabase, RecordingQueue, resetMeteringTables } from "./d1-harness.js";
+import { FIXTURE_COST_USD, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
+const controlDb = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
 const BASE = "https://gw.test";
 
 const ATTRIBUTION: MeteringAttribution = {
@@ -59,7 +62,7 @@ interface RollupRow {
 
 /** Every `usage_aggregate_rollups` row, joined to the context it is filed under. */
 async function aggregateRows(): Promise<RollupRow[]> {
-  const result = await db
+  const result = await tenantObjectDb("tenant_a")
     .prepare(
       "SELECT r.total_tokens AS total_tokens, c.api_key_id AS api_key_id " +
         "FROM usage_aggregate_rollups r JOIN tenant_contexts c ON c.id = r.tenant_context_id",
@@ -69,7 +72,7 @@ async function aggregateRows(): Promise<RollupRow[]> {
 }
 
 async function monthlyScopes(): Promise<{ scope_type: string; scope_id: string }[]> {
-  const result = await db
+  const result = await tenantObjectDb("tenant_a")
     .prepare("SELECT scope_type, scope_id FROM usage_monthly_rollups ORDER BY scope_type")
     .all<{ scope_type: string; scope_id: string }>();
   return result.results;
@@ -81,6 +84,32 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM tenant_contexts").run();
   await db.prepare("DELETE FROM api_keys").run();
+    await controlDb.prepare("DELETE FROM usage_metadata_rollups").run();
+    await controlDb.prepare("DELETE FROM usage_monthly_rollups").run();
+    await controlDb.prepare("DELETE FROM usage_aggregate_rollups").run();
+  await controlDb.prepare("DELETE FROM observed_agent_presence").run();
+  const tenantDb = tenantObjectDb("tenant_a");
+  await tenantDb.batch([
+    tenantDb.prepare("DELETE FROM observed_agent_presence"),
+    tenantDb.prepare("DELETE FROM agent_cost_burn"),
+    tenantDb.prepare("DELETE FROM usage_projection_retries"),
+    tenantDb.prepare("DELETE FROM usage_event_claims"),
+    tenantDb.prepare("DELETE FROM usage_metadata_rollups"),
+    tenantDb.prepare("DELETE FROM usage_monthly_rollups"),
+    tenantDb.prepare("DELETE FROM usage_aggregate_rollups"),
+    tenantDb.prepare("DELETE FROM tenant_contexts"),
+  ]);
+  const replayTenantDb = tenantObjectDb("tenant_b");
+  await replayTenantDb.batch([
+    replayTenantDb.prepare("DELETE FROM observed_agent_presence"),
+    replayTenantDb.prepare("DELETE FROM agent_cost_burn"),
+    replayTenantDb.prepare("DELETE FROM usage_projection_retries"),
+    replayTenantDb.prepare("DELETE FROM usage_event_claims"),
+    replayTenantDb.prepare("DELETE FROM usage_metadata_rollups"),
+    replayTenantDb.prepare("DELETE FROM usage_monthly_rollups"),
+    replayTenantDb.prepare("DELETE FROM usage_aggregate_rollups"),
+    replayTenantDb.prepare("DELETE FROM tenant_contexts"),
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -132,6 +161,20 @@ describe("usageWriteFor — attribution belongs to ONE request", () => {
     expect(usageDatabaseFrom({ DB: "a-var-string" })).toBeUndefined();
     expect(usageDatabaseFrom(undefined)).toBeUndefined();
   });
+
+  test("usageDatabaseFrom resolves the tenant object before the shared DB", () => {
+    const bindings = env as unknown as {
+      readonly DB: D1Database;
+      readonly TENANT_DATA: unknown;
+    };
+    const tenantDb = usageDatabaseFrom(
+      { DB: bindings.DB, TENANT_DATA: bindings.TENANT_DATA },
+      "tenant_usage_authority",
+    );
+
+    expect(tenantDb).toBeDefined();
+    expect(tenantDb).not.toBe(bindings.DB);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -160,6 +203,48 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     expect(sink.stats.recorded).toBe(1);
     expect(sink.stats.aggregated).toBe(1);
     expect(await aggregateRows()).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
+    expect(
+      await controlDb
+        .prepare(
+          "SELECT tenant, period_month, scope_type, scope_id, total_tokens, cost_usd " +
+            "FROM usage_monthly_rollups",
+        )
+        .all(),
+    ).toMatchObject({
+      results: [
+        {
+          tenant: "tenant_a",
+          scope_type: "tenant",
+          scope_id: "tenant_a",
+          total_tokens: 15,
+          cost_usd: FIXTURE_COST_USD,
+        },
+      ],
+    });
+    expect(
+      await controlDb
+        .prepare(
+          "SELECT tenant, logical_model, provider, api_key_id, total_tokens " +
+            "FROM usage_aggregate_rollups",
+        )
+        .all(),
+    ).toMatchObject({
+      results: [
+        {
+          tenant: "tenant_a",
+          logical_model: "gpt-4o-mini",
+          provider: "openai-main",
+          api_key_id: "key_metered",
+          total_tokens: 15,
+        },
+      ],
+    });
+    const presenceProjection = await controlDb
+      .prepare("SELECT tenant_id, api_key_id, request_count FROM observed_agent_presence")
+      .all();
+    expect(presenceProjection.results).toEqual([
+      { tenant_id: "tenant_a", api_key_id: "key_metered", request_count: 1 },
+    ]);
   });
 
   test("and in usage_monthly_rollups for every scope in the chain", async () => {
@@ -177,7 +262,102 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     ]);
   });
 
-  test("a REPLAY accumulates nothing — the accumulate is additive, not idempotent", async () => {
+  test("the same tenant settlement updates presence and agent burn", async () => {
+    const queue = new RecordingQueue();
+    const sink = sinkFor(queue);
+    const tenantDb = tenantObjectDb("tenant_a");
+    const attribution = { ...ATTRIBUTION, agentRunId: "agent_run_1" };
+
+    sink.record(usageFixture({ requestId: attribution.requestId }));
+    await sink.flush({
+      env: bindings(queue),
+      attribution,
+      usageDatabase: tenantDb,
+    });
+
+    const presence = await tenantDb
+      .prepare(
+        "SELECT tenant_id, api_key_id, first_seen_at_unix, last_seen_at_unix, request_count " +
+          "FROM observed_agent_presence",
+      )
+      .first<{
+        tenant_id: string;
+        api_key_id: string;
+        first_seen_at_unix: number;
+        last_seen_at_unix: number;
+        request_count: number;
+      }>();
+    expect(presence).toMatchObject({
+      tenant_id: "tenant_a",
+      api_key_id: "key_metered",
+      request_count: 1,
+    });
+    expect(presence?.first_seen_at_unix).toBe(presence?.last_seen_at_unix);
+    expect(presence?.last_seen_at_unix).toBeGreaterThan(0);
+
+    const burn = await tenantDb
+      .prepare("SELECT tenant_id, agent_key, period, accumulated_usd FROM agent_cost_burn")
+      .first<{
+        tenant_id: string;
+        agent_key: string;
+        period: string;
+        accumulated_usd: number;
+      }>();
+    expect(burn).toMatchObject({
+      tenant_id: "tenant_a",
+      agent_key: "agent_run_1",
+      accumulated_usd: 4.05e-6,
+    });
+    expect(burn?.period).toBe(periodMonthFromUnix(presence?.last_seen_at_unix ?? 0));
+  });
+
+  test("a control projection outage leaves a durable intent and repairs without re-accumulating", async () => {
+    const queue = new RecordingQueue();
+    const failingControl = new RecordingDatabase(controlDb);
+    failingControl.failure = new Error("control projection unavailable");
+    const sink = sinkFor(queue);
+    const failedEnv = {
+      ...bindings(queue),
+      CONTROL_DB: failingControl,
+    };
+
+    sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
+    await sink.flush({
+      env: failedEnv,
+      attribution: ATTRIBUTION,
+      usageDatabase: tenantObjectDb("tenant_a"),
+    });
+
+    const tenantDb = tenantObjectDb("tenant_a");
+    const pending = await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all();
+    expect(pending.results).toMatchObject([{ source_id: expect.any(String) }]);
+    const tenantAggregate = await tenantDb
+      .prepare(
+        "SELECT r.total_tokens AS total_tokens, c.api_key_id AS api_key_id " +
+          "FROM usage_aggregate_rollups r JOIN tenant_contexts c ON c.id = r.tenant_context_id",
+      )
+      .all<RollupRow>();
+    expect(tenantAggregate.results).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
+
+    failingControl.failure = undefined;
+    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000);
+
+    const repaired = await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all();
+    expect(repaired.results).toEqual([]);
+    const repairedAggregate = await tenantDb
+      .prepare(
+        "SELECT r.total_tokens AS total_tokens, c.api_key_id AS api_key_id " +
+          "FROM usage_aggregate_rollups r JOIN tenant_contexts c ON c.id = r.tenant_context_id",
+      )
+      .all<RollupRow>();
+    expect(repairedAggregate.results).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
+    const projected = await controlDb
+      .prepare("SELECT tenant, total_tokens FROM usage_aggregate_rollups")
+      .all();
+    expect(projected.results).toMatchObject([{ tenant: "tenant_a", total_tokens: 15 }]);
+  });
+
+  test("a REPLAY repairs idempotently without re-adding usage", async () => {
     const queue = new RecordingQueue();
     const sink = sinkFor(queue);
     const rc = { env: bindings(queue), attribution: ATTRIBUTION };
@@ -185,7 +365,8 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
     await sink.flush(rc);
     // Same request id ⇒ same `ledgerEntryId` ⇒ the control-database claim
-    // answers `duplicate`, and the tenant-database accumulate must NOT run.
+    // answers `duplicate`. The tenant batch is safe to retry because its
+    // source-id claim guards every additive statement.
     sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
     await sink.flush(rc);
 
@@ -193,21 +374,165 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     expect(await aggregateRows()).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
   });
 
-  test("with no tenant database bound nothing accumulates and nothing throws", async () => {
+  test("with no tenant object bound the charge stays retryable", async () => {
     const queue = new RecordingQueue();
     const sink = sinkFor(queue);
     // Destructured out rather than `delete`d: the point is that the key is
     // ABSENT, not undefined — `env.DB` must not even be present for the
     // aggregate leg's binding probe to skip.
-    const { DB: _unbound, ...withoutDb } = bindings(queue);
+    const { DB: _unbound, TENANT_DATA: _tenantDataUnbound, ...withoutDb } = bindings(queue);
 
     sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
     await sink.flush({ env: withoutDb, attribution: ATTRIBUTION });
 
-    // The billing ledger still settles — only the aggregate leg is absent.
+    // The billing ledger settles, but the tenant leg fails closed and remains
+    // retryable instead of falling back to the shared DB.
     expect(sink.stats.recorded).toBe(1);
     expect(sink.stats.aggregated).toBe(0);
+    expect(sink.stats.deliveryFailures).toBe(1);
     expect(await aggregateRows()).toEqual([]);
+  });
+
+  test("a context-free outbox sweep restores attribution-derived rollups", async () => {
+    const queue = new RecordingQueue();
+    const sink = sinkFor(queue);
+    const attribution = { ...ATTRIBUTION, agentRunId: "agent_run_recovered" };
+    const { DB: _unbound, TENANT_DATA: _tenantDataUnbound, ...withoutObject } = bindings(queue);
+
+    sink.record(usageFixture({ requestId: attribution.requestId }));
+    await sink.flush({ env: withoutObject, attribution });
+
+    await sink.sweep({ env: bindings(queue) }, 2_000_000_000);
+
+    const tenantDb = tenantObjectDb("tenant_a");
+    const presence = await tenantDb
+      .prepare("SELECT tenant_id, api_key_id, request_count FROM observed_agent_presence")
+      .all();
+    expect(presence.results).toEqual([
+      { tenant_id: "tenant_a", api_key_id: "key_metered", request_count: 1 },
+    ]);
+    const burn = await tenantDb
+      .prepare("SELECT tenant_id, agent_key, accumulated_usd FROM agent_cost_burn")
+      .all();
+    expect(burn.results).toEqual([
+      { tenant_id: "tenant_a", agent_key: "agent_run_recovered", accumulated_usd: 4.05e-6 },
+    ]);
+  });
+
+  test("a replay routes by charge tenant, never by the request database", async () => {
+    const queue = new RecordingQueue();
+    const sink = sinkFor(queue);
+    const charge = usageFixture({ requestId: "fg-tenant-b-replay", tenantId: "tenant_b" });
+
+    sink.record(charge);
+    await sink.flush({
+      env: bindings(queue),
+      attribution: ATTRIBUTION,
+      usageDatabase: tenantObjectDb("tenant_a"),
+    });
+
+    const tenantA = await tenantObjectDb("tenant_a")
+      .prepare("SELECT total_tokens FROM usage_monthly_rollups")
+      .all();
+    const tenantB = await tenantObjectDb("tenant_b")
+      .prepare("SELECT total_tokens FROM usage_monthly_rollups")
+      .all();
+    expect(tenantA.results).toEqual([]);
+    expect(tenantB.results).toEqual([
+      { total_tokens: 15 },
+      { total_tokens: 15 },
+    ]);
+  });
+
+  test("a charge without tenant identity cannot borrow the request database", async () => {
+    const queue = new RecordingQueue();
+    const sink = sinkFor(queue);
+    const charge = usageFixture({
+      requestId: "fg-unattributed-replay",
+      tenantId: undefined,
+      projectId: "project_1",
+    });
+
+    sink.record(charge);
+    await sink.flush({
+      env: bindings(queue),
+      attribution: ATTRIBUTION,
+      usageDatabase: tenantObjectDb("tenant_a"),
+    });
+
+    expect(sink.stats.deliveryFailures).toBe(0);
+    expect(queue.sent).toHaveLength(1);
+    expect(await aggregateRows()).toEqual([]);
+  });
+
+  test("usage projection repair drains every due page", async () => {
+    const queue = new RecordingQueue();
+    const failingControl = new RecordingDatabase(controlDb);
+    failingControl.failure = new Error("control projection unavailable");
+    const sink = sinkFor(queue);
+    const tenantDb = tenantObjectDb("tenant_a");
+    const failedEnv = { ...bindings(queue), CONTROL_DB: failingControl };
+
+    for (let index = 0; index < 3; index += 1) {
+      const requestId = `fg-projection-page-${index}`;
+      sink.record(usageFixture({ requestId }));
+      await sink.flush({
+        env: failedEnv,
+        attribution: { ...ATTRIBUTION, requestId },
+        usageDatabase: tenantDb,
+      });
+    }
+    expect((await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results)
+      .toHaveLength(3);
+
+    failingControl.failure = undefined;
+    await sink.sweepUsageProjections(
+      { env: bindings(queue) },
+      ["tenant_a"],
+      2_000_000_000,
+      2,
+    );
+
+    expect((await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results)
+      .toEqual([]);
+    expect(
+      (await controlDb.prepare("SELECT tenant, total_tokens FROM usage_monthly_rollups").all())
+        .results,
+    ).toContainEqual({ tenant: "tenant_a", total_tokens: 45 });
+  });
+
+  test("usage projection repair rejects a row whose tenant disagrees with its payload", async () => {
+    const queue = new RecordingQueue();
+    const failingControl = new RecordingDatabase(controlDb);
+    failingControl.failure = new Error("control projection unavailable");
+    const sink = sinkFor(queue);
+    const tenantDb = tenantObjectDb("tenant_a");
+    const requestId = "fg-projection-tenant-mismatch";
+
+    sink.record(usageFixture({ requestId }));
+    await sink.flush({
+      env: { ...bindings(queue), CONTROL_DB: failingControl },
+      attribution: { ...ATTRIBUTION, requestId },
+      usageDatabase: tenantDb,
+    });
+    const sourceId = (
+      await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").first<{ source_id: string }>()
+    )?.source_id;
+    if (sourceId === undefined) throw new Error("expected a durable usage projection retry");
+    await tenantDb
+      .prepare("UPDATE usage_projection_retries SET tenant_id = 'tenant_b' WHERE source_id = ?")
+      .bind(sourceId)
+      .run();
+
+    failingControl.failure = undefined;
+    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000, 2);
+
+    expect(
+      (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
+    ).toEqual([{ source_id: sourceId }]);
+    expect((await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results).toEqual(
+      [],
+    );
   });
 });
 
@@ -229,7 +554,7 @@ describe("the loop, closed: a served request moves the token budget's own readin
   const KEY_ID = "key_loop";
 
   async function seedBudgetedKey(budget: number): Promise<void> {
-    await db
+    await tenantObjectDb("tenant_a")
       .prepare(
         "INSERT OR REPLACE INTO api_keys " +
           "(id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, " +
@@ -242,7 +567,7 @@ describe("the loop, closed: a served request moves the token budget's own readin
 
   test("committed tokens go from 0 to the request's real total", async () => {
     await seedBudgetedKey(1_000_000);
-    const budgets = d1TokenBudgetSource(db);
+    const budgets = d1TokenBudgetSource(tenantObjectDb("tenant_a"));
 
     const before = await budgets.forApiKey(KEY_ID, "tenant_a");
     expect(before).toEqual({ ok: true, budget: 1_000_000, committedTokens: 0 });

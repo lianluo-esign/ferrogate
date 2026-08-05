@@ -63,6 +63,9 @@ import { completionTextFrom } from "./content.js";
 import {
   type OnlineEvalScoreDatabase,
   onlineEvalDatabaseFrom,
+  onlineEvalTenantDatabaseFrom,
+  writeOnlineEvalScoreProjections,
+  writeTenantOnlineEvalScores,
   writeOnlineEvalScores,
 } from "./d1.js";
 import { buildJudgeRequestBody, parseJudgeVerdict } from "./judge.js";
@@ -96,6 +99,10 @@ export interface OnlineEvalConsumerDeps {
   readonly routeFor?: (env: unknown, model: string) => PhysicalRoute | null;
   readonly dispatcher?: (env: unknown) => UpstreamDispatcher;
   readonly database?: (env: unknown) => OnlineEvalScoreDatabase | undefined;
+  /** Object-authoritative score database, grouped one tenant at a time. */
+  readonly tenantDatabase?: (env: unknown, tenantId: string) => OnlineEvalScoreDatabase | undefined;
+  /** Control-D1 projection database. */
+  readonly projectionDatabase?: (env: unknown) => OnlineEvalScoreDatabase | undefined;
   readonly now?: () => number;
   /** Judge call timeout. A wedged judge must not hold the consumer open. */
   readonly timeoutMs?: number;
@@ -162,6 +169,8 @@ export async function consumeOnlineEvalBatch(
   const dispatcherFor =
     deps.dispatcher ?? ((e: unknown) => dispatcherFromEnv(e as InferenceBindings));
   const databaseFor = deps.database ?? onlineEvalDatabaseFrom;
+  const tenantDatabaseFor = deps.tenantDatabase ?? onlineEvalTenantDatabaseFrom;
+  const projectionDatabaseFor = deps.projectionDatabase ?? onlineEvalDatabaseFrom;
   const now = deps.now ?? (() => Date.now());
   const timeoutMs = deps.timeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS;
   const maxBytes = deps.maxResponseBytes ?? DEFAULT_JUDGE_MAX_BYTES;
@@ -257,17 +266,42 @@ export async function consumeOnlineEvalBatch(
     return { scored: 0, malformed, refusedResidency, unjudgeable, retried: false };
   }
 
-  const db = databaseFor(env);
-  if (db === undefined) {
-    // No control database bound. The judging has already been paid for and
-    // there is nowhere to put it; retrying would pay again for the same
-    // nowhere, so the delivery is acked and the loss is visible in the result.
-    for (const message of batch.messages) message.ack?.();
-    return { scored: 0, malformed, refusedResidency, unjudgeable: unjudgeable, retried: false };
-  }
-
   try {
-    await writeOnlineEvalScores(db, records);
+    if (deps.database !== undefined) {
+      // Explicit database injection is the legacy/test seam. Production does
+      // not pass it: tenant rows are authoritative and the control DB is only
+      // their fleet projection.
+      const db = databaseFor(env);
+      if (db === undefined) throw new Error("online evaluation database is unavailable");
+      await writeOnlineEvalScores(db, records);
+    } else {
+      const projection = projectionDatabaseFor(env);
+      if (projection === undefined) {
+        // The judge has already been paid for. A missing projection destination
+        // is a durable-write failure, not a permanently bad sample: throwing
+        // into the common handler arms retryAll without acknowledging a result
+        // that has not reached either durable store.
+        throw new Error("online evaluation projection database is unavailable");
+      }
+
+      const byTenant = new Map<string, OnlineEvalScoreRecord[]>();
+      for (const record of records) {
+        if (record.tenantId.trim() === "") {
+          throw new Error("online evaluation score has no tenant authority");
+        }
+        const group = byTenant.get(record.tenantId) ?? [];
+        group.push(record);
+        byTenant.set(record.tenantId, group);
+      }
+      for (const [tenantId, group] of byTenant) {
+        const tenantDatabase = tenantDatabaseFor(env, tenantId);
+        if (tenantDatabase === undefined) {
+          throw new Error(`tenant evaluation database is unavailable for ${tenantId}`);
+        }
+        await writeTenantOnlineEvalScores(tenantDatabase, group);
+        await writeOnlineEvalScoreProjections(projection, group);
+      }
+    }
   } catch {
     batch.retryAll?.();
     return { scored: 0, malformed, refusedResidency, unjudgeable, retried: true };

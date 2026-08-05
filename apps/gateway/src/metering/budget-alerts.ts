@@ -139,6 +139,7 @@ import {
   type QuotaPolicySource,
   type SpendSource,
   currentPeriodMonth,
+  d1SpendSource,
   quotaPolicySourceFromEnv,
   spendSourceFromEnv,
 } from "../ratelimit/quota.js";
@@ -231,6 +232,8 @@ export interface BudgetAlertPorts {
   readonly policies: QuotaPolicySource;
   /** `get_usage_monthly_rollup(...)` — the TENANT database. */
   readonly spend: SpendSource;
+  /** Resolve monthly spend from the same tenant object as the claim store. */
+  readonly spendForTenant?: (tenantId: string) => Promise<SpendSource>;
   /** `budget_alert_already_notified` + `record_budget_alert_notification`. */
   readonly claims: BudgetAlertClaimStore;
 }
@@ -271,22 +274,28 @@ export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined
   if (namespace === undefined) return undefined;
   const router = new DurableObjectTenantDatabaseRouter(namespace, controlDb);
   const tenantDbs = new Map<string, Promise<TenantDatabaseHandle>>();
+  const tenantDbFor = (tenantId: string): Promise<TenantDatabaseHandle> => {
+    let tenantDb = tenantDbs.get(tenantId);
+    if (tenantDb === undefined) {
+      tenantDb = (async () => {
+        await backfillTenantConfigurationPolicy(controlDb, router, tenantId);
+        return router.forTenant(tenantId);
+      })();
+      tenantDbs.set(tenantId, tenantDb);
+    }
+    return tenantDb;
+  };
   return {
     config,
     policies: quotaPolicySourceFromEnv(env as Parameters<typeof quotaPolicySourceFromEnv>[0]),
     spend: spendSourceFromEnv(env as Parameters<typeof spendSourceFromEnv>[0]),
+    spendForTenant: async (tenantId) => d1SpendSource((await tenantDbFor(tenantId)).db),
     claims: {
       async claimBudgetAlertNotification(claim) {
         if (claim.tenantId.trim() === "") return false;
-        let tenantDb = tenantDbs.get(claim.tenantId);
-        if (tenantDb === undefined) {
-          tenantDb = (async () => {
-            await backfillTenantConfigurationPolicy(controlDb, router, claim.tenantId);
-            return router.forTenant(claim.tenantId);
-          })();
-          tenantDbs.set(claim.tenantId, tenantDb);
-        }
-        return budgetAlertStoreForTenant(await tenantDb).claimBudgetAlertNotification(claim);
+        return budgetAlertStoreForTenant(await tenantDbFor(claim.tenantId)).claimBudgetAlertNotification(
+          claim,
+        );
       },
     },
   };
@@ -362,6 +371,16 @@ export async function dispatchBudgetThresholdAlerts(
 
   if (input.scopes.length === 0) return 0;
 
+  let spend = ports.spend;
+  if (ports.spendForTenant !== undefined) {
+    try {
+      spend = await ports.spendForTenant(input.tenantId);
+    } catch (error) {
+      report("budget_alert_spend", error);
+      return 0;
+    }
+  }
+
   // ONE policy read for the whole chain: `d1QuotaPolicySource` issues the four
   // scope rows plus the plan as a single `db.batch()`, so this costs one round
   // trip rather than one per scope — the shape `resolve_effective_quota` uses
@@ -401,7 +420,7 @@ export async function dispatchBudgetThresholdAlerts(
 
     let spentUsd: number;
     try {
-      const reading = await ports.spend.committedSpendUsd(
+      const reading = await spend.committedSpendUsd(
         scope.scopeType,
         scope.scopeId,
         periodMonth,

@@ -17,11 +17,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
-  ONLINE_EVAL_SCORE_UPSERT_SQL,
+  ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
   type OnlineEvalWindowAggregate,
   RECENT_WINDOW_SECONDS,
   detectOnlineEvalRegressions,
-  onlineEvalScoreBindings,
+  onlineEvalScoreProjectionBindings,
   sweepOnlineEvalRegressions,
 } from "../../src/evals/index.js";
 import { controlDb, resetOnlineEvalTables, storedRegressions } from "./harness.js";
@@ -97,11 +97,11 @@ const NOW_UNIX = 1_800_000_000;
 /** Insert `count` scores at `atUnix` with the given score value. */
 async function seedScores(count: number, score: number, atUnix: number): Promise<void> {
   const db = controlDb();
-  const statement = db.prepare(ONLINE_EVAL_SCORE_UPSERT_SQL);
+  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
   await db.batch(
     Array.from({ length: count }, (_, index) =>
       statement.bind(
-        ...onlineEvalScoreBindings({
+        ...onlineEvalScoreProjectionBindings({
           requestId: `fg-${atUnix}-${index}`,
           tenantId: "tenant_a",
           criterionId: "answer_relevance",

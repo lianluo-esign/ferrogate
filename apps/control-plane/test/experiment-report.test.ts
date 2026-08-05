@@ -46,6 +46,10 @@ const EXPERIMENT = "exp_00000000deadbeef";
 const OTHER_EXPERIMENT = "exp_00000000feedface";
 const NOW = 1_800_000_000;
 
+function projectionKey(tenant: string, logicalId: string): string {
+  return `${Array.from(tenant).length}:${tenant}:${logicalId}`;
+}
+
 interface ArmDocument {
   arm: string;
   requests: number;
@@ -142,11 +146,12 @@ async function seedShadowLegs(options: {
       db()
         .prepare(
           `INSERT INTO experiment_shadow_legs
-             (leg_id, client_request_id, experiment_id, tenant, logical_model, provider,
+             (projection_key, leg_id, client_request_id, experiment_id, tenant, logical_model, provider,
               provider_model, status_code, error_code, latency_ms, cost_usd, observed_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
+          projectionKey(TENANT, `shadow-${index}~shadow`),
           `shadow-${index}~shadow`,
           `shadow-${index}`,
           EXPERIMENT,
@@ -203,11 +208,16 @@ async function seedScores(options: {
       db()
         .prepare(
           `INSERT INTO online_eval_scores
-             (request_id, criterion_id, tenant, sampling_key, sampling_unit, sample_rate,
+             (projection_key, request_id, criterion_id, tenant, sampling_key, sampling_unit, sample_rate,
               judge_model, score, scored_at_unix, experiment_id, experiment_arm)
-           VALUES (?, ?, ?, ?, 'request', 1, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, 'request', 1, ?, ?, ?, ?, ?)`,
         )
         .bind(
+          projectionKey(
+            options.tenant ?? TENANT,
+            options.requestIdFor?.(index) ??
+              `score-${options.arm}-${judgeModel}-${criterionId}-${index}`,
+          ),
           options.requestIdFor?.(index) ??
             `score-${options.arm}-${judgeModel}-${criterionId}-${index}`,
           criterionId,

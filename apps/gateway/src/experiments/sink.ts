@@ -28,7 +28,13 @@
  * is the difference between a broken deployment and one that simply is not
  * mirroring.
  */
-import { type ExperimentDatabase, experimentDatabaseFrom, writeShadowLeg } from "./d1.js";
+import {
+  type ExperimentDatabase,
+  experimentDatabaseFrom,
+  experimentTenantDatabaseFrom,
+  writeShadowLeg,
+  writeShadowLegProjection,
+} from "./d1.js";
 import type { ShadowLegRecord } from "./record.js";
 
 /** What the observer has done since the isolate started. */
@@ -70,6 +76,8 @@ export const NO_EXPERIMENT_OBSERVER: ExperimentObserver = {
 
 export interface ExperimentSinkOptions {
   readonly database?: (env: unknown) => ExperimentDatabase | undefined;
+  readonly tenantDatabase?: (env: unknown, tenantId: string) => ExperimentDatabase | undefined;
+  readonly projectionDatabase?: (env: unknown) => ExperimentDatabase | undefined;
   readonly diagnostics?: { onError?(error: unknown): void } | undefined;
 }
 
@@ -87,10 +95,16 @@ export class D1ExperimentObserver {
   #dropped = 0;
   #failed = 0;
   readonly #databaseFor: (env: unknown) => ExperimentDatabase | undefined;
+  readonly #tenantDatabaseFor: (env: unknown, tenantId: string) => ExperimentDatabase | undefined;
+  readonly #projectionDatabaseFor: (env: unknown) => ExperimentDatabase | undefined;
+  readonly #legacyDatabase: boolean;
   readonly #diagnostics: { onError?(error: unknown): void } | undefined;
 
   constructor(options: ExperimentSinkOptions = {}) {
     this.#databaseFor = options.database ?? experimentDatabaseFrom;
+    this.#tenantDatabaseFor = options.tenantDatabase ?? experimentTenantDatabaseFrom;
+    this.#projectionDatabaseFor = options.projectionDatabase ?? experimentDatabaseFrom;
+    this.#legacyDatabase = options.database !== undefined;
     this.#diagnostics = options.diagnostics;
   }
 
@@ -100,13 +114,27 @@ export class D1ExperimentObserver {
 
   /** NEVER REJECTS. See the module docs. */
   async observeShadowLeg(record: ShadowLegRecord, env: unknown): Promise<void> {
-    const db = this.#databaseFor(env);
-    if (db === undefined) {
-      this.#dropped += 1;
-      return;
-    }
     try {
-      await writeShadowLeg(db, record);
+      if (this.#legacyDatabase) {
+        const db = this.#databaseFor(env);
+        if (db === undefined) {
+          this.#dropped += 1;
+          return;
+        }
+        // Explicit database injection is the compatibility seam. It still
+        // targets CONTROL_D1, so it must use the tenant-qualified projection
+        // key rather than the object's logical leg primary key.
+        await writeShadowLegProjection(db, record);
+      } else {
+        const tenant = this.#tenantDatabaseFor(env, record.tenantId);
+        const projection = this.#projectionDatabaseFor(env);
+        if (tenant === undefined || projection === undefined) {
+          this.#dropped += 1;
+          return;
+        }
+        await writeShadowLeg(tenant, record);
+        await writeShadowLegProjection(projection, record);
+      }
       this.#written += 1;
     } catch (error) {
       this.#failed += 1;

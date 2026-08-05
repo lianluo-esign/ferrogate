@@ -27,10 +27,9 @@
  *
  * Those two legs no longer read the SAME database, and `defaultSpendSource`
  * below is where the split is decided. Since #819 a tenant's `wallets` row lives
- * inside `env.TENANT_DATA.idFromName(tenantId)`, so the wallet leg follows the
- * routed handle — the same database step 3b reserves in. The rollup leg stays on
- * `env.DB`, because that is still where `../metering/` WRITES it. Each leg reads
- * what writes it; that is the whole rule.
+ * inside `env.TENANT_DATA.idFromName(tenantId)`, so both legs follow the routed
+ * handle — the same database step 3b reserves in and the metering drain writes.
+ * Each leg reads what writes it; that is the whole rule.
  *
  * ## The four guards this file MOUNTS, which existed and guarded nothing
  *
@@ -123,6 +122,7 @@ import {
   type WalletBalanceReading,
   budgetHoldUsdFromEnv,
   currentPeriodMonth,
+  d1SpendSource,
   monthlyBudgetCharges,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
@@ -132,6 +132,8 @@ import {
 import {
   type TokenBudgetBindings,
   type TokenBudgetSource,
+  NO_TOKEN_BUDGET,
+  d1TokenBudgetSource,
   tokenBudgetSourceFromEnv,
 } from "./token-budget.js";
 import {
@@ -197,10 +199,11 @@ export interface RateLimitDeps extends RateLimitOptions {
   readonly quotas?: QuotaPolicySource | ((env: RateLimitBindings) => QuotaPolicySource);
   /**
    * Override the spend/wallet source behind admission steps 2 and 3. Defaults
-   * to `defaultSpendSource`: the monthly rollups from `env.DB` (where the
-   * metering sink writes them) and the WALLET balance from whichever database
-   * admission step 3b reserves in — the tenant's own Durable Object under the
-   * `durable_object` default, `env.DB` only when routing is explicitly `"off"`.
+   * to `defaultSpendSource`: the monthly rollups from the tenant's own Durable
+   * Object (where the metering sink writes them) and the WALLET balance from
+   * whichever database admission step 3b reserves in — the same tenant object
+   * under the `durable_object` default, `env.DB` only when routing is explicitly
+   * `"off"`.
    */
   readonly spend?: SpendSource | ((env: RateLimitBindings) => SpendSource);
   /**
@@ -211,7 +214,8 @@ export interface RateLimitDeps extends RateLimitOptions {
   readonly wallet?: WalletAdmission | ((env: RateLimitBindings) => WalletAdmission);
   /**
    * Override the `api_keys.monthly_token_budget` source (step 5b). Defaults to
-   * {@link tokenBudgetSourceFromEnv}.
+   * the request-scoped tenant object under durable-object routing and the shared
+   * database only when routing is explicitly disabled.
    */
   readonly tokenBudget?: TokenBudgetSource | ((env: RateLimitBindings) => TokenBudgetSource);
   /**
@@ -486,19 +490,35 @@ function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings):
  * move with it.
  */
 function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): SpendSource {
-  const rollups = spendSourceFromEnv(env);
+  const legacyRollups = spendSourceFromEnv(env);
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
   // Only an EXPLICIT `"off"` keeps the wallet on the shared `DB`; an
   // unparseable value is not a licence to guess, exactly as in
   // `defaultWalletAdmission`.
-  if (mode === "off") return rollups;
+  if (mode === "off") return legacyRollups;
   if (mode === "durable_object" && env.TENANT_DATA === undefined) {
     // No tenant storage bound at all ⇒ no `wallets` row exists for any tenant.
     // `availableCredits: null` is the OPT-IN answer ("this tenant has no
     // wallet"), never `0`, and never a read of `env.DB` — the same conclusion
     // `NO_WALLET_ADMISSION` reaches at step 3b, reached the same way.
-    return { ...rollups, walletBalanceCredits: NO_SPEND_SOURCE.walletBalanceCredits };
+    return NO_SPEND_SOURCE;
   }
+  const rollups: SpendSource = {
+    async committedSpendUsd(scopeKind, scopeId, periodMonth) {
+      try {
+        const accessor = tenantDatabaseOf(c);
+        if (accessor.tenantId === null) {
+          return NO_SPEND_SOURCE.committedSpendUsd(scopeKind, scopeId, periodMonth);
+        }
+        const handle = await accessor.handle();
+        return d1SpendSource(handle.db).committedSpendUsd(scopeKind, scopeId, periodMonth);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: "routed tenant spend unavailable: " + detail };
+      }
+    },
+    walletBalanceCredits: NO_SPEND_SOURCE.walletBalanceCredits,
+  };
   const routed = routedWalletSpendSource(rollups, async (tenantId) => {
     const handle = await tenantDatabaseOf(c).handle();
     if (handle.tenantId !== tenantId) {
@@ -524,6 +544,35 @@ function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): Spe
         return NO_SPEND_SOURCE.walletBalanceCredits(tenantId);
       }
       return routed.walletBalanceCredits(tenantId);
+    },
+  };
+}
+
+function defaultTokenBudget(c: Context<GatewayEnv>, env: RateLimitBindings): TokenBudgetSource {
+  const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
+  if (mode === "off") return tokenBudgetSourceFromEnv(env);
+  if (mode === "durable_object" && env.TENANT_DATA === undefined) return NO_TOKEN_BUDGET;
+  const accessor = tenantDatabaseOf(c);
+  if (accessor.tenantId === null) return NO_TOKEN_BUDGET;
+  return {
+    async forApiKey(apiKeyId, tenantId) {
+      try {
+        const handle = await accessor.handle();
+        if (handle.tenantId !== tenantId) {
+          return {
+            ok: false,
+            detail:
+              "the routed tenant database is " +
+              handle.tenantId +
+              ", but token budget lookup requested " +
+              tenantId,
+          };
+        }
+        return d1TokenBudgetSource(handle.db).forApiKey(apiKeyId, tenantId);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: "routed tenant token budget unavailable: " + detail };
+      }
     },
   };
 }
@@ -565,7 +614,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
     const tokenBudget =
       typeof deps.tokenBudget === "function"
         ? deps.tokenBudget(env)
-        : (deps.tokenBudget ?? tokenBudgetSourceFromEnv(env));
+        : (deps.tokenBudget ?? defaultTokenBudget(c, env));
     const workflowBudgets =
       typeof deps.workflowBudgets === "function"
         ? deps.workflowBudgets(env)

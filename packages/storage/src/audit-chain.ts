@@ -83,11 +83,12 @@ export const AUDIT_CHAIN_FIRST_SEQ = 1;
  * One `audit_events` row, as both the table and
  * `GET /admin/v1/audit-events` expose it.
  *
- * The four chain columns are NULLABLE because two things legitimately produce
- * unchained rows: rows written before the chain migration, and the gateway's
- * asset audit sink (`apps/gateway/src/assets/d1.ts`), which writes this same
- * table and is not chained yet. {@link verifyAuditChain} reports them rather
- * than dropping them — see {@link AuditChainVerification.unchainedRows}.
+ * The four chain columns are NULLABLE because legacy rows may predate the
+ * chain migration, while platform-global/control-plane records can remain
+ * outside a tenant object's chain. The production gateway asset sink now
+ * appends tenant-attributed rows through the owning TenantDataObject;
+ * {@link verifyAuditChain} reports any remaining unchained rows rather than
+ * dropping them — see {@link AuditChainVerification.unchainedRows}.
  */
 export interface AuditChainRow {
   readonly id: string;

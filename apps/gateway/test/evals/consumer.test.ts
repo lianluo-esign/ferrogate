@@ -23,6 +23,7 @@ import {
 } from "../../src/evals/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
 import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 const JUDGE_ROUTE: PhysicalRoute = {
   logicalModel: "judge-model",
@@ -122,6 +123,11 @@ const VERDICT = JSON.stringify({
 
 beforeEach(async () => {
   await resetOnlineEvalTables();
+  const tenant = tenantObjectDb("tenant_a");
+  await tenant.batch([
+    tenant.prepare("DELETE FROM online_eval_scores"),
+    tenant.prepare("DELETE FROM online_eval_regressions"),
+  ]);
 });
 
 describe("a sampled exchange becomes durable scores", () => {
@@ -168,6 +174,39 @@ describe("a sampled exchange becomes durable scores", () => {
     expect(asked["temperature"]).toBe(0);
     expect(JSON.stringify(asked["messages"])).toContain("capital of France");
     expect(JSON.stringify(asked["messages"])).toContain("Paris.");
+  });
+
+  it("writes the tenant object first and keeps a retry-safe control projection", async () => {
+    const judge = judgeAnswering(VERDICT);
+    const delivery = batchOf(sample());
+    const dependencies = {
+      routeFor: () => JUDGE_ROUTE,
+      dispatcher: () => judge.dispatcher,
+      tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
+      projectionDatabase: () => controlDb(),
+      now: () => 1_700_000_500_000,
+    };
+
+    const first = await consumeOnlineEvalBatch(delivery.batch, {}, dependencies);
+    expect(first).toMatchObject({ scored: 2, retried: false });
+    const tenant = tenantObjectDb("tenant_a");
+    expect(
+      await tenant
+        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    const firstProjection = await storedScores();
+    expect(firstProjection).toHaveLength(2);
+    expect(firstProjection[0]?.["projection_key"]).toContain("tenant_a");
+
+    const second = await consumeOnlineEvalBatch(batchOf(sample()).batch, {}, dependencies);
+    expect(second).toMatchObject({ scored: 2, retried: false });
+    expect(
+      await tenant
+        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    expect(await storedScores()).toHaveLength(2);
   });
 
   it("a redelivered sample corrects its row instead of doubling the sample", async () => {
@@ -404,5 +443,29 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
 
     expect(result).toMatchObject({ scored: 0, retried: true });
     expect(delivery.retried).toBe(true);
+  });
+
+  it("retries when the control projection is unavailable after judging", async () => {
+    const judge = judgeAnswering(VERDICT);
+    const delivery = batchOf(sample());
+    const result = await consumeOnlineEvalBatch(
+      delivery.batch,
+      {},
+      {
+        routeFor: () => JUDGE_ROUTE,
+        dispatcher: () => judge.dispatcher,
+        tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
+        projectionDatabase: () => undefined,
+      },
+    );
+
+    expect(result).toMatchObject({ scored: 0, retried: true });
+    expect(delivery.retried).toBe(true);
+    expect(delivery.acked).toEqual([]);
+    expect(
+      await tenantObjectDb("tenant_a")
+        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
   });
 });

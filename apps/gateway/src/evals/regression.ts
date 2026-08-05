@@ -63,11 +63,16 @@
  */
 import {
   ONLINE_EVAL_REGRESSION_CLAIM_SQL,
+  ONLINE_EVAL_REGRESSION_PROJECTION_SQL,
   ONLINE_EVAL_SCORE_TABLE,
   ONLINE_EVAL_WINDOW_AGGREGATE_SQL,
+  TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL,
   type OnlineEvalScoreDatabase,
   onlineEvalDatabaseFrom,
+  onlineEvalRegressionBindings,
+  onlineEvalTenantDatabaseFrom,
 } from "./d1.js";
+import { evidenceProjectionKey } from "../requestlog/d1.js";
 import { ONLINE_EVAL_REGRESSION_METRIC, publishOnlineEvalScorePoints } from "./metrics.js";
 import type { OnlineEvalPolicy } from "./policy.js";
 import { type OnlineEvalBindings, onlineEvalPolicySourceFromEnv } from "./source.js";
@@ -208,13 +213,26 @@ export async function sweepOnlineEvalRegressions(
   policy: Pick<OnlineEvalPolicy, "regressionDrop" | "regressionMinSamples">,
   nowUnix: number,
   database: (env: unknown) => OnlineEvalScoreDatabase | undefined = onlineEvalDatabaseFrom,
+  tenantDatabase: (
+    env: unknown,
+    tenantId: string,
+  ) => OnlineEvalScoreDatabase | undefined = onlineEvalTenantDatabaseFrom,
 ): Promise<OnlineEvalSweepResult> {
   const db = database(env);
   if (db === undefined) return { detected: 0, claimed: 0 };
 
+  const authoritative = tenantDatabase(env, tenantId);
+  // The default deployment is object-first. An absent object binding is a
+  // storage misconfiguration, not permission to read the old shared table.
+  // Explicit database injection remains the compatibility/test seam.
+  if (database === onlineEvalDatabaseFrom && authoritative === undefined) {
+    return { detected: 0, claimed: 0 };
+  }
+  const source = authoritative ?? db;
+
   let regressions: OnlineEvalRegression[];
   try {
-    const aggregates = await onlineEvalWindowAggregates(db, tenantId, nowUnix);
+    const aggregates = await onlineEvalWindowAggregates(source, tenantId, nowUnix);
     regressions = detectOnlineEvalRegressions(aggregates, policy);
   } catch {
     return { detected: 0, claimed: 0 };
@@ -225,25 +243,41 @@ export async function sweepOnlineEvalRegressions(
   const claimed: OnlineEvalRegression[] = [];
   for (const regression of regressions) {
     try {
-      const row = await db
-        .prepare(ONLINE_EVAL_REGRESSION_CLAIM_SQL)
-        .bind(
-          regressionClaimKey(regression, windowStartUnix),
-          regression.tenantId,
-          regression.criterionId,
-          regression.judgeModel,
-          regression.logicalModel ?? null,
-          regression.baselineMean,
-          regression.baselineCount,
-          regression.recentMean,
-          regression.recentCount,
-          regression.dropAmount,
-          nowUnix,
+      const claimKey = regressionClaimKey(regression, windowStartUnix);
+      const bindings = onlineEvalRegressionBindings({
+        claimKey,
+        tenantId: regression.tenantId,
+        criterionId: regression.criterionId,
+        judgeModel: regression.judgeModel,
+        logicalModel: regression.logicalModel,
+        baselineMean: regression.baselineMean,
+        baselineCount: regression.baselineCount,
+        recentMean: regression.recentMean,
+        recentCount: regression.recentCount,
+        dropAmount: regression.dropAmount,
+        detectedAtUnix: nowUnix,
+      });
+      const row = await source
+        .prepare(
+          authoritative === undefined
+            ? ONLINE_EVAL_REGRESSION_CLAIM_SQL
+            : TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL,
         )
+        .bind(...bindings)
         .first();
       // `null` = the conflict arm fired: somebody already alerted for this
       // group in this window. Not an error, and deliberately not re-emitted.
       if (row !== null && row !== undefined) claimed.push(regression);
+
+      if (authoritative !== undefined) {
+        // The object claim is the arbiter. Project even when the object claim
+        // already existed, so a retry after a projection-only failure repairs
+        // control D1 without emitting a second alert.
+        await db
+          .prepare(ONLINE_EVAL_REGRESSION_PROJECTION_SQL)
+          .bind(evidenceProjectionKey(regression.tenantId, claimKey), ...bindings)
+          .run();
+      }
     } catch {
       // A claim that could not be written is a claim not taken; the next tick
       // tries again. Never a throw — see the function docs.
@@ -306,6 +340,10 @@ export async function sweepAllOnlineEvalRegressions(
   env: unknown,
   nowUnix: number,
   database: (env: unknown) => OnlineEvalScoreDatabase | undefined = onlineEvalDatabaseFrom,
+  tenantDatabase: (
+    env: unknown,
+    tenantId: string,
+  ) => OnlineEvalScoreDatabase | undefined = onlineEvalTenantDatabaseFrom,
 ): Promise<OnlineEvalSweepResult> {
   const db = database(env);
   if (db === undefined) return { detected: 0, claimed: 0 };
@@ -337,6 +375,7 @@ export async function sweepAllOnlineEvalRegressions(
       resolved.policy,
       nowUnix,
       database,
+      tenantDatabase,
     );
     detected += result.detected;
     claimed += result.claimed;

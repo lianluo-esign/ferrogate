@@ -31,8 +31,15 @@
  */
 import type { Context } from "hono";
 import { HttpError } from "../middleware/errors.js";
-import type { CallerScope, ControlPlaneEnv } from "../ports.js";
-import { listResponse, parseListQuery } from "../responses.js";
+import type { CallerScope, ControlPlaneDeps, ControlPlaneEnv, StoreRecord } from "../ports.js";
+import {
+  adminListPaginated,
+  adminListPaginatedWithMetadata,
+  derivedControlProjectionMetadata,
+  listResponse,
+  parseListQuery,
+} from "../responses.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
   crudGroup,
@@ -44,6 +51,125 @@ import {
 
 const METERING_EVENTS = "metering-events";
 const DEAD_LETTERS = "billing-outbox-dead-letters";
+const USAGE_AGGREGATE_TABLE = "usage_aggregate_rollups";
+
+interface UsageAggregateRow {
+  readonly id: string;
+  readonly tenant?: string;
+  readonly tenant_context_id: string;
+  readonly organization_id: string | null;
+  readonly project_id: string | null;
+  readonly api_key_id: string | null;
+  readonly logical_model: string;
+  readonly provider: string;
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly total_tokens: number;
+}
+
+const USAGE_AGGREGATE_COLUMNS =
+  "r.id, r.tenant, r.tenant_context_id, r.organization_id, r.project_id, r.api_key_id, " +
+  "r.logical_model, r.provider, r.prompt_tokens, r.completion_tokens, r.total_tokens";
+
+const TENANT_USAGE_AGGREGATE_COLUMNS =
+  "r.id, r.tenant_context_id, c.organization_id, c.project_id, c.api_key_id, " +
+  "r.logical_model, r.provider, r.prompt_tokens, r.completion_tokens, r.total_tokens";
+
+function usageAggregateDocument(row: UsageAggregateRow): StoreRecord {
+  return {
+    object: "usage_aggregate",
+    id: row.id,
+    organization_id: row.organization_id,
+    project_id: row.project_id,
+    api_key_id: row.api_key_id,
+    logical_model: row.logical_model,
+    provider: row.provider,
+    usage: {
+      prompt_tokens: row.prompt_tokens,
+      completion_tokens: row.completion_tokens,
+      total_tokens: row.total_tokens,
+    },
+  };
+}
+
+async function tenantUsageAggregatePage(
+  deps: ControlPlaneDeps,
+  tenantId: string,
+  limit: number,
+  offset: number,
+): Promise<{ records: StoreRecord[]; total: number }> {
+  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
+  const result = await db
+    .prepare(
+      `SELECT ${TENANT_USAGE_AGGREGATE_COLUMNS}, count(*) OVER() AS total
+         FROM ${USAGE_AGGREGATE_TABLE} r
+        JOIN tenant_contexts c ON c.id = r.tenant_context_id
+        WHERE c.organization_id = ?
+        ORDER BY r.updated_at_unix DESC, r.id ASC
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(tenantId, limit, offset)
+    .all<UsageAggregateRow & { readonly total?: number }>();
+  return {
+    records: result.results.map(usageAggregateDocument),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+async function controlUsageAggregatePage(
+  db: D1Database,
+  limit: number,
+  offset: number,
+): Promise<{ records: StoreRecord[]; total: number }> {
+  const result = await db
+    .prepare(
+      `SELECT ${USAGE_AGGREGATE_COLUMNS}, count(*) OVER() AS total
+         FROM ${USAGE_AGGREGATE_TABLE} r
+        ORDER BY updated_at_unix DESC, id ASC
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(limit, offset)
+    .all<UsageAggregateRow & { readonly total?: number }>();
+  return {
+    records: result.results.map(usageAggregateDocument),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+function listAdminUsageAggregates(): (c: Context<ControlPlaneEnv>) => Promise<Response> {
+  return async (c) => {
+    const deps = c.get("deps");
+    const scope = scopeOf(c);
+    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+
+    if (scope.kind === "tenant") {
+      const page = await tenantUsageAggregatePage(deps, scope.tenantId, query.limit, query.offset);
+      return json(c, 200, adminListPaginated(page.records, page.total, query.offset, query.limit));
+    }
+
+    if (deps.controlDatabase === null) {
+      const page = await deps.store.list("usage-aggregates", scope, query);
+      return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
+    }
+
+    const page = await controlUsageAggregatePage(
+      deps.controlDatabase,
+      query.limit,
+      query.offset,
+    );
+    return json(
+      c,
+      200,
+      adminListPaginatedWithMetadata(
+        page.records,
+        page.total,
+        query.offset,
+        query.limit,
+        derivedControlProjectionMetadata(),
+      ),
+    );
+  };
+}
 
 /** The shared gateway→billing outbox (`sql/d1-ts/control/0001_init_control.sql`). */
 export const BILLING_OUTBOX_TABLE = "billing_report_outbox";
@@ -371,13 +497,13 @@ async function replayOutboxReportRow(
 }
 
 /**
- * PORT-TODO(P: inventory-data-billing §2.5) — the six READ feeds page document
- * collections that the metering path never writes.
+ * PORT-TODO(P: inventory-data-billing §2.5) — the remaining billing READ feeds
+ * page document collections that their typed writers never populate.
  *
  * `apps/gateway/src/metering/d1.ts` writes `billing_events`, `billing_ledger`
  * and `billing_report_outbox` (typed tables in the SAME control database this
- * Worker binds). This group lists `metering-events`, `usage-aggregates`,
- * `usage-reports`, `metering-export-status` and `billing-outbox-dead-letters` as
+ * Worker binds). This group lists `metering-events`, `usage-reports`,
+ * `metering-export-status` and `billing-outbox-dead-letters` as
  * `control_plane_resources` documents — a disjoint set, empty on every
  * deployment. Rust `handle_admin_metering_events` pages
  * `state.metering_events_page(...)`, the real store.
@@ -410,6 +536,7 @@ export const billingRoutes: GroupModule = crudGroup(
     readOnlyCollection(DEAD_LETTERS, "billing_outbox_dead_letter"),
   ],
   {
+    listAdminUsageAggregates: listAdminUsageAggregates(),
     /**
      * The legacy `/admin/v1/billing-events` spelling. Reads the SAME rows as
      * `/admin/v1/metering-events` — a separate collection would let the two

@@ -135,6 +135,60 @@ export function auditEventDocument(row: AuditEventRow): StoreRecord {
   };
 }
 
+const AUDIT_EVENT_COLUMNS =
+  "id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+  "chain_key, seq, prev_hash, row_hash";
+
+/** Read the complete tenant chain before pagination; projection rows are merged below. */
+async function auditRowsForTenant(
+  db: D1Database,
+  tenantId: string,
+): Promise<AuditEventRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT ${AUDIT_EVENT_COLUMNS}
+         FROM ${AUDIT_TABLE}
+        WHERE tenant = ?
+        ORDER BY occurred_at_unix ASC, id ASC`,
+    )
+    .bind(tenantId)
+    .all<AuditEventRow>();
+  return result.results;
+}
+
+/**
+ * Tenant asset audit rows are authoritative in the object; control-D1 rows
+ * remain useful for admin mutations owned by the control plane. Merge by the
+ * stable audit id and prefer the object row so a stale projection cannot
+ * replace a newer chain position or document.
+ */
+async function tenantAuditPage(
+  deps: ReturnType<typeof depsOf>,
+  tenantId: string,
+  query: { readonly offset: number; readonly limit: number },
+): Promise<{ rows: AuditEventRow[]; total: number }> {
+  const router = deps.tenantStorage ?? deps.tenantDatabases;
+  const authoritative = await tenantEvidenceDatabaseFor(router, tenantId);
+  const authoritativeRows = await auditRowsForTenant(authoritative, tenantId);
+  const rowsById = new Map<string, AuditEventRow>();
+
+  if (deps.controlDatabase !== null) {
+    for (const row of await auditRowsForTenant(deps.controlDatabase, tenantId)) {
+      rowsById.set(row.id, row);
+    }
+  }
+  for (const row of authoritativeRows) rowsById.set(row.id, row);
+
+  const rows = [...rowsById.values()].sort(
+    (left, right) =>
+      left.occurred_at_unix - right.occurred_at_unix || left.id.localeCompare(right.id),
+  );
+  return {
+    rows: rows.slice(query.offset, query.offset + query.limit),
+    total: rows.length,
+  };
+}
+
 /**
  * `GET /admin/v1/audit-events` — the durable admin audit trail.
  *
@@ -172,6 +226,20 @@ function listAuditEventsHandler(): Handler {
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
 
+    if (db !== null && scope.kind === "tenant") {
+      const page = await tenantAuditPage(deps, scope.tenantId, query);
+      return json(
+        c,
+        200,
+        adminListPaginated(
+          page.rows.map(auditEventDocument),
+          page.total,
+          query.offset,
+          query.limit,
+        ),
+      );
+    }
+
     if (db === null) {
       // No control database means no `audit_events` table AND no durable store
       // to have written one — `controlDatabase` is `null` exactly when
@@ -185,8 +253,7 @@ function listAuditEventsHandler(): Handler {
     const fence = auditTenantFence(scope);
     const rows = await db
       .prepare(
-        `SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
-                chain_key, seq, prev_hash, row_hash,
+        `SELECT ${AUDIT_EVENT_COLUMNS},
                 count(*) OVER() AS total
            FROM ${AUDIT_TABLE}${fence.sql}
           ORDER BY occurred_at_unix ASC, id ASC
@@ -429,6 +496,7 @@ function listRequestLogsHandler(): Handler {
     const scope = scopeOf(c);
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     if (db === null && scope.kind === "platform_operator") {
       // No control database means no derived `request_logs` projection. The
@@ -441,7 +509,7 @@ function listRequestLogsHandler(): Handler {
     const page =
       scope.kind === "tenant"
         ? await requestLogTenantPage(
-            deps.tenantDatabases,
+            tenantRouter,
             scope.tenantId,
             query.limit,
             query.offset,
@@ -503,6 +571,7 @@ function exportRequestLogsHandler(): Handler {
       REQUEST_LOG_EXPORT_MAX_LIMIT,
     );
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     const metadata =
       db !== null && scope.kind === "platform_operator"
@@ -514,7 +583,7 @@ function exportRequestLogsHandler(): Handler {
         ? (await deps.store.list("request-log-exports", scope, query)).items
         : (await (scope.kind === "tenant"
             ? requestLogTenantPage(
-                deps.tenantDatabases,
+                tenantRouter,
                 scope.tenantId,
                 query.limit,
                 query.offset,
@@ -842,13 +911,14 @@ function listGuardrailEvaluationsHandler(): Handler {
     const scope = scopeOf(c);
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     if (scope.kind === "tenant") {
       // Tenant scope is an authority read. CONTROL is only a fleet projection,
       // so its absence or staleness must not change the tenant answer.
-      await ensureTenantGuardrailEvidenceBackfill(db, deps.tenantDatabases, scope.tenantId);
+      await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
       const page = await tenantGuardrailEvaluationPage(
-        deps.tenantDatabases,
+        tenantRouter,
         scope.tenantId,
         query.limit,
         query.offset,
@@ -960,12 +1030,13 @@ function getGuardrailInvestigationHandler(): Handler {
     const selector = `${column}=${value}`;
 
     const db = deps.controlDatabase;
+    const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
     const authoritativeTenantDb =
       scope.kind === "tenant"
-        ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, scope.tenantId)
+        ? await tenantEvidenceDatabaseFor(tenantRouter, scope.tenantId)
         : null;
     if (scope.kind === "tenant") {
-      await ensureTenantGuardrailEvidenceBackfill(db, deps.tenantDatabases, scope.tenantId);
+      await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
     }
     if (scope.kind === "platform_operator" && db === null) {
       // Nothing writes the control projection in a memory-store deployment, so
@@ -1043,7 +1114,7 @@ function getGuardrailInvestigationHandler(): Handler {
       scope.kind === "tenant"
         ? requestRows.results
         : await tenantEvidenceRows<RequestLogRow>(
-            deps.tenantDatabases,
+            tenantRouter,
             tenantGroups,
             (count) =>
               `SELECT ${REQUEST_LOG_COLUMNS}
@@ -1070,7 +1141,7 @@ function getGuardrailInvestigationHandler(): Handler {
     ];
 
     const objectAgentRunRows = await tenantEvidenceRows<Record<string, unknown>>(
-      deps.tenantDatabases,
+      tenantRouter,
       tenantGroups,
       (count) =>
         `SELECT id, request_id, tenant, started_at_unix, completed_at_unix, run_json
@@ -1079,7 +1150,7 @@ function getGuardrailInvestigationHandler(): Handler {
           ORDER BY started_at_unix ASC, id ASC`,
     );
     const objectAgentEventRows = await tenantEvidenceRows<Record<string, unknown>>(
-      deps.tenantDatabases,
+      tenantRouter,
       tenantGroups,
       (count) =>
         `SELECT id, run_id, request_id, tenant, occurred_at_unix, event_json

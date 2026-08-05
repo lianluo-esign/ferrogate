@@ -17,12 +17,15 @@
  * `dispatcherFromEnv` with only the outbound `fetch` intercepted, and the rows
  * are read back out of the real control D1.
  */
+import { env as poolEnv } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  ONLINE_EVAL_SCORE_UPSERT_SQL,
+  ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
+  TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL,
   onlineEvalSampleToWire,
   onlineEvalScoreBindings,
+  onlineEvalScoreProjectionBindings,
 } from "../../src/evals/index.js";
 import { GATEWAY_MIDDLEWARE, gatewayQueue, gatewayScheduled } from "../../src/index.js";
 import { REQUEST_LOG_OBJECT } from "../../src/requestlog/index.js";
@@ -32,6 +35,7 @@ import {
   providerJson,
 } from "../inference/provider-mock.js";
 import { controlDb, resetOnlineEvalTables, storedRegressions, storedScores } from "./harness.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 const CRITERIA = [{ id: "grounded", definition: "Is it supported by the context?" }];
 
@@ -48,6 +52,7 @@ const MODELS = [{ name: "judge-model", provider: "openai-judge", provider_model:
 function env(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     CONTROL_DB: controlDb(),
+    TENANT_DATA: (poolEnv as unknown as Record<string, unknown>).TENANT_DATA,
     GATEWAY_PROVIDERS: JSON.stringify(PROVIDERS),
     GATEWAY_MODELS: JSON.stringify(MODELS),
     JUDGE_API_KEY: "sk-judge",
@@ -80,6 +85,11 @@ afterEach(() => {
 
 beforeEach(async () => {
   await resetOnlineEvalTables();
+  const tenant = tenantObjectDb("tenant_a");
+  await tenant.batch([
+    tenant.prepare("DELETE FROM online_eval_scores"),
+    tenant.prepare("DELETE FROM online_eval_regressions"),
+  ]);
 });
 
 describe("seam 1 — the sampler is in the deployed chain", () => {
@@ -177,29 +187,29 @@ describe("seam 2 — the queue entry point routes both queues", () => {
 describe("seam 3 — the cron tick sweeps regressions", () => {
   it("records a regression the scheduled handler found", async () => {
     const nowUnix = Math.floor(Date.now() / 1000);
-    const db = controlDb();
-    const statement = db.prepare(ONLINE_EVAL_SCORE_UPSERT_SQL);
-    const seed = (count: number, score: number, atUnix: number) =>
-      db.batch(
-        Array.from({ length: count }, (_, index) =>
-          statement.bind(
-            ...onlineEvalScoreBindings({
-              requestId: `fg-${atUnix}-${index}`,
-              tenantId: "tenant_a",
-              criterionId: "grounded",
-              score,
-              judgeModel: "judge-model",
-              logicalModel: "gpt-4o-mini",
-              samplingKey: `fg-${atUnix}-${index}`,
-              samplingUnit: "request",
-              sampleRate: 1,
-              promptTruncated: false,
-              completionTruncated: false,
-              scoredAtUnix: atUnix,
-            }),
-          ),
-        ),
+    const db = tenantObjectDb("tenant_a");
+    const statement = db.prepare(TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL);
+    const seed = async (count: number, score: number, atUnix: number) => {
+      const records = Array.from({ length: count }, (_, index) => ({
+        requestId: `fg-${atUnix}-${index}`,
+        tenantId: "tenant_a",
+        criterionId: "grounded",
+        score,
+        judgeModel: "judge-model",
+        logicalModel: "gpt-4o-mini",
+        samplingKey: `fg-${atUnix}-${index}`,
+        samplingUnit: "request" as const,
+        sampleRate: 1,
+        promptTruncated: false,
+        completionTruncated: false,
+        scoredAtUnix: atUnix,
+      }));
+      await db.batch(records.map((record) => statement.bind(...onlineEvalScoreBindings(record))));
+      const projection = controlDb().prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
+      await controlDb().batch(
+        records.map((record) => projection.bind(...onlineEvalScoreProjectionBindings(record))),
       );
+    };
     await seed(40, 0.95, nowUnix - 3 * 24 * 60 * 60);
     await seed(40, 0.5, nowUnix - 3600);
 
@@ -209,7 +219,7 @@ describe("seam 3 — the cron tick sweeps regressions", () => {
     // detection legitimate rather than defaulted — and putting it in D1 rather
     // than in the var also proves the D1 arm of the source, which is the arm
     // every real deployment takes.
-    await db
+    await controlDb()
       .prepare(
         `INSERT INTO quota_policies (id, scope_type, scope_id, online_eval_enabled,
            online_eval_sample_rate, online_eval_judge_model, online_eval_criteria_json,

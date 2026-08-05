@@ -48,6 +48,7 @@ import { assetDepsFromEnv } from "../../src/assets/handlers.js";
 import { InMemoryAssetMetadataStore, type StoredBundleFile } from "../../src/assets/ports.js";
 import { seedApiKey } from "../keys/seed.js";
 import { tenantObjectDb, tenantObjectHandle } from "../tenant-object.js";
+import { applyControlMigrations } from "../requestlog/harness.js";
 
 const TENANT = "tenant_asset_wiring";
 const PLAN = "plan_asset_wiring";
@@ -89,6 +90,7 @@ async function provision(): Promise<void> {
     tenant.prepare("DELETE FROM asset_channels"),
     tenant.prepare("DELETE FROM stored_assets"),
     tenant.prepare("DELETE FROM retention_policies"),
+    tenant.prepare("DELETE FROM audit_events"),
   ]);
 
   // The SAME seeder `test/keys/` uses, so the row is hashed by the function the
@@ -128,7 +130,10 @@ async function push(name: string, version: string, body: string): Promise<Respon
 }
 
 describe("the deployed Worker persists asset metadata to D1", () => {
-  beforeEach(provision);
+  beforeEach(async () => {
+    await applyControlMigrations();
+    await provision();
+  });
 
   test("a push over SELF lands a row in the tenant Durable Object", async () => {
     const response = await push("cli", "1.0.0", "hello-ferrogate");
@@ -278,7 +283,10 @@ describe("the deployed Worker persists asset metadata to D1", () => {
 });
 
 describe("the deployed Worker persists the asset audit trail to D1", () => {
-  beforeEach(provision);
+  beforeEach(async () => {
+    await applyControlMigrations();
+    await provision();
+  });
 
   test("a push over SELF commits an `audit_events` row on CONTROL_DB", async () => {
     expect((await push("cli", "5.0.0", "payload")).status).toBe(200);

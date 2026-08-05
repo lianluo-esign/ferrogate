@@ -685,7 +685,9 @@ CREATE TABLE IF NOT EXISTS guardrail_policy_bindings (
 -- `TenantDataObject`. These same-named CONTROL tables remain as derived
 -- compatibility projections for bounded fleet discovery and existing joins;
 -- they are never a fallback for an unavailable object. Unattributed/platform
--- request rows remain control-only. `audit_events` remains control-owned.
+-- request rows remain control-only. Control-plane mutation audit rows remain
+-- on the control chain; tenant data-plane/asset audit rows are object-owned and
+-- projected back here for fleet visibility.
 --
 -- Keeping this projection preserves existing one-database fleet surfaces while
 -- #825 defines their bounded, paginated, freshness, and deletion contract.
