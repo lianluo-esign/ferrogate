@@ -140,14 +140,12 @@ async function registerTenantDatabase(tenantId: string, bindingName: string | nu
   await control()
     .prepare(
       `INSERT INTO tenant_databases
-         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+         (tenant_id, binding_name, schema_version,
           storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, ?, ?, ?, 'ready', 1, 1)`,
+       VALUES (?, ?, ?, ?, 'ready', 1, 1)`,
     )
     .bind(
       tenantId,
-      `uuid-${tenantId}`,
-      `ferrogate-${tenantId}`,
       durableObject ? null : bindingName,
       durableObject ? 15 : 1,
       durableObject ? "durable_object" : "native_binding",

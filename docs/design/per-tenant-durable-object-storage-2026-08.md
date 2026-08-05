@@ -11,8 +11,9 @@ previous D1-per-tenant, REST, proxy and lifecycle apparatus is retired.
 
 ## The retired design and why it changed
 
-Before 2026-08-05, FerroGate proposed **one D1 database per tenant**. That
-proposal could not provide a production multi-tenant onboarding path because
+Historical, superseded 2026-08-05: before that date, FerroGate proposed **one
+D1 database per tenant**. That proposal could not provide a production
+multi-tenant onboarding path because
 Cloudflare D1 bindings are declared at deploy time:
 
 > Cloudflare bindings are declared at **deploy** time. There is no runtime

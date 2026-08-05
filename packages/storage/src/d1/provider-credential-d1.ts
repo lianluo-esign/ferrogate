@@ -34,8 +34,8 @@
  * Every operation here is a single statement, which SQLite already runs in an
  * implicit transaction. `requireAtomicBatch` is deliberately NOT asserted —
  * same reasoning as `./site-domain-d1.ts` and `./references-d1.ts`: this store
- * is safe on any handle that can run one statement, including the D1 REST
- * transport.
+ * is safe on any handle that can run one statement, including native D1
+ * compatibility handles.
  *
  * ## The plaintext never lives here
  *

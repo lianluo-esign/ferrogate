@@ -583,10 +583,10 @@ describe("tenant model catalog CRUD", () => {
       .prepare(
         `INSERT INTO tenant_databases
            (tenant_id, storage_backend, provisioning_status, schema_version,
-            database_uuid, database_name, binding_name, migration_state, provisioned_at_unix, updated_at_unix)
-         VALUES (?, 'native_binding', 'ready', 10, ?, ?, 'TENANT_DB_A', 'done', ?, ?)`,
+            binding_name, migration_state, provisioned_at_unix, updated_at_unix)
+         VALUES (?, 'native_binding', 'ready', 10, 'TENANT_DB_A', 'done', ?, ?)`,
       )
-      .bind(tenantId, `uuid-${tenantId}`, `database-${tenantId}`, now, now)
+      .bind(tenantId, now, now)
       .run();
     await nativeDb
       .prepare(

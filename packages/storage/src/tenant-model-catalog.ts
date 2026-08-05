@@ -314,10 +314,10 @@ export interface TenantModelCatalogSeedOutcome {
 /**
  * Seed one tenant's catalog, at most once, ever.
  *
- * Everything happens in ONE `batch()`, which is one transaction on every backend
- * this repo routes a tenant through (`native_binding` and `durable_object`;
- * `rest` reports `supportsAtomicBatch: false` and is not a tenant backend any
- * more). That matters because the mark and the rows must land together: rows
+ * Everything happens in ONE `batch()`, which is one transaction on every
+ * supported tenant backend (`native_binding`, `durable_object`, and
+ * `shared_development`). That matters because the mark and the rows must land
+ * together: rows
  * without a mark are re-seeded over the tenant's edits on the next resume, while
  * a known legacy empty-seed mark is repaired before a new seed is attempted. An
  * empty seed is rejected before the mark is written, so a failed catalog step

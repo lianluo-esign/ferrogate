@@ -556,7 +556,7 @@ GATEWAY_CACHE_DISABLED_API_KEYS = "[]"
 GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 
 # ---------------------------------------------------------------------------
-# [vars] — per-tenant D1 routing (ONE DATABASE PER TENANT)
+# [vars] — tenant data routing
 #
 # Read by `resolverForEnv` (src/tenancy/resolver.ts), mounted ahead of
 # `rateLimit()` in `GATEWAY_MIDDLEWARE`. Modes:
@@ -573,7 +573,6 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 #                       resolved lazily at first use. Self-hosted/single-tenant.
 #   binding_strict      same, but resolved BEFORE the request is served, so an
 #                       un-provisioned tenant is refused at the door.
-#   rest                D1 REST API (no `batch()` atomicity — see ports.ts).
 #   shared_development  every tenant on `DB`. LOCAL ONLY.
 #
 # WHY THE DEFAULT MOVED OFF `"off"`. Per-tenant storage that has to be switched
@@ -596,8 +595,8 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 # which is the only way to enumerate the fleet — a Durable Object namespace
 # cannot be listed in production.
 #
-# The three `binding*`/`rest` modes DO route on CONTROL_DB's `tenant_databases`,
-# and each provisioned tenant then needs its own stanza, which is DEPLOY-TIME
+# The two `binding*` modes route on CONTROL_DB's `tenant_databases`,
+# and each native-binding tenant then needs its own stanza, which is DEPLOY-TIME
 # state and therefore not committed with real ids:
 #
 #   [[d1_databases]]
@@ -606,12 +605,8 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 #   database_id = "replace-at-deploy"             # PLACEHOLDER — never a real uuid
 #   migrations_dir = "../../sql/d1-ts/tenant"
 #
-# `GATEWAY_TENANT_DB_ACCOUNT_ID` is only read in `"rest"` mode; its companion
-# `GATEWAY_TENANT_DB_API_TOKEN` is a SECRET (`wrangler secret put`) and is
-# deliberately absent from this file.
 # ---------------------------------------------------------------------------
 GATEWAY_TENANT_DB_ROUTING = "durable_object"
-GATEWAY_TENANT_DB_ACCOUNT_ID = "replace-at-deploy"
 
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
 # makes `/readyz` answer 503 while `/healthz` stays 200, which is the

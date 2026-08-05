@@ -446,21 +446,14 @@ describe("the real money path, unmodified, over the facade", () => {
    * `src/d1/wallet-d1.ts`. That is the acceptance criterion for this slice
    * stated as a test: if the module needed editing, the facade would be wrong.
    */
-  test("requireAtomicBatch ADMITS a durable_object handle and still refuses rest", () => {
+  test("requireAtomicBatch ADMITS a durable_object handle", () => {
     const handle = {
       tenantId: ACME,
       db: facadeFor(ACME),
       source: "durable_object" as const,
       supportsAtomicBatch: true,
     };
-    // Under `rest` all 13 of these refused, which is what made the REST
-    // strategy a read-only topology. They must now RUN.
     expect(requireAtomicBatch(handle, "reserve_wallet_credits")).toBe(handle);
-
-    const restHandle = { ...handle, source: "rest" as const, supportsAtomicBatch: false };
-    expect(() => requireAtomicBatch(restHandle, "reserve_wallet_credits")).toThrow(
-      /refusing to run the guard non-atomically/,
-    );
   });
 
   test("the no-oversell reserve admits exactly as many holds as the balance affords", async () => {

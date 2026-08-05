@@ -41,10 +41,10 @@
  * guard had just yanked). Inside one batch they are one transaction, so the
  * label describes the state the guard actually acted on.
  *
- * That is also why these operations require `supportsAtomicBatch`: on a REST
- * handle `batch()` is neither one transaction nor able to return `RETURNING`
- * rows, and a guard whose verdict is read from an empty `RETURNING` set would
- * silently read "refused" for every call.
+ * That is also why these operations require `supportsAtomicBatch`: a handle
+ * that cannot provide one transaction and `RETURNING` rows would make a guard
+ * whose verdict is read from an empty `RETURNING` set silently report "refused"
+ * for every call.
  */
 import {
   type AssetPromotionTarget,

@@ -122,11 +122,11 @@ async function provision(caller: Caller): Promise<void> {
     control()
       .prepare(
         `INSERT INTO tenant_databases
-           (tenant_id, database_uuid, database_name, binding_name, schema_version,
+           (tenant_id, binding_name, schema_version,
             storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, NULL, 15, 'durable_object', 'ready', 1, 1)`,
+         VALUES (?, NULL, 15, 'durable_object', 'ready', 1, 1)`,
       )
-      .bind(caller.tenantId, `uuid-${caller.tenantId}`, `ferrogate-${caller.tenantId}`),
+      .bind(caller.tenantId),
     control()
       .prepare(
         `INSERT INTO api_key_directory

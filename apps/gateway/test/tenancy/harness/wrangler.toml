@@ -22,7 +22,7 @@ compatibility_flags = ["nodejs_compat"]
 
 # ---------------------------------------------------------------------------
 # The CONTROL database — account-global. Holds `tenant_databases`, the
-# tenantId -> (database_uuid, binding_name) registry the router reads. Already
+# tenantId -> binding_name registry the compatibility router reads. Already
 # declared on the real Worker; repeated here because this config is standalone.
 # ---------------------------------------------------------------------------
 [[d1_databases]]

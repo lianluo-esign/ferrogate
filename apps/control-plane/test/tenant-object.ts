@@ -40,9 +40,9 @@ export async function registerDurableObjectTenant(tenantId: string): Promise<voi
   await db()
     .prepare(
       `INSERT INTO tenant_databases
-         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+         (tenant_id, binding_name, schema_version,
           storage_backend, provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
-       VALUES (?, ?, ?, NULL, 15, 'durable_object', 'ready', 'done', 1, 1)
+       VALUES (?, NULL, 15, 'durable_object', 'ready', 'done', 1, 1)
        ON CONFLICT (tenant_id) DO UPDATE SET
          binding_name = NULL,
          storage_backend = 'durable_object',
@@ -50,7 +50,7 @@ export async function registerDurableObjectTenant(tenantId: string): Promise<voi
          migration_state = 'done',
          schema_version = 15`,
     )
-    .bind(tenantId, `uuid-${tenantId}`, `ferrogate-${tenantId}`)
+    .bind(tenantId)
     .run();
 }
 

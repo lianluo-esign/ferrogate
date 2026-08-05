@@ -26,8 +26,8 @@
  *
  * The `RETURNING` clause is what makes this observable: an empty result set is
  * the guard's "not admitted" signal. Without `RETURNING` the caller could not
- * distinguish "inserted" from "predicate was false", which is why the D1 **REST**
- * API cannot host this algorithm at all — see `requireAtomicBatch`.
+ * distinguish "inserted" from "predicate was false". `requireAtomicBatch`
+ * refuses any future handle that cannot preserve this contract.
  *
  * ## Divergence from the Rust D1 backend (deliberate, and an improvement)
  *

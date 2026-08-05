@@ -38,15 +38,9 @@
  *     along INSIDE it (the router constructs one); no app names it directly, so
  *     it is mounted transitively, not directly — the three apps that appear to
  *     import it only mention it in comments.
- *   - `NonAtomicD1RestTenantDatabaseRouter` and `SharedDatabaseTenantRouter` →
- *     `apps/gateway/src/tenancy/resolver.ts`. Both were missing from this list
- *     AND from the gate below, i.e. neither claimed live nor claimed dead — the
- *     state in which a mount can disappear with every suite still green. The
- *     REST one is the fail-closed escape hatch for a tenant fleet larger than
- *     the binding budget (`supportsAtomicBatch: false`, so `requireAtomicBatch`
- *     keeps every guarded write off it); the shared one is the development
- *     posture whose `source: "shared_development"` label says it carries no
- *     physical isolation.
+ *   - `SharedDatabaseTenantRouter` → `apps/gateway/src/tenancy/resolver.ts`.
+ *     It is the development posture whose `source: "shared_development"`
+ *     label says it carries no physical isolation.
  *   - `D1WalletStore` → `apps/gateway/src/ratelimit/{wallet,middleware}.ts`;
  *     the no-oversell reserve now guards real money.
  *   - `D1WorkflowBudgetStore` → `apps/gateway/src/ratelimit/workflow.ts`.
@@ -179,14 +173,6 @@ export * from "./audit-chain.js";
  * a plain vitest suite) stays safe.
  */
 export * from "./tenant-router.js";
-/**
- * The REST leg of the tenant router (strategy (c) of `D1_BINDING_STRATEGIES`):
- * a `D1Database`-shaped client addressed by RUNTIME `database_uuid`, with
- * `batch()` refused and `supportsAtomicBatch: false` so `requireAtomicBatch`
- * keeps every money path off it. See the file docblock for the exact
- * atomic/non-atomic table.
- */
-export * from "./tenant-rest.js";
 /**
  * The DURABLE-OBJECT leg of the tenant router (strategy `durable_object`): a
  * `D1Database`-shaped facade over one tenant's `TenantDataObject`, with

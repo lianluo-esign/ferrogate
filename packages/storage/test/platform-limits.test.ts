@@ -78,10 +78,13 @@ describe("PLATFORM LIMIT — supported tenant storage strategies", () => {
     expect(D1_BINDING_STRATEGIES.shared_development.atomicBatch).toBe(true);
   });
 
-  test("exactly one strategy is both deploy-free and money-safe: durable_object", () => {
+  test("exactly one production strategy is both deploy-free and money-safe: durable_object", () => {
     expect(
       Object.entries(D1_BINDING_STRATEGIES)
-        .filter(([, s]) => s.atomicBatch && !s.requiresDeployPerTenant)
+        .filter(
+          ([name, s]) =>
+            name !== "shared_development" && s.atomicBatch && !s.requiresDeployPerTenant,
+        )
         .map(([name]) => name),
     ).toEqual(["durable_object"]);
     expect(D1_BINDING_STRATEGIES.durable_object.returning).toBe(true);

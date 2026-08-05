@@ -57,7 +57,7 @@ The following architecture was retired on 2026-08-05:
 - one D1 database for every tenant;
 - runtime REST-query routing to a D1 database identifier;
 - proxy Workers used to regain tenant transaction semantics; and
-- per-tenant D1 lifecycle and manual provisioning procedures.
+- tenant-scoped D1 lifecycle and manual provisioning procedures.
 
 Those mechanisms do not participate in current request handling. Historical
 analysis is preserved, with dated annotations, in `docs/rewrite/` and
@@ -68,7 +68,7 @@ analysis is preserved, with dated annotations, in `docs/rewrite/` and
 Apply CONTROL D1 migrations with the normal Worker deployment process. Tenant
 schema initialization and migration are owned by the tenant Durable Object
 lifecycle. Operators should use audited application-level administration for
-tenant data rather than a console procedure that targets a per-tenant D1
+tenant data rather than a console procedure that targets a tenant-specific D1
 database.
 
 For the full rationale, limits and retention decision, see

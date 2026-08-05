@@ -1,6 +1,11 @@
 -- ===========================================================================
 -- `tenant_databases` becomes the PROVISIONING STATE record (#820)
 --
+-- HISTORICAL MIGRATION NOTE (superseded 2026-08-05): this migration preserves
+-- the legacy D1 identity columns for databases that existed before the
+-- Durable Object cutover. Migration 0022 removes `database_uuid` and
+-- `database_name`; only `binding_name` remains for native-binding compatibility.
+--
 -- The table survives the move to one Durable Object per tenant
 -- (`docs/design/per-tenant-durable-object-storage-2026-08.md`). Its MEANING
 -- does not.
@@ -35,7 +40,7 @@
 -- admit exactly ONE Durable-Object tenant and refuse the second with a
 -- constraint error nobody could read.
 --
--- ## Why the three columns are KEPT rather than dropped
+-- ## Why the three columns were KEPT at that point in history
 --
 -- The brief for this slice called them dead. Two of them are not, and dropping
 -- a live column to make a doc comment true is how a topology that is still
@@ -47,19 +52,13 @@
 --     `EnvBindingTenantDatabaseRouter` resolves `env[binding_name]` from this
 --     column. `apps/gateway/test/tenancy/harness/` deploys that posture on
 --     purpose so the fail-closed refusals stay observable.
---   * `database_uuid` is read by `NonAtomicD1RestTenantDatabaseRouter`
---     (`packages/storage/src/tenant-rest.ts`), which the `rest` mode still
---     mounts. `rest` is RETIRED BY DECISION and not yet removed from the
---     resolver; deleting the column would turn a documented, tested,
---     still-branched mode into a runtime `no such column`. Retiring the mode is
---     its own slice, and it is the slice that gets to drop this column.
---   * `database_name` is carried by both of the above as the operator-facing
---     name of the D1 database. It is dead the moment `rest` goes.
+--   * `database_uuid` and `database_name` were consumed by the then-existing
+--     runtime D1 REST and lifecycle paths. Those paths were retired on
+--     2026-08-05; migration 0022 is the forward cleanup that drops both.
 --
--- What this migration DOES do is stop them reading like a live design: they are
--- nullable now, they are grouped and commented as the D1-topology columns, and a
--- `durable_object` tenant writes NULL into all three. A row with three NULLs
--- there and `storage_backend = 'durable_object'` is unambiguous.
+-- What this migration did was make the legacy columns nullable while the
+-- compatibility transition was in flight. Migration 0022 completes that
+-- transition and leaves only `binding_name` for explicit native bindings.
 --
 -- ## The new columns
 --

@@ -450,10 +450,6 @@ export interface GatewayBindings {
    * the shared `DB`.
    */
   readonly GATEWAY_TENANT_DB_ROUTING?: string;
-  /** D1 REST account id — `"rest"` mode only. */
-  readonly GATEWAY_TENANT_DB_ACCOUNT_ID?: string;
-  /** D1 REST API token — `"rest"` mode only. A SECRET, never a committed var. */
-  readonly GATEWAY_TENANT_DB_API_TOKEN?: string;
 
   // -------------------------------------------------------------------------
   // Wave-10 bindings. Same rule: each is declared in `wrangler.toml` and read

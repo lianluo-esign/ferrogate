@@ -225,12 +225,10 @@ async function provisionTenantDatabase(tenantId: string): Promise<void> {
   await db()
     .prepare(
       `INSERT INTO tenant_databases
-         (tenant_id, database_uuid, database_name, binding_name, schema_version,
+         (tenant_id, binding_name, schema_version,
           migration_state, provisioned_at_unix, updated_at_unix)
-       VALUES (?, 'uuid-a', 'ferrogate-tenant-a', 'TENANT_DB_A', 1, 'done', 1, 1)
+       VALUES (?, 'TENANT_DB_A', 1, 'done', 1, 1)
        ON CONFLICT (tenant_id) DO UPDATE SET
-         database_uuid = excluded.database_uuid,
-         database_name = excluded.database_name,
          binding_name = excluded.binding_name,
          storage_backend = 'native_binding',
          migration_state = 'done',

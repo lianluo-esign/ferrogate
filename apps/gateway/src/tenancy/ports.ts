@@ -1,52 +1,50 @@
 /**
- * The request-path tenancy seam: authenticated identity → **that tenant's** D1
- * database.
+ * The request-path tenancy seam: authenticated identity → **that tenant's**
+ * Durable Object-backed data store.
  *
  * ## The user directive this closes, and what was actually true before it
  *
- * The standing directive is "use Cloudflare D1 as the database, **one isolated
- * database per tenant**". Before this module the gateway used a SINGLE shared
- * `env.DB` (+ `env.CONTROL_DB` / `env.BILLING_DB`) for every tenant, and
- * `TenantDatabaseRouter` — implemented and tested in `@ferrogate/storage` —
- * had zero callers. Logical isolation (a `tenant_id` column, filtered in the
- * query) existed and was tested; **physical** isolation did not exist on any
- * deployed path.
+ * The current directive is one SQLite-backed Durable Object per tenant, with
+ * account-global CONTROL D1 for the roster and projections. Before this module
+ * the gateway used a SINGLE shared `env.DB` (+ `env.CONTROL_DB` /
+ * `env.BILLING_DB`) for every tenant, and `TenantDatabaseRouter` — implemented
+ * and tested in `@ferrogate/storage` — had zero callers. Logical isolation (a
+ * `tenant_id` column, filtered in the query) existed and was tested; physical
+ * isolation did not exist on any deployed path.
  *
  * ## The platform constraint, stated honestly
  *
- * `docs/legacy/inventory-data-billing.md` §1.7 records it as "the biggest
- * architectural open question": **Cloudflare bindings resolve at DEPLOY time.**
- * `env.DB` is handed to the isolate already connected; there is no runtime
- * `openDatabase(uuid)`. So there are exactly three ways to reach tenant X's
- * database, and `@ferrogate/storage`'s `D1_BINDING_STRATEGIES` prices all three:
+ * `docs/legacy/inventory-data-billing.md` §1.7 records the old D1 binding
+ * constraint: **Cloudflare bindings resolve at DEPLOY time.** The Durable
+ * Object namespace is bound once, then `idFromName(tenantId)` addresses the
+ * tenant at runtime. The supported sources are:
  *
  * | strategy | how | atomic `batch()` + `RETURNING`? | onboarding |
  * |---|---|---|---|
+ * | `durable_object` | one SQLite-backed object per tenant; the namespace is bound once and `idFromName(tenantId)` selects the object | **yes** | no per-tenant provisioning |
  * | `native_binding` | one `[[d1_databases]]` stanza per tenant; the CONTROL database's `tenant_databases.binding_name` names it; `env[bindingName]` is an ordinary **runtime** property read over a deploy-time-declared set | **yes** | needs a `wrangler deploy` |
- * | `proxy_service` | a proxy Worker holds the per-tenant bindings behind a `[[services]]` binding (the shape `workers/d1-proxy` had, issue #450) | **yes** | redeploy the proxy, not the gateway |
- * | `rest` | the D1 HTTP query API addressed by RUNTIME `database_uuid` | **NO** — no transaction envelope | a control-database row |
+ * | `shared_development` | one shared D1 database for local development or a genuinely single-tenant deployment | **yes** | no per-tenant provisioning |
  *
- * The registry is the same in all three: the **CONTROL** database's
- * `tenant_databases` table (`sql/d1-ts/control/0001_init_control.sql`), which is
- * the direct descendant of the Rust `d1_tenant_database` registry document.
+ * CONTROL retains the **tenant roster and provisioning state** in
+ * `tenant_databases` (`sql/d1-ts/control/0001_init_control.sql`). Its
+ * `binding_name` column is used only by the native-binding compatibility mode;
+ * Durable Object routing does not read it on the request path.
  *
- * ### Which operations can and cannot be atomic through the REST path
+ * ### Atomicity contract
  *
- * Single statements — including a guarded `UPDATE … WHERE <cas> RETURNING …` —
- * ARE atomic over REST and their `RETURNING` rows do come back. What is
- * impossible is `batch()`: N statements as ONE transaction. That is exactly the
- * primitive the wallet no-oversell reserve (3 statements), the workflow-budget
- * CAS and the billing-outbox enqueue (#150) are built on, so a REST handle
- * reports `supportsAtomicBatch: false` and `requireAtomicBatch` refuses it.
- * This is the reason the Rust tree needed a `d1-proxy` Worker at all.
+ * Every supported source preserves atomic `batch()` plus `RETURNING`: Durable
+ * Objects use their SQLite transaction boundary, native bindings use D1's
+ * transaction boundary, and shared development uses the same D1 surface.
+ * `requireAtomicBatch` remains the fail-closed guard for any future router that
+ * cannot uphold that contract.
  *
  * ## FAIL CLOSED — the invariant the whole feature exists for
  *
  * If a tenant's database cannot be resolved, the request ERRORS. It never falls
- * back to `env.DB`, to `env.CONTROL_DB`, or to any other tenant's database. A
+ * back to `env.DB`, to `env.CONTROL_DB`, or to any other tenant's data store. A
  * silent fallback would write tenant A's wallet reservation into the shared
- * database that tenant B also reads — i.e. it would destroy the isolation the
- * DB-per-tenant topology is the entire point of. There is deliberately **no**
+ * database that tenant B also reads — i.e. it would destroy the physical
+ * isolation this topology exists to provide. There is deliberately **no**
  * "default database" option anywhere in this directory, and
  * `test/tenancy/resolver.spec.ts` mutation-proves it.
  *
@@ -125,14 +123,6 @@ export type TenantDatabaseRoutingMode =
    */
   | "binding_strict"
   /**
-   * `NonAtomicD1RestTenantDatabaseRouter` over the D1 HTTP query API, addressed
-   * by runtime uuid. Read paths and single-statement writes only: every handle
-   * reports `supportsAtomicBatch: false`, so `requireAtomicBatch` refuses the
-   * money paths. Needs `GATEWAY_TENANT_DB_ACCOUNT_ID` + the
-   * `GATEWAY_TENANT_DB_API_TOKEN` secret.
-   */
-  | "rest"
-  /**
    * `SharedDatabaseTenantRouter` over `env.DB` — ONE database for every tenant,
    * i.e. NO physical isolation. `wrangler dev --local` and genuinely
    * single-tenant self-hosted deployments only. It must be named explicitly in
@@ -153,7 +143,6 @@ export const TENANT_DATABASE_ROUTING_MODES: readonly TenantDatabaseRoutingMode[]
   "off",
   "binding",
   "binding_strict",
-  "rest",
   "shared_development",
 ] as const;
 
@@ -248,10 +237,6 @@ export interface TenancyBindings {
    * under `"durable_object"` is a NAMED 503, never a fallback to `DB`.
    */
   readonly TENANT_DATA?: TenantDataNamespace;
-  /** Cloudflare account id — `"rest"` mode only. */
-  readonly GATEWAY_TENANT_DB_ACCOUNT_ID?: string;
-  /** D1-capable API token — `"rest"` mode only. A SECRET, never a var. */
-  readonly GATEWAY_TENANT_DB_API_TOKEN?: string;
   /** The CONTROL database holding `tenant_databases`. */
   readonly CONTROL_DB?: D1Database;
   /** The shared database — `"shared_development"` mode only. */

@@ -3,10 +3,8 @@
  *
  * Ported from `crates/ferrogate-cloudflare/src/client.rs:148-170`
  * (`RetryPolicy`). Cloudflare's global API limit is **~1,200 requests / 5 min /
- * user** (≈4 req/s), so a transient 429 or 502 on a control-plane call is
- * expected traffic, not an outage — and until this landed, one of them was a
- * hard user-visible failure on `@ferrogate/storage`'s request-path D1 REST
- * router.
+ * user** (≈4 req/s), so a transient 429 or 502 on an account-management call is
+ * expected traffic, not an outage.
  *
  * ## No jitter, on purpose
  *
@@ -108,11 +106,9 @@ export interface RetryOptions<T extends RetryableOutcome = RetryableOutcome> {
    * Whether a received outcome is worth re-issuing. Defaults to
    * {@link isRetryableStatus} on its status.
    *
-   * Override it when "retryable" is finer than the status alone. The D1 REST
-   * transport in `@ferrogate/storage` does: it POSTs every statement, so a 5xx
-   * is AMBIGUOUS — the write may have applied — while a 429 is an outright
-   * rejection that never reached the database. It therefore retries a 429
-   * unconditionally and a 5xx only for a statement that cannot mutate.
+   * Override it when "retryable" is finer than the status alone, for example
+   * when a caller must distinguish an outright rejection from an ambiguous
+   * write response.
    */
   readonly isRetryableOutcome?: (outcome: T) => boolean;
   /** Whether a THROWN failure is worth re-issuing. Default: never. */

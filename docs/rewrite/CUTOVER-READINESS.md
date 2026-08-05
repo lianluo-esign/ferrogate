@@ -1,5 +1,9 @@
 # CUTOVER READINESS — THE FINAL DECISION
 
+> **Historical tenant-storage annotation (2026-08-05):** D1-per-tenant and
+> REST/lifecycle passages in this preserved readiness record are superseded.
+> Current tenant storage is CONTROL D1 plus one SQLite Durable Object per tenant.
+
 **Wave 25 · 2026-08-02 · branch `main-ts` · worktree `/home/dev/ferrogate-ts`**
 
 This document supersedes every previous version. Waves 15–24 are preserved

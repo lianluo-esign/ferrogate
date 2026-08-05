@@ -307,11 +307,11 @@ describe("D1WalletStore — standalone balance settlement", () => {
 });
 
 describe("D1WalletStore — atomicity is a precondition, not a hope", () => {
-  test("a handle that cannot do atomic batch is refused outright", async () => {
+  test("a handle that does not advertise atomic batch is refused outright", async () => {
     const restLike: TenantDatabaseHandle = {
       tenantId: TENANT_A,
       db: handleA.db,
-      source: "rest",
+      source: "native_binding",
       supportsAtomicBatch: false,
     };
     const store = new D1WalletStore(restLike);
