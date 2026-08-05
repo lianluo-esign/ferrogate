@@ -307,14 +307,10 @@ const SECRETS: readonly string[] = [];
  * Vars and BINDINGS deliberately left out of the committed config, each NAMED
  * in its prose so an operator can still discover it.
  *
- *  - `DB` / `CONTROL_DB` — the two `[[d1_databases]]` stanzas are written out
- *    IN FULL but COMMENTED. That is not laziness: `vitest.config.ts` loads this
- *    `wrangler.toml`, so an uncommented stanza injects an EMPTY unmigrated
- *    database into every unit test and routes the durable-first branch of
- *    `resolveDeps` onto schema-less tables — 106 of 259 tests go red on a
- *    correct tree. The durable adapters have their own chained harness
- *    (`test/durable/harness/`) which binds and MIGRATES both. Uncommenting is a
- *    deploy step, and `CLOUD-VERIFICATION.md` row B1 is where it is tracked.
+ *  - `DB` / `CONTROL_DB` — live D1 authorities. The default unit project uses
+ *    the `unit` Wrangler environment, which deliberately omits non-inheritable
+ *    D1 bindings while preserving the committed deploy file for the binding
+ *    and drift gates. The chained durable harness binds and migrates both.
  *  - `AGENT_UPSTREAMS` — deliberately NOT committed even as `"[]"`, because
  *    `resolveDeps` reads `env.AGENT_UPSTREAMS ?? env.FG_DEV_AGENT_UPSTREAMS`
  *    and a committed empty would SHADOW the dev fallback the A2A tests seed.
@@ -333,8 +329,6 @@ const SECRETS: readonly string[] = [];
  */
 const DOCUMENTED_BUT_UNDECLARED = [
   "AGENT_UPSTREAMS",
-  "CONTROL_DB",
-  "DB",
   "FG_DEV_AGENT_UPSTREAMS",
 ] as const;
 
@@ -353,8 +347,8 @@ const DOCUMENTED_BUT_UNDECLARED = [
  * would reasonably conclude the list is complete. Each is DELIBERATELY not
  * committed to `[vars]`: `vitest.config.ts` loads `wrangler.toml`, so a
  * committed value would be injected into every unit test and shadow the
- * fixtures the harness seeds — the measured failure mode behind the commented
- * D1 stanzas (106 of 259 tests) and the `AGENT_UPSTREAMS = "[]"` incident
+ * fixtures the harness seeds — the measured failure mode behind the prior
+ * unmigrated-D1 unit configuration and the `AGENT_UPSTREAMS = "[]"` incident
  * (14 A2A tests).
  *
  * All three are `wrangler.toml` edits, i.e. the integrate step's file, so this
@@ -424,9 +418,14 @@ describe("the env-var drift gate itself", () => {
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "AGENT_RUN_STATE",
+      "CONTROL_DB",
+      "DB",
       // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
       // because it is LIVE; while it was commented out it was not.
       "RATE_LIMIT",
+      // Cross-script, pointed at the gateway's authoritative tenant evidence
+      // object (#859). AgentRunState writes request/run evidence through it.
+      "TENANT_DATA",
       "WORKER_PLANE",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(14);
@@ -451,11 +450,11 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
-    // Not vacuous: four entries today — the two commented-out D1 stanzas and
-    // the two upstream-catalog knobs, each of whose whole justification lives
-    // in that prose. It was five until #666 made the cross-script RATE_LIMIT
-    // binding live.
-    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(4);
+    // Not vacuous: two entries today — the two upstream-catalog knobs, each of
+    // whose whole justification lives in that prose. It was four while the D1
+    // authorities were still commented, and five until #666 made the
+    // cross-script RATE_LIMIT binding live.
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(2);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name), `${name} is read but no longer documented`).toBe(true);
     }
@@ -466,15 +465,13 @@ describe("every var the source reads is declared or explicitly excepted", () => 
     expect(silent).toEqual([...UNDOCUMENTED].sort());
   });
 
-  it("keeps both D1 stanzas COMMENTED, which is what makes DB/CONTROL_DB undeclared", () => {
-    // The claim behind the two exceptions above, stated so it cannot rot. If
-    // someone uncomments a stanza the name becomes DECLARED, this goes red, and
-    // the exception table has to be updated — which is the moment to notice
-    // that 106 unit tests are about to change posture.
-    expect(DECLARED.bindings.has("DB")).toBe(false);
-    expect(DECLARED.bindings.has("CONTROL_DB")).toBe(false);
-    expect(WRANGLER_TOML).toContain('#   binding = "DB"');
-    expect(WRANGLER_TOML).toContain('#   binding = "CONTROL_DB"');
+  it("declares live D1 authorities for the deployed Worker", () => {
+    expect(DECLARED.bindings.has("DB")).toBe(true);
+    expect(DECLARED.bindings.has("CONTROL_DB")).toBe(true);
+    expect(WRANGLER_TOML).toContain('binding = "DB"');
+    expect(WRANGLER_TOML).toContain('binding = "CONTROL_DB"');
+    expect(WRANGLER_TOML).toContain('migrations_dir = "../../sql/d1-ts/tenant"');
+    expect(WRANGLER_TOML).toContain('migrations_dir = "../../sql/d1-ts/control"');
   });
 
   /**

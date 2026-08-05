@@ -678,23 +678,28 @@ CREATE TABLE IF NOT EXISTS guardrail_policy_bindings (
 );
 
 -- ---------------------------------------------------------------------------
--- Observability append/analytics  (split rule (d))
+-- Observability append/analytics compatibility projections (split rule (d))
 --
--- On Postgres these are single global tables scanned time-ordered across every
--- tenant; their `tenant` column is a COMPOSITE STORAGE KEY, not a routing
--- tenant id. Routing them per tenant would force a lossy fan-out merge-sort for
--- every list plus fetch-all-then-slice pagination, so they stay single tables
--- in CONTROL — the faithful mirror of the Postgres single-query ordering and
--- the cross-family UNION seed.
+-- As of #859, tenant-attributed `request_logs`, `agent_runs`, and
+-- `agent_run_events` are authoritative in the exact tenant's
+-- `TenantDataObject`. These same-named CONTROL tables remain as derived
+-- compatibility projections for bounded fleet discovery and existing joins;
+-- they are never a fallback for an unavailable object. Unattributed/platform
+-- request rows remain control-only. `audit_events` remains control-owned.
+--
+-- Keeping this projection preserves existing one-database fleet surfaces while
+-- #825 defines their bounded, paginated, freshness, and deletion contract.
 --
 -- PORT-TODO(inventory-data-billing §1.7): `request_logs` / `audit_events` are
--- the strongest Analytics Engine candidates in the tree (`writeDataPoint` +
--- the SQL API). Ported as D1 tables here so the admin read surface stays
--- queryable and the port is behavior-complete; the sink swap is a
--- `packages/observability` / `apps/telemetry` slice.
+-- Analytics Engine candidates in the tree (`writeDataPoint` + the SQL API).
+-- Analytics Engine remains a documented future option; #859 keeps the
+-- queryable compatibility projection and does not implement that sink swap.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_runs (
-    id TEXT PRIMARY KEY,
+    -- `id` is a caller-supplied business identifier and may repeat across
+    -- tenants. `projection_key` is the storage key for the derived mirror.
+    projection_key TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     request_id TEXT NOT NULL,
     tenant TEXT,
     started_at_unix INTEGER NOT NULL,
@@ -709,7 +714,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_started
     ON agent_runs(started_at_unix);
 
 CREATE TABLE IF NOT EXISTS agent_run_events (
-    id TEXT PRIMARY KEY,
+    -- Event ids are only unique within the tenant that owns the run.
+    projection_key TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
     tenant TEXT,
@@ -724,7 +731,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_events_request
     ON agent_run_events(request_id);
 
 CREATE TABLE IF NOT EXISTS request_logs (
-    request_id TEXT PRIMARY KEY,
+    -- Clients may supply the same request id in different tenants. Keep the
+    -- logical id for joins, but key the projection by tenant plus id.
+    projection_key TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
     agent_run_id TEXT,
     tenant TEXT,
     started_at_unix INTEGER NOT NULL,

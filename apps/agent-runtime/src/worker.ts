@@ -16,3 +16,6 @@
 export { default } from "./index.js";
 export { AgentRunState } from "./runs/do.js";
 export { WorkerPlane } from "./workers/plane.js";
+
+/** The cross-script tenant database class used by the durable test harness. */
+export { TenantDataObject } from "@ferrogate/storage/durable-objects";

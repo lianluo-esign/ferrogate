@@ -7,39 +7,47 @@ import { guardrailEvidenceStatements } from "../guardrails/evidence-d1.js";
  *
  * `[[queues.producers]] BILLING` is producer-only on this Worker, and its
  * stanza says why: the consumer belongs to whoever settles wallets downstream.
- * Request logs are the opposite case. The only thing that has to happen to a
- * request-log message is an insert into the CONTROL database, and this Worker
- * already binds it (`CONTROL_DB`) because the guardrail policy source reads
- * from it. Routing the message to a second Worker would add a deploy unit, a
- * second `wrangler.toml` and a second set of credentials to be able to do
- * exactly the same statement.
+ * Request logs are the opposite case. A message is written to the tenant's
+ * authoritative object and then to the CONTROL database compatibility
+ * projection; this Worker already binds both because the guardrail policy
+ * source reads from the control database. Routing the message to a second
+ * Worker would add a deploy unit, a second `wrangler.toml` and a second set of
+ * credentials to be able to do exactly the same writes.
  *
  * A Worker consuming a queue it produces is a supported Cloudflare topology; it
  * is a separate invocation with its own `env`, not a re-entrant call.
  *
  * ## The batch contract, and why a bad message does not poison a good one
  *
- * Queues are AT LEAST ONCE. The write is an upsert keyed on `request_id`
- * (`d1.ts`), so a redelivered message re-applies the same row instead of
- * failing on the primary key — which is what makes `retryAll()` on a partial
- * failure safe rather than a loop.
+ * Queues are AT LEAST ONCE. The tenant-object write is keyed on `request_id`,
+ * while the control projection is keyed on its tenant-qualified
+ * `projection_key` (`d1.ts`). A redelivered message therefore re-applies the
+ * same row instead of failing on the primary key, which is what makes
+ * `retryAll()` on a partial failure safe rather than a loop.
  *
  * A message whose body does not decode is `ack()`ed and counted, NOT retried:
  * it cannot become valid on redelivery, and retrying it would keep a
  * permanently-bad message in front of good evidence until it dead-lettered.
  * `requestLogFromWire` is total and returns `undefined` for exactly that case.
  *
- * The batch is written in ONE `db.batch`, so either the whole delivery lands or
- * none of it does. On failure the batch is retried whole — with the upsert, the
- * messages that had already landed are simply re-applied.
+ * Each tenant group is written in ONE object batch, and the compatibility rows
+ * plus control-owned guardrail evidence are written in ONE projection batch.
+ * On failure the delivery is retried whole — with the upsert, rows that had
+ * already landed are simply re-applied.
  */
 import {
   type GuardrailEvidenceEnvelope,
   guardrailEvidenceFromWire,
 } from "../guardrails/evidence-wire.js";
-import { REQUEST_LOG_UPSERT_SQL, type RequestLogDatabase, requestLogBindings } from "./d1.js";
+import {
+  TENANT_REQUEST_LOG_UPSERT_SQL,
+  REQUEST_LOG_UPSERT_SQL,
+  requestLogBindings,
+  tenantRequestLogBindings,
+  type RequestLogDatabase,
+} from "./d1.js";
 import { requestLogFromWire } from "./record.js";
-import { requestLogDatabaseFrom } from "./sink.js";
+import { requestLogDatabaseFrom, requestLogTenantDatabaseFromEnv } from "./sink.js";
 
 /** The `MessageBatch` slice this consumer uses, structurally. */
 export interface RequestLogMessageBatch {
@@ -59,7 +67,8 @@ export interface RequestLogConsumeResult {
 }
 
 /**
- * Apply one queue delivery to `request_logs`.
+ * Apply one queue delivery to tenant-authoritative `request_logs` and its
+ * derived control projection.
  *
  * NEVER throws: a consumer that throws gets its batch redelivered by the
  * platform anyway, so throwing would only lose the ability to say what
@@ -70,6 +79,10 @@ export async function consumeRequestLogBatch(
   batch: RequestLogMessageBatch,
   env: unknown,
   databaseOf: (env: unknown) => RequestLogDatabase | undefined = requestLogDatabaseFrom,
+  tenantDatabaseOf: (
+    env: unknown,
+    tenantId: string,
+  ) => RequestLogDatabase | undefined = requestLogTenantDatabaseFromEnv,
 ): Promise<RequestLogConsumeResult> {
   const records = [];
   const evidence: GuardrailEvidenceEnvelope[] = [];
@@ -100,28 +113,40 @@ export async function consumeRequestLogBatch(
     return { written: 0, malformed, retried: false };
   }
 
-  const db = databaseOf(env);
-  if (db === undefined) {
-    // The binding is missing, which is a DEPLOY fault, not a data fault. Retry
-    // rather than ack: the evidence is still in the queue when it is fixed, and
-    // the dead-letter queue bounds how long that can go on.
-    batch.retryAll?.();
-    return { written: 0, malformed, retried: true };
-  }
-
-  // ONE batch for BOTH kinds, because a mixed delivery must land or not land as
-  // a unit: writing the request log and then failing on the evidence would give
-  // an auditor a decision with no screening record attached, which reads as "no
-  // guardrail ran". D1 applies a batch in order and both upserts are
-  // idempotent, so a `retryAll()` re-applies the whole delivery safely.
-  const requestLogStatement = db.prepare(REQUEST_LOG_UPSERT_SQL);
-  const statements = [
-    ...records.map((record) => requestLogStatement.bind(...requestLogBindings(record))),
-    ...guardrailEvidenceStatements(db, evidence),
-  ];
-
   try {
-    await db.batch(statements);
+    // One object batch per tenant preserves append throughput and the
+    // transaction boundary without pretending that two objects share a
+    // transaction. Retries are safe because every row is an upsert.
+    const byTenant = new Map<string, typeof records>();
+    for (const record of records) {
+      if (record.tenantId === undefined || record.tenantId === "") continue;
+      const group = byTenant.get(record.tenantId) ?? [];
+      group.push(record);
+      byTenant.set(record.tenantId, group);
+    }
+    for (const [tenantId, tenantRecords] of byTenant) {
+      const tenantDb = tenantDatabaseOf(env, tenantId);
+      if (tenantDb === undefined) {
+        throw new Error(`authoritative TenantDataObject is unavailable for tenant ${tenantId}`);
+      }
+      const statement = tenantDb.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
+      await tenantDb.batch(
+        tenantRecords.map((record) => statement.bind(...tenantRequestLogBindings(record))),
+      );
+    }
+
+    const projection = databaseOf(env);
+    if (projection === undefined) throw new Error("derived request-log projection is unavailable");
+
+    // The control batch is only the compatibility projection plus the existing
+    // control-owned guardrail evidence. It is not the source of truth for the
+    // tenant rows above.
+    const requestLogStatement = projection.prepare(REQUEST_LOG_UPSERT_SQL);
+    const statements = [
+      ...records.map((record) => requestLogStatement.bind(...requestLogBindings(record))),
+      ...guardrailEvidenceStatements(projection, evidence),
+    ];
+    await projection.batch(statements);
     return { written: records.length + evidence.length, malformed, retried: false };
   } catch {
     batch.retryAll?.();

@@ -114,6 +114,7 @@ describe("an unhandled failure is still recorded", () => {
 function envWith(queue: RecordingQueue): Record<string, unknown> {
   return {
     ...(env as unknown as Record<string, unknown>),
+    TENANT_DATA: env.TENANT_DATA,
     REQUEST_LOG: queue,
     GATEWAY_STATIC_API_KEYS: JSON.stringify([
       { key: "fg_root", id: "key_root", platform_operator: true },

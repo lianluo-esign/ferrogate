@@ -23,8 +23,15 @@
  * auth middleware from the contract, so it is not repeated here.
  */
 import { HttpError } from "../middleware/errors.js";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import { adminListPaginated, parseListQuery } from "../responses.js";
+import {
+  adminListPaginated,
+  adminListPaginatedWithMetadata,
+  derivedControlProjectionMetadata,
+  evidenceResponseHeaders,
+  parseListQuery,
+} from "../responses.js";
 import {
   AUDIT_TABLE,
   GUARDRAIL_CHECK_TABLE,
@@ -41,6 +48,7 @@ import {
   readOnlyCollection,
   scopeOf,
 } from "./resource.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 
 /**
  * The tenant fence for `audit_events`, which is NARROWER than the document
@@ -200,11 +208,13 @@ function listAuditEventsHandler(): Handler {
 }
 
 // ---------------------------------------------------------------------------
-// `request_logs` — the per-inference-decision evidence trail (#664)
+// `request_logs` — the per-inference-decision evidence trail (#664, #859)
 // ---------------------------------------------------------------------------
 
 /**
- * The tenant fence for `request_logs`.
+ * The tenant fence for the derived control projection of `request_logs`.
+ * Tenant-scoped callers use {@link requestLogTenantPage} instead, which routes
+ * to the exact authoritative TenantDataObject before applying the same fence.
  *
  * Identical in shape and in reasoning to {@link auditTenantFence}, and stated
  * separately rather than shared because the two tables' `tenant` columns are
@@ -225,7 +235,9 @@ export function requestLogTenantFence(scope: CallerScope): { sql: string; params
 }
 
 /**
- * The projection every `request_logs` read shares.
+ * The column projection every `request_logs` read shares. It is used for the
+ * control compatibility projection and for the exact tenant object because
+ * both stores carry the same evidence shape.
  *
  * Written once and named here so the list and the export cannot drift into
  * answering different documents for the same row — which is exactly how a SIEM
@@ -364,6 +376,27 @@ async function requestLogPage(
   return { rows: result.results, total: result.results[0]?.total ?? 0 };
 }
 
+/** One tenant-scoped page from its authoritative TenantDataObject. */
+async function requestLogTenantPage(
+  router: TenantDatabaseRouter,
+  tenantId: string,
+  limit: number,
+  offset: number,
+): Promise<{ rows: RequestLogRow[]; total: number }> {
+  const db = await tenantEvidenceDatabaseFor(router, tenantId);
+  const result = await db
+    .prepare(
+      `SELECT ${REQUEST_LOG_COLUMNS}, count(*) OVER() AS total
+         FROM ${REQUEST_LOG_TABLE}
+        WHERE tenant = ?
+        ${REQUEST_LOG_ORDER}
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(tenantId, limit, offset)
+    .all<RequestLogRow>();
+  return { rows: result.results, total: result.results[0]?.total ?? 0 };
+}
+
 /**
  * `GET /admin/v1/request-logs` — the durable per-decision evidence trail.
  *
@@ -377,12 +410,10 @@ async function requestLogPage(
  * of a record is how you conclude a decision was not made, so this failure mode
  * lies rather than errors.
  *
- * The other half of the defect was that nothing wrote the table; that is
- * `apps/gateway/src/requestlog/` (a different Worker on the same CONTROL
- * database) and it landed in the same change. A reader over a table with no
- * writer is indistinguishable from the defect being closed, which is precisely
- * why the previous author refused to write one speculatively — the note that
- * stood here said so — and why this one arrives WITH the writer.
+ * The other half of the defect was that nothing wrote the evidence. The
+ * gateway now writes the exact tenant object first and then updates the
+ * same-shaped control compatibility projection for fleet readers. A tenant
+ * read never falls back to that projection when the object is unavailable.
  *
  * Three details are shared with {@link listAuditEventsHandler} deliberately:
  * `count(*) OVER()` so the total and the page cannot disagree under a
@@ -398,21 +429,39 @@ function listRequestLogsHandler(): Handler {
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
 
-    if (db === null) {
-      // No control database means no `request_logs` table AND no gateway
-      // writing one — `controlDatabase` is `null` exactly when
-      // `CONTROL_PLANE_STORE = "memory"` or no `DB` is bound. The document
-      // collection is the only request-log surface such a deployment has.
+    if (db === null && scope.kind === "platform_operator") {
+      // No control database means no derived `request_logs` projection. The
+      // tenant-object path above remains independent; for an in-memory
+      // platform deployment the document collection is the only fleet surface.
       const page = await deps.store.list("request-logs", scope, query);
       return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
     }
 
-    const page = await requestLogPage(db, scope, query.limit, query.offset);
-    return json(
-      c,
-      200,
-      adminListPaginated(page.rows.map(requestLogDocument), page.total, query.offset, query.limit),
-    );
+    const page =
+      scope.kind === "tenant"
+        ? await requestLogTenantPage(
+            deps.tenantDatabases,
+            scope.tenantId,
+            query.limit,
+            query.offset,
+          )
+        : await requestLogPage(db as D1Database, scope, query.limit, query.offset);
+    const body =
+      scope.kind === "platform_operator"
+        ? adminListPaginatedWithMetadata(
+            page.rows.map(requestLogDocument),
+            page.total,
+            query.offset,
+            query.limit,
+            derivedControlProjectionMetadata(),
+          )
+        : adminListPaginated(
+            page.rows.map(requestLogDocument),
+            page.total,
+            query.offset,
+            query.limit,
+          );
+    return json(c, 200, body);
   };
 }
 
@@ -454,10 +503,24 @@ function exportRequestLogsHandler(): Handler {
     );
     const db = deps.controlDatabase;
 
+    const metadata =
+      db !== null && scope.kind === "platform_operator"
+        ? derivedControlProjectionMetadata()
+        : null;
+
     const records =
-      db === null
+      db === null && scope.kind === "platform_operator"
         ? (await deps.store.list("request-log-exports", scope, query)).items
-        : (await requestLogPage(db, scope, query.limit, query.offset)).rows.map(requestLogDocument);
+        : (await (scope.kind === "tenant"
+            ? requestLogTenantPage(
+                deps.tenantDatabases,
+                scope.tenantId,
+                query.limit,
+                query.offset,
+              )
+            : requestLogPage(db as D1Database, scope, query.limit, query.offset))).rows.map(
+            requestLogDocument,
+          );
 
     const body = records.map((record) => JSON.stringify(record)).join("\n");
     return raw(
@@ -471,6 +534,7 @@ function exportRequestLogsHandler(): Handler {
       // A trailing newline only when there IS a line: JSONL readers treat a
       // blank line as an error, and an empty export must be zero bytes.
       body === "" ? "" : `${body}\n`,
+      metadata === null ? {} : evidenceResponseHeaders(metadata),
     );
   };
 }
@@ -763,25 +827,31 @@ interface TimelineLeg {
 
 /**
  * `GET /admin/v1/investigations` — who / why / target / action / cost for ONE
- * request, joined across every evidence table in the control database.
+ * request, joined across the control projection and the exact tenant object.
  *
  * ## The order of operations is the fence
  *
- * The selector is resolved FIRST, against the two tenant-fenced evidence tables
- * (`guardrail_evaluations` and `request_logs`). If neither yields a row the
- * answer is 404 — and that is what makes the un-fenced legs safe: `billing_events`
- * has no tenant column at all (its rows are keyed by `request_id`), so it is
- * only ever read for request ids the caller has ALREADY been shown to own. A
- * reader that queried billing first and fenced afterwards would leak the
- * existence and the cost of another tenant's request through a 200/404
+ * The selector is resolved FIRST, against the tenant-fenced control projection
+ * (`guardrail_evaluations` and the derived `request_logs` mirror). Those rows
+ * discover candidate `(tenant, request_id)` pairs only. Attributed request,
+ * agent-run and agent-event rows are then read from the exact TenantDataObject
+ * for each candidate tenant. The control copy is never the authority for a
+ * tenant-scoped answer. If neither the projection discovery nor the exact
+ * object has evidence the answer is 404 — and that is what makes the remaining
+ * un-fenced control legs safe: `billing_events` has no tenant column at all
+ * (its rows are keyed by `request_id`), so it is only ever read for request ids
+ * that exact tenant evidence or a tenant-fenced guardrail row has already
+ * cleared. A reader that queried billing first and fenced afterwards would leak
+ * the existence and the cost of another tenant's request through a 200/404
  * difference.
  *
  * ## What is joined, and what is honestly empty
  *
- * Joined for real, all from the CONTROL database: `requests` (`request_logs`,
- * #664), `guardrail_evaluations` + their checks (#665), `audit_events`,
- * `agent_runs` / `agent_events`, `billing_events` and the cost summed from
- * them.
+ * Guardrail evaluations/checks, audit events and billing remain control-owned.
+ * Request logs, agent runs and agent events are object-authoritative; their
+ * control tables are bounded discovery/projection state for fleet joins only.
+ * A platform operator therefore sees an as-of projection for the fleet until
+ * #825 supplies the general bounded fan-out/read-freshness contract.
  *
  * `approvals` is `[]` and stays `[]`: there is no approvals table in
  * `sql/d1-ts/control/`, and fabricating an empty array is the honest answer
@@ -858,7 +928,55 @@ function getGuardrailInvestigationHandler(): Handler {
       ]),
     ].slice(0, INVESTIGATION_MAX_REQUESTS);
 
-    // ---- 2. Everything else hangs off the ids the fence already cleared ----
+    // ---- 2. Projection discovery becomes exact object reads ---------------
+    const tenantGroups = investigationTenantGroups(scope, evaluationRows.results, requestRows.results, requestIds);
+    const authoritativeRequestRows = await tenantEvidenceRows<RequestLogRow>(
+      deps.tenantDatabases,
+      tenantGroups,
+      (count) =>
+        `SELECT ${REQUEST_LOG_COLUMNS}
+           FROM ${REQUEST_LOG_TABLE}
+          WHERE tenant = ? AND request_id IN (${placeholders(count)})
+          ${REQUEST_LOG_ORDER}`,
+    );
+    const unscopedRequestRows =
+      scope.kind === "platform_operator"
+        ? requestRows.results.filter((row) => row.tenant === null || row.tenant.trim() === "")
+        : [];
+    const responseRequestRows = [...authoritativeRequestRows, ...unscopedRequestRows].sort(
+      requestLogRowOrder,
+    );
+    if (evaluationRows.results.length === 0 && responseRequestRows.length === 0) {
+      throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
+    }
+    const joinedRequestIds = [
+      ...new Set([
+        ...evaluationRows.results.map((row) => row.request_id),
+        ...authoritativeRequestRows.map((row) => row.request_id),
+        ...unscopedRequestRows.map((row) => row.request_id),
+      ]),
+    ];
+
+    const objectAgentRunRows = await tenantEvidenceRows<Record<string, unknown>>(
+      deps.tenantDatabases,
+      tenantGroups,
+      (count) =>
+        `SELECT id, request_id, tenant, started_at_unix, completed_at_unix, run_json
+           FROM agent_runs
+          WHERE tenant = ? AND request_id IN (${placeholders(count)})
+          ORDER BY started_at_unix ASC, id ASC`,
+    );
+    const objectAgentEventRows = await tenantEvidenceRows<Record<string, unknown>>(
+      deps.tenantDatabases,
+      tenantGroups,
+      (count) =>
+        `SELECT id, run_id, request_id, tenant, occurred_at_unix, event_json
+           FROM agent_run_events
+          WHERE tenant = ? AND request_id IN (${placeholders(count)})
+          ORDER BY occurred_at_unix ASC, id ASC`,
+    );
+
+    // ---- 3. Everything else hangs off ids cleared by exact evidence --------
     const checks = await guardrailChecksFor(
       db,
       evaluationRows.results.map((row) => row.id),
@@ -868,36 +986,28 @@ function getGuardrailInvestigationHandler(): Handler {
       `SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
               chain_key, seq, prev_hash, row_hash
          FROM ${AUDIT_TABLE}
-        WHERE request_id IN (${placeholders(requestIds.length)})
+        WHERE request_id IN (${placeholders(joinedRequestIds.length)})
         ORDER BY occurred_at_unix ASC, id ASC`,
-      requestIds,
+      joinedRequestIds,
       (row) => auditEventDocument(row as AuditEventRow),
     );
-    const agentRuns = await investigationLeg(
-      db,
-      `SELECT id, request_id, tenant, started_at_unix, completed_at_unix, run_json
-         FROM agent_runs
-        WHERE request_id IN (${placeholders(requestIds.length)})
-        ORDER BY started_at_unix ASC, id ASC`,
-      requestIds,
-      (row) => correlatedDocument(row as Record<string, unknown>, "run_json", "agent_run"),
-    );
-    const agentEvents = await investigationLeg(
-      db,
-      `SELECT id, run_id, request_id, tenant, occurred_at_unix, event_json
-         FROM agent_run_events
-        WHERE request_id IN (${placeholders(requestIds.length)})
-        ORDER BY occurred_at_unix ASC, id ASC`,
-      requestIds,
-      (row) => correlatedDocument(row as Record<string, unknown>, "event_json", "agent_run_event"),
-    );
+    const agentRuns = {
+      records: objectAgentRunRows
+        .sort(timelineRowOrder("started_at_unix"))
+        .map((row) => correlatedDocument(row, "run_json", "agent_run")),
+    };
+    const agentEvents = {
+      records: objectAgentEventRows
+        .sort(timelineRowOrder("occurred_at_unix"))
+        .map((row) => correlatedDocument(row, "event_json", "agent_run_event")),
+    };
     const billing = await investigationLeg(
       db,
       `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
          FROM billing_events
-        WHERE request_id IN (${placeholders(requestIds.length)})
+        WHERE request_id IN (${placeholders(joinedRequestIds.length)})
         ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
-      requestIds,
+      joinedRequestIds,
       (row) =>
         correlatedDocument(
           row as Record<string, unknown>,
@@ -915,12 +1025,12 @@ function getGuardrailInvestigationHandler(): Handler {
     const evaluations = evaluationRows.results.map((row) =>
       guardrailEvaluationDocument(row, checks.get(row.id) ?? []),
     );
-    const requests = requestRows.results.map(requestLogDocument);
+    const requests = responseRequestRows.map(requestLogDocument);
 
     return json(c, 200, {
       object: "guardrail_investigation",
       selector,
-      identity: investigationIdentity(evaluationRows.results, requestRows.results),
+      identity: investigationIdentity(evaluationRows.results, responseRequestRows),
       agent_runs: agentRuns.records,
       agent_events: agentEvents.records,
       requests,
@@ -930,7 +1040,7 @@ function getGuardrailInvestigationHandler(): Handler {
       approvals: [],
       billing_events: billing.records,
       total_cost_usd: totalCostUsd,
-      final_outcome: finalOutcome(evaluationRows.results, requestRows.results),
+      final_outcome: finalOutcome(evaluationRows.results, responseRequestRows),
     });
   };
 }
@@ -948,6 +1058,73 @@ async function investigationLeg(
     .bind(...requestIds)
     .all<Record<string, unknown>>();
   return { records: rows.results.map(project) };
+}
+
+interface InvestigationTenantGroup {
+  readonly tenantId: string;
+  readonly requestIds: readonly string[];
+}
+
+/**
+ * Turn control-projection discovery into exact object targets.
+ *
+ * Platform rows with no tenant have no object by definition and remain
+ * control-owned. Every attributed candidate must resolve through the object
+ * router; the caller never gets a shared-D1 fallback.
+ */
+function investigationTenantGroups(
+  scope: CallerScope,
+  evaluations: readonly GuardrailEvaluationRow[],
+  requests: readonly RequestLogRow[],
+  requestIds: readonly string[],
+): InvestigationTenantGroup[] {
+  if (requestIds.length === 0) return [];
+  if (scope.kind === "tenant") return [{ tenantId: scope.tenantId, requestIds }];
+
+  const allowed = new Set(requestIds);
+  const byTenant = new Map<string, Set<string>>();
+  for (const row of [...evaluations, ...requests]) {
+    const tenantId = row.tenant?.trim() ?? "";
+    if (tenantId === "" || !allowed.has(row.request_id)) continue;
+    const ids = byTenant.get(tenantId);
+    if (ids === undefined) byTenant.set(tenantId, new Set([row.request_id]));
+    else ids.add(row.request_id);
+  }
+  return [...byTenant.entries()].map(([tenantId, ids]) => ({
+    tenantId,
+    requestIds: [...ids],
+  }));
+}
+
+/** Read one bounded candidate set from each exact tenant object. */
+async function tenantEvidenceRows<T>(
+  router: TenantDatabaseRouter,
+  groups: readonly InvestigationTenantGroup[],
+  sql: (requestCount: number) => string,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (const group of groups) {
+    if (group.requestIds.length === 0) continue;
+    const db = await tenantEvidenceDatabaseFor(router, group.tenantId);
+    const result = await db
+      .prepare(sql(group.requestIds.length))
+      .bind(group.tenantId, ...group.requestIds)
+      .all<T>();
+    rows.push(...result.results);
+  }
+  return rows;
+}
+
+function requestLogRowOrder(a: RequestLogRow, b: RequestLogRow): number {
+  return b.started_at_unix - a.started_at_unix || a.request_id.localeCompare(b.request_id);
+}
+
+function timelineRowOrder(timeColumn: string): (a: Record<string, unknown>, b: Record<string, unknown>) => number {
+  return (a, b) => {
+    const aTime = typeof a[timeColumn] === "number" ? (a[timeColumn] as number) : 0;
+    const bTime = typeof b[timeColumn] === "number" ? (b[timeColumn] as number) : 0;
+    return aTime - bTime || String(a.id ?? "").localeCompare(String(b.id ?? ""));
+  };
 }
 
 /**

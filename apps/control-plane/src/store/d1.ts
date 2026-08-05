@@ -94,12 +94,16 @@ export const RESOURCE_TABLE = "control_plane_resources";
 /** The durable admin-mutation evidence table (`sql/d1-ts/control/`). */
 export const AUDIT_TABLE = "audit_events";
 /**
- * The durable per-inference-decision evidence table (`sql/d1-ts/control/`).
+ * The derived per-inference-decision evidence projection
+ * (`sql/d1-ts/control/`).
  *
  * READ-ONLY from this Worker. The writer is `apps/gateway`'s
- * `src/requestlog/` (#664) — a different Worker on the same CONTROL database —
- * so nothing in `D1ControlPlaneStore` inserts here; the constant lives with its
- * siblings so the reader in `routes/admin_request_log.ts` names the table once.
+ * `src/requestlog/` (#664, #859) — a different Worker on the same CONTROL
+ * database — so nothing in `D1ControlPlaneStore` inserts here. Tenant-
+ * attributed rows are authoritative in `TenantDataObject`; this table exists
+ * for bounded fleet discovery and compatibility joins, while unscoped rows
+ * remain control-owned. The constant lives with its siblings so the reader in
+ * `routes/admin_request_log.ts` names the table once.
  */
 export const REQUEST_LOG_TABLE = "request_logs";
 

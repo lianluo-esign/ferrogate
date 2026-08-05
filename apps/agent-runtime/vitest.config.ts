@@ -282,7 +282,10 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       main: "./src/worker.ts",
-      wrangler: { configPath: "./wrangler.toml" },
+      // The root config is the deploy contract and carries live D1 authorities.
+      // Its named unit environment omits non-inheritable D1 bindings while
+      // keeping the local DO topology and test-safe vars explicit.
+      wrangler: { configPath: "./wrangler.toml", environment: "unit" },
       miniflare: {
         // The `ferrogate-gateway` script this Worker's committed
         // `[[durable_objects.bindings]] RATE_LIMIT` points at with
@@ -294,7 +297,11 @@ export default defineConfig({
         // configuration. The auxiliary worker carries the gateway's REAL
         // `RateLimiterDurableObject`, so `test/shared-rate-limit.test.ts` can
         // charge a window as the gateway and watch THIS Worker find it spent.
-        workers: [gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url))],
+        workers: [
+          gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url), {
+            tenantData: true,
+          }),
+        ],
         bindings: {
           TEST_WRANGLER_TOML: WRANGLER_TOML,
           FG_DEV_IN_MEMORY_PORTS: "1",

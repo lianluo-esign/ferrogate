@@ -26,6 +26,10 @@ export interface AdminList<T> {
   readonly total?: number;
   readonly offset?: number;
   readonly limit?: number;
+  /** Optional evidence provenance for projection-backed operator reads. */
+  readonly source?: string;
+  /** Unix seconds at which the projection-backed read was assembled. */
+  readonly as_of_unix?: number;
 }
 
 /** Rust `AdminList::new` — the un-paginated envelope. */
@@ -41,6 +45,41 @@ export function adminListPaginated<T>(
   limit: number,
 ): AdminList<T> {
   return { object: "list", data, total, offset, limit };
+}
+
+export const DERIVED_CONTROL_PROJECTION_SOURCE = "derived_control_projection" as const;
+
+export interface EvidenceResponseMetadata {
+  readonly source: typeof DERIVED_CONTROL_PROJECTION_SOURCE;
+  readonly as_of_unix: number;
+}
+
+/** Metadata that tells an operator a fleet read is a bounded control projection. */
+export function derivedControlProjectionMetadata(now = Date.now()): EvidenceResponseMetadata {
+  return {
+    source: DERIVED_CONTROL_PROJECTION_SOURCE,
+    as_of_unix: Math.floor(now / 1_000),
+  };
+}
+
+/** Add optional evidence provenance without changing the existing list fields. */
+export function adminListPaginatedWithMetadata<T>(
+  data: readonly T[],
+  total: number,
+  offset: number,
+  limit: number,
+  metadata: EvidenceResponseMetadata,
+): AdminList<T> {
+  return { ...adminListPaginated(data, total, offset, limit), ...metadata };
+}
+
+export function evidenceResponseHeaders(
+  metadata: EvidenceResponseMetadata,
+): Record<string, string> {
+  return {
+    "x-ferrogate-evidence-source": metadata.source,
+    "x-ferrogate-evidence-as-of-unix": String(metadata.as_of_unix),
+  };
 }
 
 /** Rust `admin_list_query::list_response` — the `query.is_none()` fork. */

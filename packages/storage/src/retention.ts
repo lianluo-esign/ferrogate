@@ -30,10 +30,11 @@
  * invokes prunes nothing.
  *
  * Also still open and deliberately so: {@link planLogRetention} has no D1
- * executor here. `request_logs` / `audit_events` are CONTROL-database tables and
- * this module's executor is tenant-scoped; deleting from the control database on
- * a tenant's rule is a cross-scope decision that belongs to the control plane,
- * not to a per-tenant sweep.
+ * executor here. #859's gateway sweep owns the request-evidence executor: it
+ * deletes the authoritative `request_logs` row in the exact TenantDataObject
+ * first and then removes the derived control projection. This library keeps
+ * the pure planner because it cannot route a tenant object or coordinate the
+ * projection cleanup.
  */
 import type { StoredAsset, StoredAssetChannel } from "./assets.js";
 

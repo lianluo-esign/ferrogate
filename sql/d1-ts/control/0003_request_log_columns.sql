@@ -1,6 +1,12 @@
 -- ---------------------------------------------------------------------------
 -- `request_logs` — the queryable columns the evidence surface needs  (#664)
 --
+-- #859 source-of-truth boundary: tenant-attributed rows are authoritative in
+-- `sql/d1-ts/tenant/0012_request_logs_agent_runs.sql` inside TenantDataObject.
+-- This control table is retained as a derived compatibility projection for
+-- bounded fleet readers and existing joins; unscoped platform rows remain
+-- control-only. The projection is written only after the object write.
+--
 -- `0001_init_control.sql` created `request_logs` with only the CORRELATION
 -- keys (`request_id`, `agent_run_id`, `tenant`, the two timestamps) plus a
 -- `request_json` document, which was enough for a table nothing wrote. It is
@@ -18,7 +24,8 @@
 -- columns exist for the three things a JSON blob cannot do in SQLite without a
 -- scan: the tenant FENCE, the recency ORDER BY, and the joins the dependent
 -- slices need (cost attribution by model/provider, SIEM export by status).
--- Where both carry a fact, the COLUMN is authoritative on read — see
+-- Within this projection, where both carry a fact, the COLUMN is authoritative
+-- over the JSON document on read — see
 -- `apps/control-plane/src/routes/admin_request_log.ts::requestLogDocument`,
 -- which applies the columns last for the same reason `auditEventDocument`
 -- does: the document is assembled from operator-influenced request data and

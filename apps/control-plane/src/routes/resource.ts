@@ -151,9 +151,10 @@ export function raw(
   status: number,
   contentType: string,
   body: string,
+  extraHeaders: Record<string, string> = {},
 ): Response {
   const requestId = c.get("requestId") ?? null;
-  const headers: Record<string, string> = { "content-type": contentType };
+  const headers: Record<string, string> = { "content-type": contentType, ...extraHeaders };
   if (requestId !== null) {
     headers["x-request-id"] = requestId;
     headers["x-trace-id"] = requestId;

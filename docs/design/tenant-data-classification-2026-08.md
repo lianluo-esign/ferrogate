@@ -405,6 +405,32 @@ first**, not after. `apps/mcp/src/approvals.ts:263-273` has the same shape (isol
 `approvalFingerprint` being computed over the tenant, `:68` — a hash-collision argument rather
 than a SQL predicate) and should be fixed in the same pass.
 
+### #859 implementation boundary
+
+#859 establishes the source-of-truth split for C28/C29/C30: tenant-attributed
+`agent_runs`, `agent_run_events`, and `request_logs` are written to and read from
+the exact `TenantDataObject`; same-named control rows are derived compatibility
+projections. A tenant-scoped request-log list/export routes directly to that
+object. An investigation first uses the control projection only to discover
+candidate tenant/request rows, then groups by tenant and calls
+`TenantDatabaseRouter.forTenant(tenant)` before reading request logs, runs, or
+events with an explicit `tenant = ?` predicate. It cannot satisfy the agent leg
+from a request-id-only control query. Retention deletes the object row first and
+then deletes its projection row; a projection failure leaves a labeled stale
+mirror rather than deleting the authority or treating the mirror as truth.
+
+The #859 fleet-reader inventory is explicit: `admin_request_log` uses the
+exact-object path for tenant scope and bounded/as-of control projection for
+fleet scope; `admin_cost_record`, `admin_experiment`, `finops/source.ts`, and
+`siem/source.ts` remain projection-backed until #825; `admin_agent_cost_burn`
+continues its existing tenant-store reads/fan-out; `asset_fleet` continues its
+bounded stored-asset fan-out; `billing` and `admin_spend_anomaly` continue to
+read their control-owned billing/anomaly state. The latter paths do not become
+request-evidence authorities in #859. The remaining #825 work is the common
+bounded, paginated, freshness/as-of, and deletion/tombstone contract for these
+fleet surfaces. Analytics Engine is a future option, not an implementation in
+#859.
+
 ---
 
 ## Part 3 — `control_plane_resources` must split

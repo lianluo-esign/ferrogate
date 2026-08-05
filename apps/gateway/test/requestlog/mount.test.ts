@@ -28,12 +28,17 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
+import { evidenceProjectionKey } from "../../src/requestlog/d1.js";
 import {
+  REQUEST_LOG_RETENTION_DAYS_VAR,
+  REQUEST_LOG_RETENTION_POLICIES_VAR,
   REQUEST_LOG_TABLE,
   requestLogRetentionFromEnv,
+  requestLogTenantDatabaseFromEnv,
   sweepRequestLogRetention,
   sweepRequestLogs,
   writeRequestLogs,
+  writeTenantRequestLogs,
 } from "../../src/requestlog/index.js";
 import type { RequestLogRecord } from "../../src/requestlog/index.js";
 import {
@@ -270,6 +275,121 @@ describe("policy-driven retention", () => {
     const result = await sweepRequestLogs(controlDb(), {}, NOW);
     expect(result).toEqual({ scanned: 0, pruned: 0 });
     expect(await storedRequestLogs()).toHaveLength(1);
+  });
+
+  it("keeps the scheduled sweep alive when a tenant object binding is missing", async () => {
+    await expect(
+      sweepRequestLogs(
+        controlDb(),
+        { [REQUEST_LOG_RETENTION_POLICIES_VAR]: JSON.stringify({ ghost: { days: 1 } }) },
+        NOW,
+      ),
+    ).resolves.toEqual({ scanned: 0, pruned: 0 });
+  });
+
+  it("does not let 5000 recent tenants block an eligible tenant", async () => {
+    const eligibleTenant = "zz-retention-eligible";
+    const old = record("retention-after-discovery-window", NOW - 40 * DAY, eligibleTenant);
+    const objectDb = requestLogTenantDatabaseFromEnv(env, eligibleTenant);
+    if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
+
+    await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
+    await controlDb()
+      .prepare(
+        `WITH RECURSIVE
+          first(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM first WHERE n < 99),
+          second(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM second WHERE n < 49)
+        INSERT INTO ${REQUEST_LOG_TABLE} (request_id, tenant, started_at_unix)
+        SELECT 'retention-blocked-' || printf('%04d', first.n * 50 + second.n),
+               'retention-blocked-' || printf('%04d', first.n * 50 + second.n),
+               ?
+        FROM first CROSS JOIN second`,
+      )
+      .bind(NOW - DAY)
+      .run();
+    await controlDb()
+      .prepare(
+        `INSERT INTO ${REQUEST_LOG_TABLE}
+          (projection_key, request_id, tenant, started_at_unix, request_json)
+        VALUES (?, ?, ?, ?, '{}')`,
+      )
+      .bind(
+        evidenceProjectionKey(eligibleTenant, old.requestId),
+        old.requestId,
+        eligibleTenant,
+        old.startedAtUnix,
+      )
+      .run();
+    await objectDb
+      .prepare(
+        `INSERT INTO ${REQUEST_LOG_TABLE}
+          (request_id, tenant, started_at_unix, request_json)
+        VALUES (?, ?, ?, '{}')`,
+      )
+      .bind(old.requestId, eligibleTenant, old.startedAtUnix)
+      .run();
+
+    const result = await sweepRequestLogs(
+      controlDb(),
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        [REQUEST_LOG_RETENTION_DAYS_VAR]: "30",
+      },
+      NOW,
+    );
+
+    expect(result).toEqual({ scanned: 1, pruned: 1 });
+    const objectRows = (await objectDb
+      .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+      .bind(old.requestId)
+      .all()) as { results?: unknown[] };
+    expect(objectRows.results ?? []).toHaveLength(0);
+    expect(
+      await controlDb()
+        .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+        .bind(old.requestId)
+        .first(),
+    ).toBeNull();
+  }, 20_000);
+
+  it("deletes the tenant object before its control projection", async () => {
+    const tenantId = "retention-order-tenant";
+    const old = record("retention-order-old", NOW - 10 * DAY, tenantId);
+    const objectDb = requestLogTenantDatabaseFromEnv(env, tenantId);
+    if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
+    await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
+    await writeRequestLogs(controlDb(), [old]);
+    await writeTenantRequestLogs(objectDb, [old]);
+
+    // A failing projection batch is a mutation-backed ordering probe: if the
+    // implementation deletes control first, the object row would still exist.
+    const failingProjection = {
+      prepare: (query: string) => controlDb().prepare(query),
+      batch: async () => {
+        throw new Error("control projection unavailable");
+      },
+    };
+    const result = await sweepRequestLogs(
+      failingProjection,
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        [REQUEST_LOG_RETENTION_POLICIES_VAR]: JSON.stringify({ [tenantId]: { days: 1 } }),
+      },
+      NOW,
+    );
+
+    expect(result.pruned).toBe(1);
+    const objectRows = (await objectDb
+      .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+      .bind(old.requestId)
+      .all()) as { results?: unknown[] };
+    expect(objectRows.results ?? []).toHaveLength(0);
+    expect(
+      await controlDb()
+        .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
+        .bind(old.requestId)
+        .first(),
+    ).not.toBeNull();
   });
 
   it("reads the fleet default and the per-tenant overrides off env", () => {

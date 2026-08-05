@@ -1,21 +1,42 @@
 /**
- * `request_logs` in the CONTROL database — the durable half of the evidence
- * trail (#664).
+ * Request-log persistence for the tenant-authoritative evidence trail (#664,
+ * #859).
  *
- * The table is defined by `sql/d1-ts/control/0001_init_control.sql` (the
- * correlation keys) plus `0003_request_log_columns.sql` (the queryable decision
- * columns). `apps/control-plane` READS it; this module is the only writer in
- * the tree, and it deliberately lives on the gateway because that is the only
- * Worker on the inference path.
+ * `TenantDataObject` owns the authoritative table from
+ * `sql/d1-ts/tenant/0012_request_logs_agent_runs.sql`. The same table in
+ * `sql/d1-ts/control` is a derived compatibility projection for existing fleet
+ * joins. The control copy is never a fallback for a tenant object and may be
+ * stale.
  */
+import { DurableObjectD1Database } from "@ferrogate/storage";
+import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
 
 /** The table `apps/control-plane/src/store/d1.ts::REQUEST_LOG_TABLE` reads. */
 export const REQUEST_LOG_TABLE = "request_logs";
 
+/** The control-D1 table is a derived compatibility projection, never authority. */
+export const REQUEST_LOG_PROJECTION_TABLE = REQUEST_LOG_TABLE;
+
 /**
- * The upsert every write goes through.
+ * Key the derived projection by its owning tenant and logical id. The length
+ * prefix keeps tenant ids containing `:` unambiguous while leaving the
+ * human-facing request id unchanged for joins and exports.
+ */
+export function evidenceProjectionKey(
+  tenantId: string | null | undefined,
+  logicalId: string,
+): string {
+  const tenant = tenantId ?? "";
+  // SQLite length() counts Unicode code points; JS string.length counts UTF-16 units.
+  return `${Array.from(tenant).length}:${tenant}:${logicalId}`;
+}
+
+/**
+ * The control-projection upsert. Tenant-object writes use the sibling
+ * `TENANT_REQUEST_LOG_UPSERT_SQL`, whose single physical database makes the
+ * logical request id sufficient as its conflict target.
  *
  * ## Why UPSERT and not INSERT
  *
@@ -49,17 +70,7 @@ export const REQUEST_LOG_TABLE = "request_logs";
  * one fact, and merging two JSON blobs in SQLite would need `json_patch()` and
  * a decision about array semantics that nothing here needs yet.
  */
-export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
-  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
-  experiment_id, experiment_arm,
-  tenant, project, workspace, api_key_id,
-  route, provider, logical_model, provider_model,
-  status_code, error_code, cache_status, latency_ms,
-  prompt_tokens, completion_tokens, total_tokens,
-  guardrail_verdict, guardrail_policy_id, streamed,
-  started_at_unix, completed_at_unix, request_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (request_id) DO UPDATE SET
+const REQUEST_LOG_UPDATE_SET = `DO UPDATE SET
   trace_id = COALESCE(excluded.trace_id, ${REQUEST_LOG_TABLE}.trace_id),
   agent_run_id = COALESCE(excluded.agent_run_id, ${REQUEST_LOG_TABLE}.agent_run_id),
   delegation_chain = COALESCE(excluded.delegation_chain, ${REQUEST_LOG_TABLE}.delegation_chain),
@@ -88,6 +99,32 @@ ON CONFLICT (request_id) DO UPDATE SET
   request_json = CASE WHEN excluded.request_json = '{}' THEN ${REQUEST_LOG_TABLE}.request_json
                       ELSE excluded.request_json END`;
 
+/** Control-D1 projection write: the tenant-qualified key is authoritative. */
+export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
+  projection_key, request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
+  experiment_id, experiment_arm,
+  tenant, project, workspace, api_key_id,
+  route, provider, logical_model, provider_model,
+  status_code, error_code, cache_status, latency_ms,
+  prompt_tokens, completion_tokens, total_tokens,
+  guardrail_verdict, guardrail_policy_id, streamed,
+  started_at_unix, completed_at_unix, request_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) ${REQUEST_LOG_UPDATE_SET}`;
+
+/** Tenant-object write: one object contains one tenant, so request_id is enough. */
+export const TENANT_REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
+  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
+  experiment_id, experiment_arm,
+  tenant, project, workspace, api_key_id,
+  route, provider, logical_model, provider_model,
+  status_code, error_code, cache_status, latency_ms,
+  prompt_tokens, completion_tokens, total_tokens,
+  guardrail_verdict, guardrail_policy_id, streamed,
+  started_at_unix, completed_at_unix, request_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (request_id) ${REQUEST_LOG_UPDATE_SET}`;
+
 /** `undefined` → SQL NULL, so an unknown fact is stored as unknown. */
 function bindOptional(value: string | number | undefined): string | number | null {
   return value === undefined ? null : value;
@@ -95,6 +132,16 @@ function bindOptional(value: string | number | undefined): string | number | nul
 
 /** The bound values for one record, in `REQUEST_LOG_UPSERT_SQL`'s column order. */
 export function requestLogBindings(record: RequestLogRecord): (string | number | null)[] {
+  return [
+    evidenceProjectionKey(record.tenantId, record.requestId),
+    ...tenantRequestLogBindings(record),
+  ];
+}
+
+/** Bound values for the tenant-object SQL, which has no projection key column. */
+export function tenantRequestLogBindings(
+  record: RequestLogRecord,
+): (string | number | null)[] {
   return [
     record.requestId,
     bindOptional(record.traceId),
@@ -141,6 +188,17 @@ export interface RequestLogDatabase {
   batch(statements: unknown[]): Promise<unknown[]>;
 }
 
+/** Resolve the authoritative object-backed database for one tenant. */
+export function requestLogTenantDatabaseFrom(
+  env: unknown,
+  tenantId: string,
+): RequestLogDatabase | undefined {
+  if (tenantId.trim() === "") return undefined;
+  if (typeof env !== "object" || env === null) return undefined;
+  const stub = tenantDataObjectFor(env as TenantDataBindings, tenantId);
+  return new DurableObjectD1Database(tenantId, stub).asD1Database() as RequestLogDatabase;
+}
+
 /**
  * Persist a batch of records in ONE D1 round trip.
  *
@@ -160,4 +218,14 @@ export async function writeRequestLogs(
   if (records.length === 0) return;
   const statement = db.prepare(REQUEST_LOG_UPSERT_SQL);
   await db.batch(records.map((record) => statement.bind(...requestLogBindings(record))));
+}
+
+/** Persist tenant-attributed rows through their authoritative object. */
+export async function writeTenantRequestLogs(
+  db: RequestLogDatabase,
+  records: readonly RequestLogRecord[],
+): Promise<void> {
+  if (records.length === 0) return;
+  const statement = db.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
+  await db.batch(records.map((record) => statement.bind(...tenantRequestLogBindings(record))));
 }

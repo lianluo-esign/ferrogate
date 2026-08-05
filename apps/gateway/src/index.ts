@@ -128,9 +128,9 @@ const usage = createMeteringUsageSink({
  * per request, and workerd refuses I/O started on behalf of a different
  * request, so a captured `env` is a correctness bug that only shows up under
  * concurrency. `requestLogBindingsFromEnv` reads `env.REQUEST_LOG` (the Queue
- * producer) and `env.CONTROL_DB` (the CONTROL database that owns
- * `request_logs` — NOT the tenant `DB`, whose migration has no such table) off
- * whichever request is being served.
+ * producer), `env.TENANT_DATA` (the authoritative tenant object), and
+ * `env.CONTROL_DB` (the derived fleet compatibility projection) off whichever
+ * request is being served. Unattributed platform rows remain control-only.
  */
 const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
 
@@ -535,10 +535,10 @@ export async function gatewayScheduled(
   // #689 — expired `/v1/responses` conversation state, on the SAME tick.
   //
   // It is a SEPARATE call rather than a line inside `gatewayRequestLogRetention`
-  // because the two read different databases: the request log lives in
-  // `CONTROL_DB` and conversation state lives in the TENANT database (`DB`), so
-  // a deployment can bind one without the other and the sweep for either must
-  // still run.
+  // because the two read different storage surfaces: request evidence is
+  // tenant-object authoritative with a CONTROL_DB projection, while conversation
+  // state lives in the TENANT database (`DB`), so a deployment can bind one
+  // without the other and the sweep for either must still run.
   //
   // This call is the whole reason the storage decision went to D1 rather than a
   // Durable Object per conversation: a DO namespace cannot be enumerated, so
@@ -582,7 +582,8 @@ async function gatewayRequestLogRetention(env: unknown): Promise<void> {
 }
 
 /**
- * The `[[queues.consumers]]` handler — request-log messages become D1 rows.
+ * The `[[queues.consumers]]` handler — request-log messages become object rows
+ * plus derived D1 projection rows.
  *
  * Exposed here and re-exported through `src/worker.ts` for the same reason
  * `gatewayScheduled` is: workerd only dispatches a queue event to a handler

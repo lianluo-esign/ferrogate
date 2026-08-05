@@ -18,7 +18,9 @@ MISSING row stay invisible for seventeen waves.
 > its own count disagrees with §13.1's total. §13.3 is the reconciliation.
 > Three seams got their first gate ever in the process: **TEL-T4** (the
 > observability Worker's own logs/traces block), **AR-C9**, and the narrowed
-> **AR-T11** finding.
+> **AR-T11** finding. #859 then closed AR-T11 by declaring the live tenant and
+> control D1 authorities and moving the default unit project to an explicit
+> D1-free Wrangler environment.
 
 > **Read §3 first.** The wave-18 walk found **eight mount lines that had never
 > been a row in any wave's table**, one row whose seam is **DEAD IN PRODUCTION**
@@ -290,14 +292,9 @@ the Channel column and run with `--config`, which is the whole speed story:
   `WorkerPlane as AgentRunState` ⇒ **1 RED** (`is a DIFFERENT class than
   src/worker.ts's`), which a `typeof === "function"` check would have passed.
 
-**Two are NOT-MUTABLE or ungated by category, and are now labelled as such rather
+**One is NOT-MUTABLE or ungated by category, and is now labelled as such rather
 than reading as "skipped".**
 
-- **AR-T11** — `NONE · NOT-MUTABLE`. The seam is the ABSENCE of a
-  `[[d1_databases]]` stanza; nothing on disk can be removed. The inverse
-  assertion is deliberately not written: it would lock in the very posture the
-  row exists to flag, which is what wave 15 did to `GW-C11`. Closing this row
-  means adding the stanza.
 - **CP-C13b** — `NONE`, and the ONLY unproven-and-gateable row left in the file.
 
 ---
@@ -817,7 +814,7 @@ DEPLOY-ONLY row here has no `wrangler dev` fallback in CI either.
 | AR-T7 | `[vars] FG_REQUIRE_PRODUCTION_MTLS = "0"` | `MUT-2 →"\"1\""` | mutated line present | `test/wrangler-bindings.test.ts` + `test/env-var-drift.test.ts` — **drift**. **NOT** ~~`test/mtls.test.ts`~~ (citation WITHDRAWN), which pins its own binding (corrected wave 17). **Committed OFF — must be `"1"` in production** | DEF · DRIFT | T1 |
 | AR-T8 | `[vars] CONTAINER_GOVERNED_EGRESS_HOSTS = ""` (sealed by default, #471) | `MUT-2 →"\"*\""` | mutated line present | `test/env-var-drift.test.ts` — **drift**. The behavioural proof is AR-P4's `test/governance-mount.test.ts` | DEF · DRIFT | T1 |
 | AR-T9 | `[vars] AGENT_RUNTIME_ENABLED`, `AGENT_JOB_MAX_OPEN_PER_TENANT`, `AGENT_JOB_DISPATCH_TTL_SECS` | `MUT-1 /^AGENT_(RUNTIME_ENABLED\|JOB_)/` | anchors gone | `test/env-var-drift.test.ts` (wave 15) — **drift**. `test/budget.test.ts` is weak here: absent ≈ default, so a deletion is behaviourally invisible | DEF · DRIFT | T2 |
-| AR-T11 | **NO `[[d1_databases]]` stanza exists in this file.** `AR-P1`/`AR-P2` read `env.DB` / `env.CONTROL_DB`, which only the durable HARNESS binds | — | `grep -cF 'd1_databases' wrangler.toml` → 0 (uncommented) | **NONE, and NOT-MUTABLE BY CATEGORY — this is not the same as "unproven".** The seam is the ABSENCE of a stanza: there is nothing on disk to delete, so no mutation exists that could turn a gate red. The inverse — asserting that no `[[d1_databases]]` is declared — is deliberately NOT written, because it would lock in the very posture this row flags as a deploy blocker, the mistake wave 15 made on `GW-C11` (§3.2). As committed, a deployed agent-runtime has no D1, so `resolveDeps` takes the dev branch — and `FG_DEV_IN_MEMORY_PORTS = "1"` (AR-T6) is committed, so it *succeeds* with an in-memory credential table instead of failing closed. The exact stanzas to add are written out as comments in that file and in `src/ports.ts`'s WIRING block. **Closing this row means adding the stanza, not adding a test** | NONE · NOT-MUTABLE | T1 |
+| AR-T11 | the LIVE tenant and control `[[d1_databases]]` authorities in `apps/agent-runtime/wrangler.toml`; the `[env.unit]` environment intentionally omits non-inheritable D1 bindings so unit fixtures do not receive empty unmigrated databases | `MUT-1` whole authority block / `[env.unit]` selection | live names, database names and both `migrations_dir` values are pinned | `test/env-var-drift.test.ts` and `test/wrangler-bindings.test.ts` — **Closed by #859.** The deploy config carries both live placeholders and the durable harness binds and migrates both schemas. The unit project uses `wrangler: { environment: "unit" }` so the default suite keeps its explicit fixture posture; a deploy must replace the placeholder IDs and apply `sql/d1-ts/tenant` and `sql/d1-ts/control` | DEF · DRIFT | T1 |
 | AR-T10 | the LIVE cross-script counter stanza (`script_name = "ferrogate-gateway"`) | `MUT-1 /^script_name = "ferrogate-gateway"$/` | `grep -nF 'script_name' apps/agent-runtime/wrangler.toml` → nothing | `test/env-var-drift.test.ts` §"keeps RATE_LIMIT LIVE, CROSS-SCRIPT, and claimed by no migration", `test/wrangler-bindings.test.ts` §"the BORROWED counter namespace (#666)", and behaviourally `test/shared-rate-limit.test.ts` — same three rot directions as MCP-T10, and no longer WORKERD-REFUSAL for the same reason (#666). A `RateLimiterDurableObject` defined in THIS Worker instead would compile, deploy and pass every test while handing `/v1/agent-jobs` its own full RPM quota — a quieter version of the admission bypass wave 16 closed | DEF | T1 |
 
 ---
@@ -884,23 +881,21 @@ and the reason the tool now EXITS NON-ZERO when the two disagree.
 
 | App | Seams | T1 | T2 | T3 |
 |---|---:|---:|---:|---:|
-| `apps/gateway` | 62 | 44 | 16 | 2 |
+| `apps/gateway` | 63 | 45 | 16 | 2 |
 | `apps/control-plane` | 42 | 26 | 11 | 5 |
 | `apps/mcp` | 35 | 29 | 4 | 2 |
 | `apps/agent-runtime` | 38 | 26 | 10 | 2 |
 | `apps/telemetry` | 17 | 9 | 3 | 5 |
 | `apps/cli` | 8 | 3 | 5 | 0 |
-| **Total** | **202** | **137** | **49** | **16** |
+| **Total** | **203** | **138** | **49** | **16** |
 
 Plus **1 RETIRED tombstone** (`GW-C11`, §3.2), which is a row but not a seam and
-is excluded from every total above. 202 ID-bearing lines, 201 seams.
+is excluded from every total above. 204 ID-bearing lines, 203 live seams.
 
 **#765 added `MCP-U1`** (§9.6, T1 — the idle reaper that finally calls the
-unified session's `close()`), which is the +1 in both cells above. It does NOT
-close §13.3's outstanding gap: `bun scripts/seam-proof.mjs --list` still reports
-one more parsed row than claimed, and the extra one is in `apps/gateway` (63
-parsed against 62 claimed), which predates this slice and belongs to whoever
-added it.
+unified session's `close()`), and #859 reconciles the inventory with the
+machine-readable parser. The gateway's `GW-R17` row is included in the live
+count rather than left as an unclaimed extra.
 
 **Wave 22 added TEN rows, all T1.** Five are FC-1 (the operator drain, joined
 across the fleet): `MCP-P12`/`MCP-P13`, `AR-P10`/`AR-P11` and `CP-P9` — see
@@ -940,31 +935,26 @@ was written down was prose inside the *Seam* cell, where no tool could see it.
 
 | RUN | Meaning | Seams |
 |---|---|---:|
-| `DEF` | the app's own default vitest project — `bunx vitest run <files>` | 184 |
-| `ESC` | a `*.spec.ts` under a CHAINED config (§4); the runner adds `--config`. Under a bare `vitest run` these specs are **not collected and the suite reports green** | 4 — GW-C8, AR-P1, AR-P2, AR-P9 |
-| `NONE` | no local gate of any kind; nothing to run | 2 — AR-T11, CP-C13b |
+| `DEF` | the app's own default vitest project — `bunx vitest run <files>` | 196 |
+| `ESC` | a `*.spec.ts` under a CHAINED config (§4); the runner adds `--config`. Under a bare `vitest run` these specs are **not collected and the suite reports green** | 6 — GW-C8, AR-P1, AR-P2, AR-P9, AR-P10, AR-P11 |
+| `NONE` | no local gate of any kind; nothing to run | 1 — CP-C13b |
 
 | QUALITY | Meaning | Seams |
 |---|---|---:|
-| *(absent)* | the gate is behavioural | 152 |
-| `DRIFT` | the committed value is overridden by a pinned miniflare binding, or is config the pool never reads (`[[migrations]]`, `[triggers]`, `compatibility_*`, `main`). The gate is a NAME/PRESENCE assertion and **cannot** be behavioural | 34 |
-| `NOT-MUTABLE` | the seam cannot be mutated **by category** — an absent stanza (`AR-T11`), or a duplicate export that resolves nothing (`AR-C9`). **A skipped NOT-MUTABLE row is not an unproven row**, and telling those two apart is the reason this column exists | 2 — AR-C9, AR-T11 |
+| *(absent)* | the gate is behavioural | 165 |
+| `DRIFT` | the committed value is overridden by a pinned miniflare binding, or is config the pool never reads (`[[migrations]]`, `[triggers]`, `compatibility_*`, `main`). The gate is a NAME/PRESENCE assertion and **cannot** be behavioural | 35 |
+| `NOT-MUTABLE` | the seam cannot be mutated **by category** — a duplicate export that resolves nothing (`AR-C9`). **A skipped NOT-MUTABLE row is not an unproven row**, and telling those two apart is the reason this column exists | 1 — AR-C9 |
+| `ESC` | the row uses the durable harness as an escape channel while retaining a default-project label for the local mutation proof | 2 — AR-P10, AR-P11 |
 | `WORKERD-REFUSAL` | exercising the seam takes the runtime to a start-up refusal and the suite to 0 collected tests; only the rot directions are gated | **0 since #666** — MCP-T10 and AR-T10 left this class when their auxiliary-worker harness landed, and both are now behaviourally gated |
 | `RETIRED` | a tombstone. Not a seam, never counted | 1 — GW-C11 |
 
-**Every one of the 190 seams now resolves to something a runner can act on: 188
-name at least one test file that exists on disk, and 2 declare `NONE` with the
+**Every one of the 203 seams now resolves to something a runner can act on: 202
+name at least one test file that exists on disk, and 1 declares `NONE` with the
 category reason.** `bun scripts/seam-proof.mjs --list` exits non-zero if that
 stops being true.
 
-The two `NONE` rows, stated plainly rather than rounded away:
+The remaining `NONE` row, stated plainly rather than rounded away:
 
-- **AR-T11** — `NONE · NOT-MUTABLE`. The seam is the ABSENCE of a
-  `[[d1_databases]]` stanza. There is nothing on disk to remove, so no mutation
-  exists that could turn a gate red, and the inverse assertion is deliberately
-  NOT written because it would lock in the posture the row flags as a deploy
-  blocker (the mistake wave 15 made on `GW-C11`, §3.2). **Closing it means adding
-  the stanza, not adding a test.**
 - **CP-C13b** — `NONE`, and this one IS gateable: `api: PUBLIC_API_MAJOR` → `api:
   0` leaves 687/687 green. It is the only *unproven-and-gateable* row in the
   file. The gate to write asserts the three counts in the `/version` document
@@ -977,7 +967,6 @@ each has a local gate for everything except the named part —
 
 - **MCP-T8** — the stanza is gated (`test/d1-auth.test.ts`, `test/approvals.test.ts`);
   the missing `migrations_dir` is not, and cannot be locally.
-- **AR-T11** — above; the whole row is the residue.
 - **TEL-T4** — **closed in wave 21.** The behavioural half stays unreachable
   locally, but the committed bytes are now pinned on the drift channel: **2 RED**
   on a whole-block delete, **1 RED** on `enabled = false`, **1 RED** on
@@ -992,7 +981,7 @@ which is the finding, not the footnote:
 |---|---:|---:|
 | rows **CLAIMED** by §13's total | 188 | **190** |
 | rows **PARSED** by `seam-proof.mjs` | 170 | **190** |
-| rows with a **RESOLVABLE GATE** | 157 | **188** (+2 `NONE` by design = 190) |
+| rows with a **RESOLVABLE GATE** | 157 | **189** (+1 `NONE` by design = 190) |
 
 The *After* column is 190 rather than the 189 the repair slice reconciled to,
 because the wave-21 INTEGRATE step added **`AR-P9`** — the durable
@@ -1015,7 +1004,10 @@ Counted mechanically off this file: `bun scripts/seam-proof.mjs --list`.
 
 ### 13.4 Two FALSE REDs the wave-21 INTEGRATE step found by actually RUNNING it
 
-`--list` reconciled at 190/190/188 and exited 0. `--run` did not agree, and the
+The wave-21 historical `--list` reconciled at 190/190/188 and exited 0. #859
+then added the AR-T11 drift gate and reconciled the pre-existing gateway row,
+so the current inventory is 203/203/202;
+`--run` did not agree, and the
 gap is the reminder that **a planner which resolves every row is not a runner
 which executes every row**:
 

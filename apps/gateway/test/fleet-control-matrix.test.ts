@@ -1399,6 +1399,12 @@ describe("§4 fleet-wide ratchets", () => {
       // JSONL export. If a second Worker ever grows a `request_logs` READ, that
       // fence becomes a fleet property and this entry must move into CONTROLS.
       "request_logs",
+      // #859 — tenant request/run evidence is physically shared by the gateway
+      // writer, agent-runtime lifecycle, and control-plane reader, but it is
+      // not an operator control. TenantDataObject is the authority; the
+      // control-D1 copies are derived fleet projections.
+      "agent_runs",
+      "agent_run_events",
       // #665 — guardrail screening evidence, newly SHARED on exactly the same
       // terms as `request_logs` above (written by
       // `apps/gateway/src/guardrails/`, read by

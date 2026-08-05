@@ -23,6 +23,7 @@ import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_e
 import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_chain.sql?raw";
 import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
 import experimentOutcomesSql from "../../../../sql/d1-ts/control/0011_experiment_outcomes.sql?raw";
+import evidenceProjectionKeysSql from "../../../../sql/d1-ts/control/0014_tenant_evidence_projection_keys.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 
@@ -119,6 +120,11 @@ export async function applyControlMigrations(): Promise<void> {
   }
   if (!names.has("experiment_arm")) {
     for (const statement of sqlStatements(experimentOutcomesSql)) {
+      await db.prepare(statement).run();
+    }
+  }
+  if (!names.has("projection_key")) {
+    for (const statement of sqlStatements(evidenceProjectionKeysSql)) {
       await db.prepare(statement).run();
     }
   }

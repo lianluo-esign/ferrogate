@@ -144,16 +144,20 @@ const MOUNTED: [symbol: string, app: string][] = [
   // instead. Reached from `apps/gateway/src/tenancy/tenant-data.ts` as well,
   // which is where `env.TENANT_DATA.idFromName(tenantId)` is issued.
   ["TenantDataObject", "gateway"],
+  // #859 — the D1-shaped facade is now used by the gateway request-log writer
+  // and by AgentRunState's cross-script evidence writer. It remains a facade,
+  // not a second storage authority: both call the same TenantDataObject RPC.
+  ["DurableObjectD1Database", "gateway"],
+  ["DurableObjectD1Database", "agent-runtime"],
   // #819 — MOVED UP FROM `DEAD`, which is the transition that entry was written
   // to force. `apps/gateway/src/tenancy/resolver.ts` constructs one on the
   // `durable_object` branch, and that branch is now the DEFAULT
   // (`GATEWAY_TENANT_DB_ROUTING = "durable_object"` in the committed
   // `wrangler.toml`), so unmounting it takes every tenant's storage with it.
   //
-  // `DurableObjectD1Database` deliberately did NOT move: it is constructed
-  // INSIDE the router and named by no app, which is a transitive mount and a
-  // weaker claim — the same distinction this file already draws for
-  // `ControlDatabaseTenantRegistry`.
+  // The D1-shaped facade moved into the direct gateway and agent-runtime
+  // evidence paths in #859, so those mounts are asserted above. The router
+  // still constructs the same facade transitively for other tenant stores.
   ["DurableObjectTenantDatabaseRouter", "gateway"],
   // #820's follow-up: `apps/control-plane` provisions every new tenant onto a
   // Durable Object but resolved its own tenant-DATA paths through
@@ -167,16 +171,6 @@ const MOUNTED: [symbol: string, app: string][] = [
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
 const DEAD = [
-  // #823's `D1Database` facade over `TenantDataObject`. Its ROUTER moved to
-  // `MOUNTED` when #819 made `durable_object` the default; this class stayed
-  // here, and the split is the point: no app names it, because
-  // `DurableObjectTenantDatabaseRouter` constructs it. That is a transitive
-  // mount, which is a weaker claim than a direct one and is recorded as such —
-  // exactly as this file already does for `ControlDatabaseTenantRegistry`.
-  //
-  // It is proved live by `vitest.d1do.config.ts`, which runs the whole of
-  // `test/d1/**` through the facade.
-  "DurableObjectD1Database",
   "D1BillingEventLedger",
   "D1RetentionPolicyStore",
   "D1AgentScheduleStore",

@@ -51,6 +51,13 @@ class_name = "AgentRunState"
 name = "WORKER_PLANE"
 class_name = "WorkerPlane"
 
+# AgentRunState writes authoritative request/run evidence through this
+# cross-script TenantDataObject. It is deliberately not a fallback to CONTROL_DB.
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
 # DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`,
 # NOT `new_classes`) — same requirement the Agents SDK has.
 [[migrations]]
@@ -153,34 +160,27 @@ FG_DEV_A2A_GUARDRAILS = ""
 # authenticated surface answers `503 agent_runtime_unavailable`. There is no
 # permissive default.
 #
-# COMMENTED OUT, and the reason is a TEST-HARNESS one that must not be lost:
-# `vitest.config.ts` loads THIS file through `wrangler: { configPath }`, so an
-# uncommented stanza injects `env.DB` / `env.CONTROL_DB` into every unit test —
-# where miniflare provisions an EMPTY local database with no migrations applied.
-# The durable-first rule above then routes the whole default suite onto
-# schema-less tables: 106 of 259 tests fail on a correct tree (measured, not
-# assumed — uncomment both stanzas and run `bun run test` to reproduce). The
-# durable path has its own harness that binds these two
-# databases and applies the migrations
-# (`test/durable/harness/vitest.config.ts`, chained from `bun run test`), so the
-# D1 adapters ARE proven — against a migrated database, which is the only way
-# the proof means anything.
+# LIVE. These bindings are the deployed authorities for credentials, worker
+# identity and the control-plane evidence mirror. `database_id` stays a
+# PLACEHOLDER here: the deploy step supplies the account's real database UUID,
+# and no real resource identifier is invented or committed.
 #
-# UNCOMMENT BOTH STANZAS AT DEPLOY TIME and delete `FG_DEV_IN_MEMORY_PORTS`
-# above. `database_id` stays a PLACEHOLDER here: real uuids come from whoever
-# runs `wrangler d1 create`, and are never invented and committed.
-#
-#   [[d1_databases]]
-#   binding = "DB"
-#   database_name = "ferrogate-tenant"
-#   database_id = "replace-at-deploy"
-#   migrations_dir = "../../sql/d1-ts/tenant"
-#
-#   [[d1_databases]]
-#   binding = "CONTROL_DB"
-#   database_name = "ferrogate-control"
-#   database_id = "replace-at-deploy"
-#   migrations_dir = "../../sql/d1-ts/control"
+# The default unit suite selects `[env.unit]` below. Wrangler environments do
+# not inherit D1 bindings, so that environment deliberately has no D1 stanza;
+# the durable harness binds these same authorities and applies the migrations
+# from `sql/d1-ts/**` before exercising the durable branch.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "ferrogate-tenant"
+database_id = "replace-at-deploy-tenant"
+migrations_dir = "../../sql/d1-ts/tenant"
+
+[[d1_databases]]
+binding = "CONTROL_DB"
+database_name = "ferrogate-control"
+database_id = "replace-at-deploy"
+migrations_dir = "../../sql/d1-ts/control"
 # ---------------------------------------------------------------------------
 
 # ===========================================================================
@@ -281,3 +281,45 @@ invocation_logs = true
 
 [observability.traces]
 enabled = true
+
+# ==========================================================================
+# UNIT TEST ENVIRONMENT
+#
+# D1 bindings are intentionally absent here. D1 is non-inheritable in named
+# Wrangler environments, so selecting this environment keeps the default
+# suite on its explicit in-memory fixtures instead of an empty unmigrated D1.
+# The durable harness has its own config because it must bind and migrate both
+# live schemas. This block mirrors the local DO bindings that the unit suite
+# needs while leaving the root deployment authorities above intact.
+# ===========================================================================
+[env.unit]
+main = "src/worker.ts"
+d1_databases = []
+
+[[env.unit.durable_objects.bindings]]
+name = "AGENT_RUN_STATE"
+class_name = "AgentRunState"
+
+[[env.unit.durable_objects.bindings]]
+name = "WORKER_PLANE"
+class_name = "WorkerPlane"
+
+[[env.unit.durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
+[[env.unit.durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+script_name = "ferrogate-gateway"
+
+[env.unit.vars]
+FG_DEV_IN_MEMORY_PORTS = "1"
+FG_REQUIRE_PRODUCTION_MTLS = "0"
+CONTAINER_GOVERNED_EGRESS_HOSTS = ""
+AGENT_RUNTIME_ENABLED = "1"
+AGENT_JOB_MAX_OPEN_PER_TENANT = "200"
+AGENT_JOB_DISPATCH_TTL_SECS = "86400"
+AGENT_WORKFLOWS = "[]"
+FG_DEV_A2A_GUARDRAILS = ""
