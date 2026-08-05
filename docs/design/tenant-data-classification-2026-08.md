@@ -181,8 +181,7 @@ are exactly two fan-out sources in the tree:
 
 ```
 $ grep -rn "provisionedTenants\|fleetTenantIds" --include="*.ts" apps packages | grep -v /test/
-packages/storage/src/tenant-router.ts:113,532,608,774   (the interface + 3 impls)
-packages/storage/src/tenant-rest.ts:473
+packages/storage/src/tenant-router.ts:145,607,697   (the interface + 2 D1 router impls)
 apps/control-plane/src/store/tenancy.ts:281
 apps/control-plane/src/store/asset_fleet.ts:330  fleetTenantIds  → capped at 50 (FLEET_FANOUT_MAX_TENANTS, :84)
 apps/control-plane/src/routes/admin_asset.ts:376  the only fleetTenantIds caller
