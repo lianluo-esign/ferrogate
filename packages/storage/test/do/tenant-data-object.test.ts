@@ -10,15 +10,20 @@
  *    choice, never as a SQL surface);
  *  * that `transactionSync` really rolls back, so `batch()` is genuinely atomic
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
- *  * that the version gate really stops the 130-statement apply re-running on
+ *  * that the version gate really stops the 148-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
- *    sixteen tenant migrations are covered by the census below;
+ *    seventeen tenant migrations are covered by the census below;
  *  * that two `idFromName` objects really hold physically different databases.
  *
  * A fake namespace would agree with all four because the fake was written to
  * agree.
  */
-import { env, listDurableObjectIds, runInDurableObject } from "cloudflare:test";
+import {
+  env,
+  listDurableObjectIds,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   type TenantDataBatchRequest,
@@ -26,6 +31,7 @@ import {
   type TenantDataObject,
   sqlStatements,
 } from "../../src/tenant-data-object.js";
+import type { TenantScheduleAlarmMessage } from "../../src/tenant-schedule-alarm.js";
 import { TENANT_MIGRATIONS, TENANT_SCHEMA_VERSION } from "../../src/tenant-schema-sql.js";
 
 declare global {
@@ -38,14 +44,15 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0015.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0017.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
  * derived from the thing under test cannot disagree with it. Twenty-one of these
  * are the `TENANT_ONLY` set that file already pins against a real D1 tenant
  * database; `storage_schema_migrations` is shared with the control role and
- * `responses_conversations` plus `tenant_resources` post-date that list.
+ * `responses_conversations` plus `tenant_resources` post-date the original
+ * inventory and are included explicitly here.
  */
 const TENANT_TABLES = [
   "agent_cost_burn",
@@ -53,6 +60,7 @@ const TENANT_TABLES = [
   "agent_runs",
   "agent_schedule_fires",
   "agent_schedules",
+  "agent_worker_instances",
   "api_keys",
   "asset_bundle_files",
   "asset_channels",
@@ -65,6 +73,11 @@ const TENANT_TABLES = [
   "delegation_revocations",
   "guardrail_check_evaluations",
   "guardrail_evaluations",
+  "managed_worker_isolation_policies",
+  "managed_worker_isolation_selections",
+  "managed_worker_lifecycle_events",
+  "managed_worker_sessions",
+  "managed_worker_templates",
   "mcp_identity_generations",
   "mcp_oauth_credentials",
   "mcp_servers",
@@ -75,6 +88,10 @@ const TENANT_TABLES = [
   "request_logs",
   "responses_conversations",
   "retention_policies",
+  "self_hosted_run_dispatches",
+  "self_hosted_worker_artifacts",
+  "self_hosted_worker_checkpoints",
+  "self_hosted_worker_heartbeats",
   "semantic_cache_policies",
   "sso_provider_configs",
   "storage_schema_migrations",
@@ -109,6 +126,15 @@ type PrivilegedTenantObject = DurableObjectStub<TenantDataObject> & {
 
 function privilegedObjectFor(tenantId: string): PrivilegedTenantObject {
   return objectFor(tenantId) as unknown as PrivilegedTenantObject;
+}
+
+type ScheduleAlarmStub = DurableObjectStub<TenantDataObject> & {
+  setScheduleAlarm(request: { tenantId: string; scheduledAtUnix: number }): Promise<void>;
+  clearScheduleAlarm(request: { tenantId: string }): Promise<void>;
+};
+
+function scheduleAlarmObjectFor(tenantId: string): ScheduleAlarmStub {
+  return objectFor(tenantId) as unknown as ScheduleAlarmStub;
 }
 
 /**
@@ -181,7 +207,7 @@ describe("the statement splitter", () => {
 
   test("the census `sqlStatements`' own docblock states is still the census", () => {
     // WHY A TEST AND NOT A COMMENT. `sqlStatements`' header carries a safety
-    // ARGUMENT ("measured over all sixteen files, every non-comment `;` is at
+    // ARGUMENT ("measured over all seventeen files, every non-comment `;` is at
     // end-of-line…") and `#migrate`'s header carries the statement breakdown
     // that justifies the version gate. Both are measurements, and a measurement
     // in a comment rots: a migration can land after the last census and
@@ -193,7 +219,7 @@ describe("the statement splitter", () => {
     //
     // If this fails, do NOT change the numbers here alone. Update the four
     // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
-    // count and "all SIXTEEN files" in the `sqlStatements` docblock, the
+    // count and "all SEVENTEEN files" in the `sqlStatements` docblock, the
     // "N statements" in the constructor comment, and the breakdown in
     // `#migrate`'s docblock.
     const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
@@ -207,10 +233,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 16,
-      statements: 130,
-      createTable: 48,
-      createIndex: 60,
+      files: 17,
+      statements: 148,
+      createTable: 58,
+      createIndex: 68,
       createUniqueIndex: 5,
       alterTable: 10,
       insert: 6,
@@ -262,7 +288,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(16);
+    expect(TENANT_MIGRATIONS.length).toBe(17);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -643,14 +669,14 @@ describe("the second wake", () => {
     const second = await objectFor(ACME).schemaVersion();
     // The assertion is on what the applier DID, not on how long it took: a
     // wall-time test would be a timing guess, and a test that only checked the
-    // version would pass against an applier that re-ran all 130 statements.
+    // version would pass against an applier that re-ran all 148 statements.
     expect(second.appliedThisWake).toEqual([]);
     expect(second.version).toBe(TENANT_SCHEMA_VERSION);
     expect(second.failure).toBeNull();
   });
 
   test("survives at all, which is itself the ALTER-idempotence proof", async () => {
-    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the sixteen tenant
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the seventeen tenant
     // migrations are ALTER-only, so an applier that re-ran them would throw
     // `duplicate column name` and this object would come back refusing.
     await evict(ACME);
@@ -946,6 +972,240 @@ describe("the cross-tenant guard", () => {
     expect(
       await refusal(objectFor(name).query({ tenantId: GLOBEX, sql: "SELECT 1 AS one" })),
     ).toMatch(/holds tenant tenant_adopt_probe/);
+  });
+});
+
+describe("tenant-owned worker and schedule state", () => {
+  test("rolls back worker and schedule rows together in one transaction", async () => {
+    const tenantId = "tenant_worker_transaction";
+    const object = objectFor(tenantId);
+
+    expect(
+      await refusal(
+        object.batch({
+          tenantId,
+          statements: [
+            {
+              sql: "INSERT INTO managed_worker_templates (id, template_json) VALUES (?, ?)",
+              params: ["template_rollback", '{"tenant_id":"tenant_worker_transaction"}'],
+            },
+            {
+              sql:
+                "INSERT INTO self_hosted_run_dispatches " +
+                "(dispatch_id, queued_at_unix, dispatch_json) VALUES (?, ?, ?)",
+              params: ["dispatch_rollback", 100, '{"tenant_id":"tenant_worker_transaction"}'],
+            },
+            {
+              sql:
+                "INSERT INTO agent_schedules " +
+                "(schedule_id, tenant_id, workspace_id, name, spec_kind, target_kind, " +
+                "created_at_unix, updated_at_unix) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              params: [
+                "schedule_rollback",
+                tenantId,
+                "workspace_rollback",
+                "Rollback",
+                "interval",
+                "agent_run",
+                100,
+                100,
+              ],
+            },
+            {
+              sql:
+                "INSERT INTO agent_schedule_fires " +
+                "(fire_id, schedule_id, scheduled_fire_at_unix, fired_at_unix, outcome) " +
+                "VALUES (?, ?, ?, ?, ?)",
+              params: ["fire_rollback", "schedule_rollback", 100, 100, "dispatched"],
+            },
+            {
+              sql: "INSERT INTO managed_worker_templates (id, template_json) VALUES (?, ?)",
+              params: ["template_rollback", '{"duplicate":true}'],
+            },
+          ],
+        }),
+      ),
+    ).toMatch(/constraint|unique|primary key/i);
+
+    const rows = await object.query({
+      tenantId,
+      sql:
+        "SELECT " +
+        "(SELECT COUNT(*) FROM managed_worker_templates) AS templates, " +
+        "(SELECT COUNT(*) FROM self_hosted_run_dispatches) AS dispatches, " +
+        "(SELECT COUNT(*) FROM agent_schedules) AS schedules, " +
+        "(SELECT COUNT(*) FROM agent_schedule_fires) AS fires",
+    });
+    expect(rows.results).toEqual([{ templates: 0, dispatches: 0, schedules: 0, fires: 0 }]);
+  });
+
+  test("claims one schedule slot at most once inside the tenant object", async () => {
+    const tenantId = "tenant_schedule_claim";
+    const object = objectFor(tenantId);
+    const claimSql =
+      "INSERT INTO agent_schedule_fires " +
+      "(fire_id, schedule_id, scheduled_fire_at_unix, fired_at_unix, node_id, outcome) " +
+      "VALUES (?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT (schedule_id, scheduled_fire_at_unix) DO NOTHING RETURNING fire_id";
+
+    const results = await Promise.all(
+      ["node_a", "node_b"].map((nodeId) =>
+        object.batch({
+          tenantId,
+          statements: [
+            {
+              sql: claimSql,
+              params: [
+                "fire_" + nodeId,
+                "schedule_once",
+                1_800_000_000,
+                1_800_000_001,
+                nodeId,
+                "dispatched",
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(results.map((batch) => batch[0]?.results.length).sort()).toEqual([0, 1]);
+    const ledger = await object.query({
+      tenantId,
+      sql:
+        "SELECT schedule_id, scheduled_fire_at_unix, COUNT(*) AS claims " +
+        "FROM agent_schedule_fires GROUP BY schedule_id, scheduled_fire_at_unix",
+    });
+    expect(ledger.results).toEqual([
+      { schedule_id: "schedule_once", scheduled_fire_at_unix: 1_800_000_000, claims: 1 },
+    ]);
+  });
+
+  test("keeps worker rows with the same ids isolated between tenant objects", async () => {
+    const tenantA = "tenant_worker_isolation_a";
+    const tenantB = "tenant_worker_isolation_b";
+    const templateId = "template_same_id";
+
+    await objectFor(tenantA).query({
+      tenantId: tenantA,
+      sql: "INSERT INTO managed_worker_templates (id, template_json) VALUES (?, ?)",
+      params: [templateId, '{"tenant":"a"}'],
+    });
+    await objectFor(tenantB).query({
+      tenantId: tenantB,
+      sql: "INSERT INTO managed_worker_templates (id, template_json) VALUES (?, ?)",
+      params: [templateId, '{"tenant":"b"}'],
+    });
+
+    const rowsA = await objectFor(tenantA).query({
+      tenantId: tenantA,
+      sql: "SELECT id, template_json FROM managed_worker_templates",
+    });
+    const rowsB = await objectFor(tenantB).query({
+      tenantId: tenantB,
+      sql: "SELECT id, template_json FROM managed_worker_templates",
+    });
+    expect(rowsA.results).toEqual([{ id: templateId, template_json: '{"tenant":"a"}' }]);
+    expect(rowsB.results).toEqual([{ id: templateId, template_json: '{"tenant":"b"}' }]);
+  });
+});
+
+describe("tenant schedule alarms", () => {
+  test("sets and clears the native alarm through an admitted tenant RPC", async () => {
+    const tenantId = "tenant_schedule_alarm_lifecycle";
+    const object = scheduleAlarmObjectFor(tenantId);
+    const scheduledAtUnix = 1_800_000_123;
+
+    await object.setScheduleAlarm({ tenantId, scheduledAtUnix });
+    expect(
+      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
+    ).toBe(scheduledAtUnix * 1000);
+
+    await object.clearScheduleAlarm({ tenantId });
+    expect(
+      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
+  });
+
+  test("keeps the alarm and callback isolated to one tenant object", async () => {
+    type AlarmHookSeam = {
+      alarmCallbackRuns: number;
+      alarmCallbackActive: boolean;
+      alarmCallbackMessage: TenantScheduleAlarmMessage | null;
+      onScheduleAlarm: (message: TenantScheduleAlarmMessage) => Promise<void>;
+    };
+    const tenantA = "tenant_schedule_alarm_a";
+    const tenantB = "tenant_schedule_alarm_b";
+    const objectA = scheduleAlarmObjectFor(tenantA);
+    const objectB = scheduleAlarmObjectFor(tenantB);
+    const seam = async (instance: DurableObjectStub<TenantDataObject>) => {
+      await runInDurableObject(instance, (current) => {
+        const target = current as unknown as AlarmHookSeam;
+        target.alarmCallbackRuns = 0;
+        target.alarmCallbackActive = false;
+        target.alarmCallbackMessage = null;
+        target.onScheduleAlarm = async function (
+          this: AlarmHookSeam,
+          message: TenantScheduleAlarmMessage,
+        ) {
+          expect(this.alarmCallbackActive).toBe(false);
+          this.alarmCallbackActive = true;
+          await Promise.resolve();
+          this.alarmCallbackMessage = message;
+          this.alarmCallbackRuns += 1;
+          this.alarmCallbackActive = false;
+        };
+      });
+    };
+
+    await seam(objectA);
+    await seam(objectB);
+    const scheduledAtUnixA = 1_800_000_200;
+    const scheduledAtUnixB = 1_800_000_300;
+    await objectA.setScheduleAlarm({ tenantId: tenantA, scheduledAtUnix: scheduledAtUnixA });
+    await objectB.setScheduleAlarm({ tenantId: tenantB, scheduledAtUnix: scheduledAtUnixB });
+
+    expect(await refusal(objectA.clearScheduleAlarm({ tenantId: tenantB }))).toMatch(
+      /holds tenant tenant_schedule_alarm_a|another tenant/,
+    );
+    expect(
+      await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm()),
+    ).toBe(scheduledAtUnixA * 1000);
+    expect(await runDurableObjectAlarm(objectA)).toBe(true);
+    expect(
+      await runInDurableObject(objectA, (instance) => {
+        const target = instance as unknown as AlarmHookSeam;
+        return {
+          runs: target.alarmCallbackRuns,
+          active: target.alarmCallbackActive,
+          message: target.alarmCallbackMessage,
+        };
+      }),
+    ).toEqual({
+      runs: 1,
+      active: false,
+      message: {
+        kind: "tenant-schedule-alarm",
+        version: 1,
+        tenant_id: tenantA,
+        scheduled_at_unix: scheduledAtUnixA,
+      },
+    });
+    expect(
+      await runInDurableObject(objectB, (instance) => {
+        const target = instance as unknown as AlarmHookSeam;
+        return {
+          runs: target.alarmCallbackRuns,
+          active: target.alarmCallbackActive,
+          message: target.alarmCallbackMessage,
+        };
+      }),
+    ).toEqual({ runs: 0, active: false, message: null });
+    expect(await runDurableObjectAlarm(objectB)).toBe(true);
+
+    expect(
+      await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
   });
 });
 
