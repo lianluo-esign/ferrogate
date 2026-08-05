@@ -250,13 +250,13 @@ interface DurableObjectBinding {
 /**
  * The LIVE Durable Object bindings, split by who owns the class.
  *
- * The split is the whole point (#666). Two of this Worker's three bindings name
- * classes `src/worker.ts` exports and `[[migrations]]` introduces; the third,
- * `RATE_LIMIT`, names `apps/gateway`'s `RateLimiterDurableObject` through
+ * The split is the whole point (#666). Three of this Worker's five bindings
+ * name classes `src/worker.ts` exports and `[[migrations]]` introduces; the
+ * other two, `RATE_LIMIT` and `TENANT_DATA`, name gateway-owned classes through
  * `script_name`, which this Worker must NOT export and must NOT migrate. A gate
- * that treats all three the same either fails on the correct config or — the
- * way this file used to be written — only stays green while the shared counter
- * is commented out and therefore not shared at all.
+ * that treats all five the same either fails on the correct config or — the way
+ * this file used to be written — only stays green while a shared namespace is
+ * commented out and therefore not shared at all.
  */
 function durableObjectBindings(): DurableObjectBinding[] {
   const out: DurableObjectBinding[] = [];
@@ -341,7 +341,6 @@ const DOCUMENTED_BUT_UNDECLARED: readonly string[] = [];
  */
 const UNDOCUMENTED = ["FG_DEV_MCP_DURABLE_UPSTREAMS"] as const;
 
-
 /**
  * Declared names read through a renamed parameter, invisible to the
  * `env`-anchored scanner. `BILLING_DB` is passed as part of the environment to
@@ -381,6 +380,8 @@ describe("the env-var drift gate itself", () => {
       // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
       // because it is LIVE; while it was commented out it was not.
       "RATE_LIMIT",
+      // Cross-script tenant catalog and identity storage, owned by gateway.
+      "TENANT_DATA",
       "TENANT_DB",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(7);
@@ -412,10 +413,12 @@ describe("the deploy config's unobservable lines", () => {
     // Cloudflare rejects at deploy: "Cannot create binding for class X because
     // it is not currently defined". `new_classes` is NOT an acceptable
     // substitute — it deploys and hands the object the key-value backend.
-    const sqlite = [...WRANGLER_TOML.matchAll(/new_sqlite_classes\s*=\s*\[([^\]]*)\]/g)]
-      .flatMap((m) => [...(m[1] ?? "").matchAll(/"([^"]+)"/g)].map((e) => e[1] as string));
-    const legacy = [...WRANGLER_TOML.matchAll(/new_classes\s*=\s*\[([^\]]*)\]/g)]
-      .flatMap((m) => [...(m[1] ?? "").matchAll(/"([^"]+)"/g)].map((e) => e[1] as string));
+    const sqlite = [...WRANGLER_TOML.matchAll(/new_sqlite_classes\s*=\s*\[([^\]]*)\]/g)].flatMap(
+      (m) => [...(m[1] ?? "").matchAll(/"([^"]+)"/g)].map((e) => e[1] as string),
+    );
+    const legacy = [...WRANGLER_TOML.matchAll(/new_classes\s*=\s*\[([^\]]*)\]/g)].flatMap((m) =>
+      [...(m[1] ?? "").matchAll(/"([^"]+)"/g)].map((e) => e[1] as string),
+    );
     // LOCAL classes only. A `[[durable_objects.bindings]]` carrying
     // `script_name` binds a class ANOTHER script defines and migrates
     // (`RATE_LIMIT` → `ferrogate-gateway`, #666); a `[[migrations]]` entry for
