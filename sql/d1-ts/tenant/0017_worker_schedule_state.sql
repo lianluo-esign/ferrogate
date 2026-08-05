@@ -11,9 +11,11 @@
 --
 -- Deliberately not moved here:
 --   * self_hosted_worker_registrations is the control-plane bootstrap
---     directory, because worker_id is the lookup key before a tenant is known
---   * self_hosted_worker_telemetry_events and managed_worker_isolation_evidence
---     are high-volume or derived projection state owned by later slices
+--     directory, because worker_id is the lookup key before a tenant is known.
+--     The identity row below is the tenant authority; the control row remains a
+--     narrow compatibility lookup until the runtime reads the object directly.
+--   * managed_worker_isolation_evidence is derived projection state owned by a
+--     later slice; the managed lifecycle state below is authoritative here.
 -- ===========================================================================
 
 CREATE TABLE IF NOT EXISTS managed_worker_templates (
@@ -72,6 +74,21 @@ CREATE TABLE IF NOT EXISTS self_hosted_worker_heartbeats (
 CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_heartbeats_worker
     ON self_hosted_worker_heartbeats(worker_id, reported_at_unix);
 
+CREATE TABLE IF NOT EXISTS self_hosted_worker_identities (
+    worker_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    token_secret TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    identity_json TEXT NOT NULL DEFAULT '{}',
+    registered_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_identities_tenant
+    ON self_hosted_worker_identities(tenant_id, workspace_id, worker_id);
+
 CREATE TABLE IF NOT EXISTS self_hosted_worker_artifacts (
     id TEXT PRIMARY KEY,
     worker_id TEXT NOT NULL,
@@ -91,6 +108,21 @@ CREATE TABLE IF NOT EXISTS self_hosted_worker_checkpoints (
 
 CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_checkpoints_worker
     ON self_hosted_worker_checkpoints(worker_id, created_at_unix);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_telemetry_events (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    run_id TEXT,
+    occurred_at_unix INTEGER,
+    ingested_at_unix INTEGER,
+    event_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_worker
+    ON self_hosted_worker_telemetry_events(worker_id, occurred_at_unix);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_run
+    ON self_hosted_worker_telemetry_events(run_id, occurred_at_unix);
 
 CREATE TABLE IF NOT EXISTS self_hosted_run_dispatches (
     dispatch_id TEXT PRIMARY KEY,

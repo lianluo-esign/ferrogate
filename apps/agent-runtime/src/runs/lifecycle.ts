@@ -553,6 +553,8 @@ async function createRun(
     requestId,
     traceId,
     parentActionFingerprint,
+    sessionId,
+    isolationGrant: grant,
     initialStatus: options.initialStatus,
   });
 

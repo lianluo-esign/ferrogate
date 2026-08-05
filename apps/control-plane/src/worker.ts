@@ -24,10 +24,12 @@
  */
 import app from "./index.js";
 import { scheduled } from "./schedule/scheduled.js";
+import { consumeTenantScheduleAlarmBatch } from "./schedule/alarm-queue.js";
 
 const handler: ExportedHandler<Parameters<typeof scheduled>[1]> = {
   fetch: (request, env, ctx) => app.fetch(request, env, ctx),
   scheduled: (controller, env, ctx) => scheduled(controller, env, ctx),
+  queue: (batch, env) => consumeTenantScheduleAlarmBatch(batch, env),
 };
 
 export default handler;

@@ -81,6 +81,31 @@ export const AGENT_SCHEDULE_FIRE_COLUMNS =
  */
 export const INSERT_SCHEDULE_FIRE_SQL = `INSERT INTO agent_schedule_fires (${AGENT_SCHEDULE_FIRE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (schedule_id, scheduled_fire_at_unix) DO NOTHING RETURNING fire_id`;
 
+/** Insert a caller-supplied manual or migrated fire id, suppressing either unique key. */
+export const INSERT_SCHEDULE_FIRE_WITH_ID_SQL = `INSERT INTO agent_schedule_fires (${AGENT_SCHEDULE_FIRE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING fire_id`;
+
+/**
+ * Claim a due slot and advance its cursor in one D1 batch.
+ *
+ * The private claim token in `detail` distinguishes the row inserted by this
+ * batch from a row inserted by a competing delivery. The second statement
+ * advances only when that token is present, so a duplicate queue delivery
+ * cannot move the cursor after losing the unique fire claim.
+ */
+export const CLAIM_AND_ADVANCE_SCHEDULE_SQL = `INSERT INTO agent_schedule_fires (${AGENT_SCHEDULE_FIRE_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agent_schedules WHERE schedule_id = ? AND enabled = 1 AND revision = ? AND next_fire_at_unix = ?) ON CONFLICT (schedule_id, scheduled_fire_at_unix) DO NOTHING RETURNING fire_id`;
+
+const LEGACY_CLAIM_AND_ADVANCE_SCHEDULE_SQL = `INSERT INTO agent_schedule_fires (${AGENT_SCHEDULE_FIRE_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agent_schedules WHERE schedule_id = ? AND enabled = 1 AND next_fire_at_unix = ?) ON CONFLICT (schedule_id, scheduled_fire_at_unix) DO NOTHING RETURNING fire_id`;
+
+export const ADVANCE_CLAIMED_SCHEDULE_SQL =
+  "UPDATE agent_schedules SET last_fire_at_unix = ?, next_fire_at_unix = ?, updated_at_unix = ?, revision = revision + 1 " +
+  "WHERE schedule_id = ? AND enabled = 1 AND revision = ? AND next_fire_at_unix = ? AND EXISTS " +
+  "(SELECT 1 FROM agent_schedule_fires WHERE fire_id = ? AND detail = ?) RETURNING schedule_id";
+
+const LEGACY_ADVANCE_CLAIMED_SCHEDULE_SQL =
+  "UPDATE agent_schedules SET last_fire_at_unix = ?, next_fire_at_unix = ?, updated_at_unix = ?, revision = revision + 1 " +
+  "WHERE schedule_id = ? AND enabled = 1 AND next_fire_at_unix = ? AND EXISTS " +
+  "(SELECT 1 FROM agent_schedule_fires WHERE fire_id = ? AND detail = ?) RETURNING schedule_id";
+
 /**
  * The due scan. `enabled = 1` is the SQLite spelling of the Postgres boolean,
  * and `next_fire_at_unix IS NOT NULL` keeps an unschedulable definition (a
@@ -335,13 +360,48 @@ export class D1AgentScheduleStore {
       const result = await this.db
         .prepare(
           "UPDATE agent_schedules SET last_fire_at_unix = ?, next_fire_at_unix = ?, " +
-            "updated_at_unix = ? WHERE schedule_id = ?",
+            "updated_at_unix = ?, revision = revision + 1 WHERE schedule_id = ?",
         )
         .bind(lastFireAtUnix, bindOptional(nextFireAtUnix), nowUnix, scheduleId)
         .run();
       return changes(result) > 0;
     } catch (error) {
       throw d1Error("advance_agent_schedule", error);
+    }
+  }
+
+  /** Advance only if the schedule still points at the claimed slot. */
+  async advanceScheduleIfCurrent(
+    scheduleId: string,
+    expectedNextFireAtUnix: number,
+    lastFireAtUnix: number,
+    nextFireAtUnix: number | undefined,
+    nowUnix: number,
+    expectedRevision?: number,
+  ): Promise<boolean> {
+    try {
+      const sql =
+        expectedRevision === undefined
+          ? "UPDATE agent_schedules SET last_fire_at_unix = ?, next_fire_at_unix = ?, updated_at_unix = ?, revision = revision + 1 WHERE schedule_id = ? AND enabled = 1 AND next_fire_at_unix = ?"
+          : "UPDATE agent_schedules SET last_fire_at_unix = ?, next_fire_at_unix = ?, updated_at_unix = ?, revision = revision + 1 WHERE schedule_id = ? AND enabled = 1 AND revision = ? AND next_fire_at_unix = ?";
+      const bindings =
+        expectedRevision === undefined
+          ? [lastFireAtUnix, bindOptional(nextFireAtUnix), nowUnix, scheduleId, expectedNextFireAtUnix]
+          : [
+              lastFireAtUnix,
+              bindOptional(nextFireAtUnix),
+              nowUnix,
+              scheduleId,
+              expectedRevision,
+              expectedNextFireAtUnix,
+            ];
+      const result = await this.db
+        .prepare(sql)
+        .bind(...bindings)
+        .run();
+      return changes(result) > 0;
+    } catch (error) {
+      throw d1Error("advance_agent_schedule_if_current", error);
     }
   }
 
@@ -377,6 +437,176 @@ export class D1AgentScheduleStore {
       return result.results.length > 0;
     } catch (error) {
       throw d1Error("insert_agent_schedule_fire", error);
+    }
+  }
+
+  /** Insert a manual or migrated fire with its explicit id, before dispatch. */
+  async insertScheduleFireWithId(fire: StoredAgentScheduleFire): Promise<boolean> {
+    try {
+      const result = await this.db
+        .prepare(INSERT_SCHEDULE_FIRE_WITH_ID_SQL)
+        .bind(
+          fire.fireId,
+          fire.scheduleId,
+          fire.scheduledFireAtUnix,
+          fire.firedAtUnix,
+          bindOptional(fire.nodeId),
+          fire.outcome,
+          bindOptional(fire.dispatchId),
+          bindOptional(fire.runId),
+          bindOptional(fire.detail),
+        )
+        .all<{ fire_id: string }>();
+      return result.results.length > 0;
+    } catch (error) {
+      throw d1Error("insert_agent_schedule_fire_with_id", error);
+    }
+  }
+
+  /**
+   * Claim a fire and advance the matching schedule cursor atomically.
+   *
+   * The method returns `true` only when this caller inserted the deterministic
+   * fire row and advanced the schedule. A duplicate delivery returns `false`
+   * without dispatching or changing the cursor.
+   */
+  async claimAndAdvanceSchedule(
+    fire: StoredAgentScheduleFire,
+    nextFireAtUnix: number | undefined,
+    nowUnix: number,
+    expectedRevision?: number,
+  ): Promise<boolean> {
+    requireAtomicBatch(this.handle, "claim_and_advance_agent_schedule");
+    const fireId = agentScheduleFireId(fire.scheduleId, fire.scheduledFireAtUnix);
+    const claimToken = `schedule-claim:${crypto.randomUUID()}`;
+    try {
+      const claimSql =
+        expectedRevision === undefined
+          ? LEGACY_CLAIM_AND_ADVANCE_SCHEDULE_SQL
+          : CLAIM_AND_ADVANCE_SCHEDULE_SQL;
+      const advanceSql =
+        expectedRevision === undefined
+          ? LEGACY_ADVANCE_CLAIMED_SCHEDULE_SQL
+          : ADVANCE_CLAIMED_SCHEDULE_SQL;
+      const claimBindings =
+        expectedRevision === undefined
+          ? [
+              fireId,
+              fire.scheduleId,
+              fire.scheduledFireAtUnix,
+              fire.firedAtUnix,
+              bindOptional(fire.nodeId),
+              fire.outcome,
+              bindOptional(fire.dispatchId),
+              bindOptional(fire.runId),
+              claimToken,
+              fire.scheduleId,
+              fire.scheduledFireAtUnix,
+            ]
+          : [
+              fireId,
+              fire.scheduleId,
+              fire.scheduledFireAtUnix,
+              fire.firedAtUnix,
+              bindOptional(fire.nodeId),
+              fire.outcome,
+              bindOptional(fire.dispatchId),
+              bindOptional(fire.runId),
+              claimToken,
+              fire.scheduleId,
+              expectedRevision,
+              fire.scheduledFireAtUnix,
+            ];
+      const advanceBindings =
+        expectedRevision === undefined
+          ? [
+              fire.scheduledFireAtUnix,
+              bindOptional(nextFireAtUnix),
+              nowUnix,
+              fire.scheduleId,
+              fire.scheduledFireAtUnix,
+              fireId,
+              claimToken,
+            ]
+          : [
+              fire.scheduledFireAtUnix,
+              bindOptional(nextFireAtUnix),
+              nowUnix,
+              fire.scheduleId,
+              expectedRevision,
+              fire.scheduledFireAtUnix,
+              fireId,
+              claimToken,
+            ];
+      const results = await this.db.batch([
+        this.db
+          .prepare(claimSql)
+          .bind(...claimBindings),
+        this.db
+          .prepare(advanceSql)
+          .bind(...advanceBindings),
+      ]);
+      const inserted = (results[0] as D1Result<{ fire_id: string }>).results.length > 0;
+      const advanced = (results[1] as D1Result<{ schedule_id: string }>).results.length > 0;
+      return inserted && advanced;
+    } catch (error) {
+      throw d1Error("claim_and_advance_agent_schedule", error);
+    }
+  }
+
+  /** Stamp the terminal outcome after the target dispatch completes. */
+  async updateScheduleFireOutcome(
+    fireId: string,
+    outcome: StoredAgentScheduleFire["outcome"],
+    dispatchId: string | undefined,
+    runId: string | undefined,
+    detail: string | undefined,
+  ): Promise<boolean> {
+    try {
+      const result = await this.db
+        .prepare(
+          "UPDATE agent_schedule_fires SET outcome = ?, dispatch_id = ?, run_id = ?, detail = ? WHERE fire_id = ?",
+        )
+        .bind(
+          outcome,
+          bindOptional(dispatchId),
+          bindOptional(runId),
+          bindOptional(detail),
+          fireId,
+        )
+        .run();
+      return changes(result) > 0;
+    } catch (error) {
+      throw d1Error("update_agent_schedule_fire", error);
+    }
+  }
+
+  async getScheduleFire(fireId: string): Promise<StoredAgentScheduleFire | undefined> {
+    try {
+      const row = await this.db
+        .prepare(`SELECT ${AGENT_SCHEDULE_FIRE_COLUMNS} FROM agent_schedule_fires WHERE fire_id = ?`)
+        .bind(fireId)
+        .first<AgentScheduleFireRow>();
+      return row === null ? undefined : intoStoredFire(row);
+    } catch (error) {
+      throw d1Error("get_agent_schedule_fire", error);
+    }
+  }
+
+  async getScheduleFireForSlot(
+    scheduleId: string,
+    scheduledFireAtUnix: number,
+  ): Promise<StoredAgentScheduleFire | undefined> {
+    try {
+      const row = await this.db
+        .prepare(
+          `SELECT ${AGENT_SCHEDULE_FIRE_COLUMNS} FROM agent_schedule_fires WHERE schedule_id = ? AND scheduled_fire_at_unix = ?`,
+        )
+        .bind(scheduleId, scheduledFireAtUnix)
+        .first<AgentScheduleFireRow>();
+      return row === null ? undefined : intoStoredFire(row);
+    } catch (error) {
+      throw d1Error("get_agent_schedule_fire_for_slot", error);
     }
   }
 

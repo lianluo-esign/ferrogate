@@ -52,7 +52,7 @@ import {
   workflowBudgetDenialCode,
 } from "@ferrogate/policy";
 import { workflowRunBudgetId } from "@ferrogate/storage";
-import type { AgentRuntimeBindings } from "../ports.js";
+import type { AgentRuntimeBindings, IsolationGrant } from "../ports.js";
 import {
   comparePosition,
   doneFrame,
@@ -70,7 +70,11 @@ import {
   type WorkerReportedRunState,
   isTerminalStatus,
 } from "./model.js";
-import { persistAgentRunEvidence, persistAgentRunEventEvidence } from "./evidence.js";
+import {
+  persistAgentRunEvidence,
+  persistAgentRunEventEvidence,
+  type ManagedWorkerEvidenceContext,
+} from "./evidence.js";
 
 /** Heartbeat cadence for an idle SSE stream. */
 const SSE_HEARTBEAT_MS = 15_000;
@@ -86,6 +90,7 @@ const SEQ_KEY = "seq";
 const EVENT_PREFIX = "evt:";
 /** One workflow ledger per `(workflowId, version)` this run has stepped in. */
 const WORKFLOW_PREFIX = "wf:";
+const MANAGED_CONTEXT_KEY = "managed-worker-context";
 
 function eventKey(seq: number): string {
   return `${EVENT_PREFIX}${String(seq).padStart(16, "0")}`;
@@ -116,6 +121,8 @@ export interface CreateRunInput {
   readonly requestId: string | null;
   readonly traceId: string | null;
   readonly parentActionFingerprint: string | null;
+  readonly sessionId: string | null;
+  readonly isolationGrant: IsolationGrant;
   /** `"queued"` for the async job protocol, `"running"` for a synchronous run. */
   readonly initialStatus: Extract<RunStatus, "queued" | "running">;
 }
@@ -448,6 +455,11 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
       cancel_requested: false,
     };
     await this.ctx.storage.put(RUN_KEY, run);
+    await this.ctx.storage.put(MANAGED_CONTEXT_KEY, {
+      sessionId: input.sessionId,
+      frameworkAdapter: input.frameworkAdapter,
+      isolationGrant: input.isolationGrant,
+    } satisfies ManagedWorkerEvidenceContext);
     await this.#repairEvidence(run);
     await this.ctx.storage.put(SEQ_KEY, 0);
     await this.#append({
@@ -514,7 +526,8 @@ export class AgentRunState extends DurableObject<AgentRuntimeBindings> {
    * idempotent upserts make the replay safe and repair the missing prefix.
    */
   async #repairEvidence(run: StoredAgentRun): Promise<void> {
-    await persistAgentRunEvidence(this.#env, run);
+    const managed = await this.ctx.storage.get<ManagedWorkerEvidenceContext>(MANAGED_CONTEXT_KEY);
+    await persistAgentRunEvidence(this.#env, run, managed);
     const events = (await this.#allEvents()).sort((left, right) => left.seq - right.seq);
     for (const event of events) {
       await persistAgentRunEventEvidence(this.#env, run.tenant_id, event);

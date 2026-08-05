@@ -69,25 +69,28 @@
  *     `site_domain_verifications` rows — read an empty directory on every
  *     deployment. `verifySiteDomain` now projects the proof into the typed
  *     table through this class.
+ *   - `D1AgentScheduleStore` -> `apps/control-plane/src/schedule/tenant-schedule.ts`
+ *     (#856). Tenant-object schedules now use this store's durable claim gate;
+ *     native-binding tenants remain on the compatibility scheduler during the
+ *     migration.
  *
  * STILL DEAD — zero importers anywhere under `apps/`, so deleting any of them
  * would leave every suite in this repo green:
  *   - `D1BillingEventLedger`      (the billing outbox drain)
  *   - `D1RetentionPolicyStore`    (see `./retention.js` — no cron calls it)
- *   - `D1AgentScheduleStore`      (see the §1.4.7 marker below)
  *   - `TenantMonotonicUpserts` / `ControlMonotonicUpserts`
  *   - `R2AssetBlobStore`
  *   - `D1AssetMetadataStore`      (duplicated app-locally, see below)
  *
- * TWO of those are dead by DUPLICATION rather than by a missing trigger, which
- * is the worse failure: a second implementation exists, is live, and can drift
- * from the one that has the tests.
+ * The remaining `D1AssetMetadataStore` is dead by DUPLICATION rather than by a
+ * missing trigger, which is the worse failure: a second implementation exists,
+ * is live, and can drift from the one that has the tests.
  *   - assets: `apps/gateway/src/assets/d1.ts` declares its own
  *     `D1AssetMetadataStore` and imports nothing from here
  *     (`docs/rewrite/parity-audit-storage.md` §4.11 records the decision).
- *   - agent schedules: `apps/control-plane/src/schedule/{cron,engine,model,
- *     scheduled}.ts` is a SECOND, independent ~1650-line schedule engine with
- *     its own 5-field cron parser, and it does not import `@ferrogate/storage`.
+ *   - agent schedules: the tenant-object path uses `D1AgentScheduleStore`,
+ *     while `apps/control-plane/src/schedule/{cron,engine,model,scheduled}.ts`
+ *     remains a SECOND implementation for native/compatibility tenants.
  *
  * The close is the composition roots, NOT this package (a library cannot mount
  * itself); `packages/storage/README.md` §4 has the exact wiring. The split above
@@ -97,8 +100,8 @@
  * ---------------------------------------------------------------------------
  *
  * PORT-TODO(P: inventory-data-billing §1.4.7 `agent_schedules` / `agent_schedule_fires`)
- * — SHARPENED. The ENGINE is no longer absent; the TICK TRIGGER still is, and a
- * RIVAL ENGINE has landed in `apps/control-plane` in the meantime.
+ * — SHARPENED. The tenant-object engine is mounted; the native-binding fallback
+ * and its rival scheduler remain until the migration is complete.
  *
  * CLOSED in this package: `./agent-schedule.js` ports the whole engine
  * clean-room — a 5-field cron parser (no `croner`), IANA-timezone wall-clock
@@ -115,29 +118,19 @@
  * the claim. `test/d1/agent-schedule-d1.test.ts` races two claimers on one slot,
  * asserts exactly one wins, and mutation-pins the gate.
  *
- * STILL OPEN, and NOT CLOSABLE FROM A LIBRARY PACKAGE: nothing TICKS *this*
- * engine. A `packages/*` library has no Worker entry module and no
- * `wrangler.toml`, so it cannot declare `[triggers] crons` or a Durable Object
- * alarm; `listDueSchedules` → `planScheduleTick` → `insertScheduleFire` →
- * `advanceSchedule` has no caller under `apps/`.
+ * CLOSED for the object-backed path: `apps/control-plane/src/schedule/alarm-queue.ts`
+ * calls this engine against a tenant handle after a Durable Object alarm. A
+ * `packages/*` library still has no Worker entry module and no `wrangler.toml`,
+ * so the native-binding compatibility path keeps its own scheduled trigger.
  *
- * WHAT CHANGED, and why it is worse than "no trigger": a trigger now exists, on
- * a DIFFERENT engine. `apps/control-plane/src/schedule/{cron,engine,model,
- * scheduled}.ts` (~1650 lines) re-implements the cron parser, the timezone
- * arithmetic, the overlap/catch-up policies and the tick, and imports nothing
- * from here. So the repo carries TWO schedule engines: the one that ticks, and
- * the one with `test/agent-schedule.test.ts` + `test/d1/agent-schedule-d1.test.ts`
- * behind it (including the two-claimer race on the at-most-once fire gate). They
- * can disagree about when a schedule fires and no test in either tree would
- * notice.
+ * WHAT CHANGED: the object-backed path now uses this engine's transaction-backed
+ * claim gate and per-object alarm delivery. The native compatibility path still
+ * carries a second engine, so both implementations remain covered until that
+ * fallback is retired.
  *
- * The resolution is a DELETION, not more code, and it belongs to whoever owns
- * the composition root: point `apps/control-plane/src/schedule/` at
- * `@ferrogate/storage`'s engine + `D1AgentScheduleStore` on the tenant handle
- * and delete the duplicate, or delete THIS engine and move its tests over.
- * Keeping both is the option that guarantees a divergence. A Durable Object
- * alarm remains the answer for sub-minute cadences, since cron triggers do not
- * go below one minute.
+ * The remaining resolution is to retire the native compatibility engine after
+ * all tenants are object-backed. A Durable Object alarm remains the answer for
+ * sub-minute cadences, since cron triggers do not go below one minute.
  */
 
 export * from "./errors.js";

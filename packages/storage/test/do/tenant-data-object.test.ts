@@ -10,7 +10,7 @@
  *    choice, never as a SQL surface);
  *  * that `transactionSync` really rolls back, so `batch()` is genuinely atomic
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
- *  * that the version gate really stops the 148-statement apply re-running on
+ *  * that the version gate really stops the 153-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
  *    seventeen tenant migrations are covered by the census below;
  *  * that two `idFromName` objects really hold physically different databases.
@@ -26,9 +26,11 @@ import {
 } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
+  TENANT_SCHEDULE_ALARM_CALLBACK,
   type TenantDataBatchRequest,
   type TenantDataNamespace,
   type TenantDataObject,
+  type TenantScheduleAlarmCallback,
   sqlStatements,
 } from "../../src/tenant-data-object.js";
 import type { TenantScheduleAlarmMessage } from "../../src/tenant-schedule-alarm.js";
@@ -92,6 +94,8 @@ const TENANT_TABLES = [
   "self_hosted_worker_artifacts",
   "self_hosted_worker_checkpoints",
   "self_hosted_worker_heartbeats",
+  "self_hosted_worker_identities",
+  "self_hosted_worker_telemetry_events",
   "semantic_cache_policies",
   "sso_provider_configs",
   "storage_schema_migrations",
@@ -234,9 +238,9 @@ describe("the statement splitter", () => {
       insert: count(/^INSERT/i),
     }).toEqual({
       files: 17,
-      statements: 148,
-      createTable: 58,
-      createIndex: 68,
+      statements: 153,
+      createTable: 60,
+      createIndex: 71,
       createUniqueIndex: 5,
       alterTable: 10,
       insert: 6,
@@ -264,8 +268,9 @@ describe("the statement splitter", () => {
       "0013_guardrail_evaluations": 1,
       "0015_tenant_configuration_policy": 1,
       "0016_control_plane_resources": 1,
+      "0017_worker_schedule_state": 2,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(34);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(36);
 
     // The claim those two counts exist to support, asserted rather than
     // restated: NO statement the splitter produces still carries a `;`, i.e.
@@ -669,7 +674,7 @@ describe("the second wake", () => {
     const second = await objectFor(ACME).schemaVersion();
     // The assertion is on what the applier DID, not on how long it took: a
     // wall-time test would be a timing guess, and a test that only checked the
-    // version would pass against an applier that re-ran all 148 statements.
+    // version would pass against an applier that re-ran all 153 statements.
     expect(second.appliedThisWake).toEqual([]);
     expect(second.version).toBe(TENANT_SCHEMA_VERSION);
     expect(second.failure).toBeNull();
@@ -1132,7 +1137,7 @@ describe("tenant schedule alarms", () => {
       alarmCallbackRuns: number;
       alarmCallbackActive: boolean;
       alarmCallbackMessage: TenantScheduleAlarmMessage | null;
-      onScheduleAlarm: (message: TenantScheduleAlarmMessage) => Promise<void>;
+      [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback;
     };
     const tenantA = "tenant_schedule_alarm_a";
     const tenantB = "tenant_schedule_alarm_b";
@@ -1144,7 +1149,7 @@ describe("tenant schedule alarms", () => {
         target.alarmCallbackRuns = 0;
         target.alarmCallbackActive = false;
         target.alarmCallbackMessage = null;
-        target.onScheduleAlarm = async function (
+        target[TENANT_SCHEDULE_ALARM_CALLBACK] = async function (
           this: AlarmHookSeam,
           message: TenantScheduleAlarmMessage,
         ) {

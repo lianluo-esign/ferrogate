@@ -43,6 +43,10 @@ import {
   workerRegistrationDocument,
 } from "../store/worker_registry.js";
 import {
+  openTenantWorkerRepository,
+  type TenantWorkerRepository,
+} from "../store/tenant-worker.js";
+import {
   type CollectionSpec,
   type GroupModule,
   type Handler,
@@ -142,6 +146,133 @@ async function provision(
   );
 }
 
+function tenantIdOf(record: StoreRecord): string | null {
+  return typeof record.tenant_id === "string" && record.tenant_id.trim() !== ""
+    ? record.tenant_id.trim()
+    : null;
+}
+
+async function tenantWorkerRepository(
+  c: Parameters<Handler>[0],
+  record: StoreRecord,
+): Promise<TenantWorkerRepository | null> {
+  const tenantId = tenantIdOf(record);
+  if (tenantId === null) return null;
+  const deps = depsOf(c);
+  // Worker state follows the tenant roster. `tenantStorage` is the provisioning
+  // router and may default to Durable Objects even while this tenant still
+  // lives on a native binding in a mixed-backend deployment.
+  return openTenantWorkerRepository(deps.tenantDatabases, tenantId);
+}
+
+/**
+ * Resolve a worker for an action. The object-local generic store is the normal
+ * path; the bootstrap registry supplies the tenant id for a platform operator
+ * whose request only carries the worker id. This avoids a fleet object scan and
+ * keeps the registry as a lookup directory, not as the worker-state authority.
+ */
+async function visibleWorker(
+  c: Parameters<Handler>[0],
+  db: D1Database | null,
+  scope: ReturnType<typeof scopeOf>,
+  workerId: string,
+): Promise<StoreRecord | null> {
+  const deps = depsOf(c);
+  const direct = await deps.store.get(WORKERS, scope, workerId);
+  if (direct !== null || scope.kind !== "platform_operator") return direct;
+  if (db === null) return null;
+
+  const registration = await readWorkerRegistration(db, workerId);
+  const tenantId = registration?.tenant_id?.trim();
+  if (tenantId === undefined || tenantId === "") return null;
+  return deps.store.get(WORKERS, { kind: "tenant", tenantId }, workerId);
+}
+
+function tenantWorkerIdentity(
+  record: StoreRecord,
+  credential: TransportCredential,
+  nowUnix: number,
+  registeredAtUnix = nowUnix,
+): {
+  readonly tenantId: string;
+  readonly workerId: string;
+  readonly workspaceId: string;
+  readonly tokenId: string;
+  readonly tokenSecret: string;
+  readonly status: string;
+  readonly document: StoreRecord;
+  readonly registeredAtUnix: number;
+  readonly updatedAtUnix: number;
+} {
+  const tenantId = tenantIdOf(record);
+  const workspaceId = typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
+  if (tenantId === null || workspaceId === "") {
+    throw new HttpError(
+      400,
+      "invalid_request_body",
+      "tenant_id and workspace_id are required for tenant worker state",
+    );
+  }
+  return {
+    tenantId,
+    workerId: record.id,
+    workspaceId,
+    tokenId: credential.token_id,
+    tokenSecret: credential.token_secret,
+    status: typeof record.status === "string" ? record.status : "active",
+    document: { ...stripCredentialFields(record), id: record.id },
+    registeredAtUnix,
+    updatedAtUnix: nowUnix,
+  };
+}
+
+/**
+ * Backfill the tenant identity for a worker created before #856.
+ *
+ * The control registry remains the bootstrap directory, so it has the
+ * credential needed to reconstruct the object row. Refuse a missing or
+ * mismatched directory entry before creating the child projection; otherwise a
+ * child could be visible in the compatibility collection while its authoritative
+ * tenant row was rejected.
+ */
+async function hydrateTenantWorkerIdentity(
+  db: D1Database | null,
+  repository: TenantWorkerRepository,
+  record: StoreRecord,
+  nowUnix: number,
+): Promise<void> {
+  if (db === null) {
+    throw new HttpError(
+      503,
+      "control_database_unavailable",
+      "tenant worker identity hydration requires the control database",
+    );
+  }
+  const registration = await readWorkerRegistration(db, record.id);
+  const tenantId = tenantIdOf(record);
+  const workspaceId =
+    typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
+  if (
+    registration === null ||
+    registration.tenant_id !== tenantId ||
+    registration.workspace_id !== workspaceId
+  ) {
+    throw new HttpError(
+      409,
+      "conflict",
+      `self-hosted worker ${record.id} has no matching bootstrap identity`,
+    );
+  }
+  await repository.upsertIdentity(
+    tenantWorkerIdentity(
+      record,
+      { token_id: registration.token_id, token_secret: registration.token_secret },
+      nowUnix,
+      registration.registered_at_unix,
+    ),
+  );
+}
+
 const WORKER_SPEC = resolveSpec(SELF_HOSTED_WORKER_SPEC);
 
 /**
@@ -177,6 +308,20 @@ export const registerSelfHostedWorkerHandler: Handler = async (c) => {
   };
   const blocker = registrationBlocker(record);
   if (blocker !== null) throw new HttpError(400, "invalid_request_body", blocker);
+  const existingRegistration = await readWorkerRegistration(db, id);
+  const workspaceId =
+    typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
+  if (
+    existingRegistration !== null &&
+    (existingRegistration.tenant_id !== tenantIdOf(record) ||
+      existingRegistration.workspace_id !== workspaceId)
+  ) {
+    throw new HttpError(
+      409,
+      "conflict",
+      `self-hosted worker ${id} is already registered for another tenant or workspace`,
+    );
+  }
 
   let stored: StoreRecord;
   try {
@@ -186,6 +331,11 @@ export const registerSelfHostedWorkerHandler: Handler = async (c) => {
       throw new HttpError(409, "conflict", `${WORKER_SPEC.object} ${id} already exists`);
     }
     throw error;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const tenantRepository = await tenantWorkerRepository(c, stored);
+  if (tenantRepository !== null) {
+    await tenantRepository.upsertIdentity(tenantWorkerIdentity(stored, credential, now));
   }
   await provision(db, stored, credential);
   return json(c, 201, {
@@ -214,20 +364,35 @@ export const rotateSelfHostedWorkerIdentityHandler: Handler = async (c) => {
   const db = controlDatabaseOr503(c);
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
-  const existing = await deps.store.get(WORKER_SPEC.collection, scope, id);
+  const existing = await visibleWorker(c, db, scope, id);
   if (existing === null) {
     throw new HttpError(404, "not_found", `self-hosted worker ${id} not found`);
   }
+  const workerScope =
+    scope.kind === "platform_operator" && tenantIdOf(existing) !== null
+      ? { kind: "tenant" as const, tenantId: tenantIdOf(existing) as string }
+      : scope;
   const previous = await readWorkerRegistration(db, id);
   const now = Math.floor(Date.now() / 1000);
   const credential = mintTransportCredential();
-  const stored = await deps.store.merge(WORKER_SPEC.collection, scope, id, {
+  const stored = await deps.store.merge(WORKER_SPEC.collection, workerScope, id, {
     identity_fingerprint: crypto.randomUUID(),
     identity_rotated_at: now,
     token_id: credential.token_id,
   });
   if (stored === null) {
     throw new HttpError(404, "not_found", `self-hosted worker ${id} not found`);
+  }
+  const tenantRepository = await tenantWorkerRepository(c, stored);
+  if (tenantRepository !== null) {
+    await tenantRepository.upsertIdentity(
+      tenantWorkerIdentity(
+        stored,
+        credential,
+        now,
+        typeof previous?.registered_at_unix === "number" ? previous.registered_at_unix : now,
+      ),
+    );
   }
   await provision(db, stored, credential);
   return json(c, 200, {
@@ -254,12 +419,16 @@ export const heartbeatSelfHostedWorkerHandler: Handler = async (c) => {
   const db = controlDatabaseOr503(c);
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
-  const existing = await deps.store.get(WORKER_SPEC.collection, scope, id);
+  const existing = await visibleWorker(c, db, scope, id);
   if (existing === null) {
     throw new HttpError(404, "not_found", `self-hosted worker ${id} not found`);
   }
+  const workerScope =
+    scope.kind === "platform_operator" && tenantIdOf(existing) !== null
+      ? { kind: "tenant" as const, tenantId: tenantIdOf(existing) as string }
+      : scope;
   const now = Math.floor(Date.now() / 1000);
-  const stored = await deps.store.merge(WORKER_SPEC.collection, scope, id, {
+  const stored = await deps.store.merge(WORKER_SPEC.collection, workerScope, id, {
     last_heartbeat_at: now,
     status: "active",
   });
@@ -267,6 +436,17 @@ export const heartbeatSelfHostedWorkerHandler: Handler = async (c) => {
     throw new HttpError(404, "not_found", `self-hosted worker ${id} not found`);
   }
   const registration = await readWorkerRegistration(db, id);
+  const tenantRepository = await tenantWorkerRepository(c, stored);
+  if (tenantRepository !== null) {
+    // A typed tenant worker cannot acknowledge a heartbeat until its bootstrap
+    // directory can reconstruct the authoritative object identity.
+    await hydrateTenantWorkerIdentity(db, tenantRepository, stored, now);
+    await tenantRepository.recordHeartbeat(
+      id,
+      { id: crypto.randomUUID(), worker_id: id, status: "active", last_heartbeat_at: now },
+      now,
+    );
+  }
   if (registration !== null) {
     await provision(db, stored, {
       token_id: registration.token_id,
@@ -281,21 +461,47 @@ export const heartbeatSelfHostedWorkerHandler: Handler = async (c) => {
  * (never 403) when the worker belongs to another tenant — the same
  * indistinguishability the read paths use.
  */
-function appendChild(collection: string, object: string, schema: z.ZodTypeAny): Handler {
+function appendChild(
+  collection: string,
+  object: string,
+  schema: z.ZodTypeAny,
+  writeTenantState: (
+    repository: TenantWorkerRepository,
+    workerId: string,
+    record: StoreRecord,
+    nowUnix: number,
+  ) => Promise<void>,
+): Handler {
   return async (c) => {
     const deps = c.get("deps");
     const scope = scopeOf(c);
     const workerId = pathParam(c, "id");
-    if ((await deps.store.get(WORKERS, scope, workerId)) === null) {
+    const db = deps.controlDatabase;
+    const parent = await visibleWorker(c, db, scope, workerId);
+    if (parent === null) {
       throw new HttpError(404, "not_found", `self-hosted worker ${workerId} not found`);
     }
     const body = (await readJson(c, schema)) as Record<string, unknown>;
-    const stored = await deps.store.create(collection, scope, {
+    const now = Math.floor(Date.now() / 1000);
+    const childScope =
+      scope.kind === "platform_operator" && tenantIdOf(parent) !== null
+        ? { kind: "tenant" as const, tenantId: tenantIdOf(parent) as string }
+        : scope;
+    const tenantRepository = await tenantWorkerRepository(c, parent);
+    if (tenantRepository !== null) {
+      await hydrateTenantWorkerIdentity(db, tenantRepository, parent, now);
+    }
+    const stored = await deps.store.create(collection, childScope, {
       ...body,
+      ...(tenantIdOf(parent) === null ? {} : { tenant_id: tenantIdOf(parent) }),
       id: crypto.randomUUID(),
       worker_id: workerId,
-      recorded_at: Math.floor(Date.now() / 1000),
+      recorded_at: now,
     });
+    const storedTenantRepository = await tenantWorkerRepository(c, stored);
+    if (storedTenantRepository !== null) {
+      await writeTenantState(storedTenantRepository, workerId, stored, now);
+    }
     return json(c, 201, { object, [object]: stored });
   };
 }
@@ -315,16 +521,22 @@ export const selfHostedWorkerRoutes: GroupModule = crudGroup(
       ARTIFACTS,
       "self_hosted_worker_artifact",
       workerArtifactSchema,
+      (repository, workerId, record, now) =>
+        repository.recordArtifact(workerId, record, now),
     ),
     recordAdminSelfHostedWorkerCheckpoint: appendChild(
       CHECKPOINTS,
       "self_hosted_worker_checkpoint",
       workerCheckpointSchema,
+      (repository, workerId, record, now) =>
+        repository.recordCheckpoint(workerId, record, now),
     ),
     recordAdminSelfHostedWorkerTelemetryEvent: appendChild(
       EVENTS,
       "self_hosted_worker_event",
       workerEventSchema,
+      (repository, workerId, record, now) =>
+        repository.recordTelemetry(workerId, record, now),
     ),
 
     listAdminSelfHostedWorkerTelemetryEvents: subListHandler({

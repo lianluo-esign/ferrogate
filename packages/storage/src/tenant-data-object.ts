@@ -61,6 +61,7 @@ import {
 } from "./tenant-schema-sql.js";
 import {
   decodeTenantScheduleAlarm,
+  encodeTenantScheduleAlarm,
   tenantScheduleAlarmMessage,
   type TenantScheduleAlarmMessage,
 } from "./tenant-schedule-alarm.js";
@@ -203,6 +204,31 @@ const TENANT_ID_KEY = "tenant_data:tenant_id";
 /** The validated tenant-only payload retained until the native alarm fires. */
 const SCHEDULE_ALARM_KEY = "tenant_data:schedule_alarm";
 
+interface TenantScheduleAlarmQueue {
+  send(body: unknown): Promise<unknown>;
+}
+
+function scheduleAlarmQueueFrom(env: unknown): TenantScheduleAlarmQueue | null {
+  if (typeof env !== "object" || env === null) return null;
+  const queue = (env as { SCHEDULE_ALARMS?: unknown }).SCHEDULE_ALARMS;
+  if (typeof queue !== "object" || queue === null) return null;
+  const send = (queue as { send?: unknown }).send;
+  return typeof send === "function" ? (queue as TenantScheduleAlarmQueue) : null;
+}
+
+/**
+ * Symbol-keyed so it is a testable/internal seam without becoming a string RPC
+ * method. Cloudflare RPC only addresses string properties; the alarm entrypoint
+ * is the only production caller.
+ */
+export const TENANT_SCHEDULE_ALARM_CALLBACK = Symbol(
+  "TenantDataObject.scheduleAlarmCallback",
+);
+
+export type TenantScheduleAlarmCallback = (
+  message: TenantScheduleAlarmMessage,
+) => Promise<void>;
+
 /**
  * A witness table from `0001_init_tenant.sql`, used to catch a ledger that
  * disagrees with the database it claims to describe. See `#assertLedgerHonest`.
@@ -310,9 +336,10 @@ function requiresPrivilegedWrite(sql: string): string | null {
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the SEVENTEEN files have 34
+ *    comment lines containing a `;` mid-prose, and the SEVENTEEN files have 36
  *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
- *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015 and 1 in 0016) — 34, not 18,
+ *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015, 1 in 0016 and 2 in 0017) —
+ *    36, not 18,
  *    is the number that bounds this function's exposure. Splitting before
  *    stripping cuts statements in half at every one of them.
  *
@@ -360,14 +387,24 @@ export class TenantDataObject extends DurableObject {
   #tenantId: string | null = null;
   #appliedThisWake: string[] = [];
   #failure: string | null = null;
+  readonly #scheduleAlarmQueue: TenantScheduleAlarmQueue | null;
+  readonly [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback = async (message) => {
+    if (this.#scheduleAlarmQueue === null) {
+      throw new Error(
+        `${REFUSAL}: SCHEDULE_ALARMS is not bound; retaining the alarm for retry`,
+      );
+    }
+    await this.#scheduleAlarmQueue.send(encodeTenantScheduleAlarm(message));
+  };
 
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx as never, env as never);
     this.#state = ctx;
+    this.#scheduleAlarmQueue = scheduleAlarmQueueFrom(env);
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 148 statements
+    // gate inside `#migrate` is what keeps that from re-applying 153 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -489,8 +526,10 @@ export class TenantDataObject extends DurableObject {
     const message = tenantScheduleAlarmMessage(request.tenantId, request.scheduledAtUnix);
     await this.#admit(message.tenant_id);
     await this.#state.blockConcurrencyWhile(async () => {
-      await this.#state.storage.setAlarm(message.scheduled_at_unix * 1000);
+      // Keep the payload durable before arming the deadline. If the alarm
+      // write fails, a retry still has a complete message to deliver.
       await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
+      await this.#state.storage.setAlarm(message.scheduled_at_unix * 1000);
     });
   }
 
@@ -505,13 +544,46 @@ export class TenantDataObject extends DurableObject {
   }
 
   /**
+   * Recompute the deadline from rows in this object, while no other object RPC
+   * can interleave. The caller never supplies a schedule snapshot, so a late
+   * rearm cannot clear or replace an alarm written by a newer schedule update.
+   */
+  async rearmScheduleAlarm(request: TenantScheduleAlarmClearRequest): Promise<void> {
+    const tenantId = tenantScheduleAlarmMessage(request.tenantId, 0).tenant_id;
+    await this.#admit(tenantId);
+    await this.#state.blockConcurrencyWhile(async () => {
+      let earliest: number | undefined;
+      const rows = this.#state.storage.sql
+        .exec<{ enabled: number; next_fire_at_unix: number | null }>(
+          "SELECT enabled, next_fire_at_unix FROM agent_schedules WHERE enabled = 1 AND next_fire_at_unix IS NOT NULL ORDER BY next_fire_at_unix ASC LIMIT 1",
+        )
+        .toArray();
+      const candidate = rows[0]?.next_fire_at_unix;
+      if (typeof candidate === "number" && Number.isSafeInteger(candidate)) {
+        earliest = candidate;
+      }
+
+      if (earliest === undefined) {
+        await this.#state.storage.deleteAlarm();
+        await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
+        return;
+      }
+
+      const message = tenantScheduleAlarmMessage(tenantId, earliest);
+      // Retain the payload before arming the native alarm. If setAlarm fails,
+      // the caller receives the failure and can retry without losing intent.
+      await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
+      await this.#state.storage.setAlarm(earliest * 1000);
+    });
+  }
+
+  /**
    * Native Durable Object alarm entrypoint.
    *
-   * The callback is protected rather than public, so a binding caller cannot
-   * invoke a queue-like operation with caller-supplied tenant data. The only
-   * input is the validated payload retained by this object itself; future
-   * gateway/control-plane wiring can override this seam without widening the
-   * RPC surface.
+   * The callback is symbol-keyed rather than a public string method, so a
+   * binding caller cannot invoke a queue-like operation with caller-supplied
+   * tenant data. Production sends the validated payload to `SCHEDULE_ALARMS`;
+   * a missing binding throws and leaves the payload retained for retry.
    */
   override async alarm(): Promise<void> {
     await this.#state.blockConcurrencyWhile(async () => {
@@ -528,13 +600,10 @@ export class TenantDataObject extends DurableObject {
             "; refusing",
         );
       }
-      await this.onScheduleAlarm(message);
+      await this[TENANT_SCHEDULE_ALARM_CALLBACK](message);
       await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
     });
   }
-
-  /** Internal-only callback seam for the tenant's schedule consumer. */
-  protected async onScheduleAlarm(_message: TenantScheduleAlarmMessage): Promise<void> {}
 
   // -------------------------------------------------------------------------
   // Admission
@@ -633,8 +702,8 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 148 statements of the seventeen files — 58 `CREATE TABLE IF
-   * NOT EXISTS`, 68 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
+   * re-running the 153 statements of the seventeen files — 60 `CREATE TABLE IF
+   * NOT EXISTS`, 71 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
    * COLUMN`, 6 ledger `INSERT` statements and one `DROP TABLE`. (Counted,
    * not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the

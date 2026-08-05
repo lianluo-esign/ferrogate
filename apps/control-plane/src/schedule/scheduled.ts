@@ -1,41 +1,16 @@
 /**
- * The `scheduled` seam for the agent-schedule tick.
+ * The maintenance Cron seam for the control plane.
  *
- * ## Read this before believing the scheduler runs
+ * Agent schedules no longer run from this handler. Each TenantDataObject owns
+ * the earliest schedule deadline, its native alarm publishes one tenant-only
+ * wake-up to the queue, and `alarm-queue.ts` performs the claim and dispatch.
+ * This Cron remains for fleet maintenance passes that are intentionally not
+ * schedule execution: tenant-catalog reconciliation, audit anchoring, SIEM
+ * export and spend-anomaly detection.
  *
- * Everything under `src/schedule/` is reachable from the HTTP surface — create,
- * replace, merge, delete and `run-now` all go through it, and
- * `test/schedule-wiring.test.ts` proves each of those mounts by removal. The
- * TICK is the exception: on Cloudflare a periodic tick is a Cron Trigger, which
- * means a `scheduled` handler on the module `wrangler.toml`'s `main` points at
- * (`src/worker.ts`) plus a `[triggers] crons` stanza. Both halves are already
- * wired in this Worker, and the entrypoint test drives the same default export
- * that Cloudflare invokes:
- *
- * ```ts
- * // apps/control-plane/src/worker.ts
- * export { default } from "./index.js";
- * export { scheduled } from "./schedule/scheduled.js";   // <- ADD
- * ```
- *
- * ```toml
- * # apps/control-plane/wrangler.toml
- * [triggers]
- * crons = ["* * * * *"]                                  # <- ADD
- * ```
- *
- * (A Worker's `scheduled` handler and its `fetch` handler may be separate named
- * exports of the entry module; `export default withAliasCanonicalization(app)`
- * stays exactly as it is. `* * * * *` is the finest granularity Cron Triggers
- * offer, which is also the finest granularity a 5-field cron expression can
- * ask for, so nothing is lost — a sub-minute schedule would need a Durable
- * Object alarm instead.)
- *
- * `test/cron-trigger.test.ts` checks the committed trigger and
- * `test/worker-entry.test.ts` invokes the default export through the same shape
- * workerd uses. A scheduler whose tick is never invoked is exactly the defect
- * `docs/rewrite/parity-audit-storage.md` §4.2 recorded, so both wiring halves
- * stay under test here.
+ * `test/cron-trigger.test.ts` checks that the maintenance trigger remains
+ * declared, while `test/worker-entry.test.ts` checks that the default export
+ * exposes the handler shape workerd invokes.
  */
 
 import { resolveAuditAnchorBucket, resolveControlDatabase, resolveDeps } from "../adapters.js";
@@ -47,7 +22,7 @@ import {
   reconcileProvisionedTenantCatalogAudits,
   type TenantCatalogAuditSweepReport,
 } from "../store/tenant-model-catalog.js";
-import { type ScheduleTickSummary, runScheduleTick } from "./engine.js";
+import type { ScheduleTickSummary } from "./engine.js";
 
 /** What `scheduled` reports back, so a tail log says something useful. */
 export interface ScheduledTickReport extends ScheduleTickSummary {
@@ -86,18 +61,19 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
 }
 
 /**
- * One tick of the agent-schedule engine, built from the Worker's bindings.
+ * One minute of the control-plane maintenance work, built from the Worker's
+ * bindings.
  *
  * Deps come from `resolveDeps` — the SAME composition root every request uses —
- * rather than from a second, tick-only construction. That is deliberate: a
- * scheduler holding its own store would be able to fire schedules the request
- * path cannot see, and the tenancy lifecycle gate it enforces would be a
- * different gate from the one the admin surface enforces.
+ * Schedule execution is deliberately absent here. TenantDataObject native
+ * alarms publish tenant wake-ups to the queue consumer in `alarm-queue.ts`; a
+ * fleet-wide Cron scan would reintroduce a second schedule authority and race
+ * the per-object fire claim.
  *
  * Errors are swallowed into the report rather than thrown. A `scheduled`
- * handler that throws is retried by the platform, and retrying a tick whose
- * failure is a bad schedule definition would re-run every OTHER due schedule in
- * the batch with it — the fire ledger makes that harmless but not free.
+ * handler that throws is retried by the platform; maintenance passes own their
+ * own cursors and retry policy, so a transient failure must not turn into a
+ * second schedule execution path.
  */
 export async function runScheduledTick(
   env: ControlPlaneBindings,
@@ -105,10 +81,13 @@ export async function runScheduledTick(
 ): Promise<ScheduledTickReport> {
   const deps = resolveDeps(env, { requestId: `cron-${now}` });
   const tenantCatalogAudit = await catalogAuditPass(deps);
-  const summary = await runScheduleTick(
-    { store: deps.store, lifecycle: deps.lifecycle, nodeId: "control-plane-cron" },
-    now,
-  );
+  const summary: ScheduleTickSummary = {
+    scanned: 0,
+    fired: [],
+    skipped: [],
+    advanced: [],
+    errors: [],
+  };
   return {
     at: now,
     ...summary,
@@ -120,8 +99,7 @@ export async function runScheduledTick(
     // defect this file's own docblock warns about, one layer further out.
     //
     // `runSpendAnomalyPass` never rejects; it folds every failure into its
-    // report, so it cannot make the platform retry this tick and re-dispatch
-    // the schedules above.
+    // report, so it cannot make the platform retry this maintenance pass.
     spendAnomaly: await runSpendAnomalyPass(env, now),
     tenantCatalogAudit,
   };
@@ -142,7 +120,7 @@ async function catalogAuditPass(
 }
 
 /**
- * The audit-anchor pass (#684), riding the SAME minute tick as the scheduler.
+ * The audit-anchor pass (#684), riding the same minute maintenance tick.
  *
  * It runs on every tick rather than on a slower cadence of its own because the
  * anchor cadence IS the detection window: a row appended and deleted between
@@ -152,9 +130,8 @@ async function catalogAuditPass(
  * per chain.
  *
  * Failures are caught and reported, never thrown: a `scheduled` handler that
- * throws is retried by the platform, and retrying would re-run the SCHEDULE
- * half of the tick — dispatching schedules a second time because an evidence
- * write failed is a worse outcome than a late anchor.
+ * throws is retried by the platform, and retrying an evidence write must not
+ * introduce a second schedule execution path.
  */
 async function anchorPass(
   env: ControlPlaneBindings,
@@ -184,10 +161,8 @@ async function anchorPass(
  *
  * Errors are caught here rather than thrown for the reason the anchor pass
  * gives one paragraph up, and it applies with more force: a `scheduled` handler
- * that throws is RETRIED by the platform, and retrying because a customer's
- * collector answered 503 would re-dispatch every due SCHEDULE in the batch. The
- * pump does not need the retry — its cursor is the retry, and the next tick is
- * a minute away.
+ * that throws is RETRIED by the platform. The pump owns its cursor, so its next
+ * maintenance pass is the retry and no schedule dispatch is coupled to it.
  */
 async function siemPass(env: ControlPlaneBindings, now: number): Promise<SiemExportReport> {
   try {
@@ -207,10 +182,9 @@ async function siemPass(env: ControlPlaneBindings, now: number): Promise<SiemExp
 /**
  * The `ExportedHandler["scheduled"]` shape workerd expects.
  *
- * `waitUntil` is NOT used to background the tick: the platform keeps the
- * invocation alive for the returned promise, and detaching it would let the
- * isolate be evicted mid-batch, leaving fire rows claimed with no dispatch
- * behind them. Awaiting is what makes the claim-then-dispatch order safe.
+ * `waitUntil` is NOT used to background the maintenance pass: the platform
+ * keeps the invocation alive for the returned promise, so its cursor and
+ * report are settled before the invocation ends.
  */
 export const scheduled: ExportedHandlerScheduledHandler<ControlPlaneBindings> = async (
   controller,
