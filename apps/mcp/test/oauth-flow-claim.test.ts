@@ -17,10 +17,12 @@ import { describe, expect, it } from "vitest";
 import { DurableCredentialStore, KvOauthFlowStore } from "../src/durable.js";
 import { DurableOauthFlowStore, type McpOauthFlowClaim } from "../src/oauth-flow.js";
 import type { McpIdentityActor, StoredMcpOauthFlow } from "../src/ports.js";
+import { tenantDataNamespace } from "./tenant-storage.js";
 
 const FLOWS = env.MCP_OAUTH_FLOWS as unknown as DurableObjectNamespace<McpOauthFlowClaim>;
 const KV = env.MCP_OAUTH_KV as unknown as KVNamespace;
 const DB = env.DB as unknown as D1Database;
+const TENANT_DATA = tenantDataNamespace(env);
 
 const ACTOR: McpIdentityActor = { tenantId: "t1", workspaceId: "w1", userId: "u1" };
 
@@ -138,7 +140,7 @@ describe("McpOauthFlowClaim — the atomic single-use claim", () => {
   it("DurableCredentialStore routes flows through the claim it was given", async () => {
     // The composition, not just the class: a store constructed with the DO
     // claim must not quietly keep using KV underneath.
-    const store = new DurableCredentialStore(KV, DB, new DurableOauthFlowStore(FLOWS));
+    const store = new DurableCredentialStore(KV, TENANT_DATA, new DurableOauthFlowStore(FLOWS));
     const began = flow();
     await store.beginOauthFlow(began);
 
@@ -155,6 +157,7 @@ describe("McpOauthFlowClaim — the atomic single-use claim", () => {
     const { resolvePorts } = await import("../src/ports.js");
     const ports = resolvePorts({
       DB,
+      TENANT_DATA,
       MCP_OAUTH_KV: KV,
       MCP_OAUTH_FLOWS: FLOWS,
       FERROGATE_MCP_IDENTITY_KEY: "a".repeat(64),
@@ -166,20 +169,14 @@ describe("McpOauthFlowClaim — the atomic single-use claim", () => {
     expect(await ports.credentials.consumeOauthFlow(began.id, 1_100)).toEqual(began);
   });
 
-  it("WITHOUT the namespace it degrades to KV rather than failing", async () => {
-    // The fallback is deliberate and must keep working — but it is the degraded
-    // path, and this test names it as such so a future reader does not mistake
-    // it for the intended posture.
+  it("WITHOUT the tenant object it does not bind an identity store", async () => {
+    // A flat control D1 is not a valid identity fallback after the cutover.
     const { resolvePorts } = await import("../src/ports.js");
     const ports = resolvePorts({
       DB,
       MCP_OAUTH_KV: KV,
       FERROGATE_MCP_IDENTITY_KEY: "a".repeat(64),
     });
-    const began = flow();
-    await ports.credentials.beginOauthFlow(began);
-
-    // It went to KV, which is observable from the KV side.
-    expect(await new KvOauthFlowStore(KV).consume(began.id, 1_100)).toEqual(began);
+    expect(ports.credentials).not.toBeInstanceOf(DurableCredentialStore);
   });
 });

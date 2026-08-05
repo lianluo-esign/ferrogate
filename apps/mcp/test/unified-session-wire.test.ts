@@ -30,7 +30,6 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureMcpIdentitySchema } from "../src/durable.js";
 import { inMemoryPorts, resetInMemoryPorts } from "../src/ports.js";
 import { parseSseEvents } from "../src/transport.js";
 import {
@@ -42,6 +41,7 @@ import {
   tenantAuth,
   upstreamConfig,
 } from "./fixtures.js";
+import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
 /** The header the MCP Streamable-HTTP transport carries a session on. */
 const SESSION_HEADER = "mcp-session-id";
@@ -419,7 +419,7 @@ describe("the resume cursor is meaningful across the whole fan-out", () => {
  * table, and a test whose failure mode depends on DNS is not one worth having.
  */
 describe("an upstream drop recorded on one request is visible to the client on the next", () => {
-  const DB = env.DB as unknown as D1Database;
+  const TENANT_DATA = tenantDataNamespace(env);
   const DROPPED_META = "ferrogate/sessionUpstreamsDropped";
 
   /** The `_meta` of the first (or only) frame of a response. */
@@ -431,12 +431,11 @@ describe("an upstream drop recorded on one request is visible to the client on t
   }
 
   beforeEach(async () => {
-    await ensureMcpIdentitySchema(DB);
-    await DB.prepare("DELETE FROM mcp_servers").run();
+    await clearMcpIdentityTables(TENANT_DATA, TENANT);
     // `streamable_http` with no url: the config decodes, the session is
     // configured, and the FIRST thing the handshake does is refuse for want of
     // an endpoint. That failure is what `fanIn` reports as `degraded`.
-    await DB.prepare(
+    await tenantDatabase(TENANT_DATA, TENANT).prepare(
       `INSERT INTO mcp_servers
          (tenant_id, name, transport, url, auth_type, tools_to_execute,
           tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
@@ -451,7 +450,7 @@ describe("an upstream drop recorded on one request is visible to the client on t
 
   afterEach(async () => {
     setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", undefined);
-    await DB.prepare("DELETE FROM mcp_servers").run();
+    await clearMcpIdentityTables(TENANT_DATA, TENANT);
   });
 
   it("tells a returning client which upstream dropped, on a request that touches none", async () => {

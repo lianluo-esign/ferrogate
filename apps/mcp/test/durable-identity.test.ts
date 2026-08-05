@@ -20,16 +20,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { D1McpAuth } from "../src/auth.js";
 import {
-  D1CredentialGrants,
+  TenantObjectCredentialGrants,
   DurableCredentialStore,
   IDENTITY_KEY_BYTES,
   KV_MIN_EXPIRATION_TTL_SECS,
   KvOauthFlowStore,
-  MCP_IDENTITY_SCHEMA,
   OAUTH_FLOW_KEY_PREFIX,
   decodeIdentityKey,
   decodeServerRow,
-  ensureMcpIdentitySchema,
   identityCipherFrom,
   loadServerCatalog,
 } from "../src/durable.js";
@@ -43,9 +41,15 @@ import {
   portsBound,
   resolvePorts,
 } from "../src/ports.js";
+import {
+  clearMcpIdentityTables,
+  tenantDataNamespace,
+  tenantDatabase,
+} from "./tenant-storage.js";
 
 const DB = env.DB as unknown as D1Database;
 const KV = env.MCP_OAUTH_KV as unknown as KVNamespace;
+const TENANT_DATA = tenantDataNamespace(env);
 
 const ACTOR: McpIdentityActor = { tenantId: "t1", workspaceId: "w1", userId: "u1" };
 const OTHER_ACTOR: McpIdentityActor = { tenantId: "t2", workspaceId: "w1", userId: "u1" };
@@ -97,12 +101,9 @@ function credential(overrides: Partial<StoredMcpOauthCredential> = {}): StoredMc
 }
 
 async function truncate(): Promise<void> {
-  await ensureMcpIdentitySchema(DB);
-  await DB.batch([
-    DB.prepare("DELETE FROM mcp_oauth_credentials"),
-    DB.prepare("DELETE FROM mcp_identity_generations"),
-    DB.prepare("DELETE FROM mcp_servers"),
-  ]);
+  await Promise.all(
+    ["t1", "t2", "t3"].map((tenantId) => clearMcpIdentityTables(TENANT_DATA, tenantId)),
+  );
   const keys = await KV.list({ prefix: OAUTH_FLOW_KEY_PREFIX });
   for (const key of keys.keys) await KV.delete(key.name);
 }
@@ -111,34 +112,15 @@ beforeEach(truncate);
 
 // ---------------------------------------------------------------------------
 
-describe("D1 schema", () => {
-  it("creates every table the identity store reads", async () => {
-    await ensureMcpIdentitySchema(DB);
-    const rows = await DB.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-    ).all<{ name: string }>();
-    const names = rows.results.map((row) => row.name);
-    expect(names).toEqual(
-      expect.arrayContaining(["mcp_oauth_credentials", "mcp_identity_generations", "mcp_servers"]),
-    );
-  });
-
-  it("is idempotent — applying it twice is not an error", async () => {
-    await DB.batch(MCP_IDENTITY_SCHEMA.map((sql) => DB.prepare(sql)));
-    await DB.batch(MCP_IDENTITY_SCHEMA.map((sql) => DB.prepare(sql)));
-    await expect(ensureMcpIdentitySchema(DB)).resolves.toBeUndefined();
-  });
-});
-
-describe("D1 grants — durability and revocation", () => {
+describe("TenantDataObject grants — durability and revocation", () => {
   it("round-trips a grant byte for byte, including the sealed token bytes", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     const stored = credential();
     await grants.put(stored);
 
     // A FRESH store object — the durability claim is about surviving the
     // object that wrote it, not about an in-process cache.
-    const reloaded = await new D1CredentialGrants(DB).get(ACTOR, SERVER);
+    const reloaded = await new TenantObjectCredentialGrants(TENANT_DATA).get(ACTOR, SERVER);
     expect(reloaded).toBeDefined();
     expect(reloaded?.subject).toBe("sub-1");
     expect(reloaded?.scopes).toEqual(["mcp.read", "mcp.write"]);
@@ -149,19 +131,19 @@ describe("D1 grants — durability and revocation", () => {
   });
 
   it("keeps a grant revoked — a revoked credential never comes back unrevoked", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.put(credential());
 
     const revoked = await grants.revoke(ACTOR, SERVER, 1_500, "local_revoked");
     expect(revoked?.revokedAtUnix).toBe(1_500);
     expect(revoked?.lastRevocationOutcome).toBe("local_revoked");
 
-    const reloaded = await new D1CredentialGrants(DB).get(ACTOR, SERVER);
+    const reloaded = await new TenantObjectCredentialGrants(TENANT_DATA).get(ACTOR, SERVER);
     expect(reloaded?.revokedAtUnix).toBe(1_500);
   });
 
   it("refuses a second revoke instead of rewriting the first timestamp", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.put(credential());
     await grants.revoke(ACTOR, SERVER, 1_500, "local_revoked");
 
@@ -172,31 +154,33 @@ describe("D1 grants — durability and revocation", () => {
   });
 
   it("returns undefined when there is nothing to revoke", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     expect(await grants.revoke(ACTOR, SERVER, 1_500, "local_revoked")).toBeUndefined();
   });
 
   it("scopes a grant to its actor — another tenant's read finds nothing", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.put(credential());
     expect(await grants.get(OTHER_ACTOR, SERVER)).toBeUndefined();
     expect(await grants.get(ACTOR, "other-server")).toBeUndefined();
   });
 
   it("upserts rather than duplicating the actor row", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.put(credential());
     await grants.put(credential({ subject: "sub-2", version: 2, updatedAtUnix: 1_200 }));
 
-    const rows = await DB.prepare("SELECT COUNT(*) AS n FROM mcp_oauth_credentials").first<{
+    const rows = await tenantDatabase(TENANT_DATA, ACTOR.tenantId)
+      .prepare("SELECT COUNT(*) AS n FROM mcp_oauth_credentials")
+      .first<{
       n: number;
-    }>();
+      }>();
     expect(rows?.n).toBe(1);
     expect((await grants.get(ACTOR, SERVER))?.subject).toBe("sub-2");
   });
 
   it("records the revocation outcome without un-revoking", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.put(credential());
     await grants.revoke(ACTOR, SERVER, 1_500, "local_revoked");
     await grants.updateRevocationOutcome(ACTOR, SERVER, "remote_revoked");
@@ -206,9 +190,9 @@ describe("D1 grants — durability and revocation", () => {
   });
 });
 
-describe("D1 grants — authorization generation guard", () => {
+describe("TenantDataObject grants — authorization generation guard", () => {
   it("starts at generation 0 and bumps per (actor, server)", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     expect(await grants.authorizationGeneration(ACTOR, SERVER)).toBe(0);
     await grants.bumpGeneration(ACTOR, SERVER);
     await grants.bumpGeneration(ACTOR, SERVER);
@@ -219,13 +203,13 @@ describe("D1 grants — authorization generation guard", () => {
   });
 
   it("commits when the generation is unchanged", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     expect(await grants.commit(flow(), credential())).toBe(true);
     expect(await grants.get(ACTOR, SERVER)).toBeDefined();
   });
 
   it("REFUSES the commit when the generation moved mid-flow, and writes nothing", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     const began = flow({ authorizationGeneration: 0 });
     // Access changed while the user was at the identity provider.
     await grants.bumpGeneration(ACTOR, SERVER);
@@ -235,7 +219,7 @@ describe("D1 grants — authorization generation guard", () => {
   });
 
   it("REFUSES a stale-generation commit that would overwrite a live grant", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.put(credential({ subject: "existing" }));
     await grants.bumpGeneration(ACTOR, SERVER);
 
@@ -249,7 +233,7 @@ describe("D1 grants — authorization generation guard", () => {
   });
 
   it("commits at a non-zero generation when the flow began there", async () => {
-    const grants = new D1CredentialGrants(DB);
+    const grants = new TenantObjectCredentialGrants(TENANT_DATA);
     await grants.bumpGeneration(ACTOR, SERVER);
     expect(await grants.commit(flow({ authorizationGeneration: 1 }), credential())).toBe(true);
   });
@@ -320,71 +304,69 @@ describe("KV OAuth flows", () => {
 
 describe("DurableCredentialStore (the bound composition)", () => {
   it("completes a flow begun by a DIFFERENT store object — the cross-isolate case", async () => {
-    const beginner = new DurableCredentialStore(KV, DB);
+    const beginner = new DurableCredentialStore(KV, TENANT_DATA);
     const began = flow();
     await beginner.beginOauthFlow(began);
 
     // A different isolate would construct its own store over the same bindings.
-    const completer = new DurableCredentialStore(KV, DB);
+    const completer = new DurableCredentialStore(KV, TENANT_DATA);
     const consumed = await completer.consumeOauthFlow(began.id, 1_100);
     expect(consumed).toBeDefined();
     expect(await completer.commitOauthCallback(consumed as StoredMcpOauthFlow, credential())).toBe(
       true,
     );
-    expect(await new DurableCredentialStore(KV, DB).getCredential(ACTOR, SERVER)).toBeDefined();
+    expect(await new DurableCredentialStore(KV, TENANT_DATA).getCredential(ACTOR, SERVER)).toBeDefined();
   });
 
   it("survives a revoke across store objects", async () => {
-    const store = new DurableCredentialStore(KV, DB);
+    const store = new DurableCredentialStore(KV, TENANT_DATA);
     await store.putCredential(credential());
     await store.revokeCredential(ACTOR, SERVER, 1_500, "local_revoked");
-    const fresh = await new DurableCredentialStore(KV, DB).getCredential(ACTOR, SERVER);
+    const fresh = await new DurableCredentialStore(KV, TENANT_DATA).getCredential(ACTOR, SERVER);
     expect(fresh?.revokedAtUnix).toBe(1_500);
   });
 });
 
 describe("server catalog", () => {
   it("reads only the requested tenant's servers", async () => {
-    await ensureMcpIdentitySchema(DB);
-    const insert = DB.prepare(
-      `INSERT INTO mcp_servers (tenant_id, name, transport, url, auth_type,
-         tools_to_execute, tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    await DB.batch([
-      insert.bind(
-        "t1",
-        "srv",
-        "streamable_http",
-        "https://up.test/mcp",
-        "per_user_oauth",
-        '["echo"]',
-        '["echo"]',
-        null,
-        '{"issuer":"https://idp.test","clientId":"c1","scopes":["openid"]}',
-        null,
-        5000,
-      ),
-      insert.bind(
-        "t2",
-        "other",
-        "sse",
-        "https://other.test/sse",
-        "none",
-        "[]",
-        "[]",
-        null,
-        null,
-        null,
-        1000,
-      ),
-    ]);
+    const t1 = tenantDatabase(TENANT_DATA, "t1");
+    const t2 = tenantDatabase(TENANT_DATA, "t2");
+    const sql = `INSERT INTO mcp_servers
+      (tenant_id, name, transport, url, auth_type, tools_to_execute,
+       tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    await t1.prepare(sql).bind(
+      "t1",
+      "srv",
+      "streamable_http",
+      "https://up.test/mcp",
+      "per_user_oauth",
+      '["echo"]',
+      '["echo"]',
+      null,
+      '{"issuer":"https://idp.test","clientId":"c1","scopes":["openid"]}',
+      null,
+      5000,
+    ).run();
+    await t2.prepare(sql).bind(
+      "t2",
+      "other",
+      "sse",
+      "https://other.test/sse",
+      "none",
+      "[]",
+      "[]",
+      null,
+      null,
+      null,
+      1000,
+    ).run();
 
-    const catalog = await loadServerCatalog(DB, "t1");
+    const catalog = await loadServerCatalog(TENANT_DATA, "t1");
     expect(catalog.map((server) => server.name)).toEqual(["srv"]);
     expect(catalog[0]?.authType).toBe("per_user_oauth");
     expect(catalog[0]?.oauth?.clientId).toBe("c1");
-    expect(await loadServerCatalog(DB, "t3")).toEqual([]);
+    expect(await loadServerCatalog(TENANT_DATA, "t3")).toEqual([]);
   });
 
   it("REFUSES an unknown auth_type rather than downgrading it to none", () => {
@@ -514,11 +496,17 @@ describe("identity key material", () => {
 });
 
 describe("resolvePorts binding postures", () => {
-  const base: McpEnv = { DB, MCP_OAUTH_KV: KV, FERROGATE_MCP_IDENTITY_KEY: KEY_HEX };
+  const base: McpEnv = {
+    DB,
+    TENANT_DATA,
+    MCP_OAUTH_KV: KV,
+    FERROGATE_MCP_IDENTITY_KEY: KEY_HEX,
+  };
 
-  it("reports the durable identity bound only when ALL THREE are present", () => {
+  it("reports the durable identity bound only when object, KV and key are present", () => {
     expect(durableIdentityBound(base)).toBe(true);
-    expect(durableIdentityBound({ ...base, DB: undefined })).toBe(false);
+    expect(durableIdentityBound({ ...base, TENANT_DATA: undefined })).toBe(false);
+    expect(durableIdentityBound({ ...base, DB: undefined })).toBe(true);
     expect(durableIdentityBound({ ...base, MCP_OAUTH_KV: undefined })).toBe(false);
     expect(durableIdentityBound({ ...base, FERROGATE_MCP_IDENTITY_KEY: undefined })).toBe(false);
     // Malformed key material is NOT "bound" — no ephemeral fallback.

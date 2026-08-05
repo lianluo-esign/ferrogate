@@ -245,6 +245,16 @@ export interface CollectionSpec {
    */
   readonly project?: (db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>;
   /**
+   * Project a tenant-owned record into its authoritative TenantDataObject.
+   * Unlike {@link project}, this hook receives the full dependency set because
+   * the target database is selected by tenant at runtime.
+   */
+  readonly tenantProject?: (
+    deps: ControlPlaneDeps,
+    record: StoreRecord,
+    nowUnix: number,
+  ) => Promise<void>;
+  /**
    * Provision the record's per-tenant STORAGE (#820), after {@link
    * CollectionSpec.project} has written the typed row it admits on.
    *
@@ -293,6 +303,12 @@ export interface CollectionSpec {
    * unfenced cross-tenant write.
    */
   readonly unproject?: (db: D1Database, id: string, record: StoreRecord) => Promise<void>;
+  /** Remove a tenant-owned authority row before the control document disappears. */
+  readonly tenantUnproject?: (
+    deps: ControlPlaneDeps,
+    id: string,
+    record: StoreRecord,
+  ) => Promise<void>;
 }
 
 interface ResolvedSpec {
@@ -305,8 +321,14 @@ interface ResolvedSpec {
   readonly project:
     | ((db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>)
     | null;
+  readonly tenantProject:
+    | ((deps: ControlPlaneDeps, record: StoreRecord, nowUnix: number) => Promise<void>)
+    | null;
   readonly provision: ((deps: ControlPlaneDeps, record: StoreRecord) => Promise<unknown>) | null;
   readonly unproject: ((db: D1Database, id: string, record: StoreRecord) => Promise<void>) | null;
+  readonly tenantUnproject:
+    | ((deps: ControlPlaneDeps, id: string, record: StoreRecord) => Promise<void>)
+    | null;
 }
 
 function resolveSpec(spec: CollectionSpec): ResolvedSpec {
@@ -319,8 +341,10 @@ function resolveSpec(spec: CollectionSpec): ResolvedSpec {
     body,
     patch: spec.patch ?? body,
     project: spec.project ?? null,
+    tenantProject: spec.tenantProject ?? null,
     provision: spec.provision ?? null,
     unproject: spec.unproject ?? null,
+    tenantUnproject: spec.tenantUnproject ?? null,
   };
 }
 
@@ -341,6 +365,9 @@ async function runProjection(
   const db = deps.controlDatabase;
   if (spec.project !== null && db !== null) {
     await spec.project(db, record, Math.floor(Date.now() / 1000));
+  }
+  if (spec.tenantProject !== null) {
+    await spec.tenantProject(deps, record, Math.floor(Date.now() / 1000));
   }
   // AFTER the typed row, never before: the provisioner admits a tenant on its
   // `tenants` row, so running these in the other order would refuse every
@@ -438,6 +465,14 @@ export function deleteHandler(spec: ResolvedSpec, param: string): Handler {
       const visible = await deps.store.get(spec.collection, scope, id);
       if (visible === null) throw notFound(spec, id);
       await spec.unproject(db, id, visible);
+    }
+
+    if (spec.tenantUnproject !== null) {
+      // Resolve the visible document under the caller's fence before touching
+      // the tenant authority row. A cross-tenant id therefore remains a 404.
+      const visible = await deps.store.get(spec.collection, scope, id);
+      if (visible === null) throw notFound(spec, id);
+      await spec.tenantUnproject(deps, id, visible);
     }
 
     const removed = await deps.store.remove(spec.collection, scope, id);

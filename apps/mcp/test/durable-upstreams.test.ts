@@ -22,7 +22,6 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureMcpIdentitySchema } from "../src/durable.js";
 import { type McpEnv, type McpTool, inMemoryPorts } from "../src/ports.js";
 import { MCP_PROTOCOL_VERSION, type McpNegotiatedProtocol } from "../src/protocol.js";
 import {
@@ -47,8 +46,9 @@ import {
   setMcpEnvVar,
   tenantAuth,
 } from "./fixtures.js";
+import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
-const DB = env.DB as unknown as D1Database;
+const TENANT_DATA = tenantDataNamespace(env);
 const SESSIONS = env.MCP_SESSION as unknown as DurableObjectNamespace;
 
 const MODERN: McpNegotiatedProtocol = { mode: "modern", version: "2026-07-28" };
@@ -188,8 +188,7 @@ async function seedServerRow(
   transport: string,
   url: string | null,
 ): Promise<void> {
-  await ensureMcpIdentitySchema(DB);
-  await DB.prepare(
+  await tenantDatabase(TENANT_DATA, tenantId).prepare(
     `INSERT OR REPLACE INTO mcp_servers
        (tenant_id, name, transport, url, auth_type, tools_to_execute,
         tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
@@ -247,8 +246,10 @@ async function toolNames(key: string): Promise<string[]> {
 describe("the durable upstream catalog is MOUNTED on the exported Worker", () => {
   beforeEach(async () => {
     seedFixture();
-    await ensureMcpIdentitySchema(DB);
-    await DB.prepare("DELETE FROM mcp_servers").run();
+    await Promise.all([
+      clearMcpIdentityTables(TENANT_DATA, TENANT),
+      clearMcpIdentityTables(TENANT_DATA, "some-other-tenant"),
+    ]);
   });
 
   afterEach(() => {
@@ -346,13 +347,12 @@ describe("the durable upstream catalog is MOUNTED on the exported Worker", () =>
 describe("the shared MCP_SESSION is WRITTEN by the host on the request path", () => {
   beforeEach(async () => {
     seedFixture();
-    await ensureMcpIdentitySchema(DB);
-    await DB.prepare("DELETE FROM mcp_servers").run();
+    await clearMcpIdentityTables(TENANT_DATA, TENANT);
   });
 
   afterEach(async () => {
     setMcpEnvVar("FG_DEV_MCP_DURABLE_UPSTREAMS", undefined);
-    await DB.prepare("DELETE FROM mcp_servers").run();
+    await clearMcpIdentityTables(TENANT_DATA, TENANT);
   });
 
   it("records an upstream failure observed by a REAL request on the shared session", async () => {
@@ -411,8 +411,7 @@ describe("the shared MCP_SESSION is WRITTEN by the host on the request path", ()
 describe("resolveUpstreams — the tenant filter is the isolation boundary", () => {
   beforeEach(async () => {
     seedFixture();
-    await ensureMcpIdentitySchema(DB);
-    await DB.prepare("DELETE FROM mcp_servers").run();
+    await clearMcpIdentityTables(TENANT_DATA, TENANT);
   });
 
   afterEach(() => {

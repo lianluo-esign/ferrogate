@@ -77,6 +77,7 @@ import {
 } from "@ferrogate/guardrails";
 import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
 import { EnvBindingTenantDatabaseRouter } from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 // `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
 // this module. The cycle is safe because neither side touches the other at
@@ -1666,12 +1667,14 @@ export interface McpEnv {
   MCP_OAUTH_FLOWS?: DurableObjectNamespace<McpOauthFlowClaim>;
 
   /**
-   * D1 database holding the sealed per-user identity grants
-   * (`mcp_oauth_credentials`) and the tenant's upstream MCP server catalog
-   * (`mcp_servers`). Dereferenced by {@link resolvePorts} through
-   * `D1CredentialGrants` / `loadServerCatalog`; OPTIONAL for the same reason
-   * as {@link MCP_OAUTH_KV}.
+   * The authoritative per-tenant Durable Object database for MCP identity
+   * grants, authorization generations and the upstream server catalog. The
+   * object migration ledger applies these tables before RPC, so no request path
+   * creates schema or consults the control D1.
    */
+  TENANT_DATA?: TenantDataNamespace;
+
+  /** CONTROL D1 database used by authentication and other control-plane reads. */
   DB?: D1Database;
 
   /** CONTROL D1 binding used by the shared billing egress meter. */
@@ -2080,7 +2083,7 @@ function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
  */
 export function durableIdentityBound(env: McpEnv): boolean {
   return (
-    env.DB !== undefined &&
+    env.TENANT_DATA !== undefined &&
     env.MCP_OAUTH_KV !== undefined &&
     decodeIdentityKey(env.FERROGATE_MCP_IDENTITY_KEY) !== undefined
   );
@@ -2271,7 +2274,7 @@ export function resolvePorts(env: McpEnv): McpPorts {
       ...ports,
       credentials: new DurableCredentialStore(
         env.MCP_OAUTH_KV as KVNamespace,
-        env.DB as D1Database,
+        env.TENANT_DATA as TenantDataNamespace,
         env.MCP_OAUTH_FLOWS === undefined
           ? undefined
           : new DurableOauthFlowStore(env.MCP_OAUTH_FLOWS),

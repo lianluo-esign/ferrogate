@@ -5,7 +5,7 @@
  *
  * `resolvePorts` (`./ports.ts`) is synchronous and runs BEFORE authentication,
  * so it cannot build the real upstream host: the upstream catalog is
- * per-TENANT (`mcp_servers` filtered by `tenant_id`) and the tenant id is not
+ * per-TENANT (`mcp_servers` in the tenant object) and the tenant id is not
  * known until a caller has been authenticated. Binding a host at that point
  * would mean either loading every tenant's catalog — a cross-tenant read on
  * every request — or binding none, which is what the app did: `ports.upstreams`
@@ -59,12 +59,12 @@ export function upstreamCatalogTenant(auth: AuthContext): string | undefined {
  * `FG_DEV_MCP_DURABLE_UPSTREAMS` opts in — see the field docs on
  * {@link McpEnv.FG_DEV_MCP_DURABLE_UPSTREAMS} for why that opt-in exists.
  *
- * `DB` is required either way: without it there is no catalog to read and the
- * honest answer is the in-memory host, not an empty catalog that would report
- * every configured upstream as missing.
+ * `TENANT_DATA` is required either way: without the object namespace there is
+ * no catalog to read and the honest answer is the in-memory host, not an empty
+ * catalog that would report every configured upstream as missing.
  */
 export function durableUpstreamsBound(env: McpEnv): boolean {
-  if (env.DB === undefined) return false;
+  if (env.TENANT_DATA === undefined) return false;
   if (env.FG_DEV_IN_MEMORY_PORTS === "1") return env.FG_DEV_MCP_DURABLE_UPSTREAMS === "1";
   return true;
 }
@@ -87,7 +87,9 @@ export async function resolveUpstreams(
 ): Promise<McpUpstreamPort> {
   if (tenantId === undefined || tenantId === "") return ports.upstreams;
   if (!durableUpstreamsBound(env)) return ports.upstreams;
-  const configs = await loadServerCatalog(env.DB as D1Database, tenantId);
+  const namespace = env.TENANT_DATA;
+  if (namespace === undefined) return ports.upstreams;
+  const configs = await loadServerCatalog(namespace, tenantId);
   if (env.MCP_SESSION === undefined) return new HttpMcpUpstreams(configs);
   return new HttpMcpUpstreams(configs, undefined, {
     sessions: new DurableMcpSessionStore(env.MCP_SESSION, tenantId),
