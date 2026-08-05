@@ -18,26 +18,29 @@
  *     `provider` and `alias` in plaintext, which is exactly the commercial
  *     information an enterprise BYOK customer is protecting.
  */
-import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   D1TenantProviderCredentialStore,
   LOOKUP_TENANT_PROVIDER_CREDENTIAL_SQL,
   credentialLast4,
+  tenantProviderCredentialStoreFor,
 } from "../../src/index.js";
-import { TENANT_A, TENANT_B, setupDatabases } from "./harness.js";
+import { TENANT_A, TENANT_B, setupTenantRouter, tenantDb } from "./harness.js";
 
 const NOW = 1_784_073_600;
 
 let store: D1TenantProviderCredentialStore;
+let storeB: D1TenantProviderCredentialStore;
 
 beforeAll(async () => {
-  await setupDatabases();
-  store = new D1TenantProviderCredentialStore(env.CONTROL_DB);
+  const router = await setupTenantRouter();
+  store = tenantProviderCredentialStoreFor(await router.forTenant(TENANT_A));
+  storeB = tenantProviderCredentialStoreFor(await router.forTenant(TENANT_B));
 });
 
 beforeEach(async () => {
-  await env.CONTROL_DB.prepare("DELETE FROM tenant_provider_credentials").run();
+  await tenantDb(TENANT_A).prepare("DELETE FROM tenant_provider_credentials").run();
+  await tenantDb(TENANT_B).prepare("DELETE FROM tenant_provider_credentials").run();
 });
 
 async function seed(
@@ -46,7 +49,7 @@ async function seed(
   provider = "openai",
   ciphertext = `sealed-for-${tenantId}`,
 ): Promise<void> {
-  await store.upsert(
+  await (tenantId === TENANT_B ? storeB : store).upsert(
     {
       tenantId,
       alias,
@@ -77,7 +80,7 @@ describe("D1TenantProviderCredentialStore", () => {
     await seed(TENANT_A, "openai-enterprise", "openai", "sealed-a");
     await seed(TENANT_B, "openai-enterprise", "openai", "sealed-b");
     expect((await store.lookup(TENANT_A, "openai-enterprise"))?.ciphertext).toBe("sealed-a");
-    expect((await store.lookup(TENANT_B, "openai-enterprise"))?.ciphertext).toBe("sealed-b");
+    expect((await storeB.lookup(TENANT_B, "openai-enterprise"))?.ciphertext).toBe("sealed-b");
   });
 
   test("FENCE 2: a tenant cannot revoke another tenant's alias", async () => {
