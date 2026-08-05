@@ -165,6 +165,86 @@ interface TenantCandidateRow {
   readonly occurred_at_unix: number;
 }
 
+const AUTHORITY_ID_CHUNK_SIZE = 90;
+
+/**
+ * Remove projection rows whose authority was already deleted by an earlier
+ * sweep. This is the recovery path for a successful object delete followed by
+ * a failed projection delete: discovery still sees the mirror, but the normal
+ * authority candidate query no longer sees anything to delete.
+ */
+async function sweepStaleTenantGuardrailProjectionRows(
+  projectionDb: GuardrailEvidenceDatabase | undefined,
+  authoritativeDb: GuardrailEvidenceDatabase,
+  tenantId: string,
+  policy: RetentionPolicy,
+  nowUnix: number,
+  maxRows: number,
+): Promise<RequestLogSweepResult> {
+  if (projectionDb === undefined || projectionDb === authoritativeDb) {
+    return { scanned: 0, pruned: 0 };
+  }
+
+  let rows: ProjectionCandidateRow[];
+  try {
+    const result = (await projectionDb
+      .prepare(
+        `SELECT projection_key, id, tenant, occurred_at_unix FROM ${GUARDRAIL_EVALUATION_TABLE}
+          WHERE tenant = ? ORDER BY occurred_at_unix ASC LIMIT ?`,
+      )
+      .bind(tenantId, maxRows)
+      .all()) as { results?: ProjectionCandidateRow[] };
+    rows = result.results ?? [];
+  } catch {
+    return { scanned: 0, pruned: 0 };
+  }
+
+  const doomedKeys = new Set(
+    planLogRetention(
+      rows.map((row) => ({ id: row.projection_key, createdAtUnix: row.occurred_at_unix })),
+      nowUnix,
+      policy,
+    ),
+  );
+  const candidates = rows.filter((row) => doomedKeys.has(row.projection_key));
+  if (candidates.length === 0) return { scanned: rows.length, pruned: 0 };
+
+  const existing = new Set<string>();
+  for (let offset = 0; offset < candidates.length; offset += AUTHORITY_ID_CHUNK_SIZE) {
+    const chunk = candidates.slice(offset, offset + AUTHORITY_ID_CHUNK_SIZE);
+    try {
+      const result = (await authoritativeDb
+        .prepare(
+          `SELECT id FROM ${GUARDRAIL_EVALUATION_TABLE}
+            WHERE tenant = ? AND id IN (${placeholders(chunk.length)})`,
+        )
+        .bind(tenantId, ...chunk.map((row) => row.id))
+        .all()) as { results?: { id?: unknown }[] };
+      for (const row of result.results ?? []) {
+        if (typeof row.id === "string") existing.add(row.id);
+      }
+    } catch {
+      // An authority lookup failure must keep the derived row. The object is
+      // still the source of truth, so uncertainty never authorizes deletion.
+      return { scanned: rows.length, pruned: 0 };
+    }
+  }
+
+  const stale = candidates.filter((row) => !existing.has(row.id));
+  if (stale.length === 0) return { scanned: rows.length, pruned: 0 };
+  try {
+    await projectionDb.batch(
+      projectionDeleteStatements(
+        projectionDb,
+        stale.map((row) => row.projection_key),
+      ),
+    );
+  } catch {
+    return { scanned: rows.length, pruned: 0 };
+  }
+  return { scanned: rows.length, pruned: stale.length };
+}
+
 /**
  * Sweep one tenant object, then remove only the matching projection rows.
  *
@@ -178,8 +258,17 @@ async function sweepTenantGuardrailEvidenceRetention(
   policy: RetentionPolicy,
   nowUnix: number,
   maxRows: number,
-  projectionDb: GuardrailEvidenceDatabase,
+  projectionDb: GuardrailEvidenceDatabase | undefined,
 ): Promise<RequestLogSweepResult> {
+  const stale = await sweepStaleTenantGuardrailProjectionRows(
+    projectionDb,
+    authoritativeDb,
+    tenantId,
+    policy,
+    nowUnix,
+    maxRows,
+  );
+
   let rows: TenantCandidateRow[];
   try {
     const result = (await authoritativeDb
@@ -199,22 +288,26 @@ async function sweepTenantGuardrailEvidenceRetention(
     createdAtUnix: row.occurred_at_unix,
   }));
   const doomed = planLogRetention(candidates, nowUnix, policy);
-  if (doomed.length === 0) return { scanned: rows.length, pruned: 0 };
+  if (doomed.length === 0) {
+    return { scanned: stale.scanned + rows.length, pruned: stale.pruned };
+  }
 
   try {
     await authoritativeDb.batch(tenantDeleteStatements(authoritativeDb, doomed));
   } catch {
-    return { scanned: rows.length, pruned: 0 };
+    return { scanned: stale.scanned + rows.length, pruned: stale.pruned };
   }
 
   const projectionKeys = doomed.map((id) => evidenceProjectionKey(tenantId, id));
-  if (projectionDb === authoritativeDb) return { scanned: rows.length, pruned: doomed.length };
+  if (projectionDb === undefined || projectionDb === authoritativeDb) {
+    return { scanned: stale.scanned + rows.length, pruned: stale.pruned + doomed.length };
+  }
   try {
     await projectionDb.batch(projectionDeleteStatements(projectionDb, projectionKeys));
   } catch {
-    return { scanned: rows.length, pruned: doomed.length };
+    return { scanned: stale.scanned + rows.length, pruned: stale.pruned + doomed.length };
   }
-  return { scanned: rows.length, pruned: doomed.length };
+  return { scanned: stale.scanned + rows.length, pruned: stale.pruned + doomed.length };
 }
 
 /** Resolve an authoritative object without letting a Cron binding fault escape. */
@@ -290,7 +383,7 @@ async function sweepUnscopedProjection(
  * everything, which is the only safe default for evidence.
  */
 export async function sweepGuardrailEvidence(
-  db: GuardrailEvidenceDatabase,
+  db: GuardrailEvidenceDatabase | undefined,
   env: unknown,
   nowUnix: number,
 ): Promise<RequestLogSweepResult> {
@@ -318,7 +411,7 @@ export async function sweepGuardrailEvidence(
   }
 
   const fleet = scopes.find((scope) => scope.tenantId === undefined);
-  if (fleet !== undefined) {
+  if (fleet !== undefined && db !== undefined) {
     const unscoped = await sweepUnscopedProjection(db, fleet.policy, nowUnix);
     scanned += unscoped.scanned;
     pruned += unscoped.pruned;

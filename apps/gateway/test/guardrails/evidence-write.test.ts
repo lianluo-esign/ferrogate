@@ -45,6 +45,7 @@ import {
   writeGuardrailEvidence,
   writeTenantGuardrailEvidence,
 } from "../../src/guardrails/index.js";
+import { gatewayScheduled } from "../../src/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { RequestIdFactory } from "../../src/inference/index.js";
 import { consumeRequestLogBatch } from "../../src/requestlog/index.js";
@@ -633,6 +634,41 @@ describe("the data plane does not depend on the evidence path", () => {
     expect(evidence.stats.failed).toBeGreaterThan(0);
   });
 
+  it("retains a failed direct object batch for the next flush", async () => {
+    const envelope = manualEnvelope("tenant_a");
+    const authoritative = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
+    if (authoritative === undefined) throw new Error("TENANT_DATA binding is required");
+
+    let attempts = 0;
+    const failingObject = {
+      prepare: () => ({
+        bind: () => ({
+          run: async () => ({}),
+          all: async () => ({ results: [] }),
+        }),
+      }),
+      batch: async () => {
+        throw new Error("tenant object unavailable");
+      },
+    };
+    const evidence = new DurableGuardrailEvidenceSink({
+      queue: () => undefined,
+      database: () => undefined,
+      tenantDatabase: () => {
+        attempts += 1;
+        return attempts === 1 ? failingObject : authoritative;
+      },
+    });
+
+    expect(evidence.append(envelope.evaluation, envelope.checks)).toBe(true);
+    await evidence.flush({ env: {} });
+    expect(evidence.pending).toBe(1);
+
+    await evidence.flush({ env: {} });
+    expect(evidence.pending).toBe(0);
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(1);
+  });
+
   /**
    * With NO queue and NO control database the sink counts a `dropped` and the
    * request is served. Counted rather than silent: "no rows" and "no writer"
@@ -773,5 +809,37 @@ describe("guardrail evidence retention", () => {
     expect(result.pruned).toBe(1);
     expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
     expect(await storedGuardrailEvaluations()).toHaveLength(1);
+
+    // A later tick can prove the object has no matching authority and remove
+    // the stale derived row once the projection database is available again.
+    await sweepGuardrailEvidence(
+      controlDb(),
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
+      },
+      NOW,
+    );
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+  });
+
+  it("runs tenant retention from Cron with TENANT_DATA and no CONTROL_DB", async () => {
+    const envelope = manualEnvelope("tenant_a");
+    const object = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
+    if (object === undefined) throw new Error("TENANT_DATA binding is required");
+    await writeTenantGuardrailEvidence(object, [envelope]);
+
+    const ctx = createExecutionContext();
+    await gatewayScheduled(
+      {},
+      {
+        TENANT_DATA: env.TENANT_DATA,
+        REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
+      },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
   });
 });

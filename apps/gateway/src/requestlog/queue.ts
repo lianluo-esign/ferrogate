@@ -39,6 +39,7 @@ import {
   tenantGuardrailEvidenceStatements,
 } from "../guardrails/evidence-d1.js";
 import {
+  GUARDRAIL_EVALUATION_OBJECT,
   type GuardrailEvidenceEnvelope,
   guardrailEvidenceFromWire,
 } from "../guardrails/evidence-wire.js";
@@ -67,6 +68,14 @@ export interface RequestLogConsumeResult {
   readonly malformed: number;
   /** True when the batch was handed back for redelivery. */
   readonly retried: boolean;
+}
+
+function isGuardrailEvidenceBody(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { object?: unknown }).object === GUARDRAIL_EVALUATION_OBJECT
+  );
 }
 
 /**
@@ -99,6 +108,13 @@ export async function consumeRequestLogBatch(
     const envelope = guardrailEvidenceFromWire(message.body);
     if (envelope !== undefined) {
       evidence.push(envelope);
+      continue;
+    }
+    if (isGuardrailEvidenceBody(message.body)) {
+      malformed += 1;
+      // A guardrail discriminator with an invalid payload must not fall
+      // through to the permissive request-log decoder.
+      message.ack?.();
       continue;
     }
     const record = requestLogFromWire(message.body);

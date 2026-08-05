@@ -226,6 +226,14 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
     return this.#pending.size;
   }
 
+  /** Requeue failed delivery without replacing a newer concurrent append. */
+  #requeue(envelopes: readonly GuardrailEvidenceEnvelope[]): void {
+    for (const envelope of envelopes) {
+      const key = evidenceBufferKey(envelope.evaluation);
+      if (!this.#pending.has(key)) this.#pending.set(key, envelope);
+    }
+  }
+
   /**
    * Buffer one evaluation. SYNCHRONOUS, and the only thing that can make it
    * return `false` is capacity.
@@ -337,10 +345,26 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       byTenant.set(tenantId, group);
     }
     for (const [tenantId, group] of byTenant) {
-      const tenantDb = this.#tenantDatabaseOf(runtime.env, tenantId);
+      let tenantDb: GuardrailEvidenceDatabase | undefined;
+      try {
+        tenantDb = this.#tenantDatabaseOf(runtime.env, tenantId);
+      } catch (error) {
+        this.#failed += group.length;
+        this.#requeue(group);
+        this.#diagnostics?.onError?.("d1", error);
+        continue;
+      }
       if (tenantDb === undefined) {
         this.#failed += group.length;
-        if (this.#databaseOf(runtime.env) === undefined) this.#dropped += group.length;
+        let projectionAvailable = false;
+        try {
+          projectionAvailable = this.#databaseOf(runtime.env) !== undefined;
+        } catch {
+          // No usable destination is the same observable outcome as an absent
+          // binding; the diagnostics below still retain the failure signal.
+        }
+        if (projectionAvailable) this.#requeue(group);
+        else this.#dropped += group.length;
         this.#diagnostics?.onError?.(
           "d1",
           new Error(`authoritative TenantDataObject is unavailable for tenant ${tenantId}`),
@@ -353,6 +377,7 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
         this.#written += group.length;
       } catch (error) {
         this.#failed += group.length;
+        this.#requeue(group);
         this.#diagnostics?.onError?.("d1", error);
       }
     }
@@ -361,7 +386,15 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
     // for object rows that landed, plus unscoped rows which have no object.
     const projectionEnvelopes = [...objectWritten, ...unscoped];
     if (projectionEnvelopes.length === 0) return;
-    const db = this.#databaseOf(runtime.env);
+    let db: GuardrailEvidenceDatabase | undefined;
+    try {
+      db = this.#databaseOf(runtime.env);
+    } catch (error) {
+      this.#failed += projectionEnvelopes.length;
+      this.#requeue(projectionEnvelopes);
+      this.#diagnostics?.onError?.("d1", error);
+      return;
+    }
     if (db === undefined) {
       this.#dropped += unscoped.length;
       return;
@@ -371,6 +404,7 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       this.#written += unscoped.length;
     } catch (error) {
       this.#failed += projectionEnvelopes.length;
+      this.#requeue(projectionEnvelopes);
       this.#diagnostics?.onError?.("d1", error);
     }
   }
