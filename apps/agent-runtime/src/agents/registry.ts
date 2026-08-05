@@ -404,7 +404,13 @@ export function d1AgentUpstreamPort(
       if (agentId === "") return { outcome: "not_found" };
       if (router !== undefined && scope.tenantId !== null && scope.tenantId.trim() !== "") {
         try {
-          return (await tenantObjectAgentUpstream(router, scope.tenantId, agentId)).result;
+          const object = await tenantObjectAgentUpstream(router, scope.tenantId, agentId);
+          if (object.result.outcome !== "not_found") return object.result;
+          // Tenant callers inherit platform-global reach-set entries from the
+          // named control-D1 projection. This is a destination decision, not a
+          // fallback for an object read failure: the catch below remains
+          // unavailable, and tenant-owned rows never come from control D1.
+          return controlPlatformAgentUpstream(db, agentId);
         } catch (error) {
           return {
             outcome: "unavailable",
@@ -419,9 +425,14 @@ export function d1AgentUpstreamPort(
             if (object.result.outcome === "found") matches.push(object.result.upstream);
           }
         } catch (error) {
+          // Platform-global upstreams have a named control-D1 projection. A
+          // roster failure must not hide that projection; tenant-scoped
+          // lookups remain object-only and still fail closed above.
+          const projection = await controlPlatformAgentUpstream(db, agentId);
+          if (projection.outcome !== "not_found") return projection;
           return {
             outcome: "unavailable",
-            detail: `tenant object: agent upstream lookup failed: ${String(error)}`,
+            detail: `tenant object roster lookup failed: ${String(error)}`,
           };
         }
         if (matches.length > 1) {

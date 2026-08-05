@@ -340,7 +340,22 @@ export async function durableAgentUpstreams(
     return controlPlatformAgentUpstreams(db);
   }
 
-  return tenantObjectAgentUpstreams(router, tenantId);
+  let objectRows: readonly AgentUpstreamRecord[];
+  try {
+    objectRows = await tenantObjectAgentUpstreams(router, tenantId);
+  } catch {
+    // A tenant-object read failure must not resurrect a legacy control row or
+    // turn a discovery request into an unbounded error response.
+    return [];
+  }
+  const rows = [...objectRows];
+  const seen = new Set(rows.map((upstream) => upstream.id));
+  for (const upstream of await controlPlatformAgentUpstreams(db)) {
+    if (seen.has(upstream.id)) continue;
+    seen.add(upstream.id);
+    rows.push(upstream);
+  }
+  return rows;
 }
 
 /**
@@ -380,7 +395,10 @@ export async function agentUpstreamsForCaller(
         objectRows.push(...(await tenantObjectAgentUpstreams(router, tenantId)));
       }
     } catch {
-      return [];
+      // The platform projection has a named control-D1 destination and does
+      // not require tenant roster enumeration. Keep it available while the
+      // tenant roster is unavailable; tenant-local readers remain object-only.
+      return controlPlatformAgentUpstreams(db);
     }
     const seen = new Set(objectRows.map((upstream) => upstream.id));
     for (const upstream of await controlPlatformAgentUpstreams(db)) {

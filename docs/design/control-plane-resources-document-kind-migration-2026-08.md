@@ -27,7 +27,7 @@ tenant's `TenantDataObject`, using a same-shape `tenant_resources` table.
 | `virtual-keys` | object | `control-plane/routes/admin_virtual_key.ts`, `session/gateway_key.ts` | control `api_key_directory` plus tenant `api_keys` | Copy; retain both typed indexes. |
 | `api-keys` | object | control-plane admin API-key routes | tenant `api_keys` | Copy; control directory remains the pre-tenant auth index. |
 | `quota-policies` | object | `control-plane/routes/quota_policy.ts` | gateway typed `quota_policies` admission source | Move document and projection together; operator-only write fence stays. |
-| `agent-upstreams` | object | `control-plane/routes/admin_agent_upstream.ts` | gateway discovery/dispatch and agent-runtime registry | Copy, then switch reach-set readers; control row is compat only. |
+| `agent-upstreams` | object + platform projection | `control-plane/routes/admin_agent_upstream.ts` | gateway discovery/dispatch and agent-runtime registry; tenant reads include the named control platform projection | Tenant rows are copied to objects and read object-first; un-attributed platform rows stay on control D1 as a named projection. Object read failures never fall back to tenant control rows. |
 | `agent-workflows` | object | `control-plane/routes/admin_agent_workflow.ts` | gateway workflow gate and agent runtime | Copy, then switch gate readers; control row is compat only. |
 | `agent-schedules` | object | `control-plane/routes/admin_agent_schedule.ts` | tenant schedule engine | Copy; object is the schedule source. |
 | `agent-schedule-fires` | object | control-plane schedule engine | tenant fire ledger | Copy with schedules; preserve at-most-once keys. |
