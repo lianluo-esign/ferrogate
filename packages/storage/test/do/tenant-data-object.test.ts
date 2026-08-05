@@ -347,6 +347,21 @@ describe("tenant configuration and policy state", () => {
     expect(message).toMatch(/privileged/i);
   });
 
+  test("rejects alternate SQLite write forms for protected role tables", async () => {
+    const statements = [
+      "UPDATE OR REPLACE tenant_role_bindings SET role_id = 'role_operator'",
+      "DELETE FROM main.tenant_role_catalog",
+      "WITH candidate AS (SELECT 1) INSERT INTO tenant_role_bindings (id) SELECT 'binding' FROM candidate",
+      "CREATE TRIGGER role_projection_trigger AFTER INSERT ON projects BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
+    ];
+    for (const [index, sql] of statements.entries()) {
+      const tenantId = `tenant_privileged_syntax_${index}`;
+      expect(
+        await refusal(objectFor(tenantId).query({ tenantId, sql })),
+      ).toMatch(/privileged/i);
+    }
+  });
+
   test("accepts a role snapshot and binding only through the privileged RPC", async () => {
     const tenantId = "tenant_privileged_role";
     await privilegedObjectFor(tenantId).privilegedBatch({

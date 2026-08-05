@@ -199,13 +199,25 @@ const REFUSAL = "tenant_data_object";
 const PRIVILEGED_WRITE_TABLES = ["tenant_role_bindings", "tenant_role_catalog"] as const;
 
 function requiresPrivilegedWrite(sql: string): string | null {
-  const normalized = sql.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
+  // This is deliberately conservative. Tokenising after removing comments and
+  // string literals catches CTEs, `UPDATE OR REPLACE`, schema-qualified names,
+  // and trigger bodies without trying to implement SQLite's grammar here.
+  const normalized = sql
+    .replace(/--[^\n]*/g, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/'(?:''|[^'])*'/g, " ");
+  const tokens = new Set(
+    (normalized.match(/[A-Za-z_][A-Za-z0-9_$]*/g) ?? []).map((token) => token.toLowerCase()),
+  );
+  if (
+    !["insert", "replace", "update", "delete", "create", "alter", "drop", "truncate"].some((verb) =>
+      tokens.has(verb),
+    )
+  ) {
+    return null;
+  }
   for (const table of PRIVILEGED_WRITE_TABLES) {
-    const write = new RegExp(
-      `\\b(?:INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+[\\x22\\x60]?${table}[\\x22\\x60]?\\b`,
-      "i",
-    );
-    if (write.test(normalized)) return table;
+    if (tokens.has(table)) return table;
   }
   return null;
 }

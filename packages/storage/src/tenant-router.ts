@@ -42,7 +42,7 @@
  * module.
  */
 import { StorageError } from "./errors.js";
-import type { TenantDataResult, TenantDataStatement } from "./tenant-data-object.js";
+import type { TenantDataStatement } from "./tenant-data-object.js";
 
 // ---------------------------------------------------------------------------
 // Handles
@@ -134,15 +134,17 @@ export interface TenantDatabaseRouter {
   /** Resolve one tenant's database, or throw. NEVER falls back. */
   forTenant(tenantId: string): Promise<TenantDatabaseHandle>;
   /**
-   * Optional operator-only object RPC used for authority projections such as
-   * tenant RBAC bindings. Native/rest routers do not expose this capability;
-   * callers must fail closed instead of routing a privileged write through a
-   * normal tenant SQL handle.
+   * Optional operator-only batch used for authority projections such as tenant
+   * RBAC bindings. Durable Object routers forward this to the private RPC;
+   * native/shared routers implement the same capability only at this trusted
+   * composition-root boundary. REST routers do not expose it, so callers must
+   * fail closed instead of routing a privileged write through a normal tenant
+   * SQL handle.
    */
   privilegedBatch?(
     tenantId: string,
     statements: readonly TenantDataStatement[],
-  ): Promise<readonly TenantDataResult[]>;
+  ): Promise<void>;
   /**
    * Every provisioned tenant id, ascending.
    *
@@ -799,6 +801,17 @@ export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
     };
   }
 
+  /** Trusted migration/projection path; ordinary tenant callers only get `db`. */
+  async privilegedBatch(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<void> {
+    const handle = await this.forTenant(tenantId);
+    await handle.db.batch(
+      statements.map((statement) => handle.db.prepare(statement.sql).bind(...(statement.params ?? []))),
+    );
+  }
+
   async provisionedTenants(): Promise<readonly string[]> {
     const rows = await this.registry.list();
     return rows.map((r) => r.tenantId);
@@ -876,6 +889,17 @@ export class SharedDatabaseTenantRouter implements TenantDatabaseRouter {
       source: "shared_development",
       supportsAtomicBatch: true,
     };
+  }
+
+  /** Trusted migration/projection path; this class is development-only. */
+  async privilegedBatch(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<void> {
+    const handle = await this.forTenant(tenantId);
+    await handle.db.batch(
+      statements.map((statement) => handle.db.prepare(statement.sql).bind(...(statement.params ?? []))),
+    );
   }
 
   async provisionedTenants(): Promise<readonly string[]> {

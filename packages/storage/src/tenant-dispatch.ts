@@ -61,7 +61,7 @@ import {
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
-import type { TenantDataStatement, TenantDataResult } from "./tenant-data-object.js";
+import type { TenantDataStatement } from "./tenant-data-object.js";
 
 /** The arms {@link BackendDispatchingTenantDatabaseRouter} dispatches between. */
 export interface TenantBackendArms {
@@ -147,7 +147,7 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
   async privilegedBatch(
     tenantId: string,
     statements: readonly TenantDataStatement[],
-  ): Promise<readonly TenantDataResult[]> {
+  ): Promise<void> {
     if (tenantId === "") {
       throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
     }
@@ -164,7 +164,7 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
         `tenant ${tenantId} backend does not expose the privileged tenant-write RPC`,
       );
     }
-    return router.privilegedBatch(tenantId, statements);
+    await router.privilegedBatch(tenantId, statements);
   }
 
   async provisionedTenants(): Promise<readonly string[]> {

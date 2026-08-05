@@ -763,7 +763,7 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
   async privilegedBatch(
     tenantId: string,
     statements: readonly TenantDataStatement[],
-  ): Promise<readonly TenantDataResult[]> {
+  ): Promise<void> {
     if (tenantId.trim() === "") {
       throw StorageError.runtime("privileged tenant writes require a non-empty tenant id");
     }
@@ -773,7 +773,7 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
         `tenant ${tenantId} does not expose the privileged tenant-write RPC`,
       );
     }
-    return stub.privilegedBatch({ tenantId, statements });
+    await stub.privilegedBatch({ tenantId, statements });
   }
 
   async provisionedTenants(): Promise<readonly string[]> {

@@ -77,12 +77,12 @@ import {
 } from "@ferrogate/guardrails";
 import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
 import {
-  BackendDispatchingTenantDatabaseRouter,
   DurableObjectTenantDatabaseRouter,
-  EnvBindingTenantDatabaseRouter,
+  StorageError,
+  type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
-import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import type { TenantDataNamespace, TenantDataStatement } from "@ferrogate/storage/durable-objects";
 
 // `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
 // this module. The cycle is safe because neither side touches the other at
@@ -2383,16 +2383,80 @@ function durableAdmission(env: McpEnv): AdmissionPort {
   return admissionFromEnv(env, tenantDatabaseRouter(env, env.DB));
 }
 
+/**
+ * MCP serves the Durable Object tenant plane only. The control registry is
+ * consulted solely to reject an unprovisioned or differently-homed tenant; it
+ * is never used as a tenant data fallback.
+ */
+class DurableObjectOnlyTenantDatabaseRouter implements TenantDatabaseRouter {
+  readonly backend = "durable_object" as const;
+
+  constructor(
+    private readonly controlDb: D1Database,
+    private readonly objectRouter: DurableObjectTenantDatabaseRouter,
+  ) {}
+
+  control(): D1Database {
+    return this.controlDb;
+  }
+
+  async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+    await this.assertDurableObjectTenant(tenantId);
+    return this.objectRouter.forTenant(tenantId);
+  }
+
+  async privilegedBatch(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<void> {
+    await this.assertDurableObjectTenant(tenantId);
+    await this.objectRouter.privilegedBatch(tenantId, statements);
+  }
+
+  provisionedTenants(): Promise<readonly string[]> {
+    return this.objectRouter.provisionedTenants();
+  }
+
+  private async assertDurableObjectTenant(tenantId: string): Promise<void> {
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime("MCP tenant database routing requires a non-empty tenant id");
+    }
+    const row = await this.controlDb
+      .prepare(
+        "SELECT storage_backend FROM tenant_databases WHERE tenant_id = ?1",
+      )
+      .bind(tenantId)
+      .first<{ storage_backend: string | null }>();
+    if (row === null) {
+      throw StorageError.notFound(`tenant ${tenantId} has no provisioned tenant database`);
+    }
+    if (row.storage_backend !== "durable_object") {
+      throw StorageError.runtime(
+        `tenant ${tenantId} is registered on ${row.storage_backend ?? "an unknown"} storage, but MCP requires durable_object storage`,
+      );
+    }
+  }
+}
+
 function tenantDatabaseRouter(env: McpEnv, controlDb: D1Database): TenantDatabaseRouter {
-  const fallback = new EnvBindingTenantDatabaseRouter(
-    env as unknown as Record<string, unknown>,
+  if (env.TENANT_DATA === undefined) {
+    return {
+      backend: "durable_object",
+      control: () => controlDb,
+      forTenant: async (tenantId: string) => {
+        throw StorageError.runtime(
+          `MCP tenant ${tenantId} cannot be served: TENANT_DATA Durable Object binding is missing`,
+        );
+      },
+      provisionedTenants: async () => {
+        throw StorageError.runtime("MCP tenant routing cannot enumerate tenants without TENANT_DATA");
+      },
+    };
+  }
+  return new DurableObjectOnlyTenantDatabaseRouter(
     controlDb,
+    new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb),
   );
-  if (env.TENANT_DATA === undefined) return fallback;
-  return new BackendDispatchingTenantDatabaseRouter(controlDb, {
-    fallback,
-    durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb),
-  });
 }
 
 /**

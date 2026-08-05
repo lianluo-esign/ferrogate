@@ -329,20 +329,16 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
     if (auth.platformOperator) return { allowed: true };
     const tenantId = auth.tenancy.tenantId ?? "";
 
+    if (this.#tenantDatabases === null) {
+      return {
+        allowed: "unavailable",
+        detail: "TENANT_DATA is not bound, so tenant role bindings cannot be resolved",
+      };
+    }
+
     let rows: { permission_keys_json: string }[];
     try {
-      const result =
-        this.#tenantDatabases === null
-          ? await this.#db
-              .prepare(
-                `SELECT roles.permission_keys_json AS permission_keys_json
-                 FROM tenant_role_bindings
-                 JOIN roles ON roles.id = tenant_role_bindings.role_id
-                WHERE tenant_role_bindings.tenant_id = ?`,
-              )
-              .bind(tenantId)
-              .all<{ permission_keys_json: string }>()
-          : await this.#tenantRoleGrants(tenantId);
+      const result = await this.#tenantRoleGrants(tenantId);
       rows = result.results;
     } catch (error) {
       // The one thing this must never do is guess.

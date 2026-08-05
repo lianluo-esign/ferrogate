@@ -10,6 +10,10 @@ import type { TenantDatabaseRouter } from "./tenant-router.js";
 
 export const TENANT_CONFIGURATION_BACKFILL_MARK = "tenant_configuration_policy_v1";
 
+/** Keep each trusted projection RPC below the D1/DO statement envelope size. */
+export const MAX_BACKFILL_STATEMENTS = 100;
+const BACKFILL_PAGE_SIZE = 100;
+
 type Row = Record<string, unknown>;
 
 interface BackfillSources {
@@ -54,15 +58,108 @@ async function sources(db: D1Database): Promise<BackfillSources> {
 }
 
 async function all(db: D1Database, sql: string, ...params: readonly unknown[]): Promise<Row[]> {
-  const result = await db.prepare(sql).bind(...params).all<Row>();
-  return result.results;
+  const rows: Row[] = [];
+  for (let offset = 0; ; offset += BACKFILL_PAGE_SIZE) {
+    const result = await db
+      .prepare(`${sql} LIMIT ? OFFSET ?`)
+      .bind(...params, BACKFILL_PAGE_SIZE, offset)
+      .all<Row>();
+    rows.push(...result.results);
+    if (result.results.length < BACKFILL_PAGE_SIZE) return rows;
+  }
 }
 
-function value(row: Row, key: string, fallback: string | number | null = null): string | number | null {
+function requiredString(row: Row, key: string, context: string): string {
   const candidate = row[key];
-  return typeof candidate === "string" || typeof candidate === "number" || candidate === null
-    ? candidate
-    : fallback;
+  if (typeof candidate !== "string" || candidate.trim() === "") {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return candidate;
+}
+
+function text(row: Row, key: string, context: string): string {
+  const candidate = row[key];
+  if (typeof candidate !== "string") {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return candidate;
+}
+
+function nullableString(row: Row, key: string, context: string): string | null {
+  const candidate = row[key];
+  if (candidate === null) return null;
+  if (typeof candidate !== "string") {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return candidate;
+}
+
+function requiredNumber(row: Row, key: string, context: string): number {
+  const candidate = row[key];
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return candidate;
+}
+
+function nullableNumber(row: Row, key: string, context: string): number | null {
+  const candidate = row[key];
+  if (candidate === null) return null;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return candidate;
+}
+
+function tenantString(row: Row, key: string, tenantId: string, context: string): string {
+  const value = requiredString(row, key, context);
+  if (value !== tenantId) {
+    throw new Error(`tenant configuration backfill found cross-tenant ${context}.${key}`);
+  }
+  return value;
+}
+
+function jsonArray(row: Row, key: string, context: string): string {
+  const value = requiredString(row, key, context);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return value;
+}
+
+function nullableJsonArray(row: Row, key: string, context: string): string | null {
+  const value = nullableString(row, key, context);
+  if (value === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return value;
+}
+
+function jsonObject(row: Row, key: string, context: string): string {
+  const value = requiredString(row, key, context);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`tenant configuration backfill found invalid ${context}.${key}`);
+  }
+  return value;
 }
 
 function add(statements: TenantDataStatement[], sql: string, params: readonly TenantDataValue[]): void {
@@ -75,12 +172,16 @@ async function runTenantBatch(
   statements: readonly TenantDataStatement[],
 ): Promise<void> {
   if (router.privilegedBatch !== undefined) {
-    await router.privilegedBatch(tenantId, statements);
+    for (let offset = 0; offset < statements.length; offset += MAX_BACKFILL_STATEMENTS) {
+      await router.privilegedBatch(
+        tenantId,
+        statements.slice(offset, offset + MAX_BACKFILL_STATEMENTS),
+      );
+    }
     return;
   }
-  const handle = await router.forTenant(tenantId);
-  await handle.db.batch(
-    statements.map((statement) => handle.db.prepare(statement.sql).bind(...(statement.params ?? []))),
+  throw new Error(
+    `tenant configuration backfill requires the trusted privilegedBatch capability for ${tenantId}`,
   );
 }
 
@@ -116,16 +217,16 @@ export async function backfillTenantConfigurationPolicy(
           "(tenant_id, alias, provider, key_version, iv, ciphertext, last4, created_at_unix, rotated_at_unix, revoked_at_unix) " +
           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-          value(row, "tenant_id", tenantId) ?? tenantId,
-          value(row, "alias", "") ?? "",
-          value(row, "provider", "") ?? "",
-          value(row, "key_version", 0) ?? 0,
-          value(row, "iv", "") ?? "",
-          value(row, "ciphertext", "") ?? "",
-          value(row, "last4", "") ?? "",
-          value(row, "created_at_unix", nowUnix) ?? nowUnix,
-          value(row, "rotated_at_unix", nowUnix) ?? nowUnix,
-          value(row, "revoked_at_unix"),
+          tenantString(row, "tenant_id", tenantId, "provider"),
+          requiredString(row, "alias", "provider"),
+          requiredString(row, "provider", "provider"),
+          requiredNumber(row, "key_version", "provider"),
+          requiredString(row, "iv", "provider"),
+          requiredString(row, "ciphertext", "provider"),
+          requiredString(row, "last4", "provider"),
+          requiredNumber(row, "created_at_unix", "provider"),
+          requiredNumber(row, "rotated_at_unix", "provider"),
+          nullableNumber(row, "revoked_at_unix", "provider"),
         ],
       );
     }
@@ -141,25 +242,25 @@ export async function backfillTenantConfigurationPolicy(
           "saml_idp_certificate, saml_sp_entity_id, saml_acs_url, saml_email_attribute, saml_name_attribute, " +
           "saml_groups_attribute, created_at_unix, updated_at_unix) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-          value(row, "tenant_id", tenantId) ?? tenantId,
-          value(row, "provider_kind", "") ?? "",
-          value(row, "default_role", "member") ?? "member",
-          value(row, "group_role_mapping_json", "{}") ?? "{}",
-          value(row, "oidc_issuer"),
-          value(row, "oidc_client_id"),
-          value(row, "oidc_client_secret_ref"),
-          value(row, "oidc_redirect_uri"),
-          value(row, "oidc_group_claim"),
-          value(row, "saml_idp_entity_id"),
-          value(row, "saml_idp_sso_url"),
-          value(row, "saml_idp_certificate"),
-          value(row, "saml_sp_entity_id"),
-          value(row, "saml_acs_url"),
-          value(row, "saml_email_attribute"),
-          value(row, "saml_name_attribute"),
-          value(row, "saml_groups_attribute"),
-          value(row, "created_at_unix", nowUnix) ?? nowUnix,
-          value(row, "updated_at_unix", nowUnix) ?? nowUnix,
+          tenantString(row, "tenant_id", tenantId, "sso"),
+          requiredString(row, "provider_kind", "sso"),
+          requiredString(row, "default_role", "sso"),
+          jsonObject(row, "group_role_mapping_json", "sso"),
+          nullableString(row, "oidc_issuer", "sso"),
+          nullableString(row, "oidc_client_id", "sso"),
+          nullableString(row, "oidc_client_secret_ref", "sso"),
+          nullableString(row, "oidc_redirect_uri", "sso"),
+          nullableString(row, "oidc_group_claim", "sso"),
+          nullableString(row, "saml_idp_entity_id", "sso"),
+          nullableString(row, "saml_idp_sso_url", "sso"),
+          nullableString(row, "saml_idp_certificate", "sso"),
+          nullableString(row, "saml_sp_entity_id", "sso"),
+          nullableString(row, "saml_acs_url", "sso"),
+          nullableString(row, "saml_email_attribute", "sso"),
+          nullableString(row, "saml_name_attribute", "sso"),
+          nullableString(row, "saml_groups_attribute", "sso"),
+          requiredNumber(row, "created_at_unix", "sso"),
+          requiredNumber(row, "updated_at_unix", "sso"),
         ],
       );
     }
@@ -187,23 +288,23 @@ export async function backfillTenantConfigurationPolicy(
           "description = excluded.description, permission_keys_json = excluded.permission_keys_json, " +
           "updated_at_unix = excluded.updated_at_unix",
         [
-          value(row, "role_id", "") ?? "",
-          value(row, "name", "") ?? "",
-          value(row, "slug", "") ?? "",
-          value(row, "description", "") ?? "",
-          value(row, "permission_keys_json", "[]") ?? "[]",
-          value(row, "role_created_at_unix", nowUnix) ?? nowUnix,
-          value(row, "role_updated_at_unix", nowUnix) ?? nowUnix,
+          requiredString(row, "role_id", "binding"),
+          requiredString(row, "name", "binding"),
+          requiredString(row, "slug", "binding"),
+          text(row, "description", "binding"),
+          jsonArray(row, "permission_keys_json", "binding"),
+          requiredNumber(row, "role_created_at_unix", "binding"),
+          requiredNumber(row, "role_updated_at_unix", "binding"),
         ],
       );
       add(
         statements,
         "INSERT OR IGNORE INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) VALUES (?, ?, ?, ?)",
         [
-          value(row, "id", `${tenantId}:${String(value(row, "role_id", ""))}`) ?? "",
-          tenantId,
-          value(row, "role_id", "") ?? "",
-          value(row, "created_at_unix", nowUnix) ?? nowUnix,
+          requiredString(row, "id", "binding"),
+          tenantString(row, "tenant_id", tenantId, "binding"),
+          requiredString(row, "role_id", "binding"),
+          requiredNumber(row, "created_at_unix", "binding"),
         ],
       );
     }
@@ -217,17 +318,17 @@ export async function backfillTenantConfigurationPolicy(
           "(scope_type, scope_id, enabled, mode, similarity_threshold, ttl_seconds, scoped_models, " +
           "invalidation_epoch, updated_at_unix, updated_by, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-          value(row, "scope_type", "tenant") ?? "tenant",
-          value(row, "scope_id", tenantId) ?? tenantId,
-          value(row, "enabled"),
-          value(row, "mode"),
-          value(row, "similarity_threshold"),
-          value(row, "ttl_seconds"),
-          value(row, "scoped_models"),
-          value(row, "invalidation_epoch", 0) ?? 0,
-          value(row, "updated_at_unix", nowUnix) ?? nowUnix,
-          value(row, "updated_by"),
-          value(row, "generation", 0) ?? 0,
+          requiredString(row, "scope_type", "cache"),
+          requiredString(row, "scope_id", "cache"),
+          nullableNumber(row, "enabled", "cache"),
+          nullableString(row, "mode", "cache"),
+          nullableNumber(row, "similarity_threshold", "cache"),
+          nullableNumber(row, "ttl_seconds", "cache"),
+          nullableJsonArray(row, "scoped_models", "cache"),
+          requiredNumber(row, "invalidation_epoch", "cache"),
+          requiredNumber(row, "updated_at_unix", "cache"),
+          nullableString(row, "updated_by", "cache"),
+          requiredNumber(row, "generation", "cache"),
         ],
       );
     }
@@ -240,12 +341,12 @@ export async function backfillTenantConfigurationPolicy(
         "INSERT OR IGNORE INTO delegation_revocations " +
           "(tenant, subject, reason, revoked_by, revoked_at_unix, expires_at_unix) VALUES (?, ?, ?, ?, ?, ?)",
         [
-          tenantId,
-          value(row, "subject", "") ?? "",
-          value(row, "reason"),
-          value(row, "revoked_by"),
-          value(row, "revoked_at_unix", nowUnix) ?? nowUnix,
-          value(row, "expires_at_unix"),
+          tenantString(row, "tenant", tenantId, "revocation"),
+          requiredString(row, "subject", "revocation"),
+          nullableString(row, "reason", "revocation"),
+          nullableString(row, "revoked_by", "revocation"),
+          requiredNumber(row, "revoked_at_unix", "revocation"),
+          nullableNumber(row, "expires_at_unix", "revocation"),
         ],
       );
     }
@@ -258,10 +359,10 @@ export async function backfillTenantConfigurationPolicy(
         "INSERT OR IGNORE INTO control_plane_replay_floors " +
           "(tenant_id, deployment_id, last_accepted_revision, updated_at_unix) VALUES (?, ?, ?, ?)",
         [
-          tenantId,
-          value(row, "deployment_id", "") ?? "",
-          value(row, "last_accepted_revision", 0) ?? 0,
-          value(row, "updated_at_unix", nowUnix) ?? nowUnix,
+          tenantString(row, "tenant_id", tenantId, "replay_floor"),
+          requiredString(row, "deployment_id", "replay_floor"),
+          requiredNumber(row, "last_accepted_revision", "replay_floor"),
+          requiredNumber(row, "updated_at_unix", "replay_floor"),
         ],
       );
     }
@@ -274,13 +375,13 @@ export async function backfillTenantConfigurationPolicy(
         "INSERT OR IGNORE INTO budget_alert_notifications " +
           "(id, tenant_id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
-          value(row, "id", "") ?? "",
+          requiredString(row, "id", "budget_alert"),
           tenantId,
-          value(row, "scope_type", "tenant") ?? "tenant",
-          value(row, "scope_id", tenantId) ?? tenantId,
-          value(row, "period_month", "") ?? "",
-          value(row, "threshold_pct", 0) ?? 0,
-          value(row, "notified_at_unix", nowUnix) ?? nowUnix,
+          requiredString(row, "scope_type", "budget_alert"),
+          requiredString(row, "scope_id", "budget_alert"),
+          requiredString(row, "period_month", "budget_alert"),
+          requiredNumber(row, "threshold_pct", "budget_alert"),
+          requiredNumber(row, "notified_at_unix", "budget_alert"),
         ],
       );
     }
