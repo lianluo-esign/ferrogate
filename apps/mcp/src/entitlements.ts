@@ -92,6 +92,7 @@
  * taxonomy from a deleted file. `toolExecutionDenial` accepts only the
  * backends this Worker can actually reach.
  */
+import { backfillTenantConfigurationPolicy, type TenantDatabaseRouter } from "@ferrogate/storage";
 import type { AuthContext, EntitlementPort, ToolExecuteBackend } from "./ports.js";
 
 /** Rust permission key for the MCP arm (`local.rs:155`). */
@@ -185,10 +186,18 @@ interface PlanRow {
 export class D1ToolEntitlements implements EntitlementPort {
   readonly #db: D1Database;
   readonly #fallback: EntitlementPort | undefined;
+  readonly #tenantDatabases: TenantDatabaseRouter | undefined;
 
-  constructor(db: D1Database, options: { fallback?: EntitlementPort | undefined } = {}) {
+  constructor(
+    db: D1Database,
+    options: {
+      fallback?: EntitlementPort | undefined;
+      tenantDatabases?: TenantDatabaseRouter | undefined;
+    } = {},
+  ) {
     this.#db = db;
     this.#fallback = options.fallback;
+    this.#tenantDatabases = options.tenantDatabases;
   }
 
   async toolExecutionDenial(
@@ -244,10 +253,13 @@ export class D1ToolEntitlements implements EntitlementPort {
       // happen to name it.
       if (declared === null) return false;
 
-      const bound = await this.#db
-        .prepare(ROLE_GRANTS_SQL)
-        .bind(tenantId)
-        .all<{ permission_keys_json: string | null }>();
+      const bound =
+        this.#tenantDatabases === undefined
+          ? await this.#db
+              .prepare(ROLE_GRANTS_SQL)
+              .bind(tenantId)
+              .all<{ permission_keys_json: string | null }>()
+          : await this.#tenantRoleGrants(tenantId);
       for (const row of bound.results) {
         const raw = row.permission_keys_json;
         if (typeof raw !== "string") continue;
@@ -268,5 +280,32 @@ export class D1ToolEntitlements implements EntitlementPort {
       // `if let Ok(bindings)` / `if let Ok(Some(role))` — both are "no grant".
       return false;
     }
+  }
+
+  async #tenantRoleGrants(
+    tenantId: string,
+  ): Promise<{ results: { permission_keys_json: string | null }[] }> {
+    const router = this.#tenantDatabases;
+    if (router === undefined) throw new Error("tenant object router is not configured");
+    await backfillTenantConfigurationPolicy(this.#db, router, tenantId);
+    const handle = await router.forTenant(tenantId);
+    const local = await handle.db
+      .prepare(
+        `SELECT b.role_id
+           FROM tenant_role_bindings AS b
+          WHERE b.tenant_id = ?1`,
+      )
+      .bind(tenantId)
+      .all<{ role_id: string }>();
+    const valid: { permission_keys_json: string | null }[] = [];
+    for (const row of local.results) {
+      const shared = await this.#db
+        .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
+        .bind(row.role_id)
+        .all<{ permission_keys_json: string | null }>();
+      const role = shared.results[0];
+      if (role !== undefined) valid.push(role);
+    }
+    return { results: valid };
   }
 }

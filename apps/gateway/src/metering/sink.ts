@@ -149,7 +149,7 @@ interface MeteringBackend {
    *
    * A FOURTH seam, resolved with the other three so it is memoized on the same
    * env object: it reads the CONTROL database's `quota_policies` and the TENANT
-   * database's `usage_monthly_rollups`, and writes the CONTROL database's
+   * database's `usage_monthly_rollups`, and writes the TENANT database's
    * `budget_alert_notifications` claim. `undefined` whenever no webhook URL is
    * configured or no control database is bound — never a degraded in-isolate
    * substitute, because an alerter without a durable arbiter re-fires the same
@@ -891,8 +891,14 @@ export class MeteringUsageSink implements UsageSink {
     // the wrong operator.
     const owned = attribution !== undefined && attribution.requestId === charge.requestId;
     const scopes = budgetAlertScopesFor(owned ? attribution : undefined, charge.event.tenant);
+    const tenantId = charge.event.tenant.organization_id ?? attribution?.tenantId ?? "";
+    if (tenantId.trim() === "") {
+      this.#report("budget_alert_tenant", new Error(charge.requestId));
+      return;
+    }
     try {
       await dispatchBudgetThresholdAlerts(ports, {
+        tenantId,
         scopes,
         nowUnixSeconds: this.#clock.nowUnixSeconds(),
         diagnostics: this.#diagnostics,

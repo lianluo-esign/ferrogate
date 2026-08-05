@@ -41,6 +41,10 @@ export interface Fixture {
   calls: RecordedCall[];
 }
 
+export interface SeedFixtureOptions {
+  readonly tenantId?: string;
+}
+
 export function tenantAuth(overrides: Partial<AuthContext> = {}): AuthContext {
   return {
     apiKeyId: "key-1",
@@ -71,15 +75,19 @@ export function upstreamConfig(overrides: Partial<McpServerConfig> = {}): McpSer
  * Reset every port and seed the standard fixture: two API keys, one upstream
  * MCP server exposing an allowlisted `echo` plus an un-allowlisted `danger`.
  */
-export function seedFixture(): Fixture {
+export function seedFixture(options: SeedFixtureOptions = {}): Fixture {
   resetInMemoryPorts();
   const ports = inMemoryPorts();
   const calls: RecordedCall[] = [];
+  const tenantId = options.tenantId ?? TENANT;
+
+  const authForTenant = (overrides: Partial<AuthContext> = {}): AuthContext =>
+    tenantAuth({ organizationId: tenantId, ...overrides });
 
   ports.auth
-    .register(READ_KEY, tenantAuth({ scopes: ["tools.read", "assets.read"] }))
-    .register(EXEC_KEY, tenantAuth())
-    .register(NO_SCOPE_KEY, tenantAuth({ scopes: [] }));
+    .register(READ_KEY, authForTenant({ scopes: ["tools.read", "assets.read"] }))
+    .register(EXEC_KEY, authForTenant())
+    .register(NO_SCOPE_KEY, authForTenant({ scopes: [] }));
 
   ports.upstreams.register(
     upstreamConfig(),

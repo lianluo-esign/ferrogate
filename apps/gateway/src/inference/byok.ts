@@ -59,7 +59,12 @@ import {
   type TenantCredentialStore,
   byokKeyringFromEnvAsync,
 } from "@ferrogate/secrets";
-import { D1TenantProviderCredentialStore } from "@ferrogate/storage";
+import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
+  tenantProviderCredentialStoreFor,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { InferenceRejection } from "./errors.js";
 import { reject } from "./errors.js";
 import type { Caller, InferenceBindings, ModelResolver, PhysicalRoute } from "./ports.js";
@@ -120,7 +125,9 @@ export type ByokPortsFactory = (env: InferenceBindings) => ByokPorts | null;
  */
 export function byokPortsFromEnv(env: InferenceBindings): ByokPorts | null {
   const db = env.CONTROL_DB as D1Database | undefined;
-  if (db === undefined || typeof db.prepare !== "function") return null;
+  const namespace = (env as InferenceBindings & { readonly TENANT_DATA?: TenantDataNamespace })
+    .TENANT_DATA;
+  if (db === undefined || typeof db.prepare !== "function" || namespace === undefined) return null;
   // Written as a STRING LITERAL rather than `env[BYOK_MASTER_KEY_ENV]` so
   // `test/env-var-drift.test.ts`'s scanner sees a NAMED read: a dynamic index
   // would land on the "sites we cannot reason about" list, and the whole point
@@ -130,7 +137,17 @@ export function byokPortsFromEnv(env: InferenceBindings): ByokPorts | null {
   // cannot drift apart silently.
   if (env["FERROGATE_BYOK_MASTER_KEY"] === undefined) return null;
 
-  const store = new D1TenantProviderCredentialStore(db);
+  const router = new DurableObjectTenantDatabaseRouter(namespace, db);
+  const store: TenantCredentialStore = {
+    async lookup(tenantId, alias) {
+      // The legacy table is migration input only. Once the object is available,
+      // all credential reads stay in that object's database and an object error
+      // is surfaced to the caller rather than falling back to CONTROL.
+      await backfillTenantConfigurationPolicy(db, router, tenantId);
+      const handle = await router.forTenant(tenantId);
+      return tenantProviderCredentialStoreFor(handle).lookup(tenantId, alias);
+    },
+  };
   // Memoized per env object: the key import is cheap but not free, and the env
   // object is per request, so this caches within a request without leaking a
   // key across isolate-reused requests any longer than the env itself lives.

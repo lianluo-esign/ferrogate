@@ -53,10 +53,10 @@ import {
 } from "../src/admission/index.js";
 import { hashApiKeySecret } from "../src/auth.js";
 import { rpcRequest, seedFixture } from "./fixtures.js";
+import { seedTenantRoleProjection, tenantObjectDb } from "./tenant-object.js";
 
 interface SharedCounterBindings {
   readonly DB: D1Database;
-  readonly TENANT_DB_A: D1Database;
   readonly RATE_LIMIT?: {
     idFromName(name: string): DurableObjectId;
     get(id: DurableObjectId): { consumeRequest(limit: number): Promise<{ allowed: boolean }> };
@@ -70,7 +70,7 @@ function bindings(): SharedCounterBindings {
 }
 
 const control = (): D1Database => bindings().DB;
-const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+const tenantDb = (tenantId: string): D1Database => tenantObjectDb(tenantId);
 
 /**
  * Charge one request against a counter key THROUGH THE BINDING — i.e. do
@@ -121,8 +121,9 @@ async function provision(caller: Caller, requestLimitPerMinute: number): Promise
       .prepare(
         `INSERT INTO tenant_databases
            (tenant_id, database_uuid, database_name, binding_name, schema_version,
+            storage_backend, provisioning_status,
             provisioned_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, 'TENANT_DB_A', 1, 1, 1)`,
+         VALUES (?, ?, ?, NULL, 15, 'durable_object', 'ready', 1, 1)`,
       )
       .bind(caller.tenantId, `uuid-${caller.tenantId}`, `ferrogate-${caller.tenantId}`),
     control()
@@ -139,11 +140,9 @@ async function provision(caller: Caller, requestLimitPerMinute: number): Promise
          VALUES (?, 'MCP', ?, '', ?)`,
       )
       .bind(`role-${caller.tenantId}`, `mcp-${caller.tenantId}`, JSON.stringify(["mcp.execute"])),
-    control()
-      .prepare("INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, ?)")
-      .bind(`${caller.tenantId}:role`, caller.tenantId, `role-${caller.tenantId}`),
   ]);
-  await tenantDb()
+  await seedTenantRoleProjection(caller.tenantId, `role-${caller.tenantId}`, ["mcp.execute"]);
+  await tenantDb(caller.tenantId)
     .prepare(
       `INSERT INTO api_keys
          (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4,
@@ -177,7 +176,6 @@ async function toolsCall(key: string): Promise<{ status: number; body: JsonBody 
 beforeAll(async () => {
   const b = bindings();
   await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
-  await applyD1Migrations(b.TENANT_DB_A, b.TEST_TENANT_D1_SCHEMA);
 });
 
 beforeEach(async () => {
@@ -185,11 +183,9 @@ beforeEach(async () => {
     control().prepare("DELETE FROM quota_policies"),
     control().prepare("DELETE FROM tenant_databases"),
     control().prepare("DELETE FROM api_key_directory"),
-    control().prepare("DELETE FROM tenant_role_bindings"),
     control().prepare("DELETE FROM roles"),
   ]);
-  await tenantDb().prepare("DELETE FROM api_keys").run();
-  seedFixture();
+  seedFixture({ tenantId: "tenant-mcp-shared-rate-limit" });
 });
 
 describe("the committed config binds the gateway's counter, not a private one", () => {

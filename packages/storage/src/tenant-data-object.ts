@@ -192,6 +192,94 @@ const WITNESS_TABLE = "projects";
 const REFUSAL = "tenant_data_object";
 
 /**
+ * Role bindings and their local catalog are an operator projection. Letting a
+ * tenant-facing SQL caller write either half would allow it to manufacture its
+ * own permission grant, so those writes require the separate privileged RPC.
+ */
+const PRIVILEGED_WRITE_TABLES = ["tenant_role_bindings", "tenant_role_catalog"] as const;
+
+function stripSqlCommentsAndStrings(sql: string): string {
+  let output = "";
+  let mode: "normal" | "line_comment" | "block_comment" | "string" = "normal";
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (mode === "line_comment") {
+      if (current === "\n") {
+        output += current;
+        mode = "normal";
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (mode === "block_comment") {
+      if (current === "*" && next === "/") {
+        output += "  ";
+        index += 1;
+        mode = "normal";
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (mode === "string") {
+      if (current === "'") {
+        if (next === "'") {
+          output += "  ";
+          index += 1;
+        } else {
+          output += " ";
+          mode = "normal";
+        }
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (current === "-" && next === "-") {
+      output += "  ";
+      index += 1;
+      mode = "line_comment";
+    } else if (current === "/" && next === "*") {
+      output += "  ";
+      index += 1;
+      mode = "block_comment";
+    } else if (current === "'") {
+      output += " ";
+      mode = "string";
+    } else {
+      output += current;
+    }
+  }
+  return output;
+}
+
+function requiresPrivilegedWrite(sql: string): string | null {
+  // This is deliberately conservative. Tokenising after a stateful pass that
+  // removes comments and string literals catches CTEs, `UPDATE OR REPLACE`,
+  // schema-qualified names, and trigger bodies without trying to implement
+  // SQLite's grammar here. The state machine matters: `--` and `/*` inside a
+  // legal string must not hide SQL that follows that string.
+  const normalized = stripSqlCommentsAndStrings(sql);
+  const tokens = new Set(
+    (normalized.match(/[A-Za-z_][A-Za-z0-9_$]*/g) ?? []).map((token) => token.toLowerCase()),
+  );
+  if (
+    !["insert", "replace", "update", "delete", "create", "alter", "drop", "truncate"].some((verb) =>
+      tokens.has(verb),
+    )
+  ) {
+    return null;
+  }
+  for (const table of PRIVILEGED_WRITE_TABLES) {
+    if (tokens.has(table)) return table;
+  }
+  return null;
+}
+
+/**
  * Split a migration file into single statements.
  *
  * A near-copy of the splitter in `apps/gateway/test/setup-d1.ts:70` (and its
@@ -201,9 +289,9 @@ const REFUSAL = "tenant_data_object";
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the FOURTEEN files have 32
+ *    comment lines containing a `;` mid-prose, and the FIFTEEN files have 33
  *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
- *    1 in 0011, 1 in 0012 and 1 in 0013) — 32, not 18,
+ *    1 in 0011, 1 in 0012, 1 in 0013 and 1 in 0015) — 33, not 18,
  *    is the number that bounds this function's exposure. Splitting before
  *    stripping cuts statements in half at every one of them.
  *
@@ -216,7 +304,7 @@ const REFUSAL = "tenant_data_object";
  *    lossless over `0005_responses_conversations.sql` — that file indents `--`
  *    comments BETWEEN columns, and a filter anchored at column 0 would corrupt
  *    the table.
- *  * It is safe today because, measured over all FOURTEEN files, every non-comment
+ *  * It is safe today because, measured over all FIFTEEN files, every non-comment
  *    `;` is at end-of-line, there is no `;` inside any string literal in a live
  *    statement, and there are no trailing inline comments. **A migration that
  *    introduces a `CREATE TRIGGER`, or a `;` inside a quoted literal, breaks
@@ -258,7 +346,7 @@ export class TenantDataObject extends DurableObject {
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 115 statements
+    // gate inside `#migrate` is what keeps that from re-applying 128 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -306,6 +394,7 @@ export class TenantDataObject extends DurableObject {
    */
   async query(request: TenantDataQueryRequest): Promise<TenantDataResult> {
     await this.#admit(request.tenantId);
+    this.#refuseUnprivilegedWrite(request.sql);
     // One statement is still a transaction: `changes` is measured as a
     // `total_changes()` delta, and a delta straddling a commit boundary could
     // be polluted by another statement. `transactionSync` also gives a bare
@@ -329,11 +418,26 @@ export class TenantDataObject extends DurableObject {
    */
   async batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]> {
     await this.#admit(request.tenantId);
+    for (const statement of request.statements) this.#refuseUnprivilegedWrite(statement.sql);
     return this.#state.storage.transactionSync(() => {
       const results: TenantDataResult[] = [];
       for (const statement of request.statements) {
         results.push(this.#exec(statement));
       }
+      return results;
+    });
+  }
+
+  /**
+   * Internal operator path for projections that must be written atomically.
+   * The binding is private to Worker-to-Worker bindings; ordinary tenant
+   * callers only receive `query` and `batch` through the D1 facade.
+   */
+  async privilegedBatch(request: TenantDataBatchRequest): Promise<TenantDataResult[]> {
+    await this.#admit(request.tenantId);
+    return this.#state.storage.transactionSync(() => {
+      const results: TenantDataResult[] = [];
+      for (const statement of request.statements) results.push(this.#exec(statement));
       return results;
     });
   }
@@ -393,6 +497,14 @@ export class TenantDataObject extends DurableObject {
     }
   }
 
+  #refuseUnprivilegedWrite(sql: string): void {
+    const table = requiresPrivilegedWrite(sql);
+    if (table === null) return;
+    throw new Error(
+      `${REFUSAL}: writes to ${table} require the privileged operator RPC; refusing ordinary tenant SQL`,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Execution
   // -------------------------------------------------------------------------
@@ -442,8 +554,8 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 115 statements of the fourteen files — 39 `CREATE TABLE IF
-   * NOT EXISTS`, 54 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
+   * re-running the 128 statements of the fifteen files — 47 `CREATE TABLE IF
+   * NOT EXISTS`, 59 `CREATE INDEX`, 5 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
    * COLUMN` and the ledger `INSERT`. (Counted, not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
    * whole census then went stale again the moment `0013_guardrail_evaluations.sql`

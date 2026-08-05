@@ -81,6 +81,12 @@
  * the body size and the streaming flag have all been checked.
  */
 
+import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+
 /** Binding name of the CONTROL D1. Same constant `guardrails/d1.ts` uses. */
 export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
 
@@ -300,7 +306,23 @@ export function cacheGovernanceSourceFromEnv(
   env: Record<string, unknown> | undefined,
 ): CacheGovernanceSource | null {
   const binding = env?.[CONTROL_DATABASE_BINDING];
-  return isGovernanceDatabase(binding) ? d1CacheGovernanceSource(binding) : null;
+  const namespace = env?.TENANT_DATA as TenantDataNamespace | undefined;
+  if (!isGovernanceDatabase(binding) || namespace === undefined) return null;
+  const controlDb = binding as D1Database;
+  const router = new DurableObjectTenantDatabaseRouter(namespace, controlDb);
+  return {
+    async governanceFor(scopeId: string): Promise<CacheGovernanceLookup> {
+      try {
+        await backfillTenantConfigurationPolicy(controlDb, router, scopeId);
+        const handle = await router.forTenant(scopeId);
+        return d1CacheGovernanceSource(handle.db).governanceFor(scopeId);
+      } catch (error) {
+        return CACHE_GOVERNANCE_UNAVAILABLE(
+          `semantic cache policy object lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

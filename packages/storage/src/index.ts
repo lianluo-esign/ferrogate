@@ -232,6 +232,7 @@ export * from "./tenant-dispatch.js";
 export * from "./tenant-model-catalog.js";
 export * from "./tenant-provisioning.js";
 export * from "./mcp-catalog.js";
+export * from "./tenant-config-backfill.js";
 export * from "./d1/index.js";
 
 /**

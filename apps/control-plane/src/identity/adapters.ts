@@ -47,6 +47,7 @@ import type {
 import { JwksCache } from "@ferrogate/identity";
 import type { EnvLike } from "@ferrogate/secrets";
 import { EnvSecretResolver, parseSecretRef } from "@ferrogate/secrets";
+import { StorageError, backfillTenantConfigurationPolicy } from "@ferrogate/storage";
 import type {
   SamlPorts,
   StoredSsoProviderConfig as SamlStoredSsoProviderConfig,
@@ -316,17 +317,32 @@ export class ControlPlaneIdentityRepository implements IdentityRepository {
     return new D1AdminConsoleSessionStore(this.#db());
   }
 
+  async #tenantDb(tenantId: string): Promise<D1Database> {
+    const control = this.#db();
+    await backfillTenantConfigurationPolicy(control, this.#deps.tenantDatabases, tenantId);
+    return (await this.#deps.tenantDatabases.forTenant(tenantId)).db;
+  }
+
   async getSsoProviderConfig(tenantId: string): Promise<FullSsoProviderConfig | null> {
-    const row = await this.#db()
-      .prepare("SELECT * FROM sso_provider_configs WHERE tenant_id = ?")
-      .bind(tenantId)
-      .first<RawSsoConfig>();
+    let row: RawSsoConfig | null;
+    try {
+      row = await (await this.#tenantDb(tenantId))
+        .prepare("SELECT * FROM sso_provider_configs WHERE tenant_id = ?")
+        .bind(tenantId)
+        .first<RawSsoConfig>();
+    } catch (error) {
+      // An unregistered tenant has no configuration and must not materialize
+      // storage just to answer the mounted route's 404. Registered-but-
+      // unreachable object storage still propagates as an outage.
+      if (error instanceof StorageError && error.kind === "not_found") return null;
+      throw error;
+    }
     return row === null ? null : decodeSsoConfig(row);
   }
 
   /** Upsert — `tenant_id` is the primary key, so a tenant has ONE config, ever. */
   async putSsoProviderConfig(config: FullSsoProviderConfig): Promise<void> {
-    await this.#db()
+    await (await this.#tenantDb(config.tenantId))
       .prepare(
         `INSERT INTO sso_provider_configs (
            tenant_id, provider_kind, default_role, group_role_mapping_json,
@@ -379,7 +395,7 @@ export class ControlPlaneIdentityRepository implements IdentityRepository {
   }
 
   async deleteSsoProviderConfig(tenantId: string): Promise<boolean> {
-    const result = await this.#db()
+    const result = await (await this.#tenantDb(tenantId))
       .prepare("DELETE FROM sso_provider_configs WHERE tenant_id = ?")
       .bind(tenantId)
       .run();

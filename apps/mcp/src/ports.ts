@@ -76,8 +76,13 @@ import {
   flattenedText,
 } from "@ferrogate/guardrails";
 import { type EnvLike, SecretResolverRegistry } from "@ferrogate/secrets";
-import { EnvBindingTenantDatabaseRouter } from "@ferrogate/storage";
-import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import {
+  DurableObjectTenantDatabaseRouter,
+  StorageError,
+  type TenantDatabaseHandle,
+  type TenantDatabaseRouter,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace, TenantDataStatement } from "@ferrogate/storage/durable-objects";
 
 // `./durable.js` imports the TYPES and `webCryptoIdentityCipher` back out of
 // this module. The cycle is safe because neither side touches the other at
@@ -2097,9 +2102,9 @@ export function durableIdentityBound(env: McpEnv): boolean {
  * Worker already binds as `env.DB` (`wrangler.toml`,
  * `database_name = "ferrogate-control"`). The per-tenant databases the NATIVE
  * leg's second hop needs are resolved by NAME at runtime through
- * `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter`, so they are not part
- * of this predicate: a deployment with no tenant bindings still authenticates
- * operator/static keys and refuses virtual ones with a 401, which is a partial
+ * the DO-only tenant router, so the namespace itself is not part of this
+ * predicate: a deployment with no TENANT_DATA still authenticates operator/
+ * static keys and refuses virtual ones with a 503, which is a partial
  * capability rather than an unready Worker.
  */
 export function durableAuthBound(env: McpEnv): boolean {
@@ -2288,9 +2293,9 @@ export function resolvePorts(env: McpEnv): McpPorts {
 /**
  * Choose the {@link AuthPort} for this env.
  *
- * `env.DB` bound ⇒ {@link D1McpAuth} over the CONTROL database, with
- * `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter` for the NATIVE leg's
- * second hop and — in the dev posture only — the in-memory table as fallback.
+ * `env.DB` bound ⇒ {@link D1McpAuth} over the CONTROL database, with the
+ * DO-only tenant router for the NATIVE leg's second hop and — in the dev
+ * posture only — the in-memory table as fallback.
  * No `env.DB` ⇒ {@link UnboundAuth}, which is a 503 and never an open door.
  *
  * The router is constructed here rather than inside `D1McpAuth` so the class
@@ -2317,7 +2322,7 @@ function durableApprovals(env: McpEnv): ApprovalPort {
 function durableAuth(env: McpEnv): AuthPort {
   if (env.DB === undefined) return new UnboundAuth();
   const options: D1McpAuthOptions = {
-    router: new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
+    router: tenantDatabaseRouter(env, env.DB),
   };
   return new D1McpAuth(
     env.DB,
@@ -2370,17 +2375,87 @@ function durableAuth(env: McpEnv): AuthPort {
  */
 function durableLifecycle(env: McpEnv): TenancyLifecycleGatePort {
   if (env.DB === undefined) return new UnboundLifecycleGate();
-  return new D1McpTenancyLifecycleGate(
-    env.DB,
-    new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
-  );
+  return new D1McpTenancyLifecycleGate(env.DB, tenantDatabaseRouter(env, env.DB));
 }
 
 function durableAdmission(env: McpEnv): AdmissionPort {
   if (env.DB === undefined) return ADMIT_ALL;
-  return admissionFromEnv(
-    env,
-    new EnvBindingTenantDatabaseRouter(env as unknown as Record<string, unknown>, env.DB),
+  return admissionFromEnv(env, tenantDatabaseRouter(env, env.DB));
+}
+
+/**
+ * MCP serves the Durable Object tenant plane only. The control registry is
+ * consulted solely to reject an unprovisioned or differently-homed tenant; it
+ * is never used as a tenant data fallback.
+ */
+class DurableObjectOnlyTenantDatabaseRouter implements TenantDatabaseRouter {
+  readonly backend = "durable_object" as const;
+
+  constructor(
+    private readonly controlDb: D1Database,
+    private readonly objectRouter: DurableObjectTenantDatabaseRouter,
+  ) {}
+
+  control(): D1Database {
+    return this.controlDb;
+  }
+
+  async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+    await this.assertDurableObjectTenant(tenantId);
+    return this.objectRouter.forTenant(tenantId);
+  }
+
+  async privilegedBatch(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<void> {
+    await this.assertDurableObjectTenant(tenantId);
+    await this.objectRouter.privilegedBatch(tenantId, statements);
+  }
+
+  provisionedTenants(): Promise<readonly string[]> {
+    return this.objectRouter.provisionedTenants();
+  }
+
+  private async assertDurableObjectTenant(tenantId: string): Promise<void> {
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime("MCP tenant database routing requires a non-empty tenant id");
+    }
+    const row = await this.controlDb
+      .prepare(
+        "SELECT storage_backend FROM tenant_databases WHERE tenant_id = ?1",
+      )
+      .bind(tenantId)
+      .first<{ storage_backend: string | null }>();
+    if (row === null) {
+      throw StorageError.notFound(`tenant ${tenantId} has no provisioned tenant database`);
+    }
+    if (row.storage_backend !== "durable_object") {
+      throw StorageError.runtime(
+        `tenant ${tenantId} is registered on ${row.storage_backend ?? "an unknown"} storage, but MCP requires durable_object storage`,
+      );
+    }
+  }
+}
+
+function tenantDatabaseRouter(env: McpEnv, controlDb: D1Database): TenantDatabaseRouter {
+  if (env.TENANT_DATA === undefined) {
+    return {
+      backend: "durable_object",
+      control: () => controlDb,
+      forTenant: async (tenantId: string) => {
+        throw StorageError.runtime(
+          `MCP tenant ${tenantId} cannot be served: TENANT_DATA Durable Object binding is missing`,
+        );
+      },
+      provisionedTenants: async () => {
+        throw StorageError.runtime("MCP tenant routing cannot enumerate tenants without TENANT_DATA");
+      },
+    };
+  }
+  return new DurableObjectOnlyTenantDatabaseRouter(
+    controlDb,
+    new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb),
   );
 }
 
@@ -2413,6 +2488,9 @@ function durableEntitlements(env: McpEnv): EntitlementPort {
   if (env.DB === undefined) return inMemoryPorts().entitlements;
   return new D1ToolEntitlements(
     env.DB,
-    env.FG_DEV_IN_MEMORY_PORTS === "1" ? { fallback: inMemoryPorts().entitlements } : {},
+    {
+      tenantDatabases: tenantDatabaseRouter(env, env.DB),
+      ...(env.FG_DEV_IN_MEMORY_PORTS === "1" ? { fallback: inMemoryPorts().entitlements } : {}),
+    },
   );
 }

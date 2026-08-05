@@ -145,20 +145,21 @@ describe("every Durable Object binding is deployable", () => {
   });
 });
 
-describe("the BORROWED counter namespace (#666)", () => {
+describe("the BORROWED gateway namespaces (#666/#863)", () => {
   const borrowed = stanzas("durable_objects.bindings").filter((body) => !LOCAL(body));
 
-  it("binds only gateway-owned RATE_LIMIT and TENANT_DATA namespaces", () => {
+  it("binds RATE_LIMIT and TENANT_DATA from apps/gateway", () => {
     expect(borrowed.length).toBe(2);
-    const rateLimit = borrowed.find((body) => value(body, "name") === "RATE_LIMIT");
-    expect(rateLimit).toBeDefined();
-    expect(value(rateLimit as string[], "class_name")).toBe("RateLimiterDurableObject");
-    expect(value(rateLimit as string[], "script_name")).toBe("ferrogate-gateway");
-
-    const tenantData = borrowed.find((body) => value(body, "name") === "TENANT_DATA");
-    expect(tenantData).toBeDefined();
-    expect(value(tenantData as string[], "class_name")).toBe("TenantDataObject");
-    expect(value(tenantData as string[], "script_name")).toBe("ferrogate-gateway");
+    const body = borrowed.find((candidate) => value(candidate, "name") === "RATE_LIMIT");
+    const tenantData = borrowed.find((candidate) => value(candidate, "name") === "TENANT_DATA");
+    if (body === undefined || tenantData === undefined) {
+      throw new Error("the committed config must borrow RATE_LIMIT and TENANT_DATA");
+    }
+    expect(value(body, "name")).toBe("RATE_LIMIT");
+    expect(value(body, "class_name")).toBe("RateLimiterDurableObject");
+    expect(value(body, "script_name")).toBe("ferrogate-gateway");
+    expect(value(tenantData, "class_name")).toBe("TenantDataObject");
+    expect(value(tenantData, "script_name")).toBe("ferrogate-gateway");
   });
 
   it("neither migrates nor exports the borrowed class", () => {

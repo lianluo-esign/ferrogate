@@ -43,6 +43,7 @@
  */
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { SemanticResponseCache } from "../../src/cache/semantic.js";
 import { MemoryResponseCacheStore } from "../../src/cache/store.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
@@ -50,11 +51,13 @@ import { CACHE_STATUS_HEADER, responseCache } from "../../src/middleware/respons
 import { createGatewayApp } from "../../src/routes/index.js";
 import { ALL_ROUTES, fixedRequestIds } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
+import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 const CHAT = `${BASE}/v1/chat/completions`;
 
 const CONTROL_DB = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
+const TENANT_DATA = (env as unknown as { TENANT_DATA: TenantDataNamespace }).TENANT_DATA;
 
 /** Two tenants, two credentials — the partition a governed cache must keep. */
 const NATIVE_KEYS = JSON.stringify([
@@ -128,7 +131,7 @@ function gateway(
   // A FRESH env object per gateway: `guardrailPolicyFingerprint` memoizes on
   // the env identity, and reusing one would carry a memo across a test that
   // changes durable state.
-  const fullEnv = { ...DEPLOYMENT_VARS, CONTROL_DB, ...overrides };
+  const fullEnv = { ...DEPLOYMENT_VARS, CONTROL_DB, TENANT_DATA, ...overrides };
   return {
     post: (key, prompt) =>
       app.request(
@@ -162,7 +165,7 @@ async function setPolicy(
     invalidationEpoch?: number;
   },
 ): Promise<void> {
-  await CONTROL_DB.prepare(
+  await tenantObjectDb(scopeId).prepare(
     "INSERT INTO semantic_cache_policies " +
       "(scope_type, scope_id, enabled, mode, similarity_threshold, ttl_seconds, scoped_models, " +
       " invalidation_epoch, updated_at_unix, updated_by, generation) " +
@@ -186,7 +189,7 @@ async function setPolicy(
 }
 
 beforeEach(async () => {
-  await CONTROL_DB.prepare("DELETE FROM semantic_cache_policies").run();
+  await resetTenantObjectState(["tenant_a", "tenant_b"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -489,22 +492,30 @@ describe("an unreadable governance table fails closed", () => {
       // database, and only the governance query rejects. A wholesale broken
       // binding would 503 on the drain gate long before the cache ran, and the
       // test would pass for a reason that has nothing to do with the cache.
-      const brokenGovernance = {
-        prepare(sql: string) {
-          if (sql.includes("semantic_cache_policies")) {
-            return {
-              bind: () => ({
-                all: () => Promise.reject(new Error("no such table: semantic_cache_policies")),
-              }),
-            };
-          }
-          return CONTROL_DB.prepare(sql);
+      const brokenTenantData = {
+        idFromName: (name: string) => TENANT_DATA.idFromName(name),
+        get(id: DurableObjectId) {
+          const stub = TENANT_DATA.get(id) as unknown as {
+            query(request: { sql: string; params?: readonly unknown[] }): Promise<unknown>;
+            batch(request: unknown): Promise<unknown>;
+            privilegedBatch?(request: unknown): Promise<unknown>;
+          };
+          return {
+            query(request: { sql: string; params?: readonly unknown[] }) {
+              if (request.sql.includes("semantic_cache_policies")) {
+                return Promise.reject(new Error("no such table: semantic_cache_policies"));
+              }
+              return stub.query(request);
+            },
+            batch: (request: unknown) => stub.batch(request),
+            ...(stub.privilegedBatch === undefined
+              ? {}
+              : { privilegedBatch: (request: unknown) => stub.privilegedBatch?.(request) }),
+          };
         },
-        batch: (statements: unknown) =>
-          (CONTROL_DB as unknown as { batch(s: unknown): unknown }).batch(statements),
-      };
-      const first = await gateway(stores, { CONTROL_DB: brokenGovernance }).post("fg_a", PROMPT);
-      const second = await gateway(stores, { CONTROL_DB: brokenGovernance }).post("fg_a", PROMPT);
+      } as unknown as TenantDataNamespace;
+      const first = await gateway(stores, { TENANT_DATA: brokenTenantData }).post("fg_a", PROMPT);
+      const second = await gateway(stores, { TENANT_DATA: brokenTenantData }).post("fg_a", PROMPT);
 
       // Availability is never traded for a cache: both requests are served.
       expect(first.status).toBe(200);

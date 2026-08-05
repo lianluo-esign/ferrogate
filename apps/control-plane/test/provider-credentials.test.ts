@@ -20,6 +20,11 @@ import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, tenantKey } from "./harness.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 /**
  * A TEST master key — 32 bytes of `0x2a`, base64. Deterministic and public on
@@ -58,13 +63,19 @@ function revoke(secret: string, alias: string): Promise<Response> {
   });
 }
 
-async function rows(): Promise<
+async function rows(tenantId: string): Promise<
   { tenant_id: string; alias: string; ciphertext: string; last4: string }[]
 > {
-  const result = await db()
+  const result = await tenantObjectDb(tenantId)
     .prepare("SELECT tenant_id, alias, ciphertext, last4 FROM tenant_provider_credentials")
     .all<{ tenant_id: string; alias: string; ciphertext: string; last4: string }>();
   return result.results ?? [];
+}
+
+async function allRows(): Promise<
+  { tenant_id: string; alias: string; ciphertext: string; last4: string }[]
+> {
+  return [...(await rows(ACME)), ...(await rows(RIVAL))];
 }
 
 beforeAll(async () => {
@@ -73,7 +84,9 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await resetD1();
-  await db().prepare("DELETE FROM tenant_provider_credentials").run();
+  await resetTenantObjectState([ACME, RIVAL]);
+  await registerDurableObjectTenant(ACME);
+  await registerDurableObjectTenant(RIVAL);
   armWorld();
 });
 
@@ -108,7 +121,7 @@ describe("register and rotate, with no deploy", () => {
       provider: "openai-main",
       value: "sk-acme-negotiated-0001",
     });
-    const stored = await rows();
+    const stored = await rows(ACME);
     expect(stored).toHaveLength(1);
     // The strongest cheap statement: the plaintext is absent from the column
     // that holds the credential, and from the whole row.
@@ -121,7 +134,7 @@ describe("register and rotate, with no deploy", () => {
       provider: "openai-main",
       value: "sk-acme-negotiated-0001",
     });
-    const before = (await rows())[0]?.ciphertext;
+    const before = (await rows(ACME))[0]?.ciphertext;
 
     const rotated = await put(ACME_KEY, "openai-enterprise", {
       provider: "openai-main",
@@ -129,7 +142,7 @@ describe("register and rotate, with no deploy", () => {
     });
     expect(rotated.status).toBe(200);
 
-    const after = await rows();
+    const after = await rows(ACME);
     // Still ONE row — a rotation replaces, it does not accumulate.
     expect(after).toHaveLength(1);
     expect(after[0]?.ciphertext).not.toBe(before);
@@ -151,7 +164,7 @@ describe("register and rotate, with no deploy", () => {
       value: "sk-acme-negotiated-0001",
     });
     expect(response.status).toBe(400);
-    expect(await rows()).toHaveLength(0);
+    expect(await rows(ACME)).toHaveLength(0);
   });
 });
 
@@ -175,7 +188,7 @@ describe("THE FENCE: one tenant cannot touch another's alias", () => {
   it("cannot revoke it", async () => {
     expect((await revoke(RIVAL_KEY, "openai-enterprise")).status).toBe(404);
     // …and ACME's row is untouched and still live.
-    const stored = await rows();
+    const stored = await allRows();
     expect(stored).toHaveLength(1);
     expect(stored[0]?.tenant_id).toBe(ACME);
     expect((await list(ACME_KEY)).status).toBe(200);
@@ -188,7 +201,7 @@ describe("THE FENCE: one tenant cannot touch another's alias", () => {
     });
     expect(response.status).toBe(200);
 
-    const stored = await rows();
+    const stored = await allRows();
     expect(stored).toHaveLength(2);
     const acme = stored.find((row) => row.tenant_id === ACME);
     const rival = stored.find((row) => row.tenant_id === RIVAL);

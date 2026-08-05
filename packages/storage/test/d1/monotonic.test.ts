@@ -7,11 +7,11 @@
  * an in-order-only test passes against a plain last-write-wins upsert and
  * therefore proves nothing.
  */
-import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   ControlMonotonicUpserts,
   type TenantDatabaseHandle,
+  type TenantDatabaseRouter,
   TenantMonotonicUpserts,
 } from "../../src/index.js";
 import { TENANT_A, TENANT_B, resetTenantData, setupTenantRouter, tenantDb } from "./harness.js";
@@ -20,19 +20,21 @@ const NOW = 1_700_000_000;
 
 let handleA: TenantDatabaseHandle;
 let handleB: TenantDatabaseHandle;
+let router: TenantDatabaseRouter;
 let control: ControlMonotonicUpserts;
 
 beforeAll(async () => {
-  const router = await setupTenantRouter();
+  router = await setupTenantRouter();
   handleA = await router.forTenant(TENANT_A);
   handleB = await router.forTenant(TENANT_B);
-  control = new ControlMonotonicUpserts(router.control());
+  control = new ControlMonotonicUpserts(router);
 });
 
 beforeEach(async () => {
   await resetTenantData(tenantDb(TENANT_A));
   await resetTenantData(tenantDb(TENANT_B));
-  await env.CONTROL_DB.prepare("DELETE FROM control_plane_replay_floors").run();
+  await tenantDb(TENANT_A).prepare("DELETE FROM control_plane_replay_floors").run();
+  await tenantDb(TENANT_B).prepare("DELETE FROM control_plane_replay_floors").run();
 });
 
 describe("observed presence", () => {
@@ -145,32 +147,32 @@ describe("agent cost burn", () => {
 
 describe("control-plane replay floors", () => {
   test("a lower revision NEVER lowers the floor, and the caller reads back the winner", async () => {
-    expect(await control.raiseReplayFloor("t", "deploy_1", 10, NOW)).toBe(10);
+    expect(await control.raiseReplayFloor(TENANT_A, "deploy_1", 10, NOW)).toBe(10);
     // A lagging deployment re-announces an older snapshot.
-    expect(await control.raiseReplayFloor("t", "deploy_1", 4, NOW + 1)).toBe(10);
-    expect(await control.getReplayFloor("t", "deploy_1")).toBe(10);
+    expect(await control.raiseReplayFloor(TENANT_A, "deploy_1", 4, NOW + 1)).toBe(10);
+    expect(await control.getReplayFloor(TENANT_A, "deploy_1")).toBe(10);
 
-    expect(await control.raiseReplayFloor("t", "deploy_1", 11, NOW + 2)).toBe(11);
+    expect(await control.raiseReplayFloor(TENANT_A, "deploy_1", 11, NOW + 2)).toBe(11);
   });
 
   test("floors are per (tenant, deployment)", async () => {
-    await control.raiseReplayFloor("t1", "d1", 5, NOW);
-    await control.raiseReplayFloor("t1", "d2", 9, NOW);
-    await control.raiseReplayFloor("t2", "d1", 1, NOW);
-    expect(await control.getReplayFloor("t1", "d1")).toBe(5);
-    expect(await control.getReplayFloor("t1", "d2")).toBe(9);
-    expect(await control.getReplayFloor("t2", "d1")).toBe(1);
+    await control.raiseReplayFloor(TENANT_A, "d1", 5, NOW);
+    await control.raiseReplayFloor(TENANT_A, "d2", 9, NOW);
+    await control.raiseReplayFloor(TENANT_B, "d1", 1, NOW);
+    expect(await control.getReplayFloor(TENANT_A, "d1")).toBe(5);
+    expect(await control.getReplayFloor(TENANT_A, "d2")).toBe(9);
+    expect(await control.getReplayFloor(TENANT_B, "d1")).toBe(1);
   });
 
   test("CONCURRENT announcements converge on the maximum", async () => {
     const revisions = [7, 3, 12, 1, 9, 12, 2];
-    await Promise.all(revisions.map((r) => control.raiseReplayFloor("t", "d", r, NOW)));
-    expect(await control.getReplayFloor("t", "d")).toBe(12);
+    await Promise.all(revisions.map((r) => control.raiseReplayFloor(TENANT_A, "d", r, NOW)));
+    expect(await control.getReplayFloor(TENANT_A, "d")).toBe(12);
   });
 
   test("an unknown floor reads back as undefined, not 0", async () => {
     // 0 would be indistinguishable from a real floor of 0, which is a legal
     // starting revision — the caller must be able to tell "never announced".
-    expect(await control.getReplayFloor("nobody", "nowhere")).toBeUndefined();
+    expect(await control.getReplayFloor(TENANT_B, "nowhere")).toBeUndefined();
   });
 });

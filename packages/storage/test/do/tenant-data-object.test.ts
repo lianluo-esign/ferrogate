@@ -10,9 +10,9 @@
  *    choice, never as a SQL surface);
  *  * that `transactionSync` really rolls back, so `batch()` is genuinely atomic
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
- *  * that the version gate really stops the 109-statement apply re-running on
+ *  * that the version gate really stops the 128-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
- *    fourteen tenant migrations are covered by the census below;
+ *    fifteen tenant migrations are covered by the census below;
  *  * that two `idFromName` objects really hold physically different databases.
  *
  * A fake namespace would agree with all four because the fake was written to
@@ -21,6 +21,7 @@
 import { env, listDurableObjectIds, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
+  type TenantDataBatchRequest,
   type TenantDataNamespace,
   type TenantDataObject,
   sqlStatements,
@@ -37,7 +38,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0014.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0015.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -55,10 +56,13 @@ const TENANT_TABLES = [
   "api_keys",
   "asset_bundle_files",
   "asset_channels",
+  "budget_alert_notifications",
   "catalog_audit_outbox",
   "catalog_model_offerings",
   "catalog_models",
   "catalog_revisions",
+  "control_plane_replay_floors",
+  "delegation_revocations",
   "guardrail_check_evaluations",
   "guardrail_evaluations",
   "mcp_identity_generations",
@@ -71,11 +75,16 @@ const TENANT_TABLES = [
   "request_logs",
   "responses_conversations",
   "retention_policies",
+  "semantic_cache_policies",
+  "sso_provider_configs",
   "storage_schema_migrations",
   "stored_assets",
   "tenant_contexts",
   "tenant_database_identity",
+  "tenant_provider_credentials",
   "tenant_provisioning_marks",
+  "tenant_role_bindings",
+  "tenant_role_catalog",
   "usage_aggregate_rollups",
   "usage_metadata_rollups",
   "usage_monthly_rollups",
@@ -91,6 +100,14 @@ const GLOBEX = "tenant_globex";
 
 function objectFor(tenantId: string): DurableObjectStub<TenantDataObject> {
   return env.TENANT_DATA.get(env.TENANT_DATA.idFromName(tenantId));
+}
+
+type PrivilegedTenantObject = DurableObjectStub<TenantDataObject> & {
+  privilegedBatch(request: TenantDataBatchRequest): Promise<unknown[]>;
+};
+
+function privilegedObjectFor(tenantId: string): PrivilegedTenantObject {
+  return objectFor(tenantId) as unknown as PrivilegedTenantObject;
 }
 
 /**
@@ -163,7 +180,7 @@ describe("the statement splitter", () => {
 
   test("the census `sqlStatements`' own docblock states is still the census", () => {
     // WHY A TEST AND NOT A COMMENT. `sqlStatements`' header carries a safety
-    // ARGUMENT ("measured over all fourteen files, every non-comment `;` is at
+    // ARGUMENT ("measured over all fifteen files, every non-comment `;` is at
     // end-of-line…") and `#migrate`'s header carries the statement breakdown
     // that justifies the version gate. Both are measurements, and a measurement
     // in a comment rots: a migration can land after the last census and
@@ -175,7 +192,7 @@ describe("the statement splitter", () => {
     //
     // If this fails, do NOT change the numbers here alone. Update the four
     // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
-    // count and "all FOURTEEN files" in the `sqlStatements` docblock, the
+    // count and "all FIFTEEN files" in the `sqlStatements` docblock, the
     // "N statements" in the constructor comment, and the breakdown in
     // `#migrate`'s docblock.
     const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
@@ -189,10 +206,10 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 14,
-      statements: 115,
-      createTable: 39,
-      createIndex: 54,
+      files: 15,
+      statements: 128,
+      createTable: 47,
+      createIndex: 59,
       createUniqueIndex: 5,
       alterTable: 10,
       insert: 6,
@@ -218,8 +235,9 @@ describe("the statement splitter", () => {
       "0011_asset_file_metadata": 1,
       "0012_request_logs_agent_runs": 1,
       "0013_guardrail_evaluations": 1,
+      "0015_tenant_configuration_policy": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(32);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(33);
 
     // The claim those two counts exist to support, asserted rather than
     // restated: NO statement the splitter produces still carries a `;`, i.e.
@@ -242,7 +260,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(14);
+    expect(TENANT_MIGRATIONS.length).toBe(15);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -307,6 +325,146 @@ describe("a fresh tenant object", () => {
         }),
       ),
     ).toMatch(/CHECK constraint failed|constraint/i);
+  });
+});
+
+describe("tenant configuration and policy state", () => {
+  test("rejects tenant-role binding writes on the ordinary RPC", async () => {
+    const tenantId = "tenant_privileged_write";
+    const message = await refusal(
+      objectFor(tenantId).batch({
+        tenantId,
+        statements: [
+          {
+            sql:
+              "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
+              "VALUES (?, ?, ?, ?)",
+            params: ["binding_ordinary", tenantId, "role_operator", 100],
+          },
+        ],
+      }),
+    );
+    expect(message).toMatch(/privileged/i);
+  });
+
+  test("rejects alternate SQLite write forms for protected role tables", async () => {
+    const statements = [
+      "UPDATE OR REPLACE tenant_role_bindings SET role_id = 'role_operator'",
+      "DELETE FROM main.tenant_role_catalog",
+      "WITH candidate AS (SELECT 1) INSERT INTO tenant_role_bindings (id) SELECT 'binding' FROM candidate",
+      "CREATE TRIGGER role_projection_trigger AFTER INSERT ON projects BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
+      "CREATE TRIGGER role_projection_guard AFTER INSERT ON projects WHEN '--' = '--' BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
+    ];
+    for (const [index, sql] of statements.entries()) {
+      const tenantId = `tenant_privileged_syntax_${index}`;
+      expect(
+        await refusal(objectFor(tenantId).query({ tenantId, sql })),
+      ).toMatch(/privileged/i);
+    }
+  });
+
+  test("accepts a role snapshot and binding only through the privileged RPC", async () => {
+    const tenantId = "tenant_privileged_role";
+    await privilegedObjectFor(tenantId).privilegedBatch({
+      tenantId,
+      statements: [
+        {
+          sql:
+            "INSERT INTO tenant_role_catalog " +
+            "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+          params: [
+            "role_operator",
+            "Operator",
+            "operator",
+            "",
+            '["tenant.read"]',
+            100,
+            100,
+          ],
+        },
+        {
+          sql:
+            "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
+            "VALUES (?, ?, ?, ?)",
+          params: ["binding_privileged", tenantId, "role_operator", 100],
+        },
+      ],
+    });
+
+    const rows = await objectFor(tenantId).query({
+      tenantId,
+      sql:
+        "SELECT b.tenant_id, b.role_id, c.permission_keys_json " +
+        "FROM tenant_role_bindings AS b " +
+        "JOIN tenant_role_catalog AS c ON c.role_id = b.role_id " +
+        "WHERE b.tenant_id = ?",
+      params: [tenantId],
+    });
+    expect(rows.results).toEqual([
+      { tenant_id: tenantId, role_id: "role_operator", permission_keys_json: '["tenant.read"]' },
+    ]);
+  });
+
+  test("keeps configuration and policy rows physically isolated per tenant", async () => {
+    const tenantA = "tenant_config_isolation_a";
+    const tenantB = "tenant_config_isolation_b";
+    await objectFor(tenantA).batch({
+      tenantId: tenantA,
+      statements: [
+        {
+          sql:
+            "INSERT INTO tenant_provider_credentials " +
+            "(tenant_id, alias, provider, key_version, iv, ciphertext, last4, created_at_unix, rotated_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          params: [tenantA, "primary", "openai", 1, "iv-a", "cipher-a", "1234", 1, 1],
+        },
+        {
+          sql:
+            "INSERT INTO semantic_cache_policies " +
+            "(scope_type, scope_id, enabled, mode, similarity_threshold, ttl_seconds, " +
+            "scoped_models, invalidation_epoch, updated_at_unix, updated_by, generation) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          params: ["tenant", tenantA, 1, "semantic", 0.9, 60, '["model-a"]', 1, 1, "operator", 1],
+        },
+        {
+          sql:
+            "INSERT INTO delegation_revocations " +
+            "(tenant, subject, reason, revoked_by, revoked_at_unix, expires_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?)",
+          params: [tenantA, "subject-a", "test", "operator", 1, null],
+        },
+        {
+          sql:
+            "INSERT INTO control_plane_replay_floors " +
+            "(tenant_id, deployment_id, last_accepted_revision, updated_at_unix) " +
+            "VALUES (?, ?, ?, ?)",
+          params: [tenantA, "deployment-a", 7, 1],
+        },
+        {
+          sql:
+            "INSERT INTO budget_alert_notifications " +
+            "(id, tenant_id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+          params: ["alert-a", tenantA, "tenant", tenantA, "2026-08", 80, 1],
+        },
+      ],
+    });
+
+    const rows = await objectFor(tenantB).query({
+      tenantId: tenantB,
+      sql:
+        "SELECT " +
+        "(SELECT COUNT(*) FROM tenant_provider_credentials) AS credentials, " +
+        "(SELECT COUNT(*) FROM semantic_cache_policies) AS cache_policies, " +
+        "(SELECT COUNT(*) FROM delegation_revocations) AS revocations, " +
+        "(SELECT COUNT(*) FROM control_plane_replay_floors) AS replay_floors, " +
+        "(SELECT COUNT(*) FROM budget_alert_notifications WHERE tenant_id = ?) AS alerts",
+      params: [tenantA],
+    });
+    expect(rows.results).toEqual([
+      { credentials: 0, cache_policies: 0, revocations: 0, replay_floors: 0, alerts: 0 },
+    ]);
   });
 });
 
@@ -483,14 +641,14 @@ describe("the second wake", () => {
     const second = await objectFor(ACME).schemaVersion();
     // The assertion is on what the applier DID, not on how long it took: a
     // wall-time test would be a timing guess, and a test that only checked the
-    // version would pass against an applier that re-ran all 115 statements.
+    // version would pass against an applier that re-ran all 128 statements.
     expect(second.appliedThisWake).toEqual([]);
     expect(second.version).toBe(TENANT_SCHEMA_VERSION);
     expect(second.failure).toBeNull();
   });
 
   test("survives at all, which is itself the ALTER-idempotence proof", async () => {
-    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the fourteen tenant
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the fifteen tenant
     // migrations are ALTER-only, so an applier that re-ran them would throw
     // `duplicate column name` and this object would come back refusing.
     await evict(ACME);

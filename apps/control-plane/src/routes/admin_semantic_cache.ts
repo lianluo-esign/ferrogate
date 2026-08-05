@@ -46,6 +46,7 @@
  * every cache key is a function of it, so a bumped epoch IS the purge.
  */
 import { z } from "zod";
+import { backfillTenantConfigurationPolicy } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import { type CallerScope, type ControlPlaneStore, StoreConflictError } from "../ports.js";
 import { adminDeleted, adminItem } from "../responses.js";
@@ -164,14 +165,17 @@ async function project(
   scopeType: SemanticCacheScopeKind,
   scopeId: string,
 ): Promise<void> {
-  const db = depsOf(c).controlDatabase;
-  // No control database bound means a deployment that has not provisioned the
-  // typed tables. The document write already succeeded; refusing here would
-  // make the admin surface unusable on such a deployment for no gain, and the
-  // gateway on the same deployment has no CONTROL_DB to read either, so it is
-  // var-only and consistent with itself. Same call `./quota_policy.ts` makes —
-  // and the deliberate OPPOSITE of the invalidate leg, which refuses.
-  if (db === null) return;
+  const deps = depsOf(c);
+  const control = deps.controlDatabase;
+  if (control === null) {
+    throw new HttpError(
+      503,
+      "storage_unavailable",
+      "semantic cache policy persistence requires CONTROL_DB and tenant object storage",
+    );
+  }
+  await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, scopeId);
+  const db = (await deps.tenantDatabases.forTenant(scopeId)).db;
   await projectSemanticCachePolicy(
     db,
     record as Parameters<typeof projectSemanticCachePolicy>[1],
@@ -262,8 +266,17 @@ export const semanticCachePolicyRoutes: GroupModule = crudGroup(
       }
       // Document first, enforcement row second — the ordering table in
       // `../store/semantic_cache_registry.ts`.
-      const db = deps.controlDatabase;
-      if (db !== null) await deleteSemanticCachePolicyRow(db, scopeType, scopeId);
+      const control = deps.controlDatabase;
+      if (control === null) {
+        throw new HttpError(
+          503,
+          "storage_unavailable",
+          "semantic cache policy deletion requires CONTROL_DB and tenant object storage",
+        );
+      }
+      await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, scopeId);
+      const db = (await deps.tenantDatabases.forTenant(scopeId)).db;
+      await deleteSemanticCachePolicyRow(db, scopeType, scopeId);
       return json(c, 200, adminDeleted("semantic_cache_policy", id));
     },
 
@@ -273,8 +286,8 @@ export const semanticCachePolicyRoutes: GroupModule = crudGroup(
       const { scopeType, scopeId } = readScope(c);
       await authorizeScopedResource(deps.store, scope, scopeType, scopeId);
 
-      const db = deps.controlDatabase;
-      if (db === null) {
+      const control = deps.controlDatabase;
+      if (control === null) {
         // A purge that cannot reach the typed row has not happened, and
         // reporting 200 would tell an operator that bodies they are trying to
         // stop serving are gone. This is the one leg that must refuse rather
@@ -283,9 +296,11 @@ export const semanticCachePolicyRoutes: GroupModule = crudGroup(
         throw new HttpError(
           503,
           "control_database_unavailable",
-          "semantic cache invalidation requires the control database binding",
+          "semantic cache invalidation requires CONTROL_DB and tenant object storage",
         );
       }
+      await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, scopeId);
+      const db = (await deps.tenantDatabases.forTenant(scopeId)).db;
       const epoch = await bumpSemanticCacheEpoch(
         db,
         scopeType,

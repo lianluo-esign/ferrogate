@@ -73,6 +73,7 @@
  * behalf, and would then disagree with the documents the admin surface serves.
  */
 import type { StoreRecord } from "../ports.js";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 
 /** The three typed tables in `sql/d1-ts/control/0001_init_control.sql`. */
 export const ROLES_TABLE = "roles";
@@ -190,18 +191,57 @@ export async function unprojectPermission(db: D1Database, id: string): Promise<v
  */
 export async function projectTenantRoleBinding(
   db: D1Database,
+  tenantDatabases: TenantDatabaseRouter,
   tenantId: string,
   roleId: string,
   nowUnix: number,
 ): Promise<void> {
-  await db
+  const role = await db
     .prepare(
-      `INSERT INTO ${TENANT_ROLE_BINDINGS_TABLE} (id, tenant_id, role_id, created_at_unix)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT (id) DO NOTHING`,
+      "SELECT id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix " +
+        "FROM roles WHERE id = ?",
     )
-    .bind(`${tenantId}:${roleId}`, tenantId, roleId, nowUnix)
-    .run();
+    .bind(roleId)
+    .first<{
+      id: string;
+      name: string;
+      slug: string;
+      description: string;
+      permission_keys_json: string;
+      created_at_unix: number;
+      updated_at_unix: number;
+    }>();
+  if (role === null) throw new Error(`shared role ${roleId} does not exist`);
+  if (tenantDatabases.privilegedBatch === undefined) {
+    throw new Error("tenant role projection requires the privileged tenant object RPC");
+  }
+  await tenantDatabases.privilegedBatch(tenantId, [
+    {
+      sql:
+        "INSERT INTO tenant_role_catalog " +
+        "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(role_id) DO UPDATE SET name = excluded.name, slug = excluded.slug, " +
+        "description = excluded.description, permission_keys_json = excluded.permission_keys_json, " +
+        "updated_at_unix = excluded.updated_at_unix",
+      params: [
+        role.id,
+        role.name,
+        role.slug,
+        role.description,
+        role.permission_keys_json,
+        role.created_at_unix,
+        role.updated_at_unix,
+      ],
+    },
+    {
+      sql:
+        `INSERT INTO ${TENANT_ROLE_BINDINGS_TABLE} (id, tenant_id, role_id, created_at_unix)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (tenant_id, role_id) DO NOTHING`,
+      params: [`${tenantId}:${roleId}`, tenantId, roleId, nowUnix],
+    },
+  ]);
 }
 
 /**
@@ -213,12 +253,17 @@ export async function projectTenantRoleBinding(
  * spelled differently is the exact failure this whole module exists to remove.
  */
 export async function unprojectTenantRoleBinding(
-  db: D1Database,
+  tenantDatabases: TenantDatabaseRouter,
   tenantId: string,
   roleId: string,
 ): Promise<void> {
-  await db
-    .prepare(`DELETE FROM ${TENANT_ROLE_BINDINGS_TABLE} WHERE tenant_id = ? AND role_id = ?`)
-    .bind(tenantId, roleId)
-    .run();
+  if (tenantDatabases.privilegedBatch === undefined) {
+    throw new Error("tenant role projection requires the privileged tenant object RPC");
+  }
+  await tenantDatabases.privilegedBatch(tenantId, [
+    {
+      sql: `DELETE FROM ${TENANT_ROLE_BINDINGS_TABLE} WHERE tenant_id = ? AND role_id = ?`,
+      params: [tenantId, roleId],
+    },
+  ]);
 }

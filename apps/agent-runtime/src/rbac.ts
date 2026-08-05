@@ -66,6 +66,12 @@
  * no `rbac_action` never reaches this port, so an unbound deployment serves
  * exactly what it served before.
  */
+import {
+  DurableObjectTenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
+  type TenantDatabaseRouter,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { AuthContext } from "./ports.js";
 
 /**
@@ -141,9 +147,11 @@ function isRbacDatabase(value: unknown): value is RbacDatabase {
 /** The durable Permission → Role → TenantRoleBinding walk, over the CONTROL D1. */
 export class D1RbacAuthorizer implements RbacAuthorizerPort {
   readonly #db: RbacDatabase;
+  readonly #tenantDatabases: TenantDatabaseRouter | undefined;
 
-  constructor(db: RbacDatabase) {
+  constructor(db: RbacDatabase, options: { tenantDatabases?: TenantDatabaseRouter } = {}) {
     this.#db = db;
+    this.#tenantDatabases = options.tenantDatabases;
   }
 
   async authorize(auth: AuthContext, rbacAction: string): Promise<RbacDecision> {
@@ -175,7 +183,10 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
     const declared = await this.#db.prepare(RBAC_PERMISSION_EXISTS_SQL).bind(rbacAction).all();
     if ((declared.results ?? []).length === 0) return false;
 
-    const grants = await this.#db.prepare(RBAC_TENANT_ROLE_GRANTS_SQL).bind(tenantId).all();
+    const grants =
+      this.#tenantDatabases === undefined
+        ? await this.#db.prepare(RBAC_TENANT_ROLE_GRANTS_SQL).bind(tenantId).all()
+        : await this.#tenantRoleGrants(tenantId);
     for (const row of grants.results ?? []) {
       const raw = (row as { permission_keys_json?: unknown }).permission_keys_json;
       if (typeof raw !== "string") continue;
@@ -191,6 +202,39 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
       if (Array.isArray(keys) && keys.some((key) => key === rbacAction)) return true;
     }
     return false;
+  }
+
+  /** Read the tenant-local binding and validate its projected role in CONTROL. */
+  async #tenantRoleGrants(tenantId: string): Promise<{ results: unknown[] }> {
+    const router = this.#tenantDatabases;
+    if (router === undefined) throw new Error("tenant object router is not configured");
+    await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
+    const handle = await router.forTenant(tenantId);
+    const local = await handle.db
+      .prepare(
+        `SELECT b.role_id
+           FROM tenant_role_bindings AS b
+          WHERE b.tenant_id = ?1`,
+      )
+      .bind(tenantId)
+      .all<{ role_id: string }>();
+    const valid: unknown[] = [];
+    for (const row of local.results) {
+      const shared = await this.#db
+        .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
+        .bind(row.role_id)
+        .all();
+      const role = (shared.results ?? [])[0] as
+        | { permission_keys_json?: unknown }
+        | undefined;
+      if (role !== undefined) {
+        valid.push({
+          permission_keys_json:
+            typeof role.permission_keys_json === "string" ? role.permission_keys_json : null,
+        });
+      }
+    }
+    return { results: valid };
   }
 }
 
@@ -211,8 +255,15 @@ export class UnboundRbacAuthorizer implements RbacAuthorizerPort {
  * `tenant_role_bindings` rows `apps/control-plane`'s RBAC routes write and
  * `apps/gateway` reads. Absent ⇒ {@link UnboundRbacAuthorizer}.
  */
-export function rbacAuthorizerFromEnv(env: { CONTROL_DB?: unknown }): RbacAuthorizerPort {
-  return isRbacDatabase(env.CONTROL_DB)
-    ? new D1RbacAuthorizer(env.CONTROL_DB)
-    : new UnboundRbacAuthorizer();
+export function rbacAuthorizerFromEnv(env: {
+  CONTROL_DB?: unknown;
+  TENANT_DATA?: unknown;
+}): RbacAuthorizerPort {
+  if (!isRbacDatabase(env.CONTROL_DB)) return new UnboundRbacAuthorizer();
+  const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
+  const tenantDatabases =
+    namespace === undefined
+      ? undefined
+      : new DurableObjectTenantDatabaseRouter(namespace, env.CONTROL_DB as D1Database);
+  return new D1RbacAuthorizer(env.CONTROL_DB, { tenantDatabases });
 }

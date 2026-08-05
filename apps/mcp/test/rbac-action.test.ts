@@ -46,7 +46,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { type ApiOperation, operationById } from "../src/contract.js";
 import { type AuthOutcome, authenticateRequest, recordOperation } from "../src/http.js";
 import { type McpEnv, resolvePorts } from "../src/ports.js";
-import { EXEC_KEY, TENANT, seedFixture } from "./fixtures.js";
+import { EXEC_KEY, seedFixture } from "./fixtures.js";
+import { resetTenantObjectState, seedTenantRoleProjection } from "./tenant-object.js";
 
 function controlDb(): D1Database {
   const binding = (env as unknown as { DB?: D1Database }).DB;
@@ -104,6 +105,8 @@ async function authenticate(operation: ApiOperation): Promise<Outcome> {
 const GUARDRAIL_ACTION = "guardrails.policy.activate";
 /** A non-`guardrails.` action, to pin the OTHER half of the denial taxonomy. */
 const PLAIN_ACTION = "mcp.servers.write";
+/** This file must not reset the shared `fixtures.ts` tenant object. */
+const RBAC_TENANT = "tenant-mcp-rbac-action";
 
 async function declarePermission(key: string): Promise<void> {
   await controlDb()
@@ -126,22 +129,17 @@ async function grantRole(
     )
     .bind(roleId, roleId, roleId, JSON.stringify(permissionKeys))
     .run();
-  await controlDb()
-    .prepare(
-      "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?1, ?2, ?3)",
-    )
-    .bind(`${tenantId}:${roleId}`, tenantId, roleId)
-    .run();
+  await seedTenantRoleProjection(tenantId, roleId, permissionKeys);
 }
 
 beforeEach(async () => {
-  seedFixture();
+  seedFixture({ tenantId: RBAC_TENANT });
   const db = controlDb();
   await db.batch([
-    db.prepare("DELETE FROM tenant_role_bindings"),
     db.prepare("DELETE FROM roles"),
     db.prepare("DELETE FROM permissions"),
   ]);
+  await resetTenantObjectState([RBAC_TENANT, "tenant-somebody-else"]);
 });
 
 describe("FC-7 — the deployed MCP chokepoint consults the durable role graph", () => {
@@ -165,7 +163,7 @@ describe("FC-7 — the deployed MCP chokepoint consults the durable role graph",
 
   it("admits once a role bound to the tenant grants it — no redeploy", async () => {
     await declarePermission(GUARDRAIL_ACTION);
-    await grantRole("role_guardrail_operator", [GUARDRAIL_ACTION], TENANT);
+    await grantRole("role_guardrail_operator", [GUARDRAIL_ACTION], RBAC_TENANT);
     // Nothing but three CONTROL rows changed between this test and the one
     // above, which is what makes the refusal a decision about the GRAPH rather
     // than a blanket denial.
@@ -184,7 +182,7 @@ describe("FC-7 — the deployed MCP chokepoint consults the durable role graph",
     // Step 1 of the Rust walk (`list_permissions().any(key == …)`). Skipping it
     // would let a typo in a role's `permission_keys` mint an entitlement; the
     // role below names the action and the `permissions` row is absent.
-    await grantRole("role_typo", [GUARDRAIL_ACTION], TENANT);
+    await grantRole("role_typo", [GUARDRAIL_ACTION], RBAC_TENANT);
     expect(await authenticate(guardedBy(GUARDRAIL_ACTION))).toMatchObject({
       status: 403,
       code: "guardrail_rbac_denied",

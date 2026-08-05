@@ -47,6 +47,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { hashApiKeySecret } from "../src/auth.js";
 import { MCP_EXECUTE_PERMISSION, TOOL_ENTITLEMENTS } from "../src/entitlements.js";
 import { type Fixture, rpcRequest, seedFixture } from "./fixtures.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 // ---------------------------------------------------------------------------
 // Bindings
@@ -55,15 +61,14 @@ import { type Fixture, rpcRequest, seedFixture } from "./fixtures.js";
 interface Bindings {
   /** `apps/mcp`'s `DB` IS the CONTROL database (`wrangler.toml`). */
   readonly DB: D1Database;
-  /** A provisioned tenant database, declared in `vitest.config.ts`. */
-  readonly TENANT_DB_A: D1Database;
+  readonly TENANT_DATA: unknown;
 }
 
 function bindings(): Bindings {
   const b = env as unknown as Partial<Bindings>;
-  if (b.DB === undefined || b.TENANT_DB_A === undefined) {
+  if (b.DB === undefined || b.TENANT_DATA === undefined) {
     throw new Error(
-      "the S5 entitlement gate needs both the `DB` (control) and `TENANT_DB_A` bindings; " +
+      "the S5 entitlement gate needs both the `DB` (control) and `TENANT_DATA` bindings; " +
         "without them the ladder has nothing durable to read and this file proves nothing.",
     );
   }
@@ -71,7 +76,7 @@ function bindings(): Bindings {
 }
 
 const control = (): D1Database => bindings().DB;
-const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+const tenantDb = (): D1Database => tenantObjectDb(TENANT);
 
 // ---------------------------------------------------------------------------
 // The one credential + the one plan
@@ -92,12 +97,12 @@ const SCOPES = ["tools.read", "tools.execute", "assets.read"];
 
 async function seedCredential(): Promise<void> {
   const hash = await hashApiKeySecret(KEY);
+  await resetTenantObjectState([TENANT]);
 
   await control().batch([
     control().prepare("DELETE FROM tenants WHERE id = ?").bind(TENANT),
     control().prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(TENANT),
     control().prepare("DELETE FROM api_key_directory WHERE tenant_id = ?").bind(TENANT),
-    control().prepare("DELETE FROM tenant_role_bindings WHERE tenant_id = ?").bind(TENANT),
     control().prepare("DELETE FROM roles WHERE id = ?").bind(ROLE),
     control().prepare("DELETE FROM permissions WHERE key = ?").bind(MCP_EXECUTE_PERMISSION),
     control().prepare("DELETE FROM plans WHERE id = ?").bind(PLAN),
@@ -116,19 +121,13 @@ async function seedCredential(): Promise<void> {
       .bind(TENANT, PLAN),
     control()
       .prepare(
-        `INSERT INTO tenant_databases (tenant_id, database_uuid, database_name, binding_name,
-           schema_version, provisioned_at_unix, updated_at_unix)
-         VALUES (?, 'uuid-s5', 'ferrogate-s5', 'TENANT_DB_A', 1, 1, 1)`,
-      )
-      .bind(TENANT),
-    control()
-      .prepare(
         `INSERT INTO api_key_directory (key_hash, id, tenant_id, project_id, workspace_id,
            key_prefix, last4, enabled)
          VALUES (?, 'key-s5', ?, ?, ?, ?, ?, 1)`,
       )
       .bind(hash, TENANT, PROJECT, WORKSPACE, KEY_PREFIX, KEY_LAST4),
   ]);
+  await registerDurableObjectTenant(TENANT);
 
   await tenantDb().batch([
     tenantDb()
@@ -175,9 +174,6 @@ async function bindRole(options: { declare: boolean }): Promise<void> {
          VALUES (?, 'MCP', 'mcp-s5', '', ?)`,
       )
       .bind(ROLE, JSON.stringify([MCP_EXECUTE_PERMISSION])),
-    control()
-      .prepare("INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, ?)")
-      .bind(`${TENANT}:${ROLE}`, TENANT, ROLE),
   ];
   if (options.declare) {
     statements.unshift(
@@ -187,6 +183,7 @@ async function bindRole(options: { declare: boolean }): Promise<void> {
     );
   }
   await control().batch(statements);
+  await seedTenantRoleProjection(TENANT, ROLE, [MCP_EXECUTE_PERMISSION]);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +244,7 @@ const ADMITTED_REST: Wire = { status: 200, code: undefined, message: undefined }
 let fixture: Fixture;
 
 beforeEach(async () => {
-  fixture = seedFixture();
+  fixture = seedFixture({ tenantId: TENANT });
   await seedCredential();
 });
 

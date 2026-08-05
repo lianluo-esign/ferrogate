@@ -90,6 +90,7 @@
  */
 import {
   StorageError,
+  backfillTenantConfigurationPolicy,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
@@ -290,6 +291,10 @@ const ROLE_PERMISSIONS_SQL = `SELECT r.permission_keys_json AS permission_keys_j
    FROM ${TENANT_ROLE_BINDING_TABLE} b
    JOIN ${ROLE_TABLE} r ON r.id = b.role_id
    WHERE b.tenant_id = ?`;
+
+const TENANT_ROLE_PERMISSIONS_SQL = `SELECT b.role_id
+   FROM tenant_role_bindings AS b
+  WHERE b.tenant_id = ?`;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -512,6 +517,34 @@ export class D1McpAuth implements AuthPort {
     tables: ReadonlySet<string>,
   ): Promise<readonly string[] | AuthError> {
     if (tenantId === undefined) return [];
+    if (this.#router !== undefined) {
+      try {
+        const registered = await this.#db
+          .prepare("SELECT 1 AS present FROM tenant_databases WHERE tenant_id = ?1")
+          .bind(tenantId)
+          .all();
+        if ((registered.results ?? []).length === 0) return INVALID_KEY;
+        await backfillTenantConfigurationPolicy(this.#db, this.#router, tenantId);
+        const handle = await this.#router.forTenant(tenantId);
+        const rows = await handle.db
+          .prepare(TENANT_ROLE_PERMISSIONS_SQL)
+          .bind(tenantId)
+          .all<{ role_id: string }>();
+        const keys = new Set<string>();
+        for (const row of rows.results) {
+          const shared = await this.#db
+            .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
+            .bind(row.role_id)
+            .all<{ permission_keys_json: string | null }>();
+          const role = shared.results[0];
+          if (role === undefined) continue;
+          for (const key of parseVirtualKeyScopes(role.permission_keys_json)) keys.add(key);
+        }
+        return [...keys].sort();
+      } catch (error) {
+        return unavailable(`tenant RBAC lookup failed: ${describe(error)}`);
+      }
+    }
     if (!tables.has(ROLE_TABLE) || !tables.has(TENANT_ROLE_BINDING_TABLE)) return [];
     let rows: { results: { permission_keys_json: string | null }[] };
     try {

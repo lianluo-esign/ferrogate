@@ -270,7 +270,13 @@ const rbacCrud: GroupModule = crudGroup(
         // publish an invisible grant. See `store/rbac_registry.ts`.
         const db = deps.controlDatabase;
         if (db !== null) {
-          await projectTenantRoleBinding(db, tenantId, body.role_id, Math.floor(Date.now() / 1000));
+          await projectTenantRoleBinding(
+            db,
+            deps.tenantDatabases,
+            tenantId,
+            body.role_id,
+            Math.floor(Date.now() / 1000),
+          );
         }
         return json(c, 201, { object: "tenant_role", tenant_role: stored });
       } catch (error) {
@@ -307,7 +313,7 @@ const rbacCrud: GroupModule = crudGroup(
             `role ${roleId} is not bound to tenant ${tenantId}`,
           );
         }
-        await unprojectTenantRoleBinding(db, tenantId, roleId);
+        await unprojectTenantRoleBinding(deps.tenantDatabases, tenantId, roleId);
       }
       if (!(await deps.store.remove(TENANT_ROLES_COLLECTION, scope, id))) {
         throw new HttpError(404, "not_found", `role ${roleId} is not bound to tenant ${tenantId}`);

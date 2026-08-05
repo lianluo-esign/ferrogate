@@ -43,7 +43,12 @@ import {
   byokKeyringFromEnvAsync,
   sealTenantCredential,
 } from "@ferrogate/secrets";
-import { D1TenantProviderCredentialStore, credentialLast4 } from "@ferrogate/storage";
+import {
+  backfillTenantConfigurationPolicy,
+  credentialLast4,
+  type D1TenantProviderCredentialStore,
+  tenantProviderCredentialStoreFor,
+} from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { ControlPlaneEnv } from "../ports.js";
@@ -90,17 +95,23 @@ function tenantOf(c: Context<ControlPlaneEnv>): string {
 }
 
 /** The control database, or a precise 503 rather than a silent no-op. */
-function storeOf(c: Context<ControlPlaneEnv>): D1TenantProviderCredentialStore {
-  const db = depsOf(c).controlDatabase;
-  if (db === null) {
+async function storeOf(
+  c: Context<ControlPlaneEnv>,
+  tenantId: string,
+): Promise<D1TenantProviderCredentialStore> {
+  const deps = depsOf(c);
+  const control = deps.controlDatabase;
+  if (control === null) {
     throw new HttpError(
       503,
       "storage_unavailable",
-      "per-tenant BYOK needs the CONTROL_DB binding, which is not configured on this " +
+      "per-tenant BYOK needs the CONTROL_DB and TENANT_DATA bindings, which are not configured on this " +
         "deployment",
     );
   }
-  return new D1TenantProviderCredentialStore(db);
+  await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, tenantId);
+  const handle = await deps.tenantDatabases.forTenant(tenantId);
+  return tenantProviderCredentialStoreFor(handle);
 }
 
 /**
@@ -147,7 +158,7 @@ const listProviderCredentials: Handler = async (c) => {
   // ahead of the scope check is a (small) configuration oracle for an
   // unauthorized caller, and it costs nothing to order it the other way.
   const tenantId = tenantOf(c);
-  const rows = await storeOf(c).list(tenantId);
+  const rows = await (await storeOf(c, tenantId)).list(tenantId);
   // `object`/`data` is the admin list envelope this app uses elsewhere; the
   // rows are the REDACTED summary type, which has no credential field at all.
   return json(c, 200, { object: "list", data: rows });
@@ -157,7 +168,7 @@ const putProviderCredential: Handler = async (c) => {
   const tenantId = tenantOf(c);
   const alias = aliasOf(c);
   const body = await readJson(c, putBodySchema);
-  const store = storeOf(c);
+  const store = await storeOf(c, tenantId);
   const keyring = await keyringOf(c);
 
   // `last4` is derived BEFORE sealing, from the plaintext, because it is the
@@ -202,7 +213,11 @@ const putProviderCredential: Handler = async (c) => {
 const revokeProviderCredential: Handler = async (c) => {
   const tenantId = tenantOf(c);
   const alias = aliasOf(c);
-  const revoked = await storeOf(c).revoke(tenantId, alias, Math.floor(Date.now() / 1000));
+  const revoked = await (await storeOf(c, tenantId)).revoke(
+    tenantId,
+    alias,
+    Math.floor(Date.now() / 1000),
+  );
   if (!revoked) {
     // 404 for "this tenant has no live alias by that name" — the same answer
     // another tenant's alias produces, so this is not an oracle.

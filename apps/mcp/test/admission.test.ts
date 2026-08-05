@@ -44,6 +44,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { hashApiKeySecret } from "../src/auth.js";
 import { type Fixture, rpcRequest, seedFixture } from "./fixtures.js";
+import { resetTenantObjectState, seedTenantRoleProjection, tenantObjectDb } from "./tenant-object.js";
 
 interface AdmissionBindings {
   readonly DB: D1Database;
@@ -57,7 +58,7 @@ function bindings(): AdmissionBindings {
 }
 
 const control = (): D1Database => bindings().DB;
-const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+const tenantDb = (tenantId: string): D1Database => tenantObjectDb(tenantId);
 
 interface JsonBody {
   readonly error?: { code: string; message: string };
@@ -97,18 +98,11 @@ beforeEach(async () => {
     control().prepare("DELETE FROM tenant_databases"),
     control().prepare("DELETE FROM api_key_directory"),
     control().prepare("DELETE FROM static_api_keys"),
-    control().prepare("DELETE FROM tenant_role_bindings"),
     control().prepare("DELETE FROM roles"),
     control().prepare("DELETE FROM tenants"),
     control().prepare("DELETE FROM plans"),
   ]);
-  await tenantDb().batch([
-    tenantDb().prepare("DELETE FROM api_keys"),
-    tenantDb().prepare("DELETE FROM usage_monthly_rollups"),
-    tenantDb().prepare("DELETE FROM wallets"),
-    tenantDb().prepare("DELETE FROM wallet_reservations"),
-  ]);
-  fixture = seedFixture();
+  fixture = seedFixture({ tenantId: "tenant-mcp-admission" });
 });
 
 // ---------------------------------------------------------------------------
@@ -122,13 +116,15 @@ beforeEach(async () => {
  */
 async function provision(caller: Caller): Promise<void> {
   const keyHash = await hashApiKeySecret(caller.secret);
+  const tenant = tenantDb(caller.tenantId);
+  await resetTenantObjectState([caller.tenantId]);
   await control().batch([
     control()
       .prepare(
         `INSERT INTO tenant_databases
            (tenant_id, database_uuid, database_name, binding_name, schema_version,
-            provisioned_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, 'TENANT_DB_A', 1, 1, 1)`,
+            storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, NULL, 15, 'durable_object', 'ready', 1, 1)`,
       )
       .bind(caller.tenantId, `uuid-${caller.tenantId}`, `ferrogate-${caller.tenantId}`),
     control()
@@ -145,11 +141,9 @@ async function provision(caller: Caller): Promise<void> {
          VALUES (?, 'MCP', ?, '', ?)`,
       )
       .bind(`role-${caller.tenantId}`, `mcp-${caller.tenantId}`, JSON.stringify(["mcp.execute"])),
-    control()
-      .prepare("INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, ?)")
-      .bind(`${caller.tenantId}:role`, caller.tenantId, `role-${caller.tenantId}`),
   ]);
-  await tenantDb()
+  await seedTenantRoleProjection(caller.tenantId, `role-${caller.tenantId}`, ["mcp.execute"]);
+  await tenant
     .prepare(
       `INSERT INTO api_keys
          (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4,
@@ -202,7 +196,7 @@ async function seedMonthlySpend(
 ): Promise<void> {
   const now = new Date();
   const periodMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-  await tenantDb()
+  await tenantDb(scopeId)
     .prepare(
       `INSERT INTO usage_monthly_rollups
          (id, period_month, scope_type, scope_id, cost_usd, updated_at_unix)
@@ -213,7 +207,7 @@ async function seedMonthlySpend(
 }
 
 async function seedWallet(tenantId: string, balanceCredits: number): Promise<void> {
-  await tenantDb()
+  await tenantDb(tenantId)
     .prepare(
       `INSERT INTO wallets (id, tenant_id, balance_credits, dunning, created_at_unix, updated_at_unix)
        VALUES (?, ?, ?, 0, 1, 1)`,
@@ -273,7 +267,7 @@ describe("the admission half of finalize_auth is enforced on MCP tools/call", ()
     // still honour it, or the column is inert configuration.
     const caller = mintCaller();
     await provision(caller);
-    await tenantDb()
+    await tenantDb(caller.tenantId)
       .prepare("UPDATE api_keys SET request_limit_per_minute = 1 WHERE id = ?")
       .bind(caller.keyId)
       .run();
@@ -339,7 +333,7 @@ describe("the admission half of finalize_auth is enforced on MCP tools/call", ()
 
     // ...and the holds really are gone from the durable table, not merely
     // forgotten in memory.
-    const live = await tenantDb()
+    const live = await tenantDb(caller.tenantId)
       .prepare(
         "SELECT COUNT(*) AS n FROM wallet_reservations WHERE tenant_id = ? AND status = 'active'",
       )
@@ -414,7 +408,7 @@ describe("the 401 / 403 ladder ABOVE admission is preserved", () => {
   it("an authenticated credential missing the operation scope is 403 insufficient_scope", async () => {
     const caller = mintCaller();
     await provision(caller);
-    await tenantDb()
+    await tenantDb(caller.tenantId)
       .prepare("UPDATE api_keys SET scopes_json = ? WHERE id = ?")
       .bind(JSON.stringify(["tools.read"]), caller.keyId)
       .run();
@@ -430,7 +424,7 @@ describe("the 401 / 403 ladder ABOVE admission is preserved", () => {
     const caller = mintCaller();
     await provision(caller);
     await seedQuotaPolicy(caller, { rpmLimit: 1 });
-    await tenantDb()
+    await tenantDb(caller.tenantId)
       .prepare("UPDATE api_keys SET scopes_json = ? WHERE id = ?")
       .bind(JSON.stringify(["tools.read"]), caller.keyId)
       .run();

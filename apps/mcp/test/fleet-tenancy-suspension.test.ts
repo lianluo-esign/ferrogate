@@ -81,7 +81,15 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import agentRuntimeApp from "../../agent-runtime/src/index.js";
 import gatewayApp from "../../gateway/src/index.js";
 import { hashApiKeySecret } from "../src/auth.js";
-import { rpcRequest, seedFixture } from "./fixtures.js";
+import { rpcRequest, seedFixture, setMcpEnvVar } from "./fixtures.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+  tenantObjectDb,
+  tenantObjectNamespace,
+  tenantObjectNamespaceWithQueryFailure,
+} from "./tenant-object.js";
 
 // ---------------------------------------------------------------------------
 // Bindings
@@ -90,17 +98,16 @@ import { rpcRequest, seedFixture } from "./fixtures.js";
 interface FleetBindings {
   /** `apps/mcp`'s `DB` IS the CONTROL database (`wrangler.toml`). */
   readonly DB: D1Database;
-  /** A provisioned tenant database, declared in `vitest.config.ts`. */
-  readonly TENANT_DB_A: D1Database;
+  readonly TENANT_DATA: ReturnType<typeof tenantObjectNamespace>;
   readonly TEST_CONTROL_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
   readonly TEST_TENANT_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
 }
 
 function bindings(): FleetBindings {
   const b = env as unknown as Partial<FleetBindings>;
-  if (b.DB === undefined || b.TENANT_DB_A === undefined) {
+  if (b.DB === undefined || b.TENANT_DATA === undefined) {
     throw new Error(
-      "the FC-2 fleet gate needs both the `DB` (control) and `TENANT_DB_A` bindings; " +
+      "the FC-2 fleet gate needs both the `DB` (control) and `TENANT_DATA` bindings; " +
         "without them it would prove nothing about any Worker.",
     );
   }
@@ -108,7 +115,7 @@ function bindings(): FleetBindings {
 }
 
 const control = (): D1Database => bindings().DB;
-const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+const tenantDb = (): D1Database => tenantObjectDb(TENANT);
 
 /**
  * The env the other two Workers are invoked with.
@@ -123,6 +130,7 @@ const tenantDb = (): D1Database => bindings().TENANT_DB_A;
 const siblingEnv = (): Record<string, unknown> => ({
   DB: tenantDb(),
   CONTROL_DB: control(),
+  TENANT_DATA: bindings().TENANT_DATA,
 });
 
 // ---------------------------------------------------------------------------
@@ -157,10 +165,10 @@ async function seedCredential(): Promise<void> {
     control().prepare("DELETE FROM tenant_databases"),
     control().prepare("DELETE FROM api_key_directory"),
     control().prepare("DELETE FROM static_api_keys"),
-    control().prepare("DELETE FROM tenant_role_bindings"),
     control().prepare("DELETE FROM roles"),
     control().prepare("DELETE FROM permissions"),
   ]);
+  await resetTenantObjectState([TENANT]);
   await tenantDb().batch([
     tenantDb().prepare("DELETE FROM api_keys"),
     tenantDb().prepare("DELETE FROM workspaces"),
@@ -173,13 +181,6 @@ async function seedCredential(): Promise<void> {
       .prepare("INSERT INTO tenants (id, name, slug, status) VALUES (?, 'FC2', 'fc2', 'active')")
       .bind(TENANT),
     // `apps/mcp`'s NATIVE leg: hash -> tenant, then route to that tenant's db.
-    control()
-      .prepare(
-        `INSERT INTO tenant_databases (tenant_id, database_uuid, database_name, binding_name,
-           schema_version, provisioned_at_unix, updated_at_unix)
-         VALUES (?, 'uuid-fc2', 'ferrogate-fc2', 'TENANT_DB_A', 1, 1, 1)`,
-      )
-      .bind(TENANT),
     control()
       .prepare(
         `INSERT INTO api_key_directory (key_hash, id, tenant_id, project_id, workspace_id,
@@ -205,12 +206,10 @@ async function seedCredential(): Promise<void> {
          VALUES ('role-fc2', 'MCP', 'mcp', '', ?)`,
       )
       .bind(JSON.stringify(["mcp.execute"])),
-    control()
-      .prepare(
-        "INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, 'role-fc2')",
-      )
-      .bind(`${TENANT}:role-fc2`, TENANT),
   ]);
+
+  await registerDurableObjectTenant(TENANT);
+  await seedTenantRoleProjection(TENANT, "role-fc2", ["mcp.execute"]);
 
   await tenantDb().batch([
     tenantDb()
@@ -384,12 +383,11 @@ const UNAVAILABLE: Record<string, Wire> = {
 beforeAll(async () => {
   const b = bindings();
   await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
-  await applyD1Migrations(b.TENANT_DB_A, b.TEST_TENANT_D1_SCHEMA);
 });
 
 beforeEach(async () => {
   // The MCP upstream catalog + the recorded-call sink `tools/call` needs.
-  seedFixture();
+  seedFixture({ tenantId: TENANT });
   await seedCredential();
 });
 
@@ -482,22 +480,28 @@ describe("the 401-vs-403 taxonomy survives the new gate", () => {
 describe("FAIL CLOSED — a lifecycle authority that cannot be read admits nobody", () => {
   it("answers 503 rather than admitting when a lifecycle row cannot be read", async () => {
     // "Flap the control plane" must not be a suspension bypass (Rust
-    // `LifecycleGateError::Unavailable`). Renaming a table the WALK reads is
-    // the cheapest real read failure available to an offline harness: the
-    // query raises exactly as it would against an unreachable database.
+    // `LifecycleGateError::Unavailable`). Reject only the target query at the
+    // namespace boundary: making the real object throw causes workerd to log
+    // the remote exception as uncaught even though every Worker converts it
+    // into the expected 503. All other object RPCs remain real.
     //
     // `projects` rather than `tenants` on purpose. `tenants` also carries
-    // `plan_id`, so hiding it takes the QUOTA chain down too and every Worker
+    // `plan_id`, so rejecting it takes the QUOTA chain down too and every Worker
     // then answers `503 quota_resolution_unavailable` — a fail-closed refusal
     // for the wrong reason, which would let this test pass against a fleet
     // with no lifecycle gate at all. `projects` is read by the lifecycle walk
     // and by nothing else on these three request paths, so the codes below can
     // only come from the gate under test.
-    await tenantDb().prepare("ALTER TABLE projects RENAME TO projects_hidden").run();
+    const originalTenantData = bindings().TENANT_DATA;
+    const brokenTenantData = tenantObjectNamespaceWithQueryFailure(
+      originalTenantData,
+      "FROM projects",
+    );
+    setMcpEnvVar("TENANT_DATA", brokenTenantData);
     try {
       expect(await fleet()).toEqual(UNAVAILABLE);
     } finally {
-      await tenantDb().prepare("ALTER TABLE projects_hidden RENAME TO projects").run();
+      setMcpEnvVar("TENANT_DATA", originalTenantData);
     }
   });
 });

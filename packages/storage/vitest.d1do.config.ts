@@ -28,11 +28,9 @@ import { d1SuiteConfig } from "./vitest.d1.shared.js";
  * migration sets, the file list — is identical, because everything else is
  * genuinely the same question.
  *
- * The control plane stays on D1 in BOTH legs, and that is not an oversight:
- * `billing_*`, `site_domain_verifications`, `tenant_provider_credentials` and
- * `control_plane_replay_floors` are account-global tables that do not exist in
- * the tenant schema. Routing them through a tenant object would fail
- * `no such table`, which is the correct outcome and the reason
- * `docs/design/tenant-data-classification-2026-08.md` exists.
+ * The control plane stays on D1 in BOTH legs for account-global `billing_*` and
+ * `site_domain_verifications`. The #863 provider-credential and replay-floor
+ * rows are tenant object tables, so their tests route through the object
+ * database just like the other tenant-private families.
  */
 export default d1SuiteConfig("durable_object");
