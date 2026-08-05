@@ -44,13 +44,13 @@
  * authenticated credential by `meteringDrain`, which holds `c.get("auth")`, and
  * travels on the drain's own {@link MeteringAttribution}.
  *
- * It is applied to a charge ONLY when `charge.requestId` matches the attribution's
- * request id. That guard is not decoration: one drain pass can pick up an outbox
- * row left behind by an EARLIER request whose drain failed, and stamping this
- * request's credential onto that charge would attribute one key's spend to
- * another. The unmatched case writes the tenant/project rollup with no api-key
- * id — the spend is still counted against the tenant's USD budget, it is only
- * the per-key token attribution that is dropped. Under-attribution, never
+ * It is applied to a charge or cost-less event ONLY when its request id matches
+ * the attribution's request id. That guard is not decoration: one drain pass can
+ * pick up an outbox row left behind by an EARLIER request whose drain failed, and
+ * stamping this request's credential onto that row would attribute one key's
+ * spend to another. The unmatched case writes the tenant/project rollup with no
+ * api-key id — the spend is still counted against the tenant's USD budget, it is
+ * only the per-key token attribution that is dropped. Under-attribution, never
  * mis-attribution.
  */
 import {
@@ -59,6 +59,7 @@ import {
   periodMonthFromUnix,
   type UsageAggregateWrite,
 } from "@ferrogate/storage";
+import type { BillingEvent } from "@ferrogate/billing";
 import type { QuotaScopeKind } from "@ferrogate/storage";
 import type { UsageRecordContext } from "../inference/ports.js";
 import { gatewayTenantHandle } from "../ratelimit/wallet.js";
@@ -177,14 +178,14 @@ export function withUsageProjectionRetry(
   };
 }
 
-/** Persist request attribution on the charge for context-free outbox repair. */
-export function chargeWithTenantAttribution(
-  charge: MeteredCharge,
+/** Apply request attribution to an event only when it belongs to this request. */
+export function eventWithTenantAttribution(
+  event: BillingEvent,
   attribution: MeteringAttribution | undefined,
-): MeteredCharge {
-  if (attribution === undefined || attribution.requestId !== charge.requestId) return charge;
+): BillingEvent {
+  if (attribution === undefined || attribution.requestId !== event.request_id) return event;
   const tenant = {
-    ...charge.event.tenant,
+    ...event.tenant,
     ...(attribution.tenantId === undefined || attribution.tenantId === ""
       ? {}
       : { organization_id: attribution.tenantId }),
@@ -198,10 +199,20 @@ export function chargeWithTenantAttribution(
       ? {}
       : { api_key_id: attribution.apiKeyId }),
   };
+  return { ...event, tenant };
+}
+
+/** Persist request attribution on the charge for context-free outbox repair. */
+export function chargeWithTenantAttribution(
+  charge: MeteredCharge,
+  attribution: MeteringAttribution | undefined,
+): MeteredCharge {
+  const event = eventWithTenantAttribution(charge.event, attribution);
+  if (event === charge.event) return charge;
   return {
     ...charge,
-    event: { ...charge.event, tenant },
-    entry: { ...charge.entry, tenant },
+    event,
+    entry: { ...charge.entry, tenant: event.tenant },
   };
 }
 

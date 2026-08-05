@@ -680,6 +680,38 @@ describe("durable metering — fail closed (issue #129, corrected by #663)", () 
     expect(h.sink.stats.unpricedRecorded).toBe(1);
     expect(h.sink.unpriced[0]?.providerModel).toBe("unpriced-model-9000");
   });
+
+  it("routes an unpriced event by matching request attribution", async () => {
+    const h = durableGateway();
+    const requestId = "fg-unpriced-tenant-attribution";
+    const context = createExecutionContext();
+
+    h.sink.record(
+      usageFixture({
+        requestId,
+        providerModel: "unpriced-model-9000",
+        tenantId: undefined,
+        projectId: undefined,
+      }),
+      {
+        env: h.env,
+        ctx: context,
+        attribution: { requestId, tenantId: "tenant_a" },
+      },
+    );
+    await waitOnExecutionContext(context);
+
+    expect(await rowCount("billing_events")).toBe(0);
+    expect(await tenantRowCount("billing_events")).toBe(1);
+    const row = await tenantObjectDb("tenant_a")
+      .prepare("SELECT tenant_id, event_json FROM billing_events")
+      .first<{ tenant_id: string; event_json: string }>();
+    expect(row?.tenant_id).toBe("tenant_a");
+    expect(JSON.parse(row?.event_json ?? "{}")).toMatchObject({
+      request_id: requestId,
+      tenant: { organization_id: "tenant_a" },
+    });
+  });
 });
 
 describe("durable metering — integer credits past 2^53", () => {

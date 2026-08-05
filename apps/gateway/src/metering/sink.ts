@@ -123,6 +123,7 @@ import {
   type MeteringDrainContext,
   chargeWithTenantAttribution,
   d1UsageAggregateSink,
+  eventWithTenantAttribution,
   withUsageDerivedRollups,
   withUsageProjectionRetry,
   usageWriteFor,
@@ -740,13 +741,22 @@ export class MeteringUsageSink implements UsageSink {
     const pending = this.#pendingUnpriced.splice(0, this.#pendingUnpriced.length);
     for (const refused of pending) {
       try {
-        const backend = this.#backend(rc?.env, refused.event.tenant.organization_id);
+        // Unpriced events do not have a MeteredCharge wrapper, so apply the
+        // same request-id guarded attribution directly before choosing the
+        // tenant backend. A public route can produce an event without a tenant
+        // field even though the authenticated request is tenant-scoped.
+        const event = eventWithTenantAttribution(refused.event, rc?.attribution);
+        const tenantId = event.tenant.organization_id;
+        const backend = this.#backend(
+          rc?.env,
+          tenantId === undefined || tenantId.trim() === "" ? undefined : tenantId,
+        );
         const ledger = backend.ledger;
         if (ledger.recordEvent === undefined) {
           this.#queueUnpricedEvent(refused);
           continue;
         }
-        await ledger.recordEvent(refused.event, refused.id, refused.event.occurred_at_unix ?? now);
+        await ledger.recordEvent(event, refused.id, event.occurred_at_unix ?? now);
         this.#stats.unpricedRecorded += 1;
       } catch (error) {
         this.#queueUnpricedEvent(refused);

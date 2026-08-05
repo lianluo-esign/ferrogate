@@ -38,7 +38,7 @@ import {
   derivedControlProjectionMetadata,
   parseListQuery,
 } from "../responses.js";
-import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
+import { tenantDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
   crudGroup,
@@ -133,8 +133,33 @@ function billingOutboxDocument(row: BillingOutboxAuthorityRow): StoreRecord {
   };
 }
 
-function pageLimit(offset: number, limit: number): number {
-  return Math.min(Number.MAX_SAFE_INTEGER, offset + limit);
+/** Billing authority is the tenant DO when present; older/native tenants use the control mirror. */
+async function tenantBillingDatabaseFor(
+  deps: ControlPlaneDeps,
+  tenantId: string,
+): Promise<D1Database | null> {
+  // Use the dispatching router, not the provisioning router: a deployment may
+  // still have native-binding tenants while newer tenants use Durable Objects.
+  // The dispatcher's handle source is the physical authority for this tenant.
+  const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantId);
+  return handle === null || handle.source !== "durable_object" ? null : handle.db;
+}
+
+function billingAuthorityKey(record: StoreRecord): string {
+  return `${String(record.tenant_id ?? "")}\u0000${String(record.id)}`;
+}
+
+function addBillingPage(
+  rowsByKey: Map<string, StoreRecord>,
+  page: { items: readonly StoreRecord[]; total: number },
+): { total: number; duplicates: number } {
+  let duplicates = 0;
+  for (const item of page.items) {
+    const key = billingAuthorityKey(item);
+    if (rowsByKey.has(key)) duplicates += 1;
+    rowsByKey.set(key, item);
+  }
+  return { total: page.total, duplicates };
 }
 
 async function tenantBillingEventPage(
@@ -142,48 +167,67 @@ async function tenantBillingEventPage(
   tenantId: string,
   limit: number,
 ): Promise<{ items: StoreRecord[]; total: number }> {
-  if (deps.controlDatabase === null && deps.tenantStorage === undefined) {
-    const page = await deps.store.list(METERING_EVENTS, { kind: "tenant", tenantId }, {
-      offset: 0,
-      limit,
-      paginate: false,
-      search: null,
-      filters: {},
-    });
-    return { items: [...page.items], total: page.total };
+  const rowsByKey = new Map<string, StoreRecord>();
+  let sourceTotal = 0;
+  let duplicates = 0;
+  const legacy = await deps.store.list(METERING_EVENTS, { kind: "tenant", tenantId }, {
+    offset: 0,
+    limit,
+    paginate: false,
+    search: null,
+    filters: {},
+  });
+  ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
+  const control = await controlBillingEventPage(deps.controlDatabase, limit, tenantId);
+  const controlAdded = addBillingPage(rowsByKey, control);
+  sourceTotal += controlAdded.total;
+  duplicates += controlAdded.duplicates;
+  const db = await tenantBillingDatabaseFor(deps, tenantId);
+  if (db !== null) {
+    const result = await db
+      .prepare(
+        `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
+                occurred_at_unix, event_json, count(*) OVER() AS total
+           FROM ${BILLING_EVENTS_TABLE}
+          WHERE tenant_id = ?
+          ORDER BY occurred_at_unix DESC, billing_event_id ASC
+          LIMIT ? OFFSET 0`,
+      )
+      .bind(tenantId, limit)
+      .all<BillingEventAuthorityRow>();
+    const authority = {
+      items: result.results.map(billingEventDocument),
+      total: result.results[0]?.total ?? 0,
+    };
+    const authorityAdded = addBillingPage(rowsByKey, authority);
+    sourceTotal += authorityAdded.total;
+    duplicates += authorityAdded.duplicates;
   }
-  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
-  const result = await db
-    .prepare(
-      `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
-              occurred_at_unix, event_json, count(*) OVER() AS total
-         FROM ${BILLING_EVENTS_TABLE}
-        WHERE tenant_id = ?
-        ORDER BY occurred_at_unix DESC, billing_event_id ASC
-        LIMIT ? OFFSET 0`,
-    )
-    .bind(tenantId, limit)
-    .all<BillingEventAuthorityRow>();
+  const items = [...rowsByKey.values()].sort(byBillingTime);
   return {
-    items: result.results.map(billingEventDocument),
-    total: result.results[0]?.total ?? 0,
+    items: items.slice(0, limit),
+    total: Math.max(items.length, sourceTotal - duplicates),
   };
 }
 
 async function controlBillingEventPage(
   db: D1Database | null,
   limit: number,
+  tenantId?: string,
 ): Promise<{ items: StoreRecord[]; total: number }> {
   if (db === null) return { items: [], total: 0 };
+  const where = tenantId === undefined ? "" : "WHERE tenant_id = ?";
+  const params = tenantId === undefined ? [limit] : [tenantId, limit];
   const result = await db
     .prepare(
       `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
               occurred_at_unix, event_json, count(*) OVER() AS total
          FROM ${BILLING_EVENTS_TABLE}
+        ${where}
         ORDER BY occurred_at_unix DESC, billing_event_id ASC
         LIMIT ? OFFSET 0`,
     )
-    .bind(limit)
+    .bind(...params)
     .all<BillingEventAuthorityRow>();
   return {
     items: result.results.map(billingEventDocument),
@@ -196,49 +240,67 @@ async function tenantBillingOutboxPage(
   tenantId: string,
   limit: number,
 ): Promise<{ items: StoreRecord[]; total: number }> {
-  if (deps.controlDatabase === null && deps.tenantStorage === undefined) {
-    const page = await deps.store.list(DEAD_LETTERS, { kind: "tenant", tenantId }, {
-      offset: 0,
-      limit,
-      paginate: false,
-      search: null,
-      filters: {},
-    });
-    return { items: [...page.items], total: page.total };
+  const rowsByKey = new Map<string, StoreRecord>();
+  let sourceTotal = 0;
+  let duplicates = 0;
+  const legacy = await deps.store.list(DEAD_LETTERS, { kind: "tenant", tenantId }, {
+    offset: 0,
+    limit,
+    paginate: false,
+    search: null,
+    filters: {},
+  });
+  ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
+  const control = await controlBillingOutboxPage(deps.controlDatabase, limit, tenantId);
+  const controlAdded = addBillingPage(rowsByKey, control);
+  sourceTotal += controlAdded.total;
+  duplicates += controlAdded.duplicates;
+  const db = await tenantBillingDatabaseFor(deps, tenantId);
+  if (db !== null) {
+    const result = await db
+      .prepare(
+        `SELECT id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
+                created_at_unix, updated_at_unix, event_json, count(*) OVER() AS total
+           FROM ${BILLING_OUTBOX_TABLE}
+          WHERE tenant_id = ? AND dead_lettered_at_unix IS NOT NULL
+          ORDER BY dead_lettered_at_unix DESC, id ASC
+          LIMIT ? OFFSET 0`,
+      )
+      .bind(tenantId, limit)
+      .all<BillingOutboxAuthorityRow>();
+    const authority = {
+      items: result.results.map(billingOutboxDocument),
+      total: result.results[0]?.total ?? 0,
+    };
+    const authorityAdded = addBillingPage(rowsByKey, authority);
+    sourceTotal += authorityAdded.total;
+    duplicates += authorityAdded.duplicates;
   }
-  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
-  const result = await db
-    .prepare(
-      `SELECT id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
-              created_at_unix, updated_at_unix, event_json, count(*) OVER() AS total
-         FROM ${BILLING_OUTBOX_TABLE}
-        WHERE tenant_id = ? AND dead_lettered_at_unix IS NOT NULL
-        ORDER BY dead_lettered_at_unix DESC, id ASC
-        LIMIT ? OFFSET 0`,
-    )
-    .bind(tenantId, limit)
-    .all<BillingOutboxAuthorityRow>();
+  const items = [...rowsByKey.values()].sort(byBillingTime);
   return {
-    items: result.results.map(billingOutboxDocument),
-    total: result.results[0]?.total ?? 0,
+    items: items.slice(0, limit),
+    total: Math.max(items.length, sourceTotal - duplicates),
   };
 }
 
 async function controlBillingOutboxPage(
   db: D1Database | null,
   limit: number,
+  tenantId?: string,
 ): Promise<{ items: StoreRecord[]; total: number }> {
   if (db === null) return { items: [], total: 0 };
+  const tenantPredicate = tenantId === undefined ? "" : " AND tenant_id = ?";
+  const params = tenantId === undefined ? [limit] : [tenantId, limit];
   const result = await db
     .prepare(
       `SELECT id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
               created_at_unix, updated_at_unix, event_json, count(*) OVER() AS total
          FROM ${BILLING_OUTBOX_TABLE}
-        WHERE dead_lettered_at_unix IS NOT NULL
+        WHERE dead_lettered_at_unix IS NOT NULL${tenantPredicate}
         ORDER BY dead_lettered_at_unix DESC, id ASC
         LIMIT ? OFFSET 0`,
     )
-    .bind(limit)
+    .bind(...params)
     .all<BillingOutboxAuthorityRow>();
   return {
     items: result.results.map(billingOutboxDocument),
@@ -258,56 +320,51 @@ async function listBillingAuthority(
   query: ReturnType<typeof parseListQuery>,
   kind: "events" | "outbox",
 ): Promise<{ items: StoreRecord[]; total: number }> {
-  const fetchLimit = pageLimit(query.offset, query.limit);
+  const fetchLimit = Number.MAX_SAFE_INTEGER;
   if (scope.kind === "tenant") {
     const page = kind === "events"
       ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit)
       : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
-    return page.then(async (result) => {
-      if (result.total > 0) {
-        return {
-          items: result.items.slice(query.offset, query.offset + query.limit),
-          total: result.total,
-        };
-      }
-      // Legacy documents remain a compatibility read only while the tenant
-      // authority has no row. The store applies the tenant fence to the
-      // control projection, so this cannot expose another tenant's document.
-      const compatibility = await deps.store.list(
-        kind === "events" ? METERING_EVENTS : DEAD_LETTERS,
-        scope,
-        query,
-      );
-      return { items: [...compatibility.items], total: compatibility.total };
-    });
+    return page.then((result) => ({
+      items: result.items.slice(query.offset, query.offset + query.limit),
+      total: result.total,
+    }));
   }
 
   const rowsById = new Map<string, StoreRecord>();
+  let sourceTotal = 0;
+  let duplicates = 0;
   const legacy = await deps.store.list(
     kind === "events" ? METERING_EVENTS : DEAD_LETTERS,
     scope,
     { ...query, offset: 0, limit: fetchLimit, paginate: false },
   );
-  for (const item of legacy.items) rowsById.set(String(item.id), item);
+  const legacyAdded = addBillingPage(rowsById, legacy);
+  sourceTotal += legacyAdded.total;
+  duplicates += legacyAdded.duplicates;
 
   const control =
     kind === "events"
       ? await controlBillingEventPage(deps.controlDatabase, fetchLimit)
       : await controlBillingOutboxPage(deps.controlDatabase, fetchLimit);
-  for (const item of control.items) rowsById.set(String(item.id), item);
+  const controlAdded = addBillingPage(rowsById, control);
+  sourceTotal += controlAdded.total;
+  duplicates += controlAdded.duplicates;
 
   for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
     const page =
       kind === "events"
         ? await tenantBillingEventPage(deps, tenantId, fetchLimit)
         : await tenantBillingOutboxPage(deps, tenantId, fetchLimit);
-    for (const item of page.items) rowsById.set(String(item.id), item);
+    const tenantAdded = addBillingPage(rowsById, page);
+    sourceTotal += tenantAdded.total;
+    duplicates += tenantAdded.duplicates;
   }
 
   const items = [...rowsById.values()].sort(byBillingTime);
   return {
     items: items.slice(query.offset, query.offset + query.limit),
-    total: items.length,
+    total: Math.max(items.length, sourceTotal - duplicates),
   };
 }
 
@@ -346,7 +403,20 @@ async function tenantUsageAggregatePage(
   limit: number,
   offset: number,
 ): Promise<{ records: StoreRecord[]; total: number }> {
-  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
+  const db = await tenantBillingDatabaseFor(deps, tenantId);
+  if (db === null) {
+    if (deps.controlDatabase === null) {
+      const page = await deps.store.list("usage-aggregates", { kind: "tenant", tenantId }, {
+        offset,
+        limit,
+        paginate: false,
+        search: null,
+        filters: {},
+      });
+      return { records: [...page.items], total: page.total };
+    }
+    return controlUsageAggregatePage(deps.controlDatabase, limit, offset, tenantId);
+  }
   const result = await db
     .prepare(
       `SELECT ${TENANT_USAGE_AGGREGATE_COLUMNS}, count(*) OVER() AS total
@@ -368,15 +438,19 @@ async function controlUsageAggregatePage(
   db: D1Database,
   limit: number,
   offset: number,
+  tenantId?: string,
 ): Promise<{ records: StoreRecord[]; total: number }> {
+  const where = tenantId === undefined ? "" : "WHERE r.tenant = ?";
+  const params = tenantId === undefined ? [limit, offset] : [tenantId, limit, offset];
   const result = await db
     .prepare(
       `SELECT ${USAGE_AGGREGATE_COLUMNS}, count(*) OVER() AS total
          FROM ${USAGE_AGGREGATE_TABLE} r
+        ${where}
         ORDER BY updated_at_unix DESC, id ASC
         LIMIT ? OFFSET ?`,
     )
-    .bind(limit, offset)
+    .bind(...params)
     .all<UsageAggregateRow & { readonly total?: number }>();
   return {
     records: result.results.map(usageAggregateDocument),
@@ -623,7 +697,8 @@ async function readTenantOutboxReportRow(
   tenantId: string,
   reportId: string,
 ): Promise<OutboxReportRow | null> {
-  const db = await tenantEvidenceDatabaseFor(deps.tenantStorage ?? deps.tenantDatabases, tenantId);
+  const db = await tenantBillingDatabaseFor(deps, tenantId);
+  if (db === null) return null;
   try {
     const row = await db
       .prepare(
@@ -663,10 +738,31 @@ async function locateOutboxReport(
     const tenantRow = await readTenantOutboxReportRow(deps, scope.tenantId, reportId);
     if (tenantRow !== null) return tenantRow;
   } else {
+    const matches: OutboxReportRow[] = [];
     for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
       const tenantRow = await readTenantOutboxReportRow(deps, tenantId, reportId);
-      if (tenantRow !== null) return tenantRow;
+      if (tenantRow !== null) matches.push(tenantRow);
     }
+    if (matches.length > 1) {
+      throw new HttpError(
+        409,
+        "dead_letter_ambiguous",
+        `billing report ${reportId} exists for multiple tenants; replay it with a tenant-scoped key`,
+      );
+    }
+    const control = await readControlOutboxReportRow(deps.tenantDatabases, reportId);
+    if (matches.length === 1) {
+      const tenantRow = matches[0];
+      if (tenantRow !== undefined && control !== null && control.tenantId !== tenantRow.tenantId) {
+        throw new HttpError(
+          409,
+          "dead_letter_ambiguous",
+          `billing report ${reportId} exists for multiple tenants; replay it with a tenant-scoped key`,
+        );
+      }
+      return tenantRow ?? null;
+    }
+    return control;
   }
   return readControlOutboxReportRow(deps.tenantDatabases, reportId);
 }
@@ -819,8 +915,10 @@ async function replayOutboxReportRow(
 
 /**
  * Billing feeds read typed authority first. Tenant-scoped calls address one
- * tenant Durable Object; platform calls perform a bounded fan-out over the
- * provisioned tenant roster and merge legacy control compatibility rows.
+ * tenant Durable Object; platform calls perform a full-key fan-out over the
+ * provisioned tenant roster and merge legacy control compatibility rows. The
+ * response remains paginated, but the complete key set is required for an exact
+ * union total after authority precedence and de-duplication.
  *
  * The document collections remain as a compatibility fallback for deployments
  * that have not mounted the typed billing schema.
@@ -854,6 +952,15 @@ export const billingRoutes: GroupModule = crudGroup(
       const deps = c.get("deps");
       const scope = scopeOf(c);
       const reportId = pathParam(c, "report_id");
+
+      // A legacy document may share an id with the real typed row after the
+      // billing authority moved. Always resolve physical authority first, so a
+      // document cannot make replay re-arm the wrong database or report success
+      // without touching the tenant Durable Object row.
+      const physical = await locateOutboxReport(deps, scope, reportId);
+      if (physical !== null) {
+        return await replayOutboxReportRow(c, deps, scope, reportId);
+      }
 
       const record = await deps.store.get(DEAD_LETTERS, scope, reportId);
       if (record === null) {
