@@ -91,6 +91,9 @@ import { isUnfilteredQuery, pageOf } from "./query.js";
 
 /** The generic control-plane document table (`sql/d1-ts/control/`). */
 export const RESOURCE_TABLE = "control_plane_resources";
+/** The tenant-local generic document table (`sql/d1-ts/tenant/0016_*`). */
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
+export type ResourceTable = typeof RESOURCE_TABLE | typeof TENANT_RESOURCE_TABLE;
 /** The durable admin-mutation evidence table (`sql/d1-ts/control/`). */
 export const AUDIT_TABLE = "audit_events";
 /**
@@ -255,7 +258,12 @@ interface LoadedRecord {
   readonly revision: number;
 }
 
-function parseDocument(collection: string, id: string, json: string): StoreRecord {
+function parseDocument(
+  table: ResourceTable,
+  collection: string,
+  id: string,
+  json: string,
+): StoreRecord {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -263,10 +271,10 @@ function parseDocument(collection: string, id: string, json: string): StoreRecor
     // Refusing loudly beats returning `null`: "the row is unreadable" and "there
     // is no such row" are different facts and only one of them is safe to treat
     // as "free to create over".
-    throw new Error(`control_plane_resources ${collection}/${id} holds unparseable document_json`);
+    throw new Error(`${table} ${collection}/${id} holds unparseable document_json`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`control_plane_resources ${collection}/${id} document_json is not an object`);
+    throw new Error(`${table} ${collection}/${id} document_json is not an object`);
   }
   return parsed as StoreRecord;
 }
@@ -282,16 +290,45 @@ export interface D1ControlPlaneStoreOptions {
   readonly now?: () => number;
   /** Injected id minting, so tests can pin audit ids. */
   readonly newId?: () => string;
+  /** The named document table. Defaults to the platform control table. */
+  readonly resourceTable?: ResourceTable;
+  /** Object-local mode removes JSON tenant predicates after routing. */
+  readonly isolation?: "control" | "object";
+  /** Required in object-local mode; the database identity is the tenant scope. */
+  readonly objectTenantId?: string;
+  /** Audit evidence remains account-global even when the document is object-local. */
+  readonly auditDatabase?: D1Database;
 }
 
 export class D1ControlPlaneStore implements ControlPlaneStore {
   readonly #db: D1Database;
+  readonly #auditDb: D1Database;
+  readonly #resourceTable: ResourceTable;
+  readonly #objectTenantId: string | null;
   readonly #requestId: string;
   readonly #now: () => number;
   readonly #newId: () => string;
 
   constructor(db: D1Database, options: D1ControlPlaneStoreOptions = {}) {
     this.#db = db;
+    this.#auditDb = options.auditDatabase ?? db;
+    this.#resourceTable = options.resourceTable ?? RESOURCE_TABLE;
+    const isolation = options.isolation ?? "control";
+    if (isolation === "object") {
+      if (this.#resourceTable !== TENANT_RESOURCE_TABLE) {
+        throw new Error("object-local control-plane store must use tenant_resources");
+      }
+      const tenantId = options.objectTenantId?.trim();
+      if (tenantId === undefined || tenantId === "") {
+        throw new Error("object-local control-plane store requires objectTenantId");
+      }
+      this.#objectTenantId = tenantId;
+    } else {
+      if (options.objectTenantId !== undefined) {
+        throw new Error("control-plane store cannot be given an objectTenantId");
+      }
+      this.#objectTenantId = null;
+    }
     // `audit_events.request_id` is NOT NULL; an absent correlation id is the
     // empty string rather than a fabricated one, so a reader can tell the
     // difference between "unattributed" and "attributed to request ''".
@@ -300,12 +337,61 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     this.#newId = options.newId ?? (() => crypto.randomUUID());
   }
 
+  /** Object-local access is fenced by the database/router identity, not SQL. */
+  #scopeFence(
+    scope: CallerScope,
+    fence: "read" | "write",
+  ): {
+    readonly sql: string;
+    readonly params: readonly string[];
+  } {
+    if (this.#objectTenantId !== null) {
+      if (scope.kind === "tenant" && scope.tenantId !== this.#objectTenantId) {
+        throw new Error(
+          `tenant resource store for ${this.#objectTenantId} cannot serve ${scope.tenantId}`,
+        );
+      }
+      return { sql: "", params: [] };
+    }
+    return fence === "write" ? tenantWriteScopeSql(scope) : tenantScopeSql(scope);
+  }
+
+  /** Retain tenant_id as a mis-routing tripwire inside the object. */
+  #objectRecord(collection: string, id: string, record: StoreRecord): StoreRecord {
+    if (this.#objectTenantId === null) return record;
+    if (record.tenant_id !== this.#objectTenantId) {
+      throw new Error(
+        `${TENANT_RESOURCE_TABLE} ${collection}/${id} is attributed to ` +
+          `${String(record.tenant_id)} but belongs to ${this.#objectTenantId}`,
+      );
+    }
+    return record;
+  }
+
+  #storedRecord(scope: CallerScope, record: StoreRecord): StoreRecord {
+    if (this.#objectTenantId !== null) {
+      if (record.tenant_id !== undefined && record.tenant_id !== null) {
+        if (record.tenant_id !== this.#objectTenantId) {
+          throw new Error(
+            `tenant resource store for ${this.#objectTenantId} refused record ` +
+              `${String(record.id)} for ${record.tenant_id}`,
+          );
+        }
+      }
+      return { ...record, tenant_id: this.#objectTenantId };
+    }
+    return {
+      ...record,
+      tenant_id: scope.kind === "tenant" ? scope.tenantId : (record.tenant_id ?? null),
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Reads
   // -------------------------------------------------------------------------
 
   async list(collection: string, scope: CallerScope, query: ListQuery): Promise<ListPage> {
-    const tenant = tenantScopeSql(scope);
+    const tenant = this.#scopeFence(scope, "read");
     const where = `WHERE resource_kind = ?${tenant.sql}`;
     const whereParams = [collection, ...tenant.params];
 
@@ -315,18 +401,23 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       const [pageResult, countResult] = await this.#db.batch<Record<string, unknown>>([
         this.#db
           .prepare(
-            `SELECT resource_id, document_json FROM ${RESOURCE_TABLE} ${where} ${LIST_ORDER} LIMIT ? OFFSET ?`,
+            `SELECT resource_id, document_json FROM ${this.#resourceTable} ${where} ${LIST_ORDER} LIMIT ? OFFSET ?`,
           )
           .bind(...whereParams, query.limit, query.offset),
         this.#db
-          .prepare(`SELECT COUNT(*) AS total FROM ${RESOURCE_TABLE} ${where}`)
+          .prepare(`SELECT COUNT(*) AS total FROM ${this.#resourceTable} ${where}`)
           .bind(...whereParams),
       ]);
       const items = (pageResult?.results ?? []).map((row) =>
-        parseDocument(
+        this.#objectRecord(
           collection,
           String(row.resource_id),
-          String((row as { document_json: string }).document_json),
+          parseDocument(
+            this.#resourceTable,
+            collection,
+            String(row.resource_id),
+            String((row as { document_json: string }).document_json),
+          ),
         ),
       );
       const total = Number(
@@ -365,11 +456,17 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // Until then the admin/low-volume path is what Rust's own D1 backend
     // documents for these surfaces, and correctness is preferred to the seek.
     const rows = await this.#db
-      .prepare(`SELECT resource_id, document_json FROM ${RESOURCE_TABLE} ${where} ${LIST_ORDER}`)
+      .prepare(
+        `SELECT resource_id, document_json FROM ${this.#resourceTable} ${where} ${LIST_ORDER}`,
+      )
       .bind(...whereParams)
       .all<{ resource_id: string; document_json: string }>();
     const visible = rows.results.map((row) =>
-      parseDocument(collection, row.resource_id, row.document_json),
+      this.#objectRecord(
+        collection,
+        row.resource_id,
+        parseDocument(this.#resourceTable, collection, row.resource_id, row.document_json),
+      ),
     );
     return pageOf(visible, query);
   }
@@ -395,15 +492,22 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     id: string,
     fence: "read" | "write" = "read",
   ): Promise<LoadedRecord | null> {
-    const tenant = fence === "write" ? tenantWriteScopeSql(scope) : tenantScopeSql(scope);
+    const tenant = this.#scopeFence(scope, fence);
     const row = await this.#db
       .prepare(
-        `SELECT document_json, revision FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
+        `SELECT document_json, revision FROM ${this.#resourceTable} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
       )
       .bind(collection, id, ...tenant.params)
       .first<ResourceRow>();
     if (row === null) return null;
-    return { record: parseDocument(collection, id, row.document_json), revision: row.revision };
+    return {
+      record: this.#objectRecord(
+        collection,
+        id,
+        parseDocument(this.#resourceTable, collection, id, row.document_json),
+      ),
+      revision: row.revision,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -411,11 +515,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
   // -------------------------------------------------------------------------
 
   async create(collection: string, scope: CallerScope, record: StoreRecord): Promise<StoreRecord> {
-    const stored: StoreRecord = {
-      ...record,
-      // A tenant-scoped caller cannot mint a row into another tenant.
-      tenant_id: scope.kind === "tenant" ? scope.tenantId : (record.tenant_id ?? null),
-    };
+    const stored = this.#storedRecord(scope, record);
     const now = this.#now();
     // `DO NOTHING` + `RETURNING` is the atomic form of "insert if absent": a
     // colliding id returns no row, so there is no read-then-insert window in
@@ -426,7 +526,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // another tenant is a 409, not a silent second row under the same id.
     const inserted = await this.#db
       .prepare(
-        `INSERT INTO ${RESOURCE_TABLE}
+        `INSERT INTO ${this.#resourceTable}
            (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
          VALUES (?, ?, ?, 1, ?, ?)
          ON CONFLICT (resource_kind, resource_id) DO NOTHING
@@ -502,7 +602,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     patch: Readonly<Record<string, unknown>>,
     precondition: (current: StoreRecord) => boolean,
   ): Promise<MergeIfOutcome> {
-    const tenant = tenantWriteScopeSql(scope);
+    const tenant = this.#scopeFence(scope, "write");
     const { id: _ignoredId, tenant_id: _ignoredTenant, ...fields } = patch;
 
     for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
@@ -520,7 +620,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       };
       const result = await this.#db
         .prepare(
-          `UPDATE ${RESOURCE_TABLE}
+          `UPDATE ${this.#resourceTable}
              SET document_json = ?, revision = revision + 1, updated_at_unix = ?
            WHERE resource_kind = ? AND resource_id = ? AND revision = ?${tenant.sql}`,
         )
@@ -548,10 +648,10 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     // actually belonged to (which, for a platform operator deleting a global
     // row, is not the caller's).
     const existing = await this.#load(collection, scope, id, "write");
-    const tenant = tenantWriteScopeSql(scope);
+    const tenant = this.#scopeFence(scope, "write");
     const result = await this.#db
       .prepare(
-        `DELETE FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
+        `DELETE FROM ${this.#resourceTable} WHERE resource_kind = ? AND resource_id = ?${tenant.sql}`,
       )
       .bind(collection, id, ...tenant.params)
       .run();
@@ -639,7 +739,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     mutations: readonly StoreMutation[],
   ): Promise<readonly StoreRecord[] | null> {
     if (mutations.length === 0) return [];
-    const tenant = tenantWriteScopeSql(scope);
+    const tenant = this.#scopeFence(scope, "write");
 
     // (4) above: two `create`s of the same id in one unit.
     const mintedIds = new Set<string>();
@@ -722,7 +822,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
           if (target.key === ownKey || seen.has(target.key)) continue;
           seen.add(target.key);
           clauses.push(
-            `EXISTS (SELECT 1 FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ? AND revision = ?)`,
+            `EXISTS (SELECT 1 FROM ${this.#resourceTable} WHERE resource_kind = ? AND resource_id = ? AND revision = ?)`,
           );
           params.push(target.collection, target.id, revisionAt(target, position));
         }
@@ -744,9 +844,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       for (const [index, mutation] of mutations.entries()) {
         if (mutation.kind === "create") {
           const stored: StoreRecord = {
-            ...mutation.record,
-            tenant_id:
-              scope.kind === "tenant" ? scope.tenantId : (mutation.record.tenant_id ?? null),
+            ...this.#storedRecord(scope, mutation.record),
           };
           next.push(stored);
           audits.push({
@@ -764,7 +862,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
           insertStatements.push(
             this.#db
               .prepare(
-                `INSERT INTO ${RESOURCE_TABLE}
+                `INSERT INTO ${this.#resourceTable}
                    (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
                  SELECT ?, ?, ${
                    guard.clauses.length === 0
@@ -815,7 +913,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         updateStatements.push(
           this.#db
             .prepare(
-              `UPDATE ${RESOURCE_TABLE}
+              `UPDATE ${this.#resourceTable}
                  SET document_json = CASE WHEN revision = ?${tenant.sql}${
                    guard.clauses.length === 0 ? "" : ` AND ${guard.clauses.join(" AND ")}`
                  } THEN ? ELSE NULL END,
@@ -931,7 +1029,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       if (mutation.kind !== "create") continue;
       const taken = await this.#db
         .prepare(
-          `SELECT 1 AS present FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?`,
+          `SELECT 1 AS present FROM ${this.#resourceTable} WHERE resource_kind = ? AND resource_id = ?`,
         )
         .bind(mutation.collection, mutation.record.id)
         .first<{ present: number }>();
@@ -956,7 +1054,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     action: AuditAction,
     build: (existing: StoreRecord) => StoreRecord,
   ): Promise<StoreRecord | null> {
-    const tenant = tenantWriteScopeSql(scope);
+    const tenant = this.#scopeFence(scope, "write");
     for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
       const existing = await this.#load(collection, scope, id, "write");
       if (existing === null) return null;
@@ -964,7 +1062,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       const next = build(existing.record);
       const result = await this.#db
         .prepare(
-          `UPDATE ${RESOURCE_TABLE}
+          `UPDATE ${this.#resourceTable}
              SET document_json = ?, revision = revision + 1, updated_at_unix = ?
            WHERE resource_kind = ? AND resource_id = ? AND revision = ?${tenant.sql}`,
         )
@@ -1049,7 +1147,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 
     for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
       try {
-        const head = await this.#db
+        const head = await this.#auditDb
           .prepare(
             `SELECT seq, row_hash FROM ${AUDIT_TABLE}
               WHERE chain_key = ? AND seq IS NOT NULL
@@ -1072,7 +1170,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
           audit_json: auditJson,
         });
 
-        await this.#db
+        await this.#auditDb
           .prepare(
             `INSERT INTO ${AUDIT_TABLE}
                (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
