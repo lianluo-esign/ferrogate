@@ -159,6 +159,7 @@ export * from "./site-domain.js";
 export * from "./references.js";
 export * from "./payment-attempt.js";
 export * from "./agent-schedule.js";
+export * from "./tenant-schedule-alarm.js";
 /**
  * Tamper-evidence for `audit_events` (#684): the row hash chain, the anchor
  * document, and the verifier. Pure and dependency-free on purpose — the
