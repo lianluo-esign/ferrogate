@@ -99,6 +99,7 @@ import {
 export interface TenantDataStub {
   query(request: TenantDataQueryRequest): Promise<TenantDataResult>;
   batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
+  privilegedBatch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
 }
 
 /**
@@ -756,6 +757,17 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
       // table says so.
       supportsAtomicBatch: true,
     };
+  }
+
+  async privilegedBatch(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<readonly TenantDataResult[]> {
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime("privileged tenant writes require a non-empty tenant id");
+    }
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    return stub.privilegedBatch({ tenantId, statements });
   }
 
   async provisionedTenants(): Promise<readonly string[]> {

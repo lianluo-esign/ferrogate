@@ -42,6 +42,7 @@
  * module.
  */
 import { StorageError } from "./errors.js";
+import type { TenantDataResult, TenantDataStatement } from "./tenant-data-object.js";
 
 // ---------------------------------------------------------------------------
 // Handles
@@ -132,6 +133,16 @@ export interface TenantDatabaseRouter {
   control(): D1Database;
   /** Resolve one tenant's database, or throw. NEVER falls back. */
   forTenant(tenantId: string): Promise<TenantDatabaseHandle>;
+  /**
+   * Optional operator-only object RPC used for authority projections such as
+   * tenant RBAC bindings. Native/rest routers do not expose this capability;
+   * callers must fail closed instead of routing a privileged write through a
+   * normal tenant SQL handle.
+   */
+  privilegedBatch?(
+    tenantId: string,
+    statements: readonly TenantDataStatement[],
+  ): Promise<readonly TenantDataResult[]>;
   /**
    * Every provisioned tenant id, ascending.
    *
