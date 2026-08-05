@@ -14,6 +14,7 @@
  * change to the hash format breaks these specs instead of silently passing.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import {
   hashVirtualApiKeySecret,
   virtualApiKeyLast4,
@@ -41,6 +42,21 @@ const FAR_FUTURE = 4_000_000_000;
 export const TENANT_A = "tenant-a";
 /** A second, unrelated tenant — the other side of every tenancy fence. */
 export const TENANT_B = "tenant-b";
+
+export const TENANT_RESOURCE_TABLE = "tenant_resources";
+
+/** The object-local document database used by tenant-private durable fixtures. */
+export async function tenantResourceDb(tenantId: string): Promise<D1Database> {
+  const namespace = (
+    env as unknown as {
+      TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
+    }
+  ).TENANT_DATA;
+  if (namespace === undefined) throw new Error("durable harness requires TENANT_DATA");
+  return (
+    await new DurableObjectTenantDatabaseRouter(namespace, env.CONTROL_DB).forTenant(tenantId)
+  ).db;
+}
 
 // ---------------------------------------------------------------------------
 // Tenant credentials — seeded into `api_keys` in the TENANT database

@@ -45,6 +45,7 @@
  * | a step is written to `control_plane_resources` | the DEPLOYED path uses the durable ledger, not `NO_WORKFLOW_HISTORY` |
  */
 import { SELF, env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   AGENT_WORKFLOW_COLLECTION,
@@ -56,6 +57,17 @@ const CHAT = `${BASE}/v1/chat/completions`;
 const UPSTREAM_HOST = "api.workflow-mount.example";
 
 const DB = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
+const TENANT_RESOURCE_TABLE = "tenant_resources";
+
+async function tenantDb(): Promise<D1Database> {
+  const namespace = (
+    env as unknown as {
+      TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
+    }
+  ).TENANT_DATA;
+  if (namespace === undefined) throw new Error("workflow mount test expects TENANT_DATA");
+  return (await new DurableObjectTenantDatabaseRouter(namespace, DB).forTenant(TENANT_ID)).db;
+}
 
 const PROVIDERS = JSON.stringify([
   { name: "wfp", kind: "openai", base_url: `https://${UPSTREAM_HOST}/v1` },
@@ -65,9 +77,7 @@ const MODELS = JSON.stringify([
 ]);
 /** A TENANT key: the catalog is read `forTenant`, so the subject must carry one. */
 const TENANT_ID = "tenant_wf";
-const KEYS = JSON.stringify([
-  { key: "fg_wf", id: "key_wf", tenant_id: TENANT_ID, scopes: [] },
-]);
+const KEYS = JSON.stringify([{ key: "fg_wf", id: "key_wf", tenant_id: TENANT_ID, scopes: [] }]);
 
 const OVERRIDES: Record<string, string> = {
   GATEWAY_PROVIDERS: PROVIDERS,
@@ -114,27 +124,36 @@ const GRAPH_DOCUMENT = {
 };
 
 async function seedWorkflow(): Promise<void> {
-  await DB.prepare(
-    `INSERT INTO control_plane_resources
+  await (await tenantDb())
+    .prepare(
+      `INSERT INTO ${TENANT_RESOURCE_TABLE}
        (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
      VALUES (?, ?, ?, 1, 0, 0)
      ON CONFLICT (resource_kind, resource_id)
        DO UPDATE SET document_json = excluded.document_json`,
-  )
+    )
     .bind(AGENT_WORKFLOW_COLLECTION, GRAPH_DOCUMENT.id, JSON.stringify(GRAPH_DOCUMENT))
     .run();
 }
 
 async function clearWorkflowRows(): Promise<void> {
-  await DB.prepare("DELETE FROM control_plane_resources WHERE resource_kind IN (?, ?)")
-    .bind(AGENT_WORKFLOW_COLLECTION, WORKFLOW_RUN_STEP_COLLECTION)
-    .run();
+  await Promise.all([
+    DB.prepare("DELETE FROM control_plane_resources WHERE resource_kind IN (?, ?)")
+      .bind(AGENT_WORKFLOW_COLLECTION, WORKFLOW_RUN_STEP_COLLECTION)
+      .run(),
+    (async () => {
+      const objectDb = await tenantDb();
+      await objectDb
+        .prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind IN (?, ?)`)
+        .bind(AGENT_WORKFLOW_COLLECTION, WORKFLOW_RUN_STEP_COLLECTION)
+        .run();
+    })(),
+  ]);
 }
 
 async function stepRowCount(): Promise<number> {
-  const row = await DB.prepare(
-    "SELECT COUNT(*) AS n FROM control_plane_resources WHERE resource_kind = ?",
-  )
+  const row = await (await tenantDb())
+    .prepare(`SELECT COUNT(*) AS n FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind = ?`)
     .bind(WORKFLOW_RUN_STEP_COLLECTION)
     .first<{ n: number }>();
   return row === null ? 0 : Number(row.n);
@@ -163,7 +182,12 @@ function interceptUpstream(): { calls: () => number; restore: () => void } {
     }
     return await original(input as RequestInfo, init);
   }) as typeof fetch;
-  return { calls: () => calls, restore: () => { globalThis.fetch = original; } };
+  return {
+    calls: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 async function post(headers: Record<string, string>): Promise<Response> {
@@ -331,12 +355,16 @@ describe("the workflow graph gate is mounted on the app the Worker exports", () 
     expect(await stepRowCount()).toBe(0);
     const upstream = interceptUpstream();
     try {
-      expect((await post({
-        [WF_ID]: GRAPH_DOCUMENT.id,
-        [WF_VERSION]: "1",
-        [WF_NODE]: "start",
-        [AGENT_RUN]: "run_mount_5",
-      })).status).toBe(200);
+      expect(
+        (
+          await post({
+            [WF_ID]: GRAPH_DOCUMENT.id,
+            [WF_VERSION]: "1",
+            [WF_NODE]: "start",
+            [AGENT_RUN]: "run_mount_5",
+          })
+        ).status,
+      ).toBe(200);
     } finally {
       upstream.restore();
     }

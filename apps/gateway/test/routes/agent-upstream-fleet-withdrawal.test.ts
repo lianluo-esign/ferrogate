@@ -57,17 +57,41 @@
  * this repo's dominant defect; the two halves together are what close it.
  */
 import { SELF, env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   AGENT_UPSTREAM_COLLECTION as AR_COLLECTION,
   RESOURCE_TABLE as AR_TABLE,
+  TENANT_RESOURCE_TABLE as AR_TENANT_TABLE,
   d1AgentUpstreamPort,
 } from "../../../agent-runtime/src/agents/registry.js";
 import registrySource from "../../../agent-runtime/src/agents/registry.ts?raw";
-import { AGENT_UPSTREAM_COLLECTION, RESOURCE_TABLE } from "../../src/routes/agent-upstreams.js";
+import {
+  AGENT_UPSTREAM_COLLECTION,
+  RESOURCE_TABLE,
+  TENANT_RESOURCE_TABLE,
+} from "../../src/routes/agent-upstreams.js";
 
 const bindings = env as unknown as Record<string, unknown>;
+const FLEET_TENANT_KEY = "fg_fleet_tenant_a";
+let originalNativeApiKeys: unknown;
+
+beforeAll(() => {
+  originalNativeApiKeys = bindings.GATEWAY_NATIVE_API_KEYS;
+  bindings.GATEWAY_NATIVE_API_KEYS = JSON.stringify([
+    {
+      key: FLEET_TENANT_KEY,
+      id: "key_fleet_tenant_a",
+      tenant_id: "tenant-a",
+      scopes: ["agents.read"],
+    },
+  ]);
+});
+
+afterAll(() => {
+  bindings.GATEWAY_NATIVE_API_KEYS = originalNativeApiKeys;
+});
 
 function controlDb(): D1Database {
   const binding = bindings.CONTROL_DB as D1Database | undefined;
@@ -78,6 +102,14 @@ function controlDb(): D1Database {
     );
   }
   return binding;
+}
+
+function tenantRouter(): DurableObjectTenantDatabaseRouter {
+  const namespace = bindings.TENANT_DATA as
+    | import("@ferrogate/storage/durable-objects").TenantDataNamespace
+    | undefined;
+  if (namespace === undefined) throw new Error("fleet test expects TENANT_DATA");
+  return new DurableObjectTenantDatabaseRouter(namespace, controlDb());
 }
 
 // ---------------------------------------------------------------------------
@@ -93,9 +125,11 @@ async function storeUpstream(
 ): Promise<void> {
   const stored: Record<string, unknown> = { ...document, tenant_id: tenantId };
   const now = (clock += 1);
-  await controlDb()
+  const target = tenantId === null ? controlDb() : (await tenantRouter().forTenant(tenantId)).db;
+  const table = tenantId === null ? RESOURCE_TABLE : TENANT_RESOURCE_TABLE;
+  await target
     .prepare(
-      `INSERT INTO ${RESOURCE_TABLE}
+      `INSERT INTO ${table}
          (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
        VALUES (?, ?, ?, 1, ?, ?)
        ON CONFLICT (resource_kind, resource_id) DO UPDATE SET
@@ -111,9 +145,11 @@ async function storeUpstream(
  * is told: `200` when a row was removed, `404` when none matched, which is what
  * Rust's `delete_agent_upstream` answers on `Ok(None)`.
  */
-async function adminDelete(id: string): Promise<number> {
-  const result = await controlDb()
-    .prepare(`DELETE FROM ${RESOURCE_TABLE} WHERE resource_kind = ? AND resource_id = ?`)
+async function adminDelete(id: string, tenantId: string | null): Promise<number> {
+  const target = tenantId === null ? controlDb() : (await tenantRouter().forTenant(tenantId)).db;
+  const table = tenantId === null ? RESOURCE_TABLE : TENANT_RESOURCE_TABLE;
+  const result = await target
+    .prepare(`DELETE FROM ${table} WHERE resource_kind = ? AND resource_id = ?`)
     .bind(AGENT_UPSTREAM_COLLECTION, id)
     .run();
   return (result.meta.changes ?? 0) > 0 ? 200 : 404;
@@ -128,9 +164,9 @@ interface DiscoveryDocument {
 }
 
 /** DOOR 1 — `apps/gateway` DISCOVERY, through the deployed Worker. */
-async function discoveredEndpoints(): Promise<readonly string[]> {
+async function discoveredEndpoints(token = "fg_root"): Promise<readonly string[]> {
   const res = await SELF.fetch("https://gw.test/.well-known/agent.json", {
-    headers: { authorization: "Bearer fg_root" },
+    headers: { authorization: `Bearer ${token}` },
   });
   expect(res.status).toBe(200);
   return ((await res.json()) as DiscoveryDocument).data.map((entry) => entry.endpoint);
@@ -148,7 +184,7 @@ async function discoveredEndpoints(): Promise<readonly string[]> {
  * `!upstream.enabled` with `404 agent_not_found`), so it is folded in here.
  */
 async function dispatchEndpoint(id: string, tenantId: string | null): Promise<string | undefined> {
-  const lookup = await d1AgentUpstreamPort(controlDb()).lookup(id, { tenantId });
+  const lookup = await d1AgentUpstreamPort(controlDb(), tenantRouter()).lookup(id, { tenantId });
   if (lookup.outcome !== "found" || !lookup.upstream.enabled) return undefined;
   return lookup.upstream.url;
 }
@@ -165,6 +201,14 @@ beforeEach(async () => {
     .prepare(`DELETE FROM ${RESOURCE_TABLE} WHERE resource_kind = ?`)
     .bind(AGENT_UPSTREAM_COLLECTION)
     .run();
+  await Promise.all(
+    ["tenant-a", "tenant-b"].map(async (tenantId) => {
+      await (await tenantRouter().forTenant(tenantId)).db
+        .prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind = ?`)
+        .bind(AGENT_UPSTREAM_COLLECTION)
+        .run();
+    }),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -177,6 +221,7 @@ describe("the two Workers reach the SAME rows", () => {
     // are compared as VALUES, imported from each Worker's own module.
     expect(AR_COLLECTION).toBe(AGENT_UPSTREAM_COLLECTION);
     expect(AR_TABLE).toBe(RESOURCE_TABLE);
+    expect(AR_TENANT_TABLE).toBe(TENANT_RESOURCE_TABLE);
   });
 
   it("the cross-app import stays a leaf — registry.ts pulls in no module graph", () => {
@@ -184,10 +229,14 @@ describe("the two Workers reach the SAME rows", () => {
     // has no value imports. Asserted off its source text, not off its docblock,
     // because a docblock cannot go red.
     const imports = [...registrySource.matchAll(/^import\s+([\s\S]*?)\s+from\s+"([^"]+)";/gm)];
-    expect(imports.length, "registry.ts grew an import this gate has not seen").toBe(1);
-    const [, clause, specifier] = imports[0] as unknown as [string, string, string];
-    expect(specifier).toBe("../ports.js");
-    expect(clause.startsWith("type "), `registry.ts imports ${specifier} as VALUES`).toBe(true);
+    expect(imports.map(([, , specifier]) => specifier)).toEqual([
+      "@ferrogate/storage",
+      "../ports.js",
+    ]);
+    const portsImport = imports.find(([, , specifier]) => specifier === "../ports.js");
+    expect(portsImport, "registry.ts has no ports import").toBeDefined();
+    if (portsImport === undefined) return;
+    expect(portsImport[1]?.startsWith("type "), "registry.ts imports ports as VALUES").toBe(true);
   });
 });
 
@@ -206,16 +255,17 @@ describe("ONE withdrawal, BOTH reach paths", () => {
     );
 
     // THE OPERATOR'S ONE ACTION.
-    expect(await adminDelete(COMPROMISED.id), "the admin delete removed no row").toBe(200);
+    expect(await adminDelete(COMPROMISED.id, null), "the admin delete removed no row").toBe(200);
 
     // AFTER — no redeploy, no restart, no cache flush, and BOTH doors shut. A
     // failure on EITHER line is the defect, and it is the same test either way.
     expect(await discoveredEndpoints(), "still PUBLISHED after withdrawal").not.toContain(
       COMPROMISED.endpoint,
     );
-    expect(await dispatchEndpoint(COMPROMISED.id, null), "still DISPATCHABLE after withdrawal").toBe(
-      undefined,
-    );
+    expect(
+      await dispatchEndpoint(COMPROMISED.id, null),
+      "still DISPATCHABLE after withdrawal",
+    ).toBe(undefined);
   });
 
   it("holds for a tenant-attributed upstream on both doors", async () => {
@@ -224,11 +274,11 @@ describe("ONE withdrawal, BOTH reach paths", () => {
     // one passing does not imply the other.
     await storeUpstream({ ...COMPROMISED, id: "tenant-compromised" }, "tenant-a");
     expect(await dispatchEndpoint("tenant-compromised", "tenant-a")).toBe(COMPROMISED.endpoint);
-    expect(await discoveredEndpoints()).toContain(COMPROMISED.endpoint);
+    expect(await discoveredEndpoints(FLEET_TENANT_KEY)).toContain(COMPROMISED.endpoint);
 
-    expect(await adminDelete("tenant-compromised")).toBe(200);
+    expect(await adminDelete("tenant-compromised", "tenant-a")).toBe(200);
 
-    expect(await discoveredEndpoints()).not.toContain(COMPROMISED.endpoint);
+    expect(await discoveredEndpoints(FLEET_TENANT_KEY)).not.toContain(COMPROMISED.endpoint);
     expect(await dispatchEndpoint("tenant-compromised", "tenant-a")).toBe(undefined);
   });
 
@@ -237,7 +287,7 @@ describe("ONE withdrawal, BOTH reach paths", () => {
     // when no row matched, and a no-op delete must not be able to look
     // effective by taking something else down with it.
     await storeUpstream(COMPROMISED, null);
-    expect(await adminDelete("never-stored")).toBe(404);
+    expect(await adminDelete("never-stored", null)).toBe(404);
     expect(await discoveredEndpoints()).toContain(COMPROMISED.endpoint);
     expect(await dispatchEndpoint(COMPROMISED.id, null)).toBe(COMPROMISED.endpoint);
   });
