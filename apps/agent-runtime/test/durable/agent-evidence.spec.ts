@@ -51,7 +51,10 @@ describe("agent evidence source of truth", () => {
   it("tenant-qualifies the control projection when tenants reuse run and event ids", async () => {
     const run = runStateStub(env, TENANT_A, RUN_ID);
     const runB = runStateStub(env, TENANT_B, RUN_ID);
-    await Promise.all([run.create(createInput(TENANT_A, RUN_ID)), runB.create(createInput(TENANT_B, RUN_ID))]);
+    await Promise.all([
+      run.create(createInput(TENANT_A, RUN_ID)),
+      runB.create(createInput(TENANT_B, RUN_ID)),
+    ]);
     await run.appendEvent(TENANT_A, {
       kind: "event.second",
       body: { value: 2 },
@@ -92,14 +95,20 @@ describe("agent evidence source of truth", () => {
       sql:
         "SELECT i.id AS instance_id, s.id AS session_id, " +
         "e.id AS event_id, x.session_id AS selection_session_id, " +
-        "p.session_id AS policy_session_id " +
+        "p.session_id AS policy_session_id, w.id AS isolation_evidence_id " +
         "FROM agent_worker_instances i " +
         "LEFT JOIN managed_worker_sessions s ON s.session_json LIKE ? " +
         "LEFT JOIN managed_worker_lifecycle_events e ON e.id = ? " +
         "LEFT JOIN managed_worker_isolation_selections x ON x.session_id = s.id " +
         "LEFT JOIN managed_worker_isolation_policies p ON p.session_id = s.id " +
+        "LEFT JOIN managed_worker_isolation_evidence w ON w.id = ? " +
         "WHERE i.id = ?",
-      params: [`%${RUN_ID}%`, `${RUN_ID}-evt-000001`, RUN_ID],
+      params: [
+        `%${RUN_ID}%`,
+        `${RUN_ID}-evt-000001`,
+        `managed:session-${RUN_ID}:${RUN_ID}`,
+        RUN_ID,
+      ],
     });
     const runsB = await objectB.query({
       tenantId: TENANT_B,
@@ -117,6 +126,12 @@ describe("agent evidence source of truth", () => {
     )
       .bind(RUN_ID)
       .all<{ projection_key: string; id: string; tenant: string }>();
+    const controlManagedEvidence = await env.CONTROL_DB.prepare(
+      "SELECT projection_key, id, tenant FROM managed_worker_isolation_evidence " +
+        "WHERE id IN (?, ?) ORDER BY tenant",
+    )
+      .bind(`managed:session-${RUN_ID}:${RUN_ID}`, `managed:session-${RUN_ID}:${RUN_ID}`)
+      .all<{ projection_key: string; id: string; tenant: string }>();
 
     expect(runsA.results).toHaveLength(1);
     expect(runsA.results[0]?.tenant).toBe(TENANT_A);
@@ -133,6 +148,7 @@ describe("agent evidence source of truth", () => {
         event_id: `${RUN_ID}-evt-000001`,
         selection_session_id: `session-${RUN_ID}`,
         policy_session_id: `session-${RUN_ID}`,
+        isolation_evidence_id: `managed:session-${RUN_ID}:${RUN_ID}`,
       },
     ]);
     expect(runsB.results).toHaveLength(1);
@@ -173,6 +189,18 @@ describe("agent evidence source of truth", () => {
         tenant: TENANT_B,
       },
     ]);
+    expect(controlManagedEvidence.results).toEqual([
+      {
+        projection_key: projectionKey(TENANT_A, `managed:session-${RUN_ID}:${RUN_ID}`),
+        id: `managed:session-${RUN_ID}:${RUN_ID}`,
+        tenant: TENANT_A,
+      },
+      {
+        projection_key: projectionKey(TENANT_B, `managed:session-${RUN_ID}:${RUN_ID}`),
+        id: `managed:session-${RUN_ID}:${RUN_ID}`,
+        tenant: TENANT_B,
+      },
+    ]);
 
     await env.CONTROL_DB.prepare("UPDATE agent_runs SET run_json = ? WHERE projection_key = ?")
       .bind('{"tenant_id":"forged"}', projectionKey(TENANT_A, RUN_ID))
@@ -187,9 +215,7 @@ describe("agent evidence source of truth", () => {
 
   it("replays the stored run and events when authoritative rows need repair", async () => {
     const run = runStateStub(env, RETRY_TENANT, RETRY_RUN_ID);
-    const object = tenantDataNamespace().get(
-      tenantDataNamespace().idFromName(RETRY_TENANT),
-    );
+    const object = tenantDataNamespace().get(tenantDataNamespace().idFromName(RETRY_TENANT));
     const input = createInput(RETRY_TENANT, RETRY_RUN_ID);
 
     await run.create(input);
@@ -258,8 +284,6 @@ describe("agent evidence source of truth", () => {
     )
       .bind(runId, tenantId)
       .all<{ projection_key: string }>();
-    expect(rows.results).toEqual([
-      { projection_key: `8:${tenantId}:${runId}` },
-    ]);
+    expect(rows.results).toEqual([{ projection_key: `8:${tenantId}:${runId}` }]);
   });
 });

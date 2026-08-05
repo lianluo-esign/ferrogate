@@ -88,6 +88,10 @@ export async function resetD1(): Promise<void> {
     db().prepare("DELETE FROM spend_anomaly_runs"),
     db().prepare("DELETE FROM spend_anomaly_episodes"),
     db().prepare("DELETE FROM spend_throttles"),
+    db().prepare("DELETE FROM usage_aggregate_rollups"),
+    db().prepare("DELETE FROM usage_monthly_rollups"),
+    db().prepare("DELETE FROM usage_metadata_rollups"),
+    db().prepare("DELETE FROM observed_agent_presence"),
     // Tuning rides `quota_policies`, so a policy row left behind would silently
     // re-tune the next test's detector.
     db().prepare("DELETE FROM quota_policies"),

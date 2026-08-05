@@ -34,11 +34,15 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { monthBoundsUnix } from "../src/finops/pass.js";
+import {
+  monthBoundsUnix,
+  SPEND_ANOMALY_CLAIM_LEASE_SECS,
+} from "../src/finops/pass.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
+import { tenantObjectDb } from "./tenant-object.js";
 
 /** One hour, the default detection window. */
 const HOUR = 3_600;
@@ -54,6 +58,35 @@ const NOW = 1_700_100_000;
 const WINDOW_START = Math.floor(NOW / HOUR) * HOUR - HOUR;
 
 const WEBHOOK = "https://alerts.example.com/spend";
+
+const ANOMALY_TENANTS = [
+  "acme",
+  "grower",
+  "repeat",
+  "newborn",
+  "sparse",
+  "pennies",
+  "optout",
+  "stuck",
+  "worse",
+  "flap",
+  "downstream",
+  "nohook",
+  "once",
+  "fresh",
+  "nobudget",
+  "early",
+  "nobrake",
+  "brake",
+  "mild",
+  "steady",
+  "scaled",
+  "narrow",
+  "wideband",
+  "wide",
+  "other",
+  "noisy",
+] as const;
 
 interface DeliveredAlert {
   readonly url: string;
@@ -194,6 +227,11 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await resetD1();
+  await Promise.all(
+    ANOMALY_TENANTS.map((tenantId) =>
+      tenantObjectDb(tenantId).prepare("DELETE FROM spend_anomaly_episodes").run(),
+    ),
+  );
   installReceiver();
 });
 
@@ -202,6 +240,27 @@ afterEach(() => {
 });
 
 describe("burn-rate anomaly detection", () => {
+  it("reclaims an abandoned in-flight window claim", async () => {
+    await seedFlatBaseline("acme", 2);
+    await seedHour("acme", 0, 80, 40);
+    await db()
+      .prepare(
+        "INSERT INTO spend_anomaly_runs " +
+          "(window_start_unix, ran_at_unix, scopes_evaluated) VALUES (?, ?, -1)",
+      )
+      .bind(WINDOW_START, NOW - SPEND_ANOMALY_CLAIM_LEASE_SECS - 1)
+      .run();
+
+    const report = await runScheduledTick(bindings(), NOW);
+
+    expect(report.spendAnomaly.skipped).not.toBe("already_evaluated");
+    const claim = await db()
+      .prepare("SELECT scopes_evaluated FROM spend_anomaly_runs WHERE window_start_unix = ?")
+      .bind(WINDOW_START)
+      .first<{ scopes_evaluated: number }>();
+    expect(claim?.scopes_evaluated).toBeGreaterThanOrEqual(0);
+  });
+
   it("alerts on a runaway agent loop that a monthly threshold would miss", async () => {
     // A day of $2/hour, then $80 in one hour — 40x. The month-to-date total is
     // $128 against a $5,000 budget, i.e. 2.6%: the 80% threshold alerter is
@@ -221,6 +280,16 @@ describe("burn-rate anomaly detection", () => {
     expect(spike?.baseline_usd).toBeCloseTo(2, 6);
     expect(spike?.severity).toBe("critical");
     expect(spike?.notified_count).toBe(1);
+
+    const authoritative = await tenantObjectDb("acme")
+      .prepare("SELECT id, notified_count FROM spend_anomaly_episodes")
+      .all<{ id: string; notified_count: number }>();
+    expect(authoritative.results).toHaveLength(1);
+    expect(authoritative.results[0]?.id).toBe(spike?.id);
+    expect(authoritative.results[0]?.notified_count).toBe(1);
+    expect((open[0] as EpisodeRow & { projection_key?: string }).projection_key).toContain(
+      ":acme:",
+    );
 
     // The webhook is the operator-visible half; an episode row nobody is told
     // about is the defect one layer in.

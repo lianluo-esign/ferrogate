@@ -54,6 +54,7 @@
  * object is not addressable from the internet.
  */
 import { DurableObject } from "cloudflare:workers";
+import { AUDIT_CHAIN_GENESIS_HASH, auditChainKey, auditRowHash } from "./audit-chain.js";
 import {
   TENANT_MIGRATIONS,
   TENANT_SCHEMA_VERSION,
@@ -102,6 +103,30 @@ export interface TenantDataQueryRequest extends TenantDataStatement {
 export interface TenantDataBatchRequest {
   readonly tenantId: string;
   readonly statements: readonly TenantDataStatement[];
+}
+
+/** One tenant-authoritative append to the tamper-evident audit chain. */
+export interface TenantAuditAppendRequest {
+  readonly tenantId: string;
+  readonly id: string;
+  readonly requestId: string;
+  readonly agentRunId: string | null;
+  readonly occurredAtUnix: number;
+  readonly auditJson: string;
+}
+
+/** The complete row returned after the object assigned its chain position. */
+export interface TenantAuditAppendResult {
+  readonly id: string;
+  readonly requestId: string;
+  readonly agentRunId: string | null;
+  readonly tenant: string;
+  readonly occurredAtUnix: number;
+  readonly auditJson: string;
+  readonly chainKey: string;
+  readonly seq: number;
+  readonly prevHash: string;
+  readonly rowHash: string;
 }
 
 /** One statement's outcome. Every field is structured-cloneable. */
@@ -221,13 +246,9 @@ function scheduleAlarmQueueFrom(env: unknown): TenantScheduleAlarmQueue | null {
  * method. Cloudflare RPC only addresses string properties; the alarm entrypoint
  * is the only production caller.
  */
-export const TENANT_SCHEDULE_ALARM_CALLBACK = Symbol(
-  "TenantDataObject.scheduleAlarmCallback",
-);
+export const TENANT_SCHEDULE_ALARM_CALLBACK = Symbol("TenantDataObject.scheduleAlarmCallback");
 
-export type TenantScheduleAlarmCallback = (
-  message: TenantScheduleAlarmMessage,
-) => Promise<void>;
+export type TenantScheduleAlarmCallback = (message: TenantScheduleAlarmMessage) => Promise<void>;
 
 /**
  * A witness table from `0001_init_tenant.sql`, used to catch a ledger that
@@ -336,7 +357,7 @@ function requiresPrivilegedWrite(sql: string): string | null {
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the SEVENTEEN files have 36
+ *    comment lines containing a `;` mid-prose, and the NINETEEN files have 36
  *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
  *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015, 1 in 0016 and 2 in 0017) —
  *    36, not 18,
@@ -352,7 +373,7 @@ function requiresPrivilegedWrite(sql: string): string | null {
  *    lossless over `0005_responses_conversations.sql` — that file indents `--`
  *    comments BETWEEN columns, and a filter anchored at column 0 would corrupt
  *    the table.
- *  * It is safe today because, measured over all SEVENTEEN files, every non-comment
+ *  * It is safe today because, measured over all NINETEEN files, every non-comment
  *    `;` is at end-of-line, there is no `;` inside any string literal in a live
  *    statement, and there are no trailing inline comments. **A migration that
  *    introduces a `CREATE TRIGGER`, or a `;` inside a quoted literal, breaks
@@ -390,9 +411,7 @@ export class TenantDataObject extends DurableObject {
   readonly #scheduleAlarmQueue: TenantScheduleAlarmQueue | null;
   readonly [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback = async (message) => {
     if (this.#scheduleAlarmQueue === null) {
-      throw new Error(
-        `${REFUSAL}: SCHEDULE_ALARMS is not bound; retaining the alarm for retry`,
-      );
+      throw new Error(`${REFUSAL}: SCHEDULE_ALARMS is not bound; retaining the alarm for retry`);
     }
     await this.#scheduleAlarmQueue.send(encodeTenantScheduleAlarm(message));
   };
@@ -497,6 +516,122 @@ export class TenantDataObject extends DurableObject {
       const results: TenantDataResult[] = [];
       for (const statement of request.statements) results.push(this.#exec(statement));
       return results;
+    });
+  }
+
+  /**
+   * Append one tenant audit row with its chain position assigned by the object.
+   *
+   * The hash calculation is asynchronous Web Crypto, while SQLite's
+   * `transactionSync()` callback must be synchronous. `blockConcurrencyWhile`
+   * closes that gap: it keeps every other RPC out while the head is read, the
+   * digest is computed, and the checked insert commits. The transaction still
+   * re-reads the head before inserting, so the serialization assumption is
+   * explicit rather than hidden in the caller.
+   */
+  async appendAudit(request: TenantAuditAppendRequest): Promise<TenantAuditAppendResult> {
+    await this.#admit(request.tenantId);
+    if (request.tenantId.trim() === "" || request.tenantId !== request.tenantId.trim()) {
+      throw new Error(`${REFUSAL}: audit append requires a normalized tenant id`);
+    }
+    if (request.occurredAtUnix < 0 || !Number.isSafeInteger(request.occurredAtUnix)) {
+      throw new Error(`${REFUSAL}: audit append requires a non-negative integer timestamp`);
+    }
+    const tenant = request.tenantId;
+    const chainKey = auditChainKey(tenant);
+
+    return this.#state.blockConcurrencyWhile(async () => {
+      const existing = this.#state.storage.sql
+        .exec<{
+          id: string;
+          request_id: string;
+          agent_run_id: string | null;
+          tenant: string;
+          occurred_at_unix: number;
+          audit_json: string;
+          chain_key: string;
+          seq: number;
+          prev_hash: string;
+          row_hash: string;
+        }>(
+          "SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+            "chain_key, seq, prev_hash, row_hash FROM audit_events WHERE id = ?",
+          request.id,
+        )
+        .toArray()[0];
+      if (existing !== undefined) {
+        if (
+          existing.request_id !== request.requestId ||
+          existing.agent_run_id !== request.agentRunId ||
+          existing.tenant !== tenant ||
+          existing.occurred_at_unix !== request.occurredAtUnix ||
+          existing.audit_json !== request.auditJson
+        ) {
+          throw new Error(`${REFUSAL}: audit append idempotency conflict for ${request.id}`);
+        }
+        return {
+          id: existing.id,
+          requestId: existing.request_id,
+          agentRunId: existing.agent_run_id,
+          tenant: existing.tenant,
+          occurredAtUnix: existing.occurred_at_unix,
+          auditJson: existing.audit_json,
+          chainKey: existing.chain_key,
+          seq: existing.seq,
+          prevHash: existing.prev_hash,
+          rowHash: existing.row_hash,
+        };
+      }
+      const head = this.#auditHead(chainKey);
+      const seq = head === null ? 1 : head.seq + 1;
+      const prevHash = head?.rowHash ?? AUDIT_CHAIN_GENESIS_HASH;
+      const rowHash = await auditRowHash({
+        chain_key: chainKey,
+        seq,
+        prev_hash: prevHash,
+        id: request.id,
+        request_id: request.requestId,
+        agent_run_id: request.agentRunId,
+        tenant,
+        occurred_at_unix: request.occurredAtUnix,
+        audit_json: request.auditJson,
+      });
+
+      return this.#state.storage.transactionSync(() => {
+        const current = this.#auditHead(chainKey);
+        if (current?.seq !== head?.seq || current?.rowHash !== head?.rowHash) {
+          throw new Error(`${REFUSAL}: audit chain head changed while appending`);
+        }
+        this.#state.storage.sql
+          .exec(
+            "INSERT INTO audit_events " +
+              "(id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+              "chain_key, seq, prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            request.id,
+            request.requestId,
+            request.agentRunId,
+            tenant,
+            request.occurredAtUnix,
+            request.auditJson,
+            chainKey,
+            seq,
+            prevHash,
+            rowHash,
+          )
+          .toArray();
+        return {
+          id: request.id,
+          requestId: request.requestId,
+          agentRunId: request.agentRunId,
+          tenant,
+          occurredAtUnix: request.occurredAtUnix,
+          auditJson: request.auditJson,
+          chainKey,
+          seq,
+          prevHash,
+          rowHash,
+        };
+      });
     });
   }
 
@@ -809,6 +944,17 @@ export class TenantDataObject extends DurableObject {
         )
         .toArray().length > 0
     );
+  }
+
+  #auditHead(chainKey: string): { readonly seq: number; readonly rowHash: string } | null {
+    const rows = this.#state.storage.sql
+      .exec<{ seq: number; row_hash: string }>(
+        "SELECT seq, row_hash FROM audit_events WHERE chain_key = ? ORDER BY seq DESC LIMIT 1",
+        chainKey,
+      )
+      .toArray();
+    const row = rows[0];
+    return row === undefined ? null : { seq: row.seq, rowHash: row.row_hash };
   }
 }
 

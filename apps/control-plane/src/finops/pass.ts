@@ -44,7 +44,9 @@
  * The Cron Trigger ticks every minute and the window is an hour, so 59 of 60
  * ticks have nothing to do. `INSERT OR IGNORE INTO spend_anomaly_runs` on the
  * window start is the claim; a tick that does not win it returns after ONE
- * write.
+ * write. The claim is marked in-flight (`scopes_evaluated = -1`) before any
+ * tenant object is touched, and a bounded lease lets a later tick reclaim it
+ * if the Worker dies after claiming. A failed pass clears its own claim.
  *
  * That claim is also what makes the cooldown check safe. "Read when we last
  * notified, then decide" is a race in general; behind this claim there is
@@ -53,7 +55,7 @@
  * rather than left as a comfortable assumption.
  */
 import { periodMonthFromUnix } from "@ferrogate/storage";
-import { resolveControlDatabase } from "../adapters.js";
+import { resolveControlDatabase, resolveTenantStorage } from "../adapters.js";
 import type { ControlPlaneBindings } from "../ports.js";
 import {
   type BurnRateDecision,
@@ -79,6 +81,8 @@ import { readPeriodSpend, readSpendBuckets } from "./source.js";
 export const SPEND_ANOMALY_EPISODE_TABLE = "spend_anomaly_episodes";
 export const SPEND_ANOMALY_RUN_TABLE = "spend_anomaly_runs";
 export const SPEND_THROTTLE_TABLE = "spend_throttles";
+/** A dead isolate must not suppress the same closed window forever. */
+export const SPEND_ANOMALY_CLAIM_LEASE_SECS = 15 * 60;
 
 /**
  * What one pass reports back on the tick summary.
@@ -128,6 +132,93 @@ interface EpisodeRow {
   readonly windows_seen: number;
   readonly notified_count: number;
   readonly last_notified_unix: number | null;
+}
+
+interface EpisodeProjectionRow extends EpisodeRow {
+  readonly scope_type: string;
+  readonly scope_id: string;
+  readonly signal: string;
+  readonly window_start_unix: number;
+  readonly window_secs: number;
+  readonly opened_at_unix: number;
+  readonly last_seen_unix: number;
+  readonly resolved_at_unix: number | null;
+  readonly observed_usd: number;
+  readonly baseline_usd: number | null;
+  readonly threshold_usd: number | null;
+  readonly bound_by: string | null;
+  readonly baseline_windows: number | null;
+  readonly active_windows: number | null;
+  readonly projected_usd: number | null;
+  readonly budget_usd: number | null;
+  readonly period_month: string | null;
+  readonly detail_json: string;
+}
+
+interface EpisodeStore {
+  readonly authoritative: D1Database;
+  readonly projection: D1Database;
+}
+
+const EPISODE_COLUMNS = [
+  "id",
+  "scope_type",
+  "scope_id",
+  "signal",
+  "severity",
+  "peak_severity",
+  "window_start_unix",
+  "window_secs",
+  "opened_at_unix",
+  "last_seen_unix",
+  "resolved_at_unix",
+  "windows_seen",
+  "notified_count",
+  "last_notified_unix",
+  "observed_usd",
+  "baseline_usd",
+  "threshold_usd",
+  "bound_by",
+  "baseline_windows",
+  "active_windows",
+  "projected_usd",
+  "budget_usd",
+  "period_month",
+  "detail_json",
+] as const;
+
+const EPISODE_PROJECTION_UPSERT_SQL = `
+  INSERT INTO ${SPEND_ANOMALY_EPISODE_TABLE} (
+    projection_key, ${EPISODE_COLUMNS.join(", ")}
+  ) VALUES (?1, ${EPISODE_COLUMNS.map((_, index) => `?${index + 2}`).join(", ")})
+  ON CONFLICT (projection_key) DO UPDATE SET
+    id = excluded.id,
+    scope_type = excluded.scope_type,
+    scope_id = excluded.scope_id,
+    signal = excluded.signal,
+    severity = excluded.severity,
+    peak_severity = excluded.peak_severity,
+    window_start_unix = excluded.window_start_unix,
+    window_secs = excluded.window_secs,
+    opened_at_unix = excluded.opened_at_unix,
+    last_seen_unix = excluded.last_seen_unix,
+    resolved_at_unix = excluded.resolved_at_unix,
+    windows_seen = excluded.windows_seen,
+    notified_count = excluded.notified_count,
+    last_notified_unix = excluded.last_notified_unix,
+    observed_usd = excluded.observed_usd,
+    baseline_usd = excluded.baseline_usd,
+    threshold_usd = excluded.threshold_usd,
+    bound_by = excluded.bound_by,
+    baseline_windows = excluded.baseline_windows,
+    active_windows = excluded.active_windows,
+    projected_usd = excluded.projected_usd,
+    budget_usd = excluded.budget_usd,
+    period_month = excluded.period_month,
+    detail_json = excluded.detail_json`;
+
+function evidenceProjectionKey(tenantId: string, logicalId: string): string {
+  return `${Array.from(tenantId).length}:${tenantId}:${logicalId}`;
 }
 
 /** One scope's evaluation, before anything is written. */
@@ -180,23 +271,54 @@ async function evaluateWindow(
   const windowSecs = SPEND_ANOMALY_WINDOW_SECS;
   const windowStartUnix = Math.floor(now / windowSecs) * windowSecs - windowSecs;
 
-  // THE CLAIM. `INSERT OR IGNORE` returns `meta.changes === 0` when another
-  // tick already took this window; see the module docblock for why one
-  // evaluator per window is what makes the cooldown read safe.
+  // THE CLAIM. A negative `scopes_evaluated` is an in-flight marker. It is
+  // intentionally stored in the existing table so this repair needs no schema
+  // change: a completed row remains non-negative, while a dead evaluator can
+  // be reclaimed after the lease.
   const claim = await db
     .prepare(
-      `INSERT OR IGNORE INTO ${SPEND_ANOMALY_RUN_TABLE} (window_start_unix, ran_at_unix)
-       VALUES (?, ?)`,
+      `INSERT OR IGNORE INTO ${SPEND_ANOMALY_RUN_TABLE}
+        (window_start_unix, ran_at_unix, scopes_evaluated)
+       VALUES (?, ?, -1)`,
     )
     .bind(windowStartUnix, now)
     .run();
   if ((claim.meta?.changes ?? 0) === 0) {
-    return { ...IDLE, skipped: "already_evaluated", windowStartUnix };
+    const reclaimed = await db
+      .prepare(
+        `UPDATE ${SPEND_ANOMALY_RUN_TABLE}
+            SET ran_at_unix = ?, scopes_evaluated = -1,
+                episodes_opened = 0, notifications_sent = 0
+          WHERE window_start_unix = ?
+            AND scopes_evaluated = -1
+            AND ran_at_unix <= ?`,
+      )
+      .bind(now, windowStartUnix, now - SPEND_ANOMALY_CLAIM_LEASE_SECS)
+      .run();
+    if ((reclaimed.meta?.changes ?? 0) === 0) {
+      return { ...IDLE, skipped: "already_evaluated", windowStartUnix };
+    }
   }
 
-  const period = monthBoundsUnix(windowStartUnix);
-  const periodMonth = periodMonthFromUnix(windowStartUnix);
-  const windowEnd = windowStartUnix + windowSecs;
+  try {
+    const period = monthBoundsUnix(windowStartUnix);
+    const periodMonth = periodMonthFromUnix(windowStartUnix);
+    const windowEnd = windowStartUnix + windowSecs;
+    const episodeRouter = resolveTenantStorage(env);
+    const episodeStores = new Map<string, EpisodeStore>();
+    const episodeStoreFor = async (tenantId: string): Promise<EpisodeStore> => {
+      const existing = episodeStores.get(tenantId);
+      if (existing !== undefined) return existing;
+      const handle = await episodeRouter.forTenant(tenantId);
+      if (handle.source !== "durable_object") {
+        throw new Error(
+          `spend anomaly episodes require TenantDataObject storage for tenant ${tenantId}; got ${handle.source}`,
+        );
+      }
+      const store: EpisodeStore = { authoritative: handle.db, projection: db };
+      episodeStores.set(tenantId, store);
+      return store;
+    };
 
   // The policies are read FIRST, and the bucket query is then widened to the
   // LONGEST baseline anyone configured. Reading them in parallel and slicing
@@ -305,11 +427,22 @@ async function evaluateWindow(
         // "consecutive windows this was true for" instead of "windows since it
         // was first true", which are different numbers during a flapping
         // incident and only the first is actionable.
-        resolved += await closeEpisode(db, evaluation.scopeId, signal, now);
+        const episodeStore = await episodeStoreFor(evaluation.scopeId);
+        const closed = await closeEpisode(
+          episodeStore.authoritative,
+          evaluation.scopeId,
+          signal,
+          now,
+        );
+        if (closed !== null) {
+          await projectEpisode(episodeStore, closed.id);
+          resolved += 1;
+        }
         continue;
       }
 
-      const outcome = await upsertEpisode(db, {
+      const episodeStore = await episodeStoreFor(evaluation.scopeId);
+      const outcome = await upsertEpisode(episodeStore.authoritative, {
         scopeId: evaluation.scopeId,
         signal,
         windowStartUnix,
@@ -318,6 +451,7 @@ async function evaluateWindow(
         periodMonth,
         evaluation,
       });
+      await projectEpisode(episodeStore, outcome.episodeId);
       if (outcome.opened) opened += 1;
 
       // AUTO-THROTTLE, before the notification: an operator reading the alert
@@ -362,7 +496,7 @@ async function evaluateWindow(
           payload,
           ...(fetchImpl === undefined ? {} : { fetchImpl }),
         });
-        await db
+        await episodeStore.authoritative
           .prepare(
             `UPDATE ${SPEND_ANOMALY_EPISODE_TABLE}
                 SET notified_count = notified_count + 1, last_notified_unix = ?
@@ -370,6 +504,7 @@ async function evaluateWindow(
           )
           .bind(now, outcome.episodeId)
           .run();
+        await projectEpisode(episodeStore, outcome.episodeId);
         notified += 1;
       } catch (error) {
         // NOT retried and the counter is NOT bumped: an episode whose
@@ -385,25 +520,46 @@ async function evaluateWindow(
     }
   }
 
-  await db
-    .prepare(
-      `UPDATE ${SPEND_ANOMALY_RUN_TABLE}
-          SET scopes_evaluated = ?, episodes_opened = ?, notifications_sent = ?
-        WHERE window_start_unix = ?`,
-    )
-    .bind(evaluations.length, opened, notified, windowStartUnix)
-    .run();
+    const completed = await db
+      .prepare(
+        `UPDATE ${SPEND_ANOMALY_RUN_TABLE}
+            SET scopes_evaluated = ?, episodes_opened = ?, notifications_sent = ?
+          WHERE window_start_unix = ?
+            AND ran_at_unix = ?
+            AND scopes_evaluated = -1`,
+      )
+      .bind(evaluations.length, opened, notified, windowStartUnix, now)
+      .run();
+    if ((completed.meta?.changes ?? 0) === 0) {
+      throw new Error(`spend anomaly claim lease lost for ${windowStartUnix}`);
+    }
 
-  return {
-    evaluated: evaluations.length,
-    opened,
-    notified,
-    deliveryFailed,
-    throttled,
-    resolved,
-    windowStartUnix,
-    ...(delivery === undefined ? { deliveryUnconfigured: true } : {}),
-  };
+    return {
+      evaluated: evaluations.length,
+      opened,
+      notified,
+      deliveryFailed,
+      throttled,
+      resolved,
+      windowStartUnix,
+      ...(delivery === undefined ? { deliveryUnconfigured: true } : {}),
+    };
+  } catch (error) {
+    // Do not leave a dead evaluator's marker looking complete. The conditional
+    // delete cannot remove a newer evaluator's reclaimed claim.
+    try {
+      await db
+        .prepare(
+          `DELETE FROM ${SPEND_ANOMALY_RUN_TABLE}
+            WHERE window_start_unix = ? AND ran_at_unix = ? AND scopes_evaluated = -1`,
+        )
+        .bind(windowStartUnix, now)
+        .run();
+    } catch (releaseError) {
+      console.warn("control-plane: failed to release spend anomaly claim", releaseError);
+    }
+    throw error;
+  }
 }
 
 /** Every tenant-scope quota policy, indexed by scope id. */
@@ -416,6 +572,49 @@ async function readTenantPolicies(db: D1Database): Promise<Map<string, Record<st
     )
     .all<Record<string, unknown>>();
   return new Map(rows.results.map((row) => [String(row["scope_id"]), row]));
+}
+
+async function readEpisode(db: D1Database, id: string): Promise<EpisodeProjectionRow | null> {
+  return await db
+    .prepare(
+      `SELECT ${EPISODE_COLUMNS.join(", ")}
+         FROM ${SPEND_ANOMALY_EPISODE_TABLE}
+        WHERE id = ?
+        LIMIT 1`,
+    )
+    .bind(id)
+    .first<EpisodeProjectionRow>();
+}
+
+/**
+ * Copy one object-authoritative episode to the fleet projection.
+ *
+ * The object write is deliberately completed first. A bounded retry here makes
+ * a transient control-D1 failure recoverable without ever treating a missing
+ * projection as permission to write the episode to the wrong database.
+ */
+async function projectEpisode(store: EpisodeStore, id: string): Promise<void> {
+  const row = await readEpisode(store.authoritative, id);
+  if (row === null) throw new Error(`spend anomaly episode ${id} disappeared before projection`);
+  if (row.scope_type !== "tenant" || row.scope_id.trim() === "") {
+    throw new Error(`spend anomaly episode ${id} has no tenant projection scope`);
+  }
+
+  const bindings = [
+    evidenceProjectionKey(row.scope_id, row.id),
+    ...EPISODE_COLUMNS.map((column) => row[column]),
+  ];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await store.projection
+        .prepare(EPISODE_PROJECTION_UPSERT_SQL)
+        .bind(...bindings)
+        .run();
+      return;
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
+  }
 }
 
 interface UpsertOutcome {
@@ -567,7 +766,18 @@ async function closeEpisode(
   scopeId: string,
   signal: SpendAnomalySignal,
   now: number,
-): Promise<number> {
+): Promise<EpisodeProjectionRow | null> {
+  const existing = await db
+    .prepare(
+      `SELECT ${EPISODE_COLUMNS.join(", ")}
+         FROM ${SPEND_ANOMALY_EPISODE_TABLE}
+        WHERE scope_type = 'tenant' AND scope_id = ? AND signal = ? AND resolved_at_unix IS NULL
+        LIMIT 1`,
+    )
+    .bind(scopeId, signal)
+    .first<EpisodeProjectionRow>();
+  if (existing === null) return null;
+
   const result = await db
     .prepare(
       `UPDATE ${SPEND_ANOMALY_EPISODE_TABLE}
@@ -576,7 +786,8 @@ async function closeEpisode(
     )
     .bind(now, scopeId, signal)
     .run();
-  return result.meta?.changes ?? 0;
+  if ((result.meta?.changes ?? 0) === 0) return null;
+  return await readEpisode(db, existing.id);
 }
 
 /**

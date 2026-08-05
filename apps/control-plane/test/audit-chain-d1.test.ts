@@ -453,8 +453,9 @@ describe("tampering with the stored trail", () => {
     const anchors = await seedAndAnchor();
     await db()
       .prepare(
-        `INSERT INTO audit_events (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json)
-         VALUES ('evt-forged', 'req-forged', NULL, NULL, 1800000500, '{"action":"create"}')`,
+        `INSERT INTO audit_events
+           (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json)
+         VALUES ('0::evt-forged', 'evt-forged', 'req-forged', NULL, NULL, 1800000500, '{"action":"create"}')`,
       )
       .run();
 

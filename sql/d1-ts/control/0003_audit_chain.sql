@@ -13,7 +13,9 @@
 --   1. rows written BEFORE this migration cannot be retro-chained (there is no
 --      honest hash to invent for them), and
 --   2. `audit_events` has a SECOND writer — the gateway's asset audit sink
---      (`apps/gateway/src/assets/d1.ts`) — which is not chained yet.
+--      (`apps/gateway/src/assets/d1.ts`) — whose tenant-attributed rows are now
+--      chained by the owning TenantDataObject. Rows written before that cutover
+--      remain unchained and must be reported as such.
 --
 -- Unchained rows are not silently tolerated: the verifier COUNTS and REPORTS
 -- them (`unchained_rows`) and downgrades its verdict to `inconclusive`, because

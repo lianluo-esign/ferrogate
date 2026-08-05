@@ -25,7 +25,9 @@ import {
   type AssetDatabase,
   D1AssetAuditSink,
   D1AssetMetadataStore,
+  assetAuditSinkFromEnv,
   isAssetDatabase,
+  sweepAssetAuditProjections,
 } from "../../src/assets/d1.js";
 import {
   type AssetAuditEvent,
@@ -34,6 +36,9 @@ import {
   InMemoryAssetMetadataStore,
   type StoredAsset,
 } from "../../src/assets/ports.js";
+import { evidenceProjectionKey } from "../../src/requestlog/d1.js";
+import { resolverForEnv } from "../../src/tenancy/index.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 const NOW = 1_700_000_000;
 const TENANT = "tenant_assets_d1";
@@ -576,6 +581,7 @@ describe("D1AssetAuditSink", () => {
 
   beforeEach(async () => {
     await control().prepare("DELETE FROM audit_events").bind().all();
+    await tenantObjectDb(TENANT).prepare("DELETE FROM audit_events").run();
   });
 
   test("nothing is written until flush, and then everything is", async () => {
@@ -600,6 +606,16 @@ describe("D1AssetAuditSink", () => {
     await sink.flush();
     const rows = await control().prepare("SELECT id FROM audit_events").bind().all();
     expect(rows.results ?? []).toHaveLength(1);
+  });
+
+  test("a CONTROL_DB without TENANT_DATA fails closed for tenant audit", async () => {
+    const sink = assetAuditSinkFromEnv({ CONTROL_DB: control() });
+    if (sink === null) throw new Error("expected the configured audit sink");
+    if (sink.flush === undefined) throw new Error("expected the configured audit sink to flush");
+    sink.record(auditEvent());
+    await expect(sink.flush()).rejects.toThrow("tenant audit object is unavailable");
+    const rows = await control().prepare("SELECT id FROM audit_events").bind().all();
+    expect(rows.results ?? []).toHaveLength(0);
   });
 
   test("the row carries the request id and the #522 agent-run correlation", async () => {
@@ -657,10 +673,17 @@ describe("D1AssetAuditSink", () => {
     // The listing is a read surface; one corrupt row must not 500 the page.
     await control()
       .prepare(
-        "INSERT INTO audit_events (id, request_id, tenant, occurred_at_unix, audit_json) " +
-          "VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO audit_events (projection_key, id, request_id, tenant, occurred_at_unix, audit_json) " +
+          "VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
       )
-      .bind("aud_broken", "req_x", TENANT, NOW + 99, "{not json")
+      .bind(
+        evidenceProjectionKey(TENANT, "aud_broken"),
+        "aud_broken",
+        "req_x",
+        TENANT,
+        NOW + 99,
+        "{not json",
+      )
       .all();
     const sink = new D1AssetAuditSink(control());
     sink.record(auditEvent({ target: "good" }));
@@ -679,5 +702,44 @@ describe("D1AssetAuditSink", () => {
     expect(
       (await control().prepare("SELECT id FROM audit_events").bind().all()).results,
     ).toHaveLength(1);
+  });
+
+  test("the scheduled repair pages through all tenant audit rows", async () => {
+    const tenant = tenantObjectDb(TENANT);
+    await tenant.batch(
+      Array.from({ length: 3 }, (_, index) =>
+        tenant
+          .prepare(
+            "INSERT INTO audit_events " +
+              "(id, request_id, tenant, occurred_at_unix, audit_json, chain_key, seq, prev_hash, row_hash) " +
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            `asset-audit-${index}`,
+            `asset-request-${index}`,
+            TENANT,
+            NOW + index,
+            JSON.stringify({ action: "asset.push", target: `asset-${index}`, outcome: "committed" }),
+            TENANT,
+            index,
+            `prev-${index}`,
+            `hash-${index}`,
+          ),
+      ),
+    );
+
+    const bindings = env as unknown as Parameters<typeof resolverForEnv>[0];
+    await sweepAssetAuditProjections(
+      bindings,
+      resolverForEnv(bindings).router,
+      [TENANT],
+      2,
+    );
+
+    const count = await control()
+      .prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant = ?")
+      .bind(TENANT)
+      .all();
+    expect(count.results).toEqual([{ count: 3 }]);
   });
 });

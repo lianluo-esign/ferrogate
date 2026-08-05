@@ -33,6 +33,7 @@
  */
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { adminListPaginated, parseListQuery } from "../responses.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
   type Handler,
@@ -148,12 +149,18 @@ function listSpendAnomaliesHandler(): Handler {
     const scope: CallerScope = scopeOf(c);
     const url = new URL(c.req.url);
     const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
-    const db = deps.controlDatabase;
+    let db = deps.controlDatabase;
 
-    if (db === null) {
-      // No control database means the detector never ran and the table does not
-      // exist. An empty page is the truthful answer, and it is the answer every
-      // sibling evidence reader gives.
+    if (scope.kind === "tenant") {
+      // Tenant scope is an authority read. The control table is only the
+      // bounded fleet projection and may be stale or temporarily unavailable.
+      db = await tenantEvidenceDatabaseFor(
+        deps.tenantStorage ?? deps.tenantDatabases,
+        scope.tenantId,
+      );
+    } else if (db === null) {
+      // A platform operator has no tenant object to read. No control database
+      // means the detector never ran and the honest fleet answer is empty.
       return json(c, 200, adminListPaginated([], 0, query.offset, query.limit));
     }
 

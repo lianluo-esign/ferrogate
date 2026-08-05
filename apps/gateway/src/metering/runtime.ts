@@ -56,6 +56,8 @@ export interface MeteringBindings {
    * excludes the billing tables.
    */
   readonly BILLING_DB?: MeteringDatabase | undefined;
+  /** `env.CONTROL_DB`, the fleet projection database for derived usage views. */
+  readonly CONTROL_DB?: MeteringDatabase | undefined;
   /** `[[queues.producers]] binding = "BILLING"` — the billing report fan-out. */
   readonly BILLING?: MeteringQueue | undefined;
 }
@@ -123,7 +125,19 @@ export interface MeteringBindingResolver {
    * about the billing half (a test double) still satisfies the interface and
    * simply accumulates nothing.
    */
-  usageDatabase?(env: unknown): D1Database | undefined;
+  usageDatabase?(env: unknown, tenantId?: string): D1Database | undefined;
+  /** `env.CONTROL_DB`/`env.BILLING_DB`, where derived usage snapshots project. */
+  usageProjectionDatabase?(env: unknown): D1Database | undefined;
+}
+
+/** Resolve the control database used for tenant-derived fleet projections. */
+export function meteringProjectionDatabaseFrom(env: unknown): D1Database | undefined {
+  if (typeof env !== "object" || env === null) return undefined;
+  const bindings = env as MeteringBindings;
+  for (const candidate of [bindings.CONTROL_DB, bindings.BILLING_DB]) {
+    if (isMeteringDatabase(candidate)) return candidate as unknown as D1Database;
+  }
+  return undefined;
 }
 
 /**
@@ -139,6 +153,7 @@ export const meteringBindingsFromEnv: MeteringBindingResolver = {
   database: meteringDatabaseFrom,
   queue: meteringQueueFrom,
   usageDatabase: usageDatabaseFrom,
+  usageProjectionDatabase: meteringProjectionDatabaseFrom,
 };
 
 /**

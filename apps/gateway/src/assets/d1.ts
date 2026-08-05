@@ -66,7 +66,14 @@
  * when the whole durable half of `@ferrogate/storage` is mounted, not before.
  */
 import { randomHex128 } from "./hash.js";
-import { requireAtomicBatch, type TenantDatabaseHandle } from "@ferrogate/storage";
+import {
+  requireAtomicBatch,
+  type TenantDataStub,
+  type TenantDatabaseHandle,
+  type TenantDatabaseRouter,
+} from "@ferrogate/storage";
+import { evidenceProjectionKey } from "../requestlog/d1.js";
+import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type {
   AssetAuditEvent,
   AssetAuditSink,
@@ -743,25 +750,38 @@ export function assetBundleIndexStoreFromEnv(
 }
 
 // ---------------------------------------------------------------------------
-// The durable audit sink — `audit_events` on the CONTROL D1
+// The durable audit sink — tenant-object chains plus a CONTROL projection
 // ---------------------------------------------------------------------------
 
 /**
- * Binding name of the CONTROL D1. `audit_events` lives in
- * `sql/d1-ts/control/`, NOT the tenant migration — an account-global admin
- * surface has to answer "who yanked this artifact" across every tenant, which
- * a per-tenant database cannot. Same reason `src/guardrails/d1.ts` reads it.
+ * Binding name of the CONTROL D1 projection. Tenant-attributed asset evidence
+ * is authoritative in the owning TenantDataObject; control D1 keeps the
+ * tenant-qualified copy so fleet readers can discover it without a
+ * cross-object SQL query. The legacy constructor supports shared-development
+ * deployments and tests.
  */
 export const CONTROL_DATABASE_BINDING_FOR_AUDIT = "CONTROL_DB";
 
 /**
- * `id` is generated at RECORD time, not at flush time, so a retried flush is
- * idempotent against `ON CONFLICT DO NOTHING` — an audit trail that
- * double-counts a yank is as misleading as one that misses it.
+ * `id` is generated at RECORD time, not at flush time, so a retried object
+ * append is idempotent — an audit trail that double-counts a yank is as
+ * misleading as one that misses it.
  */
+/** Legacy shared-development insert; production uses the chained object path. */
 export const AUDIT_EVENT_INSERT_SQL =
-  "INSERT INTO audit_events (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json) " +
-  "VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING";
+  "INSERT INTO audit_events (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json) " +
+  "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT DO NOTHING";
+
+/** Control-D1 projection for a tenant object's chained audit row. */
+export const AUDIT_EVENT_PROJECTION_UPSERT_SQL =
+  "INSERT INTO audit_events " +
+  "(projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+  "chain_key, seq, prev_hash, row_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) " +
+  "ON CONFLICT (projection_key) DO UPDATE SET " +
+  "request_id = excluded.request_id, agent_run_id = excluded.agent_run_id, " +
+  "tenant = excluded.tenant, occurred_at_unix = excluded.occurred_at_unix, " +
+  "audit_json = excluded.audit_json, chain_key = excluded.chain_key, seq = excluded.seq, " +
+  "prev_hash = excluded.prev_hash, row_hash = excluded.row_hash";
 
 /**
  * The evidence read behind `listWithheldAssets` (#379).
@@ -788,9 +808,9 @@ export const AUDIT_EVIDENCE_SCAN_LIMIT = 500;
  * inside `return fail(...)` expressions. Making it async would have meant
  * threading `await` through every refusal path in `service.ts` and letting a
  * D1 hiccup change the STATUS the caller receives. So `record` appends to
- * `#pending` and {@link flush} commits the lot in ONE `batch()` — one round
- * trip per request instead of one per event, and either all of a request's
- * audit rows land or none do.
+ * `#pending`; production flushes one tenant chain at a time and then batches
+ * the control projections, while the legacy path commits one shared-D1 batch.
+ * Either all of a request's audit rows land or none do.
  *
  * ## Why it is NOT keyed per request
  *
@@ -810,11 +830,15 @@ export const AUDIT_EVIDENCE_SCAN_LIMIT = 500;
  */
 export class D1AssetAuditSink implements AssetAuditSink {
   #pending: { id: string; event: AssetAuditEvent }[] = [];
+  private readonly tenantAuditFor: ((tenantId: string) => TenantDataStub | undefined) | undefined;
 
   constructor(
     private readonly db: AssetDatabase,
     private readonly fallback: AssetAuditSink | undefined = undefined,
-  ) {}
+    tenantAuditFor?: ((tenantId: string) => TenantDataStub | undefined) | undefined,
+  ) {
+    this.tenantAuditFor = tenantAuditFor;
+  }
 
   record(event: AssetAuditEvent): void {
     this.#pending.push({ id: `aud_${randomHex128()}`, event });
@@ -825,23 +849,90 @@ export class D1AssetAuditSink implements AssetAuditSink {
     const draining = this.#pending;
     if (draining.length === 0) return;
     this.#pending = [];
-    await this.db.batch(
-      draining.map(({ id, event }) =>
-        this.db.prepare(AUDIT_EVENT_INSERT_SQL).bind(
-          id,
-          event.requestId,
-          event.agentRunId ?? null,
-          event.tenantId,
-          event.occurredAtUnix,
-          JSON.stringify({
-            action: event.action,
-            target: event.target,
-            outcome: event.outcome,
-            message: event.message,
-          }),
+    try {
+      if (this.tenantAuditFor === undefined) {
+        await this.db.batch(
+          draining.map(({ id, event }) =>
+            this.db
+              .prepare(AUDIT_EVENT_INSERT_SQL)
+              .bind(
+                evidenceProjectionKey(event.tenantId, id),
+                id,
+                event.requestId,
+                event.agentRunId ?? null,
+                event.tenantId,
+                event.occurredAtUnix,
+                auditJsonFor(event),
+              ),
+          ),
+        );
+        return;
+      }
+
+      const projections: {
+        readonly id: string;
+        readonly requestId: string;
+        readonly agentRunId: string | null;
+        readonly tenant: string;
+        readonly occurredAtUnix: number;
+        readonly auditJson: string;
+        readonly chainKey: string;
+        readonly seq: number;
+        readonly prevHash: string;
+        readonly rowHash: string;
+      }[] = [];
+      const byTenant = new Map<string, { id: string; event: AssetAuditEvent }[]>();
+      for (const item of draining) {
+        if (item.event.tenantId.trim() === "") {
+          throw new Error("asset audit event has no tenant authority");
+        }
+        const group = byTenant.get(item.event.tenantId) ?? [];
+        group.push(item);
+        byTenant.set(item.event.tenantId, group);
+      }
+      for (const [tenantId, group] of byTenant) {
+        const stub = this.tenantAuditFor(tenantId);
+        if (stub?.appendAudit === undefined) {
+          throw new Error(`tenant audit object is unavailable for ${tenantId}`);
+        }
+        for (const { id, event } of group) {
+          const row = await stub.appendAudit({
+            tenantId,
+            id,
+            requestId: event.requestId,
+            agentRunId: event.agentRunId ?? null,
+            occurredAtUnix: event.occurredAtUnix,
+            auditJson: auditJsonFor(event),
+          });
+          projections.push(row);
+        }
+      }
+
+      const statement = this.db.prepare(AUDIT_EVENT_PROJECTION_UPSERT_SQL);
+      await this.db.batch(
+        projections.map((row) =>
+          statement.bind(
+            evidenceProjectionKey(row.tenant, row.id),
+            row.id,
+            row.requestId,
+            row.agentRunId,
+            row.tenant,
+            row.occurredAtUnix,
+            row.auditJson,
+            row.chainKey,
+            row.seq,
+            row.prevHash,
+            row.rowHash,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      // Keep the same ids on a projection failure. The object append is
+      // idempotent by id, so the next flush can repair control D1 without
+      // creating a second chain position.
+      this.#pending = [...draining, ...this.#pending];
+      throw error;
+    }
   }
 
   /**
@@ -851,12 +942,25 @@ export class D1AssetAuditSink implements AssetAuditSink {
    * answered `undefined` for essentially every real request.
    */
   async screeningEvidence(tenantId: string): Promise<Map<string, string>> {
-    const rows = rowsOf(
-      await this.db
-        .prepare(AUDIT_SCREENING_EVIDENCE_SQL)
-        .bind(tenantId, AUDIT_EVIDENCE_SCAN_LIMIT)
-        .all(),
-    );
+    let rows: Row[];
+    if (this.tenantAuditFor === undefined) {
+      rows = rowsOf(
+        await this.db
+          .prepare(AUDIT_SCREENING_EVIDENCE_SQL)
+          .bind(tenantId, AUDIT_EVIDENCE_SCAN_LIMIT)
+          .all(),
+      );
+    } else {
+      const stub = this.tenantAuditFor(tenantId);
+      if (stub?.query === undefined) {
+        throw new Error(`tenant audit object is unavailable for ${tenantId}`);
+      }
+      rows = (await stub.query({
+        tenantId,
+        sql: AUDIT_SCREENING_EVIDENCE_SQL,
+        params: [tenantId, AUDIT_EVIDENCE_SCAN_LIMIT],
+      })).results as unknown as Row[];
+    }
     const evidence = new Map<string, string>();
     for (const row of rows) {
       let parsed: unknown;
@@ -879,11 +983,120 @@ export class D1AssetAuditSink implements AssetAuditSink {
   }
 }
 
+interface AssetAuditProjectionRow {
+  readonly id: string;
+  readonly request_id: string;
+  readonly agent_run_id: string | null;
+  readonly tenant: string;
+  readonly occurred_at_unix: number;
+  readonly audit_json: string;
+  readonly chain_key: string;
+  readonly seq: number;
+  readonly prev_hash: string;
+  readonly row_hash: string;
+}
+
+/**
+ * Rebuild tenant asset-audit projections from the authoritative object chain.
+ *
+ * The object rows are the durable retry queue: a control-D1 outage cannot lose
+ * an audit event, and a later scheduled pass walks the complete ordered source
+ * rather than depending on an isolate-local pending array.
+ */
+export async function sweepAssetAuditProjections(
+  env: unknown,
+  router: TenantDatabaseRouter,
+  tenantIds: readonly string[],
+  limit = 500,
+): Promise<void> {
+  const candidate =
+    typeof env === "object" && env !== null ? (env as { CONTROL_DB?: unknown }).CONTROL_DB : undefined;
+  if (!isAssetDatabase(candidate)) return;
+  const projection = candidate;
+  const pageSize = Math.max(1, Math.trunc(limit));
+
+  for (const tenantId of tenantIds) {
+    if (tenantId.trim() === "") continue;
+    try {
+      const handle = await router.forTenant(tenantId);
+      if (handle.source !== "durable_object") continue;
+      let cursor: { occurredAtUnix: number; id: string } | undefined;
+      for (;;) {
+        const result =
+          cursor === undefined
+            ? await handle.db
+                .prepare(
+                  "SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+                    "chain_key, seq, prev_hash, row_hash FROM audit_events " +
+                    "ORDER BY occurred_at_unix ASC, id ASC LIMIT ?",
+                )
+                .bind(pageSize)
+                .all<AssetAuditProjectionRow>()
+            : await handle.db
+                .prepare(
+                  "SELECT id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+                    "chain_key, seq, prev_hash, row_hash FROM audit_events " +
+                    "WHERE occurred_at_unix > ? OR (occurred_at_unix = ? AND id > ?) " +
+                    "ORDER BY occurred_at_unix ASC, id ASC LIMIT ?",
+                )
+                .bind(cursor.occurredAtUnix, cursor.occurredAtUnix, cursor.id, pageSize)
+                .all<AssetAuditProjectionRow>();
+        const rows = result.results ?? [];
+        if (rows.length === 0) break;
+        await projection.batch(
+          rows.map((row) =>
+            projection
+              .prepare(AUDIT_EVENT_PROJECTION_UPSERT_SQL)
+              .bind(
+                evidenceProjectionKey(tenantId, row.id),
+                row.id,
+                row.request_id,
+                row.agent_run_id,
+                tenantId,
+                row.occurred_at_unix,
+                row.audit_json,
+                row.chain_key,
+                row.seq,
+                row.prev_hash,
+                row.row_hash,
+              ),
+          ),
+        );
+        const last = rows.at(-1);
+        if (last === undefined || rows.length < pageSize) break;
+        cursor = { occurredAtUnix: last.occurred_at_unix, id: last.id };
+      }
+    } catch (error) {
+      console.warn(
+        `[ferrogate] asset audit projection repair skipped for ${tenantId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+}
+
 /**
  * Bindings → the durable audit sink. `null` when `CONTROL_DB` is unbound, so
  * `buildAssetService` keeps the bounded in-memory sink for local dev.
  */
 export function assetAuditSinkFromEnv(env: Record<string, unknown>): AssetAuditSink | null {
   const db = env[CONTROL_DATABASE_BINDING_FOR_AUDIT];
-  return isAssetDatabase(db) ? new D1AssetAuditSink(db) : null;
+  if (!isAssetDatabase(db)) return null;
+  const bindings = env as TenantDataBindings;
+  const tenantAuditFor =
+    bindings.TENANT_DATA === undefined
+      ? (_tenantId: string): undefined => undefined
+      : (tenantId: string): TenantDataStub =>
+          tenantDataObjectFor(bindings, tenantId) as unknown as TenantDataStub;
+  return new D1AssetAuditSink(db, undefined, tenantAuditFor);
+}
+
+function auditJsonFor(event: AssetAuditEvent): string {
+  return JSON.stringify({
+    action: event.action,
+    target: event.target,
+    outcome: event.outcome,
+    message: event.message,
+  });
 }

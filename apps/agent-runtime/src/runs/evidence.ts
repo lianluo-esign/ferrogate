@@ -4,7 +4,9 @@
  * `AgentRunState` keeps live state and subscribers in its run-shaped object.
  * These helpers write durable evidence into the tenant's `TenantDataObject`
  * first, then update the control-D1 compatibility mirror for existing platform
- * pages. A mirror failure is observable but never changes object authority.
+ * pages. A mirror failure is observable but never changes object authority;
+ * the gateway's scheduled managed-evidence sweep rebuilds the mirror from the
+ * object after an isolate or control-D1 failure.
  */
 import { DurableObjectD1Database } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
@@ -84,6 +86,22 @@ const TENANT_MANAGED_POLICY_UPSERT_SQL = `INSERT INTO managed_worker_isolation_p
 ) VALUES (?, ?)
 ON CONFLICT (session_id) DO UPDATE SET policy_json = excluded.policy_json`;
 
+const TENANT_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL = `INSERT INTO managed_worker_isolation_evidence (
+  id, occurred_at_unix, evidence_json
+) VALUES (?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  occurred_at_unix = excluded.occurred_at_unix,
+  evidence_json = excluded.evidence_json`;
+
+const CONTROL_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL = `INSERT INTO managed_worker_isolation_evidence (
+  projection_key, id, tenant, occurred_at_unix, evidence_json
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) DO UPDATE SET
+  id = excluded.id,
+  tenant = excluded.tenant,
+  occurred_at_unix = excluded.occurred_at_unix,
+  evidence_json = excluded.evidence_json`;
+
 const TENANT_MANAGED_EVENT_UPSERT_SQL = `INSERT INTO managed_worker_lifecycle_events (
   id, occurred_at_unix, event_json
 ) VALUES (?, ?, ?)
@@ -131,48 +149,65 @@ export async function persistAgentRunEvidence(
   ] as const;
   const db = tenantDatabase(env, run.tenant_id);
   const frameworkAdapter = managed?.frameworkAdapter ?? run.framework_adapter;
+  const managedEvidence =
+    managed?.sessionId !== undefined &&
+    managed.sessionId !== null &&
+    managed.sessionId.trim() !== "" &&
+    managed.isolationGrant !== undefined &&
+    managed.isolationGrant !== null
+      ? {
+          id: `managed:${managed.sessionId.trim()}:${run.run_id}`,
+          tenantId: run.tenant_id,
+          occurredAtUnix: run.submitted_at_unix ?? run.started_at_unix ?? 0,
+          evidenceJson: JSON.stringify({
+            session_id: managed.sessionId.trim(),
+            run_id: run.run_id,
+            tenant_id: run.tenant_id,
+            isolation_grant: managed.isolationGrant,
+          }),
+        }
+      : undefined;
   const statements: D1PreparedStatement[] = [
     db.prepare(TENANT_AGENT_RUN_UPSERT_SQL).bind(...params),
-    db
-      .prepare(TENANT_MANAGED_INSTANCE_UPSERT_SQL)
-      .bind(
-        run.run_id,
-        run.started_at_unix,
-        JSON.stringify({
-          run_id: run.run_id,
-          tenant_id: run.tenant_id,
-          workspace_id: run.workspace_id,
-          framework_adapter: run.framework_adapter,
-          required_capabilities: run.required_capabilities,
-          workload_ref: run.workload_ref,
-          status: run.status,
-        }),
-      ),
+    db.prepare(TENANT_MANAGED_INSTANCE_UPSERT_SQL).bind(
+      run.run_id,
+      run.started_at_unix,
+      JSON.stringify({
+        run_id: run.run_id,
+        tenant_id: run.tenant_id,
+        workspace_id: run.workspace_id,
+        framework_adapter: run.framework_adapter,
+        required_capabilities: run.required_capabilities,
+        workload_ref: run.workload_ref,
+        status: run.status,
+      }),
+    ),
   ];
   if (frameworkAdapter !== null && frameworkAdapter.trim() !== "") {
     statements.push(
       db
         .prepare(TENANT_MANAGED_TEMPLATE_UPSERT_SQL)
-        .bind(frameworkAdapter.trim(), JSON.stringify({ framework_adapter: frameworkAdapter.trim() })),
+        .bind(
+          frameworkAdapter.trim(),
+          JSON.stringify({ framework_adapter: frameworkAdapter.trim() }),
+        ),
     );
   }
   const sessionId = managed?.sessionId?.trim();
   if (sessionId !== undefined && sessionId !== "") {
     const isolation = managed?.isolationGrant ?? null;
     statements.push(
-      db
-        .prepare(TENANT_MANAGED_SESSION_UPSERT_SQL)
-        .bind(
-          sessionId,
-          run.submitted_at_unix ?? 0,
-          JSON.stringify({
-            session_id: sessionId,
-            run_id: run.run_id,
-            workspace_id: run.workspace_id,
-            framework_adapter: run.framework_adapter,
-            status: run.status,
-          }),
-        ),
+      db.prepare(TENANT_MANAGED_SESSION_UPSERT_SQL).bind(
+        sessionId,
+        run.submitted_at_unix ?? 0,
+        JSON.stringify({
+          session_id: sessionId,
+          run_id: run.run_id,
+          workspace_id: run.workspace_id,
+          framework_adapter: run.framework_adapter,
+          status: run.status,
+        }),
+      ),
     );
     if (isolation !== null && isolation !== undefined) {
       const isolationJson = JSON.stringify(isolation);
@@ -181,6 +216,19 @@ export async function persistAgentRunEvidence(
           .prepare(TENANT_MANAGED_SELECTION_UPSERT_SQL)
           .bind(sessionId, run.submitted_at_unix ?? 0, isolationJson),
         db.prepare(TENANT_MANAGED_POLICY_UPSERT_SQL).bind(sessionId, isolationJson),
+        db
+          .prepare(TENANT_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL)
+          .bind(
+            managedEvidence?.id ?? `managed:${sessionId}:${run.run_id}`,
+            managedEvidence?.occurredAtUnix ?? run.submitted_at_unix ?? run.started_at_unix ?? 0,
+            managedEvidence?.evidenceJson ??
+              JSON.stringify({
+                session_id: sessionId,
+                run_id: run.run_id,
+                tenant_id: run.tenant_id,
+                isolation_grant: isolation,
+              }),
+          ),
       );
     }
   }
@@ -189,6 +237,15 @@ export async function persistAgentRunEvidence(
     evidenceProjectionKey(run.tenant_id, run.run_id),
     ...params,
   ]);
+  if (managedEvidence !== undefined) {
+    await mirrorBestEffort(controlDatabase(env), CONTROL_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL, [
+      evidenceProjectionKey(managedEvidence.tenantId, managedEvidence.id),
+      managedEvidence.id,
+      managedEvidence.tenantId,
+      managedEvidence.occurredAtUnix,
+      managedEvidence.evidenceJson,
+    ]);
+  }
 }
 
 /** Write one append-only event to the tenant object, then to the mirror. */
@@ -228,6 +285,9 @@ async function mirrorBestEffort(
     const statement = db.prepare(sql);
     await db.batch([statement.bind(...params)]);
   } catch (error) {
-    console.error("agent evidence control projection failed; tenant object remains authoritative", error);
+    console.error(
+      "agent evidence control projection failed; tenant object remains authoritative",
+      error,
+    );
   }
 }

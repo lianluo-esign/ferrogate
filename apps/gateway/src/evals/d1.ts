@@ -1,10 +1,12 @@
 /**
- * `online_eval_scores` and `online_eval_regressions` in the CONTROL database.
+ * `online_eval_scores` and `online_eval_regressions` in the tenant object and
+ * their CONTROL-D1 fleet projections.
  *
- * The tables are defined by `sql/d1-ts/control/0009_online_eval.sql`.
- * `apps/gateway` is the only writer (the queue consumer and the cron sweep);
- * nothing reads them from an admin route yet — see `./index.ts` for why that is
- * deliberate rather than forgotten.
+ * The tenant tables are defined by `sql/d1-ts/tenant/0018_usage_evaluation_audit.sql`;
+ * matching control projections remain in `sql/d1-ts/control/0017_*` and
+ * `0018_*`. `apps/gateway` is the only producer (the queue consumer and the
+ * cron sweep); admin report reads remain projection-backed until their bounded
+ * fleet-read contract is implemented.
  *
  * ============================================================================
  * THE JOIN THIS SCHEMA EXISTS TO MAKE POSSIBLE
@@ -29,10 +31,9 @@
  *  GROUP BY s.logical_model;
  * ```
  *
- * Both tables live in the CONTROL database for the reason
- * `0004_guardrail_evaluations.sql` sets out at length: D1 has no read spanning
- * two databases, so a score in the tenant database and a charge in the control
- * one would make exactly this join unimplementable.
+ * Tenant-attributed rows live in the owning object. The control projection keeps
+ * the existing fleet join available; tenant authority is never recovered from
+ * that projection when the object cannot be reached.
  *
  * ### And the denormalised columns are not redundant
  *
@@ -44,6 +45,7 @@
  * point-in-time measurement wants anyway.
  */
 import type { OnlineEvalScoreRecord } from "./record.js";
+import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
 
 export const ONLINE_EVAL_SCORE_TABLE = "online_eval_scores";
 export const ONLINE_EVAL_REGRESSION_TABLE = "online_eval_regressions";
@@ -62,7 +64,14 @@ export const ONLINE_EVAL_REGRESSION_TABLE = "online_eval_regressions";
  * unlike `request_logs`: a score row is written whole by one leg, so a later
  * write is a re-judgement and not a partial contribution.
  */
-export const ONLINE_EVAL_SCORE_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SCORE_TABLE} (
+const ONLINE_EVAL_SCORE_UPDATE_SET = `DO UPDATE SET
+  score = excluded.score,
+  rationale = excluded.rationale,
+  judge_model = excluded.judge_model,
+  scored_at_unix = excluded.scored_at_unix`;
+
+/** The single-tenant authoritative write. */
+export const TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SCORE_TABLE} (
   request_id, criterion_id, tenant, project, workspace, api_key_id, agent_run_id,
   operation_id, provider, logical_model, provider_model,
   experiment_id, experiment_arm,
@@ -70,13 +79,27 @@ export const ONLINE_EVAL_SCORE_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SCORE_TAB
   judge_model, score, rationale,
   prompt_truncated, completion_truncated, scored_at_unix
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (request_id, criterion_id) DO UPDATE SET
-  score = excluded.score,
-  rationale = excluded.rationale,
-  judge_model = excluded.judge_model,
-  scored_at_unix = excluded.scored_at_unix`;
+ON CONFLICT (request_id, criterion_id) ${ONLINE_EVAL_SCORE_UPDATE_SET}`;
 
-/** Bind order for {@link ONLINE_EVAL_SCORE_UPSERT_SQL}. */
+/** Control-D1 compatibility projection, keyed by tenant plus logical score id. */
+export const ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SCORE_TABLE} (
+  projection_key, request_id, criterion_id, tenant, project, workspace, api_key_id, agent_run_id,
+  operation_id, provider, logical_model, provider_model,
+  experiment_id, experiment_arm,
+  sampling_key, sampling_unit, sample_rate,
+  judge_model, score, rationale,
+  prompt_truncated, completion_truncated, scored_at_unix
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) ${ONLINE_EVAL_SCORE_UPDATE_SET}`;
+
+/**
+ * Kept as the public legacy name for callers that explicitly inject the
+ * control database. Production object writes use the tenant-specific constant
+ * above; a control write must include the projection key.
+ */
+export const ONLINE_EVAL_SCORE_UPSERT_SQL = ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL;
+
+/** Bind order for the tenant-object score upsert. */
 export function onlineEvalScoreBindings(record: OnlineEvalScoreRecord): unknown[] {
   return [
     record.requestId,
@@ -104,6 +127,14 @@ export function onlineEvalScoreBindings(record: OnlineEvalScoreRecord): unknown[
   ];
 }
 
+/** Bind order for the control-D1 projection upsert. */
+export function onlineEvalScoreProjectionBindings(record: OnlineEvalScoreRecord): unknown[] {
+  return [
+    evidenceProjectionKey(record.tenantId, `${record.requestId}:${record.criterionId}`),
+    ...onlineEvalScoreBindings(record),
+  ];
+}
+
 /** The `D1Database` subset the writers need. A live binding fits. */
 export interface OnlineEvalScoreDatabase {
   prepare(query: string): {
@@ -128,8 +159,43 @@ export async function writeOnlineEvalScores(
   records: readonly OnlineEvalScoreRecord[],
 ): Promise<void> {
   if (records.length === 0) return;
-  const statement = db.prepare(ONLINE_EVAL_SCORE_UPSERT_SQL);
+  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
+  await db.batch(
+    records.map((record) => statement.bind(...onlineEvalScoreProjectionBindings(record))),
+  );
+}
+
+/** Resolve one tenant's authoritative score database when the object binding exists. */
+export function onlineEvalTenantDatabaseFrom(
+  env: unknown,
+  tenantId: string,
+): OnlineEvalScoreDatabase | undefined {
+  if (tenantId.trim() === "") return undefined;
+  if (typeof env !== "object" || env === null) return undefined;
+  if ((env as { TENANT_DATA?: unknown }).TENANT_DATA === undefined) return undefined;
+  return requestLogTenantDatabaseFrom(env, tenantId) as OnlineEvalScoreDatabase | undefined;
+}
+
+/** Write a same-tenant score batch to its object-authoritative table. */
+export async function writeTenantOnlineEvalScores(
+  db: OnlineEvalScoreDatabase,
+  records: readonly OnlineEvalScoreRecord[],
+): Promise<void> {
+  if (records.length === 0) return;
+  const statement = db.prepare(TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL);
   await db.batch(records.map((record) => statement.bind(...onlineEvalScoreBindings(record))));
+}
+
+/** Write the retry-safe control projection for a score batch. */
+export async function writeOnlineEvalScoreProjections(
+  db: OnlineEvalScoreDatabase,
+  records: readonly OnlineEvalScoreRecord[],
+): Promise<void> {
+  if (records.length === 0) return;
+  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
+  await db.batch(
+    records.map((record) => statement.bind(...onlineEvalScoreProjectionBindings(record))),
+  );
 }
 
 /** `env.CONTROL_DB` (or its `BILLING_DB` alias), when it really is a D1 binding. */
@@ -184,3 +250,52 @@ export const ONLINE_EVAL_REGRESSION_CLAIM_SQL = `INSERT INTO ${ONLINE_EVAL_REGRE
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (claim_key) DO NOTHING
 RETURNING claim_key`;
+
+/** The same claim inside one tenant object. */
+export const TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL = ONLINE_EVAL_REGRESSION_CLAIM_SQL;
+
+/** Control-D1 projection for a tenant-authoritative regression claim. */
+export const ONLINE_EVAL_REGRESSION_PROJECTION_SQL = `INSERT INTO ${ONLINE_EVAL_REGRESSION_TABLE} (
+  projection_key, claim_key, tenant, criterion_id, judge_model, logical_model,
+  baseline_mean, baseline_count, recent_mean, recent_count, drop_amount, detected_at_unix
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) DO UPDATE SET
+  claim_key = excluded.claim_key,
+  tenant = excluded.tenant,
+  criterion_id = excluded.criterion_id,
+  judge_model = excluded.judge_model,
+  logical_model = excluded.logical_model,
+  baseline_mean = excluded.baseline_mean,
+  baseline_count = excluded.baseline_count,
+  recent_mean = excluded.recent_mean,
+  recent_count = excluded.recent_count,
+  drop_amount = excluded.drop_amount,
+  detected_at_unix = excluded.detected_at_unix`;
+
+export function onlineEvalRegressionBindings(regression: {
+  claimKey: string;
+  tenantId: string;
+  criterionId: string;
+  judgeModel: string;
+  logicalModel?: string | undefined;
+  baselineMean: number;
+  baselineCount: number;
+  recentMean: number;
+  recentCount: number;
+  dropAmount: number;
+  detectedAtUnix: number;
+}): unknown[] {
+  return [
+    regression.claimKey,
+    regression.tenantId,
+    regression.criterionId,
+    regression.judgeModel,
+    regression.logicalModel ?? null,
+    regression.baselineMean,
+    regression.baselineCount,
+    regression.recentMean,
+    regression.recentCount,
+    regression.dropAmount,
+    regression.detectedAtUnix,
+  ];
+}

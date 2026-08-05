@@ -17,12 +17,13 @@ import { StorageError } from "../errors.js";
  * partially-applied usage record double-counts on retry. The batch is the
  * Postgres transaction's replacement.
  *
- * ## Accumulation is `+`, never assignment
+ * ## Accumulation is `+`, with a tenant-local event claim
  *
  * Every counter merges with `existing + excluded`, so an at-least-once delivery
- * from a queue is *additive*, not last-write-wins. That is the correct semantic
- * for a counter but it is NOT idempotent: replaying the same request id twice
- * counts it twice.
+ * from a queue is *additive*, not last-write-wins. When `UsageAggregateWrite`
+ * carries `sourceId`, statement 0 inserts that id into `usage_event_claims` and
+ * every additive statement is guarded by the un-applied claim. A replay can
+ * therefore repair a partially completed batch without counting it twice.
  *
  * The claim that makes it exactly-once IS now ported — see
  * {@link ../d1/billing-d1.js D1BillingEventLedger}, which claims
@@ -45,20 +46,14 @@ import { StorageError } from "../errors.js";
  * UNDER-counts one call's tokens rather than double-billing it, which is the
  * correct direction to fail.
  *
- * The residual window is NARROWABLE but not closable here, and the narrowing is
- * concrete rather than hand-waved: a `usage_event_claims(billing_event_id TEXT
- * PRIMARY KEY, recorded_at_unix INTEGER)` table in the TENANT schema, with an
- * `INSERT ... ON CONFLICT DO NOTHING RETURNING` folded in as statement 0 of THIS
- * batch, would make the accumulate itself idempotent, so a retry after a won
- * control-database claim could be replayed safely instead of under-counting.
- * That is a change to `sql/d1-ts/tenant/0001_init_tenant.sql` — a migration
- * slice outside this package — and it still would NOT make the claim and the
- * accumulate one commit: the cross-database limit below is unaffected by it.
+ * The tenant-local claim closes the old crash window after the control claim:
+ * replaying the object batch is safe, but it still cannot make the control
+ * claim and object batch one commit. The cross-database limit below remains.
  *
  * So: the CALLER still owns ordering (claim first, accumulate only on a win),
  * and the gateway records once per settled request at the end of the stream.
- * `test/d1/usage-d1.test.ts` pins the additive (non-idempotent) semantics of
- * this batch so the approximation cannot be mistaken for exactly-once.
+ * `test/d1/usage-d1.test.ts` pins both source-less additive behavior and the
+ * source-id guarded behavior used by the gateway.
  */
 import { periodMonthFromUnix, usageMetadataRollupId, usageMonthlyRollupId } from "../ids.js";
 import type { StoredUsageMetadataRollup } from "../metadata-rollups.js";
@@ -77,8 +72,32 @@ export interface UsageTenantContext {
   apiKeyId?: string;
 }
 
+/** Durable control-projection intent written in the same tenant batch. */
+export interface UsageProjectionRetryIntent {
+  sourceId: string;
+  payloadJson: string;
+}
+
+/** Optional presence touch that belongs to the settled usage event. */
+export interface UsagePresenceTouch {
+  tenantId: string;
+  apiKeyId: string;
+  seenAtUnix: number;
+}
+
+/** Optional agent-cost delta that belongs to the settled usage event. */
+export interface UsageAgentCostBurn {
+  tenantId: string;
+  agentKey: string;
+  period: string;
+  deltaUsd: number;
+  nowUnix: number;
+}
+
 /** One settled inference call's usage, as the gateway's `Usage` reduces to. */
 export interface UsageAggregateWrite {
+  /** Stable metering event id. When present, the tenant batch is idempotent. */
+  sourceId?: string;
   context: UsageTenantContext;
   logicalModel: string;
   provider: string;
@@ -122,6 +141,12 @@ export interface UsageAggregateWrite {
    * {@link ../metadata-rollups.js MemoryMetadataRollupStore} (Rust `BTreeMap`).
    */
   metadata?: ReadonlyMap<string, string>;
+  /** Inserted atomically with the object rollups when fleet projection is enabled. */
+  projectionRetry?: UsageProjectionRetryIntent;
+  /** Presence is part of the same settled usage transaction, when attributed. */
+  presenceTouch?: UsagePresenceTouch;
+  /** Agent burn is part of the same settled usage transaction, when attributed. */
+  agentCostBurn?: UsageAgentCostBurn;
 }
 
 /**
@@ -170,8 +195,26 @@ export class D1UsageLedger {
     // different rows collide on one id. The column defaults to `''` for the
     // same reason.
     const organizationId = write.context.organizationId ?? "";
+    const sourceId = write.sourceId?.trim() === "" ? undefined : write.sourceId?.trim();
+    const claimGuard =
+      sourceId === undefined
+        ? ""
+        : " WHERE EXISTS (SELECT 1 FROM usage_event_claims " +
+          "WHERE source_id = ? AND applied_at_unix IS NULL)";
+    const claimParams = sourceId === undefined ? [] : [sourceId];
 
-    const statements: D1PreparedStatement[] = [
+    const statements: D1PreparedStatement[] = [];
+    if (sourceId !== undefined) {
+      statements.push(
+        this.db
+          .prepare(
+            "INSERT INTO usage_event_claims (source_id, applied_at_unix) " +
+              "VALUES (?, NULL) ON CONFLICT (source_id) DO NOTHING",
+          )
+          .bind(sourceId),
+      );
+    }
+    statements.push(
       // 1. The attribution row. `DO NOTHING` because a context's identity
       //    columns are immutable — re-deriving them on every call would be a
       //    write amplification with no effect.
@@ -179,7 +222,10 @@ export class D1UsageLedger {
         .prepare(
           "INSERT INTO tenant_contexts " +
             "(id, organization_id, team_id, project_id, workspace_id, user_id, api_key_id) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            (sourceId === undefined
+              ? "VALUES (?, ?, ?, ?, ?, ?, ?)"
+              : "SELECT ?, ?, ?, ?, ?, ?, ?" + claimGuard) +
+            " ON CONFLICT (id) DO NOTHING",
         )
         .bind(
           write.context.id,
@@ -189,6 +235,7 @@ export class D1UsageLedger {
           bindOptional(write.context.workspaceId),
           bindOptional(write.context.userId),
           bindOptional(write.context.apiKeyId),
+          ...claimParams,
         ),
       // 2. Cumulative token totals for this (context, model, provider).
       this.db
@@ -197,7 +244,10 @@ export class D1UsageLedger {
             "(id, tenant_context_id, logical_model, provider, prompt_tokens, " +
             " completion_tokens, total_tokens, cached_input_tokens, cache_write_tokens, " +
             " reasoning_tokens, updated_at_unix) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+            (sourceId === undefined
+              ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+              : "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" + claimGuard) +
+            " " +
             "ON CONFLICT (id) DO UPDATE SET " +
             "prompt_tokens = usage_aggregate_rollups.prompt_tokens + excluded.prompt_tokens, " +
             "completion_tokens = usage_aggregate_rollups.completion_tokens + " +
@@ -224,8 +274,9 @@ export class D1UsageLedger {
           cacheWriteTokens,
           reasoningTokens,
           write.occurredAtUnix,
+          ...claimParams,
         ),
-    ];
+    );
 
     // 3. One monthly rollup row per scope level the caller occupies.
     for (const scope of write.scopes) {
@@ -236,7 +287,10 @@ export class D1UsageLedger {
               "(id, period_month, scope_type, scope_id, prompt_tokens, completion_tokens, " +
               " total_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, " +
               " cost_usd, request_count, error_count, updated_at_unix) " +
-              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) " +
+              (sourceId === undefined
+                ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"
+                : "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?" + claimGuard) +
+              " " +
               "ON CONFLICT (id) DO UPDATE SET " +
               "prompt_tokens = usage_monthly_rollups.prompt_tokens + excluded.prompt_tokens, " +
               "completion_tokens = usage_monthly_rollups.completion_tokens + " +
@@ -268,6 +322,7 @@ export class D1UsageLedger {
             write.costUsd,
             errorDelta,
             write.occurredAtUnix,
+            ...claimParams,
           ),
       );
     }
@@ -285,7 +340,10 @@ export class D1UsageLedger {
               "(id, period_month, organization_id, metadata_key, metadata_value, prompt_tokens, " +
               " completion_tokens, total_tokens, cost_usd, request_count, error_count, " +
               " updated_at_unix) " +
-              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) " +
+              (sourceId === undefined
+                ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"
+                : "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?" + claimGuard) +
+              " " +
               "ON CONFLICT (id) DO UPDATE SET " +
               "prompt_tokens = usage_metadata_rollups.prompt_tokens + excluded.prompt_tokens, " +
               "completion_tokens = usage_metadata_rollups.completion_tokens + " +
@@ -309,7 +367,103 @@ export class D1UsageLedger {
             write.costUsd,
             errorDelta,
             write.occurredAtUnix,
+            ...claimParams,
           ),
+      );
+    }
+
+    if (write.presenceTouch !== undefined) {
+      statements.push(
+        this.db
+          .prepare(
+            "INSERT INTO observed_agent_presence " +
+              "(tenant_id, api_key_id, first_seen_at_unix, last_seen_at_unix, request_count, " +
+              (sourceId === undefined
+                ? " updated_at_unix) VALUES (?, ?, ?, ?, 1, ?)"
+                : " updated_at_unix) SELECT ?, ?, ?, ?, 1, ?" + claimGuard) +
+              " " +
+              "ON CONFLICT (tenant_id, api_key_id) DO UPDATE SET " +
+              "last_seen_at_unix = max(observed_agent_presence.last_seen_at_unix, " +
+              "                        excluded.last_seen_at_unix), " +
+              "first_seen_at_unix = min(observed_agent_presence.first_seen_at_unix, " +
+              "                         excluded.first_seen_at_unix), " +
+              "request_count = observed_agent_presence.request_count + excluded.request_count, " +
+              "updated_at_unix = max(observed_agent_presence.updated_at_unix, " +
+              "                      excluded.updated_at_unix)",
+          )
+          .bind(
+            write.presenceTouch.tenantId,
+            write.presenceTouch.apiKeyId,
+            write.presenceTouch.seenAtUnix,
+            write.presenceTouch.seenAtUnix,
+            write.presenceTouch.seenAtUnix,
+            ...claimParams,
+          ),
+      );
+    }
+
+    if (write.agentCostBurn !== undefined) {
+      statements.push(
+        this.db
+          .prepare(
+            "INSERT INTO agent_cost_burn " +
+              "(tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix) " +
+              (sourceId === undefined
+                ? "VALUES (?, ?, ?, ?, ?, ?)"
+                : "SELECT ?, ?, ?, ?, ?, ?" + claimGuard) +
+              " " +
+              "ON CONFLICT (tenant_id, agent_key, period) DO UPDATE SET " +
+              "accumulated_usd = agent_cost_burn.accumulated_usd + excluded.accumulated_usd, " +
+              "first_seen_unix = min(agent_cost_burn.first_seen_unix, excluded.first_seen_unix), " +
+              "updated_at_unix = max(agent_cost_burn.updated_at_unix, excluded.updated_at_unix)",
+          )
+          .bind(
+            write.agentCostBurn.tenantId,
+            write.agentCostBurn.agentKey,
+            write.agentCostBurn.period,
+            write.agentCostBurn.deltaUsd,
+            write.agentCostBurn.nowUnix,
+            write.agentCostBurn.nowUnix,
+            ...claimParams,
+          ),
+      );
+    }
+
+    if (write.projectionRetry !== undefined && organizationId !== "") {
+      statements.push(
+        this.db
+          .prepare(
+            "INSERT INTO usage_projection_retries " +
+              "(source_id, tenant_id, occurred_at_unix, payload_json, attempts, " +
+              " next_attempt_unix, created_at_unix, updated_at_unix) " +
+              (sourceId === undefined
+                ? "VALUES (?, ?, ?, ?, 0, 0, unixepoch(), unixepoch())"
+                : "SELECT ?, ?, ?, ?, 0, 0, unixepoch(), unixepoch()" + claimGuard) +
+              " " +
+              "ON CONFLICT (source_id) DO UPDATE SET " +
+              "tenant_id = excluded.tenant_id, " +
+              "occurred_at_unix = excluded.occurred_at_unix, " +
+              "payload_json = excluded.payload_json, " +
+              "updated_at_unix = unixepoch()",
+          )
+          .bind(
+            write.projectionRetry.sourceId,
+            organizationId,
+            write.occurredAtUnix,
+            write.projectionRetry.payloadJson,
+            ...claimParams,
+          ),
+      );
+    }
+
+    if (sourceId !== undefined) {
+      statements.push(
+        this.db
+          .prepare(
+            "UPDATE usage_event_claims SET applied_at_unix = ? " +
+              "WHERE source_id = ? AND applied_at_unix IS NULL",
+          )
+          .bind(write.occurredAtUnix, sourceId),
       );
     }
 

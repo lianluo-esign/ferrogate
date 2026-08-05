@@ -12,7 +12,7 @@
  *    and the 13 `requireAtomicBatch()` money paths can be admitted;
  *  * that the version gate really stops the 153-statement apply re-running on
  *    the second wake — SQLite has no `ADD COLUMN IF NOT EXISTS`, and four of the
- *    seventeen tenant migrations are covered by the census below;
+ *    eighteen tenant migrations are covered by the census below;
  *  * that two `idFromName` objects really hold physically different databases.
  *
  * A fake namespace would agree with all four because the fake was written to
@@ -46,7 +46,7 @@ declare global {
 }
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0017.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0018.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -66,6 +66,7 @@ const TENANT_TABLES = [
   "api_keys",
   "asset_bundle_files",
   "asset_channels",
+  "audit_events",
   "budget_alert_notifications",
   "catalog_audit_outbox",
   "catalog_model_offerings",
@@ -73,8 +74,10 @@ const TENANT_TABLES = [
   "catalog_revisions",
   "control_plane_replay_floors",
   "delegation_revocations",
+  "experiment_shadow_legs",
   "guardrail_check_evaluations",
   "guardrail_evaluations",
+  "managed_worker_isolation_evidence",
   "managed_worker_isolation_policies",
   "managed_worker_isolation_selections",
   "managed_worker_lifecycle_events",
@@ -84,6 +87,8 @@ const TENANT_TABLES = [
   "mcp_oauth_credentials",
   "mcp_servers",
   "observed_agent_presence",
+  "online_eval_regressions",
+  "online_eval_scores",
   "payment_methods",
   "projects",
   "provider_channels",
@@ -97,6 +102,7 @@ const TENANT_TABLES = [
   "self_hosted_worker_identities",
   "self_hosted_worker_telemetry_events",
   "semantic_cache_policies",
+  "spend_anomaly_episodes",
   "sso_provider_configs",
   "storage_schema_migrations",
   "stored_assets",
@@ -108,8 +114,10 @@ const TENANT_TABLES = [
   "tenant_role_bindings",
   "tenant_role_catalog",
   "usage_aggregate_rollups",
+  "usage_event_claims",
   "usage_metadata_rollups",
   "usage_monthly_rollups",
+  "usage_projection_retries",
   "wallet_reservations",
   "wallet_settlements",
   "wallets",
@@ -223,7 +231,7 @@ describe("the statement splitter", () => {
     //
     // If this fails, do NOT change the numbers here alone. Update the four
     // sites in `src/tenant-data-object.ts` that state them: the comment-`;`
-    // count and "all SEVENTEEN files" in the `sqlStatements` docblock, the
+    // count and "all NINETEEN files" in the `sqlStatements` docblock, the
     // "N statements" in the constructor comment, and the breakdown in
     // `#migrate`'s docblock.
     const all = TENANT_MIGRATIONS.flatMap((migration) => sqlStatements(migration.sql));
@@ -237,11 +245,11 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 17,
-      statements: 153,
-      createTable: 60,
-      createIndex: 71,
-      createUniqueIndex: 5,
+      files: 19,
+      statements: 175,
+      createTable: 68,
+      createIndex: 84,
+      createUniqueIndex: 6,
       alterTable: 10,
       insert: 6,
     });
@@ -268,7 +276,8 @@ describe("the statement splitter", () => {
       "0013_guardrail_evaluations": 1,
       "0015_tenant_configuration_policy": 1,
       "0016_control_plane_resources": 1,
-      "0017_worker_schedule_state": 2,
+      "0017_worker_schedule_state": 1,
+      "0018_usage_evaluation_audit": 1,
     });
     expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(36);
 
@@ -293,7 +302,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(17);
+    expect(TENANT_MIGRATIONS.length).toBe(19);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -390,9 +399,7 @@ describe("tenant configuration and policy state", () => {
     ];
     for (const [index, sql] of statements.entries()) {
       const tenantId = `tenant_privileged_syntax_${index}`;
-      expect(
-        await refusal(objectFor(tenantId).query({ tenantId, sql })),
-      ).toMatch(/privileged/i);
+      expect(await refusal(objectFor(tenantId).query({ tenantId, sql }))).toMatch(/privileged/i);
     }
   });
 
@@ -406,15 +413,7 @@ describe("tenant configuration and policy state", () => {
             "INSERT INTO tenant_role_catalog " +
             "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-          params: [
-            "role_operator",
-            "Operator",
-            "operator",
-            "",
-            '["tenant.read"]',
-            100,
-            100,
-          ],
+          params: ["role_operator", "Operator", "operator", "", '["tenant.read"]', 100, 100],
         },
         {
           sql:
@@ -664,6 +663,52 @@ describe("tenant-private guardrail evidence", () => {
   });
 });
 
+describe("tenant audit chains", () => {
+  test("assign a chain position and return the same row on replay", async () => {
+    const tenant = "tenant_audit_chain";
+    const object = objectFor(tenant);
+    await object.query({ tenantId: tenant, sql: "DELETE FROM audit_events" });
+
+    const first = await object.appendAudit({
+      tenantId: tenant,
+      id: "audit-1",
+      requestId: "request-1",
+      agentRunId: null,
+      occurredAtUnix: 1_700_000_000,
+      auditJson: '{"action":"asset.push"}',
+    });
+    const replay = await object.appendAudit({
+      tenantId: tenant,
+      id: "audit-1",
+      requestId: "request-1",
+      agentRunId: null,
+      occurredAtUnix: 1_700_000_000,
+      auditJson: '{"action":"asset.push"}',
+    });
+    expect(replay).toEqual(first);
+
+    const second = await object.appendAudit({
+      tenantId: tenant,
+      id: "audit-2",
+      requestId: "request-2",
+      agentRunId: "run-2",
+      occurredAtUnix: 1_700_000_001,
+      auditJson: '{"action":"asset.yank"}',
+    });
+    expect(first.seq).toBe(1);
+    expect(second.seq).toBe(2);
+    expect(second.prevHash).toBe(first.rowHash);
+
+    const rows = await object.query({
+      tenantId: tenant,
+      sql: "SELECT seq, prev_hash, row_hash FROM audit_events ORDER BY seq",
+    });
+    expect(rows.results).toHaveLength(2);
+    expect(rows.results[0]).toMatchObject({ seq: 1, prev_hash: "0".repeat(64) });
+    expect(rows.results[1]).toMatchObject({ seq: 2, prev_hash: first.rowHash });
+  });
+});
+
 describe("the second wake", () => {
   test("does a version read and NOTHING more", async () => {
     const first = await objectFor(ACME).schemaVersion();
@@ -681,7 +726,7 @@ describe("the second wake", () => {
   });
 
   test("survives at all, which is itself the ALTER-idempotence proof", async () => {
-    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the seventeen tenant
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. Four of the eighteen tenant
     // migrations are ALTER-only, so an applier that re-ran them would throw
     // `duplicate column name` and this object would come back refusing.
     await evict(ACME);
@@ -1122,9 +1167,9 @@ describe("tenant schedule alarms", () => {
     const scheduledAtUnix = 1_800_000_123;
 
     await object.setScheduleAlarm({ tenantId, scheduledAtUnix });
-    expect(
-      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
-    ).toBe(scheduledAtUnix * 1000);
+    expect(await runInDurableObject(object, (_instance, state) => state.storage.getAlarm())).toBe(
+      scheduledAtUnix * 1000,
+    );
 
     await object.clearScheduleAlarm({ tenantId });
     expect(
@@ -1173,9 +1218,9 @@ describe("tenant schedule alarms", () => {
     expect(await refusal(objectA.clearScheduleAlarm({ tenantId: tenantB }))).toMatch(
       /holds tenant tenant_schedule_alarm_a|another tenant/,
     );
-    expect(
-      await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm()),
-    ).toBe(scheduledAtUnixA * 1000);
+    expect(await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm())).toBe(
+      scheduledAtUnixA * 1000,
+    );
     expect(await runDurableObjectAlarm(objectA)).toBe(true);
     expect(
       await runInDurableObject(objectA, (instance) => {

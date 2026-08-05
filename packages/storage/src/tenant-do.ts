@@ -69,6 +69,7 @@
  */
 import { StorageError } from "./errors.js";
 import type {
+  TenantAuditAppendRequest,
   TenantDataBatchRequest,
   TenantDataQueryRequest,
   TenantDataResult,
@@ -99,6 +100,18 @@ import {
 export interface TenantDataStub {
   query(request: TenantDataQueryRequest): Promise<TenantDataResult>;
   batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
+  appendAudit?(request: TenantAuditAppendRequest): Promise<{
+    readonly id: string;
+    readonly requestId: string;
+    readonly agentRunId: string | null;
+    readonly tenant: string;
+    readonly occurredAtUnix: number;
+    readonly auditJson: string;
+    readonly chainKey: string;
+    readonly seq: number;
+    readonly prevHash: string;
+    readonly rowHash: string;
+  }>;
   /** Optional for stale test/deployment stubs; callers fail closed if absent. */
   privilegedBatch?(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
   /** Optional schedule alarm RPC, present on the current TenantDataObject. */

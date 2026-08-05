@@ -42,6 +42,7 @@ import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, auditRows, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import { tenantObjectDb } from "./tenant-object.js";
 
 interface AuditListBody {
   object: string;
@@ -83,6 +84,11 @@ beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
+  await Promise.all(
+    ["t-1", "t-2"].map((tenantId) =>
+      tenantObjectDb(tenantId).prepare("DELETE FROM audit_events").run(),
+    ),
+  );
   arm({
     store: "d1",
     staticKeys: [operatorKey],
@@ -111,6 +117,36 @@ describe("the admin audit trail returns the evidence the store recorded", () => 
       resource_id: "pol_a",
       actor_scope: "platform_operator",
     });
+  });
+
+  it("reads tenant asset audit authority from the TenantDataObject", async () => {
+    await tenantObjectDb("t-1")
+      .prepare(
+        "INSERT INTO audit_events " +
+          "(id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json, " +
+          "chain_key, seq, prev_hash, row_hash) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "aud_asset_object",
+        "req_asset_object",
+        "t-1",
+        10,
+        JSON.stringify({ action: "asset.push", target: "bundle-1", outcome: "committed" }),
+        "t-1",
+        1,
+        "0".repeat(64),
+        "1".repeat(64),
+      )
+      .run();
+
+    const trail = await readTrail("k-tenant");
+    expect(trail.data).toContainEqual(
+      expect.objectContaining({
+        id: "aud_asset_object",
+        action: "asset.push",
+        tenant_id: "t-1",
+      }),
+    );
   });
 
   /**

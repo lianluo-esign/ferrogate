@@ -58,6 +58,7 @@ import { AGENT_RUN_ID_HEADER, agentRunIdFor } from "./agent-run.js";
 import { executionContextOf } from "./runtime.js";
 import type { MeteringUsageSink } from "./sink.js";
 import type { MeteringAttribution, MeteringDrainContext } from "./usage-ledger.js";
+import { tenantDatabaseOf } from "../tenancy/middleware.js";
 
 /**
  * Who this request's usage is attributed to, from the authenticated credential.
@@ -132,11 +133,20 @@ export function meteringDrain(sink: MeteringUsageSink): MiddlewareHandler<Gatewa
      */
     const requestId = c.res.headers.get("x-request-id") ?? c.get("requestId") ?? "";
     const attribution = attributionFrom(c, requestId);
+    let usageDatabase: D1Database | null | undefined;
+    if (attribution?.tenantId !== undefined) {
+      try {
+        usageDatabase = await tenantDatabaseOf(c).db();
+      } catch {
+        usageDatabase = null;
+      }
+    }
 
     const ctx = executionContextOf(c);
     const rc: MeteringDrainContext = {
       env: c.env,
       ctx,
+      ...(attribution?.tenantId === undefined ? {} : { usageDatabase }),
       ...(attribution === undefined ? {} : { attribution }),
     };
 

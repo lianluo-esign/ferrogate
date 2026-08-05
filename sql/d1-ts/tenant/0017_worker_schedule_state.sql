@@ -14,8 +14,8 @@
 --     directory, because worker_id is the lookup key before a tenant is known.
 --     The identity row below is the tenant authority; the control row remains a
 --     narrow compatibility lookup until the runtime reads the object directly.
---   * managed_worker_isolation_evidence is derived projection state owned by a
---     later slice; the managed lifecycle state below is authoritative here.
+--   * managed_worker_isolation_evidence is derived from the managed run
+--     lifecycle and is written by agent-runtime alongside the object state.
 -- ===========================================================================
 
 CREATE TABLE IF NOT EXISTS managed_worker_templates (

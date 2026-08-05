@@ -340,6 +340,7 @@ describe("a control+shadow split scores BOTH arms under one instrument", () => {
       } as never,
       {
         CONTROL_DB: controlDb(),
+        TENANT_DATA: (poolEnv as unknown as Record<string, unknown>).TENANT_DATA,
         GATEWAY_PROVIDERS: JSON.stringify(JUDGE_PROVIDERS),
         GATEWAY_MODELS: JSON.stringify(JUDGE_MODELS),
         JUDGE_API_KEY: "sk-judge",

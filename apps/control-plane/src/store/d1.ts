@@ -101,6 +101,12 @@ export function tenantResourceTombstoneMark(collection: string, id: string): str
 }
 /** The durable admin-mutation evidence table (`sql/d1-ts/control/`). */
 export const AUDIT_TABLE = "audit_events";
+
+/** Physical key for a tenant-qualified control audit projection. */
+function auditProjectionKey(tenantId: string | null, id: string): string {
+  const tenant = tenantId ?? "";
+  return `${Array.from(tenant).length}:${tenant}:${id}`;
+}
 /**
  * The derived per-inference-decision evidence projection
  * (`sql/d1-ts/control/`).
@@ -1215,11 +1221,12 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         await this.#auditDb
           .prepare(
             `INSERT INTO ${AUDIT_TABLE}
-               (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+               (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
                 chain_key, seq, prev_hash, row_hash)
-             VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
+            auditProjectionKey(tenantId, id),
             id,
             this.#requestId,
             tenantId,
@@ -1297,9 +1304,9 @@ export async function appendControlPlaneAudit(
   for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
     try {
       const existing = await db
-        .prepare(`SELECT id FROM ${AUDIT_TABLE} WHERE id = ? LIMIT 1`)
-        .bind(id)
-        .first<{ id: string }>();
+        .prepare(`SELECT projection_key FROM ${AUDIT_TABLE} WHERE projection_key = ? LIMIT 1`)
+        .bind(auditProjectionKey(tenantId, id))
+        .first<{ projection_key: string }>();
       if (existing !== null) return;
 
       const head = await db
@@ -1327,11 +1334,22 @@ export async function appendControlPlaneAudit(
       await db
         .prepare(
           `INSERT INTO ${AUDIT_TABLE}
-             (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+             (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
               chain_key, seq, prev_hash, row_hash)
-           VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(id, requestId, tenantId, occurredAt, auditJson, chainKey, seq, prevHash, rowHash)
+        .bind(
+          auditProjectionKey(tenantId, id),
+          id,
+          requestId,
+          tenantId,
+          occurredAt,
+          auditJson,
+          chainKey,
+          seq,
+          prevHash,
+          rowHash,
+        )
         .run();
       return;
     } catch (error) {
