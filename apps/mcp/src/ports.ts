@@ -2102,9 +2102,9 @@ export function durableIdentityBound(env: McpEnv): boolean {
  * Worker already binds as `env.DB` (`wrangler.toml`,
  * `database_name = "ferrogate-control"`). The per-tenant databases the NATIVE
  * leg's second hop needs are resolved by NAME at runtime through
- * `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter`, so they are not part
- * of this predicate: a deployment with no tenant bindings still authenticates
- * operator/static keys and refuses virtual ones with a 401, which is a partial
+ * the DO-only tenant router, so the namespace itself is not part of this
+ * predicate: a deployment with no TENANT_DATA still authenticates operator/
+ * static keys and refuses virtual ones with a 503, which is a partial
  * capability rather than an unready Worker.
  */
 export function durableAuthBound(env: McpEnv): boolean {
@@ -2293,9 +2293,9 @@ export function resolvePorts(env: McpEnv): McpPorts {
 /**
  * Choose the {@link AuthPort} for this env.
  *
- * `env.DB` bound ⇒ {@link D1McpAuth} over the CONTROL database, with
- * `@ferrogate/storage`'s `EnvBindingTenantDatabaseRouter` for the NATIVE leg's
- * second hop and — in the dev posture only — the in-memory table as fallback.
+ * `env.DB` bound ⇒ {@link D1McpAuth} over the CONTROL database, with the
+ * DO-only tenant router for the NATIVE leg's second hop and — in the dev
+ * posture only — the in-memory table as fallback.
  * No `env.DB` ⇒ {@link UnboundAuth}, which is a 503 and never an open door.
  *
  * The router is constructed here rather than inside `D1McpAuth` so the class
