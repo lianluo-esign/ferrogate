@@ -165,6 +165,17 @@ class_name = "FerroGateMcpSession"
 name = "MCP_CLIENT_SESSION"
 class_name = "FerroGateMcpUnifiedSession"
 
+# ---------------------------------------------------------------------------
+# TENANT_DATA — the gateway-owned SQLite Durable Object that is one tenant's
+# database (#822). MCP borrows the namespace by script name so its catalog and
+# identity state address the same object the gateway uses; a locally-defined
+# class here would silently create a second namespace and split tenant data.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["McpOauthFlowClaim"]
