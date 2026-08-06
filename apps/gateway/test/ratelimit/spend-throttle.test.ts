@@ -84,6 +84,20 @@ async function seedPolicy(
 }
 
 async function seedKey(scope: { org: string; keyId: string }): Promise<string> {
+  // Each fresh tenant needs its own `tenant_databases` roster row: `test/setup-d1.ts`
+  // seeds one only for the `[vars]` fixture tenants, and a tenant with no row is
+  // the dispatching router's `not_found` — i.e. every request answers 503
+  // `quota_resolution_unavailable` before the throttle is ever read.
+  // `migration_state = 'done'` because the column DEFAULTs to 'shared'
+  // (pre-cutover), which would route the tenant to the legacy shared `env.DB`.
+  await controlDb
+    .prepare(
+      "INSERT OR REPLACE INTO tenant_databases " +
+        "(tenant_id, storage_backend, provisioning_status, migration_state) " +
+        "VALUES (?, 'durable_object', 'ready', 'done')",
+    )
+    .bind(scope.org)
+    .run();
   return await seedApiKey({
     id: scope.keyId,
     secret: testSecret(`spend-throttle-${scope.keyId}`),

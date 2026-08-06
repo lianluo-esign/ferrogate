@@ -49,6 +49,14 @@ GATEWAY_NATIVE_API_KEYS = '''
 ]
 '''
 GATEWAY_STATIC_API_KEYS = "[]"
+# This harness binds no TENANT_DATA namespace and no D1: it exists to drive the
+# RATE_LIMIT Durable Object end to end, and tenant storage is orthogonal to
+# every spec in it. Since #819 the ABSENT var means "durable_object", whose
+# wallet/quota callers ask for the tenancy middleware and 500 on this worker —
+# so the no-tenant-storage posture must now be NAMED, which is exactly what
+# `src/tenancy/resolver.ts` says "off" is for (wallet admission then degrades
+# to the pre-#819 no-wallet-configured path and the limiter is what answers).
+GATEWAY_TENANT_DB_ROUTING = "off"
 SELF_HOSTED_WORKER_REGISTRY = "[]"
 TENANCY_LIFECYCLE = "{}"
 TENANT_RBAC_ACTIONS = "{}"

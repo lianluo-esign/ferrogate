@@ -77,7 +77,7 @@ const bindings = env as unknown as Record<string, unknown>;
 const FLEET_TENANT_KEY = "fg_fleet_tenant_a";
 let originalNativeApiKeys: unknown;
 
-beforeAll(() => {
+beforeAll(async () => {
   originalNativeApiKeys = bindings.GATEWAY_NATIVE_API_KEYS;
   bindings.GATEWAY_NATIVE_API_KEYS = JSON.stringify([
     {
@@ -87,6 +87,25 @@ beforeAll(() => {
       scopes: ["agents.read"],
     },
   ]);
+  // `tenant-a` is not one of `test/setup-d1.ts`'s fixture tenants, and the
+  // durable_object routing default reads the `tenant_databases` roster on
+  // every authenticated request — without this row the DISCOVERY door answers
+  // `503 quota_resolution_unavailable` for the tenant-attributed credential and
+  // the both-doors case fails before reaching the withdrawal. `migration_state`
+  // must be stated as `done`: the column's DDL default is the pre-cutover
+  // `shared`, which routes the deployed dispatch to the legacy shared arm
+  // (`env.DB`) — a database holding NONE of the rows this test writes into the
+  // tenant object. Same explicit form as `test/assets/wiring.test.ts`. (The
+  // DISPATCH door goes through `tenantRouter().forTenant`, whose resolution
+  // reads nothing.)
+  await controlDb()
+    .prepare(
+      "INSERT OR REPLACE INTO tenant_databases " +
+        "(tenant_id, storage_backend, provisioning_status, schema_version, migration_state, migration_epoch) " +
+        "VALUES (?, 'durable_object', 'ready', 1, 'done', 0)",
+    )
+    .bind("tenant-a")
+    .run();
 });
 
 afterAll(() => {

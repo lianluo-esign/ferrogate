@@ -2,13 +2,18 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { sweepManagedIsolationEvidence } from "../src/managed-evidence-projection.js";
 import { resolverForEnv } from "../src/tenancy/index.js";
-import { tenantObjectDb } from "./tenant-object.js";
+import { seedTenantRosterRows, tenantObjectDb } from "./tenant-object.js";
 
 const TENANT = "tenant_managed_evidence_repair";
 
 beforeEach(async () => {
   const control = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
   const tenant = tenantObjectDb(TENANT);
+  // Not a vitest.config fixture tenant, so `test/setup-d1.ts` seeds no roster
+  // row for it — and `resolverForEnv`'s backend-dispatching router (DB is
+  // bound in this suite) then cannot place the tenant, which the sweep records
+  // as a per-tenant skip instead of a projection.
+  await seedTenantRosterRows([TENANT]);
   await control.prepare("DELETE FROM managed_worker_isolation_evidence").run();
   await tenant.prepare("DELETE FROM managed_worker_isolation_evidence").run();
 });

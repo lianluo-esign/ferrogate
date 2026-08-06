@@ -94,6 +94,11 @@ import {
 } from "../../mcp/src/rbac.js";
 import type { AuthContext as McpAuth } from "../../mcp/src/ports.js";
 import mcpRbacSource from "../../mcp/src/rbac.ts?raw";
+import {
+  seedTenantRosterRows,
+  tenantObjectPrivilegedBatch,
+  tenantObjectRouter,
+} from "./tenant-object.js";
 
 const bindings = env as unknown as Record<string, unknown>;
 
@@ -139,21 +144,28 @@ async function grantRole(
     )
     .bind(roleId, roleId, roleId, JSON.stringify(permissionKeys))
     .run();
-  await controlDb()
-    .prepare(
-      "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?1, ?2, ?3)",
-    )
-    .bind(`${tenantId}:${roleId}`, tenantId, roleId)
-    .run();
+  // Post-#863 the binding is a TENANT-OBJECT row (the control-database table
+  // was renamed `tenant_role_bindings_legacy`), and the object refuses ordinary
+  // tenant SQL against it — the seed takes the privileged operator RPC, the
+  // same path the production backfill takes.
+  await tenantObjectPrivilegedBatch(tenantId, [
+    {
+      sql: "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, ?)",
+      params: [`${tenantId}:${roleId}`, tenantId, roleId],
+    },
+  ]);
 }
 
 async function resetGraph(): Promise<void> {
   const db = controlDb();
-  await db.batch([
-    db.prepare("DELETE FROM tenant_role_bindings"),
-    db.prepare("DELETE FROM roles"),
-    db.prepare("DELETE FROM permissions"),
-  ]);
+  // The shared catalog stays in CONTROL; the bindings live in each tenant's object.
+  await db.batch([db.prepare("DELETE FROM roles"), db.prepare("DELETE FROM permissions")]);
+  for (const tenantId of [TENANT, OTHER_TENANT]) {
+    await tenantObjectPrivilegedBatch(tenantId, [
+      { sql: "DELETE FROM tenant_role_bindings" },
+      { sql: "DELETE FROM tenant_role_catalog" },
+    ]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,13 +223,21 @@ async function fleetDecisions(
 ): Promise<Record<string, RbacDecision>> {
   const db = options.db ?? controlDb();
   const operator = options.operator ?? false;
+  // Post-#863 every Worker's authorizer reads the binding from the TENANT
+  // OBJECT and validates the role against the shared CONTROL catalog, so each
+  // gets the same `TENANT_DATA` namespace next to the database under test. The
+  // outage leg (1.7) is unaffected: the permission-existence statement runs on
+  // `db` first and throws before any object is addressed.
+  const tenantData = bindings.TENANT_DATA;
   return {
-    gateway: await new GatewayRbac(db as unknown as RbacDatabase).authorize(
-      gatewayAuth(tenantId, operator),
+    gateway: await new GatewayRbac(db as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    }).authorize(gatewayAuth(tenantId, operator), action),
+    mcp: await mcpRbacFromEnv({ DB: db, TENANT_DATA: tenantData }).authorize(
+      mcpAuth(tenantId, operator),
       action,
     ),
-    mcp: await mcpRbacFromEnv({ DB: db }).authorize(mcpAuth(tenantId, operator), action),
-    "agent-runtime": await agentRbacFromEnv({ CONTROL_DB: db }).authorize(
+    "agent-runtime": await agentRbacFromEnv({ CONTROL_DB: db, TENANT_DATA: tenantData }).authorize(
       agentAuth(tenantId, operator),
       action,
     ),
@@ -332,7 +352,7 @@ describe("§1 one grant graph, one answer on every Worker that can serve the act
 describe("§2 the gateway enforces the same graph on a real contract operation", () => {
   const ADMIN_KEY = "fg_fleet_rbac_admin";
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // A native key for a tenant with NO entry in `TENANT_RBAC_ACTIONS`
     // (`vitest.config.ts` grants `tenant_a` there), carrying the operation's
     // `admin.read` scope so the request reaches the RBAC rung rather than
@@ -340,6 +360,10 @@ describe("§2 the gateway enforces the same graph on a real contract operation",
     bindings.GATEWAY_NATIVE_API_KEYS = JSON.stringify([
       { key: ADMIN_KEY, id: "key_fleet_rbac", tenant_id: TENANT, scopes: ["admin.read"] },
     ]);
+    // Not a vitest.config fixture tenant, so `test/setup-d1.ts` seeds no
+    // roster row — without one an ADMITTED request 503s downstream when the
+    // backend-dispatching router cannot place the tenant.
+    await seedTenantRosterRows([TENANT]);
   });
 
   function listPolicies(): Promise<Response> {
@@ -375,9 +399,13 @@ describe("§3 apps/control-plane consults the same graph, with three recorded de
     expect(controlPlaneAuth).toContain("deps.rbac.authorize(auth, operation.rbacAction)");
   });
 
-  it("3.2 it resolves the grant from the same two durable tables", () => {
+  it("3.2 it resolves the grant from the same two durable authorities", () => {
+    // Post-#863 the walk is two steps on every Worker: the tenant-object
+    // `tenant_role_bindings` row, then the shared CONTROL `roles` catalog to
+    // validate the bound role. The pre-#863 spelling was a single control-D1
+    // `JOIN roles ON roles.id = tenant_role_bindings.role_id`.
     expect(controlPlaneAdapters).toContain("FROM tenant_role_bindings");
-    expect(controlPlaneAdapters).toContain("JOIN roles ON roles.id = tenant_role_bindings.role_id");
+    expect(controlPlaneAdapters).toContain("permission_keys_json FROM roles WHERE id");
   });
 
   it("3.3 RECORDED: it does not require the permission to be DECLARED", () => {
@@ -413,20 +441,33 @@ describe("§3 apps/control-plane consults the same graph, with three recorded de
 // ---------------------------------------------------------------------------
 
 describe("§4 the imported authorizers pull no foreign module graph", () => {
-  it("both rbac.ts modules import nothing but a TYPE", () => {
+  it("both rbac.ts modules pull no other WORKER's module graph", () => {
     // What makes importing another Worker's module from a test legitimate at
     // all (`apps/mcp/test/drain-fleet.test.ts` §"the cross-app drain modules
-    // stay leaves"). A value import here would drag that Worker's ports, its
-    // storage package and its bindings into this bundle — and would mean the
-    // authorizer this file exercises is not the small, self-contained thing its
-    // own Worker mounts.
+    // stay leaves"). Post-#863 each module needs ONE runtime import — the
+    // shared `@ferrogate/storage` tenant-object router, a workspace package
+    // this Worker's own bundle already carries — so the leaf property is now:
+    // every import is either type-only (erased) or from that shared storage
+    // package. A relative value import, or any `apps/*` path, would drag a
+    // foreign Worker's ports and bindings into this bundle and would mean the
+    // authorizer this file exercises is not the thing its own Worker mounts.
     for (const [name, source] of [
       ["apps/mcp/src/rbac.ts", mcpRbacSource],
       ["apps/agent-runtime/src/rbac.ts", agentRbacSource],
     ] as const) {
-      const imports = [...source.matchAll(/^import\s+(.*)$/gm)].map((m) => m[1] as string);
-      expect(imports.length, `${name} has no imports at all — the probe went stale`).toBe(1);
-      expect(imports[0], `${name} gained a runtime import`).toMatch(/^type\s/);
+      const imports = [
+        ...source.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+["']([^"']+)["'];?$/gm),
+      ].map((m) => ({ typeOnly: m[1] !== undefined, specifier: m[2] as string }));
+      expect(imports.length, `${name} has no imports at all — the probe went stale`).toBeGreaterThan(
+        0,
+      );
+      for (const { typeOnly, specifier } of imports) {
+        if (typeOnly) continue;
+        expect(
+          specifier.startsWith("@ferrogate/storage"),
+          `${name} gained a runtime import outside the shared storage package: ${specifier}`,
+        ).toBe(true);
+      }
     }
   });
 

@@ -43,6 +43,7 @@ import { type ApiOperation, operationById } from "../src/contract.js";
 import type { AuthContext, GatewayBindings, LifecycleDecision } from "../src/ports.js";
 import { createGatewayApp } from "../src/routes/index.js";
 import { seedApiKey, testSecret } from "./keys/seed.js";
+import { seedTenantRosterRows } from "./tenant-object.js";
 
 const BASE = "https://gateway.test";
 const bindings = env as unknown as Record<string, unknown>;
@@ -100,7 +101,15 @@ async function clearRows(): Promise<void> {
   await db("CONTROL_DB").exec("DELETE FROM tenants");
 }
 
-beforeEach(clearRows);
+beforeEach(async () => {
+  await clearRows();
+  // `tenant_chain` is not a vitest.config fixture tenant, so `test/setup-d1.ts`
+  // seeds no `tenant_databases` roster row for it — and a request the lifecycle
+  // gate ADMITS then 503s downstream when the backend-dispatching router cannot
+  // place the tenant. (Roster rows survive `clearRows`, which touches only
+  // workspaces/projects/api_keys/tenants.)
+  await seedTenantRosterRows(["tenant_chain"]);
+});
 afterEach(clearRows);
 
 function auth(tenancy: Partial<AuthContext["tenancy"]>): AuthContext {

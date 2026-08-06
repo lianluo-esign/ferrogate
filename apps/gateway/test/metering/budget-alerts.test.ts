@@ -50,7 +50,11 @@ import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
 import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
 import { pricedBook, usageFixture } from "./fixtures.js";
-import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
+import {
+  resetTenantBillingState,
+  resetTenantObjectState,
+  tenantObjectDb,
+} from "../tenant-object.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const controlDb = (env as unknown as { CONTROL_DB?: D1Database; BILLING_DB: D1Database })
@@ -219,6 +223,17 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM tenant_contexts").run();
   await controlDb.prepare("DELETE FROM quota_policies").run();
   await resetTenantObjectState(["tenant_a"]);
+  // Post-#863 the settle, the rollup and the alert claim are all
+  // tenant-object rows, and the object's `ctx.storage.sql` is NOT part of this
+  // pool's per-test isolated-storage rollback. Without these resets a ledger
+  // entry recorded by an earlier test makes a later test's identical settle a
+  // `duplicate` (`stats.recorded` stays 0) and the spent rollup double-counts.
+  await resetTenantBillingState(["tenant_a"]);
+  const tenantObject = tenantObjectDb("tenant_a");
+  await tenantObject.prepare("DELETE FROM usage_event_claims").run();
+  await tenantObject.prepare("DELETE FROM usage_aggregate_rollups").run();
+  await tenantObject.prepare("DELETE FROM usage_monthly_rollups").run();
+  await tenantObject.prepare("DELETE FROM tenant_contexts").run();
 });
 
 // ---------------------------------------------------------------------------

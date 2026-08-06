@@ -80,6 +80,18 @@ const VITEST_CONFIG_FILES = import.meta.glob("../vitest.config.ts", {
   eager: true,
 });
 
+/**
+ * The ONE cross-package file a binding exception below cites: the tenant
+ * Durable Object CLASS this Worker hosts (`src/worker.ts` re-exports it).
+ * Inlined with the same `?raw` device so the `SCHEDULE_ALARMS` entry of
+ * {@link READ_BY_HOSTED_DURABLE_OBJECT} is proved against the consumer's real
+ * bytes rather than trusted from a docblock.
+ */
+const TENANT_DATA_OBJECT_FILES = import.meta.glob(
+  "../../../packages/storage/src/tenant-data-object.ts",
+  { query: "?raw", import: "default", eager: true },
+);
+
 function only(files: Record<string, string>, what: string): string {
   const values = Object.values(files);
   if (values.length !== 1 || typeof values[0] !== "string" || values[0].length === 0) {
@@ -383,6 +395,27 @@ const READ_INDIRECTLY = [
   "BILLING_ALERTS_WEBHOOK_URL",
 ] as const;
 
+/**
+ * Declared bindings whose consumer is a DURABLE OBJECT class this Worker
+ * HOSTS, not any module under `src/` — so neither the `env`-anchored scanner
+ * nor {@link READ_INDIRECTLY}'s whole-token source check (both scoped to
+ * `../src`) can see the read.
+ *
+ * `SCHEDULE_ALARMS` (#856) is the queue producer `TenantDataObject` publishes
+ * the tenant schedule wake-up envelope onto. The read is
+ * `scheduleAlarmQueueFrom(env)` in
+ * `packages/storage/src/tenant-data-object.ts`, evaluated in the OBJECT's
+ * constructor against the env workerd hands the class at construction — and
+ * because `src/worker.ts` re-exports `TenantDataObject` as this Worker's
+ * `[[durable_objects.bindings]]` class, that env IS this Worker's env, queue
+ * producer included. Delete the stanza and the object's schedule alarm
+ * refuses with "SCHEDULE_ALARMS is not bound; retaining the alarm for retry"
+ * on every fire — dead config it is not. The dedicated case below re-proves
+ * the consumer from its source bytes, so this list cannot be used to park a
+ * binding nothing reads.
+ */
+const READ_BY_HOSTED_DURABLE_OBJECT = ["SCHEDULE_ALARMS"] as const;
+
 describe("the env-var drift gate itself", () => {
   it("inlined the real source tree — an empty scan would assert nothing", () => {
     const files = [...CODE.keys()];
@@ -559,12 +592,22 @@ describe("every var the source reads is declared or explicitly excepted", () => 
     // provider-secret resolver all take a binding name from config and look it
     // up. Neither half of this gate can reason about those, so the sites are
     // enumerated instead: a NEW one is red, and has to be justified.
+    //
+    // `src/assets/retention.ts` (#744, the asset-retention sweeper):
+    // `nonNegativeIntegerFromEnv(env, name, fallback)` reads the orphan-blob
+    // grace knob through a `name` PARAMETER, so the ident scanner sees a
+    // dynamic site. Its one caller passes the module constant
+    // `ASSET_RETENTION_ORPHAN_GRACE_ENV` = `ASSET_RETENTION_ORPHAN_GRACE_SECS`
+    // with the committed default `DEFAULT_ASSET_RETENTION_ORPHAN_GRACE_SECS`
+    // (86400) — a real cron knob with an in-code default, not a var smuggled
+    // past direction (1).
     const sites = Object.fromEntries(
       [...READS.dynamic].map(([ident, files]) => [ident, [...files].sort()]),
     );
     expect(sites).toEqual({
       key: ["../src/routes/readiness.ts"],
       name: [
+        "../src/assets/retention.ts",
         "../src/cache/fingerprint.ts",
         "../src/guardrails/detectors.ts",
         "../src/keys/provider-secrets.ts",
@@ -583,7 +626,10 @@ describe("every name wrangler.toml declares is read by the source", () => {
 
   it("has no dead binding stanza", () => {
     const dead = [...DECLARED.bindings.keys()].filter(
-      (name) => !READS.named.has(name) && !(READ_INDIRECTLY as readonly string[]).includes(name),
+      (name) =>
+        !READS.named.has(name) &&
+        !(READ_INDIRECTLY as readonly string[]).includes(name) &&
+        !(READ_BY_HOSTED_DURABLE_OBJECT as readonly string[]).includes(name),
     );
     expect(dead, "a binding is declared but nothing in src/ reads it").toEqual([]);
   });
@@ -648,6 +694,49 @@ describe("every name wrangler.toml declares is read by the source", () => {
         true,
       );
       expect(DECLARED.bindings.has(name) || DECLARED.vars.has(name)).toBe(true);
+    }
+  });
+
+  it("still finds a real consumer for each binding read by a hosted Durable Object", () => {
+    // Not vacuous: the loop proves nothing on an empty list.
+    expect(READ_BY_HOSTED_DURABLE_OBJECT.length).toBeGreaterThan(0);
+
+    // The class that reads the binding really is HOSTED by this Worker: the
+    // entry module must re-export it, or workerd never constructs it with this
+    // Worker's env and the "read at object construction" claim is false.
+    const worker = [...CODE.entries()].find(([path]) => path.endsWith("/src/worker.ts"));
+    expect(worker, "src/worker.ts").toBeDefined();
+    expect((worker as [string, string])[1]).toMatch(
+      /export\s*\{\s*TenantDataObject\s*\}\s*from\s*"@ferrogate\/storage\/durable-objects"/,
+    );
+
+    const objectSource = withoutComments(
+      only(TENANT_DATA_OBJECT_FILES, "packages/storage/src/tenant-data-object.ts"),
+    );
+    const objectReads = new Set<string>();
+    for (const match of objectSource.matchAll(ENV_DOT)) {
+      objectReads.add(match[1] as string);
+    }
+    for (const name of READ_BY_HOSTED_DURABLE_OBJECT) {
+      // The stanza really is declared — this list excuses the READ direction
+      // only, never an undeclared binding.
+      expect(DECLARED.bindings.has(name), `${name} has no wrangler.toml stanza`).toBe(true);
+      // …and really is invisible to the src/ scanner, i.e. it belongs on THIS
+      // list. The day a gateway module reads it as `env.NAME` this goes red
+      // and the name moves out of the exception, which is the correction we
+      // want.
+      expect(READS.named.has(name)).toBe(false);
+      // The DO's own source performs the env-anchored read, held with the
+      // same ENV_DOT arm the scanner uses — comment-stripped bytes, so prose
+      // naming the binding cannot satisfy it.
+      expect(objectReads.has(name), `${name} is not read by tenant-data-object.ts`).toBe(true);
+      // And the deploy config says WHO consumes it, next to the stanza, so an
+      // operator reading wrangler.toml can discover the object-construction
+      // read path without opening another package.
+      expect(
+        documentedNear(name, /TenantDataObject/, 8),
+        `wrangler.toml names ${name} but never names its Durable Object consumer`,
+      ).toBe(true);
     }
   });
 });

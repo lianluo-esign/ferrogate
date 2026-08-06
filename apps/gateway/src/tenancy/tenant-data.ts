@@ -82,6 +82,65 @@ export function tenantDataNamespace(env: TenantDataBindings): TenantDataNamespac
 }
 
 /**
+ * A stub facade that re-derives the REAL stub on every property access.
+ *
+ * A `DurableObjectStub` is a request-scoped I/O object: workerd refuses
+ * "I/O on behalf of a different request" the moment a stub created inside one
+ * request handler is used from another. Several consumers of
+ * {@link tenantDataObjectFor} deliberately memoize what they build from it on
+ * the ENV OBJECT — `MeteringUsageSink.#backends` caches a `D1LedgerStore`
+ * wrapping this stub once per isolate — and that device is sound for D1 and
+ * Queue bindings (env-scoped) but not for stubs. The second request's
+ * `ctx.waitUntil` drain then flushed billing through the FIRST request's stub
+ * and workerd rejected it after the response had been served, in the one place
+ * nobody is watching.
+ *
+ * Re-deriving here is correct because the address is pure data:
+ * `idFromName(tenantId)` is a pure function and `namespace.get(id)` is an
+ * in-isolate allocation, so every property access hands back a stub born in
+ * the CURRENT request context while still addressing exactly the same object.
+ * The tenant id is captured once and cannot be re-pointed, which preserves the
+ * facade property `DurableObjectD1Database` documents: a handle that could
+ * re-address itself would be a handle that could address the wrong tenant.
+ */
+function requestSafeTenantDataStub(
+  derive: () => DurableObjectStub<TenantDataObject>,
+): DurableObjectStub<TenantDataObject> {
+  return new Proxy({} as DurableObjectStub<TenantDataObject>, {
+    get(_target, property) {
+      const value = Reflect.get(derive() as object, property);
+      if (typeof value !== "function") {
+        return value;
+      }
+      // NOT `value.bind(stub)`: an RPC method property is itself a remote
+      // proxy, so calling `.bind` on it is an RPC to a method named "bind".
+      // The stub is re-derived AT INVOCATION time instead, so the I/O happens
+      // on a stub born in the caller's own request context.
+      return (...args: unknown[]) => {
+        const stub = derive() as unknown as Record<
+          string | symbol,
+          (...forwarded: unknown[]) => unknown
+        >;
+        const method = stub[property];
+        if (typeof method !== "function") {
+          // Unreachable while namespaces answer the same shape for the same
+          // address; refusing beats invoking undefined on a billing path.
+          throw new TypeError(
+            `tenant data object stub exposes no callable ${String(property)}`,
+          );
+        }
+        // Member-style invocation (receiver = the fresh stub), so an RPC
+        // property proxy behaves exactly as `stub.method(...)` would.
+        return Reflect.apply(method, stub, args);
+      };
+    },
+    has(_target, property) {
+      return Reflect.has(derive() as object, property);
+    },
+  });
+}
+
+/**
  * The Durable Object stub holding `tenantId`'s database.
  *
  * A blank tenant id is REFUSED, not addressed. `routableTenantId`
@@ -113,12 +172,14 @@ export function tenantDataObjectFor(
     );
   }
   const namespace = tenantDataNamespace(env);
-  return tenantObjectStubFor(
-    namespace as unknown as TenantObjectNamespaceLike<
-      DurableObjectStub<TenantDataObject>,
-      DurableObjectId
-    >,
-    tenantId,
-    address,
+  return requestSafeTenantDataStub(() =>
+    tenantObjectStubFor(
+      namespace as unknown as TenantObjectNamespaceLike<
+        DurableObjectStub<TenantDataObject>,
+        DurableObjectId
+      >,
+      tenantId,
+      address,
+    ),
   );
 }

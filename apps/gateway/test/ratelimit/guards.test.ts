@@ -39,7 +39,7 @@
 import { SELF, env } from "cloudflare:test";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { MiddlewareHandler } from "hono";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { GatewayEnv } from "../../src/ports.js";
 import {
@@ -64,6 +64,7 @@ import {
   workflowDeclarationFrom,
 } from "../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
+import { tenantDatabase } from "../../src/tenancy/index.js";
 import { ALL_ROUTES, errorBody, fixedRequestIds } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
 
@@ -158,6 +159,17 @@ async function get(key: string, headers: Record<string, string> = {}): Promise<R
 /** Restore every var this file mutates, so one test cannot leak into the next. */
 const MUTATED_VARS = ["GATEWAY_POLICY_RULES", "GATEWAY_WALLET_HOLD_CREDITS"] as const;
 const savedVars = new Map<string, string | undefined>();
+
+beforeAll(async () => {
+  // `test/setup-d1.ts` seeds the fixture tenants' roster rows but leaves
+  // `migration_state` at its schema DEFAULT — 'shared', a PRE-cutover state
+  // that makes `BackendDispatchingTenantDatabaseRouter` serve tenant_a from the
+  // legacy shared `env.DB`. The mount gates below assert the post-cutover
+  // posture (the tenant's own object is the authority), so record the cutover.
+  await (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB.prepare(
+    "UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id = 'tenant_a'",
+  ).run();
+});
 
 beforeEach(async () => {
   for (const name of MUTATED_VARS) savedVars.set(name, vars[name]);
@@ -832,8 +844,12 @@ describe("workflow budget: MOUNTED in the deployed app", () => {
 // 4. `api_keys.monthly_token_budget` — the committed-token loop, READ half
 // ===========================================================================
 
-async function seedApiKey(id: string, monthlyTokenBudget: number | null): Promise<void> {
-  await db
+async function seedApiKeyInto(
+  target: D1Database,
+  id: string,
+  monthlyTokenBudget: number | null,
+): Promise<void> {
+  await target
     .prepare(
       "INSERT OR REPLACE INTO api_keys " +
         "(id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, " +
@@ -844,15 +860,23 @@ async function seedApiKey(id: string, monthlyTokenBudget: number | null): Promis
     .run();
 }
 
-async function seedCommittedTokens(apiKeyId: string, totalTokens: number): Promise<void> {
+async function seedApiKey(id: string, monthlyTokenBudget: number | null): Promise<void> {
+  await seedApiKeyInto(db, id, monthlyTokenBudget);
+}
+
+async function seedCommittedTokensInto(
+  target: D1Database,
+  apiKeyId: string,
+  totalTokens: number,
+): Promise<void> {
   const contextId = `ctx_${apiKeyId}`;
-  await db
+  await target
     .prepare(
       "INSERT OR REPLACE INTO tenant_contexts (id, organization_id, api_key_id) VALUES (?, 'tenant_a', ?)",
     )
     .bind(contextId, apiKeyId)
     .run();
-  await db
+  await target
     .prepare(
       "INSERT OR REPLACE INTO usage_aggregate_rollups " +
         "(id, tenant_context_id, logical_model, provider, prompt_tokens, completion_tokens, " +
@@ -860,6 +884,10 @@ async function seedCommittedTokens(apiKeyId: string, totalTokens: number): Promi
     )
     .bind(`agg_${apiKeyId}`, contextId, totalTokens, NOW)
     .run();
+}
+
+async function seedCommittedTokens(apiKeyId: string, totalTokens: number): Promise<void> {
+  await seedCommittedTokensInto(db, apiKeyId, totalTokens);
 }
 
 describe("monthly token budget: the source", () => {
@@ -919,6 +947,16 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
     { key: "fg_budget", id: "key_budget", tenant_id: "tenant_a", scopes: [] },
   ]);
 
+  /**
+   * The deployed routing posture: `GATEWAY_TENANT_DB_ROUTING` unset defaults to
+   * `durable_object`, so `defaultTokenBudget` reads `api_keys.monthly_token_budget`
+   * and the committed-token sum from the TENANT'S OWN OBJECT through
+   * `tenantDatabaseOf(c)` — which is why `tenantDatabase()` is mounted ahead of
+   * `rateLimit()` (same order as `GATEWAY_MIDDLEWARE`) and why the seeds below
+   * go through {@link seedApiKeyInto}/{@link seedCommittedTokensInto} against
+   * `tenantWalletDb("tenant_a")`, not the shared `db`. A row seeded into
+   * `env.DB` is one the deployed source never reads.
+   */
   async function call(body: unknown): Promise<Response> {
     const { app } = createGatewayApp({
       modules: [
@@ -927,8 +965,9 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
           requestIds: fixedRequestIds,
         }),
       ],
-      middleware: [rateLimit()],
+      middleware: [tenantDatabase(), rateLimit()],
     });
+    const bindings = env as unknown as Record<string, unknown>;
     return app.request(
       CHAT,
       {
@@ -941,16 +980,28 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
         GATEWAY_PROVIDERS: "[]",
         GATEWAY_MODELS: "[]",
         DB: db,
-        RATE_LIMIT: (env as unknown as Record<string, unknown>).RATE_LIMIT,
+        CONTROL_DB: bindings.CONTROL_DB,
+        TENANT_DATA: bindings.TENANT_DATA,
+        RATE_LIMIT: bindings.RATE_LIMIT,
       },
     );
   }
 
   const CHAT_BODY = { model: "gpt-4o-mini", messages: [{ role: "user", content: "hello" }] };
 
+  const routedDb = () => tenantWalletDb("tenant_a");
+
+  beforeEach(async () => {
+    // Same explicit truncation as the wallet gate above: the object's
+    // `ctx.storage.sql` rows are not part of the pool's per-test rollback.
+    await routedDb().prepare("DELETE FROM usage_aggregate_rollups").run();
+    await routedDb().prepare("DELETE FROM tenant_contexts").run();
+    await routedDb().prepare("DELETE FROM api_keys").run();
+  });
+
   test("a key whose committed tokens already exceed its budget is REFUSED", async () => {
-    await seedApiKey("key_budget", 100);
-    await seedCommittedTokens("key_budget", 100);
+    await seedApiKeyInto(routedDb(), "key_budget", 100);
+    await seedCommittedTokensInto(routedDb(), "key_budget", 100);
 
     const provider = interceptProviderFetch(() => undefined);
     try {
@@ -965,8 +1016,8 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
   });
 
   test("a key with budget left is served", async () => {
-    await seedApiKey("key_budget", 1_000_000);
-    await seedCommittedTokens("key_budget", 10);
+    await seedApiKeyInto(routedDb(), "key_budget", 1_000_000);
+    await seedCommittedTokensInto(routedDb(), "key_budget", 10);
 
     const provider = interceptProviderFetch(() =>
       providerJson({
@@ -987,8 +1038,8 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
   });
 
   test("a key with NO budget column set is never refused by this gate", async () => {
-    await seedApiKey("key_budget", null);
-    await seedCommittedTokens("key_budget", 10_000_000);
+    await seedApiKeyInto(routedDb(), "key_budget", null);
+    await seedCommittedTokensInto(routedDb(), "key_budget", 10_000_000);
 
     const provider = interceptProviderFetch(() =>
       providerJson({

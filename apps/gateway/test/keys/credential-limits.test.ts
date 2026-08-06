@@ -28,8 +28,9 @@
  * Durable Object.
  */
 import { SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { D1ApiKeyResolver, D1ApiKeyStore, resetSharedApiKeyCache } from "../../src/keys/index.js";
+import { seedTenantRosterRows } from "../tenant-object.js";
 import { resetApiKeysTable, seedApiKey, testDb, testSecret } from "./seed.js";
 
 const BASE = "https://ferrogate.test";
@@ -44,6 +45,14 @@ interface ErrorEnvelope {
 async function envelope(res: Response): Promise<ErrorEnvelope> {
   return (await res.json()) as ErrorEnvelope;
 }
+
+beforeAll(async () => {
+  // Neither tenant is a vitest.config fixture tenant, so `test/setup-d1.ts`
+  // seeds no `tenant_databases` roster row for them — and since #819/#824 an
+  // authenticated request 503s downstream when the backend-dispatching router
+  // cannot place the credential's tenant.
+  await seedTenantRosterRows(["tenant_rpm", "tenant_allow"]);
+});
 
 beforeEach(async () => {
   await resetApiKeysTable();

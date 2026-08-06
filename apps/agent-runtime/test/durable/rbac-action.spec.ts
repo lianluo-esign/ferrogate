@@ -24,7 +24,9 @@
  *
  *  - `bearerAuth` is the function `contractAuth` calls for EVERY bearer
  *    operation. It is imported and driven directly, in its real order, with the
- *    real deps `resolveDeps(env)` builds from the harness's REAL `CONTROL_DB`.
+ *    real deps `resolveDeps(env)` builds from the harness's REAL `CONTROL_DB`
+ *    and `TENANT_DATA` — post-#863 the role BINDINGS live in the per-tenant
+ *    Durable Object while `permissions`/`roles` stay in CONTROL.
  *    Deleting the RBAC block from `src/middleware/auth.ts`, or the
  *    `rbac: rbacAuthorizerFromEnv(env)` line from `resolveDeps`, turns this
  *    file red.
@@ -42,6 +44,11 @@
  * `apps/gateway/test/fleet-rbac-action.test.ts`.
  */
 import { env } from "cloudflare:test";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
+import type {
+  TenantDataNamespace,
+  TenantDataStatement,
+} from "@ferrogate/storage/durable-objects";
 import { Hono } from "hono";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -106,6 +113,42 @@ const GUARDRAIL_ACTION = "guardrails.policy.activate";
 /** A non-`guardrails.` action, to pin the OTHER half of the denial taxonomy. */
 const PLAIN_ACTION = "agent.runs.purge";
 
+/**
+ * The tenant object router — the same construction `rbacAuthorizerFromEnv`
+ * makes, because since #863 (M9 step 5) the binding half of the grant graph is
+ * AUTHORITATIVE inside the per-tenant Durable Object: control migration
+ * `sql/d1-ts/control/0016_tenant_configuration_policy_legacy.sql` renamed the
+ * control `tenant_role_bindings` table to `_legacy` (migration input only), and
+ * the live rows are the tenant-local `tenant_role_bindings` of
+ * `sql/d1-ts/tenant/0015_tenant_configuration_policy.sql`. `permissions` and
+ * the shared `roles` catalog stay in CONTROL, so the walk the specs below drive
+ * spans BOTH authorities — exactly the pair `#tenantRoleGrants` reads.
+ */
+function tenantRouter(): DurableObjectTenantDatabaseRouter {
+  const namespace = (env as unknown as { TENANT_DATA?: TenantDataNamespace }).TENANT_DATA;
+  if (namespace === undefined) {
+    throw new Error("the durable harness requires the TENANT_DATA binding (harness/wrangler.toml)");
+  }
+  return new DurableObjectTenantDatabaseRouter(namespace, env.CONTROL_DB);
+}
+
+/**
+ * Write into one tenant object's PRIVILEGED tables. `tenant_role_bindings` and
+ * `tenant_role_catalog` refuse ordinary tenant SQL (a tenant must not mint its
+ * own grant), so seeding goes through the same trusted RPC the control plane's
+ * projection writer uses — not through a test-only side door.
+ */
+async function privilegedTenantBatch(
+  objectTenantId: string,
+  statements: readonly TenantDataStatement[],
+): Promise<void> {
+  await tenantRouter().privilegedBatch(objectTenantId, statements);
+}
+
+const INSERT_BINDING_SQL =
+  "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
+  "VALUES (?, ?, ?, ?) ON CONFLICT(tenant_id, role_id) DO NOTHING";
+
 async function declarePermission(key: string): Promise<void> {
   await env.CONTROL_DB.prepare(
     "INSERT OR REPLACE INTO permissions (id, key, name, description) VALUES (?1, ?2, ?3, '')",
@@ -114,18 +157,20 @@ async function declarePermission(key: string): Promise<void> {
     .run();
 }
 
-/** Seed a role holding `permissionKeys` and bind it to the tenant. */
+/**
+ * Seed a role in the shared CONTROL catalog and bind it to the tenant in the
+ * tenant's OWN object — the two writes `apps/control-plane`'s RBAC routes make
+ * post-#863, one per authority.
+ */
 async function grantRole(roleId: string, permissionKeys: readonly string[]): Promise<void> {
   await env.CONTROL_DB.prepare(
     "INSERT OR REPLACE INTO roles (id, name, slug, permission_keys_json) VALUES (?1, ?2, ?3, ?4)",
   )
     .bind(roleId, roleId, roleId, JSON.stringify(permissionKeys))
     .run();
-  await env.CONTROL_DB.prepare(
-    "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?1, ?2, ?3)",
-  )
-    .bind(`${TENANT_A}:${roleId}`, TENANT_A, roleId)
-    .run();
+  await privilegedTenantBatch(TENANT_A, [
+    { sql: INSERT_BINDING_SQL, params: [`${TENANT_A}:${roleId}`, TENANT_A, roleId, 1] },
+  ]);
 }
 
 beforeAll(async () => {
@@ -136,12 +181,18 @@ beforeEach(async () => {
   // Isolated storage rolls each test's writes back, but the seed rows written
   // by `setupDurablePorts` in `beforeAll` persist — so this only has to undo
   // anything a previous FILE left behind, and it makes "no grant" explicit
-  // rather than assumed.
+  // rather than assumed. `tenant_role_bindings_legacy` is swept too so the
+  // idempotent #863 backfill the authorizer runs first cannot resurrect a
+  // binding some other file parked in the pre-object table.
   const db = env.CONTROL_DB;
   await db.batch([
-    db.prepare("DELETE FROM tenant_role_bindings"),
+    db.prepare("DELETE FROM tenant_role_bindings_legacy"),
     db.prepare("DELETE FROM roles"),
     db.prepare("DELETE FROM permissions"),
+  ]);
+  await privilegedTenantBatch(TENANT_A, [
+    { sql: "DELETE FROM tenant_role_bindings", params: [] },
+    { sql: "DELETE FROM tenant_role_catalog", params: [] },
   ]);
 });
 
@@ -200,11 +251,19 @@ describe("FC-7 — the deployed bearer ladder consults the durable role graph", 
     )
       .bind("role_other_tenant", JSON.stringify([GUARDRAIL_ACTION]))
       .run();
-    await env.CONTROL_DB.prepare(
-      "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?1, ?2, ?3)",
-    )
-      .bind("other:role_other_tenant", "tenant-somebody-else", "role_other_tenant")
-      .run();
+    // The foreign binding is written into TENANT_A's OWN object on purpose.
+    // Post-#863 another tenant's rows normally live in another object, where
+    // physical isolation would make this test pass even against a walk with no
+    // `tenant_id` predicate at all — vacuously. Placing the row where a
+    // careless read COULD find it keeps the assertion about the fence in the
+    // QUERY (`WHERE b.tenant_id = ?1`), which is the half a code change can
+    // break.
+    await privilegedTenantBatch(TENANT_A, [
+      {
+        sql: INSERT_BINDING_SQL,
+        params: ["other:role_other_tenant", "tenant-somebody-else", "role_other_tenant", 1],
+      },
+    ]);
     // The fence. A walk that ignored `tenant_id` would admit here, and the
     // grant test above would still pass — so both halves are needed.
     expect(await runBearer(KEY_LIVE, guardedBy(GUARDRAIL_ACTION))).toMatchObject({

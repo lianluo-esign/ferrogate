@@ -49,7 +49,8 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { billingDb, resetMeteringTables } from "./d1-harness.js";
+import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
+import { resetMeteringTables } from "./d1-harness.js";
 
 const BASE = "https://gw.test";
 
@@ -280,7 +281,13 @@ function sse(frames: readonly string[]): Response {
 // The stored rows.
 // ---------------------------------------------------------------------------
 
-const tenantDb = (env as unknown as { DB: D1Database }).DB;
+/**
+ * The authority the deployed drain writes: post-#863 a tenant-scoped charge's
+ * `billing_events` / `billing_ledger` rows and the usage rollups all settle in
+ * the TENANT'S OWN Durable Object (`src/metering/usage-ledger.ts::usageDatabaseFrom`
+ * routes on the attribution's tenant id), not in `env.BILLING_DB` or `env.DB`.
+ */
+const tenantDb = () => tenantObjectDb("tenant_a");
 
 /** The three counters as `billing_events.event_json` really holds them. */
 interface StoredUsage {
@@ -302,7 +309,7 @@ interface StoredUsage {
  */
 async function storedEvent(): Promise<{ usage: StoredUsage; model: string; source: string }> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    const row = await billingDb()
+    const row = await tenantDb()
       .prepare("SELECT event_json FROM billing_events LIMIT 1")
       .first<{ event_json: string }>();
     if (row !== null && row !== undefined) {
@@ -320,7 +327,7 @@ async function storedEvent(): Promise<{ usage: StoredUsage; model: string; sourc
 
 /** The settled cost, as `billing_ledger.entry_json` really holds it. */
 async function storedCostUsd(): Promise<number> {
-  const row = await billingDb()
+  const row = await tenantDb()
     .prepare("SELECT entry_json FROM billing_ledger LIMIT 1")
     .first<{ entry_json: string }>();
   if (row === null || row === undefined) throw new Error("no billing_ledger row was stored");
@@ -340,7 +347,7 @@ interface StoredRollup {
 /** Poll `usage_aggregate_rollups`, joined to the context it is filed under. */
 async function storedRollup(): Promise<StoredRollup> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    const row = await tenantDb
+    const row = await tenantDb()
       .prepare(
         "SELECT r.prompt_tokens, r.completion_tokens, r.total_tokens, r.cached_input_tokens, " +
           "r.cache_write_tokens, r.reasoning_tokens, c.api_key_id " +
@@ -358,10 +365,20 @@ async function storedRollup(): Promise<StoredRollup> {
 let upstream: Upstream | undefined;
 
 beforeEach(async () => {
+  // Both surfaces are cleared: the tenant OBJECT is the authority the polls
+  // read (its `ctx.storage.sql` rows survive the pool's per-test rollback), and
+  // `BILLING_DB` keeps the unscoped compatibility tables empty so nothing
+  // stale can satisfy a later projection read.
   await resetMeteringTables();
-  await tenantDb.prepare("DELETE FROM usage_aggregate_rollups").run();
-  await tenantDb.prepare("DELETE FROM usage_monthly_rollups").run();
-  await tenantDb.prepare("DELETE FROM tenant_contexts").run();
+  await resetTenantBillingState(["tenant_a"]);
+  for (const table of [
+    "usage_event_claims",
+    "usage_aggregate_rollups",
+    "usage_monthly_rollups",
+    "tenant_contexts",
+  ]) {
+    await tenantDb().prepare(`DELETE FROM ${table}`).run();
+  }
 });
 
 afterEach(() => {

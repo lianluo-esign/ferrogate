@@ -29,6 +29,7 @@ import {
 } from "../../src/assets/index.js";
 import { GATEWAY_ROUTE_MODULES } from "../../src/index.js";
 import { ASSET_OPERATION_IDS, createGatewayApp } from "../../src/routes/index.js";
+import { seedTenantRosterRows } from "../tenant-object.js";
 
 const bindings = env as unknown as Record<string, unknown>;
 
@@ -46,7 +47,7 @@ function assetsBucket(): R2Bucket {
 const BASE = "https://gw.test";
 const RW = { authorization: "Bearer fg_r2_rw" } as const;
 
-beforeAll(() => {
+beforeAll(async () => {
   bindings.GATEWAY_NATIVE_API_KEYS = JSON.stringify([
     {
       key: "fg_r2_rw",
@@ -58,6 +59,11 @@ beforeAll(() => {
   bindings.ASSET_ENTITLEMENTS = JSON.stringify({
     tenant_r2: { asset_hosting_enabled: true },
   });
+  // Roster row for the fixture tenant: the dispatching tenant router reads
+  // `tenant_databases` on every authenticated SELF request, and a tenant with
+  // no row falls to the native-binding arm, whose `not_found` the wallet
+  // admission renders as `503 quota_resolution_unavailable`.
+  await seedTenantRosterRows(["tenant_r2"]);
 });
 
 afterEach(async () => {

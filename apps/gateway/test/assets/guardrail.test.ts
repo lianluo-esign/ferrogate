@@ -41,7 +41,8 @@
  * actually WITHHOLDS through the existing `AND visibility = 'pending_scan'`
  * CAS, rather than being a label the read path ignores.
  */
-import { describe, expect, test } from "vitest";
+import { env } from "cloudflare:test";
+import { beforeEach, describe, expect, test } from "vitest";
 import {
   ASSET_GUARDRAIL_MODES_VAR,
   DEFAULT_ASSET_GUARDRAIL_MODES,
@@ -123,6 +124,26 @@ const ASSET_POLICY = {
   created_by: "test",
 };
 
+/**
+ * The REAL storage bindings, so the composition root builds DURABLE ports.
+ *
+ * This used to run on `FG_DEV_IN_MEMORY_PORTS=1` alone, which worked while the
+ * asset service was memoized per env object. Since the service became
+ * request-scoped (the tenant-object routing of #863), any port that is not
+ * resolved from a binding is defaulted INSIDE `buildAssetService` — i.e. a
+ * fresh in-memory store per request, so a push and its pull no longer share a
+ * registry. Binding the pool's real D1/R2 (the same `wrangler.toml` set the
+ * deployed Worker has) keeps every request reading the store the last one
+ * wrote, which is also strictly closer to the deployed posture this suite
+ * claims to drive.
+ */
+const STORAGE = env as unknown as {
+  DB: unknown;
+  CONTROL_DB: unknown;
+  TENANT_DATA: unknown;
+  ASSETS: unknown;
+};
+
 const ENV: Record<string, unknown> = {
   GATEWAY_NATIVE_API_KEYS: JSON.stringify([
     {
@@ -133,9 +154,30 @@ const ENV: Record<string, unknown> = {
     },
   ]),
   ASSET_ENTITLEMENTS: JSON.stringify({ tenant_a: { asset_hosting_enabled: true } }),
-  FG_DEV_IN_MEMORY_PORTS: "1",
   GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([ASSET_POLICY]),
+  DB: STORAGE.DB,
+  CONTROL_DB: STORAGE.CONTROL_DB,
+  TENANT_DATA: STORAGE.TENANT_DATA,
+  ASSETS: STORAGE.ASSETS,
 };
+
+// Durable stores persist across tests in this pool (the sibling suites
+// truncate for the same reason — `test/assets/d1.test.ts`, `r2.test.ts`), and
+// several tests reuse names like `poisoned` and `settings/1.0.0` on purpose.
+beforeEach(async () => {
+  const db = STORAGE.DB as D1Database;
+  await db.batch([
+    db.prepare("DELETE FROM asset_bundle_files"),
+    db.prepare("DELETE FROM asset_channels"),
+    db.prepare("DELETE FROM stored_assets"),
+  ]);
+  await (STORAGE.CONTROL_DB as D1Database).prepare("DELETE FROM audit_events").run();
+  const bucket = STORAGE.ASSETS as R2Bucket;
+  const listed = await bucket.list();
+  if (listed.objects.length > 0) {
+    await bucket.delete(listed.objects.map((object) => object.key));
+  }
+});
 
 function gateway(
   overrides: Record<string, unknown> = {},
