@@ -44,8 +44,9 @@ import {
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
   SharedDatabaseTenantRouter,
-  backfillTenantConfigurationPolicy,
   type TenantDatabaseRouter,
+  type TenantObjectOperator,
+  backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 import type {
   ApiKeyAuthenticatorPort,
@@ -883,6 +884,20 @@ export function resolveTenantStorage(env: ControlPlaneBindings): TenantDatabaseR
 }
 
 /**
+ * Resolve the control-plane-only object access seam. This is intentionally
+ * independent of `CONTROL_PLANE_STORE`: an operator must still be able to
+ * inspect or restore a retained tenant object while the document store is in
+ * the test/memory posture, and the namespace plus control DB are the only
+ * bindings this seam needs.
+ */
+export function resolveTenantObjectOperator(
+  env: ControlPlaneBindings,
+): TenantObjectOperator | null {
+  if (env.TENANT_DATA === undefined || env.DB === undefined || env.DB === null) return null;
+  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+}
+
+/**
  * The CONTROL database handle, for the surfaces that must write a TYPED table
  * another Worker reads by name (see {@link ControlPlaneDeps.controlDatabase}).
  *
@@ -985,6 +1000,7 @@ export function resolveDeps(
     store,
     tenantDatabases,
     tenantStorage: resolveTenantStorage(env),
+    tenantObjectOperator: resolveTenantObjectOperator(env),
     controlDatabase: resolveControlDatabase(env),
     legacyTenantDatabase: env.LEGACY_TENANT_DB ?? null,
     promptLabels: resolvePromptLabels(env),

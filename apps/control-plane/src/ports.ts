@@ -15,7 +15,7 @@
  * handler family in `crates/ferrogate-gateway/src/server/*.rs`.
  */
 import type { PromptLabelKv } from "@ferrogate/config";
-import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import type { TenantDatabaseRouter, TenantObjectOperator } from "@ferrogate/storage";
 // TYPE-ONLY, and it must stay that way: `@ferrogate/storage/durable-objects`
 // imports `DurableObject` from `cloudflare:workers`, which resolves in workerd
 // and nowhere else. A value import here would break `apps/cli` and every plain
@@ -453,6 +453,8 @@ export interface ControlPlaneDeps {
    * and why it is not this slice.
    */
   readonly tenantStorage?: TenantDatabaseRouter;
+  /** Platform-operator-only reads, exports and PITR against a tenant object. */
+  readonly tenantObjectOperator?: TenantObjectOperator | null;
   /**
    * The CONTROL database itself, or `null` when this deployment is running
    * without one (`CONTROL_PLANE_STORE = "memory"`, or no `DB` binding).

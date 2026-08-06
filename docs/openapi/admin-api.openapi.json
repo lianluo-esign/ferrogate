@@ -12067,6 +12067,417 @@
         ]
       }
     },
+    "/admin/v1/tenant-data/{tenant_id}/query": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "queryTenantData",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Run one audited read-only SELECT against a tenant object.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "sql"
+                ],
+                "properties": {
+                  "sql": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100000
+                  },
+                  "params": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": [
+                        "string",
+                        "number",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Audited tenant object query result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "object",
+                    "tenant_id",
+                    "data",
+                    "row_count",
+                    "audit_id"
+                  ],
+                  "properties": {
+                    "object": {
+                      "const": "tenant_data_query"
+                    },
+                    "tenant_id": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "row_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "audit_id": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/v1/tenant-data/{tenant_id}/export": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "exportTenantData",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Write one resumable JSONL page of a tenant object to R2.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "export_id": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32
+                  },
+                  "part": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One JSONL page persisted in R2.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "object",
+                    "tenant_id",
+                    "export_id",
+                    "format",
+                    "rows",
+                    "next_cursor",
+                    "done",
+                    "object_key",
+                    "audit_id"
+                  ],
+                  "properties": {
+                    "object": {
+                      "const": "tenant_data_export_page"
+                    },
+                    "tenant_id": {
+                      "type": "string"
+                    },
+                    "export_id": {
+                      "type": "string"
+                    },
+                    "format": {
+                      "const": "jsonl"
+                    },
+                    "rows": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "done": {
+                      "type": "boolean"
+                    },
+                    "object_key": {
+                      "type": "string"
+                    },
+                    "manifest_key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "audit_id": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/v1/tenant-data/{tenant_id}/restore": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "restoreTenantData",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Schedule one tenant object for a retained point-in-time restore.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "bookmark": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "timestamp_unix": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "bookmark"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "timestamp_unix"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Restore scheduled for the next Durable Object session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "object",
+                    "tenant_id",
+                    "bookmark",
+                    "scheduled",
+                    "audit_id"
+                  ],
+                  "properties": {
+                    "object": {
+                      "const": "tenant_data_restore"
+                    },
+                    "tenant_id": {
+                      "type": "string"
+                    },
+                    "bookmark": {
+                      "type": "string"
+                    },
+                    "scheduled": {
+                      "const": true
+                    },
+                    "audit_id": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/admin/v1/projects": {
       "parameters": [
         {

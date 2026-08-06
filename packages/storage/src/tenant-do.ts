@@ -70,7 +70,13 @@ import { StorageError } from "./errors.js";
 import type {
   TenantAuditAppendRequest,
   TenantDataBatchRequest,
+  TenantDataExportPageRequest,
+  TenantDataExportPageResult,
+  TenantDataOperatorQueryRequest,
+  TenantDataOperatorQueryResult,
   TenantDataQueryRequest,
+  TenantDataRestoreRequest,
+  TenantDataRestoreResult,
   TenantDataResult,
   TenantDataStatement,
   TenantDataValue,
@@ -89,6 +95,12 @@ import {
 export type {
   TenantDataStatement,
   TenantDataValue,
+  TenantDataExportPageRequest,
+  TenantDataExportPageResult,
+  TenantDataOperatorQueryRequest,
+  TenantDataOperatorQueryResult,
+  TenantDataRestoreRequest,
+  TenantDataRestoreResult,
   TenantMigrationImportRequest,
   TenantMigrationMode,
   TenantMigrationModeRequest,
@@ -115,6 +127,10 @@ export type {
 export interface TenantDataStub {
   query(request: TenantDataQueryRequest): Promise<TenantDataResult>;
   batch(request: TenantDataBatchRequest): Promise<TenantDataResult[]>;
+  /** Operator-only read/export/restore RPCs; never surfaced by the D1 facade. */
+  operatorQuery?(request: TenantDataOperatorQueryRequest): Promise<TenantDataOperatorQueryResult>;
+  operatorExportPage?(request: TenantDataExportPageRequest): Promise<TenantDataExportPageResult>;
+  operatorRestore?(request: TenantDataRestoreRequest): Promise<TenantDataRestoreResult>;
   appendAudit?(request: TenantAuditAppendRequest): Promise<{
     readonly id: string;
     readonly requestId: string;
@@ -141,6 +157,22 @@ export interface TenantDataStub {
   clearScheduleAlarm?(request: { tenantId: string }): Promise<void>;
   /** Optional object-local schedule alarm rearm RPC. */
   rearmScheduleAlarm?(request: { tenantId: string }): Promise<void>;
+}
+
+/** Control-plane-only object access, deliberately separate from TenantDatabaseRouter. */
+export interface TenantObjectOperator {
+  operatorQuery(
+    tenantId: string,
+    request: Omit<TenantDataOperatorQueryRequest, "tenantId">,
+  ): Promise<TenantDataOperatorQueryResult>;
+  operatorExportPage(
+    tenantId: string,
+    request: Omit<TenantDataExportPageRequest, "tenantId">,
+  ): Promise<TenantDataExportPageResult>;
+  operatorRestore(
+    tenantId: string,
+    request: Omit<TenantDataRestoreRequest, "tenantId">,
+  ): Promise<TenantDataRestoreResult>;
 }
 
 /**
@@ -754,7 +786,9 @@ export class DurableObjectD1Database {
  * off a control-plane row would be a second source of truth that no writer
  * updates.
  */
-export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
+export class DurableObjectTenantDatabaseRouter
+  implements TenantDatabaseRouter, TenantObjectOperator
+{
   /**
    * Known before any tenant is named, because the address is a pure function of
    * the id. That is what lets `provisionTenantStorage` label its `pending` row
@@ -814,6 +848,48 @@ export class DurableObjectTenantDatabaseRouter implements TenantDatabaseRouter {
       );
     }
     await stub.privilegedBatch({ tenantId, statements });
+  }
+
+  async operatorQuery(
+    tenantId: string,
+    request: Omit<TenantDataOperatorQueryRequest, "tenantId">,
+  ): Promise<TenantDataOperatorQueryResult> {
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime("operator tenant reads require a non-empty tenant id");
+    }
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.operatorQuery === undefined) {
+      throw StorageError.runtime(`tenant ${tenantId} does not expose the operator query RPC`);
+    }
+    return stub.operatorQuery({ ...request, tenantId });
+  }
+
+  async operatorExportPage(
+    tenantId: string,
+    request: Omit<TenantDataExportPageRequest, "tenantId">,
+  ): Promise<TenantDataExportPageResult> {
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime("operator tenant exports require a non-empty tenant id");
+    }
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.operatorExportPage === undefined) {
+      throw StorageError.runtime(`tenant ${tenantId} does not expose the operator export RPC`);
+    }
+    return stub.operatorExportPage({ ...request, tenantId });
+  }
+
+  async operatorRestore(
+    tenantId: string,
+    request: Omit<TenantDataRestoreRequest, "tenantId">,
+  ): Promise<TenantDataRestoreResult> {
+    if (tenantId.trim() === "") {
+      throw StorageError.runtime("operator tenant restores require a non-empty tenant id");
+    }
+    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    if (stub.operatorRestore === undefined) {
+      throw StorageError.runtime(`tenant ${tenantId} does not expose the operator restore RPC`);
+    }
+    return stub.operatorRestore({ ...request, tenantId });
   }
 
   /** Trusted control-plane migration import; never exposed by the D1 facade. */
