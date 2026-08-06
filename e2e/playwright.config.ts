@@ -66,22 +66,54 @@ const isCi = process.env.CI !== undefined && process.env.CI !== "";
  * AFTER `wrangler dev` has already opened the database. Config evaluation is
  * the only hook that is guaranteed to precede the servers.
  *
- * Both migrations are `CREATE TABLE IF NOT EXISTS` throughout, so this is
- * idempotent and safe against the `reuseExistingServer` path and against a
- * `.wrangler/state` left over from a previous run.
+ * `wrangler d1 migrations apply` (not `execute --file`): each binding's
+ * `migrations_dir` in `apps/gateway/wrangler.toml` names the deployed
+ * directory, wrangler applies every file in order and bookkeeps by filename,
+ * so re-running is a no-op — idempotent against `reuseExistingServer` and a
+ * `.wrangler/state` left over from a previous run. This used to hand-apply
+ * only the two `0001` files, and the subset rotted exactly like the vitest
+ * harness's did: `0012` adds the `storage_backend` column the tenancy
+ * resolver reads on EVERY authenticated request since #819, so five of six
+ * gateway specs answered `503 quota_resolution_unavailable`.
+ *
+ * The roster INSERT afterwards is what production onboarding writes the
+ * moment a tenant is created: without a `tenant_databases` row the
+ * backend-dispatching router falls to the native-binding arm and refuses, so
+ * the fixture tenant is registered on the `durable_object` backend exactly
+ * as a signed-up tenant would be.
  */
 function applyLocalD1Migrations(): void {
-  const seeds: readonly [binding: string, sql: string][] = [
-    ["DB", "sql/d1-ts/tenant/0001_init_tenant.sql"],
-    ["BILLING_DB", "sql/d1-ts/control/0001_init_control.sql"],
+  // BOTH apps: the mcp Worker reads its own local `DB` (the drain document on
+  // `/readyz` — `src/drain.ts` fails CLOSED on a missing table) and its own
+  // `BILLING_DB`; seeding only the gateway's databases left mcp answering
+  // `503 drain_state_unavailable` forever.
+  const bindingsByApp: readonly [app: string, bindings: readonly string[]][] = [
+    ["gateway", ["DB", "BILLING_DB", "CONTROL_DB"]],
+    ["mcp", ["DB", "BILLING_DB"]],
   ];
-  for (const [binding, sql] of seeds) {
-    execFileSync(
-      "bunx",
-      ["wrangler", "d1", "execute", binding, "--local", "-y", `--file=${repoRoot}${sql}`],
-      { cwd: appDir("gateway"), stdio: "pipe" },
-    );
+  for (const [app, bindings] of bindingsByApp) {
+    for (const binding of bindings) {
+      execFileSync("bunx", ["wrangler", "d1", "migrations", "apply", binding, "--local"], {
+        cwd: appDir(app),
+        stdio: "pipe",
+      });
+    }
   }
+  execFileSync(
+    "bunx",
+    [
+      "wrangler",
+      "d1",
+      "execute",
+      "CONTROL_DB",
+      "--local",
+      "-y",
+      "--command",
+      "INSERT OR IGNORE INTO tenant_databases (tenant_id, storage_backend, provisioning_status) " +
+        "VALUES ('tenant_e2e', 'durable_object', 'ready')",
+    ],
+    { cwd: appDir("gateway"), stdio: "pipe" },
+  );
 }
 
 applyLocalD1Migrations();
