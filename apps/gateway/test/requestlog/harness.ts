@@ -16,33 +16,8 @@
  * agree about the row.
  */
 import { env } from "cloudflare:test";
-import controlInitSql from "../../../../sql/d1-ts/control/0001_init_control.sql?raw";
-import ssoNonceSql from "../../../../sql/d1-ts/control/0002_sso_flow_nonce.sql?raw";
-import requestLogColumnsSql from "../../../../sql/d1-ts/control/0003_request_log_columns.sql?raw";
-import auditChainSql from "../../../../sql/d1-ts/control/0003_audit_chain.sql?raw";
-import guardrailEvidenceSql from "../../../../sql/d1-ts/control/0004_guardrail_evaluations.sql?raw";
-import delegationChainSql from "../../../../sql/d1-ts/control/0008_delegation_chain.sql?raw";
-import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
-import spendAnomalySql from "../../../../sql/d1-ts/control/0010_spend_anomaly.sql?raw";
-import experimentOutcomesSql from "../../../../sql/d1-ts/control/0011_experiment_outcomes.sql?raw";
-import evidenceProjectionKeysSql from "../../../../sql/d1-ts/control/0014_tenant_evidence_projection_keys.sql?raw";
-import guardrailProjectionKeysSql from "../../../../sql/d1-ts/control/0015_guardrail_evidence_projection_keys.sql?raw";
-import derivedProjectionKeysSql from "../../../../sql/d1-ts/control/0017_tenant_derived_projection_keys.sql?raw";
-import derivedProjectionPrimaryKeysSql from "../../../../sql/d1-ts/control/0018_tenant_derived_projection_primary_keys.sql?raw";
-import usagePresenceEvidenceProjectionsSql from "../../../../sql/d1-ts/control/0019_usage_presence_evidence_projections.sql?raw";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
-
-/** Split a `.sql` migration into executable statements (comments stripped). */
-function sqlStatements(migration: string): string[] {
-  return migration
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("--"))
-    .join("\n")
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
-}
 
 /** The live `env.CONTROL_DB` binding. */
 export function controlDb(): D1Database {
@@ -58,158 +33,22 @@ export function controlDb(): D1Database {
   return binding;
 }
 
-let applied = false;
-
 /**
- * Apply the deployed control migrations once per isolate.
+ * The control schema is applied by `test/setup-d1.ts`, which runs before
+ * every test file and hands the ENTIRE `sql/d1-ts/control/` directory to
+ * `applyD1Migrations` — the same name-bookkept application `wrangler d1
+ * migrations apply` performs in production.
  *
- * `0003` is `ALTER TABLE … ADD COLUMN`, which is NOT idempotent, and the pool
- * PERSISTS the database under `.wrangler/state` between runs — so a blind
- * re-apply fails with "duplicate column name" on the second `vitest run` and
- * every assertion after it reads as a code bug. The presence of one of the new
- * columns is therefore checked first, which is the same question the migration
- * bookkeeping would answer if `applyD1Migrations` were usable for a
- * hand-applied set.
+ * This function used to hand-apply a curated subset with per-column guards,
+ * and that shape rotted twice over: the global setup's own subset missed
+ * `0012` (the `storage_backend` column the tenancy resolver reads on every
+ * authenticated request), and once the global setup went full-directory this
+ * harness's blind re-apply of `0002`'s ALTER failed every caller with
+ * `duplicate column name: nonce`. Kept as an exported no-op so the many
+ * suites that call it before their resets need no edit; there is exactly one
+ * schema applier now, and it is not here.
  */
-export async function applyControlMigrations(): Promise<void> {
-  if (applied) return;
-  const db = controlDb();
-  for (const statement of [...sqlStatements(controlInitSql), ...sqlStatements(ssoNonceSql)]) {
-    await db.prepare(statement).run();
-  }
-  const auditChainColumns = await db.prepare("PRAGMA table_info(audit_events)").all();
-  const auditChainNames = new Set(
-    (auditChainColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  if (!auditChainNames.has("chain_key")) {
-    for (const statement of sqlStatements(auditChainSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-
-  const columns = await db.prepare(`PRAGMA table_info(${REQUEST_LOG_TABLE})`).all();
-  const names = new Set(
-    (columns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  if (!names.has("latency_ms")) {
-    for (const statement of sqlStatements(requestLogColumnsSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-
-  // `0004` is `CREATE TABLE IF NOT EXISTS` throughout, so unlike `0003` it is
-  // idempotent and needs no guard (#665).
-  for (const statement of sqlStatements(guardrailEvidenceSql)) {
-    await db.prepare(statement).run();
-  }
-
-  // `0008` (#691) is MIXED: `CREATE TABLE IF NOT EXISTS` is idempotent but its
-  // two `ALTER TABLE … ADD COLUMN`s are not, so it gets the same
-  // column-presence guard `0003` gets, for the same reason — the pool persists
-  // this database under `.wrangler/state`, and a blind re-apply fails the
-  // second `vitest run` with "duplicate column name".
-  if (!names.has("delegation_chain")) {
-    for (const statement of sqlStatements(delegationChainSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-
-  // `0009` (#692) and `0010` (#693) are applied here even though neither is a
-  // request-log migration, and the reason is `0010`: it adds
-  // `request_logs.experiment_id` / `.experiment_arm`, which `REQUEST_LOG_UPSERT_SQL`
-  // now writes on EVERY row. A harness that stopped at `0008` would fail every
-  // insert with "no such column" — so the request-log suite's schema is the
-  // whole committed set from here on, not a prefix of it.
-  //
-  // Order is load-bearing: `0010` alters `online_eval_scores`, which `0009`
-  // creates. Both get the same column-presence guard the alters above get,
-  // because the pool PERSISTS this database under `.wrangler/state` and a blind
-  // re-apply fails the second `vitest run` with "duplicate column name".
-  const quotaColumns = await db.prepare("PRAGMA table_info(quota_policies)").all();
-  const quotaNames = new Set(
-    (quotaColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  for (const statement of sqlStatements(onlineEvalSql)) {
-    if (quotaNames.has("online_eval_enabled") && statement.startsWith("ALTER TABLE")) continue;
-    await db.prepare(statement).run();
-  }
-  const spendColumns = await db.prepare("PRAGMA table_info(quota_policies)").all();
-  const spendNames = new Set(
-    (spendColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  for (const statement of sqlStatements(spendAnomalySql)) {
-    const column = /^ALTER TABLE quota_policies ADD COLUMN (\w+)/i.exec(statement)?.[1];
-    if (column !== undefined && spendNames.has(column)) continue;
-    await db.prepare(statement).run();
-  }
-  if (!names.has("experiment_arm")) {
-    for (const statement of sqlStatements(experimentOutcomesSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-  if (!names.has("projection_key")) {
-    for (const statement of sqlStatements(evidenceProjectionKeysSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-  const guardrailColumns = await db
-    .prepare(`PRAGMA table_info(${GUARDRAIL_EVALUATION_TABLE})`)
-    .all();
-  const guardrailNames = new Set(
-    (guardrailColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  if (!guardrailNames.has("projection_key")) {
-    for (const statement of sqlStatements(guardrailProjectionKeysSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-  const auditColumns = await db.prepare("PRAGMA table_info(audit_events)").all();
-  const auditNames = new Set(
-    (auditColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  if (!auditNames.has("projection_key")) {
-    for (const statement of sqlStatements(derivedProjectionKeysSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-  const projectionTables = [
-    "audit_events",
-    "online_eval_scores",
-    "online_eval_regressions",
-    "experiment_shadow_legs",
-    "spend_anomaly_episodes",
-  ];
-  const projectionPrimaryKeys = await Promise.all(
-    projectionTables.map(async (table) => {
-      const result = await db.prepare(`PRAGMA table_info(${table})`).all();
-      return (result.results as { name?: unknown; pk?: unknown }[]).some(
-        (row) => row.name === "projection_key" && Number(row.pk) === 1,
-      );
-    }),
-  );
-  if (!projectionPrimaryKeys.every(Boolean)) {
-    for (const statement of sqlStatements(derivedProjectionPrimaryKeysSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-  const managedEvidenceColumns = await db
-    .prepare("PRAGMA table_info(managed_worker_isolation_evidence)")
-    .all();
-  const managedEvidenceProjectionReady = (
-    managedEvidenceColumns.results as { name?: unknown; pk?: unknown }[]
-  ).some((row) => row.name === "projection_key" && Number(row.pk) === 1);
-  const usageMonthlyTable = await db
-    .prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_monthly_rollups'",
-    )
-    .first<{ name: string }>();
-  if (!managedEvidenceProjectionReady || usageMonthlyTable === null) {
-    for (const statement of sqlStatements(usagePresenceEvidenceProjectionsSql)) {
-      await db.prepare(statement).run();
-    }
-  }
-  applied = true;
-}
+export async function applyControlMigrations(): Promise<void> {}
 
 /** Empty `request_logs`, so each test starts from zero rows. */
 export async function resetRequestLogs(): Promise<void> {

@@ -193,7 +193,17 @@ function deadlineFetch(
           : controller.signal;
       // Abort compliant fetch implementations and release callers whose
       // injected fetch does not observe AbortSignal.
-      return await Promise.race([base(new Request(request, { signal })), timeout]);
+      //
+      // The signal rides in BOTH places on purpose. `new Request(request,
+      // { signal })` hands undici a signal it tracks through an internal
+      // DEPENDENT signal, and that link is weakly held — under GC pressure the
+      // dependent signal is collected and an injected fetch reading
+      // `input.signal` never observes the abort (seen as a
+      // once-in-several-runs flake in `test/client.test.ts`). `init.signal`
+      // is the same signal by strong reference; a real fetch treats it as the
+      // override it already equals, and an injected fetch gets a delivery
+      // that cannot be collected out from under it.
+      return await Promise.race([base(new Request(request, { signal }), { signal }), timeout]);
     } catch (error) {
       if (controller.signal.aborted) {
         throw new FerrogateTransportError(

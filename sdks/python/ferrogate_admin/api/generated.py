@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 297
+OPENAPI_OPERATION_COUNT: Final[int] = 308
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -215,6 +215,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "createEmbedding": {
         "method": "POST",
         "path": "/v1/embeddings",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
+    "createFile": {
+        "method": "POST",
+        "path": "/v1/files",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
@@ -428,6 +434,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "deleteFile": {
+        "method": "DELETE",
+        "path": "/v1/files/{file_id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
     "deletePaymentMethod": {
         "method": "DELETE",
         "path": "/admin/v1/payment-methods/{payment_method_id}",
@@ -539,6 +551,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "exportAdminRequestLogsJsonl": {
         "method": "GET",
         "path": "/admin/v1/request-log-exports",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
+    "exportTenantData": {
+        "method": "POST",
+        "path": "/admin/v1/tenant-data/{tenant_id}/export",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
     },
@@ -740,6 +758,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "getAssetRetentionPolicy": {
+        "method": "GET",
+        "path": "/admin/v1/retention-policies/{tenant_id}/{asset_type}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
     "getAssetStorageSummary": {
         "method": "GET",
         "path": "/v1/assets/storage/summary",
@@ -751,6 +775,18 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/x402-spend-policies/effective",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
+    },
+    "getFile": {
+        "method": "GET",
+        "path": "/v1/files/{file_id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
+    "getFileContent": {
+        "method": "GET",
+        "path": "/v1/files/{file_id}/content",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
     },
     "getGuardrailInvestigation": {
         "method": "GET",
@@ -1178,6 +1214,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
     },
+    "listFiles": {
+        "method": "GET",
+        "path": "/v1/files",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
     "listFleetAssets": {
         "method": "GET",
         "path": "/admin/v1/assets",
@@ -1346,6 +1388,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "migrateTenantStorage": {
+        "method": "POST",
+        "path": "/admin/v1/tenant-accounts/{tenant_id}/storage-migration",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "patchAdminAgentSchedule": {
         "method": "PATCH",
         "path": "/admin/v1/agent-schedules/{id}",
@@ -1502,11 +1550,23 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "putAssetRetentionPolicy": {
+        "method": "PUT",
+        "path": "/admin/v1/retention-policies/{tenant_id}/{asset_type}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "putProviderCredential": {
         "method": "PUT",
         "path": "/admin/v1/provider-credentials/{alias}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
+    },
+    "queryTenantData": {
+        "method": "POST",
+        "path": "/admin/v1/tenant-data/{tenant_id}/query",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
     },
     "recordAdminSelfHostedWorkerArtifact": {
         "method": "POST",
@@ -1625,6 +1685,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "replayBillingOutboxDeadLetter": {
         "method": "POST",
         "path": "/admin/v1/billing-outbox-dead-letters/{report_id}/replay",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
+    "restoreTenantData": {
+        "method": "POST",
+        "path": "/admin/v1/tenant-data/{tenant_id}/restore",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
     },
@@ -1868,6 +1934,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "expireAdminToolApproval",
     "exportAdminCostRecords",
     "exportAdminRequestLogsJsonl",
+    "exportTenantData",
     "forceDeleteAssetVersion",
     "getAdminAgentRunTimeline",
     "getAdminAgentSchedule",
@@ -1890,6 +1957,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "getAdminSkillPackage",
     "getAdminStatus",
     "getAdminToolApproval",
+    "getAssetRetentionPolicy",
     "getEffectiveX402SpendPolicy",
     "getGuardrailInvestigation",
     "getGuardrailPolicyRevision",
@@ -1974,6 +2042,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "listWallets",
     "listWorkspaces",
     "listX402SpendPolicies",
+    "migrateTenantStorage",
     "patchAdminAgentSchedule",
     "patchAdminAgentUpstream",
     "patchAdminAgentWorkflow",
@@ -1996,7 +2065,9 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "putAdminPromptTemplate",
     "putAdminPromptTemplateLabel",
     "putAdminSkillPackage",
+    "putAssetRetentionPolicy",
     "putProviderCredential",
+    "queryTenantData",
     "recordAdminSelfHostedWorkerArtifact",
     "recordAdminSelfHostedWorkerCheckpoint",
     "recordAdminSelfHostedWorkerHeartbeat",
@@ -2014,6 +2085,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "replaceTenantAccount",
     "replaceWorkspace",
     "replayBillingOutboxDeadLetter",
+    "restoreTenantData",
     "reviewQuarantinedAsset",
     "revokeProviderCredential",
     "revokeVirtualKey",

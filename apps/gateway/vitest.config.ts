@@ -43,6 +43,20 @@ const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), 
 const migrations = await readD1Migrations("../../sql/d1-ts/tenant");
 
 /**
+ * The FULL control-migration set, wrangler-style. `test/setup-d1.ts` used to
+ * apply a hand-curated subset of `sql/d1-ts/control/` and the list rotted:
+ * `0012_tenant_storage_provisioning.sql` (the `storage_backend` column the
+ * tenancy resolver reads on EVERY authenticated request since #819 turned
+ * `durable_object` routing on) was never added, so the whole suite answered
+ * `503 quota_resolution_unavailable` — ~199 failures with one cause.
+ * `readD1Migrations` + `applyD1Migrations` is the same name-bookkept
+ * application `wrangler d1 migrations apply` performs in production and the
+ * same shape the mcp and storage harnesses already use; there is no list here
+ * to forget.
+ */
+const controlMigrations = await readD1Migrations("../../sql/d1-ts/control");
+
+/**
  * Test fixtures for the contract-driven auth middleware.
  *
  * The default adapters (`src/adapters.ts`) read their key/tenancy/worker tables
@@ -169,6 +183,7 @@ export default defineConfig({
           GATEWAY_PROVIDERS: "[]",
           GATEWAY_MODELS: "[]",
           TEST_D1_SCHEMA: migrations,
+          TEST_CONTROL_D1_SCHEMA: controlMigrations,
           // The COMMITTED deploy config, verbatim, so a test can assert against
           // the parts of it that no binding surfaces. `[triggers] crons` is the
           // one that matters: workerd never dispatches a scheduled event under
