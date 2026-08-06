@@ -39,6 +39,7 @@ import {
   parseListQuery,
 } from "../responses.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
+import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import {
   type GroupModule,
   crudGroup,
@@ -100,9 +101,7 @@ interface BillingOutboxAuthorityRow {
 function documentOf(raw: string): Record<string, unknown> {
   try {
     const value: unknown = JSON.parse(raw);
-    return typeof value === "object" && value !== null
-      ? (value as Record<string, unknown>)
-      : {};
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
   } catch {
     return {};
   }
@@ -170,13 +169,17 @@ async function tenantBillingEventPage(
   const rowsByKey = new Map<string, StoreRecord>();
   let sourceTotal = 0;
   let duplicates = 0;
-  const legacy = await deps.store.list(METERING_EVENTS, { kind: "tenant", tenantId }, {
-    offset: 0,
-    limit,
-    paginate: false,
-    search: null,
-    filters: {},
-  });
+  const legacy = await deps.store.list(
+    METERING_EVENTS,
+    { kind: "tenant", tenantId },
+    {
+      offset: 0,
+      limit,
+      paginate: false,
+      search: null,
+      filters: {},
+    },
+  );
   ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
   const control = await controlBillingEventPage(deps.controlDatabase, limit, tenantId);
   const controlAdded = addBillingPage(rowsByKey, control);
@@ -243,13 +246,17 @@ async function tenantBillingOutboxPage(
   const rowsByKey = new Map<string, StoreRecord>();
   let sourceTotal = 0;
   let duplicates = 0;
-  const legacy = await deps.store.list(DEAD_LETTERS, { kind: "tenant", tenantId }, {
-    offset: 0,
-    limit,
-    paginate: false,
-    search: null,
-    filters: {},
-  });
+  const legacy = await deps.store.list(
+    DEAD_LETTERS,
+    { kind: "tenant", tenantId },
+    {
+      offset: 0,
+      limit,
+      paginate: false,
+      search: null,
+      filters: {},
+    },
+  );
   ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
   const control = await controlBillingOutboxPage(deps.controlDatabase, limit, tenantId);
   const controlAdded = addBillingPage(rowsByKey, control);
@@ -319,26 +326,39 @@ async function listBillingAuthority(
   scope: CallerScope,
   query: ReturnType<typeof parseListQuery>,
   kind: "events" | "outbox",
-): Promise<{ items: StoreRecord[]; total: number }> {
-  const fetchLimit = Number.MAX_SAFE_INTEGER;
+  tenantOffset = 0,
+): Promise<{
+  items: StoreRecord[];
+  total: number;
+  tenantPage?: Awaited<ReturnType<typeof provisionedTenantPage>>;
+}> {
+  // Billing rows remain authoritative in the tenant object. The control rows
+  // below are compatibility projections/directory entries, never dashboard
+  // rollups and never invoice inputs. Read only enough from each live tenant
+  // to assemble this bounded admin page.
+  const fetchLimit = Math.max(1, Math.min(deps.listMaxLimit, query.offset + query.limit));
   if (scope.kind === "tenant") {
-    const page = kind === "events"
-      ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit)
-      : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
+    const page =
+      kind === "events"
+        ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit)
+        : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
     return page.then((result) => ({
       items: result.items.slice(query.offset, query.offset + query.limit),
       total: result.total,
     }));
   }
 
+  const tenantPage = await provisionedTenantPage(deps.tenantDatabases, tenantOffset);
+
   const rowsById = new Map<string, StoreRecord>();
   let sourceTotal = 0;
   let duplicates = 0;
-  const legacy = await deps.store.list(
-    kind === "events" ? METERING_EVENTS : DEAD_LETTERS,
-    scope,
-    { ...query, offset: 0, limit: fetchLimit, paginate: false },
-  );
+  const legacy = await deps.store.list(kind === "events" ? METERING_EVENTS : DEAD_LETTERS, scope, {
+    ...query,
+    offset: 0,
+    limit: fetchLimit,
+    paginate: false,
+  });
   const legacyAdded = addBillingPage(rowsById, legacy);
   sourceTotal += legacyAdded.total;
   duplicates += legacyAdded.duplicates;
@@ -351,7 +371,7 @@ async function listBillingAuthority(
   sourceTotal += controlAdded.total;
   duplicates += controlAdded.duplicates;
 
-  for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
+  for (const tenantId of tenantPage.tenantIds) {
     const page =
       kind === "events"
         ? await tenantBillingEventPage(deps, tenantId, fetchLimit)
@@ -365,6 +385,7 @@ async function listBillingAuthority(
   return {
     items: items.slice(query.offset, query.offset + query.limit),
     total: Math.max(items.length, sourceTotal - duplicates),
+    tenantPage,
   };
 }
 
@@ -374,9 +395,22 @@ function listBillingAuthorityHandler(
   return async (c) => {
     const deps = c.get("deps");
     const scope = scopeOf(c);
-    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
-    const page = await listBillingAuthority(deps, scope, query, kind);
-    return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
+    const url = new URL(c.req.url);
+    const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
+    const page = await listBillingAuthority(deps, scope, query, kind, tenantFanoutOffset(url));
+    return json(c, 200, {
+      ...adminListPaginated(page.items, page.total, query.offset, query.limit),
+      ...(page.tenantPage === undefined
+        ? {}
+        : {
+            tenant_page: {
+              offset: page.tenantPage.offset,
+              limit: page.tenantPage.limit,
+              total: page.tenantPage.total,
+              has_more: page.tenantPage.hasMore,
+            },
+          }),
+    });
   };
 }
 
@@ -406,13 +440,17 @@ async function tenantUsageAggregatePage(
   const db = await tenantBillingDatabaseFor(deps, tenantId);
   if (db === null) {
     if (deps.controlDatabase === null) {
-      const page = await deps.store.list("usage-aggregates", { kind: "tenant", tenantId }, {
-        offset,
-        limit,
-        paginate: false,
-        search: null,
-        filters: {},
-      });
+      const page = await deps.store.list(
+        "usage-aggregates",
+        { kind: "tenant", tenantId },
+        {
+          offset,
+          limit,
+          paginate: false,
+          search: null,
+          filters: {},
+        },
+      );
       return { records: [...page.items], total: page.total };
     }
     return controlUsageAggregatePage(deps.controlDatabase, limit, offset, tenantId);
@@ -474,11 +512,7 @@ function listAdminUsageAggregates(): (c: Context<ControlPlaneEnv>) => Promise<Re
       return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
     }
 
-    const page = await controlUsageAggregatePage(
-      deps.controlDatabase,
-      query.limit,
-      query.offset,
-    );
+    const page = await controlUsageAggregatePage(deps.controlDatabase, query.limit, query.offset);
     return json(
       c,
       200,
@@ -600,10 +634,7 @@ async function casReplayOutboxRow(
 ): Promise<RearmedRow | null> {
   try {
     const tenantPredicate = tenantId === undefined ? "" : " AND tenant_id = ?";
-    const values =
-      tenantId === undefined
-        ? [now, now, reportId]
-        : [now, now, reportId, tenantId];
+    const values = tenantId === undefined ? [now, now, reportId] : [now, now, reportId, tenantId];
     return await db
       .prepare(
         `UPDATE ${BILLING_OUTBOX_TABLE}
@@ -737,9 +768,39 @@ async function locateOutboxReport(
     }
     const tenantRow = await readTenantOutboxReportRow(deps, scope.tenantId, reportId);
     if (tenantRow !== null) return tenantRow;
+    // A provisioned Durable Object is the settlement authority even when its
+    // row is absent. Never fall through to a stale control compatibility copy;
+    // the caller must observe not-found and the tenant object's ledger remains
+    // the only source that can be re-armed.
+    if ((await tenantBillingDatabaseFor(deps, scope.tenantId)) !== null) return null;
   } else {
+    // A control outbox row carries the owning tenant. Route to that tenant's
+    // object before considering any compatibility fallback; invoices and
+    // replay settlement must never be driven from a cached fleet projection.
+    const control = await readControlOutboxReportRow(deps.tenantDatabases, reportId);
+    if (control !== null && control.tenantId !== "") {
+      const authoritativeDb = await tenantBillingDatabaseFor(deps, control.tenantId);
+      if (authoritativeDb !== null) {
+        const tenantRow = await readTenantOutboxReportRow(deps, control.tenantId, reportId);
+        return tenantRow;
+      }
+    }
+
+    // A native-binding or legacy control row has no tenant-object shortcut.
+    // Keep the collision check explicitly bounded; a wider fleet must be
+    // replayed with tenant scope so this money mutation never scans an
+    // unbounded namespace. This also checks a control row whose stale owner
+    // differs from a live tenant row with the same report id.
+    const tenantPage = await provisionedTenantPage(deps.tenantDatabases);
+    if (tenantPage.hasMore) {
+      throw new HttpError(
+        409,
+        "billing_report_tenant_scope_required",
+        `billing report ${reportId} has no tenant directory entry; replay it with a tenant-scoped key because this fleet exceeds the ${tenantPage.limit}-tenant live lookup bound`,
+      );
+    }
     const matches: OutboxReportRow[] = [];
-    for (const tenantId of await deps.tenantDatabases.provisionedTenants()) {
+    for (const tenantId of tenantPage.tenantIds) {
       const tenantRow = await readTenantOutboxReportRow(deps, tenantId, reportId);
       if (tenantRow !== null) matches.push(tenantRow);
     }
@@ -750,7 +811,6 @@ async function locateOutboxReport(
         `billing report ${reportId} exists for multiple tenants; replay it with a tenant-scoped key`,
       );
     }
-    const control = await readControlOutboxReportRow(deps.tenantDatabases, reportId);
     if (matches.length === 1) {
       const tenantRow = matches[0];
       if (tenantRow !== undefined && control !== null && control.tenantId !== tenantRow.tenantId) {

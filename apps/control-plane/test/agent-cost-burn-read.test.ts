@@ -84,6 +84,22 @@ async function seedBurn(
     )
     .bind(row.tenantId, row.agentKey, row.period, row.usd, 1, row.updatedAt ?? 2)
     .run();
+  await db()
+    .prepare(
+      `INSERT INTO tenant_agent_cost_rollups
+         (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix, as_of_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.tenantId,
+      row.agentKey,
+      row.period,
+      row.usd,
+      1,
+      row.updatedAt ?? 2,
+      Math.floor(Date.now() / 1000),
+    )
+    .run();
 }
 
 async function readBurn(secret: string, query = ""): Promise<Response> {
@@ -111,6 +127,7 @@ async function clearBurn(): Promise<void> {
   for (const handle of [tenantDbA(), tenantDbB()]) {
     await handle.prepare("DELETE FROM agent_cost_burn").run();
   }
+  await db().prepare("DELETE FROM tenant_agent_cost_rollups").run();
 }
 
 /** Drop the deliberately-unroutable fixture tenant from the registry. */
@@ -229,11 +246,9 @@ describe("burn is isolated per tenant", () => {
   });
 
   /**
-   * The platform operator gets the cross-tenant view (Rust `tenant_filter()`
-   * answers `None`). Under database-per-tenant that is a fan-out over the
-   * `tenant_databases` registry, so the unroutable fixture tenant is
-   * deregistered here — the operator's behaviour when one tenant is unreachable
-   * is asserted on its own, below.
+   * The platform operator gets the cross-tenant view from the pushed control-D1
+   * projection. The unroutable fixture is deregistered here so this assertion
+   * isolates ordering and projection contents.
    */
   it("gives the platform operator the cross-tenant view", async () => {
     await deregisterUnroutable();
@@ -246,6 +261,32 @@ describe("burn is isolated per tenant", () => {
     expect(body.data.map((row) => row.agent_key)).toEqual(["b_agent", "a_agent"]);
     expect(body.data.map((row) => row.tenant_id)).toEqual([TENANT_B, TENANT_A]);
     expect(body.total).toBe(2);
+  });
+
+  it("reports the projection as-of timestamp for the platform view", async () => {
+    await deregisterUnroutable();
+    const period = currentPeriod();
+    await db()
+      .prepare(
+        `INSERT INTO tenant_agent_cost_rollups
+           (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix, as_of_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(TENANT_A, "projected_agent", period, 17.25, 1, 2, 1234)
+      .run();
+
+    const body = await burnBody(operatorKey.secret);
+    expect(body).toMatchObject({
+      source: "derived_control_projection",
+      as_of_unix: 1234,
+    });
+    expect(body.data).toEqual([
+      expect.objectContaining({
+        tenant_id: TENANT_A,
+        agent_key: "projected_agent",
+        accumulated_usd: 17.25,
+      }),
+    ]);
   });
 });
 
@@ -328,12 +369,10 @@ describe("an unreachable store is a refusal, not an empty list", () => {
   });
 
   /**
-   * The cross-tenant view is a FAN-OUT, so it has a failure mode Rust's single
-   * store did not: one unreachable tenant would silently drop that tenant's
-   * spend out of a fleet-wide money total. A partial total is worse than no
-   * total — an operator cannot tell it is partial — so the whole read refuses.
+   * The platform view is a pushed projection, so it does not address unrelated
+   * tenant objects during a read.
    */
-  it("refuses the whole cross-tenant view when ANY registered tenant is unreachable", async () => {
+  it("does not live-fan-out to an unreachable tenant", async () => {
     await seedBurn(tenantDbA(), {
       tenantId: TENANT_A,
       agentKey: "a_agent",
@@ -341,12 +380,9 @@ describe("an unreachable store is a refusal, not an empty list", () => {
       usd: 10,
     });
 
-    // The reachable tenant has rows, so a 200 here would be a plausible-looking
-    // total that is missing `tenant_unrouted` entirely.
-    const response = await readBurn(operatorKey.secret);
-    expect(response.status).toBe(503);
-    const body = (await response.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("tenant_database_unavailable");
+    const body = await burnBody(operatorKey.secret);
+    expect(body.data.map((row) => row.agent_key)).toEqual(["a_agent"]);
+    expect(body).toMatchObject({ source: "derived_control_projection" });
   });
 
   /**

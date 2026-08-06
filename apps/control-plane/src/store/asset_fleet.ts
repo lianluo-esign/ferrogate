@@ -37,10 +37,9 @@
  * A fleet-wide read is O(tenants) round trips. `TenantDatabaseRouter`'s own
  * docblock says that fan-out "belongs on admin paths only — never on the
  * inference hot path", which is exactly where this is; but "admin path" is not
- * "unbounded", so {@link FLEET_FANOUT_MAX_TENANTS} refuses a fan-out wider
- * than the cap and tells the caller to name a tenant. Truncating silently
- * would be the worse answer: an inventory that is quietly partial is one an
- * operator will read as complete.
+ * "unbounded", so {@link FLEET_FANOUT_MAX_TENANTS} selects a bounded tenant
+ * page. The response carries the page cursor and never makes a partial page
+ * look like a complete fleet inventory.
  *
  * ## One unreachable tenant does not fail the fleet
  *
@@ -55,6 +54,9 @@
  */
 import { StorageError, type TenantDatabaseRouter } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
+import { provisionedTenantPage } from "./tenant-fanout.js";
+
+export { FLEET_FANOUT_MAX_TENANTS } from "./tenant-fanout.js";
 
 /** The tenant-database table this module reads. */
 export const STORED_ASSET_TABLE = "stored_assets";
@@ -75,14 +77,12 @@ export const WITHHELD_VISIBILITIES: readonly AssetVisibility[] = ASSET_VISIBILIT
 );
 
 /**
- * Widest fan-out a single fleet read will perform.
+ * Widest live fan-out page a single fleet read will perform.
  *
  * Not a tuning knob dressed as a constant: each tenant is a separate D1
  * round trip, and a Worker request has a wall-clock budget. Past the cap the
- * request is REFUSED with an instruction (`?tenant_id=`), never truncated.
+ * response supplies `tenant_page.has_more` and the next `tenant_offset`.
  */
-export const FLEET_FANOUT_MAX_TENANTS = 50;
-
 /** One inventory row, as the admin surface renders it. */
 export interface FleetAssetRow {
   readonly object: string;
@@ -322,22 +322,17 @@ function fleetSortKey(row: FleetAssetRow): string {
 }
 
 /**
- * The tenants a fan-out will visit, refused when it would be too wide.
+ * The bounded tenant page a fan-out will visit.
  *
  * `provisionedTenants()` is the registry, so this is every tenant the
  * deployment has onboarded — including ones with no assets, which cost a round
- * trip each. Hence the cap.
+ * trip each. Hence the cap and explicit cursor.
  */
-export async function fleetTenantIds(router: TenantDatabaseRouter): Promise<readonly string[]> {
-  const tenants = await router.provisionedTenants();
-  if (tenants.length > FLEET_FANOUT_MAX_TENANTS) {
-    throw new HttpError(
-      400,
-      "asset_fleet_fanout_too_wide",
-      `this deployment has ${tenants.length} provisioned tenants, more than the ${FLEET_FANOUT_MAX_TENANTS} a single fleet read fans out to; narrow the request with ?tenant_id=`,
-    );
-  }
-  return [...tenants].sort();
+export async function fleetTenantIds(
+  router: TenantDatabaseRouter,
+  offset = 0,
+): Promise<readonly string[]> {
+  return (await provisionedTenantPage(router, offset)).tenantIds;
 }
 
 // ---------------------------------------------------------------------------

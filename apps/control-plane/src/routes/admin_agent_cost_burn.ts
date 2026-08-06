@@ -8,7 +8,11 @@
 import { periodMonthFromUnix } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, ControlPlaneDeps, StoreRecord } from "../ports.js";
-import { adminListPaginated, parseListQuery } from "../responses.js";
+import {
+  adminListPaginated,
+  derivedControlProjectionMetadata,
+  parseListQuery,
+} from "../responses.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
@@ -55,6 +59,11 @@ interface BurnRow {
   readonly period: string;
   readonly accumulated_usd: number;
   readonly updated_at_unix: number;
+}
+
+interface ProjectedBurnRow extends BurnRow {
+  readonly first_seen_unix: number;
+  readonly as_of_unix: number;
 }
 
 /**
@@ -115,20 +124,45 @@ async function burnRowsFor(
   }
 }
 
-/**
- * Every tenant with a provisioned database, for the platform operator's
- * cross-tenant view.
- *
- * Rust reads ONE store and filters, so its cross-tenant view is a single query.
- * Under database-per-tenant the equivalent is a fan-out, and the fan-out is why
- * this stays an ADMIN-only surface: it costs one round trip per provisioned
- * tenant and must never appear on a request path.
- */
-async function provisionedTenantIds(db: D1Database): Promise<string[]> {
-  const rows = await db
-    .prepare("SELECT tenant_id FROM tenant_databases ORDER BY tenant_id")
-    .all<{ tenant_id: string }>();
-  return rows.results.map((row) => row.tenant_id);
+/** Read the pushed per-agent projection, preserving its oldest as-of time. */
+async function projectedBurnRows(
+  db: D1Database,
+  period: string,
+): Promise<{ rows: BurnRow[]; asOfUnix: number | null }> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT tenant_id, agent_key, period, accumulated_usd, first_seen_unix,
+                updated_at_unix, as_of_unix
+           FROM tenant_agent_cost_rollups
+          WHERE period = ?
+          ORDER BY accumulated_usd DESC, tenant_id ASC, agent_key ASC`,
+      )
+      .bind(period)
+      .all<ProjectedBurnRow>();
+    const asOfUnix = result.results.reduce<number | null>(
+      (oldest, row) => (oldest === null ? row.as_of_unix : Math.min(oldest, row.as_of_unix)),
+      null,
+    );
+    return {
+      rows: result.results.map((row) => ({
+        tenant_id: row.tenant_id,
+        agent_key: row.agent_key,
+        period: row.period,
+        accumulated_usd: row.accumulated_usd,
+        updated_at_unix: row.updated_at_unix,
+      })),
+      asOfUnix,
+    };
+  } catch (error) {
+    throw new HttpError(
+      503,
+      "service_unavailable",
+      `agent cost-burn projection unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
@@ -162,23 +196,23 @@ function listAgentCostBurnHandler(): Handler {
     const period = resolveBurnPeriod(url.searchParams.get("period"), Math.floor(Date.now() / 1000));
 
     const rows: BurnRow[] = [];
+    let metadata: { readonly source: string; readonly as_of_unix: number } | undefined;
     if (scope.kind === "tenant") {
       rows.push(...(await burnRowsFor(deps, scope.tenantId, period)));
+      metadata = {
+        source: "tenant_authority",
+        as_of_unix: Math.floor(Date.now() / 1000),
+      };
     } else {
       const control = deps.controlDatabase;
       if (control === null) {
-        // No control database means no `tenant_databases` registry to fan out
-        // over — and no tenant database either. There is nothing to report and
-        // nothing is being hidden.
         return json(c, 200, adminListPaginated([], 0, query.offset, query.limit));
       }
-      for (const tenantId of await provisionedTenantIds(control)) {
-        // NOT caught: a tenant whose database is unreachable makes the whole
-        // cross-tenant total a 503, because the alternative is a fleet-wide
-        // spend report that silently omits one tenant's spend. A partial money
-        // total is the one answer worse than no total.
-        rows.push(...(await burnRowsFor(deps, tenantId, period)));
-      }
+      const projected = await projectedBurnRows(control, period);
+      rows.push(...projected.rows);
+      metadata = derivedControlProjectionMetadata(
+        (projected.asOfUnix ?? Math.floor(Date.now() / 1000)) * 1000,
+      );
     }
 
     // Rust's storage layer returns "biggest accumulated total first"; the
@@ -190,11 +224,13 @@ function listAgentCostBurnHandler(): Handler {
     );
 
     const windowed = rows.slice(query.offset, query.offset + query.limit);
-    return json(
-      c,
-      200,
-      adminListPaginated(windowed.map(burnDocument), rows.length, query.offset, query.limit),
+    const list = adminListPaginated(
+      windowed.map(burnDocument),
+      rows.length,
+      query.offset,
+      query.limit,
     );
+    return json(c, 200, metadata === undefined ? list : { ...list, ...metadata });
   };
 }
 

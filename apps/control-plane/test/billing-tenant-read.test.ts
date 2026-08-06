@@ -1,8 +1,8 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
-import { tenantObjectDb, registerDurableObjectTenant } from "./tenant-object.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
+import { registerDurableObjectTenant, tenantObjectDb } from "./tenant-object.js";
 
 const TENANT = "tenant_a";
 const TENANT_SECRET = "tenant-a-secret";
@@ -100,6 +100,38 @@ describe("billing admin reads use tenant billing authority", () => {
     });
   });
 
+  it("pages the bounded live tenant lookup instead of returning a truncated fleet", async () => {
+    const extraTenants = Array.from({ length: 51 }, (_, index) => `tenant_native_${index}`);
+    await db().batch(
+      extraTenants.map((tenantId) =>
+        db()
+          .prepare(
+            `INSERT INTO tenant_databases
+               (tenant_id, binding_name, schema_version, storage_backend,
+                provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
+             VALUES (?, 'TENANT_DB_A', 15, 'native_binding', 'ready', 'done', 1, 1)`,
+          )
+          .bind(tenantId),
+      ),
+    );
+
+    const first = await SELF.fetch(`${BASE}/admin/v1/metering-events`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({
+      tenant_page: { offset: 0, limit: 50, total: 52, has_more: true },
+    });
+
+    const second = await SELF.fetch(`${BASE}/admin/v1/metering-events?tenant_offset=50`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({
+      tenant_page: { offset: 50, limit: 50, total: 52, has_more: false },
+    });
+  });
+
   it("merges control compatibility history and lets the tenant row win duplicates", async () => {
     await db().batch([
       db()
@@ -128,10 +160,7 @@ describe("billing admin reads use tenant billing authority", () => {
   });
 
   it("falls back to control compatibility rows before a tenant object is provisioned", async () => {
-    await db()
-      .prepare("DELETE FROM tenant_databases WHERE tenant_id = ?")
-      .bind("tenant_b")
-      .run();
+    await db().prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind("tenant_b").run();
     await db()
       .prepare(
         `INSERT INTO billing_events
@@ -194,6 +223,35 @@ describe("billing admin reads use tenant billing authority", () => {
       await db()
         .prepare("SELECT dead_lettered_at_unix FROM billing_report_outbox WHERE id = ?")
         .bind("report_collision")
+        .first(),
+    ).toEqual({ dead_lettered_at_unix: 1800 });
+  });
+
+  it("does not replay a stale control copy for a durable tenant", async () => {
+    const tenantDb = tenantObjectDb(TENANT);
+    await tenantDb
+      .prepare("DELETE FROM billing_report_outbox WHERE id = ?")
+      .bind("report_tenant_a")
+      .run();
+    await db()
+      .prepare(
+        `INSERT INTO billing_report_outbox
+           (id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
+            created_at_unix, updated_at_unix, event_json)
+         VALUES (?, ?, 5, 1700, 1800, 1700, 1700, ?)`,
+      )
+      .bind("report_tenant_a", TENANT, eventJson(TENANT))
+      .run();
+
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/billing-outbox-dead-letters/report_tenant_a/replay`,
+      { method: "POST", headers: bearer(TENANT_SECRET) },
+    );
+    expect(response.status).toBe(404);
+    expect(
+      await db()
+        .prepare("SELECT dead_lettered_at_unix FROM billing_report_outbox WHERE id = ?")
+        .bind("report_tenant_a")
         .first(),
     ).toEqual({ dead_lettered_at_unix: 1800 });
   });

@@ -298,7 +298,7 @@ export interface TenantSchemaStatus {
   readonly failure: string | null;
 }
 
-/** The single durable alarm deadline a tenant object can own. */
+/** A tenant-local schedule deadline retained beside the multiplexed native alarm. */
 export interface TenantScheduleAlarmRequest {
   /** The tenant this object must already hold or adopt. */
   readonly tenantId: string;
@@ -309,6 +309,24 @@ export interface TenantScheduleAlarmRequest {
 /** Clear the current tenant object's schedule alarm. */
 export interface TenantScheduleAlarmClearRequest {
   readonly tenantId: string;
+}
+
+/** The tenant-local deadline for the periodic control-D1 aggregate push. */
+export interface TenantAggregateFlushAlarmRequest {
+  /** The tenant this object must already hold or adopt. */
+  readonly tenantId: string;
+  /** Unix seconds; the native Durable Object alarm is armed in milliseconds. */
+  readonly scheduledAtUnix: number;
+}
+
+export const TENANT_AGGREGATE_FLUSH_KIND = "tenant-aggregate-flush-alarm" as const;
+export const TENANT_AGGREGATE_FLUSH_VERSION = 1 as const;
+
+export interface TenantAggregateFlushAlarmMessage {
+  readonly kind: typeof TENANT_AGGREGATE_FLUSH_KIND;
+  readonly version: typeof TENANT_AGGREGATE_FLUSH_VERSION;
+  readonly tenant_id: string;
+  readonly scheduled_at_unix: number;
 }
 
 /** Storage key for the adopted tenant id. See {@link TenantDataObject.query}. */
@@ -346,8 +364,18 @@ const FROZEN_TENANT_MIGRATION_MODES: readonly TenantMigrationMode[] = [
   "cut",
 ];
 
-/** The validated tenant-only payload retained until the native alarm fires. */
+/** The validated schedule payload retained until the native alarm fires. */
 const SCHEDULE_ALARM_KEY = "tenant_data:schedule_alarm";
+
+/** The validated aggregate-flush payload retained until the native alarm fires. */
+const AGGREGATE_FLUSH_ALARM_KEY = "tenant_data:aggregate_flush_alarm";
+
+/**
+ * One flush per minute is a deliberate cost/freshness tradeoff: one billed
+ * native-alarm write per flush keeps the admin money view bounded to one minute
+ * of staleness without turning every tenant write into a billed alarm write.
+ */
+export const TENANT_AGGREGATE_FLUSH_INTERVAL_SECONDS = 60;
 
 interface TenantScheduleAlarmQueue {
   send(body: unknown): Promise<unknown>;
@@ -369,6 +397,57 @@ function scheduleAlarmQueueFrom(env: unknown): TenantScheduleAlarmQueue | null {
 export const TENANT_SCHEDULE_ALARM_CALLBACK = Symbol("TenantDataObject.scheduleAlarmCallback");
 
 export type TenantScheduleAlarmCallback = (message: TenantScheduleAlarmMessage) => Promise<void>;
+
+/** Internal alarm seam; production reads the tenant SQLite and pushes to D1. */
+export const TENANT_AGGREGATE_FLUSH_CALLBACK = Symbol("TenantDataObject.aggregateFlushCallback");
+
+export type TenantAggregateFlushAlarmCallback = (
+  message: TenantAggregateFlushAlarmMessage,
+) => Promise<void>;
+
+function tenantAggregateFlushAlarmMessage(
+  tenantId: string,
+  scheduledAtUnix: number,
+): TenantAggregateFlushAlarmMessage {
+  if (typeof tenantId !== "string" || tenantId.trim() === "") {
+    throw new Error(`${REFUSAL}: aggregate flush alarm requires a non-empty tenant id`);
+  }
+  if (!Number.isSafeInteger(scheduledAtUnix) || scheduledAtUnix < 0) {
+    throw new Error(`${REFUSAL}: aggregate flush alarm requires a non-negative safe timestamp`);
+  }
+  return {
+    kind: TENANT_AGGREGATE_FLUSH_KIND,
+    version: TENANT_AGGREGATE_FLUSH_VERSION,
+    tenant_id: tenantId.trim(),
+    scheduled_at_unix: scheduledAtUnix,
+  };
+}
+
+function decodeTenantAggregateFlushAlarm(raw: unknown): TenantAggregateFlushAlarmMessage {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${REFUSAL}: aggregate flush alarm payload must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.kind !== TENANT_AGGREGATE_FLUSH_KIND) {
+    throw new Error(`${REFUSAL}: aggregate flush alarm kind is invalid`);
+  }
+  if (record.version !== TENANT_AGGREGATE_FLUSH_VERSION) {
+    throw new Error(`${REFUSAL}: aggregate flush alarm version is unsupported`);
+  }
+  return tenantAggregateFlushAlarmMessage(
+    record.tenant_id as string,
+    record.scheduled_at_unix as number,
+  );
+}
+
+function controlDatabaseFromEnv(env: unknown): D1Database | null {
+  if (typeof env !== "object" || env === null) return null;
+  const candidate = (env as { CONTROL_DB?: unknown }).CONTROL_DB;
+  if (typeof candidate !== "object" || candidate === null) return null;
+  return typeof (candidate as { prepare?: unknown }).prepare === "function"
+    ? (candidate as D1Database)
+    : null;
+}
 
 /**
  * A witness table from `0001_init_tenant.sql`, used to catch a ledger that
@@ -939,17 +1018,22 @@ export class TenantDataObject extends DurableObject {
   #failure: string | null = null;
   #migrationState: PersistedTenantMigrationState = DEFAULT_TENANT_MIGRATION_STATE;
   readonly #scheduleAlarmQueue: TenantScheduleAlarmQueue | null;
+  readonly #controlDatabase: D1Database | null;
   readonly [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback = async (message) => {
     if (this.#scheduleAlarmQueue === null) {
       throw new Error(`${REFUSAL}: SCHEDULE_ALARMS is not bound; retaining the alarm for retry`);
     }
     await this.#scheduleAlarmQueue.send(encodeTenantScheduleAlarm(message));
   };
+  readonly [TENANT_AGGREGATE_FLUSH_CALLBACK]: TenantAggregateFlushAlarmCallback = async () => {
+    await this.#flushAggregates(Math.floor(Date.now() / 1000));
+  };
 
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx as never, env as never);
     this.#state = ctx;
     this.#scheduleAlarmQueue = scheduleAlarmQueueFrom(env);
+    this.#controlDatabase = controlDatabaseFromEnv(env);
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
@@ -1004,6 +1088,7 @@ export class TenantDataObject extends DurableObject {
     await this.#admit(request.tenantId);
     this.#refuseMigrationWrite(request.sql, "query");
     this.#refuseUnprivilegedWrite(request.sql);
+    await this.#ensureFlushAlarm();
     this.#recordWriteAttempt(isSqlWrite(request.sql));
     // One statement is still a transaction: `changes` is measured as a
     // `total_changes()` delta, and a delta straddling a commit boundary could
@@ -1159,6 +1244,7 @@ export class TenantDataObject extends DurableObject {
       this.#refuseMigrationWrite(statement.sql, "batch");
       this.#refuseUnprivilegedWrite(statement.sql);
     }
+    await this.#ensureFlushAlarm();
     this.#recordWriteAttempt(request.statements.some((statement) => isSqlWrite(statement.sql)));
     return this.#state.storage.transactionSync(() => {
       const results: TenantDataResult[] = [];
@@ -1179,6 +1265,7 @@ export class TenantDataObject extends DurableObject {
     for (const statement of request.statements) {
       this.#refuseMigrationWrite(statement.sql, "privilegedBatch");
     }
+    await this.#ensureFlushAlarm();
     this.#recordWriteAttempt(request.statements.some((statement) => isSqlWrite(statement.sql)));
     return this.#state.storage.transactionSync(() => {
       const results: TenantDataResult[] = [];
@@ -1376,12 +1463,184 @@ export class TenantDataObject extends DurableObject {
     };
   }
 
+  /** Re-arm the native deadline to the earlier retained schedule or flush. */
+  async #rearmNativeAlarm(): Promise<void> {
+    const scheduleRaw = await this.#state.storage.get<unknown>(SCHEDULE_ALARM_KEY);
+    const flushRaw = await this.#state.storage.get<unknown>(AGGREGATE_FLUSH_ALARM_KEY);
+    const schedule = scheduleRaw === undefined ? null : decodeTenantScheduleAlarm(scheduleRaw);
+    const flush = flushRaw === undefined ? null : decodeTenantAggregateFlushAlarm(flushRaw);
+    for (const message of [schedule, flush]) {
+      if (message !== null && this.#tenantId !== message.tenant_id) {
+        throw new Error(
+          `${REFUSAL}: alarm names tenant ${message.tenant_id}, but this object holds ${
+            this.#tenantId ?? "no tenant"
+          }; refusing`,
+        );
+      }
+    }
+    const deadlines = [schedule?.scheduled_at_unix, flush?.scheduled_at_unix].filter(
+      (deadline): deadline is number => deadline !== undefined,
+    );
+    const currentAlarm = await this.#state.storage.getAlarm();
+    if (deadlines.length === 0) {
+      if (currentAlarm !== null) await this.#state.storage.deleteAlarm();
+      return;
+    }
+    const nextAlarm = Math.min(...deadlines) * 1000;
+    // Alarm writes are billed storage writes. A normal tenant RPC often calls
+    // this method while the same flush deadline is already armed, so avoid
+    // rewriting an identical native deadline.
+    if (currentAlarm !== nextAlarm) await this.#state.storage.setAlarm(nextAlarm);
+  }
+
+  /** Arm the periodic push once a tenant has made its first ordinary RPC. */
+  async #ensureFlushAlarm(): Promise<void> {
+    if (this.#controlDatabase === null || this.#tenantId === null) return;
+    await this.#state.blockConcurrencyWhile(async () => {
+      const raw = await this.#state.storage.get<unknown>(AGGREGATE_FLUSH_ALARM_KEY);
+      if (raw === undefined) {
+        await this.#state.storage.put(
+          AGGREGATE_FLUSH_ALARM_KEY,
+          tenantAggregateFlushAlarmMessage(
+            this.#tenantId as string,
+            Math.floor(Date.now() / 1000) + TENANT_AGGREGATE_FLUSH_INTERVAL_SECONDS,
+          ),
+        );
+      } else {
+        const message = decodeTenantAggregateFlushAlarm(raw);
+        if (message.tenant_id !== this.#tenantId) {
+          throw new Error(
+            `${REFUSAL}: aggregate flush alarm names tenant ${message.tenant_id}, but this object holds ${this.#tenantId}; refusing`,
+          );
+        }
+      }
+      await this.#rearmNativeAlarm();
+    });
+  }
+
+  /** Push the current tenant-owned counters as replacements, never deltas. */
+  async #flushAggregates(asOfUnix: number): Promise<void> {
+    if (this.#controlDatabase === null) {
+      throw new Error(`${REFUSAL}: CONTROL_DB is not bound; retaining aggregate flush alarm`);
+    }
+    const tenantId = this.#tenantId;
+    if (tenantId === null) {
+      throw new Error(`${REFUSAL}: aggregate flush requires an admitted tenant`);
+    }
+
+    // Retirement removes the roster row before the retained object is erased.
+    // Treat that row as the flush lease: once it is gone, remove this object's
+    // pending flush payload and do not recreate projections for a tenant that
+    // no longer appears in any fleet enumeration.
+    const roster = await this.#controlDatabase
+      .prepare("SELECT tenant_id FROM tenant_databases WHERE tenant_id = ?")
+      .bind(tenantId)
+      .first<{ tenant_id: string }>();
+    if (roster === null) {
+      await this.#state.storage.delete(AGGREGATE_FLUSH_ALARM_KEY);
+      return;
+    }
+
+    // Drain every cursor before the first D1 await. The object SQLite read is
+    // the authority; D1 receives a replacement snapshot and is never queried
+    // as a shortcut back into another tenant's database.
+    const agentRows = this.#state.storage.sql
+      .exec<{
+        tenant_id: string;
+        agent_key: string;
+        period: string;
+        accumulated_usd: number;
+        first_seen_unix: number;
+        updated_at_unix: number;
+      }>(
+        "SELECT tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix " +
+          "FROM agent_cost_burn WHERE tenant_id = ? ORDER BY period ASC, agent_key ASC",
+        tenantId,
+      )
+      .toArray();
+    const assetTotals = this.#state.storage.sql
+      .exec<{ asset_count: number; asset_bytes: number }>(
+        "SELECT count(*) AS asset_count, COALESCE(sum(size_bytes), 0) AS asset_bytes " +
+          "FROM stored_assets WHERE tenant_id = ?",
+        tenantId,
+      )
+      .toArray()[0] ?? { asset_count: 0, asset_bytes: 0 };
+    const channelTotals = this.#state.storage.sql
+      .exec<{ channel_count: number }>(
+        "SELECT count(*) AS channel_count FROM asset_channels WHERE tenant_id = ?",
+        tenantId,
+      )
+      .toArray()[0] ?? { channel_count: 0 };
+
+    const spendByPeriod = new Map<string, number>();
+    for (const row of agentRows) {
+      spendByPeriod.set(row.period, (spendByPeriod.get(row.period) ?? 0) + row.accumulated_usd);
+    }
+    const statements: D1PreparedStatement[] = [
+      this.#controlDatabase
+        .prepare("DELETE FROM tenant_agent_cost_rollups WHERE tenant_id = ?")
+        .bind(tenantId),
+      this.#controlDatabase
+        .prepare("DELETE FROM tenant_spend_rollups WHERE tenant_id = ?")
+        .bind(tenantId),
+      this.#controlDatabase
+        .prepare(
+          `INSERT INTO tenant_asset_rollups
+             (tenant_id, asset_count, asset_bytes, channel_count, as_of_unix)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (tenant_id) DO UPDATE SET
+             asset_count = excluded.asset_count,
+             asset_bytes = excluded.asset_bytes,
+             channel_count = excluded.channel_count,
+             as_of_unix = excluded.as_of_unix`,
+        )
+        .bind(
+          tenantId,
+          assetTotals.asset_count,
+          assetTotals.asset_bytes,
+          channelTotals.channel_count,
+          asOfUnix,
+        ),
+    ];
+    for (const row of agentRows) {
+      statements.push(
+        this.#controlDatabase
+          .prepare(
+            `INSERT INTO tenant_agent_cost_rollups
+               (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix, as_of_unix)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            row.tenant_id,
+            row.agent_key,
+            row.period,
+            row.accumulated_usd,
+            row.first_seen_unix,
+            row.updated_at_unix,
+            asOfUnix,
+          ),
+      );
+    }
+    for (const [period, accumulatedUsd] of spendByPeriod) {
+      statements.push(
+        this.#controlDatabase
+          .prepare(
+            `INSERT INTO tenant_spend_rollups
+               (tenant_id, period, accumulated_usd, as_of_unix)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .bind(tenantId, period, accumulatedUsd, asOfUnix),
+      );
+    }
+    await this.#controlDatabase.batch(statements);
+  }
+
   /**
    * Arm the one native alarm owned by this tenant object.
    *
-   * Cloudflare permits one alarm deadline per object, so callers must pass the
-   * earliest tenant schedule deadline. The small validated message is retained
-   * beside the native deadline because an alarm callback receives no timestamp.
+   * Cloudflare permits one alarm deadline per object. The schedule and flush
+   * payloads therefore live in separate durable keys, while this method always
+   * arms the earlier deadline and preserves the later one.
    */
   async setScheduleAlarm(request: TenantScheduleAlarmRequest): Promise<void> {
     const message = tenantScheduleAlarmMessage(request.tenantId, request.scheduledAtUnix);
@@ -1392,7 +1651,7 @@ export class TenantDataObject extends DurableObject {
       // Keep the payload durable before arming the deadline. If the alarm
       // write fails, a retry still has a complete message to deliver.
       await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
-      await this.#state.storage.setAlarm(message.scheduled_at_unix * 1000);
+      await this.#rearmNativeAlarm();
     });
   }
 
@@ -1403,8 +1662,20 @@ export class TenantDataObject extends DurableObject {
     this.#refuseMigrationStorageWrite("clear schedule alarm");
     this.#recordWriteAttempt(true);
     await this.#state.blockConcurrencyWhile(async () => {
-      await this.#state.storage.deleteAlarm();
       await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
+      await this.#rearmNativeAlarm();
+    });
+  }
+
+  /** Internal operator/test seam for arming a flush at a deterministic time. */
+  async setAggregateFlushAlarm(request: TenantAggregateFlushAlarmRequest): Promise<void> {
+    const message = tenantAggregateFlushAlarmMessage(request.tenantId, request.scheduledAtUnix);
+    await this.#admit(message.tenant_id);
+    this.#refuseMigrationStorageWrite("set aggregate flush alarm");
+    this.#recordWriteAttempt(true);
+    await this.#state.blockConcurrencyWhile(async () => {
+      await this.#state.storage.put(AGGREGATE_FLUSH_ALARM_KEY, message);
+      await this.#rearmNativeAlarm();
     });
   }
 
@@ -1431,16 +1702,14 @@ export class TenantDataObject extends DurableObject {
       }
 
       if (earliest === undefined) {
-        await this.#state.storage.deleteAlarm();
         await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
-        return;
+      } else {
+        const message = tenantScheduleAlarmMessage(tenantId, earliest);
+        // Retain the payload before arming the native alarm. If setAlarm fails,
+        // the caller receives the failure and can retry without losing intent.
+        await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
       }
-
-      const message = tenantScheduleAlarmMessage(tenantId, earliest);
-      // Retain the payload before arming the native alarm. If setAlarm fails,
-      // the caller receives the failure and can retry without losing intent.
-      await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
-      await this.#state.storage.setAlarm(earliest * 1000);
+      await this.#rearmNativeAlarm();
     });
   }
 
@@ -1454,16 +1723,51 @@ export class TenantDataObject extends DurableObject {
    */
   override async alarm(): Promise<void> {
     await this.#state.blockConcurrencyWhile(async () => {
-      const raw = await this.#state.storage.get<unknown>(SCHEDULE_ALARM_KEY);
-      if (raw === undefined) return;
-      const message = decodeTenantScheduleAlarm(raw);
-      if (this.#tenantId !== message.tenant_id) {
-        throw new Error(
-          `${REFUSAL}: schedule alarm names tenant ${message.tenant_id}, but this object holds ${this.#tenantId ?? "no tenant"}; refusing`,
-        );
+      const nowUnix = Math.floor(Date.now() / 1000);
+      const scheduleRaw = await this.#state.storage.get<unknown>(SCHEDULE_ALARM_KEY);
+      const flushRaw = await this.#state.storage.get<unknown>(AGGREGATE_FLUSH_ALARM_KEY);
+      const schedule = scheduleRaw === undefined ? null : decodeTenantScheduleAlarm(scheduleRaw);
+      const flush = flushRaw === undefined ? null : decodeTenantAggregateFlushAlarm(flushRaw);
+      const earliest = Math.min(
+        ...(schedule === null ? [] : [schedule.scheduled_at_unix]),
+        ...(flush === null ? [] : [flush.scheduled_at_unix]),
+      );
+      for (const message of [schedule, flush]) {
+        if (message !== null && this.#tenantId !== message.tenant_id) {
+          throw new Error(
+            `${REFUSAL}: alarm names tenant ${message.tenant_id}, but this object holds ${
+              this.#tenantId ?? "no tenant"
+            }; refusing`,
+          );
+        }
       }
-      await this[TENANT_SCHEDULE_ALARM_CALLBACK](message);
-      await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
+      // The platform invokes alarm() for the native deadline, so the earliest
+      // retained payload is due even when a deterministic workerd test invokes
+      // the entrypoint before wall clock time reaches that deadline. A later
+      // payload is due only when its own deadline has also elapsed.
+      if (
+        schedule !== null &&
+        (schedule.scheduled_at_unix <= nowUnix || schedule.scheduled_at_unix === earliest)
+      ) {
+        await this[TENANT_SCHEDULE_ALARM_CALLBACK](schedule);
+        await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
+      }
+      if (
+        flush !== null &&
+        (flush.scheduled_at_unix <= nowUnix || flush.scheduled_at_unix === earliest)
+      ) {
+        await this[TENANT_AGGREGATE_FLUSH_CALLBACK](flush);
+        if ((await this.#state.storage.get(AGGREGATE_FLUSH_ALARM_KEY)) !== undefined) {
+          await this.#state.storage.put(
+            AGGREGATE_FLUSH_ALARM_KEY,
+            tenantAggregateFlushAlarmMessage(
+              this.#tenantId as string,
+              nowUnix + TENANT_AGGREGATE_FLUSH_INTERVAL_SECONDS,
+            ),
+          );
+        }
+      }
+      await this.#rearmNativeAlarm();
     });
   }
 

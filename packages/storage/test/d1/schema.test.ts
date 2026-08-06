@@ -52,6 +52,9 @@ const CONTROL_ONLY = [
   "control_plane_resources",
   "api_key_directory",
   "static_api_keys",
+  "tenant_agent_cost_rollups",
+  "tenant_spend_rollups",
+  "tenant_asset_rollups",
   "guardrail_policy_revisions",
   "guardrail_policy_bindings",
   "siem_export_cursors", // 0005

@@ -54,6 +54,7 @@ import {
   tenantDbA,
   tenantDbB,
 } from "./tenant-db.js";
+import { tenantObjectDb } from "./tenant-object.js";
 
 /** A platform operator holding the wildcard — and NOT the fleet grant. */
 const WILDCARD_OPERATOR = "wildcard-operator-secret";
@@ -361,6 +362,40 @@ describe("the cross-tenant fence — a DISTINCT grant, never a side effect", () 
     expect(body.unreadable_tenants).toEqual([TENANT_UNROUTABLE]);
   });
 
+  it("pages a fleet wider than the fan-out cap instead of returning a truncated inventory", async () => {
+    const extraTenants = Array.from({ length: 51 }, (_, index) => `tenant_extra_${index}`);
+    await db().batch(
+      extraTenants.map((tenantId) =>
+        db()
+          .prepare(
+            `INSERT INTO tenant_databases
+               (tenant_id, storage_backend, provisioning_status, schema_version,
+                migration_state, binding_name)
+             VALUES (?, 'native_binding', 'ready', 1, 'done', 'TENANT_DB_A')`,
+          )
+          .bind(tenantId),
+      ),
+    );
+
+    const response = await SELF.fetch(`${BASE}/admin/v1/assets`, {
+      headers: bearer(FLEET_OPERATOR),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ListBody & {
+      tenant_page: { offset: number; limit: number; total: number; has_more: boolean };
+    };
+    expect(body.tenant_page).toEqual({ offset: 0, limit: 50, total: 54, has_more: true });
+
+    const nextResponse = await SELF.fetch(`${BASE}/admin/v1/assets?tenant_offset=50`, {
+      headers: bearer(FLEET_OPERATOR),
+    });
+    expect(nextResponse.status).toBe(200);
+    const nextBody = (await nextResponse.json()) as ListBody & {
+      tenant_page: { offset: number; limit: number; total: number; has_more: boolean };
+    };
+    expect(nextBody.tenant_page).toEqual({ offset: 50, limit: 50, total: 54, has_more: false });
+  });
+
   it("503s when the ONE tenant the request is about is unreachable", async () => {
     const response = await SELF.fetch(`${BASE}/admin/v1/assets?tenant_id=${TENANT_UNROUTABLE}`, {
       headers: bearer(FLEET_OPERATOR),
@@ -480,9 +515,11 @@ describe("POST /admin/v1/assets/quarantine/{asset_id} — the review decision", 
     expect(created[0]?.tenant).toBe(TENANT_A);
     expect(created[0]?.audit).toMatchObject({ actor_scope: "platform_operator" });
 
-    const stored = await db()
+    // `asset-reviews` is tenant-private after the split; the control row is the
+    // audit projection, while the decision document lives in the owning object.
+    const stored = await tenantObjectDb(TENANT_A)
       .prepare(
-        "SELECT document_json FROM control_plane_resources WHERE resource_kind = 'asset-reviews' AND resource_id = ?",
+        "SELECT document_json FROM tenant_resources WHERE resource_kind = 'asset-reviews' AND resource_id = ?",
       )
       .bind(String(body.asset_review.id))
       .first<{ document_json: string }>();
