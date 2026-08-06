@@ -138,3 +138,19 @@ export { ShadowBudgetDurableObject } from "@ferrogate/routing/durable-objects";
  * side; deleting this line reddens both.
  */
 export { TenantDataObject } from "@ferrogate/storage/durable-objects";
+
+/**
+ * The `CONTROL_DATA` Durable Object class — the SQLite-backed SINGLETON that
+ * is the control database (Zero-D1 S1, #877,
+ * `docs/design/zero-d1-control-object-2026-08.md`), addressed everywhere as
+ * `env.CONTROL_DATA.idFromName("control")`.
+ *
+ * Same startup rule as every class above: workerd resolves `class_name`
+ * against THIS module. The other Workers bind it cross-script with
+ * `script_name = "ferrogate-gateway"` and add no re-export of their own.
+ * Until slice S2 re-points the control-read seams, nothing addresses it in
+ * production; the binding ships first so the namespace exists with
+ * `storage = "sqlite"` from its first deploy — the backend choice is
+ * immutable, and getting it wrong is a total-data-loss tombstone.
+ */
+export { ControlDataObject } from "@ferrogate/storage/durable-objects";

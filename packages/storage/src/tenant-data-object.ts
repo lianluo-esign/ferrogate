@@ -2206,8 +2206,11 @@ export class TenantDataObject extends DurableObject {
  * Reading these is itself a `SELECT`, which changes neither counter — that is
  * what makes the before/after delta in `#exec` attributable to the caller's
  * statement alone.
+ *
+ * Exported for `control-data-object.ts`, whose `#exec` makes the identical
+ * delta measurement over its own storage handle.
  */
-function connectionCounters(sql: SqlStorage): { changes: number; lastRowId: number } {
+export function connectionCounters(sql: SqlStorage): { changes: number; lastRowId: number } {
   const rows = sql
     .exec<{ n: number; r: number }>("SELECT total_changes() AS n, last_insert_rowid() AS r")
     .toArray();

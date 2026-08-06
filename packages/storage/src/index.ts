@@ -190,6 +190,7 @@ export * from "./tenant-router.js";
  * the note below on why the CLASS still ships through a subpath.
  */
 export * from "./tenant-do.js";
+export * from "./control-do.js";
 /**
  * The router that picks between the two legs above PER TENANT, from
  * `tenant_databases.storage_backend`.

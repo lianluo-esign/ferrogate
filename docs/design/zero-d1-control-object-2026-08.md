@@ -128,15 +128,22 @@ Strict order; each slice lands green through the normal PR gate:
 
 1. **S1 — `ControlDataObject` + control schema inlining + facade** (this
    branch): the class, `control-schema-sql.ts` generation + verbatim test,
-   `ControlDurableObjectD1Database` (thin reuse of the tenant facade), export
-   from the gateway entry module, `CONTROL_DATA` bindings in all four
-   wranglers (D1 bindings stay, unused-by-default, until S5).
+   the `controlDataObjectDatabase` facade helper (thin reuse of the tenant
+   facade), export from the gateway entry module, and the
+   `[exports.ControlDataObject]` SQLite lifecycle declaration so the class
+   is born `storage = "sqlite"`. Deliberately NO `[[durable_objects.bindings]]`
+   stanza yet, in any Worker: every Worker's env-var-drift gate refuses a
+   declared-but-unread binding ("declare what the Worker reads, and nothing
+   else"), so each binding lands in the same diff as its first read —
+   gateway in S2, control-plane in S3, mcp/agent-runtime in S4. The offline
+   harness additions (auxiliary-worker class exports) move with them.
 2. **S2 — gateway seams**: `meteringDatabaseFrom` (no-tenant branch),
    `meteringProjectionDatabaseFrom`, keys/store control reader, tenancy
    `control()`, guardrail deps, budget alerts — all resolve `CONTROL_DATA`
    first, `CONTROL_DB`/`BILLING_DB` only as an explicit
-   `GATEWAY_CONTROL_STORAGE = "d1_compat"` posture. Key cache default-on
-   lands here.
+   `GATEWAY_CONTROL_STORAGE = "d1_compat"` posture. The gateway
+   `CONTROL_DATA` binding stanza lands here, with the first read. Key cache
+   default-on lands here.
 3. **S3 — control-plane store seam**: `D1ControlPlaneStore` constructed over
    the facade; `LEGACY_TENANT_DB` reads retired or routed to tenant objects.
 4. **S4 — mcp + agent-runtime seams**: same pattern as S2.

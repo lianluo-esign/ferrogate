@@ -40,6 +40,26 @@ migrations_dir = "../../../sql/d1-ts/control"
 name = "FAULTY_TENANT_DATA"
 class_name = "FaultyTenantDataObject"
 
+# The control singleton (Zero-D1 S1, #877). THE PRODUCTION STANZA IS
+# `[exports.ControlDataObject]` in `apps/gateway/wrangler.toml` — same
+# asymmetry warning as the header: this fixture proves nothing about the
+# deployed config.
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+
+# Fault-injection twin for the control applier, for the same reason
+# FAULTY_TENANT_DATA exists: a migration set that throws must be applied by
+# the real constructor on a real cold start.
+[[durable_objects.bindings]]
+name = "FAULTY_CONTROL_DATA"
+class_name = "FaultyControlDataObject"
+
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["TenantDataObject", "FaultyTenantDataObject"]
+new_sqlite_classes = [
+  "TenantDataObject",
+  "FaultyTenantDataObject",
+  "ControlDataObject",
+  "FaultyControlDataObject",
+]

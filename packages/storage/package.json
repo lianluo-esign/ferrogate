@@ -6,7 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./provider": "./src/provider.ts",
-    "./durable-objects": "./src/tenant-data-object.ts"
+    "./durable-objects": "./src/durable-objects.ts"
   },
   "types": "./src/index.ts",
   "scripts": {
