@@ -53,16 +53,16 @@
 import { DurableObject } from "cloudflare:workers";
 import { AUDIT_CHAIN_GENESIS_HASH, auditChainKey, auditRowHash } from "./audit-chain.js";
 import {
+  type TenantScheduleAlarmMessage,
+  decodeTenantScheduleAlarm,
+  encodeTenantScheduleAlarm,
+  tenantScheduleAlarmMessage,
+} from "./tenant-schedule-alarm.js";
+import {
   TENANT_MIGRATIONS,
   TENANT_SCHEMA_VERSION,
   type TenantMigration,
 } from "./tenant-schema-sql.js";
-import {
-  decodeTenantScheduleAlarm,
-  encodeTenantScheduleAlarm,
-  tenantScheduleAlarmMessage,
-  type TenantScheduleAlarmMessage,
-} from "./tenant-schedule-alarm.js";
 
 /**
  * The value domain SQLite accepts and returns through `sql.exec`.
@@ -94,6 +94,60 @@ export interface TenantDataStatement {
 export interface TenantDataQueryRequest extends TenantDataStatement {
   /** The tenant this caller believes it is addressing. Checked, not trusted. */
   readonly tenantId: string;
+}
+
+/** A control-plane operator read, kept off the tenant-facing D1 facade. */
+export interface TenantDataOperatorQueryRequest extends TenantDataStatement {
+  readonly tenantId: string;
+  /** Stable id used to make the audit append safe to retry. */
+  readonly auditId: string;
+  readonly requestId: string;
+  /** Operator identity, never a bearer secret. */
+  readonly operator: string;
+  readonly occurredAtUnix: number;
+}
+
+export interface TenantDataOperatorQueryResult extends TenantDataResult {
+  readonly rowCount: number;
+  readonly auditId: string;
+}
+
+/** One resumable page of the object export. The format is deliberately JSONL. */
+export interface TenantDataExportPageRequest {
+  readonly tenantId: string;
+  readonly exportId: string;
+  readonly cursor: string | null;
+  readonly pageSize: number;
+  readonly auditId: string;
+  readonly requestId: string;
+  readonly operator: string;
+  readonly occurredAtUnix: number;
+}
+
+export interface TenantDataExportPageResult {
+  readonly exportId: string;
+  readonly jsonl: string;
+  readonly rowCount: number;
+  readonly nextCursor: string | null;
+  readonly done: boolean;
+  readonly auditId: string;
+}
+
+/** A point-in-time restore scheduled for the object's next session. */
+export interface TenantDataRestoreRequest {
+  readonly tenantId: string;
+  readonly bookmark?: string;
+  readonly timestampUnix?: number;
+  readonly auditId: string;
+  readonly requestId: string;
+  readonly operator: string;
+  readonly occurredAtUnix: number;
+}
+
+export interface TenantDataRestoreResult {
+  readonly bookmark: string;
+  readonly auditId: string;
+  readonly scheduled: true;
 }
 
 /** An RPC carrying the caller's tenant id — see {@link TenantDataObject.batch}. */
@@ -456,6 +510,290 @@ function isSqlWrite(sql: string): boolean {
   ].some((verb) => tokens.has(verb));
 }
 
+const OPERATOR_EXPORT_MAX_PAGE_SIZE = 32;
+const OPERATOR_EXPORT_INTERNAL_TABLES = new Set(["audit_events", "storage_schema_migrations"]);
+const OPERATOR_READ_WRITE_OPCODES = new Set([
+  "Clear",
+  "CreateBtree",
+  "Delete",
+  "Destroy",
+  "DropIndex",
+  "DropTable",
+  "DropTrigger",
+  "Insert",
+  "Reindex",
+  "Update",
+  "Vacuum",
+  "VUpdate",
+]);
+type SqlLexMode =
+  | "normal"
+  | "single"
+  | "double"
+  | "backtick"
+  | "bracket"
+  | "line_comment"
+  | "block_comment";
+
+/**
+ * Return whether the suffix contains SQL rather than whitespace/comments.
+ * This is used only after a semicolon, where a second quoted literal is still
+ * content and must not be mistaken for a harmless trailing comment.
+ */
+function hasSqlContent(sql: string): boolean {
+  let mode: "normal" | "line_comment" | "block_comment" = "normal";
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (mode === "line_comment") {
+      if (current === "\n") mode = "normal";
+      continue;
+    }
+    if (mode === "block_comment") {
+      if (current === "*" && next === "/") {
+        index += 1;
+        mode = "normal";
+      }
+      continue;
+    }
+    if (current === "-" && next === "-") {
+      index += 1;
+      mode = "line_comment";
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      index += 1;
+      mode = "block_comment";
+      continue;
+    }
+    if (current !== undefined && !/\s/.test(current)) return true;
+  }
+  return false;
+}
+
+/** Strip one trailing terminator while refusing every second statement. */
+function oneSqlStatement(sql: string): string {
+  let mode: SqlLexMode = "normal";
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (mode === "line_comment") {
+      if (current === "\n") mode = "normal";
+      continue;
+    }
+    if (mode === "block_comment") {
+      if (current === "*" && next === "/") {
+        index += 1;
+        mode = "normal";
+      }
+      continue;
+    }
+    if (mode === "single") {
+      if (current === "'" && next === "'") {
+        index += 1;
+      } else if (current === "'") {
+        mode = "normal";
+      }
+      continue;
+    }
+    if (mode === "double") {
+      if (current === '"' && next === '"') {
+        index += 1;
+      } else if (current === '"') {
+        mode = "normal";
+      }
+      continue;
+    }
+    if (mode === "backtick") {
+      if (current === "`" && next === "`") {
+        index += 1;
+      } else if (current === "`") {
+        mode = "normal";
+      }
+      continue;
+    }
+    if (mode === "bracket") {
+      if (current === "]") mode = "normal";
+      continue;
+    }
+    if (current === "-" && next === "-") {
+      index += 1;
+      mode = "line_comment";
+    } else if (current === "/" && next === "*") {
+      index += 1;
+      mode = "block_comment";
+    } else if (current === "'") {
+      mode = "single";
+    } else if (current === '"') {
+      mode = "double";
+    } else if (current === "`") {
+      mode = "backtick";
+    } else if (current === "[") {
+      mode = "bracket";
+    } else if (current === ";") {
+      if (hasSqlContent(sql.slice(index + 1))) {
+        throw new Error(`${REFUSAL}: operator query must contain exactly one SQL statement`);
+      }
+      return sql.slice(0, index);
+    }
+  }
+  return sql;
+}
+
+/** Read the first executable keyword without trusting its textual position. */
+function firstSqlKeyword(sql: string): string | null {
+  let mode: SqlLexMode = "normal";
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (mode === "line_comment") {
+      if (current === "\n") mode = "normal";
+      continue;
+    }
+    if (mode === "block_comment") {
+      if (current === "*" && next === "/") {
+        index += 1;
+        mode = "normal";
+      }
+      continue;
+    }
+    if (mode === "single") {
+      if (current === "'" && next === "'") index += 1;
+      else if (current === "'") mode = "normal";
+      continue;
+    }
+    if (mode === "double") {
+      if (current === '"' && next === '"') index += 1;
+      else if (current === '"') mode = "normal";
+      continue;
+    }
+    if (mode === "backtick") {
+      if (current === "`" && next === "`") index += 1;
+      else if (current === "`") mode = "normal";
+      continue;
+    }
+    if (mode === "bracket") {
+      if (current === "]") mode = "normal";
+      continue;
+    }
+    if (current === "-" && next === "-") {
+      index += 1;
+      mode = "line_comment";
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      index += 1;
+      mode = "block_comment";
+      continue;
+    }
+    if (current === "'") {
+      mode = "single";
+      continue;
+    }
+    if (current === '"') {
+      mode = "double";
+      continue;
+    }
+    if (current === "`") {
+      mode = "backtick";
+      continue;
+    }
+    if (current === "[") {
+      mode = "bracket";
+      continue;
+    }
+    if (current !== undefined && /[A-Za-z_]/.test(current)) {
+      let end = index + 1;
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end] ?? "")) end += 1;
+      return sql.slice(index, end).toLowerCase();
+    }
+    if (current !== undefined && !/\s/.test(current)) return null;
+  }
+  return null;
+}
+
+/**
+ * Validate at SQLite parse level, then reject the VM opcodes that write.
+ * Prefix checks are intentionally absent: comments, CTEs and a second
+ * statement all change what the first word means. `EXPLAIN` parses the exact
+ * statement without executing it, and the cursor is drained before this
+ * synchronous validator returns.
+ */
+function validateReadOnlySelect(sql: SqlStorage, statement: TenantDataStatement): string {
+  if (typeof statement.sql !== "string" || statement.sql.trim() === "") {
+    throw new Error(`${REFUSAL}: operator query requires one read-only SELECT statement`);
+  }
+  const single = oneSqlStatement(statement.sql);
+  const keyword = firstSqlKeyword(single);
+  if (keyword !== "select" && keyword !== "with") {
+    throw new Error(`${REFUSAL}: operator query requires one read-only SELECT statement`);
+  }
+
+  let explainRows: { opcode?: string }[];
+  try {
+    explainRows = sql
+      .exec<{ opcode?: string }>(`EXPLAIN ${single}`, ...(statement.params ?? []))
+      .toArray();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${REFUSAL}: operator query was rejected at SQL parse level: ${detail}`);
+  }
+  const writeOpcode = explainRows.find((row) =>
+    OPERATOR_READ_WRITE_OPCODES.has(String(row.opcode ?? "")),
+  );
+  if (writeOpcode !== undefined) {
+    throw new Error(
+      `${REFUSAL}: operator query must be one read-only SELECT statement; ` +
+        `SQLite parsed a ${String(writeOpcode.opcode)} write opcode`,
+    );
+  }
+  return single;
+}
+
+interface OperatorExportCursor {
+  readonly table: string;
+  readonly rowid: number;
+}
+
+function quoteSqlIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function decodeOperatorExportCursor(value: string | null): OperatorExportCursor | null {
+  if (value === null) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (
+      typeof parsed.table !== "string" ||
+      parsed.table.trim() === "" ||
+      typeof parsed.rowid !== "number" ||
+      !Number.isSafeInteger(parsed.rowid) ||
+      parsed.rowid < 0
+    ) {
+      throw new Error("invalid cursor fields");
+    }
+    return { table: parsed.table, rowid: parsed.rowid };
+  } catch {
+    throw new Error(`${REFUSAL}: operator export cursor is invalid`);
+  }
+}
+
+function encodeOperatorExportCursor(cursor: OperatorExportCursor): string {
+  return JSON.stringify(cursor);
+}
+
+function encodeExportValue(value: TenantDataValue): unknown {
+  if (value instanceof ArrayBuffer) {
+    const bytes = new Uint8Array(value);
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return { type: "base64", data: btoa(binary) };
+  }
+  return value;
+}
+
 function isTenantMigrationMode(value: unknown): value is TenantMigrationMode {
   return typeof value === "string" && TENANT_MIGRATION_MODES.includes(value as TenantMigrationMode);
 }
@@ -579,7 +917,8 @@ export function sqlStatements(migration: string): string[] {
     }
     if (trimmed.endsWith(";")) flush();
   }
-  if (inTrigger) throw new Error("tenant schema migration has an unterminated CREATE TRIGGER block");
+  if (inTrigger)
+    throw new Error("tenant schema migration has an unterminated CREATE TRIGGER block");
   flush();
   return statements;
 }
@@ -671,6 +1010,133 @@ export class TenantDataObject extends DurableObject {
     // be polluted by another statement. `transactionSync` also gives a bare
     // `query()` the same rollback-on-throw semantics `batch()` has.
     return this.#state.storage.transactionSync(() => this.#exec(request));
+  }
+
+  /**
+   * Platform-operator-only read path. The control plane is the authorization
+   * boundary; this RPC is intentionally absent from the D1 facade exposed to
+   * tenant-facing code. The audit append reuses the same tamper-evident chain
+   * as every other object audit event.
+   */
+  async operatorQuery(
+    request: TenantDataOperatorQueryRequest,
+  ): Promise<TenantDataOperatorQueryResult> {
+    await this.#admit(request.tenantId);
+    this.#validateOperatorAuditRequest(request);
+    const parsedSql = validateReadOnlySelect(this.#state.storage.sql, request);
+    const result = this.#state.storage.transactionSync(() =>
+      this.#exec({ sql: parsedSql, params: request.params }),
+    );
+    await this.#appendOperatorAudit(request, {
+      object: "tenant_data_operator",
+      operation: "query",
+      operator: request.operator,
+      tenant_id: request.tenantId,
+      statement: request.sql,
+      row_count: result.results.length,
+    });
+    return {
+      ...result,
+      rowCount: result.results.length,
+      auditId: request.auditId,
+    };
+  }
+
+  /**
+   * Return one bounded JSONL page. Each row query uses a keyset cursor and
+   * `LIMIT 1`, so the object never materializes a tenant table. The cursor is
+   * drained synchronously before the next query or any later await: holding a
+   * `ctx.storage.sql` cursor across an await has no isolation guarantee.
+   * Resumable pages are chosen over a raised CPU limit so an export survives an
+   * object that grows and can be retried after a request deadline.
+   */
+  async operatorExportPage(
+    request: TenantDataExportPageRequest,
+  ): Promise<TenantDataExportPageResult> {
+    await this.#admit(request.tenantId);
+    this.#validateOperatorAuditRequest(request);
+    if (
+      !Number.isSafeInteger(request.pageSize) ||
+      request.pageSize < 1 ||
+      request.pageSize > OPERATOR_EXPORT_MAX_PAGE_SIZE
+    ) {
+      throw new Error(
+        `${REFUSAL}: operator export page size must be between 1 and ${OPERATOR_EXPORT_MAX_PAGE_SIZE}`,
+      );
+    }
+    if (typeof request.exportId !== "string" || request.exportId.trim() === "") {
+      throw new Error(`${REFUSAL}: operator export requires a non-empty export id`);
+    }
+
+    const page = this.#operatorExportPageSync(request);
+    await this.#appendOperatorAudit(request, {
+      object: "tenant_data_operator",
+      operation: "export_page",
+      operator: request.operator,
+      tenant_id: request.tenantId,
+      export_id: request.exportId,
+      cursor: request.cursor,
+      format: "jsonl",
+      row_count: page.rowCount,
+    });
+    return {
+      ...page,
+      exportId: request.exportId,
+      auditId: request.auditId,
+    };
+  }
+
+  /**
+   * Schedule a retained bookmark on the next object session. Cloudflare's
+   * restore API is deliberately asynchronous at the session boundary: the
+   * current invocation records the request, and the next session opens at the
+   * selected bookmark. A timestamp is resolved by the platform's bookmark
+   * index; a missing/expired result is a refusal, never a fabricated restore.
+   */
+  async operatorRestore(request: TenantDataRestoreRequest): Promise<TenantDataRestoreResult> {
+    await this.#admit(request.tenantId);
+    this.#validateOperatorAuditRequest(request);
+    const suppliedBookmark = typeof request.bookmark === "string" ? request.bookmark.trim() : "";
+    let bookmark = suppliedBookmark;
+    if (bookmark === "") {
+      if (
+        request.timestampUnix === undefined ||
+        !Number.isSafeInteger(request.timestampUnix) ||
+        request.timestampUnix < 0
+      ) {
+        throw new Error(`${REFUSAL}: restore requires a bookmark or a non-negative timestamp`);
+      }
+      try {
+        bookmark = await this.#state.storage.getBookmarkForTime(
+          new Date(request.timestampUnix * 1000),
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${REFUSAL}: no usable bookmark for tenant ${request.tenantId} at ${request.timestampUnix}: ${detail}`,
+        );
+      }
+    }
+    if (bookmark === "") {
+      throw new Error(`${REFUSAL}: no usable bookmark for tenant ${request.tenantId}`);
+    }
+    try {
+      await this.#state.storage.onNextSessionRestoreBookmark(bookmark);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${REFUSAL}: no usable bookmark for tenant ${request.tenantId}: ${detail}`);
+    }
+
+    await this.#appendOperatorAudit(request, {
+      object: "tenant_data_operator",
+      operation: "restore",
+      operator: request.operator,
+      tenant_id: request.tenantId,
+      bookmark,
+      timestamp_unix: request.timestampUnix ?? null,
+      status: "scheduled_next_session",
+    });
+    return { bookmark, auditId: request.auditId, scheduled: true };
   }
 
   /**
@@ -993,17 +1459,145 @@ export class TenantDataObject extends DurableObject {
       const message = decodeTenantScheduleAlarm(raw);
       if (this.#tenantId !== message.tenant_id) {
         throw new Error(
-          REFUSAL +
-            ": schedule alarm names tenant " +
-            message.tenant_id +
-            ", but this object holds " +
-            (this.#tenantId ?? "no tenant") +
-            "; refusing",
+          `${REFUSAL}: schedule alarm names tenant ${message.tenant_id}, but this object holds ${this.#tenantId ?? "no tenant"}; refusing`,
         );
       }
       await this[TENANT_SCHEDULE_ALARM_CALLBACK](message);
       await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
     });
+  }
+
+  #validateOperatorAuditRequest(request: {
+    readonly auditId: string;
+    readonly requestId: string;
+    readonly operator: string;
+    readonly occurredAtUnix: number;
+  }): void {
+    for (const [name, value] of [
+      ["audit id", request.auditId],
+      ["request id", request.requestId],
+      ["operator", request.operator],
+    ] as const) {
+      if (typeof value !== "string" || value.trim() === "") {
+        throw new Error(`${REFUSAL}: operator audit requires a non-empty ${name}`);
+      }
+    }
+    if (request.occurredAtUnix < 0 || !Number.isSafeInteger(request.occurredAtUnix)) {
+      throw new Error(`${REFUSAL}: operator audit requires a non-negative integer timestamp`);
+    }
+  }
+
+  async #appendOperatorAudit(
+    request: {
+      readonly tenantId: string;
+      readonly auditId: string;
+      readonly requestId: string;
+      readonly operator: string;
+      readonly occurredAtUnix: number;
+    },
+    detail: Record<string, unknown>,
+  ): Promise<TenantAuditAppendResult> {
+    return this.appendAudit({
+      tenantId: request.tenantId,
+      id: request.auditId,
+      requestId: request.requestId,
+      agentRunId: null,
+      occurredAtUnix: request.occurredAtUnix,
+      auditJson: JSON.stringify(detail),
+    });
+  }
+
+  #operatorExportPageSync(
+    request: TenantDataExportPageRequest,
+  ): Omit<TenantDataExportPageResult, "exportId" | "auditId"> {
+    const sql = this.#state.storage.sql;
+    const tables = sql
+      .exec<{ name: string; sql: string | null }>(
+        "SELECT name, sql FROM sqlite_master " +
+          "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' " +
+          "ORDER BY name",
+      )
+      .toArray()
+      .filter((table) => !OPERATOR_EXPORT_INTERNAL_TABLES.has(table.name));
+    const cursor = decodeOperatorExportCursor(request.cursor);
+    let tableIndex = 0;
+    let rowid: number | null = null;
+    if (cursor !== null) {
+      tableIndex = tables.findIndex((table) => table.name === cursor.table);
+      if (tableIndex < 0) {
+        throw new Error(`${REFUSAL}: operator export cursor names an unknown table`);
+      }
+      rowid = cursor.rowid;
+    }
+
+    const lines: string[] = [];
+    let rowCount = 0;
+    while (tableIndex < tables.length) {
+      const table = tables[tableIndex];
+      if (table === undefined) break;
+      const tableName = table.name;
+      const columns = sql
+        .exec<{
+          name: string;
+          type: string;
+          notnull: number;
+          dflt_value: string | null;
+          pk: number;
+        }>(`PRAGMA table_info(${quoteSqlIdentifier(tableName)})`)
+        .toArray();
+      lines.push(
+        JSON.stringify({
+          kind: "schema",
+          table: tableName,
+          sql: table.sql,
+          columns,
+        }),
+      );
+
+      while (rowCount < request.pageSize) {
+        // LIMIT 1 keeps the JS heap bounded even when one tenant row is large.
+        // The cursor is fully drained before this loop can await through the
+        // caller, because `toArray()` completes before any page is returned.
+        const rows = sql
+          .exec<Record<string, TenantDataValue>>(
+            `SELECT rowid AS "__ferrogate_rowid", * FROM ${quoteSqlIdentifier(tableName)} WHERE rowid > ? ORDER BY rowid LIMIT 1`,
+            rowid ?? 0,
+          )
+          .toArray();
+        const row = rows[0];
+        if (row === undefined) {
+          tableIndex += 1;
+          rowid = null;
+          break;
+        }
+        const rawRowid = row.__ferrogate_rowid;
+        if (typeof rawRowid !== "number" || !Number.isSafeInteger(rawRowid)) {
+          throw new Error(`${REFUSAL}: operator export encountered an invalid rowid`);
+        }
+        const values: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(row)) {
+          if (key !== "__ferrogate_rowid") values[key] = encodeExportValue(value);
+        }
+        lines.push(JSON.stringify({ kind: "row", table: tableName, rowid: rawRowid, values }));
+        rowCount += 1;
+        rowid = rawRowid;
+        if (rowCount === request.pageSize) {
+          return {
+            jsonl: `${lines.join("\n")}\n`,
+            rowCount,
+            nextCursor: encodeOperatorExportCursor({ table: tableName, rowid: rawRowid }),
+            done: false,
+          };
+        }
+      }
+    }
+
+    return {
+      jsonl: lines.length === 0 ? "" : `${lines.join("\n")}\n`,
+      rowCount,
+      nextCursor: null,
+      done: true,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1093,8 +1687,7 @@ export class TenantDataObject extends DurableObject {
     }
     if (this.#migrationState.mode !== "copying" && this.#migrationState.mode !== "verifying") {
       throw new Error(
-        `${REFUSAL}: migration import is only allowed in copying/verifying, current mode is ` +
-          this.#migrationState.mode,
+        `${REFUSAL}: migration import is only allowed in copying/verifying, current mode is ${this.#migrationState.mode}`,
       );
     }
   }

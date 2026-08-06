@@ -62,6 +62,7 @@ import { rbacRoutes } from "./rbac.js";
 import { selfHostedWorkerRoutes } from "./self_hosted_worker.js";
 import { siteDomainRoutes } from "./site_domain.js";
 import { skillRoutes } from "./skill.js";
+import { tenantDataRoutes } from "./tenant_data.js";
 import { tenantHierarchyRoutes } from "./tenant_hierarchy.js";
 import { walletsRoutes } from "./wallets.js";
 import { x402SpendPolicyRoutes } from "./x402_spend_policy.js";
@@ -103,6 +104,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   siteDomainRoutes,
   skillRoutes,
   tenantHierarchyRoutes,
+  tenantDataRoutes,
   walletsRoutes,
   x402SpendPolicyRoutes,
 ];

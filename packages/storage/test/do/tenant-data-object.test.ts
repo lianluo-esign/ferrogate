@@ -157,6 +157,51 @@ type ScheduleAlarmStub = DurableObjectStub<TenantDataObject> & {
   clearScheduleAlarm(request: { tenantId: string }): Promise<void>;
 };
 
+type OperatorTenantObject = DurableObjectStub<TenantDataObject> & {
+  operatorQuery(request: {
+    tenantId: string;
+    sql: string;
+    params?: readonly (string | number | null)[];
+    auditId: string;
+    requestId: string;
+    operator: string;
+    occurredAtUnix: number;
+  }): Promise<{
+    results: Record<string, unknown>[];
+    rowCount: number;
+    auditId: string;
+  }>;
+  operatorExportPage(request: {
+    tenantId: string;
+    exportId: string;
+    cursor: string | null;
+    pageSize: number;
+    auditId: string;
+    requestId: string;
+    operator: string;
+    occurredAtUnix: number;
+  }): Promise<{
+    jsonl: string;
+    rowCount: number;
+    nextCursor: string | null;
+    done: boolean;
+    auditId: string;
+  }>;
+  operatorRestore(request: {
+    tenantId: string;
+    bookmark?: string;
+    timestampUnix?: number;
+    auditId: string;
+    requestId: string;
+    operator: string;
+    occurredAtUnix: number;
+  }): Promise<{ bookmark: string; auditId: string; scheduled: true }>;
+};
+
+function operatorObjectFor(tenantId: string): OperatorTenantObject {
+  return objectFor(tenantId) as unknown as OperatorTenantObject;
+}
+
 function scheduleAlarmObjectFor(tenantId: string): ScheduleAlarmStub {
   return objectFor(tenantId) as unknown as ScheduleAlarmStub;
 }
@@ -298,7 +343,9 @@ describe("the statement splitter", () => {
     // trigger stays whole because its body contains internal terminators.
     const triggers = all.filter((statement) => /CREATE\s+TRIGGER/i.test(statement));
     expect(triggers).toHaveLength(229);
-    expect(all.filter((statement) => !/CREATE\s+TRIGGER/i.test(statement) && statement.includes(";"))).toEqual([]);
+    expect(
+      all.filter((statement) => !/CREATE\s+TRIGGER/i.test(statement) && statement.includes(";")),
+    ).toEqual([]);
   });
 });
 
@@ -748,6 +795,198 @@ describe("tenant audit chains", () => {
   });
 });
 
+describe("operator tenant-data RPCs", () => {
+  test("accepts a parsed read-only SELECT and audits the exact row count", async () => {
+    const tenant = "tenant_operator_read";
+    const object = operatorObjectFor(tenant);
+    await object.query({ tenantId: tenant, sql: "DELETE FROM audit_events" });
+
+    const result = await object.operatorQuery({
+      tenantId: tenant,
+      sql: "-- a leading comment\nWITH one AS (SELECT 1 AS answer) SELECT answer FROM one",
+      auditId: "operator-read-audit",
+      requestId: "operator-read-request",
+      operator: "operator@example.test",
+      occurredAtUnix: 1_754_000_000,
+    });
+
+    expect(result.results).toEqual([{ answer: 1 }]);
+    expect(result.rowCount).toBe(1);
+    expect(result.auditId).toBe("operator-read-audit");
+
+    const audits = await object.query({
+      tenantId: tenant,
+      sql: "SELECT id, request_id, tenant, audit_json FROM audit_events WHERE id = ?",
+      params: ["operator-read-audit"],
+    });
+    expect(audits.results).toHaveLength(1);
+    expect(audits.results[0]).toMatchObject({
+      id: "operator-read-audit",
+      request_id: "operator-read-request",
+      tenant,
+    });
+    expect(JSON.parse(String(audits.results[0]?.audit_json))).toMatchObject({
+      operator: "operator@example.test",
+      tenant_id: tenant,
+      statement: "-- a leading comment\nWITH one AS (SELECT 1 AS answer) SELECT answer FROM one",
+      row_count: 1,
+    });
+  });
+
+  test.each([
+    ["SELECT 1; DROP TABLE projects", "multiple statements"],
+    ["WITH doomed AS (SELECT 1) DELETE FROM projects WHERE 0", "DML"],
+    ["PRAGMA user_version = 828", "PRAGMA"],
+    ["SELECT 1; SELECT 2", "multiple statements"],
+  ])("rejects %s at parse level (%s)", async (sql) => {
+    const tenant = "tenant_operator_read_rejections";
+    const message = await refusal(
+      operatorObjectFor(tenant).operatorQuery({
+        tenantId: tenant,
+        sql,
+        auditId: `operator-rejection-${sql.slice(0, 8)}`,
+        requestId: "operator-rejection-request",
+        operator: "operator@example.test",
+        occurredAtUnix: 1_754_000_001,
+      }),
+    );
+
+    expect(message).toMatch(/read-only SELECT|exactly one SQL statement|PRAGMA/i);
+  });
+
+  test("exports bounded JSONL keyset pages without materialising the table", async () => {
+    const tenant = "tenant_operator_export";
+    const object = operatorObjectFor(tenant);
+    await object.privilegedBatch({
+      tenantId: tenant,
+      statements: [
+        {
+          sql:
+            "CREATE TABLE IF NOT EXISTS operator_export_rows " +
+            "(id INTEGER PRIMARY KEY, payload TEXT NOT NULL)",
+        },
+        {
+          sql: "DELETE FROM operator_export_rows",
+        },
+        {
+          sql: "INSERT INTO operator_export_rows (id, payload) VALUES (?, ?)",
+          params: [1, "one"],
+        },
+        {
+          sql: "INSERT INTO operator_export_rows (id, payload) VALUES (?, ?)",
+          params: [2, "two"],
+        },
+        {
+          sql: "INSERT INTO operator_export_rows (id, payload) VALUES (?, ?)",
+          params: [3, "three"],
+        },
+        {
+          sql: "INSERT INTO operator_export_rows (id, payload) VALUES (?, ?)",
+          params: [4, "four"],
+        },
+        {
+          sql: "INSERT INTO operator_export_rows (id, payload) VALUES (?, ?)",
+          params: [5, "five"],
+        },
+      ],
+    });
+
+    const pages: string[] = [];
+    const exportedIds: number[] = [];
+    let cursor: string | null = null;
+    let page = 0;
+    for (;;) {
+      const result: {
+        jsonl: string;
+        rowCount: number;
+        nextCursor: string | null;
+        done: boolean;
+        auditId: string;
+      } = await object.operatorExportPage({
+        tenantId: tenant,
+        exportId: "export-828",
+        cursor,
+        pageSize: 2,
+        auditId: `operator-export-audit-${page}`,
+        requestId: `operator-export-request-${page}`,
+        operator: "operator@example.test",
+        occurredAtUnix: 1_754_000_100 + page,
+      });
+      pages.push(result.jsonl);
+      expect(result.rowCount).toBeLessThanOrEqual(2);
+      for (const line of result.jsonl.trim().split("\n")) {
+        if (line === "") continue;
+        const record = JSON.parse(line) as {
+          kind: string;
+          table?: string;
+          values?: { id?: number };
+        };
+        if (record.kind === "row" && record.table === "operator_export_rows") {
+          exportedIds.push(Number(record.values?.id));
+        }
+      }
+      if (result.done) break;
+      cursor = result.nextCursor;
+      expect(cursor).not.toBeNull();
+      page += 1;
+      expect(page).toBeLessThan(20);
+    }
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(exportedIds).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test.skip("PITR restore is gated: installed local workerd exposes the types but its SQLite backend reports that PITR is unavailable", async () => {
+    const tenant = "tenant_operator_restore";
+    const object = operatorObjectFor(tenant);
+    const bookmark = await runInDurableObject(object, (_instance, state) =>
+      state.storage.getCurrentBookmark(),
+    );
+
+    const result = await object.operatorRestore({
+      tenantId: tenant,
+      bookmark,
+      auditId: "operator-restore-audit",
+      requestId: "operator-restore-request",
+      operator: "operator@example.test",
+      occurredAtUnix: 1_754_000_200,
+    });
+
+    expect(result).toEqual({
+      bookmark,
+      auditId: "operator-restore-audit",
+      scheduled: true,
+    });
+    const audit = await object.query({
+      tenantId: tenant,
+      sql: "SELECT audit_json FROM audit_events WHERE id = ?",
+      params: ["operator-restore-audit"],
+    });
+    expect(audit.results).toHaveLength(1);
+    expect(JSON.parse(String(audit.results[0]?.audit_json))).toMatchObject({
+      operation: "restore",
+      operator: "operator@example.test",
+      bookmark,
+    });
+  });
+
+  test("refuses a point before the retained bookmark window", async () => {
+    const tenant = "tenant_operator_restore_without_bookmark";
+    const message = await refusal(
+      operatorObjectFor(tenant).operatorRestore({
+        tenantId: tenant,
+        timestampUnix: 0,
+        auditId: "operator-restore-unavailable",
+        requestId: "operator-restore-unavailable-request",
+        operator: "operator@example.test",
+        occurredAtUnix: 1_754_000_201,
+      }),
+    );
+
+    expect(message).toMatch(/no usable bookmark/i);
+  });
+});
+
 describe("the second wake", () => {
   test("does a version read and NOTHING more", async () => {
     const first = await objectFor(ACME).schemaVersion();
@@ -1145,7 +1384,7 @@ describe("tenant-owned worker and schedule state", () => {
             {
               sql: claimSql,
               params: [
-                "fire_" + nodeId,
+                `fire_${nodeId}`,
                 "schedule_once",
                 1_800_000_000,
                 1_800_000_001,

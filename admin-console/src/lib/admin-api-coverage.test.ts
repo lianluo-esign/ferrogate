@@ -203,10 +203,25 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
   // reach today. Deferred, needs UI — tracked on the #313 chain as the #743
   // hosting-abuse-response follow-up. This entry must be DELETED when that
   // screen lands; an obsolete exclusion fails the check below.
+  experiments: {
+    owner: "observability cockpit (#693 follow-up, #313 chain)",
+    reason:
+      "experiment outcome reads are derived from gateway observations rather than an editable resource; they belong beside the existing model and metering diagnostics as a comparison report, not in the CRUD registry — deferred, needs UI",
+  },
+  "spend-anomalies": {
+    owner: "billing/ops cockpit (#697 follow-up, #313 chain)",
+    reason:
+      "spend-anomaly reads are a derived incident ledger with no operator mutation surface; the eventual screen belongs in the wallets/metering operations cockpit beside cost attribution, rather than as a standalone CRUD page — deferred, needs UI",
+  },
   assets: {
     owner: "hosting abuse-response console surface (#743 follow-up, #313 chain)",
     reason:
       "asset fleet inventory plus a quarantine review queue whose writes are a reasoned release/reject decision and an irreversible force-delete that must state whether it is taking a live channel down, not CRUD legs; it also needs a distinct-scope ('admin.assets.fleet' held exactly) unauthorized state and a list that must never link to bytes, so a generic CRUD resource would render the wrong affordances. Belongs as a two-pane abuse-response screen beside the site-domains hosting surfaces — deferred, needs UI",
+  },
+  "tenant-data": {
+    owner: "platform storage operations (#828, #313 chain)",
+    reason:
+      "audited SQL reads, resumable JSONL downloads and destructive point-in-time restore are operator/customer workflows rather than a CRUD page; export is streamed directly to R2 and restore needs a deliberate confirmation tool, so this API/CLI surface is intentionally excluded from the generic console — tracked by #828",
   },
 };
 

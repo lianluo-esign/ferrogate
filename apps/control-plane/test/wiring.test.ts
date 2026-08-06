@@ -167,7 +167,7 @@ describe("the mount record the composition root returned", () => {
     expect(unrecorded).toEqual([]);
   });
 
-  it("exports the PRODUCTION module list, covering exactly the 37 owned groups", () => {
+  it("exports the PRODUCTION module list, covering exactly the 38 owned groups", () => {
     expect(CONTROL_PLANE_ROUTE_MODULES).toHaveLength(CONTROL_PLANE_GROUPS.length);
     expect(CONTROL_PLANE_ROUTE_MODULES.map((module) => module.group).sort()).toEqual([
       ...CONTROL_PLANE_GROUPS,
@@ -358,13 +358,14 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ],
   ["site_domain", "listSiteDomains", "GET", "/admin/v1/site-domains", 200],
   ["skill", "listAdminSkillPackages", "GET", "/admin/v1/skill-packages", 200],
+  ["tenant_data", "queryTenantData", "POST", "/admin/v1/tenant-data/{tenant_id}/query", 400],
   ["tenant_hierarchy", "listAdminTenants", "GET", "/admin/v1/tenants", 200],
   ["wallets", "listWallets", "GET", "/admin/v1/wallets", 200],
   ["x402_spend_policy", "listX402SpendPolicies", "GET", "/admin/v1/x402-spend-policies", 200],
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 37 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 38 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });
@@ -383,7 +384,11 @@ describe("every contract GROUP is reachable on the deployed Worker", () => {
 
   it("serves a representative operation from each group", async () => {
     for (const [group, operationId, method, path, status] of GROUP_PROBES) {
-      const response = await SELF.fetch(`${BASE}${path}`, probeInit(method, operatorKey.secret));
+      const requestPath = concretePath(path);
+      const response = await SELF.fetch(
+        `${BASE}${requestPath}`,
+        probeInit(method, operatorKey.secret),
+      );
       const error = await envelope(response);
       expect(isRouterMiss(response.status, error), `${group}/${operationId} is not mounted`).toBe(
         false,
@@ -433,8 +438,12 @@ describe("the guard is universal: it holds on EVERY group, not on one path", () 
     // 403 (disclosing that the key exists); the table-driven guard cannot.
     const wrong: string[] = [];
     for (const [group, , method, path] of GROUP_PROBES) {
-      const suspended = await SELF.fetch(`${BASE}${path}`, probeInit(method, "tenant-suspended"));
-      const unknown = await SELF.fetch(`${BASE}${path}`, probeInit(method, "no-such-key"));
+      const requestPath = concretePath(path);
+      const suspended = await SELF.fetch(
+        `${BASE}${requestPath}`,
+        probeInit(method, "tenant-suspended"),
+      );
+      const unknown = await SELF.fetch(`${BASE}${requestPath}`, probeInit(method, "no-such-key"));
       const suspendedError = await envelope(suspended);
       const unknownError = await envelope(unknown);
       if (
@@ -453,7 +462,10 @@ describe("the guard is universal: it holds on EVERY group, not on one path", () 
   it("an under-scoped key is 403 scope_denied on every group — never 401", async () => {
     const wrong: string[] = [];
     for (const [group, , method, path] of GROUP_PROBES) {
-      const response = await SELF.fetch(`${BASE}${path}`, probeInit(method, "tenant-readonly"));
+      const response = await SELF.fetch(
+        `${BASE}${concretePath(path)}`,
+        probeInit(method, "tenant-readonly"),
+      );
       const error = await envelope(response);
       if (response.status !== 403 || error.code !== "scope_denied") {
         wrong.push(`${group}: ${response.status} ${error.code}`);
@@ -465,7 +477,7 @@ describe("the guard is universal: it holds on EVERY group, not on one path", () 
   it("no group is reachable with NO credential at all", async () => {
     const wrong: string[] = [];
     for (const [group, , method, path] of GROUP_PROBES) {
-      const response = await SELF.fetch(`${BASE}${path}`, {
+      const response = await SELF.fetch(`${BASE}${concretePath(path)}`, {
         method,
         headers: { "content-type": "application/json" },
         ...(method === "GET" ? {} : { body: "{}" }),
@@ -511,9 +523,13 @@ describe("/control/v1 → /admin/v1 canonicalization holds for the WHOLE surface
     // `export default` is the wrapper and not the bare Hono app.
     const drifted: string[] = [];
     for (const [group, , method, path] of GROUP_PROBES) {
-      if (!path.startsWith("/admin/v1")) continue;
-      const aliasPath = `/control/v1${path.slice("/admin/v1".length)}`;
-      const canonical = await SELF.fetch(`${BASE}${path}`, probeInit(method, operatorKey.secret));
+      const requestPath = concretePath(path);
+      if (!requestPath.startsWith("/admin/v1")) continue;
+      const aliasPath = `/control/v1${requestPath.slice("/admin/v1".length)}`;
+      const canonical = await SELF.fetch(
+        `${BASE}${requestPath}`,
+        probeInit(method, operatorKey.secret),
+      );
       const alias = await SELF.fetch(`${BASE}${aliasPath}`, probeInit(method, operatorKey.secret));
       if (alias.status !== canonical.status) {
         drifted.push(`${group}: ${alias.status} vs ${canonical.status}`);
