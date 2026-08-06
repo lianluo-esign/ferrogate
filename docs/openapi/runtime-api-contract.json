@@ -499,6 +499,14 @@
       "group": "file"
     },
     {
+      "pattern": "/v1/batches",
+      "group": "batch"
+    },
+    {
+      "pattern": "/v1/batches/{*rest}",
+      "group": "batch"
+    },
+    {
       "pattern": "/sites/{*rest}",
       "group": "site"
     },
@@ -3638,6 +3646,50 @@
       "auth": {
         "kind": "bearer",
         "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/batches",
+      "method": "post",
+      "operation_id": "createBatch",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/batches/{batch_id}",
+      "method": "get",
+      "operation_id": "retrieveBatch",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/batches/{batch_id}/cancel",
+      "method": "post",
+      "operation_id": "cancelBatch",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/batches",
+      "method": "get",
+      "operation_id": "listBatches",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
       },
       "rbac_action": null
     },

@@ -1,5 +1,5 @@
 /**
- * The 302-operation runtime API contract, as a typed, table-driven route table.
+ * The 312-operation runtime API contract, as a typed, table-driven route table.
  *
  * Clean-room port of `crates/ferrogate-gateway/src/server/api_contract.rs`.
  * The Rust build `include_str!`s `docs/openapi/runtime-api-contract.json`,
@@ -18,7 +18,7 @@
  * segment; so does this, by ranking each candidate segment-wise
  * (static < param < catch-all) and taking the lexicographically smallest rank.
  *
- * Nothing here is gateway-specific: all 302 operations are present, including
+ * Nothing here is gateway-specific: all 312 operations are present, including
  * the ones other Workers own. Ownership is a separate concern
  * (`GATEWAY_OWNED_OPERATION_IDS` in `./routes/index.ts`).
  */
@@ -120,7 +120,7 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * makes this the anti-drift gate: if the JSON changes, the assertion in
  * `test/contract.test.ts` fails before any route silently disappears.
  */
-export const EXPECTED_OPERATION_COUNT = 302;
+export const EXPECTED_OPERATION_COUNT = 312;
 
 // ---------------------------------------------------------------------------
 // Segment matcher (the `matchit` radix tree, re-implemented)
