@@ -132,7 +132,7 @@ export const DEFAULT_ADMIN_LIST_LIMIT = 100;
 export const DEFAULT_ADMIN_LIST_MAX_LIMIT = 1_000;
 
 /** Query keys that are pagination/search controls rather than record filters. */
-const RESERVED_QUERY_KEYS = new Set(["offset", "limit", "search", "q"]);
+const RESERVED_QUERY_KEYS = new Set(["offset", "limit", "search", "q", "tenant_offset"]);
 
 /**
  * Rust `AdminPagination::from_query` + the `?search=` / filter extraction the

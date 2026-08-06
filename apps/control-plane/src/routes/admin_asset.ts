@@ -136,12 +136,12 @@ import {
   applyAssetReview,
   assetVersionReferences,
   deleteAssetVersion,
-  fleetTenantIds,
   readAssetForReview,
   readFleetAssets,
   reviewTargetVisibility,
   wouldStrandChannel,
 } from "../store/asset_fleet.js";
+import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import {
   type GroupModule,
   type Handler,
@@ -372,8 +372,11 @@ function fleetListHandler(options: {
     );
 
     const explicit = requestedVisibilities(url.searchParams.get("visibility"), options.allowed);
-    const tenantIds =
-      target.kind === "tenant" ? [target.tenantId] : await fleetTenantIds(deps.tenantDatabases);
+    const tenantPage =
+      target.kind === "tenant"
+        ? null
+        : await provisionedTenantPage(deps.tenantDatabases, tenantFanoutOffset(url));
+    const tenantIds = target.kind === "tenant" ? [target.tenantId] : (tenantPage?.tenantIds ?? []);
 
     const page = await readFleetAssets(
       deps.tenantDatabases,
@@ -394,15 +397,27 @@ function fleetListHandler(options: {
     );
 
     const window = page.rows.slice(query.offset, query.offset + query.limit);
-    const envelope = query.paginate
-      ? adminListPaginated(window, page.rows.length, query.offset, query.limit)
-      : adminList(page.rows);
+    const forceTenantPagination = tenantPage !== null && tenantPage.total > tenantPage.limit;
+    const envelope =
+      query.paginate || forceTenantPagination
+        ? adminListPaginated(window, page.rows.length, query.offset, query.limit)
+        : adminList(page.rows);
     return json(c, 200, {
       ...envelope,
       // ALWAYS present, empty array included: an absent field would be
       // indistinguishable from "nothing was missed", and a partial inventory
       // read as complete is how an abuse response misses the abuse.
       unreadable_tenants: page.unreadableTenants,
+      ...(tenantPage === null
+        ? {}
+        : {
+            tenant_page: {
+              offset: tenantPage.offset,
+              limit: tenantPage.limit,
+              total: tenantPage.total,
+              has_more: tenantPage.hasMore,
+            },
+          }),
     });
   };
 }

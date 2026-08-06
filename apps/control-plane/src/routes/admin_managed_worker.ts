@@ -12,20 +12,21 @@ import { periodMonthFromUnix } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, ControlPlaneDeps, StoreRecord } from "../ports.js";
 import { adminListPaginated, listResponse, parseListQuery } from "../responses.js";
+import { pageOf } from "../store/query.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
+import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import {
   listTenantManagedWorkerSessions,
   listTenantManagedWorkers,
 } from "../store/tenant-worker.js";
-import { pageOf } from "../store/query.js";
 import {
-  json,
-  scopeOf,
   type GroupModule,
   type Handler,
   crudGroup,
   depsOf,
+  json,
   readOnlyCollection,
+  scopeOf,
 } from "./resource.js";
 
 async function listManagedObjects(
@@ -37,10 +38,14 @@ async function listManagedObjects(
   ) => Promise<readonly StoreRecord[] | null>,
 ): Promise<Response> {
   const deps = depsOf(c);
-  const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+  const url = new URL(c.req.url);
+  const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
   const scope = scopeOf(c);
-  const tenantIds =
-    scope.kind === "tenant" ? [scope.tenantId] : await deps.tenantDatabases.provisionedTenants();
+  const tenantPage =
+    scope.kind === "tenant"
+      ? null
+      : await provisionedTenantPage(deps.tenantDatabases, tenantFanoutOffset(url));
+  const tenantIds = scope.kind === "tenant" ? [scope.tenantId] : (tenantPage?.tenantIds ?? []);
   const records: StoreRecord[] = [];
   const unreadableTenants: string[] = [];
   const fanoutLimit = Math.max(1, Math.min(deps.listMaxLimit, query.offset + query.limit));
@@ -49,18 +54,33 @@ async function listManagedObjects(
       const rows = await read(deps.tenantDatabases, tenantId, fanoutLimit);
       if (rows !== null) records.push(...rows);
     } catch {
-      if (scope.kind === "tenant") throw new Error(`tenant ${tenantId} managed worker state is unreadable`);
+      if (scope.kind === "tenant")
+        throw new Error(`tenant ${tenantId} managed worker state is unreadable`);
       unreadableTenants.push(tenantId);
     }
   }
-  const body = listResponse(pageOf(records, query), query);
-  return unreadableTenants.length === 0
-    ? json(c, 200, body)
-    : json(c, 200, { ...body, unreadable_tenants: unreadableTenants });
+  const page = pageOf(records, query);
+  const body =
+    query.paginate || (tenantPage !== null && tenantPage.total > tenantPage.limit)
+      ? adminListPaginated(page.items, page.total, query.offset, query.limit)
+      : listResponse(page, query);
+  return json(c, 200, {
+    ...body,
+    ...(unreadableTenants.length === 0 ? {} : { unreadable_tenants: unreadableTenants }),
+    ...(tenantPage === null
+      ? {}
+      : {
+          tenant_page: {
+            offset: tenantPage.offset,
+            limit: tenantPage.limit,
+            total: tenantPage.total,
+            has_more: tenantPage.hasMore,
+          },
+        }),
+  });
 }
 
-const listManagedWorkers: Handler = (c) =>
-  listManagedObjects(c, listTenantManagedWorkers);
+const listManagedWorkers: Handler = (c) => listManagedObjects(c, listTenantManagedWorkers);
 
 const listManagedWorkerSessions: Handler = (c) =>
   listManagedObjects(c, listTenantManagedWorkerSessions);
@@ -249,11 +269,13 @@ async function observedActivityRowsFor(
 async function listObservedAgentActivity(c: Parameters<Handler>[0]): Promise<Response> {
   const deps = depsOf(c);
   const scope: CallerScope = scopeOf(c);
-  const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+  const url = new URL(c.req.url);
+  const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
   const nowUnix = Math.floor(Date.now() / 1000);
   const router = deps.tenantStorage ?? deps.tenantDatabases;
-  const tenantIds =
-    scope.kind === "tenant" ? [scope.tenantId] : await router.provisionedTenants();
+  const tenantPage =
+    scope.kind === "tenant" ? null : await provisionedTenantPage(router, tenantFanoutOffset(url));
+  const tenantIds = scope.kind === "tenant" ? [scope.tenantId] : (tenantPage?.tenantIds ?? []);
   const rows: ActivityRow[] = [];
   const unavailableTenants: string[] = [];
   let presenceFeedAvailable = true;
@@ -264,7 +286,8 @@ async function listObservedAgentActivity(c: Parameters<Handler>[0]): Promise<Res
       rows.push(...result.rows);
       if (!result.presenceFeedAvailable) {
         presenceFeedAvailable = false;
-        if (result.presenceReason !== null) presenceReasons.push(`${tenantId}: ${result.presenceReason}`);
+        if (result.presenceReason !== null)
+          presenceReasons.push(`${tenantId}: ${result.presenceReason}`);
       }
     } catch (error) {
       if (scope.kind === "tenant") {
@@ -288,13 +311,27 @@ async function listObservedAgentActivity(c: Parameters<Handler>[0]): Promise<Res
   );
   const windowed = rows.slice(query.offset, query.offset + query.limit);
   return json(c, 200, {
-    ...adminListPaginated(windowed.map((row) => row.document), rows.length, query.offset, query.limit),
+    ...adminListPaginated(
+      windowed.map((row) => row.document),
+      rows.length,
+      query.offset,
+      query.limit,
+    ),
     presence_feed: {
       status: presenceFeedAvailable ? "available" : "unavailable",
-      unavailable_reason:
-        presenceReasons.length === 0 ? null : presenceReasons.join("; "),
+      unavailable_reason: presenceReasons.length === 0 ? null : presenceReasons.join("; "),
       rows_may_be_incomplete: unavailableTenants.length > 0 || !presenceFeedAvailable,
     },
+    ...(tenantPage === null
+      ? {}
+      : {
+          tenant_page: {
+            offset: tenantPage.offset,
+            limit: tenantPage.limit,
+            total: tenantPage.total,
+            has_more: tenantPage.hasMore,
+          },
+        }),
   });
 }
 
@@ -317,13 +354,17 @@ async function listObservedAgentActivity(c: Parameters<Handler>[0]): Promise<Res
  * observed activity remain derived platform views until their producers exist;
  * this keeps the ADMIN VIEWS honest rather than manufacturing rows.
  */
-export const adminManagedWorkerRoutes: GroupModule = crudGroup("admin_managed_worker", [
-  readOnlyCollection("managed-workers", "managed_worker"),
-  readOnlyCollection("managed-worker-sessions", "managed_worker_session"),
-  readOnlyCollection("framework-adapters", "framework_adapter"),
-  readOnlyCollection("observed-agent-activity", "observed_agent_activity"),
-], {
-  listAdminManagedWorkers: listManagedWorkers,
-  listAdminManagedWorkerSessions: listManagedWorkerSessions,
-  listAdminObservedAgentActivity: listObservedAgentActivity,
-});
+export const adminManagedWorkerRoutes: GroupModule = crudGroup(
+  "admin_managed_worker",
+  [
+    readOnlyCollection("managed-workers", "managed_worker"),
+    readOnlyCollection("managed-worker-sessions", "managed_worker_session"),
+    readOnlyCollection("framework-adapters", "framework_adapter"),
+    readOnlyCollection("observed-agent-activity", "observed_agent_activity"),
+  ],
+  {
+    listAdminManagedWorkers: listManagedWorkers,
+    listAdminManagedWorkerSessions: listManagedWorkerSessions,
+    listAdminObservedAgentActivity: listObservedAgentActivity,
+  },
+);

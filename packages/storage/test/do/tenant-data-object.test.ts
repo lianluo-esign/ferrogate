@@ -19,20 +19,24 @@
  * agree.
  */
 import {
+  applyD1Migrations,
   env,
   listDurableObjectIds,
   runDurableObjectAlarm,
   runInDurableObject,
 } from "cloudflare:test";
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
+  TENANT_AGGREGATE_FLUSH_CALLBACK,
   TENANT_SCHEDULE_ALARM_CALLBACK,
+  type TenantAggregateFlushAlarmCallback,
   type TenantDataBatchRequest,
   type TenantDataNamespace,
   type TenantDataObject,
   type TenantScheduleAlarmCallback,
   sqlStatements,
 } from "../../src/tenant-data-object.js";
+import type { TenantAggregateFlushAlarmMessage } from "../../src/tenant-data-object.js";
 import type { TenantScheduleAlarmMessage } from "../../src/tenant-schedule-alarm.js";
 import { TENANT_MIGRATIONS, TENANT_SCHEMA_VERSION } from "../../src/tenant-schema-sql.js";
 
@@ -41,9 +45,26 @@ declare global {
     interface Env {
       TENANT_DATA: TenantDataNamespace;
       FAULTY_TENANT_DATA: TenantDataNamespace;
+      CONTROL_DB: D1Database;
+      CONTROL_MIGRATIONS: Parameters<typeof applyD1Migrations>[1];
     }
   }
 }
+
+beforeAll(async () => {
+  await applyD1Migrations(env.CONTROL_DB, env.CONTROL_MIGRATIONS);
+});
+
+beforeEach(async () => {
+  // The control projection is shared by this workerd environment; keep rows
+  // from a previous run from satisfying a freshness assertion.
+  await env.CONTROL_DB.batch([
+    env.CONTROL_DB.prepare("DELETE FROM tenant_databases"),
+    env.CONTROL_DB.prepare("DELETE FROM tenant_agent_cost_rollups"),
+    env.CONTROL_DB.prepare("DELETE FROM tenant_spend_rollups"),
+    env.CONTROL_DB.prepare("DELETE FROM tenant_asset_rollups"),
+  ]);
+});
 
 /**
  * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0021.
@@ -202,8 +223,16 @@ function operatorObjectFor(tenantId: string): OperatorTenantObject {
   return objectFor(tenantId) as unknown as OperatorTenantObject;
 }
 
+type AggregateAlarmStub = ScheduleAlarmStub & {
+  setAggregateFlushAlarm(request: { tenantId: string; scheduledAtUnix: number }): Promise<void>;
+};
+
 function scheduleAlarmObjectFor(tenantId: string): ScheduleAlarmStub {
   return objectFor(tenantId) as unknown as ScheduleAlarmStub;
+}
+
+function aggregateAlarmObjectFor(tenantId: string): AggregateAlarmStub {
+  return objectFor(tenantId) as unknown as AggregateAlarmStub;
 }
 
 /**
@@ -1488,8 +1517,8 @@ describe("tenant schedule alarms", () => {
 
     await seam(objectA);
     await seam(objectB);
-    const scheduledAtUnixA = 1_800_000_200;
-    const scheduledAtUnixB = 1_800_000_300;
+    const scheduledAtUnixA = Math.floor(Date.now() / 1000) + 10;
+    const scheduledAtUnixB = scheduledAtUnixA + 100;
     await objectA.setScheduleAlarm({ tenantId: tenantA, scheduledAtUnix: scheduledAtUnixA });
     await objectB.setScheduleAlarm({ tenantId: tenantB, scheduledAtUnix: scheduledAtUnixB });
 
@@ -1533,6 +1562,227 @@ describe("tenant schedule alarms", () => {
 
     expect(
       await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
+  });
+
+  test("multiplexes schedule and aggregate deadlines independently", async () => {
+    type AlarmHookSeam = {
+      scheduleRuns: number;
+      flushRuns: number;
+      [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback;
+      [TENANT_AGGREGATE_FLUSH_CALLBACK]: TenantAggregateFlushAlarmCallback;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const scheduleOnly = aggregateAlarmObjectFor("tenant_alarm_schedule_only");
+    const flushOnly = aggregateAlarmObjectFor("tenant_alarm_flush_only");
+    const bothDue = aggregateAlarmObjectFor("tenant_alarm_both_due");
+
+    const installHooks = async (instance: DurableObjectStub<TenantDataObject>) => {
+      await runInDurableObject(instance, (current) => {
+        const target = current as unknown as AlarmHookSeam;
+        target.scheduleRuns = 0;
+        target.flushRuns = 0;
+        target[TENANT_SCHEDULE_ALARM_CALLBACK] = async function (this: AlarmHookSeam) {
+          this.scheduleRuns += 1;
+        };
+        target[TENANT_AGGREGATE_FLUSH_CALLBACK] = async function (
+          this: AlarmHookSeam,
+          _message: TenantAggregateFlushAlarmMessage,
+        ) {
+          this.flushRuns += 1;
+        };
+      });
+    };
+
+    await Promise.all([installHooks(scheduleOnly), installHooks(flushOnly), installHooks(bothDue)]);
+
+    await scheduleOnly.setScheduleAlarm({
+      tenantId: "tenant_alarm_schedule_only",
+      scheduledAtUnix: now + 10,
+    });
+    await scheduleOnly.setAggregateFlushAlarm({
+      tenantId: "tenant_alarm_schedule_only",
+      scheduledAtUnix: now + 120,
+    });
+    await runDurableObjectAlarm(scheduleOnly);
+    expect(
+      await runInDurableObject(scheduleOnly, (current) => {
+        const target = current as unknown as AlarmHookSeam;
+        return { scheduleRuns: target.scheduleRuns, flushRuns: target.flushRuns };
+      }),
+    ).toEqual({ scheduleRuns: 1, flushRuns: 0 });
+    expect(
+      await runInDurableObject(scheduleOnly, (_instance, state) => state.storage.getAlarm()),
+    ).toBe((now + 120) * 1000);
+
+    await flushOnly.setScheduleAlarm({
+      tenantId: "tenant_alarm_flush_only",
+      scheduledAtUnix: now + 120,
+    });
+    await flushOnly.setAggregateFlushAlarm({
+      tenantId: "tenant_alarm_flush_only",
+      scheduledAtUnix: now + 10,
+    });
+    await runDurableObjectAlarm(flushOnly);
+    expect(
+      await runInDurableObject(flushOnly, (current) => {
+        const target = current as unknown as AlarmHookSeam;
+        return { scheduleRuns: target.scheduleRuns, flushRuns: target.flushRuns };
+      }),
+    ).toEqual({ scheduleRuns: 0, flushRuns: 1 });
+    expect(
+      await runInDurableObject(flushOnly, (_instance, state) => state.storage.getAlarm()),
+    ).toBeGreaterThanOrEqual((now + 60) * 1000);
+
+    await bothDue.setScheduleAlarm({
+      tenantId: "tenant_alarm_both_due",
+      scheduledAtUnix: now + 10,
+    });
+    await bothDue.setAggregateFlushAlarm({
+      tenantId: "tenant_alarm_both_due",
+      scheduledAtUnix: now + 10,
+    });
+    await runDurableObjectAlarm(bothDue);
+    expect(
+      await runInDurableObject(bothDue, (current) => {
+        const target = current as unknown as AlarmHookSeam;
+        return { scheduleRuns: target.scheduleRuns, flushRuns: target.flushRuns };
+      }),
+    ).toEqual({ scheduleRuns: 1, flushRuns: 1 });
+  });
+
+  test("pushes tenant spend to control D1 and replaces it on the next flush", async () => {
+    const tenantId = "tenant_aggregate_flush_projection";
+    const object = aggregateAlarmObjectFor(tenantId);
+    const period = "2026-08";
+    await env.CONTROL_DB.prepare("INSERT INTO tenant_databases (tenant_id) VALUES (?)")
+      .bind(tenantId)
+      .run();
+    await object.query({
+      tenantId,
+      sql:
+        "INSERT INTO agent_cost_burn " +
+        "(tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+      params: [tenantId, "agent", period, 4.5, 10, 20],
+    });
+    await object.batch({
+      tenantId,
+      statements: [
+        {
+          sql:
+            "INSERT INTO stored_assets " +
+            "(id, tenant_id, project_id, asset_type, name, version, variant, content_type, " +
+            "content_hash, size_bytes, storage_uri, visibility, yanked, created_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          params: [
+            "asset_rollup",
+            tenantId,
+            null,
+            "model",
+            "model",
+            "1",
+            "default",
+            "application/octet-stream",
+            "hash",
+            12,
+            "assets/rollup",
+            "visible",
+            0,
+            10,
+            20,
+          ],
+        },
+        {
+          sql:
+            "INSERT INTO asset_channels " +
+            "(id, tenant_id, asset_type, name, channel, version, updated_at_unix) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+          params: ["channel_rollup", tenantId, "model", "model", "stable", "1", 20],
+        },
+      ],
+    });
+    const before = Math.floor(Date.now() / 1000);
+    await object.setAggregateFlushAlarm({ tenantId, scheduledAtUnix: before + 10 });
+    await runDurableObjectAlarm(object);
+
+    const first = await env.CONTROL_DB.prepare(
+      `SELECT tenant_id, agent_key, period, accumulated_usd, as_of_unix
+           FROM tenant_agent_cost_rollups
+          WHERE tenant_id = ?`,
+    )
+      .bind(tenantId)
+      .first<{
+        tenant_id: string;
+        agent_key: string;
+        period: string;
+        accumulated_usd: number;
+        as_of_unix: number;
+      }>();
+    expect(first).toMatchObject({
+      tenant_id: tenantId,
+      agent_key: "agent",
+      period,
+      accumulated_usd: 4.5,
+    });
+    expect(first?.as_of_unix).toBeGreaterThanOrEqual(before);
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT tenant_id, period, accumulated_usd, as_of_unix FROM tenant_spend_rollups WHERE tenant_id = ?",
+      )
+        .bind(tenantId)
+        .first(),
+    ).toMatchObject({ tenant_id: tenantId, period, accumulated_usd: 4.5 });
+    expect(
+      await env.CONTROL_DB.prepare(
+        `SELECT asset_count, asset_bytes, channel_count
+             FROM tenant_asset_rollups
+            WHERE tenant_id = ?`,
+      )
+        .bind(tenantId)
+        .first<{ asset_count: number; asset_bytes: number; channel_count: number }>(),
+    ).toEqual({ asset_count: 1, asset_bytes: 12, channel_count: 1 });
+
+    await object.query({
+      tenantId,
+      sql: "UPDATE agent_cost_burn SET accumulated_usd = ?, updated_at_unix = ? WHERE tenant_id = ?",
+      params: [9.25, 30, tenantId],
+    });
+    await object.setAggregateFlushAlarm({
+      tenantId,
+      scheduledAtUnix: Math.floor(Date.now() / 1000) + 10,
+    });
+    await runDurableObjectAlarm(object);
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT accumulated_usd FROM tenant_agent_cost_rollups WHERE tenant_id = ?",
+      )
+        .bind(tenantId)
+        .first<{ accumulated_usd: number }>(),
+    ).toEqual({ accumulated_usd: 9.25 });
+
+    await env.CONTROL_DB.batch([
+      env.CONTROL_DB.prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(tenantId),
+      env.CONTROL_DB.prepare("DELETE FROM tenant_agent_cost_rollups WHERE tenant_id = ?").bind(
+        tenantId,
+      ),
+      env.CONTROL_DB.prepare("DELETE FROM tenant_spend_rollups WHERE tenant_id = ?").bind(tenantId),
+      env.CONTROL_DB.prepare("DELETE FROM tenant_asset_rollups WHERE tenant_id = ?").bind(tenantId),
+    ]);
+    await object.setAggregateFlushAlarm({
+      tenantId,
+      scheduledAtUnix: Math.floor(Date.now() / 1000) + 10,
+    });
+    await runDurableObjectAlarm(object);
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT tenant_id FROM tenant_agent_cost_rollups WHERE tenant_id = ?",
+      )
+        .bind(tenantId)
+        .first(),
+    ).toBeNull();
+    expect(
+      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
     ).toBeNull();
   });
 });

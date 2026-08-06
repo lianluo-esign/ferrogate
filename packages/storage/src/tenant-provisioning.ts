@@ -608,7 +608,25 @@ export async function retireTenantStorage(
 ): Promise<TenantDeprovisioningReceipt> {
   const registry = new ControlDatabaseTenantRegistry(router.control());
   const retained = await registry.get(tenantId);
+  // A retained tenant object is intentionally no longer enumerable. Remove
+  // every pushed projection before removing its roster row, otherwise fleet
+  // totals would keep displaying a tenant whose object the roster no longer
+  // reaches. The replacement flush is idempotent, so this cleanup is safe to
+  // retry if the roster write is interrupted.
+  const deleteRollups = async (): Promise<void> => {
+    const control = router.control();
+    await control.batch([
+      control.prepare("DELETE FROM tenant_agent_cost_rollups WHERE tenant_id = ?").bind(tenantId),
+      control.prepare("DELETE FROM tenant_spend_rollups WHERE tenant_id = ?").bind(tenantId),
+      control.prepare("DELETE FROM tenant_asset_rollups WHERE tenant_id = ?").bind(tenantId),
+    ]);
+  };
+  await deleteRollups();
   const rosterRowRemoved = await registry.remove(tenantId);
+  // A flush that was already past its SQLite read can finish between the first
+  // delete and roster removal. The second pass makes the returned receipt true
+  // even for that race; after the roster is gone, the object refuses to flush.
+  await deleteRollups();
   return {
     tenantId,
     rosterRowRemoved,

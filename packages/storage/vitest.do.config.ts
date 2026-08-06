@@ -1,5 +1,10 @@
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const controlMigrations = await readD1Migrations(path.resolve(here, "../../sql/d1-ts/control"));
 
 /**
  * The DURABLE-OBJECT suite: `test/do/**` runs inside the REAL local `workerd`
@@ -33,6 +38,10 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./test/do/wrangler.toml" },
+      miniflare: {
+        d1Databases: ["CONTROL_DB"],
+        bindings: { CONTROL_MIGRATIONS: controlMigrations },
+      },
     }),
   ],
   test: { include: ["test/do/**/*.test.ts"] },

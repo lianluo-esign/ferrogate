@@ -25,6 +25,12 @@ compatibility_flags = ["nodejs_compat"]
 name = "TENANT_DATA"
 class_name = "TenantDataObject"
 
+[[d1_databases]]
+binding = "CONTROL_DB"
+database_name = "ferrogate-storage-do-control"
+database_id = "replace-at-test"
+migrations_dir = "../../../sql/d1-ts/control"
+
 # The fault-injection twin. It is a SEPARATE namespace rather than a flag on the
 # real one because a migration set that throws must be applied by the real
 # constructor, on a real cold start, against a real database — a
