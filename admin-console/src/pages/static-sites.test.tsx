@@ -371,22 +371,25 @@ function mockBase(options: {
         total: (options.withheld ?? []).length,
       }),
     ),
-    // Per-hostname detail read: the only endpoint that carries ACME posture and
-    // the #488 `verification` block, so the drawer can show both for a binding
-    // made long before this session. It echoes the listed binding, so a fixture
-    // that says a hostname is pending is not contradicted by its own detail.
+    // Per-hostname detail read. #738 replaced the read's `acme.enabled`
+    // boolean with `certificate_status` (`AdminSiteDomainReadResponse`), and
+    // `livenessOf` in the page derives the ACME column from it: an issued
+    // certificate (`active` / `issued_not_routing`) renders as enabled, a
+    // definite non-issued state as disabled. The fixture serves that shape;
+    // `acmeEnabled` keeps steering the same two UI outcomes it always did.
+    // It echoes the listed binding, so a fixture that says a hostname is
+    // pending is not contradicted by its own detail.
     http.get(gatewayUrl("/admin/v1/site-domains/:hostname"), ({ params }) => {
       const hostname = params.hostname as string;
       const binding =
         (options.domains ?? []).find((entry) => entry.hostname === hostname) ??
         domain({ hostname });
+      const certificateStatus = (options.acmeEnabled ?? true) ? "active" : "not_provisioned";
       return HttpResponse.json({
         object: "site_domain",
         site_domain: binding,
-        acme: {
-          enabled: options.acmeEnabled ?? true,
-          reload_triggered: false,
-        },
+        certificate_status: certificateStatus,
+        certificate: null,
         // The gateway omits `verification` only when no proof record exists at
         // all; a pending binding always carries the record to publish.
         ...(binding.verification_state === "pending_verification"
