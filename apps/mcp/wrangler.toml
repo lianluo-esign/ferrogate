@@ -282,9 +282,9 @@ migrations_dir = "../../sql/d1-ts/control"
 # substitutes the account's real buckets. R2 names are lowercase alphanumerics
 # and hyphens, 3–63 chars.
 #
-# NOTE: the live account (ferrogate) has R2 unactivated. A deploy with this
-# stanza against an account without the R2 plan fails with error 10042, not
-# 10000. Activate R2 on the account before deploying this Worker.
+# NOTE: R2 is active on the live `ferrogate` account as of 2026-07-31
+# (monthly subscription). `bucket_name` / `preview_bucket_name` remain
+# deploy-time placeholders and must be replaced with the account's real buckets.
 # ---------------------------------------------------------------------------
 [[r2_buckets]]
 binding = "ASSETS"

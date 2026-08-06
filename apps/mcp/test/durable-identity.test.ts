@@ -20,18 +20,20 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { D1McpAuth } from "../src/auth.js";
 import {
-  TenantObjectCredentialGrants,
   DurableCredentialStore,
   IDENTITY_KEY_BYTES,
   KV_MIN_EXPIRATION_TTL_SECS,
   KvOauthFlowStore,
   OAUTH_FLOW_KEY_PREFIX,
+  TenantObjectCredentialGrants,
   decodeIdentityKey,
   decodeServerRow,
   identityCipherFrom,
   loadServerCatalog,
 } from "../src/durable.js";
 import {
+  D1R2AssetReader,
+  InMemoryAssets,
   type McpEnv,
   type McpIdentityActor,
   type StoredMcpOauthCredential,
@@ -41,15 +43,12 @@ import {
   portsBound,
   resolvePorts,
 } from "../src/ports.js";
-import {
-  clearMcpIdentityTables,
-  tenantDataNamespace,
-  tenantDatabase,
-} from "./tenant-storage.js";
+import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
 const DB = env.DB as unknown as D1Database;
 const KV = env.MCP_OAUTH_KV as unknown as KVNamespace;
 const TENANT_DATA = tenantDataNamespace(env);
+const ASSETS = env.ASSETS as unknown as R2Bucket;
 
 const ACTOR: McpIdentityActor = { tenantId: "t1", workspaceId: "w1", userId: "u1" };
 const OTHER_ACTOR: McpIdentityActor = { tenantId: "t2", workspaceId: "w1", userId: "u1" };
@@ -516,6 +515,24 @@ describe("resolvePorts binding postures", () => {
   it("binds the DURABLE credential store when the bindings are present", () => {
     const ports = resolvePorts(base);
     expect(ports.credentials).toBeInstanceOf(DurableCredentialStore);
+  });
+
+  it("pins the asset reader to D1/R2 only in the production posture", () => {
+    // Keep this assertion at the composition root: reader implementation tests
+    // cannot catch a deployed posture silently falling back to in-memory.
+    const production = resolvePorts({ ...base, ASSETS });
+    expect(production.assets).toBeInstanceOf(D1R2AssetReader);
+    expect(production.assets).not.toBeInstanceOf(InMemoryAssets);
+
+    expect(resolvePorts(base).assets).toBeInstanceOf(InMemoryAssets);
+    expect(resolvePorts({ ...base, ASSETS, TENANT_DATA: undefined }).assets).toBeInstanceOf(
+      InMemoryAssets,
+    );
+    expect(resolvePorts({ ...base, ASSETS, DB: undefined }).assets).toBeInstanceOf(InMemoryAssets);
+
+    const dev = resolvePorts({ ...base, ASSETS, FG_DEV_IN_MEMORY_PORTS: "1" });
+    expect(dev.assets).toBeInstanceOf(InMemoryAssets);
+    expect(dev.assets).not.toBeInstanceOf(D1R2AssetReader);
   });
 
   it("keys the CIPHER on the operator's material, not a per-isolate random key", async () => {
