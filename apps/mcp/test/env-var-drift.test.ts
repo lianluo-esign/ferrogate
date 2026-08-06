@@ -382,7 +382,6 @@ describe("the env-var drift gate itself", () => {
       "RATE_LIMIT",
       // Cross-script tenant catalog and identity storage, owned by gateway.
       "TENANT_DATA",
-      "TENANT_DB",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(7);
     expect(READS.named.has("MCP_SESSION")).toBe(true);

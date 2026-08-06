@@ -1,9 +1,10 @@
 /**
  * The D1+R2-backed {@link D1R2AssetReader} mount test.
  *
- * Asserts that `resolvePorts` selects `D1R2AssetReader` when both `env.ASSETS`
- * and `env.TENANT_DB` are present, and that `resources/list` / `resources/read`
- * return published assets through the durable path.
+ * Asserts that `resolvePorts` selects `D1R2AssetReader` when `env.ASSETS` and
+ * the gateway-owned `env.TENANT_DATA` namespace are present, and that
+ * `resources/list` / `resources/read` return published assets through the
+ * durable path.
  *
  * ## Why this test exists
  *
@@ -14,7 +15,7 @@
  * was not, which is the worst of the two shapes: the object is really there
  * and nothing can find it.
  *
- * This test seeds real rows into `env.TENANT_DB` and real objects into
+ * This test seeds real rows into tenant Durable Objects and real objects into
  * `env.ASSETS`, then drives the Worker over `SELF.fetch` and asserts the
  * durable path serves them. Deleting the `assets` line in `resolvePorts`
  * turns this test RED.
@@ -28,6 +29,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import {
   type AuthContext,
   D1R2AssetReader,
@@ -37,25 +39,30 @@ import {
   resolvePorts,
 } from "../src/ports.js";
 import { READ_KEY, TENANT, rpcRequest } from "./fixtures.js";
+import { registerDurableObjectTenant, tenantObjectDb } from "./tenant-object.js";
+import { tenantDataNamespace } from "./tenant-storage.js";
 
 const CONTENT = new TextEncoder().encode("echo hello");
+const OTHER_TENANT = "some-other-tenant";
 
 interface McpTestBindings {
   readonly ASSETS?: R2Bucket;
-  readonly TENANT_DB?: D1Database;
   readonly DB?: D1Database;
 }
 
-/** Assert that both ASSETS and TENANT_DB are defined, then return them. */
-function requireBindings(bindings: McpTestBindings): { ASSETS: R2Bucket; TENANT_DB: D1Database } {
-  const { ASSETS, TENANT_DB } = bindings;
-  if (ASSETS === undefined || TENANT_DB === undefined) {
-    throw new Error("ASSETS and TENANT_DB must be defined in test bindings");
+/** Assert that the production asset bindings are defined, then return them. */
+function requireBindings(bindings: McpTestBindings): {
+  ASSETS: R2Bucket;
+  DB: D1Database;
+} {
+  const { ASSETS, DB } = bindings;
+  if (ASSETS === undefined || DB === undefined) {
+    throw new Error("ASSETS and DB must be defined in test bindings");
   }
-  return { ASSETS, TENANT_DB };
+  return { ASSETS, DB };
 }
 
-/** Seed one asset row in the tenant D1 and one object in the R2 bucket. */
+/** Seed one asset row in a tenant-object D1 facade and one object in R2. */
 async function seedAsset(
   db: D1Database,
   bucket: R2Bucket,
@@ -73,7 +80,7 @@ async function seedAsset(
   const digest = await crypto.subtle.digest("SHA-256", CONTENT);
   const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-  // Insert the metadata row into the tenant D1.
+  // Insert the metadata row into the tenant-object D1 facade.
   await db
     .prepare(
       "INSERT OR IGNORE INTO stored_assets " +
@@ -105,6 +112,30 @@ async function seedAsset(
   });
 }
 
+async function clearTenantAssets(): Promise<void> {
+  for (const tenantId of [TENANT, OTHER_TENANT]) {
+    const db = tenantObjectDb(tenantId);
+    const existing = await db.prepare("SELECT storage_uri FROM stored_assets").all<{
+      storage_uri: string;
+    }>();
+    const { ASSETS } = requireBindings(env as unknown as McpTestBindings);
+    for (const row of existing.results ?? []) {
+      try {
+        await ASSETS.delete(row.storage_uri);
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+    await db.prepare("DELETE FROM stored_assets").run();
+  }
+}
+
+function assetReader(bindings: McpTestBindings): D1R2AssetReader {
+  const { ASSETS, DB } = requireBindings(bindings);
+  const router = new DurableObjectTenantDatabaseRouter(tenantDataNamespace(env), DB);
+  return new D1R2AssetReader((tenantId) => router.databaseFor(tenantId), ASSETS);
+}
+
 describe("D1R2AssetReader — production asset reader mount", () => {
   let bindings: McpTestBindings;
 
@@ -125,64 +156,85 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     } satisfies AuthContext);
     bindings = env as unknown as McpTestBindings;
 
-    // Clean up any assets left by previous tests.
-    const { ASSETS, TENANT_DB } = bindings;
-    if (ASSETS !== undefined && TENANT_DB !== undefined) {
-      const existing = await TENANT_DB.prepare("SELECT storage_uri FROM stored_assets").all<{
-        storage_uri: string;
-      }>();
-      for (const row of existing.results ?? []) {
-        try {
-          await ASSETS.delete(row.storage_uri);
-        } catch {
-          // Best-effort cleanup.
-        }
-      }
-      await TENANT_DB.prepare("DELETE FROM stored_assets").all();
-    }
+    // Clean up any assets left by previous tests in both tenant objects.
+    await clearTenantAssets();
   });
 
-  it("resolvePorts selects D1R2AssetReader when both ASSETS and TENANT_DB are present", () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
+  it("production posture reads each tenant's own Durable Object", async () => {
+    const { ASSETS, DB } = requireBindings(bindings);
+    const TENANT_DATA = tenantDataNamespace(env);
+    const tenantA = tenantObjectDb(TENANT);
+    const tenantB = tenantObjectDb(OTHER_TENANT);
+
+    await seedAsset(tenantA, ASSETS, { name: "object-a" });
+    await seedAsset(tenantB, ASSETS, {
+      name: "object-b",
+      tenant_id: OTHER_TENANT,
+    });
+
+    const ports = resolvePorts({
+      ASSETS,
+      DB,
+      TENANT_DATA,
+      FG_DEV_IN_MEMORY_PORTS: "0",
+    } satisfies McpEnv);
+
+    expect(ports.assets).toBeInstanceOf(D1R2AssetReader);
+    await expect(ports.assets.list(TENANT)).resolves.toEqual([
+      expect.objectContaining({ name: "object-a" }),
+    ]);
+    await expect(ports.assets.list(OTHER_TENANT)).resolves.toEqual([
+      expect.objectContaining({ name: "object-b" }),
+    ]);
+    await expect(ports.assets.read(TENANT, "cli_tool", "object-b", "1.0.0")).resolves.toMatchObject(
+      { ok: false, error: { kind: "not_found" } },
+    );
+  });
+
+  it("resolvePorts selects D1R2AssetReader when ASSETS and tenant object bindings are present", () => {
+    const { ASSETS, DB } = requireBindings(bindings);
+    const TENANT_DATA = tenantDataNamespace(env);
 
     // Build a minimal env with both bindings and NO dev-mode flag.
     const mcpEnv: McpEnv = {
       ASSETS,
-      TENANT_DB,
+      DB,
+      TENANT_DATA,
     };
     const ports = resolvePorts(mcpEnv);
     expect(ports.assets).toBeInstanceOf(D1R2AssetReader);
   });
 
   it("resolvePorts falls back to InMemoryAssets when ASSETS is absent", () => {
-    const { TENANT_DB } = bindings;
-    expect(TENANT_DB).toBeDefined();
+    const { DB } = requireBindings(bindings);
+    const TENANT_DATA = tenantDataNamespace(env);
 
     const mcpEnv: McpEnv = {
-      TENANT_DB: TENANT_DB as D1Database,
+      DB,
+      TENANT_DATA: tenantDataNamespace(env),
       // ASSETS deliberately absent
     };
     const ports = resolvePorts(mcpEnv);
     expect(ports.assets).not.toBeInstanceOf(D1R2AssetReader);
   });
 
-  it("resolvePorts falls back to InMemoryAssets when TENANT_DB is absent", () => {
-    const { ASSETS } = bindings;
-    expect(ASSETS).toBeDefined();
+  it("resolvePorts falls back to InMemoryAssets when TENANT_DATA is absent", () => {
+    const { ASSETS, DB } = requireBindings(bindings);
 
     const mcpEnv: McpEnv = {
-      ASSETS: ASSETS as R2Bucket,
-      // TENANT_DB deliberately absent
+      ASSETS,
+      DB,
+      // TENANT_DATA deliberately absent
     };
     const ports = resolvePorts(mcpEnv);
     expect(ports.assets).not.toBeInstanceOf(D1R2AssetReader);
   });
 
   it("D1R2AssetReader.list returns seeded assets", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS);
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS);
 
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const reader = assetReader(bindings);
     const assets = await reader.list(TENANT);
     expect(assets).toHaveLength(1);
     expect(assets[0]).toMatchObject({
@@ -195,10 +247,10 @@ describe("D1R2AssetReader — production asset reader mount", () => {
   });
 
   it("D1R2AssetReader.read returns content for a downloadable asset", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS);
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS);
 
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const reader = assetReader(bindings);
     const result = await reader.read(TENANT, "cli_tool", "deploy", "1.0.0");
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -208,13 +260,13 @@ describe("D1R2AssetReader — production asset reader mount", () => {
   });
 
   it("D1R2AssetReader.read returns not_found for a non-visible asset (#366)", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS, {
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-pending",
       visibility: "pending_scan",
     });
 
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const reader = assetReader(bindings);
     const result = await reader.read(TENANT, "cli_tool", "deploy-pending", "1.0.0");
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -223,13 +275,13 @@ describe("D1R2AssetReader — production asset reader mount", () => {
   });
 
   it("D1R2AssetReader.read returns not_found for a yanked asset (#366)", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS, {
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-yanked",
       yanked: true,
     });
 
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const reader = assetReader(bindings);
     const result = await reader.read(TENANT, "cli_tool", "deploy-yanked", "1.0.0");
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -238,20 +290,19 @@ describe("D1R2AssetReader — production asset reader mount", () => {
   });
 
   it("D1R2AssetReader enforces cross-tenant isolation", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    const OTHER_TENANT = "some-other-tenant";
+    const { ASSETS } = requireBindings(bindings);
 
-    // Seed one asset for each tenant.
-    await seedAsset(TENANT_DB, ASSETS, {
+    // Seed one asset in each tenant object.
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-tenant-a",
       tenant_id: TENANT,
     });
-    await seedAsset(TENANT_DB, ASSETS, {
+    await seedAsset(tenantObjectDb(OTHER_TENANT), ASSETS, {
       name: "deploy-tenant-b",
       tenant_id: OTHER_TENANT,
     });
 
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const reader = assetReader(bindings);
 
     // list() for tenant A returns only tenant A's assets.
     const assetsA = await reader.list(TENANT);
@@ -283,8 +334,8 @@ describe("D1R2AssetReader — production asset reader mount", () => {
   });
 
   it("D1R2AssetReader.read returns not_found for a missing asset", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const { ASSETS } = requireBindings(bindings);
+    const reader = assetReader(bindings);
     const result = await reader.read(TENANT, "cli_tool", "ghost", "9.9.9");
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -293,17 +344,17 @@ describe("D1R2AssetReader — production asset reader mount", () => {
   });
 
   it("D1R2AssetReader.read returns integrity error on hash mismatch", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
+    const { ASSETS } = requireBindings(bindings);
     // Seed with the correct hash, then PUT different content in R2 so the
     // stored hash no longer matches the body.
-    await seedAsset(TENANT_DB, ASSETS, {
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-bad-hash",
     });
     // Overwrite the R2 object with different content.
     const storageUri = `assets/v1/t/${TENANT}/obj/cli_tool/deploy-bad-hash/1.0.0//`;
     await ASSETS.put(storageUri, new TextEncoder().encode("wrong content"));
 
-    const reader = new D1R2AssetReader(TENANT_DB, ASSETS);
+    const reader = assetReader(bindings);
     const result = await reader.read(TENANT, "cli_tool", "deploy-bad-hash", "1.0.0");
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -313,7 +364,8 @@ describe("D1R2AssetReader — production asset reader mount", () => {
 });
 
 /**
- * End-to-end test: seeds D1+R2 and drives the Worker over SELF.fetch.
+ * End-to-end test: seeds tenant Durable Objects + R2 and drives the Worker over
+ * SELF.fetch.
  *
  * This test switches to the non-dev posture (FG_DEV_IN_MEMORY_PORTS !== "1")
  * so that resolvePorts selects D1R2AssetReader. The READ_KEY is seeded into
@@ -327,10 +379,8 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
   beforeEach(async () => {
     resetInMemoryPorts();
     bindings = env as unknown as McpTestBindings;
-    const { ASSETS, TENANT_DB, DB } = bindings;
-    if (ASSETS === undefined || TENANT_DB === undefined || DB === undefined) {
-      throw new Error("ASSETS, TENANT_DB and DB must be defined in test bindings");
-    }
+    const { DB } = requireBindings(bindings);
+    const TENANT_DATA = tenantDataNamespace(env);
 
     // Switch to the non-dev posture so resolvePorts selects D1R2AssetReader.
     originalDevPorts = (env as unknown as Record<string, unknown>).FG_DEV_IN_MEMORY_PORTS as
@@ -344,27 +394,15 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("")}`;
     await DB.prepare(
-      "INSERT OR IGNORE INTO static_api_keys " +
+      "INSERT OR REPLACE INTO static_api_keys " +
         "(key_hash, id, tenant_id, platform_operator, scopes_json, enabled, created_at_unix, updated_at_unix) " +
         "VALUES (?1, ?2, ?3, ?4, ?5, 1, 1000000, 1000000)",
     )
       .bind(keyHash, "key-1", TENANT, 0, JSON.stringify(["tools.read", "assets.read"]))
       .all();
-
-    // Clean up any assets left by previous tests.
-    if (ASSETS !== undefined && TENANT_DB !== undefined) {
-      const existing = await TENANT_DB.prepare("SELECT storage_uri FROM stored_assets").all<{
-        storage_uri: string;
-      }>();
-      for (const row of existing.results ?? []) {
-        try {
-          await ASSETS.delete(row.storage_uri);
-        } catch {
-          // Best-effort cleanup.
-        }
-      }
-      await TENANT_DB.prepare("DELETE FROM stored_assets").all();
-    }
+    await registerDurableObjectTenant(TENANT);
+    // Clean up any assets left by previous tests in both tenant objects.
+    await clearTenantAssets();
   });
 
   afterEach(() => {
@@ -373,8 +411,8 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
   });
 
   it("resources/list returns seeded assets over SELF.fetch", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS);
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS);
 
     const res = await SELF.fetch(
       rpcRequest(
@@ -395,15 +433,15 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
   });
 
   it("resources/list withholds pending_scan and yanked assets over SELF.fetch (#366)", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
+    const { ASSETS } = requireBindings(bindings);
     // Seed one visible asset (should appear), one pending_scan (should be hidden),
     // and one yanked (should be hidden).
-    await seedAsset(TENANT_DB, ASSETS, { name: "deploy-visible" });
-    await seedAsset(TENANT_DB, ASSETS, {
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, { name: "deploy-visible" });
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-pending",
       visibility: "pending_scan",
     });
-    await seedAsset(TENANT_DB, ASSETS, {
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-yanked",
       yanked: true,
     });
@@ -428,8 +466,8 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
   });
 
   it("resources/read returns asset content over SELF.fetch", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS);
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS);
 
     const res = await SELF.fetch(
       rpcRequest(
@@ -455,8 +493,8 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
   });
 
   it("resources/read returns not_found for a non-visible asset over SELF.fetch (#366)", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    await seedAsset(TENANT_DB, ASSETS, {
+    const { ASSETS } = requireBindings(bindings);
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-pending",
       visibility: "pending_scan",
     });
@@ -480,15 +518,14 @@ describe("D1R2AssetReader — end-to-end over SELF.fetch", () => {
   });
 
   it("resources/list enforces cross-tenant isolation over SELF.fetch", async () => {
-    const { ASSETS, TENANT_DB } = requireBindings(bindings);
-    const OTHER_TENANT = "some-other-tenant";
+    const { ASSETS } = requireBindings(bindings);
 
-    // Seed one asset for each tenant.
-    await seedAsset(TENANT_DB, ASSETS, {
+    // Seed one asset in each tenant object.
+    await seedAsset(tenantObjectDb(TENANT), ASSETS, {
       name: "deploy-tenant-a",
       tenant_id: TENANT,
     });
-    await seedAsset(TENANT_DB, ASSETS, {
+    await seedAsset(tenantObjectDb(OTHER_TENANT), ASSETS, {
       name: "deploy-tenant-b",
       tenant_id: OTHER_TENANT,
     });
