@@ -50,8 +50,8 @@
  *
  * ## The three load-bearing behaviours
  *
- * 1. **A `1406` duplicate is RECONCILED, not absorbed.** `r2.ts` maps an
- *    already-exists create onto success because an R2 bucket name is unique per
+ * 1. **A `1406` duplicate is RECONCILED, not absorbed.** The former bucket
+ *    provisioning path mapped an already-exists create onto success because an R2 bucket name is unique per
  *    ACCOUNT, so the duplicate is provably ours. A custom hostname is unique
  *    across **all of Cloudflare**, so `1406` means either "this zone already has
  *    it" (idempotent, fine) or "another account holds it" (no certificate will
@@ -367,7 +367,8 @@ export class CustomHostnamesClient {
    * Retry is opted IN. A hostname is globally unique, so a re-issued create
    * after a 5xx cannot mint a SECOND certificate — it either succeeds or reports
    * the duplicate, which {@link ensureCustomHostname} then reconciles. That is
-   * the same argument `d1.ts` makes and the one `r2-token.ts` cannot make.
+   * the same argument `d1.ts` makes; it does not apply to a non-idempotent
+   * credential mint.
    */
   async createCustomHostname(request: CustomHostnameRequest): Promise<CustomHostname> {
     assertCustomHostname(request.hostname);
@@ -488,7 +489,8 @@ export class CustomHostnamesClient {
 /**
  * Whether a create failure is Cloudflare's duplicate-hostname answer.
  *
- * Code-specific, not status-specific, for the reason `r2.ts` argues: a bare 409
+ * Code-specific, not status-specific, for the same reason as the former bucket
+ * provisioning path: a bare 409
  * (a hostname mid-deletion, a zone-level conflict) is a real error. The
  * difference from R2 is what happens NEXT — this predicate only says "the name
  * is taken somewhere", never "it is ours".

@@ -416,8 +416,8 @@ rest PORTED, is exactly the failure this document exists to end.
 | Module | Lines | Class | Evidence | TS owner | Note |
 |---|---:|---|---|---|---|
 | `client.rs` | 551 | PORTED | cited-by-TS | packages/cloudflare/src/retry.ts, packages/cloudflare/test/client.test.ts | TS owner cites `crates/ferrogate-cloudflare/src/client.rs` by path; signature coverage 16/22. |
-| `r2.rs` | 534 | PORTED | cited-by-TS | packages/cloudflare/src/r2.ts, packages/cloudflare/test/r2.test.ts | TS owner cites `crates/ferrogate-cloudflare/src/r2.rs` by path; signature coverage 11/19. |
-| `r2_token.rs` | 395 | PORTED | cited-by-TS | packages/cloudflare/src/r2-token.ts, packages/cloudflare/test/r2-token.test.ts | TS owner cites `crates/ferrogate-cloudflare/src/r2_token.rs` by path; signature coverage 11/17. |
+| `r2.rs` | 534 | RETIRED BY #744 | historical reference | — | The deployed asset path uses one shared bucket with tenant key-prefix isolation. |
+| `r2_token.rs` | 395 | RETIRED BY #744 | historical reference | — | Per-tenant credential minting is not a mounted feature under the shared-bucket design. |
 | `d1_proxy.rs` | 260 | OBSOLETE-ON-CF | hand-verified | packages/storage/src/tenant-router.ts, packages/storage/src/tenant-rest.ts | 260 lines: the bearer-auth HTTP shim in front of D1 that existed because Rust had no D1 binding. A Worker binds D1 natively; the REST transport remains for cross-account/tenant routing. |
 | `d1.rs` | 255 | PORTED | cited-by-TS | packages/cloudflare/src/d1.ts, packages/cloudflare/test/d1.test.ts | TS owner cites `crates/ferrogate-cloudflare/src/d1.rs` by path; signature coverage 5/10. |
 | `error.rs` | 252 | PORTED | cited-by-TS | packages/cloudflare/src/errors.ts, packages/cloudflare/test/errors.test.ts | TS owner cites `crates/ferrogate-cloudflare/src/error.rs` by path; signature coverage 4/6. |

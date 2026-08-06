@@ -24,7 +24,7 @@
  *
  * ---------------------------------------------------------------------------
  * PORT-TODO(P: inventory-data-billing §1.7 "Proposed CF/TS mapping") — THE DURABLE
- * HALF OF THIS PACKAGE IS MOUNTED IN PART. Six exports are still dead.
+ * HALF OF THIS PACKAGE IS MOUNTED IN PART. Three exports are still dead.
  *
  * This marker used to say "not mounted on any Worker … ZERO importers". That is
  * NO LONGER TRUE, and a marker that overstates the damage is as misleading as
@@ -71,14 +71,15 @@
  * STILL DEAD — zero importers anywhere under `apps/`, so deleting any of them
  * would leave every suite in this repo green:
  *   - `D1BillingEventLedger`      (the billing outbox drain)
- *   - `D1RetentionPolicyStore`    (see `./retention.js` — no cron calls it)
  *   - `TenantMonotonicUpserts` / `ControlMonotonicUpserts`
- *   - `R2AssetBlobStore`
- *   - `D1AssetMetadataStore`      (duplicated app-locally, see below)
  *
- * The remaining `D1AssetMetadataStore` is dead by DUPLICATION rather than by a
- * missing trigger, which is the worse failure: a second implementation exists,
- * is live, and can drift from the one that has the tests.
+ * The retention executor is mounted by `apps/gateway/src/assets/retention.ts`:
+ * `D1RetentionPolicyStore`, `R2AssetBlobStore`, and the package
+ * `D1AssetMetadataStore` run from the scheduled tenant sweep. The request path
+ * still has an app-local metadata store for its narrower `AssetMetadataStore`
+ * port, so the two implementations remain a deliberate duplication until the
+ * whole asset durable half is consolidated.
+ * The remaining duplicate implementations are recorded here:
  *   - assets: `apps/gateway/src/assets/d1.ts` declares its own
  *     `D1AssetMetadataStore` and imports nothing from here
  *     (`docs/rewrite/parity-audit-storage.md` §4.11 records the decision).
@@ -137,6 +138,7 @@ export * from "./workflow-budget.js";
 export * from "./guardrail-binding.js";
 export * from "./assets.js";
 export * from "./retention.js";
+export * from "./d1/retention-d1.js";
 export * from "./presence.js";
 export * from "./agent-cost-burn.js";
 export * from "./budget-alerts.js";

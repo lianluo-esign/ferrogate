@@ -223,6 +223,11 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "audited SQL reads, resumable JSONL downloads and destructive point-in-time restore are operator/customer workflows rather than a CRUD page; export is streamed directly to R2 and restore needs a deliberate confirmation tool, so this API/CLI surface is intentionally excluded from the generic console — tracked by #828",
   },
+  "retention-policies": {
+    owner: "asset lifecycle operations (#744, #313 chain)",
+    reason:
+      "tenant/operator retention rules are a narrow control-plane surface consumed by the scheduled asset sweeper; the eventual UI belongs in a tenant asset-lifecycle/settings screen, while a generic CRUD resource would hide the destructive retention semantics — deferred, needs UI",
+  },
 };
 
 /**

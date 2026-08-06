@@ -8,9 +8,10 @@
  *
  * **UPDATE (wave 17): `@ferrogate/cloudflare` NOW EXISTS.** The whole crate is
  * ported — `errors.ts` (the typed taxonomy incl. the `10013`/`10058` traps),
- * `envelope.ts`, `retry.ts`, `scopes.ts` + `preflight()`, `r2.ts`,
- * `r2-token.ts`, and `custom-hostnames.ts` — with the account-management
- * slices covered by package tests. See
+ * `envelope.ts`, `retry.ts`, `scopes.ts` + `preflight()`, and
+ * `custom-hostnames.ts` — with the account-management slices covered by
+ * package tests. The unmounted per-tenant R2 provisioning slices were retired
+ * by #744. See
  * `docs/rewrite/cf-crate-assessment.md` §0.0. **Do NOT write a third partial
  * client anywhere; import that package.**
  *

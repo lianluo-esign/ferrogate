@@ -129,6 +129,10 @@ const MOUNTED: [symbol: string, app: string][] = [
   // hostname served nothing. Leaving the symbol in `DEAD` made THIS suite red on
   // the branch that mounted it, which is exactly the forcing function intended.
   ["D1SiteDomainVerificationStore", "control-plane"],
+  // #744 — the scheduled gateway sweep owns tenant enumeration and uses the
+  // package executor against each tenant object.
+  ["D1RetentionPolicyStore", "gateway"],
+  ["R2AssetBlobStore", "gateway"],
   // #822 — `TenantDataObject`, and the only entry in this list whose unmount is
   // not merely a dead export but an UNBOOTABLE WORKER. workerd resolves the
   // `[[durable_objects.bindings]] class_name = "TenantDataObject"` stanza in
@@ -171,10 +175,8 @@ const MOUNTED: [symbol: string, app: string][] = [
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
 const DEAD = [
   "D1BillingEventLedger",
-  "D1RetentionPolicyStore",
   "TenantMonotonicUpserts",
   "ControlMonotonicUpserts",
-  "R2AssetBlobStore",
 ];
 
 describe("mount inventory (src/index.ts §1.7 marker)", () => {
@@ -200,6 +202,6 @@ describe("mount inventory (src/index.ts §1.7 marker)", () => {
 
   test("apps/gateway still carries an app-local asset metadata store", () => {
     expect(sourcesFor("gateway")).toContain("class D1AssetMetadataStore");
-    expect(importersOf("R2AssetBlobStore")).toEqual([]);
+    expect(importersOf("R2AssetBlobStore")).toContain("gateway");
   });
 });

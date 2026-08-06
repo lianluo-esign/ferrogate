@@ -25,22 +25,28 @@ resource was touched.
 > identified. §0.0 records exactly what landed and what is still deferred; the
 > per-slice sections below are unchanged and remain the rationale.
 
+> **2026-08-06 decision record (#744):** the dead per-tenant R2 provisioning
+> modules were removed. The deployed TS asset design is one shared R2 bucket
+> isolated by the `assets/v1/t/{tenant}/` key prefix; bucket-per-tenant
+> provisioning and bucket-scoped credential minting are not mounted features.
+
 ---
 
 ## 0.0 WAVE 17 — what was implemented
 
-`packages/cloudflare` (`@ferrogate/cloudflare`) now exists. **146 tests, 8
-suites**, plain vitest (every test drives an injected transport + injected
-clock: no network, no real sleep, no live account). Every slice this document
-marked STILL NEEDED is ported.
+`packages/cloudflare` (`@ferrogate/cloudflare`) now exists. The mounted account
+management slices have plain vitest coverage (every test drives an injected
+transport and clock: no network, no real sleep, no live account). The former
+per-tenant R2 provisioning slices were retired on 2026-08-06 by #744; the
+remaining package is the mounted account-management surface.
 
 | Slice | Module | Status | Mounted? |
 |---|---|---|---|
 | **S4** retry/backoff + typed taxonomy + envelope | `src/retry.ts`, `src/errors.ts`, `src/envelope.ts` | **PORTED** | **YES** — `@ferrogate/storage`'s `D1RestDatabase` (request path) |
 | **S3** preflight + required permission groups | `src/client.ts` `preflight()`, `src/scopes.ts` | **PORTED** | not yet — needs a CLI command (`apps/cli` is not this task's scope) |
 | **S5** D1 database lifecycle | `src/d1.ts` (`D1LifecycleClient`) | **PORTED** | not yet — needs a control-plane onboarding handler |
-| **S1** R2 bucket provisioning + injective naming | `src/r2.ts` (`R2Client`) | **PORTED** | not yet — gated on a bucket-per-tenant decision **and** R2 being enabled on the account |
-| **S2** bucket-scoped R2 credential mint | `src/r2-token.ts` (`R2TokenClient`) | **PORTED** | not yet — same gate as S1 |
+| **S1** R2 bucket provisioning + injective naming | Rust `r2.rs` reference only | **RETIRED** | #744 chose one shared bucket with tenant key-prefix isolation |
+| **S2** bucket-scoped R2 credential mint | Rust `r2_token.rs` reference only | **RETIRED** | #744 chose deployment bucket credentials plus tenant key-prefix isolation |
 | — D1 `/query`, `d1_proxy`, AI-Gateway REST, `cf://` resolver, `ReqwestTransport`/`TokioClock` | — | **OBSOLETE, not ported** | superseded by bindings — see §2 "What is correctly absent" |
 
 ### The one live defect this closed
@@ -74,11 +80,10 @@ missing-retry bug into a duplicate-write bug.
    its own answer. `createScopedToken` passes `false` explicitly and a test
    proves a 500 is issued exactly once — a retried mint creates a second
    credential whose secret Cloudflare returns once and can never read back.
-2. **`r2BucketNameForTenant` is async**, because `crypto.subtle` is the
-   platform's hash. Byte-for-byte the same derivation: the empty-tenant digest
-   `8785c455…` quoted in the Rust module docs is reproduced exactly, and the
-   test's expected digests were computed with `sha256sum` OUTSIDE this codebase
-   so they are golden values, not a restatement of the implementation.
+2. The former TS tenant-bucket naming helper was async, because `crypto.subtle`
+   is the platform's hash. Its golden vectors remain historical evidence only;
+   #744 removed that unmounted provisioning path in favor of the shared bucket
+   and tenant key-prefix design.
 3. **The transport contract is enforced at runtime, not by the type system.**
    Rust's `HttpTransport` trait restricted `execute` to returning
    `Err(CloudflareError::Transport)` and the retry loop leaned on it. TS cannot,
@@ -103,11 +108,10 @@ below only fail in that chained half.
 
 ### What is still open after wave 17
 
-* **S1/S2/S5/S3 have no call site.** They are ported capabilities, not mounted
-  features. Each module's docblock states the EXACT wiring line and the gate
-  that must open first. Composition roots are the integrate step's to own, and
-  the bucket-per-tenant decision and the R2 account enablement are not
-  engineering choices this wave can make.
+* **S1/S2 are retired; S5/S3 have no call site.** S1/S2 were unmounted
+  provisioning capabilities, and #744 records the shared-bucket decision that
+  replaces them. S5/S3 remain account-management capabilities whose composition
+  roots still need to own their future call sites.
 * **The deploy-time binding constraint is unchanged.** S5 makes creating a
   tenant D1 database programmable; **binding** it still needs a
   `[[d1_databases]]` stanza and a deploy.
@@ -244,9 +248,8 @@ So this is a *designed but unwired* capability on **both** sides. Porting it
 without its onboarding call site would add exactly the
 implemented-tested-never-mounted dead code this project keeps getting bitten by.
 
-**Where it should live.** `packages/cloudflare/src/r2.ts`, mounted from the
-control-plane tenant-onboarding path (the same place S5 would be called), never
-from the request path.
+**Current status.** The former TS provisioning module was removed by #744. The
+deployed path uses one shared bucket and the `assets/v1/t/{tenant}/` prefix.
 
 **What breaks today:** nothing. **What breaks at cutover:** the derivation rule
 and the two already-exists codes are unrecoverable — §5.
@@ -284,10 +287,9 @@ That said — again — the Rust had the same posture in production
 (`state_assets.rs`), so **this is not a port regression**. It is an unbuilt
 defense-in-depth layer on both sides.
 
-**Where it should live.** `packages/cloudflare/src/r2-token.ts`, called from
-control-plane onboarding, with the minted secret written straight into Cloudflare
-Secrets Store (never persisted in D1). The Rust explicitly deferred that last
-step too.
+**Current status.** The former TS token-mint module was removed by #744. The
+deployed path keeps the shared bucket credential configuration and enforces
+tenant isolation with the object-key prefix.
 
 **Non-engineering prerequisite:** **R2 is not enabled on the live Cloudflare
 account** (`CUTOVER-READINESS.md` §3.3). S1 and S2 cannot be verified end-to-end
@@ -680,10 +682,9 @@ correctness is unaffected — the cursor is followed either way.
 3. **S5** — `d1.ts` lifecycle **with** a control-plane onboarding handler that
    creates the database, migrates it and writes the `tenant_databases` row. The
    deploy-time binding constraint remains and must be documented at the handler.
-4. **S1 + S2** — only once R2 is enabled on the account **and** a
-   bucket-per-tenant decision is actually taken. Porting them before that adds
-   unmounted code; §5.1/§5.2 already preserve everything needed to build them
-   later.
+4. **S1 + S2** — retired by #744 after the shared-bucket-plus-tenant-prefix
+   decision. Do not reintroduce per-tenant provisioning without a new design
+   decision and a mounted onboarding caller.
 5. Add the `PORT-PLAN.md` row (§3) regardless of whether any of the above is
    scheduled.
 

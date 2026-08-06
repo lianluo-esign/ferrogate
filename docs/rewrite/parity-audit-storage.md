@@ -216,14 +216,16 @@ notification.** Note that a Worker isolate does not outlive the request, so
 skips the table will re-fire a tenant's 80/90/100% webhook on *every* request
 after the crossing.
 
-### 4.6 Retention has planners but no storage and no executor
+### 4.6 Retention is wired through the scheduled gateway sweep
 
 `planVersionRetention` / `planLogRetention` / `planBlobGc` are ported, pure and
-tested (7 tests). Nothing reads or writes `retention_policies`; nothing calls the
-planners; `R2AssetBlobStore.deleteOrphans` has no caller. `request_logs`,
-`audit_events`, `agent_run_events` and R2 blobs are append-only on this platform
-and **nothing prunes them**. `apps/gateway/src/worker.ts` already exposes a
-`scheduled` handler for the billing outbox — that is where the sweeper hangs.
+tested. `D1RetentionPolicyStore`, `sweepAssetRetention`, and
+`sweepOrphanBlobs` are now called by `apps/gateway/src/assets/retention.ts` from
+the existing `gatewayScheduled` Cron seam. The caller enumerates provisioned
+tenant objects, selects an exact asset-type or default policy, scopes shared R2
+listing to `assets/v1/t/{tenant}/`, and records prune audit events and lifecycle
+metrics. Request-log retention remains a separate gateway sweep because its
+authoritative rows and projection have different ordering requirements.
 
 ### 4.7 Site-domain verification: read-then-write, not CAS
 
@@ -347,7 +349,7 @@ database with a point lookup, which was indefensible on the inference hot path.
 3. **4.7 — the site-domain CAS.** Small, and it is a security property.
 4. **4.4 + 4.5** — two statements each, both inside batches that already exist.
 5. **4.8 + 4.9** — one `D1AssetMetadataStore` closes both.
-6. **4.6** — the retention sweeper (hangs off the existing `scheduled` handler).
+6. **4.6** — closed by the gateway scheduled retention/orphan-blob sweep.
 7. **4.2** — the agent-schedule engine. Largest, and the only one that needs new
    design (cron + IANA tz in a Worker; `[triggers] crons` plus a DO alarm for
    jittered/sub-minute fires).

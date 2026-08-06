@@ -68,6 +68,7 @@
  * | `ferrogate_request_errors_total` | same, on a 4xx/5xx — Rust's definition verbatim |
  * | `ferrogate_request_status_total{status_code}` | same |
  * | `ferrogate_ai_cache_requests_total{status}` | `src/cache/metrics.ts` (exact + semantic hits, misses) |
+ * | `ferrogate_asset_lifecycle_{scanned,pruned,failed}_total` | the Cron asset-retention/orphan-blob sweep |
  * | everything else | rendered at its zero value |
  *
  * The zeros are deliberate and are NOT a fabrication: they are the same zeros
@@ -97,6 +98,9 @@ export const PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8
 
 let requestLogTotal = 0;
 let requestErrorTotal = 0;
+let assetLifecycleScannedTotal = 0;
+let assetLifecyclePrunedTotal = 0;
+let assetLifecycleFailedTotal = 0;
 const statusTotals = new Map<number, number>();
 
 /**
@@ -121,6 +125,20 @@ export function resetRequestMetrics(): void {
   statusTotals.clear();
 }
 
+/** Add the completed scheduled asset lifecycle work to this isolate's totals. */
+export function recordAssetLifecycleMetrics(scanned: number, pruned: number, failed: number): void {
+  assetLifecycleScannedTotal += Math.max(0, Math.trunc(scanned));
+  assetLifecyclePrunedTotal += Math.max(0, Math.trunc(pruned));
+  assetLifecycleFailedTotal += Math.max(0, Math.trunc(failed));
+}
+
+/** Zero lifecycle counters for tests that assert scheduled deltas. */
+export function resetAssetLifecycleMetrics(): void {
+  assetLifecycleScannedTotal = 0;
+  assetLifecyclePrunedTotal = 0;
+  assetLifecycleFailedTotal = 0;
+}
+
 /**
  * This isolate's snapshot, in the shape the exporters render.
  *
@@ -135,6 +153,9 @@ export function gatewayMetricsSnapshot(): GatewayMetricsSnapshot {
     serviceName: SERVICE_NAME,
     requestLogTotal,
     requestErrorTotal,
+    assetLifecycleScannedTotal,
+    assetLifecyclePrunedTotal,
+    assetLifecycleFailedTotal,
     requestStatusTotals: [...statusTotals.entries()]
       .sort(([left], [right]) => left - right)
       .map(([statusCode, count]) => ({ statusCode, count })),

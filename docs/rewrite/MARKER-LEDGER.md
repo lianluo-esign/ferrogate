@@ -156,8 +156,8 @@ require editing a test, both forbidden. They are L.
 | P26 | `apps/mcp/src/ports.ts:645` | MCP asset reader needs an `[[r2_buckets]]` binding. **Blocked on R2 not being enabled on the live account.** | ~1 d after prereq |
 | P27 | `apps/agent-runtime/src/ports.ts:971` | `governance` port still in-memory; needs Containers/`@cloudflare/sandbox`. | ~1 wk + paid-plan prereq |
 | P28 | `apps/agent-runtime/src/durable/hash.ts:33` | BLAKE2b/sha256/constant-time-compare duplicated; move to `packages/core`. | ~0.5 d |
-| P29 | `packages/storage/src/index.ts:26` | **8 exports with zero importers anywhere under `apps/`** (`D1BillingEventLedger`, `D1BudgetAlertStore`, `D1RetentionPolicyStore`, `D1AgentScheduleStore`, `D1SiteDomainVerificationStore`, `Tenant/ControlMonotonicUpserts`, `R2AssetBlobStore`). Gated by `test/mount-inventory.test.ts`. | ~1 wk to mount or delete |
-| P30 | `packages/storage/src/retention.ts:10` | Retention sweep has no cron trigger (`sweepAssetRetention`/`sweepOrphanBlobs` have zero app importers). | 1–2 d |
+| P29 | `packages/storage/src/index.ts:26` | **Three exports with zero importers anywhere under `apps/`** (`D1BillingEventLedger`, `TenantMonotonicUpserts`, `ControlMonotonicUpserts`). Gated by `test/mount-inventory.test.ts`. | ~1 wk to mount or delete |
+| P30 | `packages/storage/src/retention.ts:10` | **CLOSED by #744:** `apps/gateway/src/assets/retention.ts` calls the asset/version executor and orphan-blob GC from `gatewayScheduled`, with policy selection, audit, and lifecycle metrics. | done |
 | P31 | `packages/storage/src/index.ts:85` | Duplicate schedule engine: `apps/control-plane/src/schedule/*` is a rival ~1650-line implementation; the package one is dead. `jitterSecs` is applied by nothing. | 2–3 d |
 | P32 | `packages/storage/src/budget-alerts.ts:22`, `d1/budget-alerts-d1.ts:46` | Threshold comparison + webhook delivery absent: **an operator who configures budget alert thresholds is never notified.** | ~2 d |
 | P33 | `packages/policy/src/workflow-budget.ts:133` | `cost` and `tool_calls` — 2 of 4 workflow budget dimensions — are never debited; owner is `apps/agent-runtime`'s run-step path. | ~2 d |
