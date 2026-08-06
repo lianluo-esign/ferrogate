@@ -1,0 +1,281 @@
+{
+  "tenantId": "tenant_throughput_issue_829",
+  "eventsPerWorker": 4,
+  "totalInferenceEvents": 116,
+  "totalStorageOperations": 580,
+  "queueingBaselineP99Ms": 11,
+  "queueingThresholdP99Ms": 22,
+  "beforeQueueing": {
+    "concurrency": 1,
+    "inferenceEventsPerSec": 125,
+    "storageOperationsPerSec": 625,
+    "p99LatencyMs": 11
+  },
+  "paths": {
+    "inferenceMeteringWrite": {
+      "opCount": 116,
+      "throughputOpsPerSec": 155.91397849462365,
+      "p50LatencyMs": 64,
+      "p99LatencyMs": 127,
+      "totalLatencyMs": 6862,
+      "latencySharePercent": 19.362302483069975
+    },
+    "walletReserve": {
+      "opCount": 116,
+      "throughputOpsPerSec": 155.91397849462365,
+      "p50LatencyMs": 65,
+      "p99LatencyMs": 127,
+      "totalLatencyMs": 6944,
+      "latencySharePercent": 19.593679458239276
+    },
+    "usageRollupUpdate": {
+      "opCount": 116,
+      "throughputOpsPerSec": 155.91397849462365,
+      "p50LatencyMs": 66,
+      "p99LatencyMs": 127,
+      "totalLatencyMs": 7042,
+      "latencySharePercent": 19.87020316027088
+    },
+    "assetRead": {
+      "opCount": 116,
+      "throughputOpsPerSec": 155.91397849462365,
+      "p50LatencyMs": 67,
+      "p99LatencyMs": 127,
+      "totalLatencyMs": 7187,
+      "latencySharePercent": 20.279345372460497
+    },
+    "requestLogWrite": {
+      "opCount": 116,
+      "throughputOpsPerSec": 155.91397849462365,
+      "p50LatencyMs": 68,
+      "p99LatencyMs": 133,
+      "totalLatencyMs": 7405,
+      "latencySharePercent": 20.894469525959366
+    }
+  },
+  "runs": [
+    {
+      "concurrency": 1,
+      "inferenceEvents": 4,
+      "storageOperations": 20,
+      "wallClockMs": 32,
+      "inferenceEventsPerSec": 125,
+      "storageOperationsPerSec": 625,
+      "p50LatencyMs": 7,
+      "p99LatencyMs": 11,
+      "queueingObserved": false,
+      "paths": {
+        "inferenceMeteringWrite": {
+          "opCount": 4,
+          "throughputOpsPerSec": 125,
+          "p50LatencyMs": 5,
+          "p99LatencyMs": 7,
+          "totalLatencyMs": 20,
+          "latencySharePercent": 14.285714285714285
+        },
+        "walletReserve": {
+          "opCount": 4,
+          "throughputOpsPerSec": 125,
+          "p50LatencyMs": 7,
+          "p99LatencyMs": 8,
+          "totalLatencyMs": 25,
+          "latencySharePercent": 17.857142857142858
+        },
+        "usageRollupUpdate": {
+          "opCount": 4,
+          "throughputOpsPerSec": 125,
+          "p50LatencyMs": 7,
+          "p99LatencyMs": 11,
+          "totalLatencyMs": 31,
+          "latencySharePercent": 22.142857142857142
+        },
+        "assetRead": {
+          "opCount": 4,
+          "throughputOpsPerSec": 125,
+          "p50LatencyMs": 8,
+          "p99LatencyMs": 11,
+          "totalLatencyMs": 32,
+          "latencySharePercent": 22.857142857142858
+        },
+        "requestLogWrite": {
+          "opCount": 4,
+          "throughputOpsPerSec": 125,
+          "p50LatencyMs": 8,
+          "p99LatencyMs": 11,
+          "totalLatencyMs": 32,
+          "latencySharePercent": 22.857142857142858
+        }
+      }
+    },
+    {
+      "concurrency": 4,
+      "inferenceEvents": 16,
+      "storageOperations": 80,
+      "wallClockMs": 99,
+      "inferenceEventsPerSec": 161.6161616161616,
+      "storageOperationsPerSec": 808.0808080808081,
+      "p50LatencyMs": 22,
+      "p99LatencyMs": 29,
+      "queueingObserved": true,
+      "paths": {
+        "inferenceMeteringWrite": {
+          "opCount": 16,
+          "throughputOpsPerSec": 161.6161616161616,
+          "p50LatencyMs": 20,
+          "p99LatencyMs": 27,
+          "totalLatencyMs": 308,
+          "latencySharePercent": 19.012345679012345
+        },
+        "walletReserve": {
+          "opCount": 16,
+          "throughputOpsPerSec": 161.6161616161616,
+          "p50LatencyMs": 21,
+          "p99LatencyMs": 27,
+          "totalLatencyMs": 310,
+          "latencySharePercent": 19.1358024691358
+        },
+        "usageRollupUpdate": {
+          "opCount": 16,
+          "throughputOpsPerSec": 161.6161616161616,
+          "p50LatencyMs": 21,
+          "p99LatencyMs": 28,
+          "totalLatencyMs": 316,
+          "latencySharePercent": 19.50617283950617
+        },
+        "assetRead": {
+          "opCount": 16,
+          "throughputOpsPerSec": 161.6161616161616,
+          "p50LatencyMs": 22,
+          "p99LatencyMs": 28,
+          "totalLatencyMs": 323,
+          "latencySharePercent": 19.938271604938272
+        },
+        "requestLogWrite": {
+          "opCount": 16,
+          "throughputOpsPerSec": 161.6161616161616,
+          "p50LatencyMs": 23,
+          "p99LatencyMs": 29,
+          "totalLatencyMs": 363,
+          "latencySharePercent": 22.407407407407405
+        }
+      }
+    },
+    {
+      "concurrency": 8,
+      "inferenceEvents": 32,
+      "storageOperations": 160,
+      "wallClockMs": 268,
+      "inferenceEventsPerSec": 119.40298507462686,
+      "storageOperationsPerSec": 597.0149253731342,
+      "p50LatencyMs": 61,
+      "p99LatencyMs": 102,
+      "queueingObserved": true,
+      "paths": {
+        "inferenceMeteringWrite": {
+          "opCount": 32,
+          "throughputOpsPerSec": 119.40298507462686,
+          "p50LatencyMs": 58,
+          "p99LatencyMs": 101,
+          "totalLatencyMs": 1821,
+          "latencySharePercent": 19.05609041439933
+        },
+        "walletReserve": {
+          "opCount": 32,
+          "throughputOpsPerSec": 119.40298507462686,
+          "p50LatencyMs": 57,
+          "p99LatencyMs": 102,
+          "totalLatencyMs": 1854,
+          "latencySharePercent": 19.401423189619088
+        },
+        "usageRollupUpdate": {
+          "opCount": 32,
+          "throughputOpsPerSec": 119.40298507462686,
+          "p50LatencyMs": 61,
+          "p99LatencyMs": 102,
+          "totalLatencyMs": 1894,
+          "latencySharePercent": 19.820008371703643
+        },
+        "assetRead": {
+          "opCount": 32,
+          "throughputOpsPerSec": 119.40298507462686,
+          "p50LatencyMs": 64,
+          "p99LatencyMs": 102,
+          "totalLatencyMs": 1959,
+          "latencySharePercent": 20.500209292591045
+        },
+        "requestLogWrite": {
+          "opCount": 32,
+          "throughputOpsPerSec": 119.40298507462686,
+          "p50LatencyMs": 64,
+          "p99LatencyMs": 106,
+          "totalLatencyMs": 2028,
+          "latencySharePercent": 21.2222687316869
+        }
+      }
+    },
+    {
+      "concurrency": 16,
+      "inferenceEvents": 64,
+      "storageOperations": 320,
+      "wallClockMs": 345,
+      "inferenceEventsPerSec": 185.50724637681162,
+      "storageOperationsPerSec": 927.536231884058,
+      "p50LatencyMs": 73,
+      "p99LatencyMs": 133,
+      "queueingObserved": true,
+      "paths": {
+        "inferenceMeteringWrite": {
+          "opCount": 64,
+          "throughputOpsPerSec": 185.50724637681162,
+          "p50LatencyMs": 69,
+          "p99LatencyMs": 133,
+          "totalLatencyMs": 4713,
+          "latencySharePercent": 19.53656110097828
+        },
+        "walletReserve": {
+          "opCount": 64,
+          "throughputOpsPerSec": 185.50724637681162,
+          "p50LatencyMs": 71,
+          "p99LatencyMs": 133,
+          "totalLatencyMs": 4755,
+          "latencySharePercent": 19.710661581827228
+        },
+        "usageRollupUpdate": {
+          "opCount": 64,
+          "throughputOpsPerSec": 185.50724637681162,
+          "p50LatencyMs": 72,
+          "p99LatencyMs": 134,
+          "totalLatencyMs": 4801,
+          "latencySharePercent": 19.901343060852263
+        },
+        "assetRead": {
+          "opCount": 64,
+          "throughputOpsPerSec": 185.50724637681162,
+          "p50LatencyMs": 73,
+          "p99LatencyMs": 134,
+          "totalLatencyMs": 4873,
+          "latencySharePercent": 20.199801028021888
+        },
+        "requestLogWrite": {
+          "opCount": 64,
+          "throughputOpsPerSec": 185.50724637681162,
+          "p50LatencyMs": 74,
+          "p99LatencyMs": 139,
+          "totalLatencyMs": 4982,
+          "latencySharePercent": 20.651633228320346
+        }
+      }
+    }
+  ],
+  "rowEvidence": {
+    "requestLogs": 116,
+    "walletReservations": 116,
+    "usageAggregateRows": 1,
+    "usageMetadataRows": 1,
+    "agentCostBurnRows": 1,
+    "storedAssets": 1,
+    "usageAggregateTotalTokens": 16240,
+    "usageMetadataRequestCount": 116,
+    "agentCostAccumulatedUsd": 0.00023199999999999954
+  }
+}
