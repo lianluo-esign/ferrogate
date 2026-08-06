@@ -389,7 +389,19 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
 
   #storedRecord(scope: CallerScope, record: StoreRecord): StoreRecord {
     if (this.#objectTenantId !== null) {
-      if (record.tenant_id !== undefined && record.tenant_id !== null) {
+      if (scope.kind === "tenant") {
+        // The in-memory reference CLAMPS a tenant caller's create onto its own
+        // tenant (`memory.ts`: `tenant_id: scope.tenantId`), so a body naming a
+        // foreign tenant is overridden, not refused. The caller's identity was
+        // already checked against the object by `#scopeFence`.
+        if (scope.tenantId !== this.#objectTenantId) {
+          throw new Error(
+            `tenant resource store for ${this.#objectTenantId} cannot serve ${scope.tenantId}`,
+          );
+        }
+      } else if (record.tenant_id !== undefined && record.tenant_id !== null) {
+        // Platform routing picked this object FROM the record's tenant_id, so a
+        // mismatch here is a genuine mis-route, not an over-claiming caller.
         if (record.tenant_id !== this.#objectTenantId) {
           throw new Error(
             `tenant resource store for ${this.#objectTenantId} refused record ` +

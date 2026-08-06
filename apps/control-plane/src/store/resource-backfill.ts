@@ -109,10 +109,15 @@ export async function backfillTenantResourceKinds(
   while (state.kindIndex < TENANT_RESOURCE_KINDS.length && remaining > 0) {
     const kind = TENANT_RESOURCE_KINDS[state.kindIndex];
     if (kind === undefined) break;
+    // `json_valid` guards the extract: a malformed legacy document would abort
+    // the whole scan with a SQLITE error otherwise. The corrupt row is NOT
+    // silently lost — it stays on control D1, where the reader's
+    // `parseDocument` refuses it loudly by name ("unparseable document_json").
+    const ownerOf = "CASE WHEN json_valid(document_json) THEN json_extract(document_json, '$.tenant_id') END";
     const predicate =
       state.cursor === null
-        ? "resource_kind = ? AND json_extract(document_json, '$.tenant_id') = ?"
-        : "resource_kind = ? AND json_extract(document_json, '$.tenant_id') = ? AND resource_id > ?";
+        ? `resource_kind = ? AND ${ownerOf} = ?`
+        : `resource_kind = ? AND ${ownerOf} = ? AND resource_id > ?`;
     const values =
       state.cursor === null
         ? [kind, tenantId, remaining]

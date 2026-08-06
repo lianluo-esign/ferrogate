@@ -38,9 +38,13 @@ interface TenantStoreMatch {
 }
 
 interface TenantStoreTarget {
-  readonly tenantId: string;
+  /** `null` when the target is an un-attributed platform row on control D1. */
+  readonly tenantId: string | null;
   readonly store: D1ControlPlaneStore;
 }
+
+/** Collections whose document id IS the owning tenant's id. */
+const ID_KEYED_TENANT_COLLECTIONS: ReadonlySet<string> = new Set(["tenant-accounts", "wallets"]);
 
 const UNPAGED_QUERY = (query: ListQuery): ListQuery => ({
   ...query,
@@ -111,39 +115,51 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     return new D1ControlPlaneStore(handle.db, options);
   }
 
-  #ownerForRecord(collection: string, record: StoreRecord): string {
+  /**
+   * The tenant a record belongs to, or `null` for an UN-ATTRIBUTED platform
+   * row. Those stay on control D1 (see the #861 migration matrix: "un-attributed
+   * platform rows stay on control D1"), where `tenantScopeSql`'s read fence
+   * keeps them visible to every tenant and `tenantWriteScopeSql` keeps tenant
+   * writes off them.
+   */
+  #ownerForRecord(collection: string, record: StoreRecord): string | null {
     const explicit = typeof record.tenant_id === "string" ? record.tenant_id.trim() : "";
     if (explicit !== "") return explicit;
-    // The tenant-account document is keyed by the tenant id and its create
-    // route historically allowed the body to omit a duplicate tenant_id.
-    if (collection === "tenant-accounts" && typeof record.id === "string" && record.id !== "") {
+    // An id-keyed document (tenant account, wallet) is owned by the tenant its
+    // id names; the create routes historically allowed the body to omit a
+    // duplicate tenant_id.
+    if (
+      ID_KEYED_TENANT_COLLECTIONS.has(collection) &&
+      typeof record.id === "string" &&
+      record.id !== ""
+    ) {
       return record.id;
     }
-    throw new Error(`${collection}/${String(record.id)} has no named tenant destination`);
+    return null;
   }
 
-  #ownerForScope(scope: CallerScope, collection: string, record?: StoreRecord): string {
-    if (scope.kind === "tenant") return scope.tenantId;
-    if (record !== undefined) return this.#ownerForRecord(collection, record);
-    throw new Error(`${collection} platform operation requires a tenant destination`);
+  /** `record` is an un-attributed platform row control D1 remains authoritative for. */
+  #isPlatformRow(collection: string, record: StoreRecord): boolean {
+    return this.#ownerForRecord(collection, record) === null;
   }
 
-  async #knownTenantAccount(id: string): Promise<boolean> {
-    const row = await this.#controlDb
-      .prepare("SELECT 1 AS present FROM tenants WHERE id = ? LIMIT 1")
-      .bind(id)
-      .first<{ present: number }>();
-    return row !== null;
+  /** The un-attributed control-D1 row under this id, or `null`. */
+  async #platformRow(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
+    const record = await this.#control.get(collection, scope, id);
+    if (record === null) return null;
+    return this.#isPlatformRow(collection, record) ? record : null;
   }
 
   async #matchTenantResource(collection: string, id: string): Promise<TenantStoreMatch | null> {
-    // The tenant-account document is addressed by its tenant id. Its typed
-    // projection remains the durable existence signal even if a provisioning
-    // repair test or an operator has removed the storage roster row.
-    if (collection === "tenant-accounts" && (await this.#knownTenantAccount(id))) {
+    // Documents KEYED BY the tenant id (`tenant-accounts`, `wallets`) resolve
+    // their object from the id alone, without the roster: the object's own
+    // stamped `tenant_id` validates the addressing, and a tenant whose roster
+    // row was never written (or was repaired away) stays reachable. A miss
+    // falls through to the roster fan-out for legacy attributions.
+    if (ID_KEYED_TENANT_COLLECTIONS.has(collection)) {
       const store = await this.#tenantStore(id);
       const record = await store.get(collection, { kind: "platform_operator" }, id);
-      return record === null ? null : { tenantId: id, store, record };
+      if (record !== null) return { tenantId: id, store, record };
     }
     const matches: TenantStoreMatch[] = [];
     for (const tenantId of await this.#tenantRouter.provisionedTenants()) {
@@ -161,8 +177,8 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     // must still come from the object; control D1 is never the resource reader.
     if (collection === "mcp-servers") {
       const directory = await this.#control.get(collection, { kind: "platform_operator" }, id);
-      if (directory !== null) {
-        const tenantId = this.#ownerForRecord(collection, directory);
+      if (directory !== null && this.#ownerForRecord(collection, directory) !== null) {
+        const tenantId = this.#ownerForRecord(collection, directory) as string;
         const store = await this.#tenantStore(tenantId);
         const record = await store.get(collection, { kind: "platform_operator" }, id);
         if (record !== null) return { tenantId, store, record };
@@ -180,6 +196,15 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     return null;
   }
 
+  /**
+   * Where a mutation of `collection/{id}` must run.
+   *
+   * A tenant-scoped caller mutates only inside its own object — the write fence
+   * never widens onto platform rows, exactly as `tenantWriteScopeSql` refuses
+   * them. A platform operator reaches every tenant object through the roster
+   * fan-out, and falls back to control D1 only for a row that is genuinely
+   * un-attributed (never for a stale tenant-attributed compatibility copy).
+   */
   async #tenantMutationStore(
     collection: string,
     scope: CallerScope,
@@ -192,6 +217,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     }
     const match = await this.#matchTenantResource(collection, id);
     if (match !== null) return { tenantId: match.tenantId, store: match.store };
+    if ((await this.#platformRow(collection, scope, id)) !== null) {
+      return { tenantId: null, store: this.#control };
+    }
     return null;
   }
 
@@ -210,8 +238,23 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
         records.push(record);
       }
     }
+    for (const record of await this.#platformRows(collection, { kind: "platform_operator" }, query)) {
+      if (seen.has(String(record.id))) continue;
+      seen.add(String(record.id));
+      records.push(record);
+    }
 
     return pageOf(records, query);
+  }
+
+  /** The kind's UN-ATTRIBUTED control-D1 rows visible to `scope`. */
+  async #platformRows(
+    collection: string,
+    scope: CallerScope,
+    query: ListQuery,
+  ): Promise<readonly StoreRecord[]> {
+    const page = await this.#control.list(collection, scope, UNPAGED_QUERY(query));
+    return page.items.filter((record) => this.#isPlatformRow(collection, record));
   }
 
   #isTenantPrivate(collection: string): boolean {
@@ -222,28 +265,64 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().list(collection, scope, query);
     if (scope.kind === "tenant") {
+      // The read fence of the control-isolation reference: a tenant sees its
+      // own rows AND the deployment's un-attributed platform rows.
+      const platformRows = await this.#platformRows(collection, scope, query);
       if (!this.#hasTenantDestination(scope)) {
-        return pageOf([], query);
+        return pageOf([...platformRows], query);
       }
-      return (await this.#tenantStore(scope.tenantId)).list(collection, scope, query);
+      const local = await (await this.#tenantStore(scope.tenantId)).list(
+        collection,
+        scope,
+        UNPAGED_QUERY(query),
+      );
+      const seen = new Set(local.items.map((record) => String(record.id)));
+      const records = [
+        ...local.items,
+        ...platformRows.filter((record) => !seen.has(String(record.id))),
+      ];
+      return pageOf(records, query);
     }
     return this.#listTenantResources(collection, query);
   }
 
   async get(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
     if (!this.#isTenantPrivate(collection)) return this.#controlStore().get(collection, scope, id);
-    if (scope.kind === "tenant" && this.#hasTenantDestination(scope))
-      return (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
-    if (scope.kind === "tenant") return null;
+    if (scope.kind === "tenant") {
+      if (this.#hasTenantDestination(scope)) {
+        const record = await (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
+        if (record !== null) return record;
+      }
+      // Same read fence as `list`: an un-attributed platform row stays visible
+      // to a tenant; another tenant's row (or a stale attributed control copy)
+      // does not.
+      return this.#platformRow(collection, scope, id);
+    }
     const match = await this.#matchTenantResource(collection, id);
-    return match?.record ?? null;
+    if (match !== null) return match.record;
+    return this.#platformRow(collection, scope, id);
   }
 
   async create(collection: string, scope: CallerScope, record: StoreRecord): Promise<StoreRecord> {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().create(collection, scope, record);
-    const tenantId = this.#ownerForScope(scope, collection, record);
-    return (await this.#tenantStore(tenantId)).create(collection, scope, record);
+    if (scope.kind === "tenant") {
+      if (this.#hasTenantDestination(scope)) {
+        // The object store clamps the stored tenant_id onto the caller's own
+        // tenant, exactly as the control-isolation reference does.
+        return (await this.#tenantStore(scope.tenantId)).create(collection, scope, record);
+      }
+      // An unclassified tenant credential stamps its (empty) tenant onto the
+      // row — the reference control-store behaviour, kept on control D1.
+      return this.#controlStore().create(collection, scope, record);
+    }
+    const owner = this.#ownerForRecord(collection, record);
+    if (owner === null) {
+      // A platform-authored row with no tenant destination is an un-attributed
+      // platform row, and those stay on control D1 (#861 matrix).
+      return this.#controlStore().create(collection, scope, record);
+    }
+    return (await this.#tenantStore(owner)).create(collection, scope, record);
   }
 
   async replace(
@@ -294,6 +373,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (target === null) return false;
     const removed = await target.store.remove(collection, scope, id);
     if (!removed) return false;
+    // An un-attributed platform row lives on control D1 itself — the delete
+    // above was the authoritative one and there is no compatibility copy.
+    if (target.tenantId === null) return true;
     try {
       await this.#controlDb
         .prepare(
@@ -330,25 +412,46 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       throw new Error("atomic control-plane mutations cannot span control D1 and a tenant object");
     }
 
-    let tenantId: string | null = scope.kind === "tenant" ? scope.tenantId : null;
-    for (const mutation of mutations) {
-      const candidate =
-        mutation.kind === "create"
-          ? this.#ownerForRecord(mutation.collection, mutation.record)
-          : tenantId;
-      if (candidate === null) {
-        if (mutation.kind !== "merge") throw new Error("atomic: unresolved tenant mutation");
-        const match = await this.#matchTenantResource(mutation.collection, mutation.id);
-        if (match === null) return null;
-        tenantId = match.tenantId;
-      } else if (tenantId === null) {
-        tenantId = candidate;
-      } else if (tenantId !== candidate) {
-        throw new Error("atomic tenant mutations must share one tenant destination");
+    // `undefined` = not yet decided; `null` = the un-attributed platform rows
+    // on control D1; a string = that tenant's object.
+    let destination: string | null | undefined =
+      scope.kind === "tenant" && scope.tenantId.trim() !== "" ? scope.tenantId : undefined;
+    if (destination === undefined) {
+      for (const mutation of mutations) {
+        // A tenant-scoped unit is clamped onto the caller's own object above;
+        // only a platform-authored unit resolves its destination from the
+        // records themselves.
+        if (mutation.kind !== "create") continue;
+        const owner = this.#ownerForRecord(mutation.collection, mutation.record);
+        if (destination === undefined) {
+          destination = owner;
+        } else if (destination !== owner) {
+          throw new Error("atomic tenant mutations must share one tenant destination");
+        }
       }
     }
-    if (tenantId === null) throw new Error("atomic tenant mutations have no named destination");
-    return (await this.#tenantStore(tenantId)).atomic(scope, mutations);
+    if (destination === undefined) {
+      // Merges only: resolve the destination from where the first target row
+      // actually lives — a tenant object via the roster fan-out, else the
+      // un-attributed control row.
+      const first = mutations[0];
+      if (first === undefined || first.kind !== "merge") {
+        throw new Error("atomic: unresolved tenant mutation");
+      }
+      const match = await this.#matchTenantResource(first.collection, first.id);
+      if (match !== null) {
+        destination = match.tenantId;
+      } else if (
+        (await this.#platformRow(first.collection, { kind: "platform_operator" }, first.id)) !==
+        null
+      ) {
+        destination = null;
+      } else {
+        return null;
+      }
+    }
+    if (destination === null) return this.#controlStore().atomic(scope, mutations);
+    return (await this.#tenantStore(destination)).atomic(scope, mutations);
   }
 }
 

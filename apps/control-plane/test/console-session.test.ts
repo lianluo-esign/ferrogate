@@ -74,6 +74,7 @@ import {
 } from "../src/session/index.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm } from "./harness.js";
+import { tenantObjectDb } from "./tenant-object.js";
 import { applyTenantSchema, resetTenantD1 } from "./tenant-db.js";
 
 // ---------------------------------------------------------------------------
@@ -239,15 +240,26 @@ async function provisionTenantDatabase(tenantId: string): Promise<void> {
 }
 
 /** The virtual-key document the console minted for this user in this tenant. */
-async function sessionKeyDocuments(): Promise<Record<string, unknown>[]> {
-  const rows = await db()
-    .prepare(
-      `SELECT document_json FROM control_plane_resources WHERE resource_kind = 'virtual-keys'`,
-    )
+async function sessionKeyDocuments(tenantId: string): Promise<Record<string, unknown>[]> {
+  // Tenant-private documents live in the tenant's OWN object (#861/#863).
+  const rows = await tenantObjectDb(tenantId)
+    .prepare(`SELECT document_json FROM tenant_resources WHERE resource_kind = 'virtual-keys'`)
     .all<{ document_json: string }>();
   return rows.results
     .map((row) => JSON.parse(row.document_json) as Record<string, unknown>)
     .filter((document) => document.name === ADMIN_CONSOLE_SESSION_KEY_NAME);
+}
+
+/** Flip the DURABLE tenant-account status where the lifecycle gate reads it. */
+async function setTenantAccountStatus(tenantId: string, status: string): Promise<void> {
+  await tenantObjectDb(tenantId)
+    .prepare(
+      `UPDATE tenant_resources
+         SET document_json = json_set(document_json, '$.status', ?)
+       WHERE resource_kind = 'tenant-accounts' AND resource_id = ?`,
+    )
+    .bind(status, tenantId)
+    .run();
 }
 
 beforeAll(async () => {
@@ -380,7 +392,7 @@ describe("POST /v1/admin/register", () => {
 
   it("mints ONE console-session key, attributed and scoped to OWNER", async () => {
     const session = await register("owner@acme.test");
-    const documents = await sessionKeyDocuments();
+    const documents = await sessionKeyDocuments(session.tenant.id);
     expect(documents).toHaveLength(1);
     const document = documents[0] as Record<string, unknown>;
     expect(document.user_id).toBe(session.user.id);
@@ -508,14 +520,7 @@ describe("POST /v1/admin/login", () => {
 
   it("refuses a SUSPENDED tenancy with 403 and hands back NO key (#514)", async () => {
     const session = await register("owner@acme.test");
-    await db()
-      .prepare(
-        `UPDATE control_plane_resources
-           SET document_json = json_set(document_json, '$.status', 'suspended')
-         WHERE resource_kind = 'tenant-accounts' AND resource_id = ?`,
-      )
-      .bind(session.tenant.id)
-      .run();
+    await setTenantAccountStatus(session.tenant.id, "suspended");
 
     const result = await call("POST", "/v1/admin/login", {
       body: { email: "owner@acme.test", password: "correct horse battery" },
@@ -529,14 +534,7 @@ describe("POST /v1/admin/login", () => {
 
   it("still lets a DISABLED tenancy in — `disabled` is the tenant's own off switch", async () => {
     const session = await register("owner@acme.test");
-    await db()
-      .prepare(
-        `UPDATE control_plane_resources
-           SET document_json = json_set(document_json, '$.status', 'disabled')
-         WHERE resource_kind = 'tenant-accounts' AND resource_id = ?`,
-      )
-      .bind(session.tenant.id)
-      .run();
+    await setTenantAccountStatus(session.tenant.id, "disabled");
 
     const result = await call("POST", "/v1/admin/login", {
       body: { email: "owner@acme.test", password: "correct horse battery" },
@@ -736,14 +734,7 @@ describe("GET /v1/admin/me", () => {
     const before = await call("GET", "/v1/admin/me", { token: session.access_token });
     expect(before.status).toBe(200);
 
-    await db()
-      .prepare(
-        `UPDATE control_plane_resources
-           SET document_json = json_set(document_json, '$.status', 'suspended')
-         WHERE resource_kind = 'tenant-accounts' AND resource_id = ?`,
-      )
-      .bind(session.tenant.id)
-      .run();
+    await setTenantAccountStatus(session.tenant.id, "suspended");
 
     const after = await call("GET", "/v1/admin/me", { token: session.access_token });
     expect(after.status).toBe(403);
@@ -889,14 +880,7 @@ describe("POST /v1/admin/refresh", () => {
 
   it("is gated by the tenancy lifecycle too — refresh must not outlive suspension (#514)", async () => {
     const session = await register("owner@acme.test");
-    await db()
-      .prepare(
-        `UPDATE control_plane_resources
-           SET document_json = json_set(document_json, '$.status', 'suspended')
-         WHERE resource_kind = 'tenant-accounts' AND resource_id = ?`,
-      )
-      .bind(session.tenant.id)
-      .run();
+    await setTenantAccountStatus(session.tenant.id, "suspended");
     const result = await call("POST", "/v1/admin/refresh", {
       body: { refresh_token: session.refresh_token },
     });

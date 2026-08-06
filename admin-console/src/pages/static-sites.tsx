@@ -769,8 +769,24 @@ function SiteDetailSheet({
    */
   function livenessOf(domain: SiteDomain) {
     const detail = detailByHostname.get(domain.hostname);
+    // #738 replaced the detail read's `acme.enabled` boolean with
+    // `certificate_status` (the edge answers before this platform sees the
+    // request, so the certificate is the half that decides reachability).
+    // The tri-state survives: `undefined` for "this deployment cannot know"
+    // (no detail yet, no backend configured, lookup failed), otherwise
+    // whether a certificate is actually issued for the hostname —
+    // `issued_not_routing` counts, because the ACME half succeeded even
+    // while fallback-origin routing has not.
+    const certificate = detail?.certificate_status;
+    const certificateUnknowable =
+      certificate === undefined ||
+      certificate === "unconfigured" ||
+      certificate === "unknown" ||
+      certificate === "unavailable";
     return {
-      acme: detail?.acme.enabled,
+      acme: certificateUnknowable
+        ? undefined
+        : certificate === "active" || certificate === "issued_not_routing",
       serving: detail?.site_domain.serving ?? domain.serving,
       verificationState:
         detail?.site_domain.verification_state ?? domain.verification_state,

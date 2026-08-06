@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 308
+OPENAPI_OPERATION_COUNT: Final[int] = 312
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -89,6 +89,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "cancelAgentJob": {
         "method": "POST",
         "path": "/v1/agent-jobs/{run_id}/cancel",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
+    "cancelBatch": {
+        "method": "POST",
+        "path": "/v1/batches/{batch_id}/cancel",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
@@ -203,6 +209,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "createAssetUploadIntent": {
         "method": "POST",
         "path": "/v1/assets/presign/upload/{asset_type}/{name}/{version}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
+    "createBatch": {
+        "method": "POST",
+        "path": "/v1/batches",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
@@ -1208,6 +1220,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "listBatches": {
+        "method": "GET",
+        "path": "/v1/batches",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
+    },
     "listBillingOutboxDeadLetters": {
         "method": "GET",
         "path": "/admin/v1/billing-outbox-dead-letters",
@@ -1693,6 +1711,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/tenant-data/{tenant_id}/restore",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
+    },
+    "retrieveBatch": {
+        "method": "GET",
+        "path": "/v1/batches/{batch_id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
     },
     "reviewQuarantinedAsset": {
         "method": "POST",

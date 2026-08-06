@@ -465,8 +465,15 @@ describe("tenant model catalog CRUD", () => {
       },
     );
 
+    // Filtered to the catalog collection: `provisionTenant` writes its own
+    // `tenant-accounts` audit row for this tenant (the tenant-account document
+    // is tenant-attributed post-#861/#863), and this case is about the CATALOG
+    // mutation's revision.
     const auditRows = await db()
-      .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?")
+      .prepare(
+        `SELECT audit_json FROM audit_events
+          WHERE tenant = ? AND json_extract(audit_json, '$.collection') = 'providers'`,
+      )
       .bind(tenantId)
       .all<{ audit_json: string }>();
     const audit = JSON.parse(auditRows.results[0]?.audit_json ?? "{}") as { revision?: number };
@@ -568,11 +575,22 @@ describe("tenant model catalog CRUD", () => {
       .bind(tenantId)
       .all<{ id: string }>();
     expect(outboxRows.results).toHaveLength(0);
+    // Exactly ONE catalog audit row — the reconciled outbox entry. Filtered to
+    // the catalog collection because `provisionTenant` writes its own, correct
+    // `tenant-accounts` audit row for this tenant (the tenant-account document
+    // is tenant-attributed post-#861/#863) and that evidence must not be
+    // mistaken for a second catalog write.
     const auditRows = await db()
-      .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?")
+      .prepare(
+        `SELECT audit_json FROM audit_events
+          WHERE tenant = ? AND json_extract(audit_json, '$.collection') = 'providers'`,
+      )
       .bind(tenantId)
       .all<{ audit_json: string }>();
     expect(auditRows.results).toHaveLength(1);
+    expect(JSON.parse(auditRows.results[0]?.audit_json ?? "{}")).toMatchObject({
+      resource_id: "channel_scheduled_audit_outbox",
+    });
   });
 
   it("uses the dispatch router for native-binding tenant audit outboxes", async () => {

@@ -24,8 +24,9 @@ import {
   claimSiteDomain,
   releaseSiteDomain,
 } from "../src/store/site_domain.js";
-import { applySchema, db, rawDocument, resetD1 } from "./d1.js";
+import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, tenantKey } from "./harness.js";
+import { rawTenantDocument } from "./tenant-object.js";
 
 const HOST = "docs.acme.test";
 const A = { tenant: "tenant_a", key: "key-tenant-a" };
@@ -91,7 +92,8 @@ async function proveOwnership(who: { tenant: string; key: string }): Promise<Res
   });
   expect(issued.status).toBe(409);
 
-  const record = await rawDocument("site-domain-verifications", `${who.tenant}:${HOST}`);
+  // The verification document lives in the proving tenant's object (#861).
+  const record = await rawTenantDocument(who.tenant, "site-domain-verifications", `${who.tenant}:${HOST}`);
   const token = String(record?.challenge_token ?? "");
   expect(token).not.toBe("");
 

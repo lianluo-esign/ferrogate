@@ -20,8 +20,13 @@
  * in `src/worker.ts`, which this slice may not edit).
  */
 import { SELF, env } from "cloudflare:test";
+import { tenantScheduleAlarmMessage } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { resolveLifecycle } from "../src/adapters.js";
+import { resolveDeps } from "../src/adapters.js";
+import {
+  consumeTenantScheduleAlarmBatch,
+  runTenantScheduleAlarm,
+} from "../src/schedule/alarm-queue.js";
 import {
   SCHEDULE_COLLECTION,
   SCHEDULE_FIRE_COLLECTION,
@@ -29,10 +34,11 @@ import {
   runScheduleTick,
 } from "../src/schedule/engine.js";
 import { agentScheduleFireId, scheduledDispatchId } from "../src/schedule/model.js";
-import { runScheduledTick, scheduled } from "../src/schedule/scheduled.js";
+import { scheduled } from "../src/schedule/scheduled.js";
 import { D1ControlPlaneStore } from "../src/store/d1.js";
 import { applySchema, db, rawDocument, resetD1, seedD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import { rawTenantDocument, registerObjectTenants } from "./tenant-object.js";
 
 const KEY = operatorKey.secret;
 const TENANT_A_KEY = "sched-tenant-a";
@@ -375,18 +381,50 @@ describe("MOUNT: a suspended tenancy stops its schedules firing", () => {
     // Exactly ON the slot, not an hour past it: a far-future `now` would make
     // this a CATCH-UP, which `skip_missed` fast-forwards before the gate is
     // ever consulted — the test would then pass without the gate existing.
-    const slot = (await rawDocument(SCHEDULE_COLLECTION, "s_tick_susp"))
-      ?.next_fire_at_unix as number;
-    const now = slot;
-    const store = new D1ControlPlaneStore(db(), { requestId: "tick-lifecycle" });
-    const gate = resolveLifecycle(
-      { CONTROL_PLANE_STORE: undefined, TENANCY_LIFECYCLE: "{}", DB: db() } as never,
-      store,
-    );
-    const summary = await runScheduleTick({ store, lifecycle: gate }, now);
-    expect(summary.errors).toEqual(["s_tick_susp"]);
-    expect(summary.fired).toEqual([]);
+    // The typed tenant-object row is the schedule authority now; the admin
+    // read surfaces its slot.
+    const stored = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s_tick_susp`, {
+      headers: bearer(KEY),
+    });
+    expect(stored.status).toBe(200);
+    const slot = ((await stored.json()) as { agent_schedule: { next_fire_at_unix: number } })
+      .agent_schedule.next_fire_at_unix;
+    expect(typeof slot).toBe("number");
 
+    // The unattended path is the tenant-object alarm consumer, built on the
+    // SAME deps a request resolves — including `deps.lifecycle`, the line this
+    // case guards.
+    const deps = resolveDeps({
+      ...(env as unknown as Record<string, unknown>),
+      CONTROL_PLANE_STORE: undefined,
+      TENANCY_LIFECYCLE: "{}",
+    } as never);
+    const report = await runTenantScheduleAlarm(
+      deps,
+      tenantScheduleAlarmMessage("tenant_susp", slot),
+      slot,
+    );
+    expect(report).not.toBeNull();
+    // The slot was claimed (so it cannot re-fire) but nothing was dispatched.
+    expect(report?.dispatched).toBe(0);
+
+    // The refusal names the root cause on the durable fire row.
+    const fires = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s_tick_susp/fires`, {
+      headers: bearer(KEY),
+    });
+    expect(fires.status).toBe(200);
+    const history = (await fires.json()) as { data: { outcome: string; detail?: string }[] };
+    expect(history.data[0]?.outcome).toBe("error");
+    expect(String(history.data[0]?.detail ?? "")).toMatch(/suspend/i);
+
+    // Nothing was queued — neither in the tenant object nor in control D1.
+    expect(
+      await rawTenantDocument(
+        "tenant_susp",
+        SELF_HOSTED_DISPATCH_COLLECTION,
+        scheduledDispatchId("s_tick_susp", slot),
+      ),
+    ).toBeNull();
     const queued = await db()
       .prepare(
         "SELECT COUNT(*) AS n FROM control_plane_resources WHERE resource_kind = ? AND json_extract(document_json, '$.schedule_id') = ?",
@@ -681,51 +719,101 @@ describe("runScheduleTick against the real control database", () => {
 // The `scheduled` seam — proven here, MOUNTED by the integrate step
 // ---------------------------------------------------------------------------
 
-describe("the scheduled handler (src/schedule/scheduled.ts)", () => {
+describe("the unattended schedule seam (src/schedule/alarm-queue.ts)", () => {
   /**
-   * The tick's composition root is `src/worker.ts`, which this slice may not
-   * edit, so there is no `SELF`-driven mount gate to write for it. What CAN be
-   * proven — and is, here — is that the exported handler builds its deps from
-   * the real bindings and drives a real fire end to end, so the integrate step
-   * only has to add `export { scheduled } from "./schedule/scheduled.js";`
-   * plus a `[triggers] crons` stanza. See that module's docblock for the exact
-   * lines and for the plain statement that until they land, nothing fires on
-   * its own.
+   * Schedule execution no longer rides the maintenance Cron: each
+   * TenantDataObject's native alarm publishes one tenant wake-up to the queue,
+   * and `consumeTenantScheduleAlarmBatch` — which builds its deps from the SAME
+   * `resolveDeps` every request uses — performs the claim and dispatch. These
+   * cases pin that seam end to end, plus the no-second-authority rule: the
+   * Cron handler must NOT fire a due schedule, or two authorities would race
+   * the per-object fire claim.
    */
   it("fires a due schedule through the SAME deps resolveDeps builds for a request", async () => {
-    const created = await createSchedule({
-      id: "s_cron",
-      spec_kind: "interval",
-      interval_secs: 60,
-    });
-    expect(created.status).toBe(201);
-    const slot = (await rawDocument(SCHEDULE_COLLECTION, "s_cron"))?.next_fire_at_unix as number;
-
-    const report = await runScheduledTick(
-      { ...(env as unknown as Record<string, unknown>), CONTROL_PLANE_STORE: undefined } as never,
-      slot,
+    await registerObjectTenants(["tenant_a"]);
+    const created = await createSchedule(
+      { id: "s_cron", spec_kind: "interval", interval_secs: 60 },
+      TENANT_A_KEY,
     );
-    expect(report.at).toBe(slot);
-    expect(report.fired).toEqual(["s_cron"]);
+    expect(created.status).toBe(201);
+    const stored = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s_cron`, {
+      headers: bearer(TENANT_A_KEY),
+    });
+    expect(stored.status).toBe(200);
+    const slot = ((await stored.json()) as { agent_schedule: { next_fire_at_unix: number } })
+      .agent_schedule.next_fire_at_unix;
+    expect(typeof slot).toBe("number");
+
+    // The queue consumer resolves its deps itself — the same composition root.
+    await consumeTenantScheduleAlarmBatch(
+      {
+        messages: [
+          {
+            body: tenantScheduleAlarmMessage("tenant_a", slot),
+            ack: () => {},
+            retry: () => {
+              throw new Error("a due schedule must not be retried as a failure");
+            },
+          },
+        ],
+      },
+      { ...(env as unknown as Record<string, unknown>), CONTROL_PLANE_STORE: undefined } as never,
+    );
+
     expect(
-      await rawDocument(SELF_HOSTED_DISPATCH_COLLECTION, scheduledDispatchId("s_cron", slot)),
+      await rawTenantDocument(
+        "tenant_a",
+        SELF_HOSTED_DISPATCH_COLLECTION,
+        scheduledDispatchId("s_cron", slot),
+      ),
     ).not.toBeNull();
   });
 
-  it("exports a handler with the shape workerd requires of `scheduled`", async () => {
+  it("exports a handler with the shape workerd requires of `scheduled`, and it fires nothing", async () => {
     // A `scheduled` export that is not callable with (controller, env, ctx)
     // fails the Worker at STARTUP, not at the first cron — so the shape is
     // worth an assertion rather than a deploy.
     expect(typeof scheduled).toBe("function");
-    await createSchedule({ id: "s_cron2", spec_kind: "interval", interval_secs: 60 });
-    const slot = (await rawDocument(SCHEDULE_COLLECTION, "s_cron2"))?.next_fire_at_unix as number;
+    await registerObjectTenants(["tenant_a"]);
+    const created = await createSchedule(
+      { id: "s_cron2", spec_kind: "interval", interval_secs: 60 },
+      TENANT_A_KEY,
+    );
+    expect(created.status).toBe(201);
+    const storedResponse = await SELF.fetch(`${BASE}/admin/v1/agent-schedules/s_cron2`, {
+      headers: bearer(TENANT_A_KEY),
+    });
+    expect(storedResponse.status).toBe(200);
+    const slot = ((await storedResponse.json()) as { agent_schedule: { next_fire_at_unix: number } })
+      .agent_schedule.next_fire_at_unix;
+    expect(typeof slot).toBe("number");
     await scheduled(
       { scheduledTime: slot * 1000, cron: "* * * * *", noRetry: () => {} },
       { ...(env as unknown as Record<string, unknown>), CONTROL_PLANE_STORE: undefined } as never,
       { waitUntil: () => {}, passThroughOnException: () => {}, props: {} } as never,
     );
+    // The Cron ran its maintenance passes and did NOT dispatch the due
+    // schedule — the object alarm/queue path is the ONE schedule authority.
     expect(
-      await rawDocument(SELF_HOSTED_DISPATCH_COLLECTION, scheduledDispatchId("s_cron2", slot)),
+      await rawTenantDocument(
+        "tenant_a",
+        SELF_HOSTED_DISPATCH_COLLECTION,
+        scheduledDispatchId("s_cron2", slot),
+      ),
+    ).toBeNull();
+
+    // …and the schedule genuinely was due: the queue consumer fires it, so the
+    // assertion above cannot pass on a schedule that could never fire at all.
+    await consumeTenantScheduleAlarmBatch(
+      { messages: [{ body: tenantScheduleAlarmMessage("tenant_a", slot), ack: () => {} }] },
+      { ...(env as unknown as Record<string, unknown>), CONTROL_PLANE_STORE: undefined } as never,
+    );
+    expect(
+      await rawTenantDocument(
+        "tenant_a",
+        SELF_HOSTED_DISPATCH_COLLECTION,
+        scheduledDispatchId("s_cron2", slot),
+      ),
     ).not.toBeNull();
   });
 });
