@@ -196,9 +196,10 @@ permission group. An otherwise-complete *account* token cannot reach
 ### 6.1 The client
 
 `packages/cloudflare/src/custom-hostnames.ts` (`CustomHostnamesClient`) — the
-same shape as the package's D1 and R2 modules: one `CloudflareClient`, one
+same shape as the package's D1 account-management module: one `CloudflareClient`, one
 envelope decoder, one error taxonomy, one retry policy. Three behaviours are
-deliberately *not* the same as `r2.ts` and each is argued in that file's header:
+deliberately different from the former bucket-provisioning path and each is
+argued in this file's header:
 
 * a `1406` duplicate is **reconciled against our own zone**, never absorbed into
   success. An R2 bucket name is unique per account so its duplicate code proves

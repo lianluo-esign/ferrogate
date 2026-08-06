@@ -54,6 +54,7 @@ export * from "./signature-screener.js";
 export * from "./guardrail-screener.js";
 export * from "./keys.js";
 export * from "./registry.js";
+export * from "./retention.js";
 export * from "./schemas.js";
 export { SigV4Presigner, formatTimestamps } from "./sigv4.js";
 export type { R2S3Endpoint } from "./sigv4.js";

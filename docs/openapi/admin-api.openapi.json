@@ -13895,6 +13895,141 @@
         ]
       }
     },
+    "/admin/v1/retention-policies/{tenant_id}/{asset_type}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "tenant_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "asset_type",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAssetRetentionPolicy",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Read an asset retention policy.",
+        "description": "Reads the asset-type policy for a tenant. `asset_type` may be `*` for the tenant default. Platform operators may address any tenant; tenant-scoped credentials may address only their own tenant.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The asset retention policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAssetRetentionPolicyResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAssetRetentionPolicy",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Set an asset retention policy.",
+        "description": "Creates or replaces the asset-type policy for a tenant. `asset_type` may be `*` for the tenant default. Platform operators may address any tenant; tenant-scoped credentials may address only their own tenant.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminAssetRetentionPolicyMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored asset retention policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAssetRetentionPolicyResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/admin/v1/semantic-cache-policies": {
       "parameters": [
         {
@@ -35571,6 +35706,111 @@
         "required": [
           "object",
           "policy"
+        ]
+      },
+      "AdminAssetRetentionPolicy": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "resource_type": {
+            "const": "asset"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "keep_last_n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_age_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "min_age_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "tenant_id",
+          "resource_type",
+          "scope",
+          "asset_type",
+          "keep_last_n",
+          "max_age_secs",
+          "min_age_secs",
+          "created_at_unix",
+          "updated_at_unix"
+        ]
+      },
+      "AdminAssetRetentionPolicyMutation": {
+        "type": "object",
+        "properties": {
+          "keep_last_n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_age_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "min_age_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAssetRetentionPolicyResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "const": "retention_policy"
+          },
+          "retention_policy": {
+            "$ref": "#/components/schemas/AdminAssetRetentionPolicy"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "retention_policy"
         ]
       },
       "AdminSemanticCachePolicy": {

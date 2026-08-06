@@ -19,6 +19,7 @@
 import {
   assetDepsFromEnv,
   assetRouteModule,
+  sweepAssetRetentionForTenants,
   sweepAssetAuditProjections,
 } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
@@ -521,9 +522,11 @@ export async function gatewayScheduled(
   env: unknown,
   ctx: { waitUntil(work: Promise<unknown>): void },
 ): Promise<void> {
+  let tenantRouter: ReturnType<typeof resolverForEnv>["router"] | undefined;
+  let tenantIds: readonly string[] | undefined;
   try {
-    const tenantRouter = resolverForEnv(env as TenancyBindings).router;
-    const tenantIds = await tenantRouter.provisionedTenants();
+    tenantRouter = resolverForEnv(env as TenancyBindings).router;
+    tenantIds = await tenantRouter.provisionedTenants();
     await usage.sweep({ env, ctx }, undefined, tenantIds);
     await usage.sweepUsageProjections({ env, ctx }, tenantIds);
     await sweepExperimentProjections(env, tenantIds);
@@ -539,6 +542,9 @@ export async function gatewayScheduled(
         error instanceof Error ? error.message : String(error)
       }`,
     );
+  }
+  if (tenantRouter !== undefined && tenantIds !== undefined) {
+    await sweepAssetRetentionForTenants(env, tenantRouter, tenantIds);
   }
   await gatewayRequestLogRetention(env);
   // #689 — expired `/v1/responses` conversation state, on the SAME tick.

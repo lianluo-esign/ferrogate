@@ -59,6 +59,7 @@ import { plansRoutes } from "./plans.js";
 import { promptRoutes } from "./prompt.js";
 import { quotaPolicyRoutes } from "./quota_policy.js";
 import { rbacRoutes } from "./rbac.js";
+import { retentionPolicyRoutes } from "./retention_policy.js";
 import { selfHostedWorkerRoutes } from "./self_hosted_worker.js";
 import { siteDomainRoutes } from "./site_domain.js";
 import { skillRoutes } from "./skill.js";
@@ -99,6 +100,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   promptRoutes,
   quotaPolicyRoutes,
   rbacRoutes,
+  retentionPolicyRoutes,
   selfHostedWorkerRoutes,
   semanticCachePolicyRoutes,
   siteDomainRoutes,

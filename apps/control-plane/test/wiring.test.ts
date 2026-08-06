@@ -167,7 +167,7 @@ describe("the mount record the composition root returned", () => {
     expect(unrecorded).toEqual([]);
   });
 
-  it("exports the PRODUCTION module list, covering exactly the 38 owned groups", () => {
+  it("exports the PRODUCTION module list, covering exactly the 39 owned groups", () => {
     expect(CONTROL_PLANE_ROUTE_MODULES).toHaveLength(CONTROL_PLANE_GROUPS.length);
     expect(CONTROL_PLANE_ROUTE_MODULES.map((module) => module.group).sort()).toEqual([
       ...CONTROL_PLANE_GROUPS,
@@ -348,6 +348,15 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["prompt", "listAdminPromptTemplates", "GET", "/admin/v1/prompt-templates", 200],
   ["quota_policy", "listQuotaPolicies", "GET", "/admin/v1/quota-policies", 200],
   ["rbac", "listPermissions", "GET", "/admin/v1/permissions", 200],
+  [
+    "retention_policy",
+    "putAssetRetentionPolicy",
+    "PUT",
+    "/admin/v1/retention-policies/{tenant_id}/{asset_type}",
+    // The generic wiring world uses the memory control-plane store without a
+    // tenant database binding; the mounted route honestly refuses storage.
+    503,
+  ],
   ["self_hosted_worker", "listAdminSelfHostedWorkers", "GET", "/admin/v1/self-hosted-workers", 200],
   [
     "semantic_cache_policy",
@@ -365,7 +374,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 38 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 39 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });

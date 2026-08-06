@@ -18,16 +18,12 @@
  * live `storage_uri` set. `test/d1/retention-d1.test.ts` pins the delete order
  * and the channel-pin protection.
  *
- * STILL OPEN, and NOT CLOSABLE FROM A LIBRARY PACKAGE: nothing CALLS the sweeper
- * on a schedule. A `packages/*` library has no Worker entry module, no
- * `wrangler.toml`, and therefore no `[triggers] crons` — the schedule can only
- * be declared on a deployable. `apps/gateway/src/worker.ts` already exposes a
- * `scheduled` handler for the billing outbox and is where this hangs off; the
- * exact seam is `sweepAssetRetention(assets, blobs, line, retentionPolicyOf(p),
- * nowUnix)` per policy returned by `listRetentionPolicies`. Until that edit
- * lands, `request_logs`, `audit_events`, `agent_run_events` and R2 asset blobs
- * still grow without bound in a deployed environment, because a sweeper nobody
- * invokes prunes nothing.
+ * CLOSED at the composition root: `apps/gateway/src/assets/retention.ts`
+ * enumerates provisioned tenant objects from the existing Cron handler,
+ * selects the exact asset-type or `*` policy, calls the executor, lists the
+ * shared bucket under `assets/v1/t/{tenant}/`, and records audit/metric output.
+ * The library remains the right place for the pure planner and executor because
+ * it cannot enumerate a Worker tenant router or mount a Cron trigger itself.
  *
  * Also still open and deliberately so: {@link planLogRetention} has no D1
  * executor here. #859's gateway sweep owns the request-evidence executor: it

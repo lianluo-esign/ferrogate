@@ -38,6 +38,8 @@ import {
   retentionPolicyId,
 } from "@ferrogate/storage";
 import { beforeEach, describe, expect, test } from "vitest";
+import { gatewayScheduled } from "../../src/index.js";
+import { gatewayMetricsSnapshot } from "../../src/routes/metrics.js";
 import {
   D1AssetAuditSink,
   D1AssetBundleIndexStore,
@@ -45,30 +47,66 @@ import {
   isAssetDatabase,
 } from "../../src/assets/d1.js";
 import { assetDepsFromEnv } from "../../src/assets/handlers.js";
+import { tenantKeyPrefix } from "../../src/assets/keys.js";
 import { InMemoryAssetMetadataStore, type StoredBundleFile } from "../../src/assets/ports.js";
 import { seedApiKey } from "../keys/seed.js";
 import { tenantObjectDb, tenantObjectHandle } from "../tenant-object.js";
 import { applyControlMigrations } from "../requestlog/harness.js";
+import tenantRegistryMigrationSql from "../../../../sql/d1-ts/control/0012_tenant_storage_provisioning.sql?raw";
+import tenantBackfillMigrationSql from "../../../../sql/d1-ts/control/0021_tenant_backfill.sql?raw";
+import tenantRegistryCleanupSql from "../../../../sql/d1-ts/control/0022_retire_legacy_d1_registry_columns.sql?raw";
+import tenantPlacementMigrationSql from "../../../../sql/d1-ts/control/0023_tenant_object_placement.sql?raw";
 
 const TENANT = "tenant_asset_wiring";
 const PLAN = "plan_asset_wiring";
 /** `fg_` + 48 hex, the shape `virtualApiKeyPrefix` recognises. */
 const SECRET = `fg_${"a1b2c3d4".repeat(6)}`;
 
+function sqlStatements(migration: string): string[] {
+  return migration
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+}
+
 interface Bindings {
   readonly DB?: D1Database;
   readonly CONTROL_DB?: D1Database;
+  readonly ASSETS?: R2Bucket;
 }
 
-function bindings(): { db: D1Database; control: D1Database } {
-  const { DB, CONTROL_DB } = env as unknown as Bindings;
-  if (DB === undefined || CONTROL_DB === undefined) {
+function bindings(): { assets: R2Bucket; db: D1Database; control: D1Database } {
+  const { ASSETS, DB, CONTROL_DB } = env as unknown as Bindings;
+  if (ASSETS === undefined || DB === undefined || CONTROL_DB === undefined) {
     throw new Error(
-      "expected both `DB` and `CONTROL_DB` (apps/gateway/wrangler.toml). " +
+      "expected `ASSETS`, `DB`, and `CONTROL_DB` (apps/gateway/wrangler.toml). " +
         "Without them this file would 'pass' while proving nothing about the mount.",
     );
   }
-  return { db: DB, control: CONTROL_DB };
+  return { assets: ASSETS, db: DB, control: CONTROL_DB };
+}
+
+function scheduledEnv(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...(env as unknown as Record<string, unknown>),
+    DB: undefined,
+    BILLING_DB: undefined,
+    ...overrides,
+  };
+}
+
+async function clearTenantObjects(): Promise<void> {
+  const { assets } = bindings();
+  let cursor: string | undefined;
+  do {
+    const page = await assets.list({ prefix: tenantKeyPrefix(TENANT), cursor });
+    const keys = page.objects.map((object) => object.key);
+    if (keys.length > 0) await assets.delete(keys);
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor !== undefined);
 }
 
 /**
@@ -78,6 +116,25 @@ function bindings(): { db: D1Database; control: D1Database } {
  */
 async function provision(): Promise<void> {
   const { db, control } = bindings();
+  const registryColumns = await control.prepare("PRAGMA table_info(tenant_databases)").all();
+  const registryNames = new Set(
+    (registryColumns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
+  );
+  if (!registryNames.has("storage_backend")) {
+    for (const statement of [
+      ...sqlStatements(tenantRegistryMigrationSql),
+      ...sqlStatements(tenantBackfillMigrationSql),
+      ...sqlStatements(tenantRegistryCleanupSql),
+    ]) {
+      await control.prepare(statement).run();
+    }
+  }
+  if (!registryNames.has("location_hint_source")) {
+    for (const statement of sqlStatements(tenantPlacementMigrationSql)) {
+      await control.prepare(statement).run();
+    }
+  }
+  await clearTenantObjects();
   await db.prepare("DELETE FROM stored_assets").run();
   await db.prepare("DELETE FROM asset_channels").run();
   await db.prepare("DELETE FROM asset_bundle_files").run();
@@ -115,6 +172,14 @@ async function provision(): Promise<void> {
         "(?1, ?2, ?3, 'active', ?4)",
     )
     .bind(TENANT, "asset wiring", TENANT, PLAN)
+    .run();
+  await control
+    .prepare(
+      "INSERT OR REPLACE INTO tenant_databases " +
+        "(tenant_id, storage_backend, provisioning_status, schema_version, migration_state, migration_epoch) " +
+        "VALUES (?1, 'durable_object', 'ready', 1, 'done', 0)",
+    )
+    .bind(TENANT)
     .run();
 }
 
@@ -343,6 +408,79 @@ describe("the deployed Worker persists the asset audit trail to D1", () => {
       .bind(`${TENANT}:binaries:cli:7.0.0`)
       .all<Record<string, unknown>>();
     expect(withheld.results?.[0]?.visibility).toBe("quarantined");
+  });
+});
+
+describe("the scheduled asset lifecycle sweeper", () => {
+  beforeEach(async () => {
+    await applyControlMigrations();
+    await provision();
+  });
+
+  test("retains the newest version, deletes its row and object, emits metrics, and audits", async () => {
+    expect((await push("cli", "1.0.0", "old")).status).toBe(200);
+    expect((await push("cli", "2.0.0", "newer")).status).toBe(200);
+
+    const policy: StoredRetentionPolicy = {
+      id: retentionPolicyId(TENANT, RETENTION_RESOURCE_ASSET, RETENTION_SCOPE_DEFAULT),
+      tenantId: TENANT,
+      resourceType: RETENTION_RESOURCE_ASSET,
+      scope: RETENTION_SCOPE_DEFAULT,
+      keepLastN: 1,
+      maxAgeSecs: undefined,
+      minAgeSecs: 0,
+      createdAtUnix: Math.floor(Date.now() / 1000),
+      updatedAtUnix: Math.floor(Date.now() / 1000),
+    };
+    await new D1RetentionPolicyStore(await tenantObjectHandle(TENANT)).setRetentionPolicy(policy);
+
+    const before = await tenantObjectDb(TENANT)
+      .prepare("SELECT storage_uri FROM stored_assets WHERE version = ?1")
+      .bind("1.0.0")
+      .first<{ storage_uri: string }>();
+    expect(before?.storage_uri).toEqual(expect.stringContaining(tenantKeyPrefix(TENANT)));
+    const beforeMetrics = gatewayMetricsSnapshot();
+
+    await gatewayScheduled({}, scheduledEnv(), { waitUntil: () => {} });
+
+    const oldRows = await tenantObjectDb(TENANT)
+      .prepare("SELECT id FROM stored_assets WHERE version = ?1")
+      .bind("1.0.0")
+      .all<{ id: string }>();
+    expect(oldRows.results).toEqual([]);
+    expect(await bindings().assets.head(before?.storage_uri as string)).toBeNull();
+    const newestRows = await tenantObjectDb(TENANT)
+      .prepare("SELECT id FROM stored_assets WHERE version = ?1")
+      .bind("2.0.0")
+      .all<{ id: string }>();
+    expect(newestRows.results).toEqual([{ id: `${TENANT}:binaries:cli:2.0.0` }]);
+
+    const auditRows = await tenantObjectDb(TENANT)
+      .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?1")
+      .bind(TENANT)
+      .all<{ audit_json: string }>();
+    expect(auditRows.results.some((row) => JSON.parse(row.audit_json).action === "asset.retention_prune")).toBe(
+      true,
+    );
+
+    const afterMetrics = gatewayMetricsSnapshot();
+    expect(afterMetrics.assetLifecycleScannedTotal - beforeMetrics.assetLifecycleScannedTotal).toBe(1);
+    expect(afterMetrics.assetLifecyclePrunedTotal - beforeMetrics.assetLifecyclePrunedTotal).toBe(2);
+    expect(afterMetrics.assetLifecycleFailedTotal - beforeMetrics.assetLifecycleFailedTotal).toBe(0);
+  });
+
+  test("reclaims an unreferenced object under the tenant prefix", async () => {
+    const orphan = `${tenantKeyPrefix(TENANT)}orphan/old-object`;
+    await bindings().assets.put(orphan, "orphan-bytes");
+    expect(await bindings().assets.head(orphan)).not.toBeNull();
+
+    await gatewayScheduled(
+      {},
+      scheduledEnv({ ASSET_RETENTION_ORPHAN_GRACE_SECS: "0" }),
+      { waitUntil: () => {} },
+    );
+
+    expect(await bindings().assets.head(orphan)).toBeNull();
   });
 });
 

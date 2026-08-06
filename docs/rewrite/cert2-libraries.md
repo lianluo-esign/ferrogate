@@ -726,8 +726,8 @@ changelog:
 
 | §6.1 slice | TS | Fidelity check |
 |---|---|---|
-| 1. per-tenant R2 bucket provisioning (`r2.rs`) | `r2.ts` | `R2_BUCKET_NAME_MAX_LEN=63`, `MIN=3`, `R2_BUCKET_ALREADY_EXISTS_CODES=[10004,10073]`, `ensureTenantBucket`, the create/list/delete surface, and the `r2BucketPath` traversal guard all match |
-| 2. scoped temporary R2 S3 credentials (`r2_token.rs`) | `r2-token.ts` | present, 1,822 test lines across the package |
+| 1. per-tenant R2 bucket provisioning (`r2.rs`) | Retired by #744 | The deployed TS asset path uses one shared bucket and the `assets/v1/t/{tenant}/` prefix |
+| 2. scoped temporary R2 S3 credentials (`r2_token.rs`) | Retired by #744 | The deployed path uses shared bucket credentials; no per-tenant minting path is mounted |
 | 3. `scopes.rs` + `preflight` | `scopes.ts` | **all 8 permission groups present, in the same order, with the same `access` strings**; `usedBy` prose differs slightly (TS drops issue numbers, adds "incl. tenant database lifecycle" and "distinct from the S3 key pair") — clearer, and `test/scopes.test.ts` pins every row verbatim |
 | 4. shared retry/backoff + typed error taxonomy | `retry.ts`, `errors.ts`, `envelope.ts` | `maxRetries: 4`, `baseBackoffMs: 1_000`, `maxBackoffMs: 60_000` and `RETRYABLE_STATUSES = [429,500,502,503,504]` are **the Rust defaults verbatim** (`client.rs:140-170`); `Retry-After` wins, itself capped; arithmetic saturates (`Infinity` collapses to the cap) exactly as Rust's `checked_shl` + `saturating_mul` |
 
@@ -743,14 +743,9 @@ count — a provability argument, made explicitly.
 `retry.test.ts` and `client.test.ts` ("an exhausted 429 surfaces RateLimited
 carrying the attempt count").
 
-**One fidelity deviation found (→ L5).** `r2BucketNameForTenant` canonicalises as
-`"{domain}:{len}:{tenant}"` before hashing. Rust's `len` is `tenant.len()` —
-**UTF-8 bytes**. TS's is `tenant.length` — **UTF-16 code units**. For any tenant
-id containing a non-ASCII character the two produce **different bucket names**.
-The golden vectors pinned in `test/r2.test.ts` (`ferrogate-acme-59964e92…`,
-`ferrogate-8785c455…` for `""`, `ferrogate-b50a9d2c…` for `"!!!"`) are all ASCII,
-so nothing catches it. Injectivity within TS is preserved; only cross-port name
-agreement is broken. Severity LOW — see §7 L5 for why.
+The former tenant-bucket naming comparison is retired by #744. There is no
+deployed TS bucket-per-tenant path to compare with the Rust reference; tenant
+isolation is provided by the shared-bucket key prefix.
 
 **Verdict: the crate is now genuinely ported. 146 tests.**
 
@@ -1045,8 +1040,8 @@ read this document as certifying them.
 2. **Close L2** — JWKS stale-serve test. Security-relevant, ~20 lines.
 3. **Close L3** — breaker `affects_circuit` test, with a positive control.
 4. **Close L4** — one literal assertion pinning `MAX_FINDINGS_PER_EVALUATION`.
-5. **Fix L5** — UTF-8 byte length in `r2BucketNameForTenant` + a non-ASCII golden
-   vector. Do it while `crates/**` is still readable.
+5. **Close the retired R2 provisioning comparison** — no action remains while
+   the shared-bucket design is deployed.
 6. **Generate a Rust golden bucket table for `rolloutBucket`** (§4.5) — cheap
    insurance that expires the moment the Rust is deleted.
 7. **Collapse L7's three CF v4 envelope decoders** onto `@ferrogate/cloudflare`.

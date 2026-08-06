@@ -16,8 +16,7 @@
  *
  * | Slice | Module | Why it survived the move to Workers |
  * |---|---|---|
- * | S1 | `r2.ts` | no binding creates an R2 bucket |
- * | S2 | `r2-token.ts` | no binding mints a bucket-scoped S3 credential |
+ * | S1/S2 | retired by #744 | the asset path uses one shared R2 bucket and tenant key prefixes |
  * | S3 | `client.ts` `preflight` + `scopes.ts` | operability: NAME the missing permission group |
  * | S4 | `retry.ts` + `errors.ts` + `envelope.ts` | the shared retry/backoff + typed taxonomy the tree had two partial copies of |
  * | S5 | retired | Tenant data is now created by Durable Object addressing; no account-management client is needed |
@@ -37,10 +36,10 @@
  * `retry.ts` provides the shared account-management retry primitive.
  * `custom-hostnames.ts` (S6) has ONE control-plane consumer,
  * `GET /admin/v1/site-domains/{hostname}` (#738).
- * S1/S2/S5 are provisioning capabilities whose control-plane call sites are not
- * built yet; each module's docblock states the exact wiring line and the gate
- * that must open first. Nothing here may acquire a request-path consumer except
- * the retry/error primitives.
+ * S1/S2 per-tenant provisioning was retired by #744. S5 is a separate
+ * provisioning capability whose control-plane call site is not built yet.
+ * Nothing here may acquire a request-path consumer except the retry/error
+ * primitives.
  */
 export {
   AUTHENTICATION_CODES,
@@ -98,32 +97,6 @@ export {
   type RequestOptions,
   type TokenResolver,
 } from "./client.js";
-
-export {
-  R2Client,
-  R2_BUCKET_ALREADY_EXISTS_CODES,
-  R2_BUCKET_NAME_MAX_LEN,
-  R2_BUCKET_NAME_MIN_LEN,
-  r2BucketNameForTenant,
-  type R2Bucket,
-  type R2BucketCreation,
-  type R2BucketProvision,
-  type R2CreateBucketRequest,
-} from "./r2.js";
-
-export {
-  R2ScopedToken,
-  R2TokenClient,
-  R2_BUCKET_ITEM_READ_PERMISSION_GROUP_ID,
-  R2_BUCKET_ITEM_WRITE_PERMISSION_GROUP_ID,
-  R2_DEFAULT_JURISDICTION,
-  permissionGroupIdFor,
-  permissionGroupNameFor,
-  r2BucketResourceScope,
-  type R2CredentialProvision,
-  type R2ScopedTokenRequest,
-  type R2TokenAccess,
-} from "./r2-token.js";
 
 export {
   CUSTOM_HOSTNAME_DUPLICATE_CODES,
