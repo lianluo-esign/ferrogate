@@ -9,7 +9,6 @@
  */
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { GATEWAY_ROUTE_MODULES, gatewayRouter } from "../src/index.js";
 import {
   AUTH_KINDS,
   type AuthKind,
@@ -27,16 +26,18 @@ import {
   pathIsDocumented,
   toHonoPath,
 } from "../src/contract.js";
+import { GATEWAY_ROUTE_MODULES, gatewayRouter } from "../src/index.js";
 import { hasScope } from "../src/ports.js";
 import {
   ASSET_OPERATION_IDS,
+  BATCH_OPERATION_IDS,
   FILES_OPERATION_IDS,
   GATEWAY_OWNED_OPERATION_IDS,
-  SITE_OPERATION_IDS,
   INFERENCE_OPERATION_IDS,
   OBSERVABILITY_OPERATION_IDS,
   PENDING_MODULE_OPERATION_IDS,
   SHARED_OPERATION_IDS,
+  SITE_OPERATION_IDS,
   createGatewayApp,
 } from "../src/routes/index.js";
 
@@ -47,11 +48,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 302 operations", () => {
+  it("carries exactly 312 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 302 unique operation ids", () => {
+  it("has 312 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -117,7 +118,7 @@ describe("contract table", () => {
     // #813 adds fifteen bearer-guarded tenant model catalog operations: five
     // provider operations, five model operations and five offering operations.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 288,
+      bearer: 298,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -146,7 +147,7 @@ describe("contract table", () => {
       // `Counter(o["visibility"] for o in operations)` returns over the merged
       // `docs/openapi/runtime-api-contract.json`.
       // #813 adds fifteen admin-visible catalog operations.
-      admin: 230,
+      admin: 236,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -167,7 +168,7 @@ describe("contract table", () => {
       // again for #697, whose spend-anomaly read is admin, not public: both
       // parents of THIS merge also wrote 60, and re-counting the merged
       // document is still what says 60 is right.
-      public: 65,
+      public: 69,
       internal: 7,
     });
   });
@@ -217,15 +218,15 @@ describe("contract table", () => {
       // and the merged document has GET 130 — again no parent's number, again
       // `Counter(o["method"] for o in operations)` over the merged JSON.
       // #813 adds three reads: provider/model item reads and offering lists.
-      GET: 137,
+      GET: 140,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
       // #743's `POST /admin/v1/assets/quarantine/{asset_id}`. Re-counted off
       // the merged document, never summed.
-      POST: 90,
+      POST: 96,
       DELETE: 33,
-      PUT: 23,
+      PUT: 24,
       PATCH: 19,
     });
   });
@@ -430,7 +431,7 @@ describe("route registration", () => {
   const router = gatewayRouter;
   const registered = new Set(router.registeredOperationIds());
 
-  it("owns exactly the 45 operations ROUTE-MAP assigns to apps/gateway", () => {
+  it("owns exactly the 49 operations ROUTE-MAP assigns to apps/gateway", () => {
     // 31 -> 32 with `countMessageTokens` (issue #671), 32 -> 33 with `getModel`
     // (issue #670) and 33 -> 34 with `createRerank` (issue #676). Both #671 and
     // #670 wrote 32 independently, so the merge kept 32 with no conflict — the
@@ -443,7 +444,7 @@ describe("route registration", () => {
     // four lists rather than three.
     // 38 -> 40 with #689's `getResponse` / `deleteResponse`, COUNTED off
     // `GATEWAY_OWNED_OPERATION_IDS` after the merge like every number above it.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(45);
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(49);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -457,14 +458,14 @@ describe("route registration", () => {
     expect(missing).toEqual([]);
   });
 
-  it("mounts ALL 45 gateway-owned operations on the app the Worker exports", () => {
+  it("mounts ALL 49 gateway-owned operations on the app the Worker exports", () => {
     // THE gate. Nothing may be excused by a pending list: every operation
     // ROUTE-MAP assigns to apps/gateway is registered on the exported app.
     const missing = GATEWAY_OWNED_OPERATION_IDS.filter(
       (operationId) => !registered.has(operationId),
     );
     expect(missing).toEqual([]);
-    // ...and the registry is exactly the 45 owned + the 2 shared health ops +
+    // ...and the registry is exactly the 49 owned + the 2 shared health ops +
     // `getMetrics`, so a stray registration is caught in the same breath.
     //
     // `getMetrics` is deliberately its OWN list rather than a 39th owned
@@ -501,6 +502,7 @@ describe("route registration", () => {
         ...INFERENCE_OPERATION_IDS,
         ...ASSET_OPERATION_IDS,
         ...FILES_OPERATION_IDS,
+        ...BATCH_OPERATION_IDS,
         ...SITE_OPERATION_IDS,
       ]),
     );

@@ -148,6 +148,7 @@ export * from "./site-domain.js";
 export * from "./references.js";
 export * from "./payment-attempt.js";
 export * from "./agent-schedule.js";
+export * from "./batches.js";
 export * from "./tenant-schedule-alarm.js";
 export * from "./tenant-placement.js";
 /**

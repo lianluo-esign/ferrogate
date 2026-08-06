@@ -19,10 +19,11 @@
 import {
   assetDepsFromEnv,
   assetRouteModule,
-  sweepAssetRetentionForTenants,
   sweepAssetAuditProjections,
+  sweepAssetRetentionForTenants,
 } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
+import { batchRouteModule } from "./batch/index.js";
 import { delegationChain } from "./delegation/index.js";
 import {
   consumeOnlineEvalBatch,
@@ -43,6 +44,7 @@ import {
   sweepResponseConversations,
   tenantModelCatalogFromD1,
 } from "./inference/index.js";
+import { sweepManagedIsolationEvidence } from "./managed-evidence-projection.js";
 import {
   createMeteringUsageSink,
   meteringBindingsFromEnv,
@@ -50,7 +52,6 @@ import {
   routePriceSettledCostUsd,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
-import { sweepManagedIsolationEvidence } from "./managed-evidence-projection.js";
 import {
   consumeRequestLogBatch,
   createRequestLogSink,
@@ -64,7 +65,7 @@ import { residency } from "./residency/index.js";
 import { type RouteModule, createGatewayApp } from "./routes/index.js";
 import { siteRouteModule } from "./sites/index.js";
 import { requestTelemetry } from "./telemetry/index.js";
-import { resolverForEnv, tenantDatabase, type TenancyBindings } from "./tenancy/index.js";
+import { type TenancyBindings, resolverForEnv, tenantDatabase } from "./tenancy/index.js";
 
 /**
  * The durable metering sink behind `UsageSink`.
@@ -211,6 +212,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
     usage,
   }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
+  batchRouteModule(),
   // The static-site serve mode (issue #737), wired to the SAME `env.ASSETS`
   // bucket and the same tenant D1 bundle index the asset module is: it serves
   // published `static_site` bundles through `AssetService.pullAsset`, so a site

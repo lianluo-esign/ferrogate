@@ -156,6 +156,14 @@ export const FILES_OPERATION_IDS = [
   "deleteFile",
 ] as const;
 
+/** The four tenant-scoped OpenAI-compatible `/v1/batches` operations. */
+export const BATCH_OPERATION_IDS = [
+  "createBatch",
+  "retrieveBatch",
+  "cancelBatch",
+  "listBatches",
+] as const;
+
 /** Tools / functions / skills / prompts / agent discovery — mounted here. */
 export const TOOLING_OPERATION_IDS = [
   "listTools",
@@ -182,12 +190,13 @@ export const TOOLING_OPERATION_IDS = [
  */
 export const SITE_OPERATION_IDS = ["serveSite"] as const;
 
-/** All 45 operations `apps/gateway` owns per ROUTE-MAP.md. */
+/** All 49 operations `apps/gateway` owns per ROUTE-MAP.md. */
 export const GATEWAY_OWNED_OPERATION_IDS: readonly string[] = [
   ...TOOLING_OPERATION_IDS,
   ...INFERENCE_OPERATION_IDS,
   ...ASSET_OPERATION_IDS,
   ...FILES_OPERATION_IDS,
+  ...BATCH_OPERATION_IDS,
   ...SITE_OPERATION_IDS,
 ];
 

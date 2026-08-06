@@ -43,3 +43,4 @@ export * from "./agent-schedule-d1.js";
 // Per-tenant BYOK alias rows (issue #682). The caller supplies the tenant
 // object's database; the credential value never passes through this module.
 export * from "./provider-credential-d1.js";
+export * from "./batches-d1.js";
