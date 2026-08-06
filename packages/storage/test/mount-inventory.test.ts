@@ -97,11 +97,11 @@ function sourcesFor(app: string): string {
 const MOUNTED: [symbol: string, app: string][] = [
   ["EnvBindingTenantDatabaseRouter", "gateway"],
   // The other two apps that route per-tenant. The header named them; only the
-  // gateway leg was gated, so `apps/control-plane` or `apps/mcp` could have
-  // dropped the router and this file would have stayed green — the exact
-  // silent-unmount this file exists to catch, one app over.
+  // gateway leg was gated, so `apps/control-plane` could have dropped the
+  // router and this file would have stayed green — the exact silent-unmount
+  // this file exists to catch, one app over. MCP intentionally uses its own
+  // durable-object-only adapter because it does not serve native bindings.
   ["EnvBindingTenantDatabaseRouter", "control-plane"],
-  ["EnvBindingTenantDatabaseRouter", "mcp"],
   // NOT `ControlDatabaseTenantRegistry`: comment-stripping showed that all three
   // of its "importers" were prose. It reaches the request path only INSIDE
   // `EnvBindingTenantDatabaseRouter`, which constructs one — a transitive mount,
@@ -120,7 +120,7 @@ const MOUNTED: [symbol: string, app: string][] = [
   // suite red; keeping it in NEITHER list is the state that let five classes
   // rot. Unmounting it now reddens here as well as in
   // `apps/gateway/test/metering/budget-alerts.test.ts`.
-  ["D1BudgetAlertStore", "gateway"],
+  ["budgetAlertStoreForTenant", "gateway"],
   // #738 — the same "good news" direction, and the reason this gate is worth
   // its cost: `apps/control-plane/src/routes/site_domain.ts` constructs one to
   // project a completed DNS-TXT ownership proof into the typed

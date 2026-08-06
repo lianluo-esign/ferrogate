@@ -153,6 +153,24 @@ describe("refusing before the object is addressed", () => {
 });
 
 describe("provisioning a tenant end to end", () => {
+  test("records the immutable placement decision and its registration signal", async () => {
+    await registerTenant(TENANT_A);
+
+    await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      locationHint: "weur",
+      locationHintSource: "cf.continent=EU;cf.colo=FRA",
+      locationHintRecordedAtUnix: NOW,
+    });
+
+    const registration = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).get(TENANT_A);
+    expect(registration).toMatchObject({
+      locationHint: "weur",
+      locationHintSource: "cf.continent=EU;cf.colo=FRA",
+      locationHintRecordedAtUnix: NOW,
+    });
+  });
+
   test("yields a state row, an object at the current schema version, and a catalog", async () => {
     await registerTenant(TENANT_A);
 

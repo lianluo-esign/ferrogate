@@ -15,8 +15,11 @@
  */
 
 import type { ResidencyPolicy } from "./policy.js";
+import type { TenantObjectAddress } from "@ferrogate/storage";
 
 const POLICIES = new WeakMap<Request, ResidencyPolicy>();
+const ADDRESSES = new WeakMap<Request, TenantObjectAddress>();
+const ENV_ADDRESSES = new WeakMap<object, Map<string, TenantObjectAddress>>();
 
 /**
  * Publish the policy governing `request`.
@@ -47,5 +50,60 @@ export function residencyPolicyFor(request: Request): ResidencyPolicy | null {
     return POLICIES.get(request) ?? null;
   } catch {
     return null;
+  }
+}
+
+/** Publish the immutable namespace address selected for this request's tenant. */
+export function recordTenantObjectAddress(
+  request: Request,
+  address: TenantObjectAddress | undefined,
+): void {
+  if (address === undefined) return;
+  try {
+    ADDRESSES.set(request, address);
+  } catch {
+    /* Request is always an object on the deployed path. */
+  }
+}
+
+/** Publish the same address for request-scoped sinks that only receive env. */
+export function recordTenantObjectAddressForEnv(
+  env: unknown,
+  tenantId: string,
+  address: TenantObjectAddress | undefined,
+): void {
+  if (address === undefined || tenantId.trim() === "") return;
+  if (typeof env !== "object" || env === null) return;
+  try {
+    let addresses = ENV_ADDRESSES.get(env);
+    if (addresses === undefined) {
+      addresses = new Map();
+      ENV_ADDRESSES.set(env, addresses);
+    }
+    addresses.set(tenantId, address);
+  } catch {
+    /* Bindings are objects on the deployed path. */
+  }
+}
+
+/** Read the namespace address selected by the outer residency resolver. */
+export function tenantObjectAddressFor(request: Request): TenantObjectAddress | undefined {
+  try {
+    return ADDRESSES.get(request);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read a request's address from a helper that only received its env. */
+export function tenantObjectAddressForEnv(
+  env: unknown,
+  tenantId: string,
+): TenantObjectAddress | undefined {
+  if (typeof env !== "object" || env === null || tenantId.trim() === "") return undefined;
+  try {
+    return ENV_ADDRESSES.get(env)?.get(tenantId);
+  } catch {
+    return undefined;
   }
 }

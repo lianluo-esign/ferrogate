@@ -47,6 +47,12 @@ import {
   type ResidencyPolicyRow,
   parseResidencyPolicyRow,
 } from "./policy.js";
+import {
+  TENANT_JURISDICTIONS,
+  TENANT_LOCATION_HINTS,
+  type TenantJurisdiction,
+  type TenantLocationHint,
+} from "@ferrogate/storage";
 
 /** The `quota_policies` columns this module reads, named once. */
 const RESIDENCY_COLUMNS = "residency_regions_json, require_zero_data_retention, log_residency";
@@ -63,6 +69,9 @@ const RESIDENCY_COLUMNS = "residency_regions_json, require_zero_data_retention, 
 const SELECT_TENANT_POLICY =
   `SELECT ${RESIDENCY_COLUMNS} FROM quota_policies ` +
   "WHERE scope_type = 'tenant' AND scope_id = ?";
+
+const SELECT_TENANT_JURISDICTION =
+  "SELECT jurisdiction, location_hint FROM tenant_databases WHERE tenant_id = ?";
 
 /** Worker vars and bindings this slice reads. */
 export interface ResidencyBindings {
@@ -96,7 +105,12 @@ export interface ResidencyDatabase {
  * must never collapse into it — see the module docs on the fail direction.
  */
 export type ResidencyResolution =
-  | { readonly ok: true; readonly policy: ResidencyPolicy | null }
+  | {
+      readonly ok: true;
+      readonly policy: ResidencyPolicy | null;
+      readonly jurisdiction?: TenantJurisdiction;
+      readonly locationHint?: TenantLocationHint;
+    }
   | { readonly ok: false; readonly detail: string };
 
 export interface ResidencyPolicySource {
@@ -178,15 +192,53 @@ export function d1ResidencyPolicySource(db: ResidencyDatabase): ResidencyPolicyS
         if (schemaPredatesResidency(detail)) return { ok: true, policy: null };
         return { ok: false, detail };
       }
-      if (row === null || row === undefined) return { ok: true, policy: null };
-      const parsed = parseResidencyPolicyRow({
-        allowedRegions: jsonArrayColumn(row["residency_regions_json"]),
-        requireZeroDataRetention: row["require_zero_data_retention"],
-        logResidency: row["log_residency"],
-      });
-      return parsed.ok
-        ? { ok: true, policy: parsed.policy }
-        : { ok: false, detail: `quota_policies row is unreadable: ${parsed.detail}` };
+      const parsed =
+        row === null || row === undefined
+          ? ({ ok: true, policy: null } as const)
+          : parseResidencyPolicyRow({
+              allowedRegions: jsonArrayColumn(row["residency_regions_json"]),
+              requireZeroDataRetention: row["require_zero_data_retention"],
+              logResidency: row["log_residency"],
+            });
+      if (!parsed.ok) {
+        return { ok: false, detail: `quota_policies row is unreadable: ${parsed.detail}` };
+      }
+
+      let jurisdiction: TenantJurisdiction | undefined;
+      let locationHint: TenantLocationHint | undefined;
+      try {
+        const addressRow = await db.prepare(SELECT_TENANT_JURISDICTION).bind(tenantId).first();
+        const raw = addressRow?.["jurisdiction"];
+        if (raw !== null && raw !== undefined && raw !== "") {
+          if (!TENANT_JURISDICTIONS.includes(raw as TenantJurisdiction)) {
+            return {
+              ok: false,
+              detail: `tenant_databases.jurisdiction is not supported: ${String(raw)}`,
+            };
+          }
+          jurisdiction = raw as TenantJurisdiction;
+        }
+        const rawHint = addressRow?.["location_hint"];
+        if (rawHint !== null && rawHint !== undefined && rawHint !== "") {
+          if (!TENANT_LOCATION_HINTS.includes(rawHint as TenantLocationHint)) {
+            return {
+              ok: false,
+              detail: `tenant_databases.location_hint is not supported: ${String(rawHint)}`,
+            };
+          }
+          locationHint = rawHint as TenantLocationHint;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!schemaPredatesPlacement(detail)) return { ok: false, detail };
+      }
+
+      return {
+        ok: true,
+        policy: parsed.policy,
+        ...(jurisdiction === undefined ? {} : { jurisdiction }),
+        ...(locationHint === undefined ? {} : { locationHint }),
+      };
     },
   };
 }
@@ -204,6 +256,13 @@ function schemaPredatesResidency(detail: string): boolean {
     /no such column:\s*(residency_regions_json|require_zero_data_retention|log_residency)/i.test(
       detail,
     ) || /no such table:\s*quota_policies/i.test(detail)
+  );
+}
+
+function schemaPredatesPlacement(detail: string): boolean {
+  return (
+    /no such column:\s*jurisdiction/i.test(detail) ||
+    /no such table:\s*tenant_databases/i.test(detail)
   );
 }
 
@@ -245,15 +304,35 @@ export function cachedResidencyPolicySource(
 ): ResidencyPolicySource {
   const ttlMs = options.ttlMs ?? DEFAULT_RESIDENCY_TTL_MS;
   const now = options.now ?? (() => Date.now());
-  const entries = new Map<string, { policy: ResidencyPolicy | null; expiresAtMs: number }>();
+  const entries = new Map<
+    string,
+    {
+      policy: ResidencyPolicy | null;
+      jurisdiction?: TenantJurisdiction;
+      locationHint?: TenantLocationHint;
+      expiresAtMs: number;
+    }
+  >();
 
   return {
     async policyFor(tenantId: string): Promise<ResidencyResolution> {
       const hit = entries.get(tenantId);
-      if (hit !== undefined && hit.expiresAtMs > now()) return { ok: true, policy: hit.policy };
+      if (hit !== undefined && hit.expiresAtMs > now()) {
+        return {
+          ok: true,
+          policy: hit.policy,
+          ...(hit.jurisdiction === undefined ? {} : { jurisdiction: hit.jurisdiction }),
+          ...(hit.locationHint === undefined ? {} : { locationHint: hit.locationHint }),
+        };
+      }
       const resolved = await inner.policyFor(tenantId);
       if (resolved.ok) {
-        entries.set(tenantId, { policy: resolved.policy, expiresAtMs: now() + ttlMs });
+        entries.set(tenantId, {
+          policy: resolved.policy,
+          ...(resolved.jurisdiction === undefined ? {} : { jurisdiction: resolved.jurisdiction }),
+          ...(resolved.locationHint === undefined ? {} : { locationHint: resolved.locationHint }),
+          expiresAtMs: now() + ttlMs,
+        });
       }
       return resolved;
     },

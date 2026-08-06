@@ -63,6 +63,7 @@ import type { BillingEvent } from "@ferrogate/billing";
 import type { QuotaScopeKind } from "@ferrogate/storage";
 import type { UsageRecordContext } from "../inference/ports.js";
 import { gatewayTenantHandle } from "../ratelimit/wallet.js";
+import { tenantObjectAddressForEnv } from "../residency/carrier.js";
 import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type { MeteredCharge } from "./ports.js";
 
@@ -132,7 +133,11 @@ export function usageDatabaseFrom(env: unknown, tenantId?: string): D1Database |
     if (typeof env !== "object" || env === null) return undefined;
     const namespace = (env as UsageLedgerBindings).TENANT_DATA;
     if (namespace === undefined) return undefined;
-    const stub = tenantDataObjectFor({ TENANT_DATA: namespace }, tenantId);
+    const stub = tenantDataObjectFor(
+      { TENANT_DATA: namespace },
+      tenantId,
+      tenantObjectAddressForEnv(env, tenantId),
+    );
     return new DurableObjectD1Database(tenantId, stub).asD1Database();
   }
   if (typeof env !== "object" || env === null) return undefined;

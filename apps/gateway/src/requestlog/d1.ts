@@ -9,6 +9,7 @@
  * stale.
  */
 import { DurableObjectD1Database } from "@ferrogate/storage";
+import { tenantObjectAddressForEnv } from "../residency/carrier.js";
 import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
@@ -195,7 +196,11 @@ export function requestLogTenantDatabaseFrom(
 ): RequestLogDatabase | undefined {
   if (tenantId.trim() === "") return undefined;
   if (typeof env !== "object" || env === null) return undefined;
-  const stub = tenantDataObjectFor(env as TenantDataBindings, tenantId);
+  const stub = tenantDataObjectFor(
+    env as TenantDataBindings,
+    tenantId,
+    tenantObjectAddressForEnv(env, tenantId),
+  );
   return new DurableObjectD1Database(tenantId, stub).asD1Database() as RequestLogDatabase;
 }
 

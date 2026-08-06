@@ -73,7 +73,13 @@
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import { type CallerScope, type ControlPlaneStore, StoreConflictError } from "../ports.js";
+import {
+  type CallerScope,
+  type ControlPlaneStore,
+  StoreConflictError,
+  type StoreRecord,
+} from "../ports.js";
+import { ControlDatabaseTenantRegistry, tenantJurisdictionForResidencyRegions } from "@ferrogate/storage";
 import { adminDeleted, adminItem } from "../responses.js";
 import { deleteQuotaPolicyRow, projectQuotaPolicy } from "../store/quota_registry.js";
 import {
@@ -120,6 +126,9 @@ export const quotaPolicySchema = adminRecordSchema.extend({
    */
   required_tags: z.array(z.string().trim().min(1)).optional(),
   on_missing_tags: z.enum(["reject", "default_from_key"]).nullish(),
+  residency_regions: z.array(z.string().trim().min(1)).optional(),
+  require_zero_data_retention: z.boolean().optional(),
+  log_residency: z.enum(["in_region", "unconstrained"]).nullish(),
   /**
    * #697 — the spend burn-rate detector's tuning, at the `tenant` scope only
    * (`apps/control-plane/src/finops/pass.ts` states why a per-key baseline is
@@ -194,6 +203,81 @@ function readScope(c: Parameters<Handler>[0]): { scopeType: QuotaScopeKind; scop
     throw new HttpError(404, "not_found", `no route for ${c.req.method} ${c.req.path}`);
   }
   return { scopeType: parsed.data, scopeId: pathParam(c, "scope_id") };
+}
+
+function residencyRegionsOf(record: { readonly residency_regions?: unknown }): string[] {
+  return Array.isArray(record.residency_regions)
+    ? record.residency_regions.filter((region): region is string => typeof region === "string")
+    : [];
+}
+
+const QUOTA_SCOPE_OWNER_COLLECTION: Readonly<Record<QuotaScopeKind, string | null>> = {
+  tenant: null,
+  project: "projects",
+  workspace: "workspaces",
+  key: "virtual-keys",
+};
+
+/** Resolve the tenant object that owns a tenant-private quota document. */
+async function quotaPolicyTenantId(
+  deps: ReturnType<typeof depsOf>,
+  scopeType: QuotaScopeKind,
+  scopeId: string,
+  record: { readonly tenant_id?: unknown },
+): Promise<string> {
+  if (scopeType === "tenant") return scopeId;
+  if (typeof record.tenant_id === "string" && record.tenant_id.trim() !== "") {
+    return record.tenant_id.trim();
+  }
+
+  const collection = QUOTA_SCOPE_OWNER_COLLECTION[scopeType];
+  if (collection === null) return scopeId;
+  const owner = await deps.store.get(collection, { kind: "platform_operator" }, scopeId);
+  if (typeof owner?.tenant_id === "string" && owner.tenant_id.trim() !== "") {
+    return owner.tenant_id.trim();
+  }
+  throw new HttpError(
+    400,
+    "invalid_request_body",
+    `quota policy scope ${scopeType}/${scopeId} must name an existing tenant owner`,
+  );
+}
+
+/** Refuse a policy update that would name a different object namespace. */
+async function assertResidencyJurisdiction(
+  c: Parameters<Handler>[0],
+  scopeType: QuotaScopeKind,
+  scopeId: string,
+  record: { readonly residency_regions?: unknown },
+): Promise<void> {
+  if (scopeType !== "tenant") return;
+  const db = c.get("deps").controlDatabase;
+  if (db === null) return;
+
+  const required = tenantJurisdictionForResidencyRegions(residencyRegionsOf(record));
+  const registration = await new ControlDatabaseTenantRegistry(db).get(scopeId);
+  if (registration === undefined) return;
+
+  const materialized =
+    registration.locationHint !== undefined ||
+    registration.status === "ready" ||
+    registration.status === "incomplete" ||
+    registration.status === "failed";
+  const actual = registration.jurisdiction;
+  const mismatch =
+    required !== undefined &&
+    (actual !== undefined ? required !== actual : materialized);
+  if (!mismatch) return;
+
+  const actualLabel = actual ?? "unrestricted";
+  const requiredLabel = required ?? "unrestricted";
+  throw new HttpError(
+    409,
+    "tenant_jurisdiction_migration_required",
+    `tenant ${scopeId} already has a Durable Object addressed in jurisdiction ${actualLabel}, ` +
+      `but this residency policy requires ${requiredLabel}; changing the jurisdiction is ` +
+      "part of the object address and requires a data migration",
+  );
 }
 
 /**
@@ -315,8 +399,19 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       }
 
       const id = quotaPolicyId(parsedType.data, body.scope_id);
+      await assertResidencyJurisdiction(c, parsedType.data, body.scope_id, body);
       try {
-        const stored = await deps.store.create(QUOTA_POLICIES, scope, { ...body, id });
+        const tenantId = await quotaPolicyTenantId(
+          deps,
+          parsedType.data,
+          body.scope_id,
+          body,
+        );
+        const stored = await deps.store.create(QUOTA_POLICIES, scope, {
+          ...body,
+          id,
+          tenant_id: tenantId,
+        });
         await projectPolicy(c, stored, parsedType.data, body.scope_id);
         return json(c, 201, adminItem("quota_policy", stored));
       } catch (error) {
@@ -345,6 +440,7 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       authorizeScopedResourceWrite(scope, "Replacing");
       const body = await readJson(c, quotaPolicySchema);
       const id = quotaPolicyId(scopeType, scopeId);
+      await assertResidencyJurisdiction(c, scopeType, scopeId, body);
       const stored = await deps.store.replace(QUOTA_POLICIES, scope, id, {
         ...body,
         scope_type: scopeType,
@@ -362,6 +458,9 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       authorizeScopedResourceWrite(scope, "Updating");
       const body = await readJson(c, quotaPolicySchema);
       const id = quotaPolicyId(scopeType, scopeId);
+      const existing = await deps.store.get(QUOTA_POLICIES, scope, id);
+      if (existing === null) throw new HttpError(404, "not_found", `quota policy ${id} not found`);
+      await assertResidencyJurisdiction(c, scopeType, scopeId, { ...existing, ...body });
       const stored = await deps.store.merge(QUOTA_POLICIES, scope, id, body);
       if (stored === null) throw new HttpError(404, "not_found", `quota policy ${id} not found`);
       await projectPolicy(c, stored, scopeType, scopeId);
@@ -374,6 +473,9 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       const { scopeType, scopeId } = readScope(c);
       authorizeScopedResourceWrite(scope, "Deleting");
       const id = quotaPolicyId(scopeType, scopeId);
+      const existing = await deps.store.get(QUOTA_POLICIES, scope, id);
+      if (existing === null) throw new HttpError(404, "not_found", `quota policy ${id} not found`);
+      await assertResidencyJurisdiction(c, scopeType, scopeId, {});
       if (!(await deps.store.remove(QUOTA_POLICIES, scope, id))) {
         throw new HttpError(404, "not_found", `quota policy ${id} not found`);
       }

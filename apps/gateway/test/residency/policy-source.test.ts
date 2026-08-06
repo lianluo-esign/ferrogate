@@ -11,6 +11,7 @@ import {
   type ResidencyDatabase,
   cachedResidencyPolicySource,
   d1ResidencyPolicySource,
+  jurisdictionForPolicyAndAddress,
   residencyPolicySourceFromVars,
 } from "../../src/residency/index.js";
 
@@ -68,6 +69,22 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
     expect(resolved.ok && resolved.policy?.requireZeroDataRetention).toBe(true);
   });
 
+  it("carries the recorded jurisdiction and placement hint when present", async () => {
+    const { db } = fakeDb({
+      tenant_eu: {
+        residency_regions_json: '["eu-west-1"]',
+        require_zero_data_retention: 0,
+        jurisdiction: "eu",
+        location_hint: "weur",
+      },
+    });
+    expect(await d1ResidencyPolicySource(db).policyFor("tenant_eu")).toMatchObject({
+      ok: true,
+      jurisdiction: "eu",
+      locationHint: "weur",
+    });
+  });
+
   it("answers 'not governed' for a tenant with no row", async () => {
     const { db } = fakeDb({});
     expect(await d1ResidencyPolicySource(db).policyFor("tenant_us")).toEqual({
@@ -104,6 +121,14 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
     const resolved = await d1ResidencyPolicySource(db).policyFor("tenant_eu");
     expect(resolved.ok).toBe(false);
     expect(resolved.ok === false && resolved.detail).toContain("residency_regions");
+  });
+});
+
+describe("residency and the object namespace cannot disagree", () => {
+  it("refuses a policy jurisdiction different from the recorded object", () => {
+    expect(() => jurisdictionForPolicyAndAddress("eu", "us")).toThrow(
+      /changing the jurisdiction requires a data migration/,
+    );
   });
 });
 

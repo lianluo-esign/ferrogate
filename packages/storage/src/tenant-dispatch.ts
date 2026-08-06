@@ -63,6 +63,7 @@ import {
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
 import type { TenantDataStatement } from "./tenant-data-object.js";
+import type { TenantObjectAddress } from "./tenant-placement.js";
 
 /** The arms {@link BackendDispatchingTenantDatabaseRouter} dispatches between. */
 export interface TenantBackendArms {
@@ -87,6 +88,19 @@ export interface TenantBackendArms {
    * migration source fail closed rather than silently using another arm.
    */
   readonly legacyShared?: TenantDatabaseRouter | undefined;
+}
+
+function objectAddressForRegistration(
+  registration: Awaited<ReturnType<ControlDatabaseTenantRegistry["get"]>>,
+  requested?: TenantObjectAddress,
+): TenantObjectAddress | undefined {
+  if (registration === undefined) return requested;
+  const locationHint = registration.locationHint ?? requested?.locationHint;
+  const jurisdiction = registration.jurisdiction ?? requested?.jurisdiction;
+  return {
+    ...(locationHint === undefined ? {} : { locationHint }),
+    ...(jurisdiction === undefined ? {} : { jurisdiction }),
+  };
 }
 
 /**
@@ -122,7 +136,7 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
     return this.#controlDb;
   }
 
-  async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+  async forTenant(tenantId: string, address?: TenantObjectAddress): Promise<TenantDatabaseHandle> {
     if (tenantId === "") {
       // Refused HERE and not delegated, because the two arms refuse it with
       // different messages and a blank id must never depend on which arm a
@@ -130,6 +144,7 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
       throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
     }
     const registration = await this.#registry.get(tenantId);
+    const objectAddress = objectAddressForRegistration(registration, address);
     if (
       registration?.migrationState !== undefined &&
       PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
@@ -140,13 +155,13 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
           `tenant ${tenantId} is in migration state ${registration.migrationState}, but this Worker binds no legacy shared tenant database`,
         );
       }
-      return legacyShared.forTenant(tenantId);
+      return legacyShared.forTenant(tenantId, objectAddress);
     }
     if (registration?.storageBackend !== "durable_object") {
       // Includes "no row at all": a tenant nothing has provisioned is the
       // fallback's `not_found`, which callers already read as "no tenant
       // database, act on the document only".
-      return this.#arms.fallback.forTenant(tenantId);
+      return this.#arms.fallback.forTenant(tenantId, objectAddress);
     }
     const durableObject = this.#arms.durableObject;
     if (durableObject === undefined) {
@@ -159,18 +174,20 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
         ].join(" "),
       );
     }
-    return durableObject.forTenant(tenantId);
+    return durableObject.forTenant(tenantId, objectAddress);
   }
 
   /** Route operator-only object writes by the same roster decision as reads. */
   async privilegedBatch(
     tenantId: string,
     statements: readonly TenantDataStatement[],
+    address?: TenantObjectAddress,
   ): Promise<void> {
     if (tenantId === "") {
       throw StorageError.runtime("tenant database routing requires a non-empty tenant id");
     }
     const registration = await this.#registry.get(tenantId);
+    const objectAddress = objectAddressForRegistration(registration, address);
     const router =
       registration?.migrationState !== undefined &&
       PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
@@ -188,11 +205,16 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
         `tenant ${tenantId} backend does not expose the privileged tenant-write RPC`,
       );
     }
-    await router.privilegedBatch(tenantId, statements);
+    await router.privilegedBatch(tenantId, statements, objectAddress);
   }
 
-  async setScheduleAlarm(tenantId: string, scheduledAtUnix: number): Promise<void> {
+  async setScheduleAlarm(
+    tenantId: string,
+    scheduledAtUnix: number,
+    address?: TenantObjectAddress,
+  ): Promise<void> {
     const registration = await this.#registry.get(tenantId);
+    const objectAddress = objectAddressForRegistration(registration, address);
     const router =
       registration?.migrationState !== undefined &&
       PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
@@ -209,11 +231,12 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
     // Preserve the optional capability so legacy schedule paths keep using
     // their existing control-plane tick.
     if (router.setScheduleAlarm === undefined) return;
-    await router.setScheduleAlarm(tenantId, scheduledAtUnix);
+    await router.setScheduleAlarm(tenantId, scheduledAtUnix, objectAddress);
   }
 
-  async clearScheduleAlarm(tenantId: string): Promise<void> {
+  async clearScheduleAlarm(tenantId: string, address?: TenantObjectAddress): Promise<void> {
     const registration = await this.#registry.get(tenantId);
+    const objectAddress = objectAddressForRegistration(registration, address);
     const router =
       registration?.migrationState !== undefined &&
       PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
@@ -227,11 +250,12 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
       );
     }
     if (router.clearScheduleAlarm === undefined) return;
-    await router.clearScheduleAlarm(tenantId);
+    await router.clearScheduleAlarm(tenantId, objectAddress);
   }
 
-  async rearmScheduleAlarm(tenantId: string): Promise<void> {
+  async rearmScheduleAlarm(tenantId: string, address?: TenantObjectAddress): Promise<void> {
     const registration = await this.#registry.get(tenantId);
+    const objectAddress = objectAddressForRegistration(registration, address);
     const router =
       registration?.migrationState !== undefined &&
       PRE_CUTOVER_TENANT_MIGRATION_STATES.includes(registration.migrationState)
@@ -245,7 +269,7 @@ export class BackendDispatchingTenantDatabaseRouter implements TenantDatabaseRou
       );
     }
     if (router.rearmScheduleAlarm === undefined) return;
-    await router.rearmScheduleAlarm(tenantId);
+    await router.rearmScheduleAlarm(tenantId, objectAddress);
   }
 
   async provisionedTenants(): Promise<readonly string[]> {

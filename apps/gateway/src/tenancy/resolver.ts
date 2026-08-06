@@ -16,6 +16,7 @@ import {
   SharedDatabaseTenantRouter,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
+  type TenantObjectAddress,
 } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import {
@@ -96,7 +97,7 @@ class DisabledTenantDatabaseResolver implements TenantDatabaseResolver {
     );
   }
 
-  forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+  forTenant(tenantId: string, _address?: TenantObjectAddress): Promise<TenantDatabaseHandle> {
     return Promise.reject(
       new HttpError(
         503,
@@ -124,9 +125,12 @@ class RoutedTenantDatabaseResolver implements TenantDatabaseResolver {
     return this.router.control();
   }
 
-  async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+  async forTenant(
+    tenantId: string,
+    address?: TenantObjectAddress,
+  ): Promise<TenantDatabaseHandle> {
     try {
-      return await this.router.forTenant(tenantId);
+      return await this.router.forTenant(tenantId, address);
     } catch (error) {
       // Every refusal the router raises arrives here. Under the D1 modes those
       // are resolution failures: unregistered tenant, registry row with no

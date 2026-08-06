@@ -12,12 +12,18 @@ import {
   assertTenantMigrationTransition,
   checksumRows,
   compareTableReceipts,
+  tenantJurisdictionForResidencyRegions,
+  TENANT_JURISDICTIONS,
+  TENANT_LOCATION_HINTS,
   TENANT_BACKFILL_TABLES,
   type TenantBackfillTable,
   type TenantDataStatement,
   type TenantDataValue,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
+  type TenantJurisdiction,
+  type TenantLocationHint,
+  type TenantObjectAddress,
   type TenantMigrationMode,
   type TenantMigrationStatus,
   type TenantMigrationState,
@@ -46,6 +52,8 @@ export interface TenantBackfillOptions {
   readonly destinationRouter: TenantDatabaseRouter;
   readonly tenantId: string;
   readonly action: TenantBackfillAction;
+  /** Observed from tenant traffic; the migration job's own location is invalid. */
+  readonly locationHint?: TenantLocationHint;
   readonly requestId?: string | null;
   readonly nowUnix?: number;
   readonly pageSize?: number;
@@ -82,6 +90,10 @@ interface TenantBackfillRow {
   readonly tenant_id: string;
   readonly storage_backend: string | null;
   readonly binding_name: string | null;
+  readonly location_hint: string | null;
+  readonly location_hint_source: string | null;
+  readonly location_hint_recorded_at_unix: number | null;
+  readonly jurisdiction: string | null;
   readonly migration_state: string;
   readonly migration_epoch: number;
   readonly migration_frozen_at_unix: number | null;
@@ -108,24 +120,30 @@ export interface TenantBackfillReceipt {
 }
 
 interface MigrationDestination {
-  forTenant(tenantId: string): Promise<TenantDatabaseHandle>;
+  forTenant(tenantId: string, address?: TenantObjectAddress): Promise<TenantDatabaseHandle>;
   migrationImport(
     tenantId: string,
     epoch: number,
     statements: readonly TenantDataStatement[],
+    address?: TenantObjectAddress,
   ): Promise<void>;
   setMigrationMode(
     tenantId: string,
     mode: TenantMigrationMode,
     epoch: number,
+    address?: TenantObjectAddress,
   ): Promise<TenantMigrationStatus>;
-  migrationStatus(tenantId: string): Promise<TenantMigrationStatus>;
+  migrationStatus(tenantId: string, address?: TenantObjectAddress): Promise<TenantMigrationStatus>;
 }
 
 const ROW_COLUMNS = [
   "tenant_id",
   "storage_backend",
   "binding_name",
+  "location_hint",
+  "location_hint_source",
+  "location_hint_recorded_at_unix",
+  "jurisdiction",
   "migration_state",
   "migration_epoch",
   "migration_frozen_at_unix",
@@ -306,6 +324,132 @@ async function readRow(db: D1Database, tenantId: string): Promise<TenantBackfill
     throw new TenantBackfillError(404, "tenant_not_found", `tenant ${tenantId} is not registered in tenant_databases`);
   }
   return row;
+}
+
+function requireBackfillLocationHint(value: TenantLocationHint | undefined): TenantLocationHint {
+  if (value === undefined || !TENANT_LOCATION_HINTS.includes(value)) {
+    throw new TenantBackfillError(
+      400,
+      "tenant_storage_migration_location_hint_required",
+      "tenant storage backfill requires a location_hint observed from the tenant's traffic; the control-plane job location is not a valid substitute",
+    );
+  }
+  return value;
+}
+
+function parseBackfillJurisdiction(value: string | null): TenantJurisdiction | undefined {
+  if (value === null) return undefined;
+  if (TENANT_JURISDICTIONS.includes(value as TenantJurisdiction)) return value as TenantJurisdiction;
+  throw new TenantBackfillError(
+    503,
+    "tenant_storage_migration_schema_error",
+    `tenant row contains unsupported jurisdiction ${value}`,
+  );
+}
+
+async function policyJurisdiction(
+  db: D1Database,
+  tenantId: string,
+): Promise<TenantJurisdiction | undefined> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT residency_regions_json FROM quota_policies " +
+          "WHERE scope_type = 'tenant' AND scope_id = ?",
+      )
+      .bind(tenantId)
+      .first<{ residency_regions_json: string | null }>();
+    if (row?.residency_regions_json === null || row?.residency_regions_json === undefined) return undefined;
+    const parsed: unknown = JSON.parse(row.residency_regions_json);
+    if (!Array.isArray(parsed)) return undefined;
+    const regions = parsed.filter((entry): entry is string => typeof entry === "string");
+    return tenantJurisdictionForResidencyRegions(regions);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (/no such (table|column):/i.test(detail)) return undefined;
+    if (error instanceof SyntaxError) {
+      throw new TenantBackfillError(503, "tenant_storage_migration_schema_error", "tenant residency policy is invalid JSON");
+    }
+    throw error;
+  }
+}
+
+async function addressForBackfill(
+  options: TenantBackfillOptions,
+  row: TenantBackfillRow,
+): Promise<{ readonly row: TenantBackfillRow; readonly address: TenantObjectAddress }> {
+  const locationHint = requireBackfillLocationHint(options.locationHint);
+  if (row.location_hint !== null && row.location_hint !== locationHint) {
+    throw new TenantBackfillError(
+      409,
+      "tenant_storage_migration_location_conflict",
+      `tenant ${row.tenant_id} is already recorded at location_hint ${row.location_hint}; changing the first placement decision requires a data migration`,
+    );
+  }
+  if (row.location_hint !== null && !TENANT_LOCATION_HINTS.includes(row.location_hint as TenantLocationHint)) {
+    throw new TenantBackfillError(
+      503,
+      "tenant_storage_migration_schema_error",
+      `tenant row contains unsupported location_hint ${row.location_hint}`,
+    );
+  }
+  const policy = await policyJurisdiction(options.controlDatabase, row.tenant_id);
+  const recorded = parseBackfillJurisdiction(row.jurisdiction);
+  if (recorded !== undefined && policy !== undefined && recorded !== policy) {
+    throw new TenantBackfillError(
+      409,
+      "tenant_jurisdiction_migration_required",
+      `tenant ${row.tenant_id} records jurisdiction ${recorded}, but its residency policy requires ${policy}; changing the jurisdiction is part of the object address and requires a data migration`,
+    );
+  }
+  const jurisdiction = recorded ?? policy;
+  if (
+    row.location_hint === null ||
+    row.location_hint_source === null ||
+    row.location_hint_recorded_at_unix === null ||
+    (row.jurisdiction === null && jurisdiction !== undefined)
+  ) {
+    await options.controlDatabase
+      .prepare(
+        `UPDATE tenant_databases SET
+           location_hint = COALESCE(location_hint, ?),
+           location_hint_source = COALESCE(location_hint_source, ?),
+           location_hint_recorded_at_unix = COALESCE(location_hint_recorded_at_unix, ?),
+           jurisdiction = COALESCE(jurisdiction, ?),
+           updated_at_unix = unixepoch()
+         WHERE tenant_id = ?`,
+      )
+      .bind(locationHint, "backfill:observed tenant traffic", options.nowUnix ?? Math.floor(Date.now() / 1000), jurisdiction ?? null, row.tenant_id)
+      .run();
+  }
+  const refreshed = await readRow(options.controlDatabase, row.tenant_id);
+  const refreshedJurisdiction = parseBackfillJurisdiction(refreshed.jurisdiction);
+  return {
+    row: refreshed,
+    address: {
+      locationHint,
+      ...(refreshedJurisdiction === undefined ? {} : { jurisdiction: refreshedJurisdiction }),
+    },
+  };
+}
+
+function objectAddressForRow(
+  options: TenantBackfillOptions,
+  row: TenantBackfillRow,
+): TenantObjectAddress {
+  const locationHint = requireBackfillLocationHint(options.locationHint);
+  if (row.location_hint !== locationHint) {
+    throw new TenantBackfillError(
+      409,
+      "tenant_storage_migration_location_conflict",
+      `tenant ${row.tenant_id} has no matching recorded location_hint for this backfill`,
+    );
+  }
+  const jurisdiction = parseBackfillJurisdiction(row.jurisdiction);
+  return {
+    locationHint,
+    ...(jurisdiction === undefined ? {} : { jurisdiction }),
+  };
 }
 
 function decodeRow(row: TenantBackfillRow): {
@@ -524,7 +668,8 @@ async function copyTables(
   progress: TenantBackfillProgress,
   pageSize: number,
 ): Promise<void> {
-  const handle = await destination.forTenant(options.tenantId);
+  const address = objectAddressForRow(options, row);
+  const handle = await destination.forTenant(options.tenantId, address);
   const destinationDb = handle.db;
   let current = progress;
   for (let tableIndex = current.table_index; tableIndex < TENANT_BACKFILL_TABLES.length; tableIndex += 1) {
@@ -554,7 +699,12 @@ async function copyTables(
         await options.legacyTenantDatabase.prepare(page.sql).bind(...page.params).all<Record<string, unknown>>()
       ).results;
       if (sourceRows.length === 0) break;
-      await destination.migrationImport(options.tenantId, row.migration_epoch, importStatements(table, sourceColumns, sourceRows));
+      await destination.migrationImport(
+        options.tenantId,
+        row.migration_epoch,
+        importStatements(table, sourceColumns, sourceRows),
+        address,
+      );
       const last = sourceRows[sourceRows.length - 1] as Record<string, unknown>;
       cursor = table.keyColumns.map((column) => toTenantValue(last[column], table.name, column));
       copied += sourceRows.length;
@@ -595,7 +745,9 @@ async function verifyTables(
   options: TenantBackfillOptions,
   destination: MigrationDestination,
 ): Promise<{ readonly source: TenantTableReceipt[]; readonly destination: TenantTableReceipt[]; readonly objectWriteEpoch: number }> {
-  const handle = await destination.forTenant(options.tenantId);
+  const row = await readRow(options.controlDatabase, options.tenantId);
+  const address = objectAddressForRow(options, row);
+  const handle = await destination.forTenant(options.tenantId, address);
   const source: TenantTableReceipt[] = [];
   const target: TenantTableReceipt[] = [];
   for (const table of TENANT_BACKFILL_TABLES) {
@@ -607,7 +759,7 @@ async function verifyTables(
     source.push(await receiptForTable(options.legacyTenantDatabase, table, options.tenantId, sourceColumns));
     target.push(await receiptForTable(handle.db, table, options.tenantId, destinationColumns));
   }
-  const status = await destination.migrationStatus(options.tenantId);
+  const status = await destination.migrationStatus(options.tenantId, address);
   const comparison = compareTableReceipts(source, target);
   if (!comparison.ok) {
     throw new TenantBackfillError(409, "tenant_storage_migration_verification_failed", JSON.stringify(comparison.mismatches));
@@ -640,10 +792,11 @@ async function startMigration(
   destination: MigrationDestination,
   nowUnix: number,
 ): Promise<TenantBackfillRow> {
+  const address = objectAddressForRow(options, row);
   const decoded = decodeRow(row);
   if (decoded.state !== "shared") return row;
   const epoch = row.migration_epoch === 0 ? 1 : row.migration_epoch;
-  const objectStatus = await destination.migrationStatus(options.tenantId);
+  const objectStatus = await destination.migrationStatus(options.tenantId, address);
   const adoptingFreshObject = objectStatus.mode === "done" && objectStatus.epoch === 0 && epoch === 1;
   if (
     (!adoptingFreshObject && objectStatus.epoch !== epoch) ||
@@ -656,9 +809,9 @@ async function startMigration(
     );
   }
   await freezeSource(options.legacyTenantDatabase, options.tenantId, epoch, nowUnix);
-  if (adoptingFreshObject) await destination.setMigrationMode(options.tenantId, "shared", epoch);
+  if (adoptingFreshObject) await destination.setMigrationMode(options.tenantId, "shared", epoch, address);
   if (objectStatus.mode === "done" || objectStatus.mode === "shared") {
-    await destination.setMigrationMode(options.tenantId, "copying", epoch);
+    await destination.setMigrationMode(options.tenantId, "copying", epoch, address);
   }
   return transitionWithAudit(
     options.controlDatabase,
@@ -682,11 +835,12 @@ async function verifyMigration(
   destination: MigrationDestination,
   nowUnix: number,
 ): Promise<TenantBackfillRow> {
+  const address = objectAddressForRow(options, row);
   const decoded = decodeRow(row);
   let current = row;
   if (decoded.state === "copying") {
     await copyTables(options, row, destination, decoded.progress, normalizePageSize(options.pageSize));
-    const objectStatus = await destination.setMigrationMode(options.tenantId, "verifying", row.migration_epoch);
+    const objectStatus = await destination.setMigrationMode(options.tenantId, "verifying", row.migration_epoch, address);
     if (objectStatus.mode !== "verifying") {
       throw new TenantBackfillError(503, "tenant_storage_migration_unavailable", "Durable Object did not enter verifying mode");
     }
@@ -718,13 +872,14 @@ async function cutoverMigration(
   destination: MigrationDestination,
   nowUnix: number,
 ): Promise<TenantBackfillRow> {
+  const address = objectAddressForRow(options, row);
   const decoded = decodeRow(row);
   if (decoded.receipt.object_write_epoch === null) {
     throw new TenantBackfillError(409, "tenant_storage_migration_not_verified", "cutover requires a completed verification receipt");
   }
 
   if (decoded.state === "cut") {
-    const status = await destination.migrationStatus(options.tenantId);
+    const status = await destination.migrationStatus(options.tenantId, address);
     if (status.mode !== "cut" && status.mode !== "done") {
       throw new TenantBackfillError(
         409,
@@ -732,7 +887,7 @@ async function cutoverMigration(
         `control row is cut, but the Durable Object is ${status.mode}`,
       );
     }
-    if (status.mode === "cut") await destination.setMigrationMode(options.tenantId, "done", row.migration_epoch);
+    if (status.mode === "cut") await destination.setMigrationMode(options.tenantId, "done", row.migration_epoch, address);
     return transitionWithAudit(options.controlDatabase, row, "done", row.migration_epoch, options.requestId, nowUnix, {
       migration_last_error: null,
     });
@@ -743,7 +898,7 @@ async function cutoverMigration(
   }
 
   await assertSourceReceiptUnchanged(options, decoded.receipt.source);
-  const status = await destination.migrationStatus(options.tenantId);
+  const status = await destination.migrationStatus(options.tenantId, address);
   if (status.mode === "cut" || status.mode === "done") {
     const current = await transitionWithAudit(options.controlDatabase, row, "cut", row.migration_epoch, options.requestId, nowUnix, {
       storage_backend: "durable_object",
@@ -757,7 +912,7 @@ async function cutoverMigration(
   if (status.mode !== "verifying" || status.writeEpoch !== decoded.receipt.object_write_epoch) {
     throw new TenantBackfillError(409, "tenant_storage_migration_write_detected", "the Durable Object changed after verification; re-run verify");
   }
-  await destination.setMigrationMode(options.tenantId, "cut", row.migration_epoch);
+  await destination.setMigrationMode(options.tenantId, "cut", row.migration_epoch, address);
   const retention = nowUnix + (options.retentionSeconds ?? DEFAULT_RETENTION_SECONDS);
   const current = await transitionWithAudit(options.controlDatabase, row, "cut", row.migration_epoch, options.requestId, nowUnix, {
     storage_backend: "durable_object",
@@ -774,12 +929,13 @@ async function rollbackMigration(
   destination: MigrationDestination,
   nowUnix: number,
 ): Promise<TenantBackfillRow> {
+  const address = objectAddressForRow(options, row);
   const decoded = decodeRow(row);
   if (decoded.state === "shared") {
     if (row.migration_epoch === 0 || row.migration_frozen_at_unix === null || row.storage_backend !== "native_binding") {
       throw new TenantBackfillError(409, "tenant_storage_migration_not_cutover", "rollback requires a completed cutover or an interrupted rollback");
     }
-    const status = await destination.migrationStatus(options.tenantId);
+    const status = await destination.migrationStatus(options.tenantId, address);
     if (status.mode !== "shared" || status.epoch !== row.migration_epoch) {
       throw new TenantBackfillError(
         409,
@@ -799,12 +955,12 @@ async function rollbackMigration(
   if (decoded.receipt.object_write_epoch === null) {
     throw new TenantBackfillError(409, "tenant_storage_migration_not_verified", "rollback requires the verification receipt");
   }
-  const status = await destination.migrationStatus(options.tenantId);
+  const status = await destination.migrationStatus(options.tenantId, address);
   if (status.writeEpoch !== decoded.receipt.object_write_epoch) {
     throw new TenantBackfillError(409, "tenant_storage_migration_write_detected", "rollback refused because the Durable Object has accepted writes after cutover");
   }
   const nextEpoch = row.migration_epoch + 1;
-  await destination.setMigrationMode(options.tenantId, "shared", nextEpoch);
+  await destination.setMigrationMode(options.tenantId, "shared", nextEpoch, address);
   const current = await transitionWithAudit(options.controlDatabase, row, "shared", nextEpoch, options.requestId, nowUnix, {
     storage_backend: "native_binding",
     migration_cutover_at_unix: null,
@@ -850,16 +1006,19 @@ export async function runTenantStorageMigration(options: TenantBackfillOptions):
   if (options.tenantId.trim() === "") {
     throw new TenantBackfillError(404, "tenant_not_found", "tenant_id must not be empty");
   }
-  const destination = asMigrationDestination(options.destinationRouter);
+  requireBackfillLocationHint(options.locationHint);
   const nowUnix = options.nowUnix ?? Math.floor(Date.now() / 1000);
   let row = await readRow(options.controlDatabase, options.tenantId);
+  const placement = await addressForBackfill(options, row);
+  row = placement.row;
+  const destination = asMigrationDestination(options.destinationRouter);
   try {
     if (options.action === "status") {
-      return result(options.action, row, await destination.migrationStatus(options.tenantId));
+      return result(options.action, row, await destination.migrationStatus(options.tenantId, placement.address));
     }
     if (options.action === "start") {
       row = await startMigration(options, row, destination, nowUnix);
-      return result(options.action, row, await destination.migrationStatus(options.tenantId));
+      return result(options.action, row, await destination.migrationStatus(options.tenantId, placement.address));
     }
     if (options.action === "resume") {
       if (parseState(row.migration_state) === "shared") row = await startMigration(options, row, destination, nowUnix);
@@ -868,25 +1027,25 @@ export async function runTenantStorageMigration(options: TenantBackfillOptions):
         row = await verifyMigration(options, row, destination, nowUnix);
       }
       if (parseState(row.migration_state) === "verifying") {
-        const objectStatus = await destination.migrationStatus(options.tenantId);
+        const objectStatus = await destination.migrationStatus(options.tenantId, placement.address);
         row = objectStatus.mode === "cut" || objectStatus.mode === "done"
           ? await cutoverMigration(options, row, destination, nowUnix)
           : await verifyMigration(options, row, destination, nowUnix);
       }
       if (parseState(row.migration_state) === "cut") row = await cutoverMigration(options, row, destination, nowUnix);
-      return result(options.action, row, await destination.migrationStatus(options.tenantId));
+      return result(options.action, row, await destination.migrationStatus(options.tenantId, placement.address));
     }
     if (options.action === "verify") {
       if (parseState(row.migration_state) === "shared") row = await startMigration(options, row, destination, nowUnix);
       row = await verifyMigration(options, row, destination, nowUnix);
-      return result(options.action, row, await destination.migrationStatus(options.tenantId));
+      return result(options.action, row, await destination.migrationStatus(options.tenantId, placement.address));
     }
     if (options.action === "cutover") {
       row = await cutoverMigration(options, row, destination, nowUnix);
-      return result(options.action, row, await destination.migrationStatus(options.tenantId));
+      return result(options.action, row, await destination.migrationStatus(options.tenantId, placement.address));
     }
     row = await rollbackMigration(options, row, destination, nowUnix);
-    return result(options.action, row, await destination.migrationStatus(options.tenantId));
+    return result(options.action, row, await destination.migrationStatus(options.tenantId, placement.address));
   } catch (error) {
     await recordError(options.controlDatabase, row, error).catch(() => undefined);
     if (error instanceof TenantBackfillError) throw error;

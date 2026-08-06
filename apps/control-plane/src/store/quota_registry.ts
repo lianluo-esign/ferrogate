@@ -245,6 +245,29 @@ function missingTagActionOf(record: StoreRecord): string | null {
   return raw === "reject" || raw === "default_from_key" ? raw : null;
 }
 
+function residencyRegionsOf(record: StoreRecord): string[] {
+  const raw = record.residency_regions;
+  if (!Array.isArray(raw)) return [];
+  return [
+    ...new Set(
+      raw
+        .filter((region): region is string => typeof region === "string")
+        .map((region) => region.trim())
+        .filter((region) => region !== ""),
+    ),
+  ];
+}
+
+function zeroDataRetentionOf(record: StoreRecord): number {
+  return record.require_zero_data_retention === true ? 1 : 0;
+}
+
+function logResidencyOf(record: StoreRecord): string | null {
+  return record.log_residency === "in_region" || record.log_residency === "unconstrained"
+    ? record.log_residency
+    : null;
+}
+
 /**
  * The `spend_anomaly_*` numeric tuning fields, in COLUMN ORDER (#697).
  *
@@ -457,9 +480,10 @@ export async function projectQuotaPolicy(
            alert_threshold_pcts_json, asset_storage_quota_bytes,
            monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes,
            agent_cost_budget_usd, required_tags_json, on_missing_tags,
+           residency_regions_json, require_zero_data_retention, log_residency,
            spend_anomaly_enabled, ${SPEND_ANOMALY_TUNING_FIELDS.join(", ")}
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${SPEND_ANOMALY_TUNING_FIELDS.map(
+         VALUES (${Array.from({ length: 22 }, () => "?").join(", ")}${SPEND_ANOMALY_TUNING_FIELDS.map(
            () => ", ?",
          ).join("")})
          ON CONFLICT (id) DO UPDATE SET
@@ -479,6 +503,9 @@ export async function projectQuotaPolicy(
            agent_cost_budget_usd = excluded.agent_cost_budget_usd,
            required_tags_json = excluded.required_tags_json,
            on_missing_tags = excluded.on_missing_tags,
+           residency_regions_json = excluded.residency_regions_json,
+           require_zero_data_retention = excluded.require_zero_data_retention,
+           log_residency = excluded.log_residency,
            spend_anomaly_enabled = excluded.spend_anomaly_enabled,
            ${SPEND_ANOMALY_TUNING_FIELDS.map((field) => `${field} = excluded.${field}`).join(
              ",\n           ",
@@ -509,6 +536,9 @@ export async function projectQuotaPolicy(
         // merge value type would imply a chain semantic nothing implements.
         JSON.stringify(requiredTagsOf(record)),
         missingTagActionOf(record),
+        JSON.stringify(residencyRegionsOf(record)),
+        zeroDataRetentionOf(record),
+        logResidencyOf(record),
         // #697. Read off the DOCUMENT for the same reason #678's tags are: the
         // spend-anomaly tuning is not part of the quota MERGE — the detector
         // reads the TENANT-scope row only (`finops/pass.ts`), and threading

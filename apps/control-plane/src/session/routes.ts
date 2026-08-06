@@ -381,7 +381,7 @@ async function handleRegister(c: Ctx): Promise<Response> {
   if (controlDb !== null) {
     await projectTenantAccount(controlDb, tenantAccount, now);
   }
-  await provisionTenantStorageFor(console_.deps, tenantId);
+  await provisionTenantStorageFor(console_.deps, tenantId, c.req.raw);
   await store.create(PROJECTS_COLLECTION, PLATFORM, {
     id: projectId,
     tenant_id: tenantId,

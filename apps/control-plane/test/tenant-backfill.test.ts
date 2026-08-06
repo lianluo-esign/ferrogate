@@ -81,6 +81,7 @@ async function migration(action: "start" | "resume" | "verify" | "cutover" | "ro
     destinationRouter: router,
     tenantId: TENANT,
     action,
+    locationHint: "wnam",
     requestId: "backfill-test-request",
     nowUnix: NOW,
     pageSize: 1,
@@ -119,6 +120,20 @@ beforeAll(async () => {
 beforeEach(reset);
 
 describe("tenant storage backfill", () => {
+  test("refuses to run without an observed placement hint", async () => {
+    await expect(
+      runTenantStorageMigration({
+        controlDatabase: db(),
+        legacyTenantDatabase: bindings.LEGACY_TENANT_DB,
+        destinationRouter: objectRouter(),
+        tenantId: TENANT,
+        action: "status",
+      }),
+    ).rejects.toMatchObject({
+      code: "tenant_storage_migration_location_hint_required",
+    });
+  });
+
   test("freezes the source, resumes a page interruption, verifies all owned rows, and cuts over", async () => {
     await bindings.LEGACY_TENANT_DB
       .prepare(
@@ -129,6 +144,20 @@ describe("tenant storage backfill", () => {
       .run();
     const started = await migration("start");
     expect(started.migration_state).toBe("copying");
+    expect(
+      await db()
+        .prepare(
+          "SELECT location_hint, location_hint_source, location_hint_recorded_at_unix, jurisdiction " +
+            "FROM tenant_databases WHERE tenant_id = ?",
+        )
+        .bind(TENANT)
+        .first(),
+    ).toEqual({
+      location_hint: "wnam",
+      location_hint_source: "backfill:observed tenant traffic",
+      location_hint_recorded_at_unix: NOW,
+      jurisdiction: null,
+    });
     expect(
       await bindings.LEGACY_TENANT_DB
         .prepare("SELECT mode FROM tenant_write_fences WHERE tenant_id = ?")

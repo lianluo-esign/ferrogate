@@ -90,9 +90,13 @@ we have available.
   see #820's own note. DOs can: `cloudflare:test` ships `runInDurableObject`,
   `listDurableObjectIds`, `runDurableObjectAlarm` and per-file isolated storage, and
   this repo already runs eight SQLite-backed DO classes under that harness.
-- **Data residency for free.** `env.TENANT_DATA.jurisdiction("eu").idFromName(t)`
-  pins a tenant's data to the EU (`us` and `fedramp` also supported). That is a hard
-  constraint, not a hint, and it is what `docs/security` residency claims need.
+- **Two different placement controls.** `locationHint` is a best-effort first-
+  `get()` preference derived from the registration request. The legal hints are
+  `wnam enam sam weur eeur apac apac-ne apac-se oc afr me`; `sam`, `afr`, and
+  `me` currently have no Durable Object capacity, so a `sam` hint may land in
+  `enam`. A hint is never a residency guarantee. The hard control is the
+  namespace jurisdiction: `env.TENANT_DATA.jurisdiction("eu").idFromName(t)`
+  (also `us` and `fedramp`).
 - **Per-tenant PITR.** 30 days of bookmarks per tenant, restorable without touching
   any other tenant.
 
@@ -118,31 +122,40 @@ already load-bearing here.
 
 ## What it costs — the honest list
 
-1. **One region per tenant.** A DO is homed near its first `get()` and
+1. **One placement decision per tenant.** A DO is homed near its first `get()` and
    **cannot be moved afterwards** (relocation is "planned"). D1 has read replication;
    DO does not. A tenant with globally spread traffic pays cross-ocean RTT on every
-   storage op. Mitigation: pass `locationHint` derived from the registration request's
-   `cf.continent` on first resolution, and record it on the tenant row so the choice
-   is auditable rather than accidental. Objects created from a migration backfill must
-   carry the hint explicitly, or every tenant lands wherever the backfill job ran.
-2. **~1,000 req/s and one thread per tenant.** A single very large tenant can saturate
+   storage op. The gateway derives a best-effort `locationHint` from `cf.continent`
+   and `cf.colo` on first resolution and records the signal and time on the tenant
+   row. Backfill must carry an observed hint explicitly; the migration job's own
+   location is not evidence of tenant traffic. `sam`, `afr`, and `me` have no DO
+   capacity today, so the hint does not promise a home region.
+2. **Jurisdiction is part of the address.** The same name has different ids in the
+   unrestricted namespace and a jurisdiction namespace:
+   `idFromName("t") !== jurisdiction("eu").idFromName("t")`. Jurisdiction is fixed
+   at registration and cannot change after creation without a data migration.
+   It constrains Durable Object storage and execution, not reach: a Worker may
+   access a jurisdiction-constrained object from anywhere, and the object id is
+   visible in logs outside that jurisdiction. EU residency policy and the object
+   must select `jurisdiction("eu")`; the system refuses a disagreement.
+3. **~1,000 req/s and one thread per tenant.** A single very large tenant can saturate
    its own object. D1 is also single-threaded per database, so this is not a
    regression — but the DO puts *all* of a tenant's storage behind one lock. The seam
    to keep open is splitting high-volume append-only tables (usage rollups, request
    logs) out of the tenant object into a sharded child namespace or Analytics Engine.
-3. **No cross-tenant SQL.** There is no `SELECT ... FROM all_tenants`. Tenant
+4. **No cross-tenant SQL.** There is no `SELECT ... FROM all_tenants`. Tenant
    billing is authoritative in each DO. The current admin billing feed uses a
    bounded fan-out over the provisioned roster, while fleet dashboards and the
    `usage_*_rollups` aggregate views are fed by push (alarm-driven flush from
    each DO into the control D1 or a Queue), not pull. The bounded billing fan-out
    is an interim read path until the projection slice closes it.
-4. **No `wrangler d1 execute` for support.** Operator access to a tenant's data needs
+5. **No `wrangler d1 execute` for support.** Operator access to a tenant's data needs
    a purpose-built, audited admin RPC on the object. Treat that as a feature, not a
    gap — an audited seam beats an unaudited console.
-5. **Storage backend is immutable.** `new_sqlite_classes` / `storage = "sqlite"` can
+6. **Storage backend is immutable.** `new_sqlite_classes` / `storage = "sqlite"` can
    never be changed on a live namespace (`storage_type_mismatch`); converting requires
    a `deleted` tombstone and total data loss. Get it right in the first deploy.
-6. **Billing shape changes.** DO storage bills rows read ($0.001/M after 25 B/mo),
+7. **Billing shape changes.** DO storage bills rows read ($0.001/M after 25 B/mo),
    rows written ($1.00/M after 50 M/mo), storage ($0.20/GB-mo after 5 GB), plus
    requests and duration. Idle, hibernation-eligible objects cost nothing for
    duration, so a long tail of dormant tenants is cheap — but a hot write path is

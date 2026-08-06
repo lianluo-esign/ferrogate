@@ -28,7 +28,7 @@
  * the admin surface reports from the DOCUMENTS. Delete any projection and the
  * rows disappear, the merge goes unlimited, and the two stop agreeing.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import {
   type QuotaScopeKind,
   type StoredPlan,
@@ -42,6 +42,8 @@ import {
   QUOTA_POLICIES_TABLE,
   TENANTS_TABLE,
 } from "../src/store/quota_registry.js";
+import { resolveTenantStorage } from "../src/adapters.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
 
@@ -182,6 +184,32 @@ beforeEach(async () => {
     db().prepare(`DELETE FROM ${PLANS_TABLE}`),
     db().prepare(`DELETE FROM ${TENANTS_TABLE}`),
   ]);
+  await db()
+    .prepare(
+      `INSERT INTO ${TENANTS_TABLE}
+         (id, name, slug, status, plan_id, created_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, 'active', ?, 0, 0)`,
+    )
+    .bind("acme", "Acme", "acme", NO_PLAN_ID)
+    .run();
+  await db()
+    .prepare(
+       `INSERT INTO tenant_databases
+         (tenant_id, storage_backend, provisioning_status, migration_state,
+          location_hint, location_hint_source, location_hint_recorded_at_unix, jurisdiction)
+       VALUES (?, 'durable_object', 'ready', 'done', ?, ?, ?, ?)`,
+    )
+    .bind("acme", "wnam", "test:registered tenant", 0, null)
+    .run();
+  const tenantHandle = await resolveTenantStorage(
+    env as unknown as ControlPlaneBindings,
+  ).forTenant("acme", { locationHint: "wnam" });
+  await tenantHandle.db.batch([
+    tenantHandle.db.prepare("DELETE FROM tenant_resources"),
+    tenantHandle.db
+      .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
+      .bind("control_plane_resource_backfill_v1"),
+  ]);
 });
 
 describe("MOUNT: a quota policy created through the admin API is enforceable", () => {
@@ -199,6 +227,9 @@ describe("MOUNT: a quota policy created through the admin API is enforceable", (
       monthly_egress_bytes_budget: 2048,
       download_rpm_limit: 7,
       agent_cost_budget_usd: 3.25,
+      residency_regions: ["global"],
+      require_zero_data_retention: true,
+      log_residency: "in_region",
     });
     expect(created.status).toBe(201);
 
@@ -220,6 +251,38 @@ describe("MOUNT: a quota policy created through the admin API is enforceable", (
       downloadRpmLimit: 7,
       agentCostBudgetUsd: 3.25,
       enabled: true,
+    });
+    expect(
+      await db()
+        .prepare(
+          "SELECT residency_regions_json, require_zero_data_retention, log_residency " +
+            "FROM quota_policies WHERE scope_type = 'tenant' AND scope_id = ?",
+        )
+        .bind("acme")
+        .first(),
+    ).toEqual({
+      residency_regions_json: '["global"]',
+      require_zero_data_retention: 1,
+      log_residency: "in_region",
+    });
+  });
+
+  it("refuses to set EU residency when the object is already unrestricted in another jurisdiction", async () => {
+    await db()
+      .prepare("UPDATE tenant_databases SET jurisdiction = 'us' WHERE tenant_id = ?")
+      .bind("acme")
+      .run();
+    const response = await post("/admin/v1/quota-policies", {
+      scope_type: "tenant",
+      scope_id: "acme",
+      residency_regions: ["eu-west-1"],
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "tenant_jurisdiction_migration_required",
+        message: expect.stringContaining("requires a data migration"),
+      },
     });
   });
 
@@ -253,6 +316,7 @@ describe("MOUNT: a quota policy created through the admin API is enforceable", (
     await post("/admin/v1/quota-policies", {
       scope_type: "project",
       scope_id: "proj-1",
+      tenant_id: "acme",
       rpm_limit: 3,
     });
     expect(await gatewayPolicyRow("project", "proj-1")).not.toBeNull();
@@ -274,6 +338,7 @@ describe("MOUNT: a quota policy created through the admin API is enforceable", (
     const res = await post("/admin/v1/quota-policies", {
       scope_type: "workspace",
       scope_id: "ws-1",
+      tenant_id: "acme",
       asset_storage_quota_bytes: 10,
     });
     expect(res.status).toBe(400);

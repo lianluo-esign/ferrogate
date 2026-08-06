@@ -225,8 +225,9 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
  * architecture", steps 5/11 + `auth::finalize_auth` → `server/chat.rs`):
  *
  *   contractAuth → meteringDrain → requestTelemetry → requestLogging
- *                → rateLimit → attributionTags → residency → guardrails
- *                → tenantDatabase → responseCache → validate → dispatch
+ *                → residency → tenantDatabase → rateLimit → attributionTags
+ *                → onlineEvaluation → responseStateCommit → guardrails
+ *                → responseCache → validate → dispatch
  *
  * (`responseCache` is mounted by `createGatewayApp` itself, immediately after
  * this array and immediately before the routes — see `CreateGatewayAppOptions`.)
@@ -353,12 +354,16 @@ export const GATEWAY_MIDDLEWARE = [
   // `BILLING_DB`), which per-tenant routing deliberately does not move — see
   // `tenancy/ports.ts` on the CONTROL/TENANT split.
   //
-  // Resolution is LAZY and does NO I/O: the address is
-  // `TENANT_DATA.idFromName(tenantId)`, a pure function of the tenant the
-  // credential resolved to, so mounting it earlier costs a request nothing. It
-  // NEVER falls back to the shared `DB`: an unresolvable tenant is refused
+  // Resolution is LAZY and does NO I/O: the address is selected by the
+  // preceding `residency()` middleware and `TENANT_DATA.idFromName(tenantId)`
+  // remains a pure function of the authenticated tenant. It NEVER falls back
+  // to the shared `DB`: an unresolvable tenant is refused
   // `503 tenant_database_unavailable` rather than silently served another
   // tenant's rows.
+  // #827: residency resolves the hard object jurisdiction before the first
+  // tenant-data resolution below. The router itself remains free of control
+  // database I/O.
+  residency(),
   tenantDatabase(),
   // `rateLimit()` with no arguments picks the DO limiter when `RATE_LIMIT` is
   // bound and the config-var quota source; both fail closed.
@@ -405,32 +410,12 @@ export const GATEWAY_MIDDLEWARE = [
   // `GATEWAY_ATTRIBUTION_POLICIES` var): with no policy for the calling tenant
   // it is one cached lookup and `next()`.
   attributionTags(),
-  // #681 — the calling TENANT's data-residency + zero-data-retention policy.
-  //
-  // It makes no ROUTING decision here (the candidate list does not exist yet):
-  // it resolves the policy, refuses what this deployment cannot satisfy at all
-  // — `503 residency_policy_unavailable` when the policy cannot be READ, `403
-  // log_residency_unsatisfiable` when the durable log cannot stay in region —
-  // and publishes the policy for `inference/candidates.ts` and
-  // `inference/shadow.ts` to enforce per route.
-  //
-  // BETWEEN `attributionTags()` and `guardrails()`, and the second edge is the
-  // one that is a residency argument rather than an economic one: guardrail
-  // screening can call OUT (an LLM judge, a hosted detector) with the prompt
-  // itself, so screening ahead of this gate would send a governed prompt to the
-  // detector's region and ask about residency afterwards.
-  //
-  // Inert until an operator sets `quota_policies.residency_regions_json` /
-  // `require_zero_data_retention` on a TENANT-scope row (or the
-  // `GATEWAY_RESIDENCY_POLICIES` var): with no policy for the calling tenant it
-  // is one cached lookup and `next()`.
-  residency(),
   // #692 — online evaluation of SAMPLED traffic, on `ctx.waitUntil`.
   //
-  // IMMEDIATELY AFTER `residency()`, and that edge is the whole reason it is
-  // here rather than anywhere else: `residency()` is what resolves and
-  // publishes the tenant's zero-data-retention posture for this request, and
-  // this middleware must be able to read it BEFORE it clones a body. A ZDR
+  // AFTER `residency()`, and that edge is the whole reason it is here rather
+  // than anywhere else: `residency()` is what resolves and publishes the
+  // tenant's zero-data-retention posture for this request, and this middleware
+  // must be able to read it BEFORE it clones a body. A ZDR
   // tenant is never sampled (evaluating a prompt means copying it), and a
   // sampler mounted ahead of the resolver would have no way to know.
   //
