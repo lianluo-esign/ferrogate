@@ -35,6 +35,11 @@
  * tenant's ledger and every row would look correct, because the physical
  * database really would be the one the id named.
  */
+import {
+  tenantObjectStubFor,
+  type TenantObjectAddress,
+  type TenantObjectNamespaceLike,
+} from "@ferrogate/storage";
 import type { TenantDataNamespace, TenantDataObject } from "@ferrogate/storage/durable-objects";
 import { HttpError } from "../middleware/errors.js";
 import { TENANT_DATABASE_ROUTING_MISCONFIGURED, TENANT_DATABASE_UNAVAILABLE } from "./ports.js";
@@ -95,6 +100,7 @@ export function tenantDataNamespace(env: TenantDataBindings): TenantDataNamespac
 export function tenantDataObjectFor(
   env: TenantDataBindings,
   tenantId: string,
+  address?: TenantObjectAddress,
 ): DurableObjectStub<TenantDataObject> {
   if (tenantId.trim() === "") {
     throw new HttpError(
@@ -107,5 +113,12 @@ export function tenantDataObjectFor(
     );
   }
   const namespace = tenantDataNamespace(env);
-  return namespace.get(namespace.idFromName(tenantId));
+  return tenantObjectStubFor(
+    namespace as unknown as TenantObjectNamespaceLike<
+      DurableObjectStub<TenantDataObject>,
+      DurableObjectId
+    >,
+    tenantId,
+    address,
+  );
 }

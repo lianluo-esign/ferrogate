@@ -73,6 +73,7 @@ import {
   type TenantDatabaseRouter,
 } from "@ferrogate/storage";
 import { evidenceProjectionKey } from "../requestlog/d1.js";
+import { tenantObjectAddressForEnv } from "../residency/carrier.js";
 import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
 import type {
   AssetAuditEvent,
@@ -1088,7 +1089,11 @@ export function assetAuditSinkFromEnv(env: Record<string, unknown>): AssetAuditS
     bindings.TENANT_DATA === undefined
       ? (_tenantId: string): undefined => undefined
       : (tenantId: string): TenantDataStub =>
-          tenantDataObjectFor(bindings, tenantId) as unknown as TenantDataStub;
+          tenantDataObjectFor(
+            bindings,
+            tenantId,
+            tenantObjectAddressForEnv(env, tenantId),
+          ) as unknown as TenantDataStub;
   return new D1AssetAuditSink(db, undefined, tenantAuditFor);
 }
 

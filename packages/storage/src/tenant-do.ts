@@ -91,6 +91,12 @@ import {
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
+import {
+  tenantObjectStubFor,
+  type TenantObjectAddress,
+  type TenantObjectGetOptions,
+  type TenantObjectNamespaceLike,
+} from "./tenant-placement.js";
 
 export type {
   TenantDataStatement,
@@ -184,9 +190,9 @@ export interface TenantObjectOperator {
  * {@link TenantDataObject} re-checks the tenant id it is handed rather than
  * deriving it from its own id.
  */
-export interface TenantDataNamespaceLike {
-  idFromName(name: string): DurableObjectId;
-  get(id: DurableObjectId): TenantDataStub;
+export interface TenantDataNamespaceLike
+  extends TenantObjectNamespaceLike<TenantDataStub, DurableObjectId> {
+  get(id: DurableObjectId, options?: TenantObjectGetOptions): TenantDataStub;
 }
 
 // ---------------------------------------------------------------------------
@@ -820,10 +826,13 @@ export class DurableObjectTenantDatabaseRouter
    * that reintroduces a registry lookup here turns it red instead of quietly
    * putting a D1 round trip back on the inference path.
    */
-  async forTenant(tenantId: string): Promise<TenantDatabaseHandle> {
+  async forTenant(
+    tenantId: string,
+    address?: TenantObjectAddress,
+  ): Promise<TenantDatabaseHandle> {
     return {
       tenantId,
-      db: this.databaseFor(tenantId),
+      db: this.databaseFor(tenantId, address),
       source: "durable_object",
       // THE claim of this slice. It is true because `TenantDataObject.batch()`
       // runs the statement array inside one `ctx.storage.transactionSync()`,
@@ -837,11 +846,16 @@ export class DurableObjectTenantDatabaseRouter
   async privilegedBatch(
     tenantId: string,
     statements: readonly TenantDataStatement[],
+    address?: TenantObjectAddress,
   ): Promise<void> {
     if (tenantId.trim() === "") {
       throw StorageError.runtime("privileged tenant writes require a non-empty tenant id");
     }
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.privilegedBatch === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the privileged tenant-write RPC`,
@@ -897,8 +911,13 @@ export class DurableObjectTenantDatabaseRouter
     tenantId: string,
     epoch: number,
     statements: readonly TenantDataStatement[],
+    address?: TenantObjectAddress,
   ): Promise<void> {
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.migrationImport === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the trusted migration import RPC`,
@@ -912,8 +931,13 @@ export class DurableObjectTenantDatabaseRouter
     tenantId: string,
     mode: TenantMigrationMode,
     epoch: number,
+    address?: TenantObjectAddress,
   ): Promise<TenantMigrationStatus> {
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.setMigrationMode === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the trusted migration state RPC`,
@@ -923,8 +947,15 @@ export class DurableObjectTenantDatabaseRouter
   }
 
   /** Read the object-local migration state and rollback write witness. */
-  async migrationStatus(tenantId: string): Promise<TenantMigrationStatus> {
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+  async migrationStatus(
+    tenantId: string,
+    address?: TenantObjectAddress,
+  ): Promise<TenantMigrationStatus> {
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.migrationStatus === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the trusted migration status RPC`,
@@ -933,8 +964,16 @@ export class DurableObjectTenantDatabaseRouter
     return stub.migrationStatus({ tenantId });
   }
 
-  async setScheduleAlarm(tenantId: string, scheduledAtUnix: number): Promise<void> {
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+  async setScheduleAlarm(
+    tenantId: string,
+    scheduledAtUnix: number,
+    address?: TenantObjectAddress,
+  ): Promise<void> {
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.setScheduleAlarm === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the schedule alarm RPC; refusing to fall back`,
@@ -943,8 +982,15 @@ export class DurableObjectTenantDatabaseRouter
     await stub.setScheduleAlarm({ tenantId, scheduledAtUnix });
   }
 
-  async clearScheduleAlarm(tenantId: string): Promise<void> {
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+  async clearScheduleAlarm(
+    tenantId: string,
+    address?: TenantObjectAddress,
+  ): Promise<void> {
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.clearScheduleAlarm === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the schedule alarm RPC; refusing to fall back`,
@@ -953,8 +999,15 @@ export class DurableObjectTenantDatabaseRouter
     await stub.clearScheduleAlarm({ tenantId });
   }
 
-  async rearmScheduleAlarm(tenantId: string): Promise<void> {
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+  async rearmScheduleAlarm(
+    tenantId: string,
+    address?: TenantObjectAddress,
+  ): Promise<void> {
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     if (stub.rearmScheduleAlarm === undefined) {
       throw StorageError.runtime(
         `tenant ${tenantId} does not expose the schedule alarm rearm RPC; refusing to use a stale snapshot`,
@@ -976,7 +1029,7 @@ export class DurableObjectTenantDatabaseRouter
    * maintenance or test path that wants only the addressing cannot accidentally
    * pass it where a routed handle is expected.
    */
-  databaseFor(tenantId: string): D1Database {
+  databaseFor(tenantId: string, address?: TenantObjectAddress): D1Database {
     if (tenantId.trim() === "") {
       throw StorageError.runtime(
         [
@@ -986,7 +1039,11 @@ export class DurableObjectTenantDatabaseRouter
         ].join(" "),
       );
     }
-    const stub = this.#namespace.get(this.#namespace.idFromName(tenantId));
+    const stub = tenantObjectStubFor(
+      this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+      tenantId,
+      address,
+    );
     return new DurableObjectD1Database(tenantId, stub).asD1Database();
   }
 }

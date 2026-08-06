@@ -6,23 +6,24 @@
  * WHERE THIS SITS ON THE LADDER
  * ============================================================================
  *
- * `src/index.ts` mounts it between `attributionTags()` and `guardrails()`:
+ * `src/index.ts` mounts it immediately before `tenantDatabase()`:
  *
  *   contractAuth → meteringDrain → requestTelemetry → requestLogging
- *                → rateLimit → attributionTags → **residency**
- *                → guardrails → tenantDatabase → responseCache → dispatch
+ *                → **residency** → tenantDatabase → rateLimit
+ *                → delegation → attributionTags → onlineEvaluation
+ *                → responseStateCommit → guardrails → responseCache → dispatch
  *
  *  - **AFTER `contractAuth`** — the policy is per-TENANT and the tenant only
  *    exists once the credential resolves. A residency policy keyed on anything
  *    the client asserts would be a policy the client can switch off.
- *  - **AFTER `rateLimit()`** — so a request refused on residency still burns the
- *    caller's admission window. The same argument `attributionTags` makes: a
- *    refusal path ahead of admission is an unmetered flood.
- *  - **BEFORE `guardrails()`** — and this edge is a residency argument, not an
- *    economic one. Guardrail screening can call OUT: an LLM-judge or a hosted
- *    detector receives the prompt itself. Screening a governed prompt before
- *    deciding whether it may leave the region would send the prompt to the
- *    detector's region first and ask afterwards.
+ *  - **BEFORE `tenantDatabase()`** — the resolver must receive the same
+ *    jurisdiction and first-placement hint on every request path. Resolving
+ *    those values here keeps the router's `forTenant()` call free of control
+ *    database I/O while preventing two namespace addresses for one tenant.
+ *  - **OUTSIDE the later admission and screening gates** — this middleware
+ *    publishes the address even for requests that do not dispatch to a model;
+ *    the policy and log-placement refusal checks still run before governed
+ *    provider operations are admitted.
  *
  * The refusal is still RECORDED — `requestLogging()` is mounted three layers
  * out and wraps everything below it, so a 403 from here lands in the #664 trail
@@ -75,8 +76,18 @@
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
-import { recordResidencyPolicy } from "./carrier.js";
-import type { ResidencyPolicy } from "./policy.js";
+import {
+  recordResidencyPolicy,
+  recordTenantObjectAddress,
+  recordTenantObjectAddressForEnv,
+  tenantObjectAddressFor,
+} from "./carrier.js";
+import {
+  jurisdictionForPolicyAndAddress,
+  jurisdictionForResidencyPolicy,
+  type ResidencyPolicy,
+} from "./policy.js";
+import { locationHintFromCloudflareSignal } from "@ferrogate/storage";
 import {
   type ResidencyBindings,
   type ResidencyPolicySource,
@@ -168,10 +179,6 @@ export function residency(
 
   return async function residencyMiddleware(c, next: Next): Promise<void> {
     const operation = (c as Context<GatewayEnv>).get("operation");
-    if (operation === null || operation === undefined || !governed.has(operation.operationId)) {
-      await next();
-      return;
-    }
 
     const auth = c.get("auth");
     if (auth === null || auth === undefined) {
@@ -207,7 +214,37 @@ export function residency(
         `residency policy lookup failed: ${resolved.detail}`,
       );
     }
+    const policyJurisdiction = jurisdictionForResidencyPolicy(resolved.policy);
+    let jurisdiction: ReturnType<typeof jurisdictionForPolicyAndAddress>;
+    try {
+      jurisdiction = jurisdictionForPolicyAndAddress(policyJurisdiction, resolved.jurisdiction);
+    } catch (error) {
+      throw new HttpError(
+        409,
+        "tenant_jurisdiction_migration_required",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const cf = (c.req.raw as Request & {
+      readonly cf?: { readonly continent?: unknown; readonly colo?: unknown };
+    }).cf;
+    const placement = locationHintFromCloudflareSignal({
+      continent: cf?.continent,
+      colo: cf?.colo,
+    });
+    recordTenantObjectAddress(c.req.raw, {
+      locationHint: resolved.locationHint ?? placement.locationHint,
+      ...(jurisdiction === undefined ? {} : { jurisdiction }),
+    });
+    recordTenantObjectAddressForEnv(env, tenantId, tenantObjectAddressFor(c.req.raw));
     if (resolved.policy === null) {
+      await next();
+      return;
+    }
+
+    recordResidencyPolicy(c.req.raw, resolved.policy);
+
+    if (operation === null || operation === undefined || !governed.has(operation.operationId)) {
       await next();
       return;
     }
@@ -224,7 +261,6 @@ export function residency(
     // to `inner.fetch` and reads the scope back from. Route eligibility and the
     // shadow mirror both read it there; this middleware deliberately makes NO
     // routing decision itself, because the candidate list does not exist yet.
-    recordResidencyPolicy(c.req.raw, resolved.policy);
     await next();
   };
 }

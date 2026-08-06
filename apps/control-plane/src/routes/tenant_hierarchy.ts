@@ -35,7 +35,11 @@ import {
   isDenied,
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
-import { LIFECYCLE_STATUS_ALL, type LifecycleStatus } from "@ferrogate/storage";
+import {
+  LIFECYCLE_STATUS_ALL,
+  TENANT_LOCATION_HINTS,
+  type LifecycleStatus,
+} from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { StoreConflictError, type StoreRecord } from "../ports.js";
@@ -106,6 +110,7 @@ export const tenantPlanAssignmentSchema = z.object({
 
 export const tenantStorageMigrationSchema = z.object({
   action: z.enum(["start", "resume", "verify", "cutover", "rollback", "status"]),
+  location_hint: z.enum(TENANT_LOCATION_HINTS),
   page_size: z.number().int().min(1).max(500).optional(),
   retention_seconds: z.number().int().min(60).max(31_536_000).optional(),
 });
@@ -293,7 +298,8 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       // roster and seed its model catalog", and nothing did either. Declared on
       // the SPEC so POST, PUT and PATCH all run it: PUT/PATCH cannot create a
       // tenant, but they are the repair points for one whose provisioning failed.
-      provision: (deps, record) => provisionTenantStorageFor(deps, String(record.id)),
+      provision: (deps, record, request) =>
+        provisionTenantStorageFor(deps, String(record.id), request),
     },
     /**
      * PORT-TODO(P: cert2-controlplane §CLASS-A tenant_hierarchy GET /tenants) —
@@ -382,7 +388,7 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       // `tenants` row of a self-registered tenant — so it is exactly the moment a
       // tenant whose storage provisioning was refused for want of that row
       // becomes provisionable, and repairing it here costs one idempotent call.
-      await provisionTenantStorageFor(deps, tenantId);
+      await provisionTenantStorageFor(deps, tenantId, c.req.raw);
       return json(c, 200, adminItem("tenant_account", stored));
     },
 
@@ -420,6 +426,7 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
           destinationRouter,
           tenantId,
           action: body.action,
+          locationHint: body.location_hint,
           requestId: c.get("requestId"),
           pageSize: body.page_size,
           retentionSeconds: body.retention_seconds,

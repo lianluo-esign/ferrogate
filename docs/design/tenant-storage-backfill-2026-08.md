@@ -7,12 +7,19 @@ an active migration.
 
 ## Preconditions
 
-- The control database has migration `0021_tenant_backfill.sql` applied.
+- The control database has the tenant backfill migrations and `0023_tenant_object_placement.sql` applied.
 - The legacy shared tenant database has migration `0021_tenant_backfill_fence.sql`
   applied.
 - The Worker has `LEGACY_TENANT_DB`, `CONTROL_DB`, and `TENANT_DATA` bindings.
 - The tenant is registered in `tenant_databases` and the destination object can
   be addressed by its tenant id.
+- An observed `location_hint` from the tenant's traffic is available. The request
+  body must include it on every migration action; the control-plane job's own
+  location is not a valid substitute. The hint is best effort, and `sam`, `afr`,
+  and `me` currently have no Durable Object capacity.
+- If the tenant has an EU residency policy, the registry row must carry
+  jurisdiction `eu`. Jurisdiction is part of the Durable Object address; changing
+  it after creation requires a data migration.
 - The operator has confirmed that the source will remain available for the
   configured rollback retention period.
 
@@ -28,6 +35,11 @@ Use the platform-operator endpoint:
 
 ```text
 POST /admin/v1/tenant-accounts/{tenant_id}/storage-migration
+
+{
+  "action": "start",
+  "location_hint": "weur"
+}
 ```
 
 1. Call `start`. This freezes the shared source, claims the object migration

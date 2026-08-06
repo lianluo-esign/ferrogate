@@ -34,6 +34,7 @@
 import type { TenantDatabaseHandle } from "@ferrogate/storage";
 import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "../middleware/errors.js";
+import { tenantObjectAddressFor } from "../residency/carrier.js";
 import { type AuthContext, type GatewayEnv, callerScope } from "../ports.js";
 import {
   TENANT_DATABASE_UNSCOPED,
@@ -87,6 +88,7 @@ class RequestTenantDatabaseAccessor implements TenantDatabaseAccessor {
     private readonly resolver: () => TenantDatabaseResolver,
     readonly tenantId: string | null,
     readonly mode: TenantDatabaseRoutingMode,
+    private readonly address?: import("@ferrogate/storage").TenantObjectAddress,
   ) {}
 
   handle(): Promise<TenantDatabaseHandle> {
@@ -109,7 +111,9 @@ class RequestTenantDatabaseAccessor implements TenantDatabaseAccessor {
     // Wrapped so it rejects the promise instead of throwing synchronously out
     // of `handle()`, because every caller awaits this and a mixed
     // throw/reject surface is how one of them ends up unhandled.
-    this.#resolved ??= (async () => this.resolver().forTenant(this.tenantId as string))();
+    this.#resolved ??= (async () =>
+      this.resolver().forTenant(this.tenantId as string, this.address)
+    )();
     return this.#resolved;
   }
 
@@ -163,7 +167,12 @@ export function tenantDatabase(options: TenantDatabaseOptions = {}): MiddlewareH
     // quietly served from the shared database either.
     const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING) ?? "off";
     const tenantId = routableTenantId(auth);
-    const accessor = new RequestTenantDatabaseAccessor(() => resolverFor(env), tenantId, mode);
+    const accessor = new RequestTenantDatabaseAccessor(
+      () => resolverFor(env),
+      tenantId,
+      mode,
+      tenantObjectAddressFor(c.req.raw),
+    );
     (c as unknown as TenancyContext).set(TENANT_DATABASE_VAR, accessor);
     if (mode === "binding_strict" && tenantId !== null) {
       // `"binding_strict"`: prove routability before the request is served, so

@@ -84,6 +84,11 @@ import {
   type TenantDatabaseSource,
   type TenantProvisioningStatus,
 } from "./tenant-router.js";
+import type {
+  TenantJurisdiction,
+  TenantLocationHint,
+  TenantObjectAddress,
+} from "./tenant-placement.js";
 
 /** What one provisioning run did. Every field is an observation, not a plan. */
 export interface TenantProvisioningOutcome {
@@ -117,7 +122,13 @@ export interface TenantProvisioningOptions {
    * afterwards, so this choice is permanent; recording it is what makes it
    * auditable rather than accidental (cost #1 in the design doc).
    */
-  readonly locationHint?: string;
+  readonly locationHint?: TenantLocationHint;
+  /** The `cf.continent`/`cf.colo` signal used to derive the hint. */
+  readonly locationHintSource?: string;
+  /** Unix time when that signal was recorded. Defaults to `nowUnix`. */
+  readonly locationHintRecordedAtUnix?: number;
+  /** The hard Durable Object namespace jurisdiction selected at registration. */
+  readonly jurisdiction?: TenantJurisdiction;
 }
 
 /**
@@ -253,6 +264,28 @@ export async function provisionTenantStorage(
   const existing = await registry.get(tenantId);
   const resumed = existing !== undefined && existing.status !== "ready";
 
+  if (
+    existing?.jurisdiction !== undefined &&
+    options.jurisdiction !== undefined &&
+    existing.jurisdiction !== options.jurisdiction
+  ) {
+    throw StorageError.runtime(
+      `tenant ${tenantId} already has a Durable Object in jurisdiction ${existing.jurisdiction}; ` +
+        `changing it to ${options.jurisdiction} requires a data migration before provisioning can continue`,
+    );
+  }
+  if (
+    existing !== undefined &&
+    existing.jurisdiction === undefined &&
+    options.jurisdiction !== undefined &&
+    (existing.status === "ready" || existing.locationHint !== undefined)
+  ) {
+    throw StorageError.runtime(
+      `tenant ${tenantId} already has a Durable Object with an unrestricted jurisdiction; ` +
+        `selecting ${options.jurisdiction} requires a data migration before provisioning can continue`,
+    );
+  }
+
   // (2) Record the INTENT before acting on it, so a crash leaves "started" and
   // not silence. The prior row's D1-topology fields are carried across verbatim:
   // this function has no opinion about a `native_binding` tenant's binding name
@@ -269,11 +302,36 @@ export async function provisionTenantStorage(
   // all. `router.backend` is knowable without resolving anything, so the label
   // is right from the first write; a router that has no single answer leaves it
   // absent and the roster's prior belief stands.
+  const firstHint =
+    existing?.locationHint !== undefined
+      ? {
+          locationHint: existing.locationHint,
+          ...(existing.locationHintSource === undefined
+            ? {}
+            : { locationHintSource: existing.locationHintSource }),
+          ...(existing.locationHintRecordedAtUnix === undefined
+            ? {}
+            : { locationHintRecordedAtUnix: existing.locationHintRecordedAtUnix }),
+        }
+      : options.locationHint === undefined
+        ? {}
+        : {
+            locationHint: options.locationHint,
+            locationHintSource: options.locationHintSource ?? "explicit",
+            locationHintRecordedAtUnix: options.locationHintRecordedAtUnix ?? nowUnix,
+          };
+  const selectedJurisdiction =
+    existing?.jurisdiction !== undefined
+      ? { jurisdiction: existing.jurisdiction }
+      : options.jurisdiction === undefined
+        ? {}
+        : { jurisdiction: options.jurisdiction };
   const base: TenantDatabaseRegistration = {
     ...(existing ?? { tenantId, schemaVersion: 0 }),
     tenantId,
     ...(router.backend === undefined ? {} : { storageBackend: router.backend }),
-    ...(options.locationHint === undefined ? {} : { locationHint: options.locationHint }),
+    ...firstHint,
+    ...selectedJurisdiction,
   };
   await registry.upsert({ ...base, status: "pending", lastError: undefined }, nowUnix);
 
@@ -282,7 +340,11 @@ export async function provisionTenantStorage(
     // I/O at all — the address is a pure function of the id — so the object is
     // first created by the schema read below, which is also the first thing that
     // proves it migrated itself.
-    const handle = await router.forTenant(tenantId);
+    const address: TenantObjectAddress = {
+      ...(base.locationHint === undefined ? {} : { locationHint: base.locationHint }),
+      ...(base.jurisdiction === undefined ? {} : { jurisdiction: base.jurisdiction }),
+    };
+    const handle = await router.forTenant(tenantId, address);
     const schemaVersion = await observedSchemaVersion(handle.db, tenantId);
 
     // (4) Seed, at most once ever, gated inside the tenant's own storage. A

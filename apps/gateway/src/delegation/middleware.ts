@@ -9,7 +9,7 @@
  *
  *   contractAuth → meteringDrain → requestTelemetry → requestLogging
  *                → rateLimit → **delegationChain** → attributionTags
- *                → residency → guardrails → tenantDatabase → … → dispatch
+ *                → residency → tenantDatabase → rateLimit → … → dispatch
  *
  * Each edge is a decision.
  *

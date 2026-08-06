@@ -53,6 +53,11 @@
  * (`inference/shadow.ts::shadowMirrorFor`).
  */
 
+import {
+  tenantJurisdictionForResidencyRegions,
+  type TenantJurisdiction,
+} from "@ferrogate/storage";
+
 /**
  * Where the DURABLE RECORD of a request may live.
  *
@@ -97,6 +102,30 @@ export interface ResidencyPolicy {
   /** Refuse any route that does not ASSERT zero data retention. */
   readonly requireZeroDataRetention: boolean;
   readonly logResidency: LogResidency;
+}
+
+/** The hard object namespace required by a tenant's region policy. */
+export function jurisdictionForResidencyPolicy(
+  policy: ResidencyPolicy | null,
+): TenantJurisdiction | undefined {
+  return policy === null ? undefined : tenantJurisdictionForResidencyRegions(policy.allowedRegions);
+}
+
+/** Combine a policy requirement and recorded object address without allowing disagreement. */
+export function jurisdictionForPolicyAndAddress(
+  policyJurisdiction: TenantJurisdiction | undefined,
+  recordedJurisdiction: TenantJurisdiction | undefined,
+): TenantJurisdiction | undefined {
+  if (
+    policyJurisdiction !== undefined &&
+    recordedJurisdiction !== undefined &&
+    policyJurisdiction !== recordedJurisdiction
+  ) {
+    throw new Error(
+      `tenant residency requires jurisdiction ${policyJurisdiction}, but the tenant object is already addressed in ${recordedJurisdiction}; changing the jurisdiction requires a data migration`,
+    );
+  }
+  return recordedJurisdiction ?? policyJurisdiction;
 }
 
 /**

@@ -6,7 +6,11 @@
  * legacy compatibility rows into that database, and use an object-local
  * `D1ControlPlaneStore` whose only isolation boundary is the object identity.
  */
-import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import {
+  ControlDatabaseTenantRegistry,
+  type TenantDatabaseRouter,
+  type TenantObjectAddress,
+} from "@ferrogate/storage";
 import type {
   CallerScope,
   ControlPlaneStore,
@@ -55,6 +59,7 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   readonly #control: D1ControlPlaneStore;
   readonly #controlDb: D1Database;
   readonly #tenantRouter: TenantDatabaseRouter;
+  readonly #registry: ControlDatabaseTenantRegistry;
   readonly #options: SplitControlPlaneStoreOptions;
 
   constructor(
@@ -64,6 +69,7 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   ) {
     this.#controlDb = controlDb;
     this.#tenantRouter = tenantRouter;
+    this.#registry = new ControlDatabaseTenantRegistry(controlDb);
     this.#options = options;
     this.#control = new D1ControlPlaneStore(controlDb, options);
   }
@@ -80,7 +86,19 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     const normalized = tenantId.trim();
     if (normalized === "")
       throw new Error("tenant-private resource requires a non-empty tenant_id");
-    const handle = await this.#tenantRouter.forTenant(normalized);
+    const registration = await this.#registry.get(normalized);
+    const address: TenantObjectAddress | undefined =
+      registration === undefined
+        ? undefined
+        : {
+            ...(registration.locationHint === undefined
+              ? {}
+              : { locationHint: registration.locationHint }),
+            ...(registration.jurisdiction === undefined
+              ? {}
+              : { jurisdiction: registration.jurisdiction }),
+          };
+    const handle = await this.#tenantRouter.forTenant(normalized, address);
     await backfillTenantResourceKinds(this.#controlDb, handle.db, normalized);
     const options: D1ControlPlaneStoreOptions = {
       ...this.#options,

@@ -16,6 +16,8 @@ export {
   type RouteResidencyFacts,
   effectiveResidencyPolicy,
   isRegionConstraint,
+  jurisdictionForPolicyAndAddress,
+  jurisdictionForResidencyPolicy,
   parseResidencyPolicyRow,
   residencyRequirementSummary,
   residencyViolations,
@@ -39,4 +41,9 @@ export {
   logPlacementSatisfied,
   residency,
 } from "./middleware.js";
-export { recordResidencyPolicy, residencyPolicyFor } from "./carrier.js";
+export {
+  recordResidencyPolicy,
+  recordTenantObjectAddressForEnv,
+  residencyPolicyFor,
+  tenantObjectAddressFor,
+} from "./carrier.js";

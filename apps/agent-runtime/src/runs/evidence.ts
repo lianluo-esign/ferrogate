@@ -8,7 +8,16 @@
  * the gateway's scheduled managed-evidence sweep rebuilds the mirror from the
  * object after an isolate or control-D1 failure.
  */
-import { DurableObjectD1Database } from "@ferrogate/storage";
+import {
+  ControlDatabaseTenantRegistry,
+  DurableObjectD1Database,
+  tenantObjectStubFor,
+} from "@ferrogate/storage";
+import type {
+  TenantDataStub,
+  TenantObjectAddress,
+  TenantObjectNamespaceLike,
+} from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { AgentRuntimeBindings, IsolationGrant } from "../ports.js";
 import type { StoredAgentRun, StoredRunEvent } from "./model.js";
@@ -119,14 +128,54 @@ ON CONFLICT (projection_key) DO UPDATE SET
   occurred_at_unix = excluded.occurred_at_unix,
   event_json = excluded.event_json`;
 
-function tenantDatabase(env: AgentRuntimeBindings, tenantId: string): D1Database {
+const TENANT_ADDRESS_CACHE = new WeakMap<
+  object,
+  Map<string, Promise<TenantObjectAddress | undefined>>
+>();
+
+function tenantAddress(
+  env: AgentRuntimeBindings,
+  tenantId: string,
+): Promise<TenantObjectAddress | undefined> {
+  const controlDatabase = env.CONTROL_DB;
+  if (controlDatabase === undefined) return Promise.resolve(undefined);
+  let cache = TENANT_ADDRESS_CACHE.get(env);
+  if (cache === undefined) {
+    cache = new Map();
+    TENANT_ADDRESS_CACHE.set(env, cache);
+  }
+  const cached = cache.get(tenantId);
+  if (cached !== undefined) return cached;
+  const lookup = new ControlDatabaseTenantRegistry(controlDatabase)
+    .get(tenantId)
+    .then((registration) => {
+      if (registration === undefined) return undefined;
+      return {
+        ...(registration.locationHint === undefined
+          ? {}
+          : { locationHint: registration.locationHint }),
+        ...(registration.jurisdiction === undefined
+          ? {}
+          : { jurisdiction: registration.jurisdiction }),
+      };
+    });
+  cache.set(tenantId, lookup);
+  return lookup;
+}
+
+async function tenantDatabase(env: AgentRuntimeBindings, tenantId: string): Promise<D1Database> {
   const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
   if (namespace === undefined) {
     throw new Error(
       "AgentRunState requires the TENANT_DATA binding for authoritative agent evidence",
     );
   }
-  const stub = namespace.get(namespace.idFromName(tenantId));
+  const address = await tenantAddress(env, tenantId);
+  const stub = tenantObjectStubFor(
+    namespace as unknown as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
+    tenantId,
+    address,
+  );
   return new DurableObjectD1Database(tenantId, stub).asD1Database();
 }
 function controlDatabase(env: AgentRuntimeBindings): D1Database | undefined {
@@ -147,7 +196,7 @@ export async function persistAgentRunEvidence(
     run.completed_at_unix,
     JSON.stringify(run),
   ] as const;
-  const db = tenantDatabase(env, run.tenant_id);
+  const db = await tenantDatabase(env, run.tenant_id);
   const frameworkAdapter = managed?.frameworkAdapter ?? run.framework_adapter;
   const managedEvidence =
     managed?.sessionId !== undefined &&
@@ -262,7 +311,7 @@ export async function persistAgentRunEventEvidence(
     event.occurred_at_unix,
     JSON.stringify(event),
   ] as const;
-  const db = tenantDatabase(env, tenantId);
+  const db = await tenantDatabase(env, tenantId);
   await db.batch([
     db.prepare(TENANT_AGENT_RUN_EVENT_UPSERT_SQL).bind(...params),
     db

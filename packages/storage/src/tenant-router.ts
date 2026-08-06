@@ -34,6 +34,11 @@
  */
 import { StorageError } from "./errors.js";
 import type { TenantDataStatement } from "./tenant-data-object.js";
+import type {
+  TenantJurisdiction,
+  TenantLocationHint,
+  TenantObjectAddress,
+} from "./tenant-placement.js";
 
 // ---------------------------------------------------------------------------
 // Handles
@@ -113,7 +118,10 @@ export interface TenantDatabaseRouter {
   /** The account-global CONTROL database. Always a native binding. */
   control(): D1Database;
   /** Resolve one tenant's database, or throw. NEVER falls back. */
-  forTenant(tenantId: string): Promise<TenantDatabaseHandle>;
+  forTenant(
+    tenantId: string,
+    address?: TenantObjectAddress,
+  ): Promise<TenantDatabaseHandle>;
   /**
    * Optional operator-only batch used for authority projections such as tenant
    * RBAC bindings. Durable Object routers forward this to the private RPC;
@@ -124,13 +132,18 @@ export interface TenantDatabaseRouter {
   privilegedBatch?(
     tenantId: string,
     statements: readonly TenantDataStatement[],
+    address?: TenantObjectAddress,
   ): Promise<void>;
   /** Arm the earliest schedule deadline in a tenant Durable Object. */
-  setScheduleAlarm?(tenantId: string, scheduledAtUnix: number): Promise<void>;
+  setScheduleAlarm?(
+    tenantId: string,
+    scheduledAtUnix: number,
+    address?: TenantObjectAddress,
+  ): Promise<void>;
   /** Clear a tenant Durable Object's schedule alarm when no schedule remains. */
-  clearScheduleAlarm?(tenantId: string): Promise<void>;
+  clearScheduleAlarm?(tenantId: string, address?: TenantObjectAddress): Promise<void>;
   /** Recompute and arm the single alarm from current tenant-local schedule rows. */
-  rearmScheduleAlarm?(tenantId: string): Promise<void>;
+  rearmScheduleAlarm?(tenantId: string, address?: TenantObjectAddress): Promise<void>;
   /**
    * Every provisioned tenant id, ascending.
    *
@@ -251,7 +264,13 @@ export interface TenantDatabaseRegistration {
    * homed near its first `get()` and cannot be moved, so the choice is permanent
    * and recorded rather than inferred.
    */
-  locationHint?: string;
+  locationHint?: TenantLocationHint;
+  /** The Cloudflare request signal used to derive the first hint. */
+  locationHintSource?: string;
+  /** Unix time when the first-resolution placement decision was recorded. */
+  locationHintRecordedAtUnix?: number;
+  /** The hard Durable Object namespace jurisdiction, when one was selected. */
+  jurisdiction?: TenantJurisdiction;
   /** The independent #824 data migration state. */
   migrationState?: TenantMigrationState;
   migrationEpoch?: number;
@@ -266,7 +285,8 @@ export interface TenantDatabaseRegistration {
 /** Every column {@link registrationFromRow} decodes. One list, so the reads cannot drift. */
 const TENANT_DATABASE_COLUMNS =
   "tenant_id, binding_name, schema_version, storage_backend, provisioning_status, " +
-  "catalog_seeded_at_unix, last_error, location_hint, " +
+  "catalog_seeded_at_unix, last_error, location_hint, location_hint_source, " +
+  "location_hint_recorded_at_unix, jurisdiction, " +
   "migration_state, migration_epoch, migration_frozen_at_unix, migration_cutover_at_unix, " +
   "migration_retention_until_unix, migration_last_error, migration_receipt_json, " +
   "migration_progress_json";
@@ -342,9 +362,10 @@ export class ControlDatabaseTenantRegistry {
       .prepare(
         "INSERT INTO tenant_databases " +
           "(tenant_id, binding_name, schema_version, storage_backend, provisioning_status, " +
-          " catalog_seeded_at_unix, last_error, location_hint, migration_state, " +
+          " catalog_seeded_at_unix, last_error, location_hint, location_hint_source, " +
+          " location_hint_recorded_at_unix, jurisdiction, migration_state, " +
           " provisioned_at_unix, updated_at_unix) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT (tenant_id) DO UPDATE SET " +
           "binding_name = excluded.binding_name, " +
           "schema_version = excluded.schema_version, " +
@@ -353,6 +374,9 @@ export class ControlDatabaseTenantRegistry {
           "catalog_seeded_at_unix = excluded.catalog_seeded_at_unix, " +
           "last_error = excluded.last_error, " +
           "location_hint = excluded.location_hint, " +
+          "location_hint_source = excluded.location_hint_source, " +
+          "location_hint_recorded_at_unix = excluded.location_hint_recorded_at_unix, " +
+          "jurisdiction = excluded.jurisdiction, " +
           "migration_state = excluded.migration_state, " +
           "updated_at_unix = excluded.updated_at_unix",
       )
@@ -369,6 +393,9 @@ export class ControlDatabaseTenantRegistry {
         registration.catalogSeededAtUnix ?? null,
         registration.lastError ?? null,
         registration.locationHint ?? null,
+        registration.locationHintSource ?? null,
+        registration.locationHintRecordedAtUnix ?? null,
+        registration.jurisdiction ?? null,
         registration.migrationState ??
           (registration.storageBackend === "durable_object" ? "done" : "shared"),
         nowUnix,
@@ -387,6 +414,9 @@ interface TenantDatabaseRow {
   catalog_seeded_at_unix: number | null;
   last_error: string | null;
   location_hint: string | null;
+  location_hint_source: string | null;
+  location_hint_recorded_at_unix: number | null;
+  jurisdiction: string | null;
   migration_state: string | null;
   migration_epoch: number | null;
   migration_frozen_at_unix: number | null;
@@ -436,7 +466,18 @@ function registrationFromRow(row: TenantDatabaseRow): TenantDatabaseRegistration
       ? {}
       : { catalogSeededAtUnix: row.catalog_seeded_at_unix }),
     ...(row.last_error === null ? {} : { lastError: row.last_error }),
-    ...(row.location_hint === null ? {} : { locationHint: row.location_hint }),
+    ...(row.location_hint === null
+      ? {}
+      : { locationHint: row.location_hint as TenantLocationHint }),
+    ...(row.location_hint_source === null
+      ? {}
+      : { locationHintSource: row.location_hint_source }),
+    ...(row.location_hint_recorded_at_unix === null
+      ? {}
+      : { locationHintRecordedAtUnix: row.location_hint_recorded_at_unix }),
+    ...(row.jurisdiction === null
+      ? {}
+      : { jurisdiction: row.jurisdiction as TenantJurisdiction }),
     ...(MIGRATION_STATES.includes(row.migration_state as TenantMigrationState)
       ? { migrationState: row.migration_state as TenantMigrationState }
       : {}),

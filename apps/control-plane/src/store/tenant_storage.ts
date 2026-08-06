@@ -60,8 +60,59 @@
  * created by being addressed, a namespace cannot be enumerated to find the junk
  * ones, and every one of them bills for storage forever.
  */
-import { provisionTenantStorage } from "@ferrogate/storage";
+import {
+  locationHintFromCloudflareSignal,
+  provisionTenantStorage,
+  tenantJurisdictionForResidencyRegions,
+  type TenantJurisdiction,
+} from "@ferrogate/storage";
 import type { ControlPlaneDeps } from "../ports.js";
+
+interface CloudflareRequest extends Request {
+  readonly cf?: {
+    readonly continent?: unknown;
+    readonly colo?: unknown;
+  };
+}
+
+interface ResidencyPolicyRow {
+  readonly residency_regions_json: string | null;
+}
+
+function residencyRegionsFromColumn(value: string | null): string[] {
+  if (value === null || value.trim() === "") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Read the jurisdiction implied by the policy already committed for a tenant. */
+export async function tenantJurisdictionFromPolicy(
+  controlDatabase: D1Database,
+  tenantId: string,
+): Promise<TenantJurisdiction | undefined> {
+  try {
+    const row = await controlDatabase
+      .prepare(
+        "SELECT residency_regions_json FROM quota_policies " +
+          "WHERE scope_type = 'tenant' AND scope_id = ?",
+      )
+      .bind(tenantId)
+      .first<ResidencyPolicyRow>();
+    return tenantJurisdictionForResidencyRegions(
+      residencyRegionsFromColumn(row?.residency_regions_json ?? null),
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (/no such (table|column):/i.test(detail)) return undefined;
+    throw error;
+  }
+}
 
 /**
  * Provision (or resume) one tenant's storage, best-effort.
@@ -76,12 +127,25 @@ import type { ControlPlaneDeps } from "../ports.js";
 export async function provisionTenantStorageFor(
   deps: ControlPlaneDeps,
   tenantId: string,
+  request?: Request,
 ): Promise<boolean> {
   if (deps.controlDatabase === null) return false;
   try {
+    const cf = (request as CloudflareRequest | undefined)?.cf;
+    const placement = locationHintFromCloudflareSignal({
+      continent: cf?.continent,
+      colo: cf?.colo,
+    });
+    const jurisdiction = await tenantJurisdictionFromPolicy(deps.controlDatabase, tenantId);
     const outcome = await provisionTenantStorage(
       deps.tenantStorage ?? deps.tenantDatabases,
       tenantId,
+      {
+        locationHint: placement.locationHint,
+        locationHintSource: placement.source,
+        locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
+        ...(jurisdiction === undefined ? {} : { jurisdiction }),
+      },
     );
     return outcome.status === "ready";
   } catch {

@@ -280,7 +280,11 @@ export interface CollectionSpec {
    * Ordered after `project` for the same reason and enforced by
    * {@link runProjection} calling them in that order, not by convention.
    */
-  readonly provision?: (deps: ControlPlaneDeps, record: StoreRecord) => Promise<unknown>;
+  readonly provision?: (
+    deps: ControlPlaneDeps,
+    record: StoreRecord,
+    request: Request,
+  ) => Promise<unknown>;
   /**
    * Remove the TYPED row {@link CollectionSpec.project} wrote, on DELETE.
    *
@@ -330,7 +334,9 @@ interface ResolvedSpec {
   readonly tenantProject:
     | ((deps: ControlPlaneDeps, record: StoreRecord, nowUnix: number) => Promise<void>)
     | null;
-  readonly provision: ((deps: ControlPlaneDeps, record: StoreRecord) => Promise<unknown>) | null;
+  readonly provision:
+    | ((deps: ControlPlaneDeps, record: StoreRecord, request: Request) => Promise<unknown>)
+    | null;
   readonly unproject: ((db: D1Database, id: string, record: StoreRecord) => Promise<void>) | null;
   readonly tenantUnproject:
     | ((deps: ControlPlaneDeps, id: string, record: StoreRecord) => Promise<void>)
@@ -384,7 +390,7 @@ async function runProjection(
   // freshly created tenant on its own creation. The ordering is here rather than
   // in a comment on the two hooks because this is the only place both are called.
   if (spec.provision !== null) {
-    await spec.provision(deps, record);
+    await spec.provision(deps, record, c.req.raw);
   }
 }
 

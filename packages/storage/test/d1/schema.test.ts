@@ -192,6 +192,9 @@ describe("control / tenant split", () => {
       "migration_last_error",
       "migration_receipt_json",
       "migration_progress_json",
+      "location_hint_source",
+      "location_hint_recorded_at_unix",
+      "jurisdiction",
     ]);
   });
 
