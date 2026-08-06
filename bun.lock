@@ -93,6 +93,7 @@
     "apps/mcp": {
       "name": "@ferrogate/app-mcp",
       "dependencies": {
+        "@ferrogate/billing": "workspace:*",
         "@ferrogate/core": "workspace:*",
         "@ferrogate/guardrails": "workspace:*",
         "@ferrogate/policy": "workspace:*",
@@ -242,7 +243,7 @@
     },
     "sdks/typescript": {
       "name": "@ferrogate/admin-sdk",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "openapi-fetch": "0.17.0",
       },

@@ -1,15 +1,15 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { readAssetForMcp } from "../src/tools.js";
 import {
   type AuthContext,
   type DispatchContext,
   type McpEnv,
-  resolvePorts,
-  resetInMemoryPorts,
   inMemoryPorts,
+  resetInMemoryPorts,
+  resolvePorts,
 } from "../src/ports.js";
+import { readAssetForMcp } from "../src/tools.js";
 import { TENANT } from "./fixtures.js";
 import { tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
 
@@ -20,24 +20,36 @@ const ASSET_ID = "stored-assets-real-variant-id";
 interface Bindings {
   readonly ASSETS?: R2Bucket;
   readonly BILLING_DB?: D1Database;
-  readonly TENANT_DB?: D1Database;
+  readonly DB?: D1Database;
 }
 
-function requireBindings(): { ASSETS: R2Bucket; BILLING_DB: D1Database; TENANT_DB: D1Database } {
+function requireBindings(): {
+  ASSETS: R2Bucket;
+  BILLING_DB: D1Database;
+  DB: D1Database;
+  TENANT_DATA: ReturnType<typeof tenantDataNamespace>;
+} {
   const bindings = env as unknown as Bindings;
-  if (bindings.ASSETS === undefined || bindings.BILLING_DB === undefined || bindings.TENANT_DB === undefined) {
-    throw new Error("MCP D1 egress test requires ASSETS, BILLING_DB, and TENANT_DB bindings");
+  if (
+    bindings.ASSETS === undefined ||
+    bindings.BILLING_DB === undefined ||
+    bindings.DB === undefined
+  ) {
+    throw new Error("MCP asset egress test requires ASSETS, BILLING_DB, and DB bindings");
   }
   return {
     ASSETS: bindings.ASSETS,
     BILLING_DB: bindings.BILLING_DB,
-    TENANT_DB: bindings.TENANT_DB,
+    DB: bindings.DB,
+    TENANT_DATA: tenantDataNamespace(env),
   };
 }
 
 async function seedAsset(db: D1Database, bucket: R2Bucket): Promise<void> {
   const digest = await crypto.subtle.digest("SHA-256", CONTENT);
-  const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const hash = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
   const storageUri = `assets/v1/t/${TENANT}/obj/cli_tool/deploy/1.0.0/linux-x86_64/obj_durable`;
   await db
     .prepare(
@@ -80,17 +92,19 @@ function context(): DispatchContext {
 
 beforeEach(async () => {
   resetInMemoryPorts();
-  const { BILLING_DB, ASSETS, TENANT_DB } = requireBindings();
+  const { BILLING_DB, ASSETS, TENANT_DATA } = requireBindings();
   await BILLING_DB.batch([
     BILLING_DB.prepare("DELETE FROM billing_report_outbox"),
     BILLING_DB.prepare("DELETE FROM billing_ledger"),
     BILLING_DB.prepare("DELETE FROM billing_events"),
   ]);
-  const rows = await TENANT_DB.prepare("SELECT storage_uri FROM stored_assets").all<{ storage_uri: string }>();
+  const tenant = tenantDatabase(TENANT_DATA, TENANT);
+  const rows = await tenant
+    .prepare("SELECT storage_uri FROM stored_assets")
+    .all<{ storage_uri: string }>();
   for (const row of rows.results ?? []) await ASSETS.delete(row.storage_uri);
-  await TENANT_DB.prepare("DELETE FROM stored_assets").run();
+  await tenant.prepare("DELETE FROM stored_assets").run();
 
-  const tenant = tenantDatabase(tenantDataNamespace(env), TENANT);
   await tenant.batch([
     tenant.prepare("DELETE FROM billing_report_outbox"),
     tenant.prepare("DELETE FROM billing_ledger"),
@@ -102,18 +116,19 @@ beforeEach(async () => {
 
 describe("#801 MCP non-dev D1 asset egress", () => {
   it("reads through D1/R2 and persists billing rows with api-key attribution", async () => {
-    const { ASSETS, BILLING_DB, TENANT_DB } = requireBindings();
-    await seedAsset(TENANT_DB, ASSETS);
+    const { ASSETS, BILLING_DB, DB, TENANT_DATA } = requireBindings();
+    const tenant = tenantDatabase(TENANT_DATA, TENANT);
+    await seedAsset(tenant, ASSETS);
 
-    const ports = resolvePorts({ ASSETS, BILLING_DB, TENANT_DB } satisfies McpEnv);
+    const ports = resolvePorts({ ASSETS, BILLING_DB, DB, TENANT_DATA } satisfies McpEnv);
     const result = await readAssetForMcp(ports, context(), "cli_tool", "deploy", "1.0.0");
     expect(result.ok).toBe(true);
     expect(ports.assetEgress.meter.constructor.name).toBe("LedgerAssetEgressMeter");
 
-    const ledger = await BILLING_DB
+    const ledger = await tenant
       .prepare("SELECT api_key_id, entry_json FROM billing_ledger")
       .all<{ api_key_id: string | null; entry_json: string }>();
-    const events = await BILLING_DB
+    const events = await tenant
       .prepare("SELECT event_json FROM billing_events")
       .all<{ event_json: string }>();
     expect(ledger.results).toHaveLength(1);
@@ -123,17 +138,18 @@ describe("#801 MCP non-dev D1 asset egress", () => {
     expect(JSON.parse(events.results?.[0]?.event_json ?? "{}").tenant.api_key_id).toBe(API_KEY_ID);
     const pull = ports.audit.events().find((event) => event.action === "asset.pull");
     expect(pull?.target).toBe(ASSET_ID);
+    const controlRows = await BILLING_DB.prepare("SELECT id FROM billing_ledger").all();
+    expect(controlRows.results).toEqual([]);
   });
 
   it("routes asset billing to the tenant Durable Object when it is bound", async () => {
-    const { ASSETS, BILLING_DB, TENANT_DB } = requireBindings();
-    await seedAsset(TENANT_DB, ASSETS);
-    const TENANT_DATA = tenantDataNamespace(env);
+    const { ASSETS, BILLING_DB, DB, TENANT_DATA } = requireBindings();
+    await seedAsset(tenantDatabase(TENANT_DATA, TENANT), ASSETS);
 
     const ports = resolvePorts({
       ASSETS,
       BILLING_DB,
-      TENANT_DB,
+      DB,
       TENANT_DATA,
     } satisfies McpEnv);
     const result = await readAssetForMcp(ports, context(), "cli_tool", "deploy", "1.0.0");
