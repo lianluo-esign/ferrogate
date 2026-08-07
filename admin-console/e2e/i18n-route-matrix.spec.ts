@@ -82,7 +82,24 @@ async function expectActionUnclipped(
   testInfo: TestInfo,
 ): Promise<void> {
   await expect(action).toBeVisible();
-  const box = await action.boundingBox();
+  // Radix sheets/dialogs slide their content in (500ms), and `boundingBox()`
+  // does not wait for animation stability, so an immediate read can catch the
+  // action mid-flight outside the viewport. Wait until two consecutive reads
+  // agree — the settled box — and hard-assert the overflow bounds on THAT.
+  // A genuinely clipped action settles out of bounds and still fails below.
+  let box = await action.boundingBox();
+  await expect(async () => {
+    const next = await action.boundingBox();
+    const stable =
+      box !== null &&
+      next !== null &&
+      Math.abs(next.x - box.x) < 0.5 &&
+      Math.abs(next.y - box.y) < 0.5 &&
+      Math.abs(next.width - box.width) < 0.5 &&
+      Math.abs(next.height - box.height) < 0.5;
+    box = next;
+    if (!stable) throw new Error("action box still animating");
+  }).toPass({ intervals: [100, 150, 250, 500], timeout: 5_000 });
   const viewport = page.viewportSize();
   const context = `${new URL(page.url()).pathname} @ ${testInfo.project.name}`;
   expect(box, `primary action has no box (${context})`).not.toBeNull();

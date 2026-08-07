@@ -16,7 +16,7 @@
 // `verification_state`). Those are rendered per row — see
 // components/site-domain-liveness.tsx — because a bound timestamp on its own
 // makes a hostname whose requests are REFUSED look identical to a live one.
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   useMutation,
   useQueries,
@@ -76,6 +76,11 @@ export default function SiteDomainsPage() {
   const [site, setSite] = useState("");
   const [bindError, setBindError] = useState<string | null>(null);
   const [pendingUnbind, setPendingUnbind] = useState<SiteDomain | null>(null);
+  // The unbind confirm is ONE controlled AlertDialog shared by every row, so
+  // Radix has no `AlertDialogTrigger` to restore focus to on close. Remember
+  // the row button that opened it and hand focus back ourselves — otherwise a
+  // keyboard operator dismissing the dialog is dropped onto <body>.
+  const unbindTriggerRef = useRef<HTMLElement | null>(null);
 
   const { data, isLoading, error: listError } = useQuery({
     queryKey,
@@ -358,7 +363,10 @@ export default function SiteDomainsPage() {
                     <Button
                       variant="destructive"
                       size="sm"
-                      onClick={() => setPendingUnbind(domain)}
+                      onClick={(event) => {
+                        unbindTriggerRef.current = event.currentTarget;
+                        setPendingUnbind(domain);
+                      }}
                     >
                       {t("page.siteDomains.unbind")}
                     </Button>
@@ -380,7 +388,19 @@ export default function SiteDomainsPage() {
         open={pendingUnbind !== null}
         onOpenChange={(open) => !open && setPendingUnbind(null)}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            // Restore focus to the opening row button (still-connected check:
+            // after a confirmed unbind the row is gone, and Radix's default —
+            // body — is then the honest fallback).
+            const trigger = unbindTriggerRef.current;
+            unbindTriggerRef.current = null;
+            if (trigger?.isConnected) {
+              event.preventDefault();
+              trigger.focus();
+            }
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t("page.siteDomains.unbind.title", { hostname: pendingUnbind?.hostname ?? "" })}

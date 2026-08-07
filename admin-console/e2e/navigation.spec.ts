@@ -53,7 +53,11 @@ test("keyboard navigation closes mobile navigation and focuses the destination h
   const group = page.getByRole("button", { name: "Organization" });
   await group.focus();
   await page.keyboard.press("Enter");
-  const destination = page.getByRole("link", { name: "Workspaces" });
+  // `exact` because the dashboard behind the sidebar legitimately renders an
+  // inventory-row link accessibly named "View Workspaces", which the default
+  // substring match would also resolve; the sidebar entry's exact name is
+  // "Workspaces".
+  const destination = page.getByRole("link", { name: "Workspaces", exact: true });
   await destination.focus();
   await page.keyboard.press("Enter");
 

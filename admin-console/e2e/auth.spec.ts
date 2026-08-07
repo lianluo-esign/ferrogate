@@ -20,11 +20,19 @@ test.describe("public auth routes", () => {
     await expect(page.getByLabel("Email")).toBeVisible();
     await expect(page.getByLabel("Email")).toHaveAttribute("name", "email");
     await expect(page.getByLabel("Email")).toHaveAttribute("autocomplete", "email");
+    // #346 placed the LanguageSwitcher BEFORE the ThemeSwitcher in the page's
+    // top-right controls, so the first Tab now lands on it. The accessibility
+    // property is unchanged: the first keyboard target is a meaningful,
+    // announced control, and the theme toggle is the immediate next stop.
     await expectKeyboardFocus(
       page,
-      page.getByRole("button", { name: "Theme: System. Change theme" }),
+      page.getByRole("button", { name: "Language: English. Change language" }),
       testInfo,
     );
+    await page.keyboard.press("Tab");
+    await expect(
+      page.getByRole("button", { name: "Theme: System. Change theme" }),
+    ).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(page.getByLabel("Email")).toBeFocused();
     await expectNoDocumentOverflow(page, testInfo);

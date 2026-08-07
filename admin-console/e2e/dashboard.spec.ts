@@ -54,7 +54,10 @@ test("cockpit surfaces inventory, traffic, health, and filtered-view links", asy
   await expect(alerts.getByText("anthropic")).toBeVisible();
   // The #458 alert kinds are titled, not a generic untitled "Alert".
   await expect(alerts.getByText("Tool approvals pending")).toBeVisible();
-  await expect(alerts.getByText("Quota pressure")).toBeVisible();
+  // `exact` because the alerts region ALSO legitimately renders the #458
+  // governance signal link "Scopes under quota pressure", which a substring
+  // match would collide with; the titled alert kind is the node under test.
+  await expect(alerts.getByText("Quota pressure", { exact: true })).toBeVisible();
   await expect(alerts.getByRole("link", { name: "Investigate" }).first()).toBeVisible();
 
   await expectNoDocumentOverflow(page, testInfo);
@@ -71,7 +74,10 @@ test("period toggle re-scopes totals and preserves the choice in the URL", async
   await page.getByRole("button", { name: "This month" }).click();
   await expect(page).toHaveURL(/[?&]period=month/);
   await expect(traffic.getByText("1,500,000")).toBeVisible();
-  await expect(traffic.getByText("Calendar month 2026-07")).toBeVisible();
+  // Two nodes are correct UI: the period-scoped tokens AND cost tiles each
+  // caption themselves with the active period, so the re-scoped label renders
+  // once per tile. Any one being visible proves the toggle re-scoped the band.
+  await expect(traffic.getByText("Calendar month 2026-07").first()).toBeVisible();
 });
 
 test("@desktop first viewport answers size, traffic, health, and action without scrolling", async ({

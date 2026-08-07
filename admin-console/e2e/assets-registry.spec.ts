@@ -109,7 +109,12 @@ test("upload drives the presigned intent -> direct PUT -> commit flow with progr
 
   // 2) Progress surfaces during the held direct-to-bucket upload phase (the
   // phase status is a substring match, so the trailing ellipsis is irrelevant).
-  await expect(page.getByText("Uploading to storage")).toBeVisible();
+  // Scoped to the announced role="status" node: the disabled submit button
+  // legitimately mirrors the same phase label as its busy state, so an
+  // unscoped text match resolves to two correct nodes.
+  await expect(
+    page.getByRole("status").filter({ hasText: "Uploading to storage" }),
+  ).toBeVisible();
   await expect(page.getByRole("progressbar")).toBeVisible();
 
   // 3) Commit re-declares the intent's upload_id + verified size.
@@ -266,9 +271,19 @@ test("permanent delete is gated behind a name@version-typed confirm dialog", asy
   await attachViewportScreenshot(page, testInfo, "assets-delete-confirm");
 });
 
-test("permanent delete names the channel blocker and keeps the 409 verdict on screen", async ({
-  page,
-}, testInfo) => {
+test.describe("channel-blocked delete", () => {
+  // The mock's 409 rejection makes Chromium log a resource-load console error;
+  // tolerate exactly that so the on-screen verdict (not a silent failure) is
+  // what is under test.
+  test.use({
+    expectedConsoleErrors: [
+      /Failed to load resource: the server responded with a status of 409/,
+    ],
+  });
+
+  test("permanent delete names the channel blocker and keeps the 409 verdict on screen", async ({
+    page,
+  }, testInfo) => {
   // #367: removing the last resolvable variant of a channel-referenced version
   // is rejected with 409 asset_version_referenced, and the mock now models
   // that. `stable` points at 1.5.0, whose only variant is the default one.
@@ -298,13 +313,22 @@ test("permanent delete names the channel blocker and keeps the 409 verdict on sc
     deleteDialog.getByRole("button", { name: "Delete permanently" }).click(),
   ]);
   await expect(deleteDialog).toContainText("move or delete the channel first");
-  // Still on screen, and the version was NOT removed from the table.
+  // Still on screen, and the version was NOT removed from the table. While the
+  // modal confirm is open Radix aria-hides the detail dialog underneath it, so
+  // role-based queries cannot see the versions table even though it is still
+  // rendered on screen — assert through the DOM (CSS) instead.
   await expect(deleteDialog).toBeVisible();
+  const backgroundVersionsTable = page
+    .locator('[role="dialog"]')
+    .filter({ hasText: "Registry manifest" })
+    .locator("table")
+    .nth(1);
   await expect(
-    versionsTable.getByRole("row").filter({ hasText: "1.5.0" }).first(),
+    backgroundVersionsTable.locator("tr").filter({ hasText: "1.5.0" }).first(),
   ).toBeVisible();
 
   await attachViewportScreenshot(page, testInfo, "assets-delete-blocked");
+  });
 });
 
 test("cancelling a large-object upload stops it and never reads as published", async ({
@@ -345,7 +369,11 @@ test("cancelling a large-object upload stops it and never reads as published", a
   });
 
   await dialog.getByRole("button", { name: "Upload large object" }).click();
-  await expect(page.getByText("Uploading to storage")).toBeVisible();
+  // role="status" scope for the same reason as the upload case above: the
+  // disabled submit button mirrors the phase label as its busy state.
+  await expect(
+    page.getByRole("status").filter({ hasText: "Uploading to storage" }),
+  ).toBeVisible();
 
   // Cancel is a REAL, enabled action mid-flight, not a greyed-out placeholder.
   const cancel = dialog.getByRole("button", { name: "Cancel upload" });
