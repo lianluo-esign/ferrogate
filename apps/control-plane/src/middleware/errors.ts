@@ -146,6 +146,20 @@ export function writeJsonError(
 /** Hono `onError` — every throw becomes the uniform envelope. */
 export const controlPlaneErrorHandler: ErrorHandler<ControlPlaneEnv> = (error, c) => {
   const { status, code, message } = classifyError(error);
+  // A 5xx is an UNEXPECTED server fault. `classifyError` deliberately never
+  // leaks an arbitrary throw's text to the client ("internal server error"), so
+  // without this line the cause is lost entirely — an operator sees a 500 with
+  // no way to tell whether it was a missing table, a null field or an outage.
+  // `console.warn` reaches the Worker log stream (the same channel the request
+  // log uses). 4xx are expected client errors and stay quiet.
+  if (status >= 500) {
+    const requestId = c.get("requestId") ?? "unknown";
+    console.warn(
+      `[ferrogate] control-plane ${code} (${status}) on ${c.req.method} ${c.req.path} [request ${requestId}]: ${
+        error instanceof Error ? (error.stack ?? error.message) : String(error)
+      }`,
+    );
+  }
   return writeJsonError(c, status, code, message);
 };
 
