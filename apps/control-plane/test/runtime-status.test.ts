@@ -77,6 +77,32 @@ describe("runtime status (real D1)", () => {
     expect(body.runtime).toBe("workers");
     expect(body.auth_required).toBe(true);
   });
+
+  it("serves the full AdminOverview document — four sections, each a valid section (#884)", async () => {
+    await seedD1("providers", [{ id: "p1" }, { id: "p2" }]);
+    await seedD1("tenants", [{ id: "t1" }]);
+
+    const response = await SELF.fetch(`${BASE}/admin/v1/overview`, { headers: bearer(KEY) });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+
+    // Top-level AdminOverview shape (OpenAPI: object const is control_plane.overview).
+    expect(body.object).toBe("control_plane.overview");
+    expect(typeof body.generated_at_unix).toBe("number");
+    // The operator caller is global-scoped.
+    expect(body.scope).toEqual({ kind: "global" });
+
+    // Every section is a valid AdminOverviewSection: status ∈ {ok, unavailable},
+    // a source string, and its own generated_at_unix — the per-section contract
+    // that lets one source degrade without sinking the whole overview.
+    for (const key of ["runtime", "control_plane", "usage", "alerts"] as const) {
+      const section = body[key] as Record<string, unknown> | undefined;
+      expect(section, `section ${key} missing`).toBeDefined();
+      expect(["ok", "unavailable"], `section ${key} status`).toContain(section?.status);
+      expect(typeof section?.source, `section ${key} source`).toBe("string");
+      expect(typeof section?.generated_at_unix, `section ${key} generated_at_unix`).toBe("number");
+    }
+  });
 });
 
 describe("PLATFORM LIMIT: a config reload cannot swap a live isolate's snapshot", () => {

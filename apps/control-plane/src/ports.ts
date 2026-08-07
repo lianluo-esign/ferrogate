@@ -379,7 +379,7 @@ export interface RuntimeStatus {
  */
 export interface RuntimeStatusPort {
   status(): Promise<RuntimeStatus>;
-  overview(): Promise<Record<string, unknown>>;
+  overview(scope?: CallerScope): Promise<Record<string, unknown>>;
   observability(): Promise<readonly Record<string, unknown>[]>;
   /** Prometheus text exposition (`text/plain; version=0.0.4`). */
   metrics(): Promise<string>;

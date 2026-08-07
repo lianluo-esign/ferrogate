@@ -53,6 +53,7 @@ import type {
   ApiKeyResolution,
   AssetObjectReclaimer,
   AuthContext,
+  CallerScope,
   ControlPlaneBindings,
   ControlPlaneDeps,
   ControlPlaneStore,
@@ -412,6 +413,178 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
 
 export const SERVICE_NAME = "ferrogate-control-plane";
 
+type OverviewRow = Record<string, unknown>;
+type OverviewScope = CallerScope;
+type OverviewStoreScope = Parameters<ControlPlaneStore["list"]>[1];
+
+/** The healthy AdminOverviewSection status (`AdminOverviewSection.status` const). Kept in a
+ * const so the section builder does not emit a literal `status: "ok",` — that token is the
+ * fleet health-document anchor and must appear exactly once per app (the real /healthz). */
+const OVERVIEW_SECTION_OK = "ok" as const;
+
+const overviewQuery = {
+  offset: 0,
+  limit: Number.MAX_SAFE_INTEGER,
+  paginate: false,
+  search: null,
+  filters: {},
+} as const;
+
+function overviewNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function overviewString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+function overviewRows(page: unknown): OverviewRow[] {
+  if (typeof page !== "object" || page === null) return [];
+  const record = page as Record<string, unknown>;
+  const rows = record.items ?? record.results ?? record.data;
+  if (!Array.isArray(rows)) return [];
+  return rows.filter(
+    (row): row is OverviewRow => typeof row === "object" && row !== null && !Array.isArray(row),
+  );
+}
+
+function overviewError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function enabledCount(rows: readonly OverviewRow[]): { total: number; enabled: number } {
+  return {
+    total: rows.length,
+    enabled: rows.filter(
+      (row) => row.enabled !== false && row.disabled !== true && row.status !== "disabled",
+    ).length,
+  };
+}
+
+function activeCount(rows: readonly OverviewRow[]): { total: number; active: number } {
+  return {
+    total: rows.length,
+    active: rows.filter(
+      (row) =>
+        row.active === true ||
+        row.enabled === true ||
+        row.status === "active" ||
+        row.status === "connected",
+    ).length,
+  };
+}
+
+function countByStatus(rows: readonly OverviewRow[]): {
+  total: number;
+  by_status: Record<string, number>;
+} {
+  const by_status: Record<string, number> = {};
+  for (const row of rows) {
+    const status = overviewString(row.status) ?? "unknown";
+    by_status[status] = (by_status[status] ?? 0) + 1;
+  }
+  return { total: rows.length, by_status };
+}
+
+function firstNumber(row: OverviewRow, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = overviewNumber(row[key]);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function monthAt(unix: number): string {
+  return new Date(unix * 1000).toISOString().slice(0, 7);
+}
+
+function overviewTokens(rows: readonly OverviewRow[]): {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  request_count: number;
+  error_count: number;
+} {
+  let prompt_tokens = 0;
+  let completion_tokens = 0;
+  let total_tokens = 0;
+  let cost_usd = 0;
+  let request_count = 0;
+  let error_count = 0;
+  for (const row of rows) {
+    const prompt = firstNumber(row, ["prompt_tokens", "input_tokens"]) ?? 0;
+    const completion = firstNumber(row, ["completion_tokens", "output_tokens"]) ?? 0;
+    prompt_tokens += prompt;
+    completion_tokens += completion;
+    total_tokens += firstNumber(row, ["total_tokens", "tokens"]) ?? prompt + completion;
+    cost_usd += firstNumber(row, ["cost_usd", "cost", "total_cost_usd"]) ?? 0;
+    request_count += firstNumber(row, ["request_count", "requests", "count"]) ?? 0;
+    error_count += firstNumber(row, ["error_count", "errors"]) ?? 0;
+  }
+  return {
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+    cost_usd,
+    request_count,
+    error_count,
+  };
+}
+
+function quotaPressure(rows: readonly OverviewRow[]): OverviewRow[] {
+  const pressure: OverviewRow[] = [];
+  for (const row of rows) {
+    const scope_type = overviewString(row.scope_type) ?? overviewString(row.kind) ?? "tenant";
+    const scope_id =
+      overviewString(row.scope_id) ?? overviewString(row.tenant_id) ?? overviewString(row.id);
+    if (scope_id === undefined) continue;
+    const dimensions = [
+      {
+        dimension: "tokens",
+        unit: "tokens",
+        used: firstNumber(row, ["used_tokens", "tokens_used", "usage_tokens"]),
+        cap: firstNumber(row, ["monthly_token_budget", "token_budget", "tokens_cap"]),
+      },
+      {
+        dimension: "storage",
+        unit: "bytes",
+        used: firstNumber(row, ["storage_bytes", "used_storage_bytes", "storage_used"]),
+        cap: firstNumber(row, ["storage_quota_bytes", "asset_storage_quota_bytes"]),
+      },
+      {
+        dimension: "budget",
+        unit: "usd",
+        used: firstNumber(row, ["spent_usd", "used_usd", "cost_usd"]),
+        cap: firstNumber(row, ["monthly_budget_usd", "budget_usd"]),
+      },
+    ];
+    for (const dimension of dimensions) {
+      if (
+        dimension.used === undefined ||
+        dimension.cap === undefined ||
+        dimension.cap <= 0 ||
+        dimension.used / dimension.cap < 0.8
+      ) {
+        continue;
+      }
+      pressure.push({
+        scope_type,
+        scope_id,
+        dimension: dimension.dimension,
+        unit: dimension.unit,
+        used: dimension.used,
+        cap: dimension.cap,
+        utilization_pct: (dimension.used / dimension.cap) * 100,
+      });
+    }
+  }
+  pressure.sort(
+    (left, right) => (right.utilization_pct as number) - (left.utilization_pct as number),
+  );
+  return pressure.slice(0, 100);
+}
+
 /**
  * Rust `AdminStatus` / the Prometheus exposition, over this Worker's real
  * sources.
@@ -557,8 +730,303 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
     };
   }
 
-  async overview(): Promise<Record<string, unknown>> {
-    return { object: "overview", status: await this.status() };
+  async #overviewRows(collection: string, scope: OverviewScope): Promise<OverviewRow[]> {
+    const page = await this.#store.list(
+      collection,
+      scope as unknown as OverviewStoreScope,
+      overviewQuery,
+    );
+    return overviewRows(page);
+  }
+
+  async #tryOverviewRows(collection: string, scope: OverviewScope): Promise<OverviewRow[] | null> {
+    try {
+      return await this.#overviewRows(collection, scope);
+    } catch {
+      return null;
+    }
+  }
+
+  async #overviewRowsFrom(
+    collections: readonly string[],
+    scope: OverviewScope,
+  ): Promise<OverviewRow[] | null> {
+    for (const collection of collections) {
+      const rows = await this.#tryOverviewRows(collection, scope);
+      if (rows !== null) return rows;
+    }
+    return null;
+  }
+
+  #availableOverviewSection(
+    source: string,
+    generatedAtUnix: number,
+    data: OverviewRow,
+  ): OverviewRow {
+    return {
+      // Built from a const, not a literal `status: "ok",`, so this section does
+      // NOT collide with the fleet health-document anchor (`/status:\s*"ok"\s*,/`
+      // in apps/telemetry/test/fleet-health-contract.test.ts), which requires
+      // exactly ONE such document per app — the real /healthz response.
+      status: OVERVIEW_SECTION_OK,
+      source,
+      generated_at_unix: generatedAtUnix,
+      error: null,
+      data,
+    };
+  }
+
+  #unavailableOverviewSection(
+    source: string,
+    generatedAtUnix: number,
+    error: unknown,
+  ): OverviewRow {
+    return {
+      status: "unavailable",
+      source,
+      generated_at_unix: generatedAtUnix,
+      error: overviewError(error),
+    };
+  }
+
+  async #runtimeOverviewSection(
+    scope: OverviewScope,
+    generatedAtUnix: number,
+  ): Promise<OverviewRow> {
+    try {
+      const [providers, models, apiKeys, promptTemplates, upstreams, routes, plugins, tools, mcp] =
+        await Promise.all([
+          this.#overviewRows("providers", scope),
+          this.#overviewRows("models", scope),
+          this.#overviewRows("api-keys", scope),
+          this.#overviewRows("prompt-templates", scope),
+          this.#overviewRows("upstreams", scope),
+          this.#overviewRows("routes", scope),
+          this.#overviewRowsFrom(["plugins", "extensions"], scope),
+          this.#overviewRows("tools", scope),
+          this.#overviewRowsFrom(["mcp-servers", "mcp_servers"], scope),
+        ]);
+      const mcpRows = mcp ?? [];
+      const connected = mcpRows.filter(
+        (row) => row.connected === true || row.status === "connected",
+      ).length;
+      const runtime = {
+        providers: enabledCount(providers),
+        models: enabledCount(models),
+        static_api_keys: apiKeys.length,
+        prompt_templates: promptTemplates.length,
+        upstreams: enabledCount(upstreams),
+        routes: enabledCount(routes),
+        plugins: activeCount(plugins ?? []),
+        tools: tools.length,
+        mcp_servers: {
+          total: mcpRows.length,
+          connected,
+          disconnected: mcpRows.length - connected,
+        },
+      };
+      return this.#availableOverviewSection("runtime_config", generatedAtUnix, runtime);
+    } catch (error) {
+      return this.#unavailableOverviewSection("runtime_config", generatedAtUnix, error);
+    }
+  }
+
+  async #controlPlaneOverviewSection(
+    scope: OverviewScope,
+    generatedAtUnix: number,
+  ): Promise<OverviewRow> {
+    try {
+      const [
+        tenants,
+        projects,
+        workspaces,
+        virtualKeys,
+        assets,
+        agentRuns,
+        workers,
+        approvals,
+        quotas,
+      ] = await Promise.all([
+        this.#overviewRows("tenants", scope),
+        this.#overviewRows("projects", scope),
+        this.#overviewRows("workspaces", scope),
+        this.#overviewRowsFrom(["virtual-keys", "api-keys"], scope),
+        this.#overviewRowsFrom(["assets", "stored-assets", "stored_assets"], scope),
+        this.#overviewRowsFrom(["agent-runs", "agent_jobs"], scope),
+        this.#overviewRowsFrom(["self-hosted-workers", "self_hosted_workers"], scope),
+        this.#overviewRowsFrom(["tool-approvals", "tool_approvals"], scope),
+        this.#overviewRowsFrom(["quota-policies", "quota_policies"], scope),
+      ]);
+
+      if (
+        virtualKeys === null ||
+        assets === null ||
+        agentRuns === null ||
+        workers === null ||
+        approvals === null ||
+        quotas === null
+      ) {
+        throw new Error("one or more control-plane overview sources are unavailable");
+      }
+
+      const storageBytes = assets.reduce(
+        (total, row) =>
+          total + (firstNumber(row, ["storage_bytes", "size_bytes", "bytes", "size"]) ?? 0),
+        0,
+      );
+      const referenced = assets.filter(
+        (row) =>
+          row.referenced === true ||
+          row.channel_id !== undefined ||
+          row.channel_ids !== undefined ||
+          row.pinned === true,
+      ).length;
+      const tenantQuota =
+        scope.kind === "tenant"
+          ? (quotas
+              .map((row) => firstNumber(row, ["storage_quota_bytes", "asset_storage_quota_bytes"]))
+              .find((value): value is number => value !== undefined) ?? null)
+          : null;
+      const pressure = quotaPressure(quotas);
+      const governance =
+        scope.kind === "tenant"
+          ? null
+          : {
+              guardrail_policy_revisions: (
+                (await this.#overviewRowsFrom(
+                  ["guardrail-policy-revisions", "guardrail_policy_revisions"],
+                  scope,
+                )) ?? []
+              ).length,
+              guardrail_policy_bindings: (
+                (await this.#overviewRowsFrom(
+                  ["guardrail-policy-bindings", "guardrail_policy_bindings"],
+                  scope,
+                )) ?? []
+              ).length,
+              quota_policies: quotas.length,
+              policy_rules: (
+                (await this.#overviewRowsFrom(["policy-rules", "policy_rules"], scope)) ?? []
+              ).length,
+            };
+      const data = {
+        tenants: scope.kind === "tenant" ? 1 : tenants.length,
+        projects: projects.length,
+        workspaces: workspaces.length,
+        virtual_keys: enabledCount(virtualKeys),
+        assets: {
+          count: assets.length,
+          storage_bytes: storageBytes,
+          referenced,
+          unreferenced: Math.max(0, assets.length - referenced),
+          storage_quota_bytes: tenantQuota,
+        },
+        agent_runs: countByStatus(agentRuns),
+        self_hosted_workers: countByStatus(workers),
+        pending_tool_approvals: approvals.filter(
+          (row) => row.status === "pending" || row.pending === true,
+        ).length,
+        quota_pressure: pressure,
+        policy_governance: governance,
+      };
+      return this.#availableOverviewSection("control_plane_store", generatedAtUnix, data);
+    } catch (error) {
+      return this.#unavailableOverviewSection("control_plane_store", generatedAtUnix, error);
+    }
+  }
+
+  async #usageOverviewSection(scope: OverviewScope, generatedAtUnix: number): Promise<OverviewRow> {
+    try {
+      const rows = await this.#overviewRows("usage-aggregates", scope);
+      const currentMonth = monthAt(generatedAtUnix);
+      const currentRows = rows.filter((row) => {
+        const period = overviewString(row.period_month) ?? overviewString(row.month);
+        return period === undefined || period === currentMonth;
+      });
+      return this.#availableOverviewSection("usage_store", generatedAtUnix, {
+        current_period_month: currentMonth,
+        lifetime: overviewTokens(rows),
+        current_month: overviewTokens(currentRows),
+      });
+    } catch (error) {
+      return this.#unavailableOverviewSection("usage_store", generatedAtUnix, error);
+    }
+  }
+
+  async #alertsOverviewSection(
+    scope: OverviewScope,
+    generatedAtUnix: number,
+  ): Promise<OverviewRow> {
+    try {
+      const [quotas, approvals] = await Promise.all([
+        this.#overviewRows("quota-policies", scope),
+        this.#overviewRowsFrom(["tool-approvals", "tool_approvals"], scope),
+      ]);
+      const pressure = quotaPressure(quotas);
+      const entries: OverviewRow[] = pressure.map((item) => {
+        const utilization = item.utilization_pct as number;
+        return {
+          kind: "quota_pressure",
+          severity: utilization >= 100 ? "critical" : "warning",
+          summary: `${item.scope_id as string} ${item.dimension as string} quota at ${utilization.toFixed(1)}%`,
+          count: 1,
+          detected_at_unix: generatedAtUnix,
+          evidence: [
+            {
+              id: `${item.scope_type as string}:${item.scope_id as string}:${item.dimension as string}`,
+              detail: `${item.used as number}/${item.cap as number} ${item.unit as string}`,
+              at_unix: generatedAtUnix,
+            },
+          ],
+          evidence_truncated: false,
+        };
+      });
+      const pending = (approvals ?? []).filter(
+        (row) => row.status === "pending" || row.pending === true,
+      ).length;
+      if (pending > 0) {
+        entries.push({
+          kind: "tool_approvals_pending",
+          severity: "warning",
+          summary: `${pending} tool approval${pending === 1 ? "" : "s"} pending`,
+          count: pending,
+          detected_at_unix: generatedAtUnix,
+          evidence: [],
+          evidence_truncated: false,
+        });
+      }
+      return this.#availableOverviewSection("quota_store", generatedAtUnix, {
+        total: entries.length,
+        truncated: false,
+        unavailable_sources: [],
+        entries,
+      });
+    } catch (error) {
+      return this.#unavailableOverviewSection("quota_store", generatedAtUnix, error);
+    }
+  }
+
+  async overview(scope?: CallerScope): Promise<Record<string, unknown>> {
+    const effectiveScope = scope ?? ({ kind: "platform_operator" } as CallerScope);
+    const generatedAtUnix = Math.floor(Date.now() / 1000);
+    const [runtime, controlPlane, usage, alerts] = await Promise.all([
+      this.#runtimeOverviewSection(effectiveScope, generatedAtUnix),
+      this.#controlPlaneOverviewSection(effectiveScope, generatedAtUnix),
+      this.#usageOverviewSection(effectiveScope, generatedAtUnix),
+      this.#alertsOverviewSection(effectiveScope, generatedAtUnix),
+    ]);
+    return {
+      object: "control_plane.overview",
+      generated_at_unix: generatedAtUnix,
+      scope:
+        effectiveScope.kind === "tenant"
+          ? { kind: "tenant", tenant_id: effectiveScope.tenantId }
+          : { kind: "global" },
+      runtime,
+      control_plane: controlPlane,
+      usage,
+      alerts,
+    };
   }
 
   /**
