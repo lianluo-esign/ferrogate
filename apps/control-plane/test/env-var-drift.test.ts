@@ -380,6 +380,7 @@ describe("the env-var drift gate itself", () => {
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
     expect([...DECLARED.vars.keys()].sort()).toEqual([
+      "CONTROL_PLANE_CONTROL_STORAGE",
       "CONTROL_PLANE_NATIVE_API_KEYS",
       "CONTROL_PLANE_SEED",
       "CONTROL_PLANE_STATIC_API_KEYS",
@@ -429,6 +430,7 @@ describe("the env-var drift gate itself", () => {
       "SIEM_EXPORTS",
       "ASSETS",
       "TENANT_DATA",
+      "CONTROL_DATA",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the
@@ -553,7 +555,8 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // EIGHT since #697 added the two `SPEND_ANOMALY_WEBHOOK_*` delivery knobs
     // (six since #683's `SIEM_EXPORT_SINKS`). Re-derived by counting the
     // committed `[vars]` table, not by incrementing the old number.
-    expect(rows.length).toBe(8);
+    // #879 added `CONTROL_PLANE_CONTROL_STORAGE` (Zero-D1 S3 posture) ⇒ 9.
+    expect(rows.length).toBe(9);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -582,6 +585,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(8);
+    expect(observable.length).toBe(9);
   });
 });

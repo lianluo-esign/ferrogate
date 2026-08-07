@@ -2,7 +2,7 @@
  * The composition root: binding-backed implementations of the ports.
  *
  * The STORE is now the real one: {@link resolveStore} builds
- * `D1ControlPlaneStore` on the `DB` binding, and the in-memory reference store
+ * `D1ControlPlaneStore` on the CONTROL storage seam, and the in-memory reference store
  * is the explicit fallback. Nothing in `middleware/` or `routes/` changed for
  * it — the 214 handlers still talk only to `ControlPlaneStore`, which is what
  * made a one-file swap possible.
@@ -38,6 +38,9 @@
  * durable-native → durable-static → declarative vars, which is Rust
  * `authenticate_with_admission`'s source ordering exactly.
  */
+
+import { controlDatabaseFrom } from "./control-data.js";
+
 import {
   BackendDispatchingTenantDatabaseRouter,
   type BindingEnvironment,
@@ -1106,18 +1109,29 @@ export interface RequestContext {
  * throws, so the failure is at the first request instead of at the first
  * eviction.
  */
+function controlDatabaseFor(
+  env: ControlPlaneBindings,
+  resolvedControlDatabase?: D1Database,
+): D1Database | undefined {
+  if (resolvedControlDatabase !== undefined) return resolvedControlDatabase;
+  if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return undefined;
+  return controlDatabaseFrom(env, { legacy: [env.DB] });
+}
+
 export function resolveStore(
   env: ControlPlaneBindings,
   context: RequestContext = {},
+  resolvedControlDatabase?: D1Database,
 ): ControlPlaneStore {
   const requested = env.CONTROL_PLANE_STORE?.trim().toLowerCase();
   if (requested === "memory") return memoryStore(env);
-  if (env.DB === undefined || env.DB === null) {
+  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  if (controlDb === undefined) {
     throw new Error(
       "control-plane: no `DB` binding is configured; add the [[d1_databases]] binding (migrations in sql/d1-ts/control/) or set CONTROL_PLANE_STORE=memory to run without durability",
     );
   }
-  return new SplitControlPlaneStore(env.DB, resolveTenantStorage(env), {
+  return new SplitControlPlaneStore(controlDb, resolveTenantStorage(env, controlDb), {
     requestId: context.requestId ?? null,
   });
 }
@@ -1157,17 +1171,21 @@ export function resolveTxtResolver(env: ControlPlaneBindings): SiteDomainTxtReso
  * is otherwise entirely valid. One switch, one answer to "is the database in
  * play".
  */
-export function resolveRbac(env: ControlPlaneBindings): RbacAuthorizerPort {
+export function resolveRbac(
+  env: ControlPlaneBindings,
+  resolvedControlDatabase?: D1Database,
+): RbacAuthorizerPort {
   const declarative = new JsonRbacAuthorizer(
     parseJson<Record<string, readonly string[]>>(env.TENANT_RBAC_ACTIONS, {}),
   );
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
-  if (env.DB === undefined || env.DB === null) return declarative;
+  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  if (controlDb === undefined) return declarative;
   const tenantDatabases =
     env.TENANT_DATA === undefined
       ? null
-      : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
-  return new D1RbacAuthorizer(env.DB, declarative, tenantDatabases);
+      : new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
+  return new D1RbacAuthorizer(controlDb, declarative, tenantDatabases);
 }
 
 /**
@@ -1182,13 +1200,17 @@ export function resolveRbac(env: ControlPlaneBindings): RbacAuthorizerPort {
  * `503` for a configuration that is otherwise entirely valid. One switch, one
  * answer to "is the database in play".
  */
-export function resolveApiKeys(env: ControlPlaneBindings): ApiKeyAuthenticatorPort {
+export function resolveApiKeys(
+  env: ControlPlaneBindings,
+  resolvedControlDatabase?: D1Database,
+): ApiKeyAuthenticatorPort {
   const declarative = new JsonApiKeyAuthenticator(
     parseJson<NativeKeyDeclaration[]>(env.CONTROL_PLANE_NATIVE_API_KEYS, []),
     parseJson<StaticKeyDeclaration[]>(env.CONTROL_PLANE_STATIC_API_KEYS, []),
   );
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
-  if (env.DB === undefined || env.DB === null) return declarative;
+  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  if (controlDb === undefined) return declarative;
   // Rust `authenticate_with_admission`'s SOURCE ORDERING, preserved exactly:
   // durable NATIVE keys first, then durable STATIC/operator keys, then the
   // declarative vars. Each layer is the fallback of the one before it, so a
@@ -1200,9 +1222,9 @@ export function resolveApiKeys(env: ControlPlaneBindings): ApiKeyAuthenticatorPo
   // construction the admin routes take, so the two cannot disagree about which
   // database a tenant is.
   return new D1NativeApiKeyAuthenticator(
-    env.DB,
-    resolveTenantDatabases(env),
-    new D1ApiKeyAuthenticator(env.DB, declarative),
+    controlDb,
+    resolveTenantDatabases(env, controlDb),
+    new D1ApiKeyAuthenticator(controlDb, declarative),
   );
 }
 
@@ -1265,16 +1287,25 @@ export function resolveLifecycle(
  *    it would fail every admin write in a configuration that is otherwise
  *    entirely valid. One switch, one answer to "is the database in play".
  */
-export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabaseRouter {
+export function resolveTenantDatabases(
+  env: ControlPlaneBindings,
+  resolvedControlDatabase?: D1Database,
+): TenantDatabaseRouter {
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") {
     return new UnprovisionedTenantDatabaseRouter();
   }
-  if (env.DB === undefined || env.DB === null) return new UnprovisionedTenantDatabaseRouter();
+  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  if (controlDb === undefined) return new UnprovisionedTenantDatabaseRouter();
   // The registration cache is per-router and `resolveDeps` builds one per
   // request, so the TTL only ever elides repeat lookups WITHIN a request. A
   // provisioning write is therefore visible on the very next request, with no
   // cache to invalidate.
-  const bindings = new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
+  const bindings = new EnvBindingTenantDatabaseRouter(
+    env as unknown as BindingEnvironment,
+    controlDb,
+  );
+  // The legacy shared-tenant router, retained for the #824 backfill migration
+  // source. It is NOT retired in S3 because `migrateTenantStorage` still reads it.
   const legacyShared =
     env.LEGACY_TENANT_DB === undefined
       ? undefined
@@ -1292,12 +1323,12 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
   // that omission is a NAMED refusal rather than a fall-through: a
   // `durable_object` tenant resolved through the binding router would land on a
   // D1 database holding none of its rows.
-  return new BackendDispatchingTenantDatabaseRouter(env.DB, {
+  return new BackendDispatchingTenantDatabaseRouter(controlDb, {
     fallback: bindings,
     ...(legacyShared === undefined ? {} : { legacyShared }),
     ...(env.TENANT_DATA === undefined
       ? {}
-      : { durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB) }),
+      : { durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb) }),
   });
 }
 
@@ -1336,19 +1367,23 @@ export function resolveTenantDatabases(env: ControlPlaneBindings): TenantDatabas
  * of a deploy-time refusal. `apps/gateway` can afford the var because it DEFINES
  * the class; this Worker only borrows it.
  */
-export function resolveTenantStorage(env: ControlPlaneBindings): TenantDatabaseRouter {
+export function resolveTenantStorage(
+  env: ControlPlaneBindings,
+  resolvedControlDatabase?: D1Database,
+): TenantDatabaseRouter {
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") {
     return new UnprovisionedTenantDatabaseRouter();
   }
-  if (env.DB === undefined || env.DB === null) return new UnprovisionedTenantDatabaseRouter();
+  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  if (controlDb === undefined) return new UnprovisionedTenantDatabaseRouter();
   if (env.TENANT_DATA !== undefined) {
-    return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+    return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
   }
   // No namespace bound: new tenants are provisioned on whatever the data paths
   // can reach, which is the binding router underneath the dispatcher. It states
   // `native_binding` as its own backend, so the roster row is labelled honestly
   // and the dispatcher will keep routing that tenant the same way afterwards.
-  return new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, env.DB);
+  return new EnvBindingTenantDatabaseRouter(env as unknown as BindingEnvironment, controlDb);
 }
 
 /**
@@ -1360,9 +1395,11 @@ export function resolveTenantStorage(env: ControlPlaneBindings): TenantDatabaseR
  */
 export function resolveTenantObjectOperator(
   env: ControlPlaneBindings,
+  resolvedControlDatabase?: D1Database,
 ): TenantObjectOperator | null {
-  if (env.TENANT_DATA === undefined || env.DB === undefined || env.DB === null) return null;
-  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  if (env.TENANT_DATA === undefined || controlDb === undefined) return null;
+  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
 }
 
 /**
@@ -1376,7 +1413,7 @@ export function resolveTenantObjectOperator(
  */
 export function resolveControlDatabase(env: ControlPlaneBindings): D1Database | null {
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return null;
-  return env.DB ?? null;
+  return controlDatabaseFor(env) ?? null;
 }
 
 /**
@@ -1457,19 +1494,20 @@ export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
 ): ControlPlaneDeps {
-  const store = resolveStore(env, context);
-  const tenantDatabases = resolveTenantDatabases(env);
+  const controlDatabase = controlDatabaseFor(env);
+  const store = resolveStore(env, context, controlDatabase);
+  const tenantDatabases = resolveTenantDatabases(env, controlDatabase);
 
   const corsAllowedOrigin = env.ADMIN_CONSOLE_ALLOWED_ORIGIN?.trim();
   return {
-    apiKeys: resolveApiKeys(env),
+    apiKeys: resolveApiKeys(env, controlDatabase),
     lifecycle: resolveLifecycle(env, store),
-    rbac: resolveRbac(env),
+    rbac: resolveRbac(env, controlDatabase),
     store,
     tenantDatabases,
-    tenantStorage: resolveTenantStorage(env),
-    tenantObjectOperator: resolveTenantObjectOperator(env),
-    controlDatabase: resolveControlDatabase(env),
+    tenantStorage: resolveTenantStorage(env, controlDatabase),
+    tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
+    controlDatabase: controlDatabase ?? null,
     legacyTenantDatabase: env.LEGACY_TENANT_DB ?? null,
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.

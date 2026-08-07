@@ -163,6 +163,12 @@ compatibility_flags = ["nodejs_compat"]
 # ---------------------------------------------------------------------------
 
 [vars]
+# Zero-D1 S3: the CONTROL_DATA facade is WIRED (the seam resolves it, the binding
+# is declared), but the active control-store source stays the flat `DB` until S5
+# backfills CONTROL_DATA and cuts over. S5 is where "flip the posture var default"
+# to "durable_object" lands (design §4, slice S5) — doing it here would read an
+# empty object. `d1_compat` is the current, correct posture.
+CONTROL_PLANE_CONTROL_STORAGE = "d1_compat"
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"
 TENANCY_LIFECYCLE = "{}"
@@ -580,4 +586,9 @@ enabled = true
 [[durable_objects.bindings]]
 name = "TENANT_DATA"
 class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
 script_name = "ferrogate-gateway"

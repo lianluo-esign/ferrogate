@@ -185,6 +185,9 @@ export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
         // The SAME specifier `apps/gateway/src/worker.ts:140` re-exports, so a
         // move of the class breaks this harness instead of detaching it.
         'export { TenantDataObject } from "@ferrogate/storage/durable-objects";',
+        // #879 (Zero-D1 S3): the control-plane binds CONTROL_DATA cross-script to
+        // this same gateway-hosted class, so publish it here too.
+        'export { ControlDataObject } from "@ferrogate/storage/durable-objects";',
         "export default {",
         "  fetch() {",
         '    return new Response("ferrogate-gateway test aux worker: RPC only", { status: 404 });',
@@ -210,6 +213,9 @@ export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
   if (!script.includes("TenantDataObject")) {
     throw new Error("tenant-data aux worker: bundle does not contain TenantDataObject");
   }
+  if (!script.includes("ControlDataObject")) {
+    throw new Error("tenant-data aux worker: bundle does not contain ControlDataObject");
+  }
 
   return {
     name,
@@ -218,6 +224,8 @@ export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
     modules: [{ type: "ESModule" as const, path: "index.mjs", contents: script }],
     durableObjects: {
       TENANT_DATA: { className: "TenantDataObject", useSQLite: true },
+      // #879: the singleton CONTROL object, bound cross-script by the control-plane.
+      CONTROL_DATA: { className: "ControlDataObject", useSQLite: true },
     },
   };
 }

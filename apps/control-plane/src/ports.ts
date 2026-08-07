@@ -658,9 +658,20 @@ export interface ControlPlaneBindings {
    */
   readonly DB: D1Database;
   /**
-   * The old shared tenant D1 (`apps/gateway`'s `DB`), exposed to the control
-   * plane only for the resumable #824 migration path. It must never be used as
-   * the control database or as an implicit fallback for an unregistered tenant.
+   * The control-plane CONTROL storage posture. Empty or absent selects the
+   * Durable Object facade; `d1_compat` selects the legacy `DB` fallback.
+   */
+  readonly CONTROL_PLANE_CONTROL_STORAGE?: string;
+  /**
+   * The gateway's singleton `ControlDataObject` namespace, bound CROSS-SCRIPT.
+   */
+  readonly CONTROL_DATA?: ControlDataNamespace;
+  /**
+   * The legacy shared tenant D1 (`apps/gateway`'s old `DB`), retained ONLY for
+   * the #824 tenant-by-tenant backfill (the `migrateTenantStorage` operator
+   * route reads it as the migration SOURCE). It must never be used as the
+   * control database or as an implicit fallback. Retiring it is deferred until
+   * the backfill route retires (a later Zero-D1 slice), not S3.
    */
   readonly LEGACY_TENANT_DB?: D1Database;
   /**
@@ -758,3 +769,4 @@ export type ControlPlaneEnv = {
   Bindings: ControlPlaneBindings;
   Variables: ControlPlaneVariables;
 };
+import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
