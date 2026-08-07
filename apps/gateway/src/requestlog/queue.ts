@@ -182,7 +182,20 @@ export async function consumeRequestLogBatch(
     ];
     await projection.batch(statements);
     return { written: records.length + evidence.length, malformed, retried: false };
-  } catch {
+  } catch (error) {
+    // Log BEFORE the retry. A bare `catch {}` here left a failing consumer with
+    // no signal at all: `retryAll()` re-queues the batch, it fails again, and
+    // after the max attempts every message dead-letters — with nothing in the
+    // logs to say why. `console.warn` reaches the Worker's log stream (same
+    // channel `src/index.ts` uses), so an operator watching a filling DLQ can
+    // see the cause (a missing tenant object, a schema gap, a D1 outage) instead
+    // of guessing. The message is still retried; this only makes the failure
+    // observable.
+    console.warn(
+      `[ferrogate] request-log consumer batch failed, retrying ${batch.messages.length} message(s): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     batch.retryAll?.();
     return { written: 0, malformed, retried: true };
   }

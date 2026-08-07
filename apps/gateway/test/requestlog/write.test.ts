@@ -674,3 +674,66 @@ describe("a later write MERGES into the row rather than blanking it", () => {
     ]);
   });
 });
+
+/**
+ * Regression (2026-08-07): the consumer's catch used to be a bare `catch {}` —
+ * a failing batch (a missing projection table, a tenant object outage) was
+ * retried and eventually dead-lettered with NOTHING in the logs to say why.
+ * Found during live stability testing: request-log messages were silently
+ * dead-lettering and the cause was invisible. The catch now logs before it
+ * retries; this pins that the failure is observable and still retried.
+ */
+describe("a failing consumer batch is logged, not swallowed", () => {
+  it("warns with the cause and still arms the retry", async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    let retried = false;
+    try {
+      const throwingProjection = {
+        prepare: () => ({ bind: () => ({}) }),
+        batch: async () => {
+          throw new Error("D1_ERROR: no such table: request_logs: SQLITE_ERROR");
+        },
+      } as unknown as Parameters<typeof consumeRequestLogBatch>[2] extends (
+        e: unknown,
+      ) => infer R
+        ? R
+        : never;
+
+      const result = await consumeRequestLogBatch(
+        {
+          messages: [
+            {
+              body: {
+                object: "request_log",
+                request_id: "fg-doomed",
+                started_at_unix: 1_700_000_000,
+                completed_at_unix: 1_700_000_000,
+                status_code: 200,
+                latency_ms: 5,
+                guardrail_verdict: "allowed",
+                streamed: false,
+                method: "POST",
+                path: "/v1/chat/completions",
+              },
+            },
+          ],
+          retryAll: () => {
+            retried = true;
+          },
+        },
+        env,
+        () => throwingProjection,
+      );
+      expect(result.retried).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(retried).toBe(true);
+    expect(warnings.some((w) => w.includes("request-log consumer batch failed"))).toBe(true);
+    expect(warnings.some((w) => w.includes("no such table"))).toBe(true);
+  });
+});
