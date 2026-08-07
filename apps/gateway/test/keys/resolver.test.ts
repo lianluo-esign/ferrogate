@@ -969,3 +969,35 @@ describe("depsFromEnv — the gateway's credential path is wired to D1", () => {
     expect(resolution.outcome).toBe("resolved");
   });
 });
+
+/**
+ * Regression (2026-08-07): a MISSING `api_keys` table is not a D1 outage. A
+ * gateway pointed at a tenant DB that has not been provisioned yet — or a
+ * deployment running entirely on operator/config static keys — must fall
+ * through to the static table, not answer 503 for every request. Only a
+ * genuine outage stays `unavailable`.
+ */
+describe("D1ApiKeyStore.findByPrefix — missing table vs outage", () => {
+  const storeThatThrows = (message: string): D1ApiKeyStore => {
+    const db = {
+      prepare: () => ({
+        bind: () => ({
+          all: async () => {
+            throw new Error(message);
+          },
+        }),
+      }),
+    } as unknown as D1Database;
+    return new D1ApiKeyStore(db);
+  };
+
+  test("returns [] when the api_keys table does not exist (falls through to static)", async () => {
+    const store = storeThatThrows("D1_ERROR: no such table: api_keys: SQLITE_ERROR");
+    await expect(store.findByPrefix("fg_x")).resolves.toEqual([]);
+  });
+
+  test("still raises ApiKeyStoreUnavailable on a genuine outage", async () => {
+    const store = storeThatThrows("D1_ERROR: Network connection lost");
+    await expect(store.findByPrefix("fg_x")).rejects.toBeInstanceOf(ApiKeyStoreUnavailable);
+  });
+});

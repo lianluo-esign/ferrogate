@@ -207,10 +207,23 @@ export class D1ApiKeyStore implements ApiKeyStore {
     try {
       result = await this.#db.prepare(FIND_BY_PREFIX_SQL).bind(keyPrefix).all<ApiKeyRow>();
     } catch (error) {
-      // A D1 outage is NOT "no such key". Collapsing the two would answer 401
-      // for a perfectly valid credential and, worse, would look identical to a
-      // revocation — so it is raised and the resolver turns it into a 503.
-      throw new ApiKeyStoreUnavailable(error instanceof Error ? error.message : String(error));
+      const detail = error instanceof Error ? error.message : String(error);
+      // A MISSING TABLE is not an outage — it is a durable store that was never
+      // provisioned (a tenant DB bound before its schema is applied, or a
+      // deployment that runs entirely on operator/config static keys). Treating
+      // it as `unavailable` (503) would defeat the config-key fallback the
+      // resolver keeps as its second leg, which needs no D1 at all: every
+      // request would 503 even with a perfectly valid static key. So an absent
+      // table means "no durable keys here" → empty, and the resolver falls
+      // through to the static table.
+      if (/no such table/i.test(detail)) {
+        return [];
+      }
+      // A genuine D1 outage IS NOT "no such key". Collapsing the two would
+      // answer 401 for a perfectly valid credential and, worse, would look
+      // identical to a revocation — so it is raised and the resolver turns it
+      // into a 503.
+      throw new ApiKeyStoreUnavailable(detail);
     }
     return (result.results ?? []).map(storedApiKeyFromRow);
   }
