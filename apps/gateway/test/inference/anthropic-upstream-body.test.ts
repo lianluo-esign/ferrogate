@@ -474,3 +474,96 @@ describe("a member no one has classified is forwarded, never dropped", () => {
     expect(out.body.top_k).toBe(5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #886 — the RESPONSE leg: an Anthropic-family provider answers a
+// /v1/chat/completions request with an Anthropic-native Message; the gateway
+// must translate it to an OpenAI `chat.completion` so OpenAI-SDK clients and
+// tool-use loops see the shape they expect.
+// ---------------------------------------------------------------------------
+
+const ANTHROPIC_TOOL_USE = {
+  id: "msg_tool",
+  type: "message",
+  role: "assistant",
+  model: "claude-3-5-sonnet-20241022",
+  content: [
+    { type: "text", text: "" },
+    { type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "Paris" } },
+  ],
+  stop_reason: "tool_use",
+  stop_sequence: null,
+  usage: { input_tokens: 11, output_tokens: 5 },
+};
+
+/** Drive one request to the Anthropic route and return the GATEWAY response body. */
+async function received(
+  path: string,
+  request: unknown,
+  upstream: unknown = ANTHROPIC_MESSAGE,
+  upstreamStatus = 200,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const provider = interceptProviderFetch(() => providerJson(upstream, upstreamStatus));
+  try {
+    const res = await harness({}, ROUTES).post(path, request);
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  } finally {
+    provider.restore();
+  }
+}
+
+describe("/v1/chat/completions on an anthropic upstream translates the RESPONSE (#886)", () => {
+  it("returns an OpenAI chat.completion, not the Anthropic Message", async () => {
+    const out = await received("/v1/chat/completions", chatRequest());
+    expect(out.status).toBe(200);
+    expect(out.body.object).toBe("chat.completion");
+    // The Anthropic-native markers are GONE.
+    expect(out.body.type).toBeUndefined();
+    expect(out.body.content).toBeUndefined();
+    // The OpenAI shape is present.
+    const choices = out.body.choices as Array<Record<string, unknown>>;
+    expect(Array.isArray(choices)).toBe(true);
+    const message = choices[0]?.message as Record<string, unknown>;
+    expect(message?.role).toBe("assistant");
+    expect(message?.content).toBe("hello");
+    expect(choices[0]?.finish_reason).toBe("stop");
+    const usage = out.body.usage as Record<string, unknown>;
+    expect(usage?.prompt_tokens).toBe(7);
+    expect(usage?.completion_tokens).toBe(2);
+  });
+
+  it("maps tool_use to OpenAI tool_calls with JSON-stringified arguments", async () => {
+    const out = await received(
+      "/v1/chat/completions",
+      chatRequest({ tools: [WEATHER_TOOL_OPENAI] }),
+      ANTHROPIC_TOOL_USE,
+    );
+    expect(out.status).toBe(200);
+    const choices = out.body.choices as Array<Record<string, unknown>>;
+    expect(choices[0]?.finish_reason).toBe("tool_calls");
+    const toolCalls = (choices[0]?.message as Record<string, unknown>)?.tool_calls as Array<
+      Record<string, unknown>
+    >;
+    expect(toolCalls?.[0]?.type).toBe("function");
+    const fn = toolCalls[0]?.function as Record<string, unknown>;
+    expect(fn?.name).toBe("get_weather");
+    // arguments is a JSON STRING, not an object (the OpenAI contract).
+    expect(JSON.parse(fn?.arguments as string)).toEqual({ city: "Paris" });
+  });
+
+  it("refuses a streaming chat/completions to an Anthropic provider rather than relay wrong SSE", async () => {
+    const out = await received("/v1/chat/completions", chatRequest({ stream: true }));
+    expect(out.status).toBe(501);
+    expect((out.body.error as Record<string, unknown>)?.code).toBe(
+      "streaming_translation_unsupported",
+    );
+  });
+
+  it("leaves /v1/messages (native ingress) untranslated — still an Anthropic Message", async () => {
+    const out = await received("/v1/messages", messagesRequest());
+    expect(out.status).toBe(200);
+    // The native surface round-trips as-is: NOT translated to chat.completion.
+    expect(out.body.type).toBe("message");
+    expect(out.body.object).toBeUndefined();
+  });
+});

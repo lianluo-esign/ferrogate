@@ -148,7 +148,9 @@ export {
   chatCompletionToMessage,
   finishReasonToStopReason,
   isAnthropicMessage,
+  messageToChatCompletion,
   parseArguments,
+  stopReasonToFinishReason,
   toChatCompletions,
 } from "./anthropic_messages.js";
 

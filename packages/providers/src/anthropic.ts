@@ -7,6 +7,13 @@
  */
 import type { ToolCall, ToolDef, ToolResult } from "@ferrogate/core";
 
+import { messageToChatCompletion } from "./anthropic_messages.js";
+import { applyPromptCacheToAnthropic, promptCacheFromBody } from "./caching.js";
+import { CanonicalAiRequest } from "./canonical.js";
+import { asStr, asU64, getField, isObject, ownBody, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
+import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
+import { applyStructuredOutputToAnthropic, structuredOutputFromChatBody } from "./structured.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
   ChatCompletionPlan,
@@ -17,12 +24,6 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
-import { CanonicalAiRequest } from "./canonical.js";
-import { applyPromptCacheToAnthropic, promptCacheFromBody } from "./caching.js";
-import { applyStructuredOutputToAnthropic, structuredOutputFromChatBody } from "./structured.js";
-import { asStr, asU64, getField, isObject, ownBody, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
-import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
 
 export class AnthropicAdapter extends BaseProviderAdapter {
   override kind(): string {
@@ -77,10 +78,7 @@ export class AnthropicAdapter extends BaseProviderAdapter {
     };
   }
 
-  override prepareResponses(
-    provider: ProviderConfig,
-    request: ResponsesPlan,
-  ): ProviderHttpRequest {
+  override prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = CanonicalAiRequest.fromResponsesBody(request.body).intoAnthropicBody();
     const messages = getField(body, "messages") ?? [];
@@ -110,6 +108,11 @@ export class AnthropicAdapter extends BaseProviderAdapter {
       stream: request.stream,
       headers: anthropicHeaders(provider.apiKey),
     };
+  }
+
+  override translateChatCompletionResponse(body: Uint8Array, model: string): Json | null {
+    const message = parseJson(body);
+    return isObject(message) ? messageToChatCompletion(message, model) : null;
   }
 
   override normalizeErrorResponse(

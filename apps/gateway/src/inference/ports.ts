@@ -602,6 +602,15 @@ export interface ProviderAdapter {
    * translates because Whisper answers `{ text, word_count, segments }`.
    */
   translateTranscriptionResponse?(body: unknown, logicalModel: string): unknown | undefined;
+  /** Provider chat/Responses answer → OpenAI chat.completion, or null to relay. */
+  translateChatCompletionResponse(body: unknown, logicalModel: string): unknown | null;
+  /** Provider error dialect → the canonical gateway error, or null to relay. */
+  normalizeErrorResponse?(
+    status: number,
+    contentType: string,
+    body: Uint8Array,
+    requestId: string,
+  ): { status: number; body: unknown } | null;
   /**
    * The SPEECH leg, and the one adapter method on this interface that returns
    * BYTES rather than a JSON document (issue #703).
@@ -1014,9 +1023,7 @@ export interface StreamNormalizerContext {
  * by `apps/gateway/src/streaming/`.
  */
 export interface StreamNormalizers {
-  normalizerFor(
-    context: StreamNormalizerContext,
-  ): TransformStream<Uint8Array, Uint8Array> | null;
+  normalizerFor(context: StreamNormalizerContext): TransformStream<Uint8Array, Uint8Array> | null;
 }
 
 /**
@@ -1032,6 +1039,8 @@ export interface AnthropicTranslator {
   toChatCompletions(body: Record<string, unknown>): TranslationResult;
   /** `chat_completion_to_message` — OpenAI chat response → Anthropic Message. */
   chatCompletionToMessage(chat: unknown, fallbackModel: string): unknown;
+  /** Anthropic Message response → OpenAI chat.completion (the inverse leg, #886). */
+  messageToChatCompletion(message: unknown, fallbackModel: string): unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -1233,9 +1242,7 @@ export interface InferenceDeps {
    * `NO_CONVERSATION_STORE` (and therefore REFUSES both members, 503) on a
    * deployment that binds no tenant database.
    */
-  readonly conversations?:
-    | ConversationStore
-    | ((env: InferenceBindings) => ConversationStore);
+  readonly conversations?: ConversationStore | ((env: InferenceBindings) => ConversationStore);
   /**
    * The operator's `GATEWAY_RESPONSES_STORE` ladder. Absent ⇒ read from `env`,
    * defaulting to `opt_in` — see `conversation.ts` for why this is not

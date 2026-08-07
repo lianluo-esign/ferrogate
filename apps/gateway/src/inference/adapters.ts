@@ -72,7 +72,7 @@ import type {
   ProviderHeader as PackageProviderHeader,
   ProviderHttpRequest as PackageProviderHttpRequest,
 } from "@ferrogate/providers";
-import { chatCompletionsToMessages } from "./anthropic.js";
+import { chatCompletionsToMessages, messageToChatCompletion } from "./anthropic.js";
 import type {
   AdapterError,
   AdapterRegistry,
@@ -282,6 +282,7 @@ function ownAdjudicatedAutomaticBody(
 
 export const openAiCompatibleAdapter: ProviderAdapter = {
   kind: "openai-compatible",
+  translateChatCompletionResponse: () => null,
 
   buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
     if (!isOpenAiCompatibleKind(plan.route.providerKind)) {
@@ -456,6 +457,59 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
 
 export const anthropicAdapter: ProviderAdapter = {
   kind: "anthropic",
+
+  translateChatCompletionResponse(body: unknown, logicalModel: string): unknown | null {
+    return messageToChatCompletion(body, logicalModel);
+  },
+
+  normalizeErrorResponse(
+    status: number,
+    contentType: string,
+    body: Uint8Array,
+    requestId: string,
+  ): { status: number; body: unknown } {
+    const parsed = (() => {
+      try {
+        return JSON.parse(new TextDecoder().decode(body)) as unknown;
+      } catch {
+        return undefined;
+      }
+    })();
+    const record = parsed !== null && typeof parsed === "object" ? parsed : undefined;
+    const providerError =
+      record !== undefined &&
+      "error" in record &&
+      record.error !== null &&
+      typeof record.error === "object"
+        ? record.error
+        : undefined;
+    const message =
+      providerError !== undefined &&
+      "message" in providerError &&
+      typeof providerError.message === "string"
+        ? providerError.message
+        : `provider returned HTTP ${status}`;
+    const providerType =
+      providerError !== undefined &&
+      "type" in providerError &&
+      typeof providerError.type === "string"
+        ? providerError.type
+        : "provider_error";
+    return {
+      status,
+      body: {
+        error: {
+          message,
+          type: "provider_error",
+          code: providerType,
+          provider_type: providerType,
+          provider_status: status,
+          provider_content_type: contentType,
+          request_id: requestId,
+        },
+      },
+    };
+  },
 
   buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
     if (plan.route.providerKind !== "anthropic") {
@@ -732,6 +786,7 @@ function withoutContentType(headers: Readonly<Record<string, string>>): Record<s
  */
 export const grokAdapter: ProviderAdapter = {
   kind: "grok",
+  translateChatCompletionResponse: () => null,
 
   buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
     const invalidKind = validateExactKind(plan.route.providerKind, ["grok", "xai"]);
@@ -819,6 +874,7 @@ function openRouterHeaders(route: OpenRouterRoute): Record<string, string> {
  */
 export const openRouterAdapter: ProviderAdapter = {
   kind: "openrouter",
+  translateChatCompletionResponse: () => null,
 
   buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
     const invalidKind = validateExactKind(plan.route.providerKind, ["openrouter"]);
@@ -954,6 +1010,7 @@ export function encodeAzurePathSegment(value: string): string {
  */
 export const azureOpenAiAdapter: ProviderAdapter = {
   kind: "azure-openai",
+  translateChatCompletionResponse: () => null,
 
   buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
     const invalidKind = validateExactKind(plan.route.providerKind, ["azure-openai", "azure"]);
@@ -1098,6 +1155,10 @@ export function packageProviderAdapter(
 
   return {
     kind: canonicalKind,
+
+    // Non-Anthropic families relay the chat body verbatim — only the dedicated
+    // anthropicAdapter translates the response to chat.completion (#886).
+    translateChatCompletionResponse: () => null,
 
     buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
       if (canonicalProviderKind(plan.route.providerKind) !== canonicalKind) {
@@ -1385,6 +1446,11 @@ function cloudflareAiGatewaySurface(
 export function withCloudflareAiGatewayRouting(adapter: ProviderAdapter): ProviderAdapter {
   const routed: ProviderAdapter = {
     kind: adapter.kind,
+
+    // The CF-AI-Gateway wrapper is transport-only; response translation is the
+    // wrapped adapter's concern (#886).
+    translateChatCompletionResponse: (body, model) =>
+      adapter.translateChatCompletionResponse(body, model),
 
     buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
       const built = adapter.buildUpstreamRequest(plan);

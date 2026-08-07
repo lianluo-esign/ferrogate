@@ -963,6 +963,86 @@ export function finishReasonToStopReason(
   }
 }
 
+/** `stop_reason_to_finish_reason` — Anthropic Message → OpenAI completion. */
+export function stopReasonToFinishReason(stopReason: string | undefined): string {
+  switch (stopReason) {
+    case "tool_use":
+      return "tool_calls";
+    case "max_tokens":
+      return "length";
+    case "end_turn":
+    case "stop_sequence":
+    default:
+      return "stop";
+  }
+}
+
+/** `message_to_chat_completion` — Anthropic Message → OpenAI chat completion. */
+export function messageToChatCompletion(message: unknown, fallbackModel: string): unknown {
+  const rawId = asString(get(message, "id"));
+  const id = rawId === undefined ? "chatcmpl_ferrogate" : rawId.replaceAll("msg", "chatcmpl");
+  const model = asString(get(message, "model")) ?? fallbackModel;
+  const contentBlocks = asArray(get(message, "content")) ?? [];
+  const textParts: string[] = [];
+  const toolCalls: Json[] = [];
+
+  for (const block of contentBlocks) {
+    if (asString(get(block, "type")) === "text") {
+      const text = asString(get(block, "text"));
+      if (text !== undefined) textParts.push(text);
+      continue;
+    }
+    if (asString(get(block, "type")) !== "tool_use") continue;
+    const input = get(block, "input");
+    toolCalls.push({
+      id: asString(get(block, "id")) ?? "",
+      type: "function",
+      function: {
+        name: asString(get(block, "name")) ?? "",
+        arguments: JSON.stringify(input ?? {}),
+      },
+    });
+  }
+
+  const assistantMessage: Json = {
+    role: "assistant",
+    content: textParts.length === 0 ? null : textParts.join(""),
+  };
+  if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls;
+
+  const usage = get(message, "usage");
+  const promptTokens = asUint(get(usage, "input_tokens")) ?? 0;
+  const completionTokens = asUint(get(usage, "output_tokens")) ?? 0;
+  const openAiUsage: Json = {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
+  const cacheRead = asUint(get(usage, "cache_read_input_tokens"));
+  const cacheCreation = asUint(get(usage, "cache_creation_input_tokens"));
+  if (cacheRead !== undefined) {
+    openAiUsage.prompt_tokens_details = { cached_tokens: cacheRead };
+    openAiUsage.cache_read_input_tokens = cacheRead;
+  }
+  if (cacheCreation !== undefined) openAiUsage.cache_creation_input_tokens = cacheCreation;
+
+  const created = asUint(get(message, "created")) ?? Math.floor(Date.now() / 1000);
+  return {
+    id,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: assistantMessage,
+        finish_reason: stopReasonToFinishReason(asString(get(message, "stop_reason"))),
+      },
+    ],
+    usage: openAiUsage,
+  };
+}
+
 /** `chat_completion_to_message`. */
 export function chatCompletionToMessage(chat: unknown, fallbackModel: string): unknown {
   if (isAnthropicMessage(chat)) {
@@ -1042,4 +1122,5 @@ function anthropicUsageCounters(usage: unknown): Record<string, number> {
 export const defaultAnthropicTranslator: AnthropicTranslator = {
   toChatCompletions,
   chatCompletionToMessage,
+  messageToChatCompletion,
 };

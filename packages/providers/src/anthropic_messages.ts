@@ -1,3 +1,6 @@
+import { PROMPT_CACHE_MEMBER } from "./caching.js";
+import { asStr, asU64, getField, isArray, isObject, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
 /**
  * Anthropic Messages ⇄ OpenAI chat-completions translation — port of
  * `anthropic_messages.rs` (issue #272). Backs the `/v1/messages` ingress: a
@@ -6,9 +9,6 @@
  * JSON ⇄ JSON, no I/O.
  */
 import { AdapterError } from "./types.js";
-import { PROMPT_CACHE_MEMBER } from "./caching.js";
-import { asStr, asU64, getField, isArray, isObject, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
 
 /** Anthropic Messages request → OpenAI chat-completions request. */
 export function toChatCompletions(body: Json): Json {
@@ -320,6 +320,86 @@ export function finishReasonToStopReason(
     default:
       return "end_turn";
   }
+}
+
+export function stopReasonToFinishReason(stopReason: string | undefined): string {
+  switch (stopReason) {
+    case "tool_use":
+      return "tool_calls";
+    case "max_tokens":
+      return "length";
+    case "end_turn":
+    case "stop_sequence":
+    default:
+      return "stop";
+  }
+}
+
+/** Anthropic Message response → OpenAI chat.completion response. */
+export function messageToChatCompletion(message: Json, fallbackModel: string): Json {
+  const rawId = asStr(getField(message, "id"));
+  const id = rawId === undefined ? "chatcmpl_ferrogate" : rawId.replaceAll("msg", "chatcmpl");
+  const model = asStr(getField(message, "model")) ?? fallbackModel;
+  const content = getField(message, "content");
+  const textParts: string[] = [];
+  const toolCalls: Json[] = [];
+
+  for (const block of Array.isArray(content) ? content : []) {
+    if (!isObject(block)) continue;
+    const type = asStr(getField(block, "type"));
+    if (type === "text") {
+      const text = asStr(getField(block, "text"));
+      if (text !== undefined) textParts.push(text);
+      continue;
+    }
+    if (type !== "tool_use") continue;
+    const input = getField(block, "input");
+    toolCalls.push({
+      id: asStr(getField(block, "id")) ?? "",
+      type: "function",
+      function: {
+        name: asStr(getField(block, "name")) ?? "",
+        arguments: JSON.stringify(input ?? {}),
+      },
+    });
+  }
+
+  const assistantMessage: JsonObject = {
+    role: "assistant",
+    content: textParts.length === 0 ? null : textParts.join(""),
+  };
+  if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls;
+
+  const usage = getField(message, "usage");
+  const promptTokens = asU64(getField(usage, "input_tokens")) ?? 0;
+  const completionTokens = asU64(getField(usage, "output_tokens")) ?? 0;
+  const openAiUsage: JsonObject = {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
+  const cacheRead = asU64(getField(usage, "cache_read_input_tokens"));
+  const cacheCreation = asU64(getField(usage, "cache_creation_input_tokens"));
+  if (cacheRead !== undefined) {
+    openAiUsage.prompt_tokens_details = { cached_tokens: cacheRead };
+    openAiUsage.cache_read_input_tokens = cacheRead;
+  }
+  if (cacheCreation !== undefined) openAiUsage.cache_creation_input_tokens = cacheCreation;
+
+  return {
+    id,
+    object: "chat.completion",
+    created: asU64(getField(message, "created")) ?? Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: assistantMessage,
+        finish_reason: stopReasonToFinishReason(asStr(getField(message, "stop_reason"))),
+      },
+    ],
+    usage: openAiUsage,
+  };
 }
 
 export function parseArguments(argumentsValue: Json | undefined): Json {

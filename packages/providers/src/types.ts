@@ -7,8 +7,8 @@
  */
 import type { ToolCall, ToolDef, ToolResult } from "@ferrogate/core";
 
-import type { Json } from "./json.js";
 import type { CloudflareAiGatewayRouting } from "./cloudflare.js";
+import type { Json } from "./json.js";
 
 // ---------------------------------------------------------------------------
 // Secrets
@@ -363,15 +363,15 @@ export const providerCompatibilityKind = (kind: string): "openai-compatible" | "
  */
 export interface ProviderAdapter {
   kind(): string;
-  prepareChatCompletions(provider: ProviderConfig, request: ChatCompletionPlan): ProviderHttpRequest;
+  prepareChatCompletions(
+    provider: ProviderConfig,
+    request: ChatCompletionPlan,
+  ): ProviderHttpRequest;
   prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest;
   prepareEmbeddings(provider: ProviderConfig, request: EmbeddingsPlan): ProviderHttpRequest;
   prepareImages(provider: ProviderConfig, request: ImagesPlan): ProviderHttpRequest;
   prepareRerank(provider: ProviderConfig, request: RerankPlan): ProviderHttpRequest;
-  prepareTranscription(
-    provider: ProviderConfig,
-    request: TranscriptionPlan,
-  ): ProviderHttpRequest;
+  prepareTranscription(provider: ProviderConfig, request: TranscriptionPlan): ProviderHttpRequest;
   prepareSpeech(provider: ProviderConfig, request: SpeechPlan): ProviderHttpRequest;
   /**
    * Provider transcription dialect → the OpenAI `{ text, duration, segments }`
@@ -389,6 +389,8 @@ export interface ProviderAdapter {
    */
   translateSpeechResponse(body: Uint8Array, contentType: string): AudioBytes | null;
   translateEmbeddingsResponse(body: Uint8Array, model: string): Json | null;
+  /** Provider chat/Responses answer → OpenAI chat.completion, or null to relay. */
+  translateChatCompletionResponse(body: Uint8Array, model: string): Json | null;
   /**
    * Provider rerank dialect → the gateway's canonical `{ object, model, results }`.
    *
@@ -434,6 +436,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
     requestId: string,
   ): ProviderErrorResponse;
   abstract extractUsage(body: Uint8Array): ProviderUsage | undefined;
+
+  translateChatCompletionResponse(_body: Uint8Array, _model: string): Json | null {
+    return null;
+  }
 
   prepareResponses(_provider: ProviderConfig, _request: ResponsesPlan): ProviderHttpRequest {
     throw AdapterError.unsupportedProviderKind(this.kind());

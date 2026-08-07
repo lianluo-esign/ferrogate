@@ -145,6 +145,7 @@ import type {
   InferenceDeps,
   InferenceOperation,
   PhysicalRoute,
+  ProviderAdapter,
   ResolvedInferenceDeps,
   StreamDialect,
   UpstreamRequest,
@@ -809,7 +810,7 @@ function planUpstream(
     { estimatedUsage: estimated, metrics: deps.routingMetrics },
   );
 
-  const candidates: AttemptCandidate[] = [];
+  const candidates: Array<AttemptCandidate & { readonly adapter: ProviderAdapter }> = [];
   let firstFailure: InferenceRejection | null = null;
   for (const route of ordered) {
     const adapter = deps.adapters.adapterFor(route.providerKind);
@@ -849,7 +850,9 @@ function planUpstream(
       continue;
     }
 
-    candidates.push({ route, upstream: built.request });
+    // Carry the exact adapter that prepared this candidate through failover so
+    // response legs cannot accidentally resolve a different adapter instance.
+    candidates.push({ route, upstream: built.request, adapter });
   }
 
   // A candidate whose adapter refuses the request is dropped, not fatal — the
@@ -2125,6 +2128,12 @@ async function handleOpenAiInference(
   // decision instead of five call sites re-deriving it.
   const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
+  // #886 — the adapter that answered, used both to refuse Anthropic streaming
+  // (no chunk translator yet) and to translate the buffered Anthropic response.
+  const servedAdapter = deps.adapters.adapterFor(servedRoute.providerKind);
+  const servedIsAnthropicChat =
+    operation === "chat.completions" && servedAdapter?.kind === "anthropic";
+
   const routeLabel = ROUTE_LABELS[operation];
   const usageDialect = usageProviderKindFor(operation, servedRoute.providerKind);
   const meterBase = {
@@ -2144,6 +2153,26 @@ async function handleOpenAiInference(
   // response whose usage frame has not arrived yet. `recordUsage` publishes it
   // again (harmlessly — the merge is idempotent) for the buffered paths.
   observeInvocation(c.get("inferenceOriginRequest"), meterBase, servedRoute.providerKind);
+
+  // #886 — an Anthropic-family provider would stream Anthropic SSE, which the
+  // openai.chat normalizer cannot turn into `chat.completion.chunk` frames yet
+  // (non-streaming translation ships in this slice; the SSE translator is a
+  // follow-up). Refuse a streaming chat/completions request clearly rather than
+  // relay a silently-wrong dialect. Gated on the REQUEST's stream flag, before
+  // the upstream-streaming branch, so it holds regardless of how the upstream answered.
+  if (stream && servedIsAnthropicChat) {
+    settleTokensDetached(c, admission, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return errorResponse(
+      reject(
+        501,
+        "streaming_translation_unsupported",
+        "streaming /v1/chat/completions from an Anthropic-family provider is not yet " +
+          'translated to OpenAI chat.completion.chunk frames; retry with "stream": false',
+      ),
+      requestId,
+    );
+  }
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
     const dialect: StreamDialect = operation === "responses" ? "openai.responses" : "openai.chat";
@@ -2199,6 +2228,24 @@ async function handleOpenAiInference(
   recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
+  // #886 — an Anthropic-family provider answers a chat/completions request with
+  // an Anthropic-native Message (`{type:"message",content:[…],stop_reason}`).
+  // Translate it to an OpenAI `chat.completion` so OpenAI-SDK clients and
+  // tool-use loops see `choices[].message`/`finish_reason`. The adapter returns
+  // null for same-protocol families, which relays the body verbatim as before.
+  const translatedChat =
+    servedIsAnthropicChat && parsed !== undefined && servedAdapter
+      ? servedAdapter.translateChatCompletionResponse(parsed, logicalModel)
+      : null;
+  if (translatedChat !== null && translatedChat !== undefined) {
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      "application/json",
+      JSON.stringify(translatedChat),
+      requestId,
+      relay,
+    );
+  }
   if (conversation !== undefined) {
     // #689 — rewrite `id` to the gateway's own and ANNOUNCE the turn. The write
     // itself happens in `conversation-commit.ts`, above the guardrail response
