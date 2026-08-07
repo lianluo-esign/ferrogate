@@ -11,10 +11,11 @@
 **语言：** [English](README.md) | 简体中文
 
 FerroGate 是一个完全运行在 Cloudflare Workers 上的开源 AI 网关。它是 AI
-流量的控制点：OpenAI 兼容与 Anthropic 原生推理 API、带 canary 和 shadow
-灰度的多供应商路由、带 scope 与租户隔离的虚拟 API Key、策略与 guardrail
-检查、频率限制、配额与预付钱包、durable 的 Token 计量与计费、资产闭环、
-MCP server、agent run，以及约 250 个操作的 Admin API。
+流量的控制点：OpenAI 兼容与 Anthropic 原生推理 API、OpenAI 兼容的 Files + Batch
+接口、带 canary 和 shadow 灰度的多供应商路由、带 scope 与**每租户 Durable Object
+隔离**（每租户一个 SQLite 对象，运行时寻址、无需按租户部署）的虚拟 API Key、策略与
+guardrail 检查、频率限制、配额与预付钱包、durable 的 Token 计量与计费、资产闭环、
+MCP server、agent run，以及约 240 个操作的 Admin API。
 
 它端到端由 TypeScript 编写，作为一组 Worker 部署，底层依赖 D1、R2、KV、
 Durable Objects、Queues 和 Analytics Engine。
@@ -27,8 +28,8 @@ Durable Objects、Queues 和 Analytics Engine。
 
 | 可部署单元 | Worker 名称 | 说明 |
 |---|---|---|
-| `apps/gateway` | `ferrogate-gateway` | **数据面**。基于 Hono 的流式代理，负责推理和资产接口。拥有 31 个 contract 操作。 |
-| `apps/control-plane` | `ferrogate-control-plane` | **Admin API** —— 197 个 contract 操作（192 个在 `/admin/v1/**` 下，另有 `/admin` 页面和 `/metrics`），以及 admin-console 会话接口、SAML、OIDC 和 SCIM。 |
+| `apps/gateway` | `ferrogate-gateway` | **数据面**。基于 Hono 的流式代理，负责推理、OpenAI 兼容的 Files + Batch 接口和资产接口，并定义每租户的 `TenantDataObject`。拥有 49 个 contract 操作。 |
+| `apps/control-plane` | `ferrogate-control-plane` | **Admin API** —— 约 240 个 contract 操作（235 个在 `/admin/v1/**` 下，另有 `/admin` 页面和 `/metrics`），以及 admin-console 会话接口、SAML、OIDC 和 SCIM。 |
 | `apps/mcp` | `ferrogate-mcp` | Model Context Protocol server：JSON-RPC 入口、OAuth 流程、会话、受治理的工具执行。6 个 contract 操作。 |
 | `apps/agent-runtime` | `ferrogate-agent-runtime` | Agent run 与 job、A2A agent upstream，以及自托管 worker plane。15 个 contract 操作。 |
 | `apps/telemetry` | `ferrogate-telemetry` | OTLP 接收端，写入 Analytics Engine。不拥有任何 contract 路由；其他 Worker 通过 service binding 向它投递。 |
@@ -43,7 +44,7 @@ Durable Objects、Queues 和 Analytics Engine。
 1. **Request id** 和请求指标。
 2. **网络门禁** —— 鉴权前的 IP allow/deny，使得洪泛流量永远不会付出凭证
    查询的代价。
-3. **Contract 鉴权** —— 面向全部 251 个操作的单一守卫，由路由 contract 的
+3. **Contract 鉴权** —— 面向全部 312 个操作的单一守卫，由路由 contract 的
    `auth.kind` / `auth.scope` / `rbac_action` 驱动。
 4. **准入** —— 频率限制（Durable Object 计数器）、配额、月度预算、预付钱包
    hold。
@@ -59,7 +60,7 @@ Durable Objects、Queues 和 Analytics Engine。
 10. **Durable 计量** —— ledger 行与 billing outbox 行在同一次 D1 `batch()`
     中提交，然后投递到 Queue。
 
-按租户的 D1 路由位于鉴权之后，因此租户状态可以存放在每租户一个的隔离数据库中。
+鉴权之后，租户自有状态被路由到以租户 id 寻址、每租户一个的 SQLite Durable Object；共享控制面仍在单一 CONTROL D1 库中。这样无需为每个租户单独部署数据库即可隔离租户事务。
 
 ### 共享 package
 
@@ -103,13 +104,13 @@ Durable Objects、Queues 和 Analytics Engine。
 
 ## 路由 contract
 
-`docs/openapi/runtime-api-contract.json` 是运行时接口的权威来源：**251 个
+`docs/openapi/runtime-api-contract.json` 是运行时接口的权威来源：**312 个
 操作**，每个都带有 `path`、`method`、`operation_id`、`visibility`、
 `auth.kind`、`auth.scope` 和 `rbac_action`。每个 Worker 都直接导入它，而不是
 重复声明一份；任何一个 app 若没有注册它应当拥有的操作，其 contract 测试就会
 失败。
 
-其中 admin 193 个、public 51 个、internal 7 个；鉴权类型为 bearer 238 个、
+其中 admin 236 个、public 69 个、internal 7 个；鉴权类型为 bearer 298 个、
 internal 6 个（worker plane 回调）、anonymous 6 个、method-dependent 1 个。
 `docs/rewrite/ROUTE-MAP.md` 把每个操作分配到具体 Worker。Admin 接口的字段级
 请求/响应体在 `docs/openapi/admin-api.openapi.json`。

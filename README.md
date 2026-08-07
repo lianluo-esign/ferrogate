@@ -12,11 +12,13 @@
 
 FerroGate is an open-source AI gateway that runs entirely on Cloudflare
 Workers. It is a control point for AI traffic: OpenAI-compatible and
-Anthropic-native inference APIs, multi-vendor provider routing with canary and
-shadow rollouts, virtual API keys with scopes and tenant isolation, policy and
-guardrail screening, rate limits, quotas and prepaid wallets, durable token
-metering and billing, an asset closed loop, an MCP server, agent runs, and a
-~250-operation admin API.
+Anthropic-native inference APIs, an OpenAI-compatible Files + Batch surface,
+multi-vendor provider routing with canary and shadow rollouts, virtual API keys
+with scopes and **per-tenant Durable Object isolation** (one SQLite-backed object
+per tenant, addressed at runtime with no per-tenant deploy), policy and guardrail
+screening, rate limits, quotas and prepaid wallets, durable token metering and
+billing, an asset closed loop, an MCP server, agent runs, and a ~240-operation
+admin API.
 
 It is written in TypeScript end to end and deploys as a fleet of Workers backed
 by D1, R2, KV, Durable Objects, Queues and Analytics Engine.
@@ -30,8 +32,8 @@ Six deployables live under `apps/`. Five are Workers; the sixth is a CLI binary.
 
 | Deployable | Worker name | What it is |
 |---|---|---|
-| `apps/gateway` | `ferrogate-gateway` | The **data plane**. A Hono streaming proxy for inference, plus the asset surface. Owns 31 contract operations. |
-| `apps/control-plane` | `ferrogate-control-plane` | The **admin API** — 197 contract operations (192 under `/admin/v1/**`, plus the `/admin` pages and `/metrics`), and the admin-console session surface, SAML, OIDC and SCIM. |
+| `apps/gateway` | `ferrogate-gateway` | The **data plane**. A Hono streaming proxy for inference, the OpenAI-compatible Files + Batch surface, and the asset surface. Defines the per-tenant `TenantDataObject`. Owns 49 contract operations. |
+| `apps/control-plane` | `ferrogate-control-plane` | The **admin API** — ~240 contract operations (235 under `/admin/v1/**`, plus the `/admin` pages and `/metrics`), and the admin-console session surface, SAML, OIDC and SCIM. |
 | `apps/mcp` | `ferrogate-mcp` | Model Context Protocol server: JSON-RPC ingress, OAuth flow, sessions, governed tool execution. 6 contract operations. |
 | `apps/agent-runtime` | `ferrogate-agent-runtime` | Agent runs and jobs, A2A agent upstreams, and the self-hosted worker plane. 15 contract operations. |
 | `apps/telemetry` | `ferrogate-telemetry` | OTLP receiver that writes to Analytics Engine. Owns no contract route; the other Workers feed it over a service binding. |
@@ -47,7 +49,7 @@ order:
 1. **Request id** and request metrics.
 2. **Network gate** — pre-auth IP allow/deny, so a flood never pays for a
    credential lookup.
-3. **Contract auth** — one guard for all 251 operations, driven by the route
+3. **Contract auth** — one guard for all 312 operations, driven by the route
    contract's `auth.kind` / `auth.scope` / `rbac_action`.
 4. **Admission** — rate limit (Durable Object counter), quota, monthly budget,
    prepaid wallet hold.
@@ -113,13 +115,13 @@ no per-package build step.
 ## The route contract
 
 `docs/openapi/runtime-api-contract.json` is the authoritative source for the
-runtime surface: **251 operations**, each carrying `path`, `method`,
+runtime surface: **312 operations**, each carrying `path`, `method`,
 `operation_id`, `visibility`, `auth.kind`, `auth.scope` and `rbac_action`.
 Every Worker imports it directly rather than restating it, and each app's
 contract test fails if an operation it owns is not registered.
 
-The split is 193 admin, 51 public and 7 internal operations; auth kinds are 238
-bearer, 6 internal (worker-plane callbacks), 6 anonymous and 1
+The split is 236 admin, 69 public and 7 internal operations; auth kinds are 298
+bearer, 6 internal (worker-plane callbacks), 7 anonymous and 1
 method-dependent. `docs/rewrite/ROUTE-MAP.md` assigns each operation to a
 Worker. Field-level request and response bodies for the admin surface are in
 `docs/openapi/admin-api.openapi.json`.
