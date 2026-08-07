@@ -134,6 +134,7 @@ import {
   type TenantDatabaseHandle,
   budgetAlertStoreForTenant,
 } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import {
   type QuotaPolicySource,
@@ -168,6 +169,8 @@ export interface BudgetAlertBindings {
   readonly BILLING_ALERTS_WEBHOOK_URL?: unknown;
   readonly BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS?: unknown;
   readonly BILLING_ALERTS_WEBHOOK_SIGNING_SECRET?: unknown;
+  /** CONTROL storage posture; absent/empty defaults to CONTROL_DATA. */
+  readonly GATEWAY_CONTROL_STORAGE?: string;
 }
 
 function stringVar(value: unknown): string | undefined {
@@ -238,22 +241,6 @@ export interface BudgetAlertPorts {
   readonly claims: BudgetAlertClaimStore;
 }
 
-/** `env.CONTROL_DB ?? env.BILLING_DB` — the control handle, when it is real D1. */
-function controlDatabaseFrom(env: unknown): D1Database | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const bindings = env as { CONTROL_DB?: unknown; BILLING_DB?: unknown };
-  for (const candidate of [bindings.CONTROL_DB, bindings.BILLING_DB]) {
-    if (
-      typeof candidate === "object" &&
-      candidate !== null &&
-      typeof (candidate as D1Database).prepare === "function"
-    ) {
-      return candidate as D1Database;
-    }
-  }
-  return undefined;
-}
-
 /**
  * Resolve the alert ports from a request's `env`, or `undefined` when this
  * deployment cannot alert.
@@ -268,7 +255,10 @@ function controlDatabaseFrom(env: unknown): D1Database | undefined {
 export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined {
   const config = budgetAlertConfigFromEnv(env);
   if (config === undefined) return undefined;
-  const controlDb = controlDatabaseFrom(env);
+  const bindings = env as { CONTROL_DB?: unknown; BILLING_DB?: unknown };
+  const controlDb = controlDatabaseFrom(env, {
+    legacy: [bindings.CONTROL_DB, bindings.BILLING_DB],
+  });
   if (controlDb === undefined || typeof env !== "object" || env === null) return undefined;
   const namespace = (env as { TENANT_DATA?: TenantDataNamespace }).TENANT_DATA;
   if (namespace === undefined) return undefined;

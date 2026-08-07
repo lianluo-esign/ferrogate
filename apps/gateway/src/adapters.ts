@@ -44,6 +44,7 @@ import {
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
+import { controlDatabaseFrom } from "./control-data.js";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -951,7 +952,9 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
       tenantDatabases?: TenantDatabaseRouter | undefined;
     } = {},
   ): D1RbacAuthorizer | null {
-    const binding = env[CONTROL_DATABASE_BINDING];
+    const binding = controlDatabaseFrom(env, {
+      legacy: [env[CONTROL_DATABASE_BINDING]],
+    });
     if (!isRbacDatabase(binding)) return null;
     const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
     const tenantDatabases =

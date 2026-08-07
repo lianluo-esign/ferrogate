@@ -51,10 +51,12 @@
 import type { ApiKeyResolution } from "../ports.js";
 
 /**
- * **0 — no caching.** Rust parity: every request resolves against the store, so
- * revocation is immediate. Raise it only deliberately; see the module docs.
+ * **30 seconds — the Zero-D1 default.** Positive key outcomes are cached to
+ * keep the singleton control object off the request hot path. Set the Worker
+ * var to `"0"` to disable it deliberately. The revocation-latency tradeoff is
+ * documented above and at the flag in `wrangler.toml`.
  */
-export const DEFAULT_API_KEY_CACHE_TTL_SECONDS = 0;
+export const DEFAULT_API_KEY_CACHE_TTL_SECONDS = 30;
 
 /** Insertion-order eviction bound, so the map cannot grow without limit. */
 export const DEFAULT_API_KEY_CACHE_MAX_ENTRIES = 1000;

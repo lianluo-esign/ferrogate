@@ -681,13 +681,15 @@ describe("key-source order", () => {
 // ---------------------------------------------------------------------------
 
 describe("cache", () => {
-  test("is OFF by default — Rust parity, so a revocation is immediate", async () => {
+  test("an explicitly uncached resolver keeps revocation immediate", async () => {
     const secret = await seedApiKey({
       id: "key_live",
       secret: testSecret("live"),
       tenantId: "tenant_a",
     });
-    const port = resolver();
+    // Default-on caching now means a bare resolver() caches for 30s; this test
+    // is about the EXPLICITLY-uncached posture, so opt out with a 0-TTL cache.
+    const port = resolver({ cache: new ApiKeyResolutionCache({ ttlSeconds: 0 }) });
     expect((await port.authenticate(secret)).outcome).toBe("resolved");
 
     await suspendApiKey("key_live");
@@ -696,8 +698,7 @@ describe("cache", () => {
       outcome: "key_suspended",
       reason: "disabled",
     });
-    expect(new ApiKeyResolutionCache().disabled).toBe(true);
-    expect(apiKeyCacheTtlSeconds({})).toBe(0);
+    expect(apiKeyCacheTtlSeconds({})).toBe(30);
   });
 
   test("a SUSPENDED key stops working once the TTL elapses — and no later", async () => {

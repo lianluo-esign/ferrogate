@@ -15,7 +15,10 @@ import type { VerifiedDelegationChain } from "@ferrogate/identity";
 // TYPE-only, and it must stay that way: the module behind this subpath extends
 // `DurableObject` from `cloudflare:workers`, so a value import would pull a
 // workerd-only module into every consumer of this file's types.
-import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import type {
+  ControlDataNamespace,
+  TenantDataNamespace,
+} from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -372,8 +375,10 @@ export interface GatewayBindings {
    * `depsFromEnv` returns byte-identically what it returned before wave 5.
    */
   readonly DB?: D1Database;
-  /** Resolution-cache TTL for `src/keys/cache.ts`. Absent/junk ⇒ 0 (disabled). */
+  /** Resolution-cache TTL for `src/keys/cache.ts`. Absent ⇒ the 30-second default. */
   readonly GATEWAY_API_KEY_CACHE_TTL_SECONDS?: string;
+  /** CONTROL storage posture; absent/empty defaults to the CONTROL_DATA object. */
+  readonly GATEWAY_CONTROL_STORAGE?: string;
 
   /**
    * `RateLimiterDurableObject` namespace — one DO instance per counter key,
@@ -485,6 +490,8 @@ export interface GatewayBindings {
    * against the ENTRY module.
    */
   readonly TENANT_DATA?: TenantDataNamespace;
+  /** The singleton CONTROL Durable Object namespace. */
+  readonly CONTROL_DATA?: ControlDataNamespace;
 
   /**
    * `[[services]] TELEMETRY_COLLECTOR` → the `ferrogate-telemetry` Worker's

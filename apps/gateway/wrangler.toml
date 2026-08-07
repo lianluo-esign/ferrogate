@@ -607,6 +607,10 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 #
 # ---------------------------------------------------------------------------
 GATEWAY_TENANT_DB_ROUTING = "durable_object"
+# CONTROL_DATA is the default control-plane read backend. Set this to
+# "d1_compat" only for an explicitly retained legacy deployment; the latter's
+# CONTROL_DB/BILLING_DB fallback is never selected implicitly.
+GATEWAY_CONTROL_STORAGE = "durable_object"
 
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
 # makes `/readyz` answer 503 while `/healthz` stays 200, which is the
@@ -819,10 +823,10 @@ GATEWAY_GUARDRAIL_BINDINGS = "[]"
 
 # Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
 # negative D1 key resolution may be reused inside one isolate. `"0"` (the
-# default, and the value shipped here) DISABLES the cache, so a key revoked in
-# the control plane stops working on the very next request. Raise it only with
-# the revocation lag that implies understood.
-GATEWAY_API_KEY_CACHE_TTL_SECONDS = "0"
+# default) caches positive outcomes for 30 seconds, which bounds the control
+# object read rate. A key revoked in the control plane may therefore continue
+# working for at most the TTL; set this to "0" only with that tradeoff understood.
+GATEWAY_API_KEY_CACHE_TTL_SECONDS = "30"
 
 # Read by `entitlementsFromEnv` (src/assets/handlers.ts).
 # JSON map tenant id → { asset_hosting_enabled, asset_storage_quota_bytes,
@@ -1438,12 +1442,14 @@ class_name = "TenantDataObject"
 # `[exports.ControlDataObject]` lifecycle declaration below, so the class is
 # BORN with `storage = "sqlite"` (immutable once a namespace exists;
 # converting later is a tombstone and total data loss). There is deliberately
-# NO `[[durable_objects.bindings]] CONTROL_DATA` stanza yet: this file's rule
-# is "declare what the Worker reads, and nothing else", and the first read
-# lands with slice S2, which adds the binding in the same diff. The other
+# S2 lands the first gateway read and this binding in the same diff. The other
 # Workers then bind it cross-script (`script_name = "ferrogate-gateway"`) in
 # S3/S4, exactly as `apps/mcp` does for RATE_LIMIT.
 # ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+
 
 # `exports` is mutually exclusive with the legacy `migrations` array. Keep all
 # five classes defined by this Worker in one declarative lifecycle map so a

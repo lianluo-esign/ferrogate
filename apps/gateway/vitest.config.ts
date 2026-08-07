@@ -167,6 +167,10 @@ export default defineConfig({
       remoteBindings: false,
       miniflare: {
         bindings: {
+          // The main suite's D1 fixtures intentionally exercise the rollback
+          // posture. Production defaults to CONTROL_DATA in wrangler.toml;
+          // control-data.test.ts covers that default with a namespace double.
+          GATEWAY_CONTROL_STORAGE: "d1_compat",
           GATEWAY_NATIVE_API_KEYS: JSON.stringify(NATIVE_API_KEYS),
           GATEWAY_STATIC_API_KEYS: JSON.stringify(STATIC_API_KEYS),
           SELF_HOSTED_WORKER_REGISTRY: JSON.stringify(SELF_HOSTED_WORKER_REGISTRY),

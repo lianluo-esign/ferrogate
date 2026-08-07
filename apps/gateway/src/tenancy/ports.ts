@@ -66,7 +66,10 @@ import type {
   TenantDatabaseRouter,
   TenantObjectAddress,
 } from "@ferrogate/storage";
-import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import type {
+  ControlDataNamespace,
+  TenantDataNamespace,
+} from "@ferrogate/storage/durable-objects";
 import type { Context, MiddlewareHandler } from "hono";
 import type { GatewayBindings, GatewayEnv, GatewayVariables } from "../ports.js";
 
@@ -237,6 +240,8 @@ export interface TenantDatabaseAccessor {
 export interface TenancyBindings {
   /** One of {@link TENANT_DATABASE_ROUTING_MODES}. Absent ⇒ `"durable_object"`. */
   readonly GATEWAY_TENANT_DB_ROUTING?: string;
+  /** CONTROL storage posture; absent/empty defaults to the CONTROL_DATA object. */
+  readonly GATEWAY_CONTROL_STORAGE?: string;
   /**
    * The per-tenant Durable Object namespace — `"durable_object"` mode, i.e. the
    * default. Optional in the TYPE because a self-hosted `"binding"` or
@@ -244,6 +249,8 @@ export interface TenancyBindings {
    * under `"durable_object"` is a NAMED 503, never a fallback to `DB`.
    */
   readonly TENANT_DATA?: TenantDataNamespace;
+  /** The singleton CONTROL Durable Object namespace. */
+  readonly CONTROL_DATA?: ControlDataNamespace;
   /** The CONTROL database holding `tenant_databases`. */
   readonly CONTROL_DB?: D1Database;
   /** The shared database — `"shared_development"` mode only. */

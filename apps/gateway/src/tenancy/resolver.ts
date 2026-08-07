@@ -29,6 +29,7 @@ import {
   type TenantDatabaseRoutingMode,
 } from "./ports.js";
 import { tenantDataNamespace } from "./tenant-data.js";
+import { controlDatabaseFrom } from "../control-data.js";
 
 /**
  * Parse `GATEWAY_TENANT_DB_ROUTING`.
@@ -195,7 +196,7 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
   // mode anyway, because a gateway with no CONTROL_DB cannot answer the fleet
   // views at all and should say so at configuration time rather than at the
   // first admin fan-out.
-  const controlDb = env.CONTROL_DB;
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
   if (controlDb === undefined) {
     throw misconfigured(
       [

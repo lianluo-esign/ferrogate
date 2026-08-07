@@ -60,7 +60,11 @@ import type {
   AuthContext,
   GatewayBindings,
 } from "../ports.js";
-import { ApiKeyResolutionCache, type Clock } from "./cache.js";
+import {
+  ApiKeyResolutionCache,
+  DEFAULT_API_KEY_CACHE_TTL_SECONDS,
+  type Clock,
+} from "./cache.js";
 import { sha256Hex, verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
 import {
   type ApiKeyStore,
@@ -77,9 +81,9 @@ export interface ApiKeyBindings {
    */
   readonly DB?: D1Database;
   /**
-   * TTL, in seconds, for the in-isolate resolution cache. Absent or `"0"` ⇒
-   * disabled, which is Rust parity (Rust caches nothing). See `./cache.ts` for
-   * the revocation-lag trade this buys.
+   * TTL, in seconds, for the in-isolate resolution cache. Absent ⇒ the
+   * 30-second default; explicit `"0"` disables it. See `./cache.ts` for the
+   * revocation-lag trade this buys.
    */
   readonly GATEWAY_API_KEY_CACHE_TTL_SECONDS?: string;
 }
@@ -377,12 +381,16 @@ export function resetSharedApiKeyCache(): void {
   sharedCache = undefined;
 }
 
-/** `GATEWAY_API_KEY_CACHE_TTL_SECONDS` → seconds. Junk reads as 0 (disabled). */
+/** `GATEWAY_API_KEY_CACHE_TTL_SECONDS` → seconds. Unset uses the 30s default. */
 export function apiKeyCacheTtlSeconds(
   env: Pick<ApiKeyBindings, "GATEWAY_API_KEY_CACHE_TTL_SECONDS">,
 ): number {
   const raw = env.GATEWAY_API_KEY_CACHE_TTL_SECONDS;
-  if (raw === undefined || raw.trim() === "") return 0;
+  // Unset ⇒ the default-on TTL (§3.1 — the auth hot path caches by default).
+  // An explicitly blank or malformed value fails closed to 0 (caching off): a
+  // misconfigured var must not silently enable a stale-tolerant cache.
+  if (raw === undefined) return DEFAULT_API_KEY_CACHE_TTL_SECONDS;
+  if (raw.trim() === "") return 0;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return Math.floor(parsed);

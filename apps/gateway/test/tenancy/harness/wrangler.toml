@@ -87,6 +87,10 @@ new_sqlite_classes = ["TenantDataObject"]
 
 [vars]
 
+# The harness exercises the legacy binding router, so its control posture is
+# explicit. Production's gateway config defaults to CONTROL_DATA.
+GATEWAY_CONTROL_STORAGE = "d1_compat"
+
 # --- routing posture -------------------------------------------------------
 # The STRICT posture: every tenant-scoped credential must resolve to a routable
 # database before its request is served. That is what makes the HTTP-level

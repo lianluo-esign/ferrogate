@@ -28,6 +28,10 @@ import {
   type RbacDatabase,
   depsFromEnv,
 } from "../src/adapters.js";
+import {
+  CONTROL_STORAGE_MISCONFIGURED,
+  controlDatabaseFrom,
+} from "../src/control-data.js";
 import type { AuthContext, RbacDecision } from "../src/ports.js";
 import {
   seedTenantRosterRows,
@@ -335,6 +339,47 @@ describe("depsFromEnv wires the durable authorizer", () => {
     // first assertion red while leaving the whole decision table above green.
     const withoutBinding = { ...bindings, CONTROL_DB: undefined };
     expect(depsFromEnv(withoutBinding as never).rbac).toBeInstanceOf(ConfiguredRbacAuthorizer);
+  });
+});
+
+describe("CONTROL storage seam", () => {
+  it("defaults to the CONTROL_DATA facade, supports d1_compat, and rejects illegal modes", () => {
+    let addressedName: string | undefined;
+    let addressedId: unknown;
+    const namespace = {
+      idFromName(name: string) {
+        addressedName = name;
+        return "control-id";
+      },
+      get(id: unknown) {
+        addressedId = id;
+        return {
+          query: async () => ({ results: [] }),
+          batch: async () => [],
+        };
+      },
+    };
+    const legacy = { prepare: () => undefined };
+
+    const facade = controlDatabaseFrom({ CONTROL_DATA: namespace, CONTROL_DB: legacy });
+    expect(facade).not.toBe(legacy);
+    expect(addressedName).toBe("control");
+    expect(addressedId).toBe("control-id");
+    expect(
+      controlDatabaseFrom({
+        GATEWAY_CONTROL_STORAGE: "d1_compat",
+        CONTROL_DATA: namespace,
+        CONTROL_DB: legacy,
+      }),
+    ).toBe(legacy);
+
+    let error: unknown;
+    try {
+      controlDatabaseFrom({ GATEWAY_CONTROL_STORAGE: "invalid", CONTROL_DB: legacy });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({ status: 503, code: CONTROL_STORAGE_MISCONFIGURED });
   });
 });
 

@@ -34,6 +34,7 @@
 import type { UsageRecordContext } from "../inference/ports.js";
 import type { MeteringDatabase, MeteringQueue } from "./ports.js";
 import { usageDatabaseFrom } from "./usage-ledger.js";
+import { controlDatabaseFrom } from "../control-data.js";
 
 /**
  * The bindings metering reads, and NOTHING else.
@@ -59,6 +60,10 @@ export interface MeteringBindings {
   readonly BILLING_DB?: MeteringDatabase | undefined;
   /** `env.CONTROL_DB`, the fleet projection database for derived usage views. */
   readonly CONTROL_DB?: MeteringDatabase | undefined;
+  /** `env.CONTROL_DATA`, the default singleton control database. */
+  readonly CONTROL_DATA?: unknown;
+  /** CONTROL storage posture; absent/empty defaults to CONTROL_DATA. */
+  readonly GATEWAY_CONTROL_STORAGE?: string;
   /** `[[queues.producers]] binding = "BILLING"` — the billing report fan-out. */
   readonly BILLING?: MeteringQueue | undefined;
 }
@@ -100,7 +105,8 @@ export function meteringDatabaseFrom(
   if (typeof env !== "object" || env === null) {
     return undefined;
   }
-  const candidate = (env as MeteringBindings).BILLING_DB;
+  const bindings = env as MeteringBindings;
+  const candidate = controlDatabaseFrom(env, { legacy: [bindings.BILLING_DB] });
   return isMeteringDatabase(candidate) ? candidate : undefined;
 }
 
@@ -142,10 +148,10 @@ export interface MeteringBindingResolver {
 export function meteringProjectionDatabaseFrom(env: unknown): D1Database | undefined {
   if (typeof env !== "object" || env === null) return undefined;
   const bindings = env as MeteringBindings;
-  for (const candidate of [bindings.CONTROL_DB, bindings.BILLING_DB]) {
-    if (isMeteringDatabase(candidate)) return candidate as unknown as D1Database;
-  }
-  return undefined;
+  const candidate = controlDatabaseFrom(env, {
+    legacy: [bindings.CONTROL_DB, bindings.BILLING_DB],
+  });
+  return isMeteringDatabase(candidate) ? (candidate as unknown as D1Database) : undefined;
 }
 
 /**

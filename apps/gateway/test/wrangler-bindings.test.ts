@@ -164,7 +164,7 @@ describe("every Durable Object binding is deployable", () => {
   it("declares at least the four classes this Worker exports", () => {
     // A guard on the gate itself: if the parser ever stopped matching, every
     // assertion below would pass vacuously over an empty list.
-    expect(bindings.length).toBeGreaterThanOrEqual(4);
+    expect(bindings.length).toBeGreaterThanOrEqual(5);
   });
 
   it("declares each bound class as an SQLite Durable Object export", () => {
@@ -210,7 +210,13 @@ describe("every Durable Object binding is deployable", () => {
     // `env.TENANT_DATA.idFromName(tenantId)` and REFUSES with a 503 when it is
     // undefined, because a tenant's wallet has no per-isolate approximation.
     const names = bindings.map((body) => value(body, "name"));
-    for (const required of ["RATE_LIMIT", "PROVIDER_CIRCUIT", "SHADOW_BUDGET", "TENANT_DATA"]) {
+    for (const required of [
+      "RATE_LIMIT",
+      "PROVIDER_CIRCUIT",
+      "SHADOW_BUDGET",
+      "TENANT_DATA",
+      "CONTROL_DATA",
+    ]) {
       expect(names, `no [[durable_objects.bindings]] is named ${required}`).toContain(required);
     }
   });

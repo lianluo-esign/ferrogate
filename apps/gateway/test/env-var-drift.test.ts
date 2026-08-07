@@ -483,7 +483,9 @@ describe("the env-var drift gate itself", () => {
     // `ASSET_GUARDRAIL_MAX_SCREEN_BYTES`) and this figure was RE-DERIVED with
     // that grep off the merged file rather than incremented — the arithmetic
     // is what goes wrong when two branches each add one.
-    expect(DECLARED.vars.size).toBe(65);
+    // #878 added `GATEWAY_CONTROL_STORAGE` (the Zero-D1 S2 control-storage
+    // posture) ⇒ 66, re-counted off the merged file with the same grep.
+    expect(DECLARED.vars.size).toBe(66);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -778,7 +780,8 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // merged file, not summed and not inherited from either parent.
     // #740: + `ASSET_GUARDRAIL_MODES`, `ASSET_GUARDRAIL_MAX_SCREEN_BYTES`,
     // re-counted off the merged file with the same grep ⇒ 65.
-    expect(rows.length).toBe(65);
+    // #878: + `GATEWAY_CONTROL_STORAGE` ⇒ 66.
+    expect(rows.length).toBe(66);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -792,6 +795,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // mean the comparison stopped working.
     expect(overridden.sort()).toEqual(
       [
+        // #878: the harness/vitest.config pin GATEWAY_CONTROL_STORAGE to
+        // `d1_compat`, overriding the committed `durable_object`.
+        "GATEWAY_CONTROL_STORAGE",
         "GATEWAY_NATIVE_API_KEYS",
         "GATEWAY_STATIC_API_KEYS",
         "SELF_HOSTED_WORKER_REGISTRY",
@@ -870,6 +876,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // test runner, so both are observable.
     const observable = rows.filter((r) => r.runtime === r.committed);
     expect(observable.length).toBe(60);
-    expect(rows.length - observable.length).toBe(5);
+    expect(rows.length - observable.length).toBe(6);
   });
 });
