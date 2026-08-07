@@ -30,6 +30,7 @@ import type { AuthContext, ControlPlaneBindings, ControlPlaneStore } from "../sr
 import { StoreTenancyLifecycleGate } from "../src/store/lifecycle.js";
 import { MemoryControlPlaneStore } from "../src/store/memory.js";
 import { applySchema, db, resetD1, seedD1 } from "./d1.js";
+import { registerObjectTenants } from "./tenant-object.js";
 import { BASE, type NativeKey, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
 
 const OPERATOR = operatorKey.secret;
@@ -64,6 +65,9 @@ beforeAll(async () => {
 describe("the exported Worker gates on the DURABLE tenancy status", () => {
   beforeEach(async () => {
     await resetD1();
+    // Roster rows for the fixture tenants: the gate's platform-operator reads
+    // fan out over `tenant_databases`, which onboarding writes in production.
+    await registerObjectTenants(["tenant_a", "tenant_b"]);
     arm({
       store: "d1",
       staticKeys: [operatorKey],
@@ -143,6 +147,9 @@ describe("the exported Worker gates on the DURABLE tenancy status", () => {
 describe("the gate walks the tenant -> project -> workspace hierarchy", () => {
   beforeEach(async () => {
     await resetD1();
+    // Roster rows for the fixture tenants: the gate's platform-operator reads
+    // fan out over `tenant_databases`, which onboarding writes in production.
+    await registerObjectTenants(["tenant_a", "tenant_b"]);
     arm({
       store: "d1",
       staticKeys: [operatorKey],
@@ -235,6 +242,9 @@ describe("the gate walks the tenant -> project -> workspace hierarchy", () => {
 describe("the gate resolves rows the CALLER cannot see", () => {
   beforeEach(async () => {
     await resetD1();
+    // Roster rows for the fixture tenants: the gate's platform-operator reads
+    // fan out over `tenant_databases`, which onboarding writes in production.
+    await registerObjectTenants(["tenant_a", "tenant_b"]);
     arm({
       store: "d1",
       staticKeys: [operatorKey],
@@ -293,6 +303,9 @@ describe("the gate resolves rows the CALLER cannot see", () => {
 describe("a DISABLED durable row still reaches the reversal routes", () => {
   beforeEach(async () => {
     await resetD1();
+    // Roster rows for the fixture tenants: the gate's platform-operator reads
+    // fan out over `tenant_databases`, which onboarding writes in production.
+    await registerObjectTenants(["tenant_a", "tenant_b"]);
     arm({
       store: "d1",
       staticKeys: [operatorKey],
@@ -346,6 +359,9 @@ describe("a DISABLED durable row still reaches the reversal routes", () => {
 describe("the declarative TENANCY_LIFECYCLE map is the fallback", () => {
   beforeEach(async () => {
     await resetD1();
+    // Roster rows for the fixture tenants: the gate's platform-operator reads
+    // fan out over `tenant_databases`, which onboarding writes in production.
+    await registerObjectTenants(["tenant_a", "tenant_b"]);
   });
 
   it("decides when the tenant has no durable row", async () => {
@@ -389,6 +405,9 @@ describe("the declarative TENANCY_LIFECYCLE map is the fallback", () => {
 describe("an unreadable lifecycle row is 503, not an implicit allow", () => {
   beforeEach(async () => {
     await resetD1();
+    // Roster rows for the fixture tenants: the gate's platform-operator reads
+    // fan out over `tenant_databases`, which onboarding writes in production.
+    await registerObjectTenants(["tenant_a", "tenant_b"]);
     arm({
       store: "d1",
       nativeKeys: [chainKey(TENANT_KEY, { tenant_id: "tenant_a" })],

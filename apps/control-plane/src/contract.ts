@@ -115,8 +115,16 @@ const RAW = contractDocument as unknown as RawContract;
 /** Contract document version this port understands (Rust rejects anything else). */
 export const SUPPORTED_CONTRACT_VERSION = 1;
 
-/** Total operations in the document (`ROUTE-MAP.md`). */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 308;
+/**
+ * Total operations in the document (`ROUTE-MAP.md`).
+ *
+ * 308 -> 312 with #698's batches API surface (`GET/POST /v1/batches`,
+ * `GET /v1/batches/{batch_id}`, `POST /v1/batches/{batch_id}/cancel`), COUNTED
+ * off the merged `docs/openapi/runtime-api-contract.json` (which is also the
+ * number `packages/schemas`' `OPENAPI_OPERATION_COUNT` pins) rather than
+ * incremented.
+ */
+export const EXPECTED_TOTAL_OPERATION_COUNT = 312;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`

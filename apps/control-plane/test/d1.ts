@@ -29,6 +29,45 @@ import {
 
 const FIXTURE_OBJECT_TENANTS = ["tenant_a", "tenant_b"] as const;
 
+/**
+ * Every tenant whose Durable Object a previous test may have written through
+ * the split store, derived from the CONTROL database's own traces rather than
+ * from a hand-kept list:
+ *
+ *  - `audit_events.tenant` — every object-store mutation appends an audit row
+ *    to the control database, so a tenant that mutated anything is named here;
+ *  - `control_plane_resources` `$.tenant_id` (plus `tenant-accounts` ids) —
+ *    a control row seeded with `seedD1` is BACKFILLED into its tenant's object
+ *    on first read, and the object then keeps both the copy and the
+ *    backfill-done mark;
+ *  - the `tenants` / `tenant_databases` registries — who was onboarded.
+ *
+ * Read BEFORE `resetD1` wipes those tables, precisely because they are the only
+ * durable record of which objects are dirty. A hand-kept list rots the way the
+ * gateway's hand-curated migration subset did.
+ */
+async function touchedObjectTenants(): Promise<readonly string[]> {
+  const tenants = new Set<string>(FIXTURE_OBJECT_TENANTS);
+  const sources = [
+    `SELECT DISTINCT tenant AS t FROM ${AUDIT_TABLE} WHERE tenant IS NOT NULL AND tenant != ''`,
+    `SELECT DISTINCT json_extract(document_json, '$.tenant_id') AS t FROM ${RESOURCE_TABLE}
+      WHERE json_extract(document_json, '$.tenant_id') IS NOT NULL
+        AND json_extract(document_json, '$.tenant_id') != ''`,
+    `SELECT DISTINCT resource_id AS t FROM ${RESOURCE_TABLE} WHERE resource_kind = 'tenant-accounts'`,
+    "SELECT id AS t FROM tenants",
+    "SELECT tenant_id AS t FROM tenant_databases",
+  ];
+  for (const sql of sources) {
+    const rows = await db()
+      .prepare(sql)
+      .all<{ t: string | null }>();
+    for (const row of rows.results) {
+      if (typeof row.t === "string" && row.t.trim() !== "") tenants.add(row.t);
+    }
+  }
+  return [...tenants];
+}
+
 interface D1TestBindings {
   readonly DB: D1Database;
   readonly TEST_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
@@ -60,6 +99,10 @@ export async function applySchema(): Promise<void> {
  * database and a leftover row would make an "empty first" precondition lie.
  */
 export async function resetD1(): Promise<void> {
+  // Which tenant OBJECTS are dirty is only recorded in the tables below, so
+  // the roster must be read before the wipe destroys it.
+  const dirtyObjectTenants = await touchedObjectTenants();
+
   await db().batch([
     db().prepare(`DELETE FROM ${RESOURCE_TABLE}`),
     db().prepare(`DELETE FROM ${AUDIT_TABLE}`),
@@ -110,9 +153,9 @@ export async function resetD1(): Promise<void> {
   ]);
 
   // `resetD1` is used by suites that do not also call `resetTenantD1`, while
-  // the split store now routes document kinds into the fixed test objects.
-  // Clear those objects here as well so a prior HTTP test cannot satisfy a
-  // later control-plane assertion through durable state.
+  // the split store now routes document kinds into per-tenant objects.
+  // Clear every object a previous test touched so a prior HTTP test cannot
+  // satisfy a later control-plane assertion through durable state.
   const bindings = env as unknown as ControlPlaneBindings;
   if (
     bindings.TENANT_DATA !== undefined &&
@@ -120,10 +163,21 @@ export async function resetD1(): Promise<void> {
   ) {
     const router = resolveTenantStorage(bindings);
     await Promise.all(
-      FIXTURE_OBJECT_TENANTS.map(async (tenantId) => {
+      dirtyObjectTenants.map(async (tenantId) => {
         const handle = await router.forTenant(tenantId);
         await handle.db.batch([
           handle.db.prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE}`),
+          // The TYPED projections the routes write alongside the documents.
+          // `wallet_settlements` in particular is the idempotency ledger, so a
+          // leftover row makes a later test's movement replay itself silently.
+          handle.db.prepare("DELETE FROM api_keys"),
+          handle.db.prepare("DELETE FROM workspaces"),
+          handle.db.prepare("DELETE FROM projects"),
+          handle.db.prepare("DELETE FROM wallet_reservations"),
+          handle.db.prepare("DELETE FROM wallet_settlements"),
+          handle.db.prepare("DELETE FROM wallets"),
+          handle.db.prepare("DELETE FROM payment_methods"),
+          handle.db.prepare("DELETE FROM semantic_cache_policies"),
           handle.db
             .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
             .bind("control_plane_resource_backfill_v1"),

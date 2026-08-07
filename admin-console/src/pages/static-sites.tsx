@@ -769,8 +769,24 @@ function SiteDetailSheet({
    */
   function livenessOf(domain: SiteDomain) {
     const detail = detailByHostname.get(domain.hostname);
+    // #738 replaced the detail read's `acme.enabled` boolean with
+    // `certificate_status` (the edge answers before this platform sees the
+    // request, so the certificate is the half that decides reachability).
+    // The tri-state survives: `undefined` for "this deployment cannot know"
+    // (no detail yet, no backend configured, lookup failed), otherwise
+    // whether a certificate is actually issued for the hostname —
+    // `issued_not_routing` counts, because the ACME half succeeded even
+    // while fallback-origin routing has not.
+    const certificate = detail?.certificate_status;
+    const certificateUnknowable =
+      certificate === undefined ||
+      certificate === "unconfigured" ||
+      certificate === "unknown" ||
+      certificate === "unavailable";
     return {
-      acme: detail?.acme.enabled,
+      acme: certificateUnknowable
+        ? undefined
+        : certificate === "active" || certificate === "issued_not_routing",
       serving: detail?.site_domain.serving ?? domain.serving,
       verificationState:
         detail?.site_domain.verification_state ?? domain.verification_state,
@@ -2058,17 +2074,34 @@ export default function StaticSitesPage() {
       <div className="rounded-md border">
         <Table>
           <TableHeader>
+            {/* Responsive contract (#336/#345): below lg the identity (site),
+                canonical serve URL, domain bind affordance and row actions must
+                sit within the viewport without a horizontal scroll; the policy
+                density columns (version/access/cache/files/size/published) are
+                >=lg only — the detail drawer carries them everywhere. */}
             <TableRow>
               <TableHead>{t("page.staticSites.col.site")}</TableHead>
-              <TableHead>{t("page.assets.col.version")}</TableHead>
-              <TableHead>{t("page.staticSites.col.access")}</TableHead>
-              <TableHead>{t("page.staticSites.col.cache")}</TableHead>
-              <TableHead>{t("page.staticSites.col.files")}</TableHead>
-              <TableHead>{t("page.assets.col.size")}</TableHead>
-              <TableHead>{t("page.staticSites.col.published")}</TableHead>
+              <TableHead className="hidden lg:table-cell">
+                {t("page.assets.col.version")}
+              </TableHead>
+              <TableHead className="hidden lg:table-cell">
+                {t("page.staticSites.col.access")}
+              </TableHead>
+              <TableHead className="hidden lg:table-cell">
+                {t("page.staticSites.col.cache")}
+              </TableHead>
+              <TableHead className="hidden lg:table-cell">
+                {t("page.staticSites.col.files")}
+              </TableHead>
+              <TableHead className="hidden lg:table-cell">
+                {t("page.assets.col.size")}
+              </TableHead>
+              <TableHead className="hidden lg:table-cell">
+                {t("page.staticSites.col.published")}
+              </TableHead>
               <TableHead>{t("page.staticSites.col.serveUrl")}</TableHead>
               <TableHead>{t("page.staticSites.col.domains")}</TableHead>
-              <TableHead className="w-24">{t("resource.table.actionsColumn")}</TableHead>
+              <TableHead className="lg:w-24">{t("resource.table.actionsColumn")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -2088,10 +2121,10 @@ export default function StaticSitesPage() {
               rows.map((row) => (
                 <TableRow key={row.name} data-testid={`static-site-${row.name}`}>
                   <TableCell className="font-medium">{row.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="hidden font-mono text-xs lg:table-cell">
                     {row.manifest?.bundle_version || t("common.unknown")}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="hidden lg:table-cell">
                     {row.manifest ? (
                       <div className="flex flex-wrap gap-1">
                         <Badge variant={row.manifest.public ? "default" : "secondary"}>
@@ -2120,17 +2153,19 @@ export default function StaticSitesPage() {
                     the policy, and say so with the same em dash the sibling
                     cells use — asserting "default" there would be a lie
                     (#458/#464/#473). */}
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="hidden font-mono text-xs lg:table-cell">
                     {row.manifest
                       ? (row.manifest.cache_control ??
                         t("page.staticSites.cache.default"))
                       : "—"}
                   </TableCell>
-                  <TableCell>{row.manifest ? row.manifest.files.length : "—"}</TableCell>
-                  <TableCell>
+                  <TableCell className="hidden lg:table-cell">
+                    {row.manifest ? row.manifest.files.length : "—"}
+                  </TableCell>
+                  <TableCell className="hidden lg:table-cell">
                     {row.manifest ? format.bytes(manifestBytes(row.manifest)) : "—"}
                   </TableCell>
-                  <TableCell className="text-xs">
+                  <TableCell className="hidden text-xs lg:table-cell">
                     {row.manifest
                       ? format.date(row.manifest.updated_at_unix * 1000, {
                           dateStyle: "medium",

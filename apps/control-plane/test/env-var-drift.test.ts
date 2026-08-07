@@ -415,8 +415,15 @@ describe("the env-var drift gate itself", () => {
     // roster and seed their model catalog — into the object the data plane will
     // read, not one of its own. See the stanza's comment in `wrangler.toml` for
     // why it carries no `[[migrations]]` entry and no `src/worker.ts` re-export.
+    // `LEGACY_TENANT_DB` is the SECOND d1 binding: the pre-M9 shared tenant
+    // database, retained only while #824 runs its tenant-by-tenant backfill
+    // (see its stanza's comment in `wrangler.toml`); `resolveTenantDatabases`
+    // reads it as the `legacyShared` arm and `resolveDeps` exposes it as
+    // `legacyTenantDatabase`. It leaves this list when the backfill retires
+    // the stanza (Zero-D1 S3, #879).
     expect([...DECLARED.bindings.keys()]).toEqual([
       "DB",
+      "LEGACY_TENANT_DB",
       "PROMPT_LABELS",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",

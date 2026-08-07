@@ -810,7 +810,14 @@ const CONTROLS: readonly FleetControl[] = [
     title: "withdrawal of an agent upstream (FC-4, closed 2026-08-01)",
     required: "self",
     enforcement: /AGENT_UPSTREAM_COLLECTION/,
-    authorityTables: ["control_plane_resources"],
+    // #861 moved tenant-discriminated document kinds — the agent-upstream
+    // collection among them — from the platform `control_plane_resources`
+    // table into the tenant object's `tenant_resources`, so the database
+    // boundary rather than a JSON predicate fences tenants. Both spellings are
+    // durable authorities of this control: platform-scoped documents stay in
+    // the former, tenant-scoped ones live in the latter, and every enforcer
+    // reads both (§3.4b holds that).
+    authorityTables: ["control_plane_resources", "tenant_resources"],
     deployVar: /\bAGENT_UPSTREAMS\b/,
   },
   {
@@ -1026,6 +1033,22 @@ const CONTROLS: readonly FleetControl[] = [
       "catalog_model_offerings",
       "catalog_revisions",
     ],
+  },
+  {
+    /**
+     * The tenant-owned MCP server catalog (Zero-D1). `apps/control-plane`
+     * authors it through the admin CRUD surface and `apps/mcp` resolves which
+     * upstream server a tenant's call reaches from the SAME tenant-object
+     * `mcp_servers` rows — the wave-20 shape (an upstream withdrawn on the
+     * authoring Worker must stop being reachable on the serving one) is what
+     * makes this a control rather than a shared record. The enforcement token
+     * is the `"mcp-servers"` collection kind both Workers spell.
+     */
+    id: "mcp-server-catalog",
+    title: "the tenant-owned MCP server catalog and its withdrawal",
+    required: "self",
+    enforcement: /"mcp-servers"/,
+    authorityTables: ["mcp_servers"],
   },
 ];
 
@@ -1370,6 +1393,17 @@ describe("§4 fleet-wide ratchets", () => {
       "audit_events",
       "billing_report_outbox",
       "usage_monthly_rollups",
+      // #852 — the tenant object owns usage rollups and observed presence;
+      // control D1 keeps tenant-qualified snapshot projections
+      // (sql/d1-ts/control/0019) for the fleet views the control plane serves.
+      // Records of what was metered and who was seen — same classification as
+      // `usage_monthly_rollups` above, and the control on spend remains the
+      // admission ladder, registered as `admission`. `tenant_contexts` is the
+      // metering grouping identity those rollups are keyed by: it answers
+      // "which context", never "may you".
+      "usage_aggregate_rollups",
+      "observed_agent_presence",
+      "tenant_contexts",
       // #664 — the per-decision evidence trail. Newly SHARED (written by
       // `apps/gateway/src/requestlog/`, read by
       // `apps/control-plane/src/routes/admin_request_log.ts`), and classified
@@ -1395,6 +1429,32 @@ describe("§4 fleet-wide ratchets", () => {
       // control-D1 copies are derived fleet projections.
       "agent_runs",
       "agent_run_events",
+      // #856/#859 — managed-worker state and evidence, on the same terms as
+      // `agent_runs` immediately above: the tenant Durable Object is the
+      // authority (sql/d1-ts/tenant/0017 + 0018), `apps/agent-runtime` writes
+      // session/instance/lifecycle records and the isolation grant it was
+      // handed for the run, and `apps/control-plane` reads the SAME object
+      // rows for its admin listings — one schema, one router, so "does a
+      // change apply to both?" is answered by construction, and both Workers'
+      // suites break together on a column rename. The isolation POLICY rows
+      // here are per-session SNAPSHOTS of the grant that was applied — the
+      // record of a decision, not the source consulted to make one. The day a
+      // Worker starts CONSULTING any of these rows before admitting work, that
+      // row becomes an operator control and moves into CONTROLS — the decision
+      // this list exists to force rather than to skip.
+      "managed_worker_templates",
+      "managed_worker_sessions",
+      "agent_worker_instances",
+      "managed_worker_lifecycle_events",
+      "managed_worker_isolation_policies",
+      "managed_worker_isolation_selections",
+      // The evidence leg of the same family, shared differently: the gateway's
+      // scheduled sweep (`src/managed-evidence-projection.ts`) rebuilds the
+      // control-D1 mirror from the tenant object after an isolate or control
+      // failure, so its sharers are (agent-runtime writer, gateway repairer).
+      // A derived projection of what a session DID — classified exactly like
+      // the guardrail evidence below.
+      "managed_worker_isolation_evidence",
       // #860 — guardrail screening evidence is tenant-object authoritative,
       // with a tenant-qualified CONTROL projection for the operator fleet
       // reader. It is a derived evidence stream rather than an enforcement

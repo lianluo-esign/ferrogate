@@ -38,7 +38,7 @@ import {
 } from "../../src/assets/ports.js";
 import { evidenceProjectionKey } from "../../src/requestlog/d1.js";
 import { resolverForEnv } from "../../src/tenancy/index.js";
-import { tenantObjectDb } from "../tenant-object.js";
+import { seedTenantRosterRows, tenantObjectDb } from "../tenant-object.js";
 
 const NOW = 1_700_000_000;
 const TENANT = "tenant_assets_d1";
@@ -705,6 +705,11 @@ describe("D1AssetAuditSink", () => {
   });
 
   test("the scheduled repair pages through all tenant audit rows", async () => {
+    // The sweep resolves each tenant through the DISPATCHING router and skips
+    // any handle that is not `durable_object`, so the tenant needs the roster
+    // row production onboarding writes (`tenant_databases`, backend
+    // durable_object, post-cutover) or the sweep silently projects nothing.
+    await seedTenantRosterRows([TENANT]);
     const tenant = tenantObjectDb(TENANT);
     await tenant.batch(
       Array.from({ length: 3 }, (_, index) =>

@@ -21,7 +21,8 @@
  */
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, rawDocument, resetD1 } from "./d1.js";
+import { applySchema, resetD1 } from "./d1.js";
+import { rawTenantDocument } from "./tenant-object.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 import {
   TENANT_A,
@@ -75,7 +76,7 @@ describe("per-tenant D1 projection", () => {
     expect(created.status).toBe(201);
 
     // The document is still the admin surface's record of truth...
-    expect(await rawDocument("projects", "proj_a")).toMatchObject({ tenant_id: TENANT_A });
+    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).toMatchObject({ tenant_id: TENANT_A });
     // ...and the typed row now exists, in tenant A's database ONLY. The second
     // assertion is what makes this a ROUTER test rather than a "some database
     // got written" test: a router that ignored its argument would satisfy the
@@ -168,7 +169,7 @@ describe("reference-guarded deletes (@ferrogate/storage §1.5.7)", () => {
 
     // BOTH rows survive. A 409 that still deleted one leg would be worse than a
     // 200 that deleted both.
-    expect(await rawDocument("projects", "proj_a")).not.toBeNull();
+    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).not.toBeNull();
     expect(await projectIds(tenantDbA())).toEqual(["proj_a"]);
   });
 
@@ -208,7 +209,7 @@ describe("reference-guarded deletes (@ferrogate/storage §1.5.7)", () => {
     });
     expect(projectDelete.status).toBe(200);
     expect(await projectIds(tenantDbA())).toEqual([]);
-    expect(await rawDocument("projects", "proj_a")).toBeNull();
+    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).toBeNull();
   });
 
   it("does NOT let another tenant's workspace block the delete", async () => {
@@ -289,7 +290,7 @@ describe("tenant database resolution", () => {
       headers: bearer(A_KEY),
     });
     expect(deleted.status).toBe(200);
-    expect(await rawDocument("projects", "proj_a")).toBeNull();
+    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).toBeNull();
   });
 
   it("deletes a document that predates the projection, without inventing a 404", async () => {
@@ -304,7 +305,7 @@ describe("tenant database resolution", () => {
       headers: bearer(A_KEY),
     });
     expect(deleted.status).toBe(200);
-    expect(await rawDocument("projects", "proj_a")).toBeNull();
+    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).toBeNull();
   });
 });
 

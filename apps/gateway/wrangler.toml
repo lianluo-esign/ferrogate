@@ -1425,8 +1425,28 @@ class_name = "ShadowBudgetDurableObject"
 name = "TENANT_DATA"
 class_name = "TenantDataObject"
 
+# ---------------------------------------------------------------------------
+# ControlDataObject — the control database as ONE SQLite-backed Durable Object
+# (Zero-D1 S1, #877, docs/design/zero-d1-control-object-2026-08.md).
+#
+# A SINGLETON: everything addresses `idFromName("control")` and the object
+# refuses any other address. It is the future home of everything
+# `CONTROL_DB`/`BILLING_DB` hold today; the D1 stanzas remain until slice S5
+# completes the backfill and cutover.
+#
+# S1 ships the CLASS — the `src/worker.ts` re-export and the
+# `[exports.ControlDataObject]` lifecycle declaration below, so the class is
+# BORN with `storage = "sqlite"` (immutable once a namespace exists;
+# converting later is a tombstone and total data loss). There is deliberately
+# NO `[[durable_objects.bindings]] CONTROL_DATA` stanza yet: this file's rule
+# is "declare what the Worker reads, and nothing else", and the first read
+# lands with slice S2, which adds the binding in the same diff. The other
+# Workers then bind it cross-script (`script_name = "ferrogate-gateway"`) in
+# S3/S4, exactly as `apps/mcp` does for RATE_LIMIT.
+# ---------------------------------------------------------------------------
+
 # `exports` is mutually exclusive with the legacy `migrations` array. Keep all
-# four classes defined by this Worker in one declarative lifecycle map so a
+# five classes defined by this Worker in one declarative lifecycle map so a
 # deploy cannot accidentally leave one class on the old path.
 [exports.RateLimiterDurableObject]
 type = "durable-object"
@@ -1441,6 +1461,10 @@ type = "durable-object"
 storage = "sqlite"
 
 [exports.TenantDataObject]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ControlDataObject]
 type = "durable-object"
 storage = "sqlite"
 

@@ -350,7 +350,11 @@ const SidebarInset = React.forwardRef<
     <main
       ref={ref}
       className={cn(
-        "relative flex w-full flex-1 flex-col bg-background",
+        // `min-w-0`: as a flex ITEM next to the sidebar, the default
+        // `min-width: auto` lets a wide descendant (a dense table's min-content
+        // width) widen the whole document instead of scrolling inside its own
+        // `overflow-auto` wrapper — horizontal page overflow at tablet widths.
+        "relative flex w-full min-w-0 flex-1 flex-col bg-background",
         "md:peer-data-[variant=inset]:m-2 md:peer-data-[state=collapsed]:peer-data-[variant=inset]:ml-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow",
         className
       )}

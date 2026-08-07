@@ -14,10 +14,12 @@
  * exactly why this fixture has to exist: without an entry module there is no
  * place for workerd to look the class up, and the suite cannot boot at all.
  */
+import { ControlDataObject } from "../../src/control-data-object.js";
+import { CONTROL_MIGRATIONS, type ControlMigration } from "../../src/control-schema-sql.js";
 import { TenantDataObject, sqlStatements } from "../../src/tenant-data-object.js";
 import { TENANT_MIGRATIONS, type TenantMigration } from "../../src/tenant-schema-sql.js";
 
-export { TenantDataObject };
+export { TenantDataObject, ControlDataObject };
 
 /**
  * A migration set whose SECOND file fails halfway through.
@@ -87,6 +89,45 @@ const FAULTY_MIGRATIONS: readonly TenantMigration[] = [
 export class FaultyTenantDataObject extends TenantDataObject {
   protected override migrations(): readonly TenantMigration[] {
     return FAULTY_MIGRATIONS;
+  }
+}
+
+/**
+ * The control applier's fault-injection twin, with the same three properties
+ * as the tenant fixture: file 1 is the REAL `0001_init_control` (so the
+ * witness table `api_key_directory` genuinely exists at that point), file 2
+ * fails at EXECUTION on a duplicate `ADD COLUMN` after a valid CREATE that
+ * must roll back with it, and file 3 exists and must never run.
+ */
+const FAULTY_CONTROL_MIGRATIONS: readonly ControlMigration[] = [
+  {
+    ordinal: 1,
+    name: "0001_init_control",
+    sql: CONTROL_MIGRATIONS[0]?.sql ?? "",
+  },
+  {
+    ordinal: 2,
+    name: "0002_faulty_control",
+    sql: [
+      "-- Valid, and must be rolled back with the statement below it.",
+      "CREATE TABLE IF NOT EXISTS faulty_control_partial (id TEXT PRIMARY KEY);",
+      "",
+      "-- `duplicate column name: id` — fails at execution, not at parse.",
+      "ALTER TABLE faulty_control_partial ADD COLUMN id TEXT;",
+      "",
+    ].join("\n"),
+  },
+  {
+    ordinal: 3,
+    name: "0003_never_runs_control",
+    sql: "CREATE TABLE IF NOT EXISTS never_runs_control (id TEXT PRIMARY KEY);\n",
+  },
+];
+
+/** Bound as `FAULTY_CONTROL_DATA`; overrides the METHOD, same as the tenant twin. */
+export class FaultyControlDataObject extends ControlDataObject {
+  protected override migrations(): readonly ControlMigration[] {
+    return FAULTY_CONTROL_MIGRATIONS;
   }
 }
 

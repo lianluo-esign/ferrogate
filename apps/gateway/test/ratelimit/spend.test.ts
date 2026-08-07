@@ -52,7 +52,7 @@ import {
   periodMonthFromUnix,
   usageMonthlyRollupId,
 } from "@ferrogate/storage";
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   NO_SPEND_SOURCE,
   currentPeriodMonth,
@@ -142,6 +142,40 @@ function tenantWalletDb(tenantId: string): D1Database {
   ).databaseFor(tenantId);
 }
 
+/**
+ * {@link seedRollup}, but into the tenant's OWN object — what `SELF` reads.
+ *
+ * Since the Zero-D1 cutover the deployed budget leg no longer reads `env.DB`:
+ * `defaultSpendSource` (src/ratelimit/middleware.ts) resolves
+ * `usage_monthly_rollups` through `tenantDatabaseOf(c).handle()`, i.e. the
+ * tenant's Durable Object, the same handle the wallet leg reads. The module
+ * comment above about the two legs reading two databases describes the pre-cutover
+ * posture; the deployed-app cases below seed the object for BOTH legs now.
+ */
+async function seedRoutedRollup(
+  tenantId: string,
+  scopeType: string,
+  scopeId: string,
+  costUsd: number,
+  periodMonth: string = MONTH,
+): Promise<void> {
+  await tenantWalletDb(tenantId)
+    .prepare(
+      "INSERT OR REPLACE INTO usage_monthly_rollups " +
+        "(id, period_month, scope_type, scope_id, cost_usd, updated_at_unix) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      usageMonthlyRollupId(periodMonth, scopeType as "tenant", scopeId),
+      periodMonth,
+      scopeType,
+      scopeId,
+      costUsd,
+      NOW,
+    )
+    .run();
+}
+
 /** {@link seedWallet}, but into the tenant's OWN object — what `SELF` reads. */
 async function seedRoutedWallet(tenantId: string, balanceCredits: number): Promise<void> {
   await tenantWalletDb(tenantId)
@@ -194,6 +228,20 @@ interface ErrorEnvelope {
   readonly error: { readonly code: string; readonly message: string; readonly type: string };
 }
 
+beforeAll(async () => {
+  // `test/setup-d1.ts` seeds the fixture tenants' roster rows but leaves
+  // `migration_state` at its schema DEFAULT — 'shared', a PRE-cutover state,
+  // which makes the dispatching router serve them from the legacy shared
+  // `env.DB`. The deployed-app cases below assert the post-cutover posture
+  // (the tenant's own object is the authority), so the cutover is recorded.
+  await controlDb
+    .prepare(
+      "UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id IN (?, ?)",
+    )
+    .bind("tenant_a", "tenant_b")
+    .run();
+});
+
 beforeEach(async () => {
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM wallets").run();
@@ -208,6 +256,7 @@ beforeEach(async () => {
     const routed = tenantWalletDb(tenantId);
     await routed.prepare("DELETE FROM wallet_reservations").run();
     await routed.prepare("DELETE FROM wallets").run();
+    await routed.prepare("DELETE FROM usage_monthly_rollups").run();
   }
 });
 
@@ -385,7 +434,7 @@ describe("currentPeriodMonth", () => {
 describe("the deployed app: step 2 — monthly budget", () => {
   test("under budget the request is served", async () => {
     await seedPolicy("tenant", "tenant_a", 10);
-    await seedRollup("tenant", "tenant_a", 1, currentPeriodMonth());
+    await seedRoutedRollup("tenant_a", "tenant", "tenant_a", 1, currentPeriodMonth());
     const response = await get(TENANT_A_KEY);
     expect(response.status).toBe(200);
   });
@@ -393,7 +442,7 @@ describe("the deployed app: step 2 — monthly budget", () => {
   test("spend AT the cap is refused — 429 monthly_budget_exceeded", async () => {
     await seedPolicy("tenant", "tenant_a", 10);
     // Rust refuses on `spent >= budget`, so exactly-at-cap denies.
-    await seedRollup("tenant", "tenant_a", 10, currentPeriodMonth());
+    await seedRoutedRollup("tenant_a", "tenant", "tenant_a", 10, currentPeriodMonth());
 
     const response = await get(TENANT_A_KEY);
     expect(response.status).toBe(429);
@@ -409,18 +458,18 @@ describe("the deployed app: step 2 — monthly budget", () => {
   test("the budget is charged to the WINNING scope, not the api key", async () => {
     // A tenant-scope budget with tenant-scope spend denies…
     await seedPolicy("tenant", "tenant_a", 5);
-    await seedRollup("tenant", "tenant_a", 6, currentPeriodMonth());
+    await seedRoutedRollup("tenant_a", "tenant", "tenant_a", 6, currentPeriodMonth());
     expect((await get(TENANT_A_KEY)).status).toBe(429);
 
     // …while the same spend recorded at the KEY scope does not, because the
     // tenant budget is measured against the tenant's aggregate rollup.
-    await db.prepare("DELETE FROM usage_monthly_rollups").run();
-    await seedRollup("key", "key_unscoped", 6, currentPeriodMonth());
+    await tenantWalletDb("tenant_a").prepare("DELETE FROM usage_monthly_rollups").run();
+    await seedRoutedRollup("tenant_a", "key", "key_unscoped", 6, currentPeriodMonth());
     expect((await get(TENANT_A_KEY)).status).toBe(200);
   });
 
   test("spend without any budget policy never refuses", async () => {
-    await seedRollup("tenant", "tenant_a", 1_000_000, currentPeriodMonth());
+    await seedRoutedRollup("tenant_a", "tenant", "tenant_a", 1_000_000, currentPeriodMonth());
     expect((await get(TENANT_A_KEY)).status).toBe(200);
   });
 });
@@ -504,7 +553,7 @@ describe("the deployed app: ordering and failure posture", () => {
       )
       .bind("tenant:tenant_a", "tenant", "tenant_a", 1)
       .run();
-    await seedRollup("tenant", "tenant_a", 500, currentPeriodMonth());
+    await seedRoutedRollup("tenant_a", "tenant", "tenant_a", 500, currentPeriodMonth());
     await seedRoutedWallet("tenant_a", 0);
 
     const response = await get(TENANT_A_KEY);
@@ -515,7 +564,7 @@ describe("the deployed app: ordering and failure posture", () => {
 
   test("budget is refused BEFORE the wallet, matching finalize_auth's order", async () => {
     await seedPolicy("tenant", "tenant_a", 1);
-    await seedRollup("tenant", "tenant_a", 2, currentPeriodMonth());
+    await seedRoutedRollup("tenant_a", "tenant", "tenant_a", 2, currentPeriodMonth());
     await seedRoutedWallet("tenant_a", 0);
     const body = (await (await get(TENANT_A_KEY)).json()) as ErrorEnvelope;
     expect(body.error.code).toBe("monthly_budget_exceeded");

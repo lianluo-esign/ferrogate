@@ -43,7 +43,8 @@
  */
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, rawDocument, resetD1 } from "./d1.js";
+import { applySchema, resetD1 } from "./d1.js";
+import { rawTenantDocument } from "./tenant-object.js";
 import { BASE, arm, bearer, jsonRequest, tenantKey } from "./harness.js";
 
 const TENANT = "tenant_a";
@@ -104,7 +105,7 @@ describe("site-domain verification rate limit (#576)", () => {
 
   it("reserves the slot BEFORE the resolver is reached", async () => {
     await bindAndIssueChallenge();
-    const minted = await rawDocument("site-domain-verifications", VERIFICATION_ID);
+    const minted = await rawTenantDocument(TENANT, "site-domain-verifications", VERIFICATION_ID);
     // Minting a challenge is not an attempt: the slot must still be free.
     expect(minted?.last_checked_at_unix ?? null).toBeNull();
 
@@ -113,21 +114,21 @@ describe("site-domain verification rate limit (#576)", () => {
     // successful lookup is how a caller loops on an unreachable resolver for
     // free.
     expect((await verify()).status).toBe(503);
-    const after = await rawDocument("site-domain-verifications", VERIFICATION_ID);
+    const after = await rawTenantDocument(TENANT, "site-domain-verifications", VERIFICATION_ID);
     expect(typeof after?.last_checked_at_unix).toBe("number");
   });
 
   it("writes NOTHING for a refused attempt", async () => {
     await bindAndIssueChallenge();
     await verify();
-    const held = await rawDocument("site-domain-verifications", VERIFICATION_ID);
+    const held = await rawTenantDocument(TENANT, "site-domain-verifications", VERIFICATION_ID);
 
     expect((await verify()).status).toBe(429);
     // A refusal that still moved `last_checked_at_unix` would extend the
     // cooldown on every rejected retry — a caller hammering the endpoint would
     // lock itself out for longer and longer, which is not the limit #576
     // specifies.
-    const afterRefusal = await rawDocument("site-domain-verifications", VERIFICATION_ID);
+    const afterRefusal = await rawTenantDocument(TENANT, "site-domain-verifications", VERIFICATION_ID);
     expect(afterRefusal).toEqual(held);
   });
 

@@ -55,7 +55,7 @@ import {
   storedAssetAudioObjects,
   workersAiDispatcher,
 } from "../../src/inference/index.js";
-import { tenantObjectDb } from "../tenant-object.js";
+import { seedTenantRosterRows, tenantObjectDb } from "../tenant-object.js";
 import { ALL_ROUTES, errorBody, harness, tenantCaller } from "./fixtures.js";
 
 const BASE = "https://gw.test";
@@ -465,11 +465,16 @@ describe("the deployed Worker resolves a file_ref from its own bindings", () => 
   const ORIGINAL: Record<string, unknown> = {};
   const mutable = env as unknown as Record<string, unknown>;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     for (const [name, value] of Object.entries(OVERRIDES)) {
       ORIGINAL[name] = mutable[name];
       mutable[name] = value;
     }
+    // Roster rows for the audio tenants: the deployed Worker routes every
+    // authenticated request through the dispatching tenant router, and a tenant
+    // absent from `tenant_databases` falls to the native-binding arm — a 503
+    // before the audio handler is ever reached.
+    await seedTenantRosterRows([TENANT, OTHER_TENANT]);
   });
   afterAll(() => {
     for (const [name, value] of Object.entries(ORIGINAL)) {

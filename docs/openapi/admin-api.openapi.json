@@ -15824,6 +15824,278 @@
         }
       }
     },
+    "/v1/batches": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "get": {
+        "operationId": "listBatches",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "List OpenAI-compatible batches.",
+        "description": "Lists the tenant's batch jobs (#698, slice 1: API surface and job-state machine; the executor is a follow-up slice). Cursor pagination over batch ids.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.read"
+          },
+          "rbac_action": null
+        },
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^batch_[A-Za-z0-9_-]+$"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List OpenAI-compatible batches.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createBatch",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Create an OpenAI-compatible batch job.",
+        "description": "Validates the referenced input file (JSONL of per-line requests against a supported endpoint) and creates the batch in `validating`. `completion_window` must be `24h`.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "input_file_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "endpoint": {
+                    "type": "string",
+                    "enum": [
+                      "/v1/chat/completions",
+                      "/v1/embeddings",
+                      "/v1/completions"
+                    ]
+                  },
+                  "completion_window": {
+                    "type": "string",
+                    "const": "24h"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "input_file_id",
+                  "endpoint",
+                  "completion_window"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The created batch, in `validating`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/batches/{batch_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "batch_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^batch_[A-Za-z0-9_-]+$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "retrieveBatch",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Retrieve one batch job.",
+        "description": "Answers the batch's current state-machine position; 404 for a batch the caller's tenant does not own.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.read"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The batch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/batches/{batch_id}/cancel": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        },
+        {
+          "name": "batch_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^batch_[A-Za-z0-9_-]+$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "cancelBatch",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Cancel a batch job.",
+        "description": "Moves a cancellable batch to `cancelling`/`cancelled`; cancelling an already-cancelled batch is idempotent and answers the current object.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The batch after the cancel transition.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/v1/assets/withheld": {
       "parameters": [
         {
@@ -34586,16 +34858,25 @@
         "properties": {
           "mode": {
             "type": "string",
-            "enum": ["auto", "explicit", "off"],
+            "enum": [
+              "auto",
+              "explicit",
+              "off"
+            ],
             "description": "`auto` — best-effort caching, never refused. `explicit` — a contract to place a cache breakpoint at the static prefix for `ttl`. `off` — a contract to not write this prompt into a provider prompt cache.\n\nRefusal: `auto` is never refused. `explicit` is refused by families without per-request breakpoints (OpenAI-compatible, Azure OpenAI, Gemini, Vertex, Workers AI). `off` is refused by families whose caching cannot be disabled per request (OpenAI-compatible, Azure OpenAI, Gemini, Vertex)."
           },
           "ttl": {
             "type": "string",
-            "enum": ["5m", "1h"],
+            "enum": [
+              "5m",
+              "1h"
+            ],
             "description": "Cache lifetime. Only meaningful with `mode: \"explicit\"`. Defaults to `\"5m\"` when omitted with `mode: \"explicit\"`. Rejected as invalid_request on any other mode. Bedrock Converse refuses `\"1h\"` (no selectable lifetime)."
           }
         },
-        "required": ["mode"],
+        "required": [
+          "mode"
+        ],
         "additionalProperties": false
       },
       "AiRequest": {
@@ -36669,6 +36950,171 @@
           }
         },
         "additionalProperties": false,
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ]
+      },
+      "Batch": {
+        "type": "object",
+        "description": "The OpenAI-compatible batch object (#698). Timestamps are unix seconds; nullable timestamps are null until their state is reached.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^batch_[A-Za-z0-9_-]+$"
+          },
+          "object": {
+            "type": "string",
+            "const": "batch"
+          },
+          "endpoint": {
+            "type": "string",
+            "enum": [
+              "/v1/chat/completions",
+              "/v1/embeddings",
+              "/v1/completions"
+            ]
+          },
+          "errors": {
+            "type": "null"
+          },
+          "input_file_id": {
+            "type": "string"
+          },
+          "completion_window": {
+            "type": "string",
+            "const": "24h"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "validating",
+              "failed",
+              "in_progress",
+              "finalizing",
+              "completed",
+              "expired",
+              "cancelling",
+              "cancelled"
+            ]
+          },
+          "output_file_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_file_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "in_progress_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "finalizing_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "completed_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "failed_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expired_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cancelling_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cancelled_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "request_counts": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "completed": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "total",
+              "completed",
+              "failed"
+            ],
+            "additionalProperties": false
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "endpoint",
+          "input_file_id",
+          "completion_window",
+          "status",
+          "created_at",
+          "expires_at",
+          "request_counts"
+        ]
+      },
+      "BatchListResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Batch"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        },
         "required": [
           "object",
           "data",

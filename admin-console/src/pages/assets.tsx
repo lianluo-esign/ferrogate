@@ -700,12 +700,21 @@ function AssetDetailDialog({
                     <div className="overflow-x-auto rounded-md border">
                       <Table>
                         <TableHeader>
+                          {/* Responsive contract (#336/#344): below lg the
+                              dialog is viewport-wide, so the identity columns
+                              and the lifecycle ACTIONS must fit without a
+                              horizontal scroll; the density columns (pull
+                              reference, timestamps) are >=lg only. */}
                           <TableRow>
                             <TableHead>{t("page.assets.col.channel")}</TableHead>
                             <TableHead>{t("page.assets.col.version")}</TableHead>
-                            <TableHead>{t("page.assets.col.reference")}</TableHead>
-                            <TableHead>{t("page.assets.col.updated")}</TableHead>
-                            <TableHead className="w-24" />
+                            <TableHead className="hidden lg:table-cell">
+                              {t("page.assets.col.reference")}
+                            </TableHead>
+                            <TableHead className="hidden lg:table-cell">
+                              {t("page.assets.col.updated")}
+                            </TableHead>
+                            <TableHead className="lg:w-24" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -724,7 +733,7 @@ function AssetDetailDialog({
                                 <TableCell className="font-mono text-xs">
                                   {channel.version}
                                 </TableCell>
-                                <TableCell>
+                                <TableCell className="hidden lg:table-cell">
                                   <TruncatedCopyable
                                     prefixLength={28}
                                     label={t("page.assets.reference.pullLabel", {
@@ -737,7 +746,7 @@ function AssetDetailDialog({
                                     )}
                                   />
                                 </TableCell>
-                                <TableCell className="text-xs">
+                                <TableCell className="hidden text-xs lg:table-cell">
                                   {format.date(channel.updated_at_unix * 1000, {
                                     dateStyle: "medium",
                                     timeStyle: "short",
@@ -784,15 +793,29 @@ function AssetDetailDialog({
                     <div className="overflow-x-auto rounded-md border">
                       <Table>
                         <TableHeader>
+                          {/* Same responsive contract as the channels table:
+                              version/state/variant identify the row and the
+                              actions column carries the lifecycle operations
+                              (download/yank/delete), so those must sit within
+                              a mobile viewport; hash/size/storage/reference
+                              density is >=lg only. */}
                           <TableRow>
                             <TableHead>{t("page.assets.col.version")}</TableHead>
                             <TableHead>{t("page.assets.col.state")}</TableHead>
                             <TableHead>{t("page.assets.col.variant")}</TableHead>
-                            <TableHead>{t("page.assets.col.contentHash")}</TableHead>
-                            <TableHead>{t("page.assets.col.size")}</TableHead>
-                            <TableHead>{t("page.assets.col.storage")}</TableHead>
-                            <TableHead>{t("page.assets.col.reference")}</TableHead>
-                            <TableHead className="w-56" />
+                            <TableHead className="hidden lg:table-cell">
+                              {t("page.assets.col.contentHash")}
+                            </TableHead>
+                            <TableHead className="hidden lg:table-cell">
+                              {t("page.assets.col.size")}
+                            </TableHead>
+                            <TableHead className="hidden lg:table-cell">
+                              {t("page.assets.col.storage")}
+                            </TableHead>
+                            <TableHead className="hidden lg:table-cell">
+                              {t("page.assets.col.reference")}
+                            </TableHead>
+                            <TableHead className="lg:w-56" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -856,16 +879,18 @@ function AssetDetailDialog({
                                       ? t("page.assets.variant.default")
                                       : variant.variant}
                                   </TableCell>
-                                  <TableCell className="font-mono text-xs">
+                                  <TableCell className="hidden font-mono text-xs lg:table-cell">
                                     {shortHash(variant.content_hash)}
                                   </TableCell>
-                                  <TableCell>{format.bytes(variant.size_bytes)}</TableCell>
-                                  <TableCell>
+                                  <TableCell className="hidden lg:table-cell">
+                                    {format.bytes(variant.size_bytes)}
+                                  </TableCell>
+                                  <TableCell className="hidden lg:table-cell">
                                     {variant.storage_backed
                                       ? t("page.assets.storage.bucket")
                                       : t("page.assets.storage.inline")}
                                   </TableCell>
-                                  <TableCell>
+                                  <TableCell className="hidden lg:table-cell">
                                     <TruncatedCopyable
                                       prefixLength={28}
                                       label={t("page.assets.reference.pullLabel", {

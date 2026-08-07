@@ -1,33 +1,13 @@
 /**
- * The REAL `CONTROL_DB` binding with the REAL `0009_online_eval.sql` applied,
- * for the online-evaluation suite.
+ * The REAL `CONTROL_DB` binding for the online-evaluation suite.
  *
- * Same posture as `test/requestlog/harness.ts`: the schema is the DEPLOYED
- * migration read with Vite's `?raw`, never a fixture copy, so a column rename in
- * the migration breaks these tests instead of letting them pass against a
- * private schema no account has.
- *
- * `0009` is MIXED — seven non-idempotent `ALTER TABLE … ADD COLUMN`s on
- * `quota_policies` plus idempotent `CREATE TABLE IF NOT EXISTS`es — and the pool
- * PERSISTS this database under `.wrangler/state` between runs, so the alters get
- * a column-presence guard for exactly the reason `0003` needs one there: a blind
- * re-apply fails the second `vitest run` with "duplicate column name" and every
- * assertion after it reads as a code bug.
+ * The schema — `0009_online_eval.sql` included — is the DEPLOYED directory,
+ * applied whole by `test/setup-d1.ts` via `applyD1Migrations` before every
+ * test file. This harness only locates the binding and resets rows.
  */
 import { env } from "cloudflare:test";
-import onlineEvalSql from "../../../../sql/d1-ts/control/0009_online_eval.sql?raw";
 import { ONLINE_EVAL_REGRESSION_TABLE, ONLINE_EVAL_SCORE_TABLE } from "../../src/evals/index.js";
 import { applyControlMigrations } from "../requestlog/harness.js";
-
-function sqlStatements(migration: string): string[] {
-  return migration
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("--"))
-    .join("\n")
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
-}
 
 /** The live `env.CONTROL_DB` binding. */
 export function controlDb(): D1Database {
@@ -43,30 +23,15 @@ export function controlDb(): D1Database {
   return binding;
 }
 
-let applied = false;
-
+/**
+ * The full control schema — `0009_online_eval.sql` included — is applied by
+ * `test/setup-d1.ts` (`applyD1Migrations` over the whole directory) before
+ * every test file. Kept as an exported no-op so callers need no edit; the
+ * subset-applier it used to be is exactly the shape that rotted (see
+ * `../requestlog/harness.ts`).
+ */
 export async function applyOnlineEvalMigrations(): Promise<void> {
-  if (applied) return;
-  // The EARLIER control migrations come from the request-log harness rather
-  // than being re-listed here. `test/evals/mount.test.ts` drives `gatewayQueue`,
-  // which routes request-log messages too, so this suite needs `request_logs`
-  // to have its `0003` decision columns — and two harnesses applying two
-  // different subsets of the same migration set is how one suite comes to pass
-  // against a schema the other cannot produce.
   await applyControlMigrations();
-  const db = controlDb();
-  const columns = await db.prepare("PRAGMA table_info(quota_policies)").all();
-  const names = new Set(
-    (columns.results as { name?: unknown }[]).map((row) => String(row.name ?? "")),
-  );
-  const statements = sqlStatements(onlineEvalSql).filter(
-    (statement) =>
-      !(names.has("online_eval_enabled") && statement.startsWith("ALTER TABLE quota_policies")),
-  );
-  for (const statement of statements) {
-    await db.prepare(statement).run();
-  }
-  applied = true;
 }
 
 /** Empty both tables, so each test starts from zero rows. */

@@ -2,8 +2,11 @@
  * `D1AssetEntitlements` — the durable `tenant_can_host`.
  *
  * Run against the REAL `CONTROL_DB` binding and the REAL `tenants` / `plans` /
- * `permissions` / `roles` / `tenant_role_bindings` DDL from
- * `sql/d1-ts/control/0001_init_control.sql` (applied by `test/setup-d1.ts`).
+ * `permissions` / `roles` DDL from `sql/d1-ts/control/` (applied by
+ * `test/setup-d1.ts`), plus the REAL per-tenant Durable Object that has been
+ * the authority for `tenant_role_bindings` since #863 renamed the control copy
+ * to `tenant_role_bindings_legacy` (0016). Role grants are seeded through the
+ * privileged tenant-object RPC — the same path the operator projection uses.
  * The only substituted thing is a THROWING database, which is what a live
  * binding cannot be asked to be.
  *
@@ -24,6 +27,7 @@ import {
   configuredEntitlementsFromEnv,
   entitlementsFromEnv,
 } from "../../src/assets/index.js";
+import { tenantObjectPrivilegedBatch, tenantObjectRouter } from "../tenant-object.js";
 
 const bindings = env as unknown as Record<string, unknown>;
 
@@ -40,6 +44,9 @@ function controlDb(): D1Database {
 function durable(fallbackVar?: string): D1AssetEntitlements {
   return new D1AssetEntitlements(controlDb() as unknown as EntitlementsDatabase, {
     fallback: configuredEntitlementsFromEnv({ ASSET_ENTITLEMENTS: fallbackVar }),
+    // Post-#863 the role half reads the TENANT OBJECT's bindings (joined back
+    // to control's shared `roles`), exactly as the deployed `fromEnv` wires it.
+    tenantDatabases: tenantObjectRouter(),
   });
 }
 
@@ -66,8 +73,12 @@ async function seedTenant(id: string, planId: string): Promise<void> {
     .run();
 }
 
+/** Every tenant a test binds `role_host` to — reset() clears their objects. */
+const ROLE_TENANTS = ["tenant_r", "tenant_other", "tenant_roleonly"] as const;
+
 async function grantHostRole(tenantId: string): Promise<void> {
   const db = controlDb();
+  // The permission declaration and the shared role catalog STAY in control.
   await db
     .prepare(
       "INSERT OR REPLACE INTO permissions (id, key, name) VALUES ('perm_host', ?1, 'assets.host')",
@@ -81,25 +92,37 @@ async function grantHostRole(tenantId: string): Promise<void> {
     )
     .bind(JSON.stringify([ASSET_HOST_PERMISSION]))
     .run();
-  await db
-    .prepare(
-      "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) " +
-        "VALUES (?1, ?2, 'role_host')",
-    )
-    .bind(`${tenantId}:role_host`, tenantId)
-    .run();
+  // The BINDING is tenant-authoritative since #863: it lives in the tenant's
+  // Durable Object and ordinary tenant SQL may not write it, so the seed goes
+  // through the privileged operator RPC.
+  await tenantObjectPrivilegedBatch(tenantId, [
+    {
+      sql:
+        "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
+        "VALUES (?, ?, 'role_host', 0)",
+      params: [`${tenantId}:role_host`, tenantId],
+    },
+  ]);
 }
 
 async function reset(): Promise<void> {
   const db = controlDb();
   await db.batch([
-    db.prepare("DELETE FROM tenant_role_bindings"),
     db.prepare("DELETE FROM roles"),
     db.prepare("DELETE FROM permissions"),
     db.prepare("DELETE FROM tenants"),
     // `plans` ships a seeded `free` row in the migration; only test rows go.
     db.prepare("DELETE FROM plans WHERE id LIKE 'plan_%'"),
   ]);
+  // The durable role grants live in each tenant's object now; clear them (and
+  // the one-shot backfill mark, so no test inherits another's projection).
+  for (const tenantId of ROLE_TENANTS) {
+    await tenantObjectPrivilegedBatch(tenantId, [
+      { sql: "DELETE FROM tenant_role_bindings", params: [] },
+      { sql: "DELETE FROM tenant_role_catalog", params: [] },
+      { sql: "DELETE FROM tenant_provisioning_marks", params: [] },
+    ]);
+  }
 }
 
 beforeEach(reset);

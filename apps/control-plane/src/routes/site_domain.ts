@@ -54,7 +54,7 @@ import {
 } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import type { StoreRecord } from "../ports.js";
+import { StoreConflictError, type StoreRecord } from "../ports.js";
 import { adminItem } from "../responses.js";
 import {
   challengeRecordName,
@@ -64,16 +64,20 @@ import {
 } from "../site_domain_txt.js";
 import {
   SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE,
+  SITE_DOMAIN_TABLE,
   claimSiteDomain,
   documentTenantId,
   releaseSiteDomain,
 } from "../store/site_domain.js";
 import {
   type GroupModule,
+  type Handler,
   adminRecordSchema,
   crudGroup,
+  depsOf,
   json,
   pathParam,
+  readJson,
   scopeOf,
 } from "./resource.js";
 
@@ -191,6 +195,59 @@ export const siteDomainRoutes: GroupModule = crudGroup(
     },
   ],
   {
+    /**
+     * The generic create, plus the ONE deterministic refusal the typed claim
+     * makes possible at BIND time.
+     *
+     * The per-tenant DOCUMENT deliberately admits several tenants holding a
+     * PENDING challenge for one hostname (a squatter's unverified binding must
+     * not block the real owner — see `../store/site_domain.ts`). But a
+     * hostname another tenant has already PROVEN is different: its
+     * `site_domains` claim row exists, `verifySiteDomain` could never grant the
+     * newcomer the serving slot, and letting the bind answer 201 would send the
+     * loser off to publish DNS records for a challenge that cannot be redeemed.
+     * First proof wins, and the loser is told at the earliest deterministic
+     * moment.
+     */
+    bindSiteDomain: (async (c) => {
+      const deps = depsOf(c);
+      const scope = scopeOf(c);
+      const body = (await readJson(c, siteDomainSchema)) as Record<string, unknown>;
+      const declared = body.hostname;
+      const hostname =
+        typeof declared === "string" && declared.trim() !== ""
+          ? declared.trim()
+          : crypto.randomUUID();
+
+      const db = deps.controlDatabase;
+      if (db !== null) {
+        const claim = await db
+          .prepare(`SELECT tenant_id FROM ${SITE_DOMAIN_TABLE} WHERE hostname = ?`)
+          .bind(hostname)
+          .first<{ tenant_id: string }>();
+        const requester =
+          scope.kind === "tenant"
+            ? scope.tenantId
+            : typeof body.tenant_id === "string"
+              ? body.tenant_id
+              : null;
+        if (claim !== null && claim.tenant_id !== requester) {
+          throw new HttpError(409, "conflict", SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE);
+        }
+      }
+
+      const record: StoreRecord = { ...body, hostname, id: hostname };
+      try {
+        const stored = await deps.store.create(SITE_DOMAINS, scope, record);
+        return json(c, 201, adminItem("site_domain", stored));
+      } catch (error) {
+        if (error instanceof StoreConflictError) {
+          throw new HttpError(409, "conflict", `site_domain ${hostname} already exists`);
+        }
+        throw error;
+      }
+    }) satisfies Handler,
+
     /**
      * The generic {@link readHandler}, plus the CERTIFICATE (#738's second
      * "Done when" bullet).

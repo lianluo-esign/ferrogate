@@ -50,6 +50,7 @@ import {
   tenantDbA,
   tenantDbB,
 } from "./tenant-db.js";
+import { tenantObjectDb } from "./tenant-object.js";
 
 const OPERATOR = operatorKey.secret;
 
@@ -485,7 +486,7 @@ describe("#790: a refused self-credit moves no money in the TENANT database", ()
 });
 
 describe("the audit trail survives", () => {
-  it("a projected movement still writes its control-database ledger entry", async () => {
+  it("a projected movement still writes its durable ledger document", async () => {
     await seedExhaustedWallet(tenantDbA(), TENANT_A);
     expect((await createWalletDocument(TENANT_A)).status).toBe(201);
     expect((await adjust(TENANT_A, { amount_cents: 500, reason: "top-up" })).status).toBe(200);
@@ -493,11 +494,10 @@ describe("the audit trail survives", () => {
     const entries = await ledgerEntries(TENANT_A);
     expect(entries.length).toBe(1);
     expect(entries[0]).toMatchObject({ kind: "adjustment", amount_cents: 500, reason: "top-up" });
-    // And the control database really has it, not just the response envelope.
-    const row = await db()
-      .prepare(
-        "SELECT COUNT(*) AS n FROM control_plane_resources WHERE resource_kind = 'wallet-ledger'",
-      )
+    // And the durable store really has it, not just the response envelope —
+    // the ledger document lives in the tenant's OWN object post-#861/#863.
+    const row = await tenantObjectDb(TENANT_A)
+      .prepare("SELECT COUNT(*) AS n FROM tenant_resources WHERE resource_kind = 'wallet-ledger'")
       .first<{ n: number }>();
     expect(row?.n).toBe(1);
   });

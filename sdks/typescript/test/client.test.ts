@@ -329,6 +329,13 @@ describe("createAdminClient — the errors it raises", () => {
 
     expect(error).toBeInstanceOf(FerrogateTransportError);
     expect(error.message).toContain("timed out after 20ms");
+    // The deadline rejection and the abort-event dispatch race: the client
+    // calls `controller.abort()` before rejecting, but Node delivers a
+    // composite-signal (`AbortSignal.any`) abort to listeners in a later task
+    // under load, so the rejection can be observed first. One drained tick
+    // keeps the assertion about WHETHER the injected fetch was aborted, not
+    // about which microtask the event landed in.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(aborted).toBe(true);
   });
 

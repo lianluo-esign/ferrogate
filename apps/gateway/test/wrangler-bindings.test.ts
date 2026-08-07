@@ -183,7 +183,7 @@ describe("every Durable Object binding is deployable", () => {
       );
       expect(definition?.get("storage"), `${className} is not SQLite-backed`).toBe("sqlite");
     }
-    expect(exports.size, "the exports map must not be empty or parser-vacuous").toBe(4);
+    expect(exports.size, "the exports map must not be empty or parser-vacuous").toBe(5);
   });
 
   it("binds each namespace under the NAME src/ reads it by", () => {

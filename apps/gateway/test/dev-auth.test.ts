@@ -15,6 +15,7 @@
  * refused. That is the "off by default" property; the rest prove that no single
  * mistake is enough to turn it on.
  */
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import app from "../src/index.js";
 import {
@@ -108,7 +109,19 @@ describe("the development key, once all three conditions hold", () => {
   const ENABLED = { GATEWAY_DEV_AUTH: "true", GATEWAY_DEV_API_KEY: DEV_KEY };
 
   it("authenticates an inference operation", async () => {
-    const res = await withDevKey(ENABLED);
+    // A resolved credential must still get PAST the tenancy resolver, which
+    // since #819 defaults to `durable_object` routing and refuses (503) when
+    // `CONTROL_DB` / `TENANT_DATA` are unbound — bindings `wrangler dev` always
+    // has. So this arm runs with the real bindings plus the dev vars, exactly
+    // the developer's posture. `DB` is deliberately NOT passed: without it the
+    // resolver keeps the pure zero-roster object router, so the ad-hoc
+    // `tenant_local_dev` needs no `tenant_databases` row.
+    const real = env as unknown as Record<string, unknown>;
+    const res = await app.request(
+      `${BASE}/v1/models`,
+      { headers: { authorization: `Bearer ${DEV_KEY}` } },
+      { ...ENABLED, CONTROL_DB: real.CONTROL_DB, TENANT_DATA: real.TENANT_DATA },
+    );
     expect(res.status).toBe(200);
     // No models are configured in this env, so the listing is empty — the point
     // is that the credential resolved, not what it saw.

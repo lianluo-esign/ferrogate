@@ -30,6 +30,7 @@
 import { GATEWAY_ROUTE_MODULES } from "../../../src/index.js";
 import { rateLimitRouteModule } from "../../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../../src/routes/index.js";
+import { tenantDatabase } from "../../../src/tenancy/index.js";
 
 /**
  * Per-credential `request_limit_per_minute` (TOK-12), keyed by api key id.
@@ -41,6 +42,18 @@ const PER_KEY_RPM: Record<string, number | undefined> = {
 };
 
 const { app } = createGatewayApp({
+  // `tenantDatabase()` — and ONLY it — from the deployed chain. Since #819 the
+  // inference route module and the admission ladder read `tenantDatabaseOf(c)`,
+  // which is a deliberate 500 on any Worker that mounts the routes without the
+  // middleware; this harness was such a composition. The FULL deployed
+  // `GATEWAY_MIDDLEWARE` cannot be reused here because it contains its own
+  // `rateLimit()`, which would stack on `rateLimitRouteModule` below and
+  // charge every request twice. The posture stays storage-free via
+  // `GATEWAY_TENANT_DB_ROUTING = "off"` in `harness/wrangler.toml`: the
+  // accessor exists, every wallet/budget/spend arm degrades to its documented
+  // no-storage answer, and the RATE_LIMIT Durable Object stays the only
+  // admission gate — which is what these specs exist to drive.
+  middleware: [tenantDatabase()],
   modules: [
     // FIRST, so it precedes every module route — see `rateLimitRouteModule`.
     rateLimitRouteModule({

@@ -65,18 +65,34 @@ const projects: AdminProject[] = Array.from({ length: 52 }, (_, index) => {
   };
 });
 
-const tenantAccounts: AdminTenantAccount[] = Array.from({ length: 24 }, (_, index) => {
-  const sequence = index + 1;
-  return {
-    id: `tenant-${sequence}`,
-    name: `Tenant ${sequence} operations`,
-    slug: `tenant-${sequence}`,
+const tenantAccounts: AdminTenantAccount[] = [
+  ...Array.from({ length: 24 }, (_, index): AdminTenantAccount => {
+    const sequence = index + 1;
+    return {
+      id: `tenant-${sequence}`,
+      name: `Tenant ${sequence} operations`,
+      slug: `tenant-${sequence}`,
+      status: "active",
+      plan_id: "enterprise",
+      created_at_unix: 1_720_000_000 + index,
+      updated_at_unix: 1_720_086_400 + index,
+    };
+  }),
+  // The SESSION's own tenant must exist in the tenant-accounts universe: pages
+  // that pre-select the signed-in tenant (e.g. the tenant-role binding form)
+  // hydrate it via GET /admin/v1/tenant-accounts/{id}, and a 404 there is a
+  // browser console error the ui-contract harness rightly fails. Appended last
+  // so the paginated "Tenant N operations" fixtures keep their positions.
+  {
+    id: "tenant-e2e",
+    name: "Acme Operations",
+    slug: "acme-operations",
     status: "active",
     plan_id: "enterprise",
-    created_at_unix: 1_720_000_000 + index,
-    updated_at_unix: 1_720_086_400 + index,
-  };
-});
+    created_at_unix: 1_720_000_000,
+    updated_at_unix: 1_720_086_400,
+  },
+];
 
 const permissions: AdminPermission[] = [
   {
@@ -747,6 +763,26 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
         offset,
         limit,
       }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname.startsWith("/admin/v1/workspaces/")) {
+    // The contract's GET /admin/v1/workspaces/{workspace_id} (wrapped under
+    // `workspace`, mirroring AdminWorkspaceMutationResponse): the picker's
+    // `hydrateEntityReference` resolves a selected workspace id to its label
+    // through this detail read, so leaving it unmocked 501s the chip into
+    // "Resolution unavailable".
+    const workspaceId = decodeURIComponent(url.pathname.slice("/admin/v1/workspaces/".length));
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    await route.fulfill({
+      status: workspace ? 200 : 404,
+      contentType: "application/json",
+      body: JSON.stringify(
+        workspace
+          ? { object: "workspace", workspace }
+          : { error: { code: "workspace_not_found", message: "workspace not found" } },
+      ),
     });
     return;
   }

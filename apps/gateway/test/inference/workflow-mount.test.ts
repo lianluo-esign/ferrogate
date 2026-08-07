@@ -88,11 +88,27 @@ const OVERRIDES: Record<string, string> = {
 const ORIGINAL: Record<string, unknown> = {};
 const mutable = env as unknown as Record<string, unknown>;
 
-beforeAll(() => {
+beforeAll(async () => {
   for (const [name, value] of Object.entries(OVERRIDES)) {
     ORIGINAL[name] = mutable[name];
     mutable[name] = value;
   }
+  // `tenant_wf` is not one of `test/setup-d1.ts`'s fixture tenants, and since
+  // durable_object routing became the default the deployed request path reads
+  // the `tenant_databases` roster on every authenticated request — a tenant
+  // with no row is answered `503 quota_resolution_unavailable` before the
+  // workflow gate is ever reached. `migration_state` is stated as `done`
+  // because the column's DDL default is the pre-cutover `shared`, which routes
+  // the deployed dispatch to the legacy shared arm instead of the tenant
+  // object this file seeds through `tenantDb()`. Same explicit form as
+  // `test/assets/wiring.test.ts`.
+  await DB.prepare(
+    "INSERT OR REPLACE INTO tenant_databases " +
+      "(tenant_id, storage_backend, provisioning_status, schema_version, migration_state, migration_epoch) " +
+      "VALUES (?, 'durable_object', 'ready', 1, 'done', 0)",
+  )
+    .bind(TENANT_ID)
+    .run();
 });
 
 afterAll(() => {

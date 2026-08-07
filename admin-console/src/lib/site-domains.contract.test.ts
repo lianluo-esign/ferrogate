@@ -1,142 +1,261 @@
 // Wire-contract drift alarm for the site-domain admin surface (issues #345,
-// #488), modelled on overview.contract.test.ts (#343).
+// #488, #738), modelled on overview.contract.test.ts (#343).
 //
 // Why this exists: the generated client declares `AdminSiteDomain.serving` and
-// `.verification_state` OPTIONAL, while the gateway serializes both on EVERY
-// binding it returns — `admin_site_domain()` sets them unconditionally and the
-// struct carries no `skip_serializing_if`. `tsc` therefore accepts a fixture
-// that omits them, i.e. a wire message the gateway never sends. That is exactly
-// how the console's domain tests stayed green while the drawer rendered a
-// hostname the gateway REFUSES identically to a live one: the fixtures simply
-// never mentioned liveness, so nothing could observe that the console dropped
-// it. Making the console's own fixtures `Required` closes the console half; this
-// closes the server half — if the gateway renames, retypes, or starts skipping
-// either field, this fails with the diff instead of the console silently
-// printing `Unknown` (or worse) forever.
+// `.verification_state` OPTIONAL, while the server serializes both on every
+// binding it returns. `tsc` therefore accepts a fixture that omits them, i.e. a
+// wire message the server never sends — which is exactly how the console's
+// domain tests stayed green while the drawer rendered a hostname the gateway
+// REFUSES identically to a live one. Making the console's own fixtures
+// `Required` closes the console half; this file pins the CONTRACT half: if the
+// served shape renames, retypes, or drops either liveness field — or any other
+// field the console parses — this fails with the diff instead of the console
+// silently printing `Unknown` (or worse) forever.
 //
-// It reads the SERVER structs directly, so there is no second artifact to
-// forget to update.
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+// RE-ANCHORED (2026-08): this test used to read the Rust server structs
+// (`crates/ferrogate-gateway/src/server/site_domains.rs` +
+// `site_domain_verification.rs`); the Rust tree was deleted on 2026-08-02. The
+// surviving authorities are the shared contract,
+// `docs/openapi/admin-api.openapi.json` (the AdminSiteDomain* schemas, which
+// carry every previously-pinned field), and the TS backend route
+// `apps/control-plane/src/routes/site_domain.ts`. The pins below hold the
+// schemas, field-for-field, with `additionalProperties: false` making each
+// field list exhaustive in BOTH directions.
+//
+// Two deliberate contract-alignment notes, per the re-anchor rules:
+//
+//  * The old "no `skip_serializing_if`" pin has no schema equivalent — Rust's
+//    unconditional serialization became "declared but NOT required" in the
+//    contract (#488 declared the liveness pair optional). That required-list is
+//    pinned exactly below, and the console keeps rendering an absent value as
+//    `Unknown` (src/components/site-domain-liveness.tsx), never as a verdict.
+//  * The #738 detail read (`AdminSiteDomainReadResponse`, GET
+//    /admin/v1/site-domains/{hostname}) replaced the old `acme`/`verification`
+//    posture with `certificate_status` + `certificate`; the bind/verify
+//    mutation responses (`AdminSiteDomainResponse`) still carry `acme` and the
+//    optional `verification` block. Both envelopes are pinned.
 import { describe, expect, it } from "vitest";
-
-// Vitest runs with `admin-console/` as its root, so the gateway sources sit one
-// directory up.
-const GATEWAY = resolve(process.cwd(), "../crates/ferrogate-gateway/src/server");
-const SITE_DOMAINS = resolve(GATEWAY, "site_domains.rs");
-const VERIFICATION = resolve(GATEWAY, "site_domain_verification.rs");
-const STORAGE_STATE = resolve(
-  process.cwd(),
-  "../crates/ferrogate-storage/src/site_domain_verification.rs",
-);
+import {
+  contractOperation,
+  contractSchema,
+  fieldShapes,
+  responseSchemaRef,
+  sortedRequired,
+} from "@/lib/contract-pin";
 
 /**
- * The serialized shapes the console parses. Keys are Rust struct names; values
- * map each serialized field to its Rust type as written.
+ * The serialized shapes the console parses: `field -> descriptor` (see
+ * `fieldShape` in src/lib/contract-pin.ts), plus each schema's exact
+ * `required` list. Keys are the contract schema names — the same names the
+ * deleted Rust structs carried.
  */
-const EXPECTED: Record<string, Record<string, string>> = {
+const EXPECTED: Record<string, { fields: Record<string, string>; required: string[] }> = {
   // src/components/site-domain-liveness.tsx renders `serving` +
   // `verification_state`; site-domains.tsx and static-sites.tsx render the rest.
   AdminSiteDomain: {
-    object: "&'static str",
-    hostname: "String",
-    tenant_id: "String",
-    site: "String",
-    serve_path: "String",
-    verification_state: "&'static str",
-    serving: "bool",
-    created_at_unix: "i64",
-    updated_at_unix: "i64",
+    fields: {
+      object: "const:site_domain",
+      hostname: "string",
+      tenant_id: "string",
+      site: "string",
+      serve_path: "string",
+      // `no_verification` is the binding-level extra state: "no proof record
+      // exists at all" (Rust's `verification.map_or("no_verification", …)`).
+      verification_state:
+        "enum:no_verification|pending_verification|verified|grandfathered|expired",
+      serving: "boolean",
+      created_at_unix: "integer:int64",
+      updated_at_unix: "integer:int64",
+    },
+    required: [
+      "created_at_unix",
+      "hostname",
+      "object",
+      "serve_path",
+      "site",
+      "tenant_id",
+      "updated_at_unix",
+    ],
   },
   AdminSiteDomainAcme: {
-    enabled: "bool",
-    reload_triggered: "bool",
+    fields: {
+      enabled: "boolean",
+      reload_triggered: "boolean",
+    },
+    required: ["enabled", "reload_triggered"],
   },
+  // Bind/verify mutation envelope. `verification` was Rust's
+  // `Option<AdminSiteDomainVerification>`: declared, not required.
   AdminSiteDomainResponse: {
-    object: "&'static str",
-    site_domain: "AdminSiteDomain",
-    acme: "AdminSiteDomainAcme",
-    verification: "Option<AdminSiteDomainVerification>",
+    fields: {
+      object: "const:site_domain",
+      site_domain: "ref:AdminSiteDomain",
+      acme: "ref:AdminSiteDomainAcme",
+      verification: "ref:AdminSiteDomainVerification",
+    },
+    required: ["acme", "object", "site_domain"],
   },
-  // The challenge record the console shows an operator to publish.
+  // The challenge record the console shows an operator to publish. The
+  // `required` split reproduces the Rust field list exactly: every non-Option
+  // field is required, every `Option<…>` field is nullable-and-optional.
   AdminSiteDomainVerification: {
-    object: "&'static str",
-    state: "&'static str",
-    serves: "bool",
-    tenant_id: "String",
-    hostname: "String",
-    site: "String",
-    challenge_record_name: "String",
-    challenge_record_type: "&'static str",
-    challenge_record_value: "String",
-    issued_at_unix: "i64",
-    token_expires_at_unix: "i64",
-    verified_at_unix: "Option<i64>",
-    verification_expires_at_unix: "Option<i64>",
-    last_checked_at_unix: "Option<i64>",
-    last_failure_reason: "Option<String>",
-    attempt_count: "i64",
+    fields: {
+      object: "const:site_domain_verification",
+      state: "enum:pending_verification|verified|grandfathered|expired",
+      serves: "boolean",
+      tenant_id: "string",
+      hostname: "string",
+      site: "string",
+      challenge_record_name: "string",
+      challenge_record_type: "const:TXT",
+      challenge_record_value: "string",
+      issued_at_unix: "integer:int64",
+      token_expires_at_unix: "integer:int64",
+      verified_at_unix: "integer:int64|null",
+      verification_expires_at_unix: "integer:int64|null",
+      last_checked_at_unix: "integer:int64|null",
+      last_failure_reason: "string|null",
+      attempt_count: "integer:int64",
+    },
+    required: [
+      "attempt_count",
+      "challenge_record_name",
+      "challenge_record_type",
+      "challenge_record_value",
+      "hostname",
+      "issued_at_unix",
+      "object",
+      "serves",
+      "site",
+      "state",
+      "tenant_id",
+      "token_expires_at_unix",
+    ],
+  },
+  // #738: the per-hostname detail read. `certificate_status` + `certificate`
+  // stand where the old read carried the acme/verification posture; the
+  // certificate is REQUIRED here (and deliberately absent from the list read —
+  // N bindings would be N outbound Cloudflare calls per page).
+  AdminSiteDomainReadResponse: {
+    fields: {
+      object: "const:site_domain",
+      site_domain: "ref:AdminSiteDomain",
+      certificate_status: "ref:AdminSiteDomainCertificateStatus",
+      certificate: "ref:AdminSiteDomainCertificate",
+      verification: "ref:AdminSiteDomainVerification",
+    },
+    required: ["certificate", "certificate_status", "object", "site_domain"],
+  },
+  AdminSiteDomainCertificate: {
+    fields: {
+      backend: "string",
+      hostname_status: "string|null",
+      ssl_status: "string|null",
+      detail: "string|null",
+      validation_records: "array<ref:AdminSiteDomainCertificateRecord>|null",
+    },
+    required: ["backend"],
+  },
+  AdminSiteDomainCertificateRecord: {
+    fields: {
+      name: "string",
+      type: "string",
+      value: "string",
+    },
+    required: ["name", "type", "value"],
+  },
+  AdminSiteDomainList: {
+    fields: {
+      object: "const:list",
+      data: "array<ref:AdminSiteDomain>",
+    },
+    required: ["data", "object"],
   },
 };
 
-/** The struct body of `[pub(...)] struct <name> { … }`, verbatim. */
-function structBody(source: string, name: string): string {
-  const match = new RegExp(
-    `(?:pub(?:\\([^)]*\\))? )?struct ${name} \\{\\n([\\s\\S]*?)\\n\\}`,
-    "m",
-  ).exec(source);
-  if (!match) throw new Error(`struct ${name} not found`);
-  return match[1];
-}
-
-/** Extract `field: Type` pairs, ignoring doc comments and attributes. */
-function structFields(source: string, name: string): Record<string, string> {
-  const fields: Record<string, string> = {};
-  for (const line of structBody(source, name).split("\n")) {
-    const field = /^\s*(?:pub(?:\([^)]*\))? )?(\w+): (.+),$/.exec(line);
-    if (field) fields[field[1]] = field[2];
-  }
-  return fields;
-}
-
 describe("site-domain admin wire contract", () => {
-  const siteDomains = readFileSync(SITE_DOMAINS, "utf8");
-  const verification = readFileSync(VERIFICATION, "utf8");
-  const sourceFor = (name: string) =>
-    name === "AdminSiteDomainVerification" ? verification : siteDomains;
-
   for (const [name, expected] of Object.entries(EXPECTED)) {
-    it(`${name} still serializes the fields the console parses`, () => {
-      expect(structFields(sourceFor(name), name)).toEqual(expected);
+    it(`${name} still declares the fields the console parses`, () => {
+      const schema = contractSchema(name);
+      expect(fieldShapes(schema)).toEqual(expected.fields);
+      expect(sortedRequired(schema)).toEqual(expected.required);
+      // Closed schemas: the field lists above are exhaustive in both
+      // directions, so an ADDED field fails here too and must be triaged into
+      // the console (or deliberately excluded) rather than silently ignored.
+      expect(schema.additionalProperties, `${name} additionalProperties`).toBe(false);
     });
   }
 
-  it("emits a binding's liveness unconditionally (no skip_serializing_if)", () => {
-    // The console treats an ABSENT `serving`/`verification_state` as "unknown"
-    // and its fixtures declare both required. Both rest on the gateway never
-    // omitting them; a `skip_serializing_if` here would turn "the gateway did
-    // not tell us" into an indistinguishable, permanently-Unknown row.
-    expect(structBody(siteDomains, "AdminSiteDomain")).not.toContain(
-      "skip_serializing_if",
-    );
+  it("every site-domain operation still answers with the pinned envelopes", () => {
+    expect(
+      responseSchemaRef(contractOperation("/admin/v1/site-domains", "get"), "200"),
+    ).toBe("#/components/schemas/AdminSiteDomainList");
+    expect(
+      responseSchemaRef(contractOperation("/admin/v1/site-domains", "post"), "201"),
+    ).toBe("#/components/schemas/AdminSiteDomainResponse");
+    // #738: the detail read is the ONE surface that carries the certificate.
+    expect(
+      responseSchemaRef(contractOperation("/admin/v1/site-domains/{hostname}", "get"), "200"),
+    ).toBe("#/components/schemas/AdminSiteDomainReadResponse");
+    expect(
+      responseSchemaRef(
+        contractOperation("/admin/v1/site-domains/{hostname}/verify", "post"),
+        "200",
+      ),
+    ).toBe("#/components/schemas/AdminSiteDomainResponse");
+  });
+
+  it("declares a binding's liveness pair on every AdminSiteDomain (optional, rendered Unknown when absent)", () => {
+    // Successor to the Rust "no skip_serializing_if" pin. The contract keeps
+    // `serving`/`verification_state` OPTIONAL (#488 declared them so), which
+    // the console honours by treating an ABSENT value as "unknown" — never as
+    // either verdict (src/components/site-domain-liveness.tsx). What must not
+    // drift: the pair stays DECLARED with these exact names, and never becomes
+    // required silently (fixtures and the tri-state rendering both hang off
+    // optionality). Both halves are pinned by the shape maps above; this spells
+    // the optionality out so a required-list change reads as deliberate.
+    const domain = contractSchema("AdminSiteDomain");
+    expect(Object.keys(domain.properties ?? {})).toContain("serving");
+    expect(Object.keys(domain.properties ?? {})).toContain("verification_state");
+    expect(sortedRequired(domain)).not.toContain("serving");
+    expect(sortedRequired(domain)).not.toContain("verification_state");
   });
 
   it("verification_state ranges over exactly the states the console labels", () => {
-    // src/components/site-domain-liveness.tsx maps every state to a label, plus
-    // `no_verification` for a binding with no proof record at all
-    // (`verification_state: verification.map_or("no_verification", …)`).
-    const state = readFileSync(STORAGE_STATE, "utf8");
-    const wireStates = [...state.matchAll(/=> "([a-z_]+)",\n/g)].map(
-      (match) => match[1],
+    // src/components/site-domain-liveness.tsx maps every state to a label
+    // (exhaustive by construction over the generated union). The binding-level
+    // enum must stay the verification-record enum PLUS `no_verification` —
+    // Rust's `verification.map_or("no_verification", …)`, now a schema fact.
+    const domainStates = contractSchema("AdminSiteDomain").properties?.verification_state?.enum;
+    const recordStates = contractSchema("AdminSiteDomainVerification").properties?.state?.enum;
+    expect(new Set(recordStates)).toEqual(
+      new Set(["pending_verification", "verified", "grandfathered", "expired"]),
     );
-    expect(new Set(wireStates)).toEqual(
+    expect(new Set(domainStates)).toEqual(new Set([...(recordStates ?? []), "no_verification"]));
+  });
+
+  it("certificate_status ranges over exactly the states the console classifies (#738)", () => {
+    // `livenessOf` (src/pages/static-sites.tsx) folds this enum into the ACME
+    // tri-state: `unconfigured`/`unknown`/`unavailable` mean "cannot know",
+    // `active`/`issued_not_routing` mean "certificate is live", the rest mean
+    // "not working yet, with a named next action". A renamed or added value
+    // must be re-triaged there, so the whole enum is pinned.
+    const status = contractSchema("AdminSiteDomainCertificateStatus");
+    expect(new Set(status.enum)).toEqual(
       new Set([
-        "pending_verification",
-        "verified",
-        "grandfathered",
+        "unconfigured",
+        "not_provisioned",
+        "unavailable",
+        "pending_validation",
+        "provisioning",
+        "issued_not_routing",
+        "active",
+        "timed_out",
         "expired",
+        "blocked",
+        "inactive",
+        "unknown",
       ]),
     );
-    expect(siteDomains).toContain('verification.map_or("no_verification"');
   });
 });

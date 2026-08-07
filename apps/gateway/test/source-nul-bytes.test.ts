@@ -35,7 +35,8 @@
  * So the scan below sweeps seven trees whole: `apps/`, `packages/`, `tools/`,
  * `sdks/`, `admin-console/`, `tests/` and `e2e/`. Each uses a whole-tree glob
  * (star-star-slash-star) rather than guessing internal src/test layout, because
- * sdks/python/ has no src/ dir, tools/openapi-client-smoke/ has no test/ dir,
+ * sdks/python/ has no src/ dir, tools/sdk-packaging/ is a single root-level
+ * check.mjs with no src/ or test/ dir at all,
  * and admin-console/ has scripts/, eslint-rules/ and root-level config files
  * outside src/. Dotfile companions (star-star-slash-dot-star) are added per
  * tree because Vite's import.meta.glob skips them by default. Build and cache
@@ -146,9 +147,9 @@ const ALL_PACKAGE_PATHS = import.meta.glob(
   { query: "?raw", import: "default", eager: true },
 );
 
-// tools/ — the tooling tree, scanned whole. tools/openapi-client-smoke/ has
-// no test/ dir and tools/generated-clients/ has root-level .mjs scripts, so
-// a src/test-guessing glob would miss them.
+// tools/ — the tooling tree, scanned whole. tools/sdk-packaging/ is a single
+// root-level check.mjs and tools/generated-clients/ has root-level .mjs
+// scripts, so a src/test-guessing glob would miss them.
 const ALL_TOOL_PATHS = import.meta.glob(
   [
     "../../../tools/**/*",
@@ -357,10 +358,14 @@ describe("source hygiene", () => {
     const members = [
       ...new Set(names.map((k) => extractMember(k, "tools"))),
     ].sort();
+    // `openapi-client-smoke` was retired and `sdk-packaging` (a single
+    // root-level check.mjs) took its place in the tree — re-derived from the
+    // committed tools/ directory, which today holds exactly these three
+    // members across 23 tracked files.
     expect(members).toEqual([
       "generated-clients",
-      "openapi-client-smoke",
       "sdk-conformance",
+      "sdk-packaging",
     ]);
   });
 

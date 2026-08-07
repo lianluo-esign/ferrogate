@@ -29,7 +29,7 @@
 import { SELF, env } from "cloudflare:test";
 import { QuotaScopeSelector } from "@ferrogate/policy";
 import { periodMonthFromUnix, usageMonthlyRollupId } from "@ferrogate/storage";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { resetSharedApiKeyCache } from "../../src/keys/index.js";
 import {
   DEFAULT_BUDGET_HOLD_USD,
@@ -38,8 +38,8 @@ import {
   limiterForEnv,
 } from "../../src/ratelimit/index.js";
 import { resetApiKeysTable, seedApiKey, testSecret } from "../keys/seed.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
-const db = (env as unknown as { DB: D1Database }).DB;
 const controlDb = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
 const vars = env as unknown as Record<string, string | undefined>;
 
@@ -58,8 +58,14 @@ interface ErrorEnvelope {
   readonly error: { readonly code: string; readonly message: string; readonly type: string };
 }
 
+/**
+ * The rollup rows live in the TENANT'S OWN Durable Object: since the Zero-D1
+ * cutover `defaultSpendSource` (src/ratelimit/middleware.ts) reads
+ * `usage_monthly_rollups` through `tenantDatabaseOf(c).handle()`, so a row
+ * seeded into the shared `env.DB` is one the deployed Worker never sees.
+ */
 async function seedRollup(scopeType: string, scopeId: string, costUsd: number): Promise<void> {
-  await db
+  await tenantObjectDb(ORG)
     .prepare(
       "INSERT OR REPLACE INTO usage_monthly_rollups " +
         "(id, period_month, scope_type, scope_id, cost_usd, updated_at_unix) VALUES (?, ?, ?, ?, ?, ?)",
@@ -108,11 +114,31 @@ async function get(secret: string): Promise<Response> {
 
 const SAVED_VARS = new Map<string, string | undefined>();
 
+beforeAll(async () => {
+  // `test/setup-d1.ts` seeds roster rows only for the `[vars]` fixture tenants;
+  // `tenant_hb` is this file's own. Without a `tenant_databases` row the
+  // dispatching router's fallback arm answers `not_found` and every
+  // authenticated request is 503 `quota_resolution_unavailable`.
+  // `migration_state = 'done'` is required: the column DEFAULTs to 'shared'
+  // (pre-cutover), which routes the tenant to the legacy shared `env.DB`
+  // instead of its object.
+  await controlDb
+    .prepare(
+      "INSERT OR REPLACE INTO tenant_databases " +
+        "(tenant_id, storage_backend, provisioning_status, migration_state) " +
+        "VALUES (?, 'durable_object', 'ready', 'done')",
+    )
+    .bind(ORG)
+    .run();
+});
+
 beforeEach(async () => {
   SAVED_VARS.set("GATEWAY_BUDGET_HOLD_USD", vars.GATEWAY_BUDGET_HOLD_USD);
   await resetApiKeysTable();
   resetSharedApiKeyCache();
-  await db.prepare("DELETE FROM usage_monthly_rollups").run();
+  // The object's rows survive this pool's per-test isolated-storage rollback
+  // (`ctx.storage.sql` is not part of it), so the truncation is explicit.
+  await tenantObjectDb(ORG).prepare("DELETE FROM usage_monthly_rollups").run();
   await controlDb.prepare("DELETE FROM quota_policies").run();
 });
 

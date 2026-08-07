@@ -147,6 +147,24 @@ beforeEach(async () => {
   await clearLabels();
   await resetApiKeysTable();
   resetSharedApiKeyCache();
+  // `tenant_other` is not one of `test/setup-d1.ts`'s fixture tenants, and the
+  // durable_object routing default reads the `tenant_databases` roster on every
+  // authenticated request — without this row tenant B's render is answered
+  // `503 quota_resolution_unavailable` and the fence assertions never run.
+  // `migration_state` stated as `done` (the DDL default is the pre-cutover
+  // `shared`), same explicit form as `test/assets/wiring.test.ts`.
+  const control = (env as { CONTROL_DB?: D1Database }).CONTROL_DB;
+  if (control === undefined) {
+    throw new Error("prompt-labels fence tests expect the CONTROL_DB binding");
+  }
+  await control
+    .prepare(
+      "INSERT OR REPLACE INTO tenant_databases " +
+        "(tenant_id, storage_backend, provisioning_status, schema_version, migration_state, migration_epoch) " +
+        "VALUES (?, 'durable_object', 'ready', 1, 'done', 0)",
+    )
+    .bind(TENANT_B)
+    .run();
   secretA = await seedApiKey({
     id: "key_label_tenant_a",
     secret: testSecret("label-tenant-a"),

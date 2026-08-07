@@ -218,15 +218,39 @@ describe("D1UsageLedger — capture", () => {
  * exactly-once.
  */
 describe("D1UsageLedger — the cross-database platform limit", () => {
-  test("a batch may not mix statements from two databases", async () => {
-    // If workerd ever grew a cross-database batch, this expectation flips and
-    // the PORT-TODO in src/d1/usage-d1.ts becomes closable.
-    await expect(
-      tenantDb(TENANT_A).batch([
-        tenantDb(TENANT_A).prepare("DELETE FROM usage_monthly_rollups WHERE id = 'x'"),
-        env.CONTROL_DB.prepare("DELETE FROM billing_events WHERE billing_event_id = 'x'"),
-      ]),
-    ).rejects.toThrow();
+  test("a mixed batch is NOT cross-database: the foreign statement runs against the RECEIVER", async () => {
+    // This pin used to be `.rejects.toThrow()` — miniflare refused a batch
+    // whose statements were prepared on another database, which made the
+    // limit loud. The current workerd/miniflare no longer refuses: it
+    // silently executes EVERY statement of the batch against the receiving
+    // database, whatever database prepared it. That is not a cross-database
+    // batch — it is a quieter failure mode of the same platform limit, so the
+    // PORT-TODO in src/d1/usage-d1.ts stays open and this pin now proves the
+    // mis-execution shape directly: an INSERT prepared on CONTROL_DB lands in
+    // TENANT A's `billing_events` (both schemas define the table), and the
+    // control database never sees the row.
+    const marker = "cross-db-batch-pin";
+    const cleanup = "DELETE FROM billing_events WHERE billing_event_id = ?1";
+    await tenantDb(TENANT_A).prepare(cleanup).bind(marker).run();
+    await env.CONTROL_DB.prepare(cleanup).bind(marker).run();
+
+    await tenantDb(TENANT_A).batch([
+      tenantDb(TENANT_A).prepare("DELETE FROM usage_monthly_rollups WHERE id = 'x'"),
+      env.CONTROL_DB.prepare(
+        // The column list satisfies the TENANT shape of `billing_events`
+        // (tenant 0020: tenant_id/request_id/occurred_at_unix NOT NULL) —
+        // that it must is itself part of the pin, because this statement was
+        // prepared on CONTROL and still executes against the tenant schema.
+        "INSERT INTO billing_events (billing_event_id, tenant_id, request_id, occurred_at_unix, event_json) " +
+          "VALUES (?1, 'tenant_a', 'req-pin', 0, '{}')",
+      ).bind(marker),
+    ]);
+
+    const probe = "SELECT billing_event_id FROM billing_events WHERE billing_event_id = ?1";
+    expect(await tenantDb(TENANT_A).prepare(probe).bind(marker).first()).not.toBeNull();
+    expect(await env.CONTROL_DB.prepare(probe).bind(marker).first()).toBeNull();
+
+    await tenantDb(TENANT_A).prepare(cleanup).bind(marker).run();
   });
 
   test("the accumulate is ADDITIVE, so replaying one settled call double-counts it", async () => {

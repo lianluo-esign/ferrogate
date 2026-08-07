@@ -29,6 +29,11 @@ import {
   depsFromEnv,
 } from "../src/adapters.js";
 import type { AuthContext, RbacDecision } from "../src/ports.js";
+import {
+  seedTenantRosterRows,
+  tenantObjectPrivilegedBatch,
+  tenantObjectRouter,
+} from "./tenant-object.js";
 
 const bindings = env as unknown as Record<string, unknown>;
 
@@ -92,23 +97,36 @@ async function grantRole(
   }
 }
 
-/** Bind a role id to a tenant — the id may name a role row that does not exist. */
+/**
+ * Bind a role id to a tenant — the id may name a role row that does not exist.
+ *
+ * Post-#863 (`sql/d1-ts/control/0016_tenant_configuration_policy_legacy.sql`)
+ * the binding lives in the TENANT OBJECT, not the control database, and the
+ * object refuses ordinary tenant SQL against it — so the seed goes through the
+ * privileged operator RPC, the same path the production backfill uses.
+ */
 async function bindRole(tenantId: string, roleId: string): Promise<void> {
-  await controlDb()
-    .prepare(
-      "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?1, ?2, ?3)",
-    )
-    .bind(`${tenantId}:${roleId}`, tenantId, roleId)
-    .run();
+  await tenantObjectPrivilegedBatch(tenantId, [
+    {
+      sql: "INSERT OR REPLACE INTO tenant_role_bindings (id, tenant_id, role_id) VALUES (?, ?, ?)",
+      params: [`${tenantId}:${roleId}`, tenantId, roleId],
+    },
+  ]);
 }
+
+/** Every tenant a test in this file writes a durable role binding for. */
+const BOUND_TENANTS = ["tenant_a", "tenant_c"] as const;
 
 async function resetRbacTables(): Promise<void> {
   const db = controlDb();
-  await db.batch([
-    db.prepare("DELETE FROM tenant_role_bindings"),
-    db.prepare("DELETE FROM roles"),
-    db.prepare("DELETE FROM permissions"),
-  ]);
+  // The shared catalog stays in CONTROL; the bindings are tenant-object rows.
+  await db.batch([db.prepare("DELETE FROM roles"), db.prepare("DELETE FROM permissions")]);
+  for (const tenantId of BOUND_TENANTS) {
+    await tenantObjectPrivilegedBatch(tenantId, [
+      { sql: "DELETE FROM tenant_role_bindings" },
+      { sql: "DELETE FROM tenant_role_catalog" },
+    ]);
+  }
 }
 
 /** A database that fails every statement, as an outage would. */
@@ -148,7 +166,9 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     await declarePermission(ACTION);
     await grantRole("role_guardrail_reader", [ACTION], "tenant_a");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toEqual({ allowed: true });
   });
 
@@ -157,7 +177,9 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     // a role's `permission_keys` would mint an entitlement nobody declared.
     await grantRole("role_guardrail_reader", [ACTION], "tenant_a");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toMatchObject({
       allowed: false,
       code: "guardrail_rbac_denied",
@@ -168,7 +190,9 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     await declarePermission(ACTION);
     await grantRole("role_other", ["guardrails.policy.archive"], "tenant_a");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toEqual({
       allowed: false,
       code: "guardrail_rbac_denied",
@@ -180,7 +204,9 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     await declarePermission(ACTION);
     await grantRole("role_guardrail_reader", [ACTION], "tenant_a");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_b"), ACTION)).toMatchObject({ allowed: false });
   });
 
@@ -189,7 +215,9 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     await declarePermission(ACTION);
     await bindRole("tenant_a", "role_that_was_deleted");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toMatchObject({ allowed: false });
   });
 
@@ -200,14 +228,18 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     await declarePermission(ACTION);
     await grantRole("role_star", ["*"], "tenant_a");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toMatchObject({ allowed: false });
   });
 
   it("names the denial after the action's domain", async () => {
     await declarePermission("workers.self_hosted");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), "workers.self_hosted")).toMatchObject({
       allowed: false,
       code: "rbac_denied",
@@ -225,7 +257,9 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
     await bindRole("tenant_a", "role_corrupt");
     await grantRole("role_good", [ACTION], "tenant_a");
 
-    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase);
+    const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
+      tenantDatabases: tenantObjectRouter(),
+    });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toEqual({ allowed: true });
   });
 
@@ -240,6 +274,12 @@ describe("D1RbacAuthorizer — tenant_has_permission_result", () => {
   });
 
   it("issues exactly the two ported statements, in order", async () => {
+    // The native-binding compatibility leg (no `tenantDatabases` router): the
+    // statement TEXT and ORDER are the ported Rust walk, and both are pinned —
+    // `test/fleet-control-matrix.test.ts` scans these very literals to see the
+    // gateway reading the RBAC authority. Post-#863 the deployed posture routes
+    // the second read through the tenant object instead (the tests above), but
+    // the compat leg must keep issuing the permission-existence check FIRST.
     await declarePermission(ACTION);
     const recording = recordingDb();
     await new D1RbacAuthorizer(recording.db).authorize(tenantAuth("tenant_a"), ACTION);
@@ -274,6 +314,7 @@ describe("D1RbacAuthorizer — an outage is not a decision", () => {
     const generous = new ConfiguredRbacAuthorizer({ tenant_a: [ACTION] });
     const rbac = new D1RbacAuthorizer(controlDb() as unknown as RbacDatabase, {
       fallback: generous,
+      tenantDatabases: tenantObjectRouter(),
     });
     expect(await rbac.authorize(tenantAuth("tenant_a"), ACTION)).toEqual({ allowed: true });
     // …and the fallback is not a blanket yes: a tenant it does not name is
@@ -315,12 +356,16 @@ describe("depsFromEnv wires the durable authorizer", () => {
 describe("composition root — the durable RBAC walk decides a real request", () => {
   const ADMIN_KEY = "fg_tenant_c_admin";
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // A native key for `tenant_c` carrying the operation's `admin.read` scope,
     // so the request reaches the RBAC step instead of stopping at `scope_denied`.
     bindings.GATEWAY_NATIVE_API_KEYS = JSON.stringify([
       { key: ADMIN_KEY, id: "key_tenant_c", tenant_id: "tenant_c", scopes: ["admin.read"] },
     ]);
+    // `tenant_c` is not a vitest.config fixture tenant, so `test/setup-d1.ts`
+    // seeds no roster row for it — and an ADMITTED request then 503s downstream
+    // when the backend-dispatching router cannot place the tenant.
+    await seedTenantRosterRows(["tenant_c"]);
   });
 
   afterEach(async () => {

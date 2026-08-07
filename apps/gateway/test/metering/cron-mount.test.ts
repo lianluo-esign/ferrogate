@@ -64,6 +64,18 @@ describe("MOUNT: the [triggers] cron handler reaches the durable billing outbox"
     const queue = new RecordingQueue();
     const ctx = createExecutionContext();
 
+    // Post-#863 `gatewayScheduled` enumerates the roster and sweeps each
+    // TENANT OBJECT's outbox; `env.BILLING_DB` is swept only for the unscoped
+    // compatibility posture — i.e. when the roster names no tenants. A tenant
+    // object's due-list RPC cannot be tapped the way `RecordingDatabase` taps a
+    // D1 binding, so the roster is emptied for this invocation (the pool's
+    // per-test isolated storage restores the fixture rows afterwards). The
+    // wave-13 mutant — an emptied `gatewayScheduled` body — still fails this:
+    // it issues no due-list query against ANY backend.
+    await (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB.prepare(
+      "DELETE FROM tenant_databases",
+    ).run();
+
     await scheduledOf()(
       { cron: "* * * * *", scheduledTime: Date.now(), noRetry: () => undefined } as never,
       { ...(env as unknown as Record<string, unknown>), BILLING_DB: db, BILLING: queue } as never,

@@ -293,6 +293,89 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
     reason:
       "downloads a CSV, JSONL or binary Parquet attachment rather than a JSON document, so the verb first needs an output-file grammar the CLI does not have — tracked as the #677 CLI follow-up",
   },
+  // ---------------------------------------------------------------------
+  // Files API (#698, batches slice 1). Five public operations whose payload
+  // is byte upload/download, not a JSON document — the same output-file
+  // grammar gap `exportAdminCostRecords` records above. The CLI group lands
+  // with the batches executor slice, which is the first consumer that makes
+  // a `files` verb usable end to end.
+  // ---------------------------------------------------------------------
+  {
+    operationId: "listFiles",
+    owner: "batches/files family (#698)",
+    reason:
+      "files verbs land as one group with the #698 batches executor slice; a list without upload/download halves is not usable",
+  },
+  {
+    operationId: "createFile",
+    owner: "batches/files family (#698)",
+    reason:
+      "multipart byte upload needs the CLI's input-file grammar; lands with the #698 files group",
+  },
+  {
+    operationId: "getFile",
+    owner: "batches/files family (#698)",
+    reason: "files verbs land as one group with the #698 batches executor slice",
+  },
+  {
+    operationId: "deleteFile",
+    owner: "batches/files family (#698)",
+    reason: "files verbs land as one group with the #698 batches executor slice",
+  },
+  {
+    operationId: "getFileContent",
+    owner: "batches/files family (#698)",
+    reason:
+      "downloads raw bytes, not a JSON document — the same output-file grammar gap as exportAdminCostRecords; lands with the #698 files group",
+  },
+  // ---------------------------------------------------------------------
+  // Tenant-data operator lifecycle (#828). Audited SQL reads, JSONL export
+  // pages and a DESTRUCTIVE restore against one tenant's Durable Object —
+  // operator tooling whose confirmation/audit UX is specified by #828, not
+  // generic CRUD a registry row can synthesize safely.
+  // ---------------------------------------------------------------------
+  {
+    operationId: "exportTenantData",
+    owner: "tenant-data operator tooling (#828)",
+    reason:
+      "resumable JSONL export pages need the #828 operator grammar (cursor resume + output files), not a one-shot JSON verb",
+  },
+  {
+    operationId: "queryTenantData",
+    owner: "tenant-data operator tooling (#828)",
+    reason:
+      "audited read-only SQL against one tenant's object; the audit-attribution flags are the #828 design, and a bare verb without them would under-record",
+  },
+  {
+    operationId: "restoreTenantData",
+    owner: "tenant-data operator tooling (#828)",
+    reason:
+      "schedules a DESTRUCTIVE point-in-time restore; needs the #828 confirmation grammar beyond the generic --yes gate before a CLI verb may exist",
+  },
+  {
+    operationId: "migrateTenantStorage",
+    owner: "tenant-data operator tooling (#828, M9 cutover)",
+    reason:
+      "drives the copy/verify/cut migration state machine; a CLI verb lands with the M9 cutover runbook it belongs to",
+  },
+  // ---------------------------------------------------------------------
+  // Asset retention policies (#744). Two admin operations for DESTRUCTIVE
+  // retention rules; the admin console defers them to an asset-lifecycle
+  // screen for the same reason (`DELIBERATE_EXCLUSIONS` there), and the CLI
+  // verb belongs in the assets group's lifecycle sub-family with them.
+  // ---------------------------------------------------------------------
+  {
+    operationId: "getAssetRetentionPolicy",
+    owner: "asset lifecycle family (#744)",
+    reason:
+      "retention read pairs with its destructive write half; both land together in the #744 asset-lifecycle follow-up",
+  },
+  {
+    operationId: "putAssetRetentionPolicy",
+    owner: "asset lifecycle family (#744)",
+    reason:
+      "authors DESTRUCTIVE retention rules (age-based deletion); lands with the #744 asset-lifecycle follow-up and its confirmation UX",
+  },
 ];
 
 /** The coverable and non-coverable operation sets parsed from an OpenAPI document. */

@@ -25,6 +25,38 @@ export function tenantObjectDb(tenantId: string): D1Database {
   return tenantObjectRouter().databaseFor(tenantId);
 }
 
+/**
+ * The raw stored document of a TENANT-ATTRIBUTED resource, read straight out of
+ * the owning tenant's object (`tenant_resources`) — the post-#861/#863
+ * authority for tenant-private kinds. The control-table twin (`rawDocument` in
+ * `./d1.ts`) keeps serving the UN-ATTRIBUTED platform rows, which stay on
+ * control D1.
+ */
+export async function rawTenantDocument(
+  tenantId: string,
+  collection: string,
+  id: string,
+): Promise<Record<string, unknown> | null> {
+  const row = await tenantObjectDb(tenantId)
+    .prepare("SELECT document_json FROM tenant_resources WHERE resource_kind = ? AND resource_id = ?")
+    .bind(collection, id)
+    .first<{ document_json: string }>();
+  return row === null ? null : (JSON.parse(row.document_json) as Record<string, unknown>);
+}
+
+/** The storage revision of a tenant-object row, or `null` when it is gone. */
+export async function rawTenantRevision(
+  tenantId: string,
+  collection: string,
+  id: string,
+): Promise<number | null> {
+  const row = await tenantObjectDb(tenantId)
+    .prepare("SELECT revision FROM tenant_resources WHERE resource_kind = ? AND resource_id = ?")
+    .bind(collection, id)
+    .first<{ revision: number }>();
+  return row === null ? null : row.revision;
+}
+
 export async function privilegedTenantBatch(
   tenantId: string,
   statements: readonly TenantDataStatement[],
@@ -52,6 +84,18 @@ export async function registerDurableObjectTenant(tenantId: string): Promise<voi
     )
     .bind(tenantId)
     .run();
+}
+
+/**
+ * Roster rows for a suite's fixture tenants (same shape the gateway's
+ * `test/setup-d1.ts` seeds): the platform-operator fan-out reads
+ * `tenant_databases`, and in production the onboarding path writes this row the
+ * moment a tenant is created — the fixture tenants of `arm()` never onboard, so
+ * suites that exercise operator reads over tenant-attributed rows seed the
+ * roster here, after `resetD1` wiped it.
+ */
+export async function registerObjectTenants(tenantIds: readonly string[]): Promise<void> {
+  for (const tenantId of tenantIds) await registerDurableObjectTenant(tenantId);
 }
 
 export async function seedTenantRoleProjection(

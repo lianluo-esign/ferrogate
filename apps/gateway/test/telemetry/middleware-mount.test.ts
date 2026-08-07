@@ -122,6 +122,21 @@ beforeEach(async () => {
     )
     .bind(TENANT, "telemetry mw", TENANT, PLAN)
     .run();
+  // `tenant_telemetry_mw` is not one of `test/setup-d1.ts`'s fixture tenants,
+  // and the durable_object routing default reads the `tenant_databases` roster
+  // on every authenticated request — without this row the asset push is
+  // answered `503 quota_resolution_unavailable` before any telemetry emission,
+  // which would make the mount gate fail for a reason unrelated to the mount.
+  // `migration_state` stated as `done` (the DDL default is the pre-cutover
+  // `shared`), same explicit form as `test/assets/wiring.test.ts`.
+  await control
+    .prepare(
+      "INSERT OR REPLACE INTO tenant_databases " +
+        "(tenant_id, storage_backend, provisioning_status, schema_version, migration_state, migration_epoch) " +
+        "VALUES (?1, 'durable_object', 'ready', 1, 'done', 0)",
+    )
+    .bind(TENANT)
+    .run();
 });
 
 /** The emission rides `ctx.waitUntil`, so it lands after the response. */
