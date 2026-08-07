@@ -44,6 +44,7 @@ import {
   periodMonthFromUnix,
 } from "@ferrogate/storage";
 
+import { controlDatabaseFrom } from "../control-data.js";
 import { type CounterWindow, requestWindows } from "./keys.js";
 
 /**
@@ -511,7 +512,7 @@ export function d1QuotaPolicySource(
  * truth per deployment, chosen by which binding exists.
  */
 export function quotaPolicySourceFromEnv(env: QuotaBindings): QuotaPolicySource {
-  const db = d1Binding(env.CONTROL_DB);
+  const db = d1Binding(controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] }));
   return db === undefined ? quotaPolicySourceFromVars(env) : d1QuotaPolicySource(db);
 }
 

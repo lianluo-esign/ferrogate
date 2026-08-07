@@ -80,6 +80,7 @@ import {
   workflowEdgeTransitionError,
 } from "@ferrogate/policy";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
 
 // ---------------------------------------------------------------------------
 // Headers — Rust's names, verbatim (`agent_runs.rs:45-47`)
@@ -766,7 +767,7 @@ export interface WorkflowCatalogBindings {
  */
 export function workflowCatalogFromEnv(env: WorkflowCatalogBindings): WorkflowCatalogPort {
   const overlay = decodeWorkflowTable(env.AGENT_WORKFLOWS);
-  const db = env.CONTROL_DB;
+  const db = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
   if (db === undefined || typeof db.prepare !== "function") {
     return {
       async forTenant(): Promise<readonly ToolWorkflowGraph[]> {

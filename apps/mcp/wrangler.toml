@@ -52,6 +52,10 @@ FG_DEV_IN_MEMORY_PORTS = "1"
 # `mcp:{server}:{tool}`; an empty list selects every target.
 FG_DEV_MCP_GUARDRAILS = ""
 
+# Control-plane storage posture. Keep D1 compatibility as the default until
+# the ControlDataObject is populated by the S5 control-plane migration.
+MCP_CONTROL_STORAGE = "d1_compat"
+
 # ---------------------------------------------------------------------------
 # KV — per-user MCP OAuth flow state
 #
@@ -178,6 +182,11 @@ class_name = "FerroGateMcpUnifiedSession"
 [[durable_objects.bindings]]
 name = "TENANT_DATA"
 class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
 script_name = "ferrogate-gateway"
 
 [[migrations]]

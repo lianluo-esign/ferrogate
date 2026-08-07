@@ -173,15 +173,18 @@ describe("every Durable Object binding is deployable", () => {
 describe("the BORROWED gateway namespaces (#666, #859)", () => {
   const borrowed = stanzas("durable_objects.bindings").filter((body) => !LOCAL(body));
 
-  it("binds RATE_LIMIT and TENANT_DATA from apps/gateway", () => {
-    expect(borrowed.length).toBe(2);
+  it("binds RATE_LIMIT, TENANT_DATA and CONTROL_DATA from apps/gateway", () => {
+    expect(borrowed.length).toBe(3);
     const byName = new Map(borrowed.map((body) => [value(body, "name"), body]));
     expect(value(byName.get("RATE_LIMIT") as string[], "class_name")).toBe(
       "RateLimiterDurableObject",
     );
     expect(value(byName.get("TENANT_DATA") as string[], "class_name")).toBe("TenantDataObject");
+    // #880 (Zero-D1 S4): the CONTROL object, borrowed cross-script from the gateway.
+    expect(value(byName.get("CONTROL_DATA") as string[], "class_name")).toBe("ControlDataObject");
     expect(value(byName.get("RATE_LIMIT") as string[], "script_name")).toBe("ferrogate-gateway");
     expect(value(byName.get("TENANT_DATA") as string[], "script_name")).toBe("ferrogate-gateway");
+    expect(value(byName.get("CONTROL_DATA") as string[], "script_name")).toBe("ferrogate-gateway");
   });
 
   it("does not locally migrate the borrowed classes", () => {

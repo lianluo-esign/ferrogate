@@ -327,10 +327,7 @@ const SECRETS: readonly string[] = [];
  * `keeps RATE_LIMIT LIVE, CROSS-SCRIPT, and claimed by no migration` below is
  * where that is now held.
  */
-const DOCUMENTED_BUT_UNDECLARED = [
-  "AGENT_UPSTREAMS",
-  "FG_DEV_AGENT_UPSTREAMS",
-] as const;
+const DOCUMENTED_BUT_UNDECLARED = ["AGENT_UPSTREAMS", "FG_DEV_AGENT_UPSTREAMS"] as const;
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.
@@ -407,6 +404,7 @@ describe("the env-var drift gate itself", () => {
     expect([...DECLARED.vars.keys()].sort()).toEqual([
       "AGENT_JOB_DISPATCH_TTL_SECS",
       "AGENT_JOB_MAX_OPEN_PER_TENANT",
+      "AGENT_RUNTIME_CONTROL_STORAGE",
       "AGENT_RUNTIME_ENABLED",
       // WAVE 20 — committed by the integrate step, on this file's own written
       // instruction, once the tool-side workflow graph gate landed.
@@ -418,6 +416,7 @@ describe("the env-var drift gate itself", () => {
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "AGENT_RUN_STATE",
+      "CONTROL_DATA",
       "CONTROL_DB",
       "DB",
       // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
@@ -562,7 +561,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(8);
+    expect(rows.length).toBe(9);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -594,7 +593,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
   it("records that all eight committed values reach this runner unchanged", () => {
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(8);
+    expect(observable.length).toBe(9);
   });
 
   /**

@@ -37,6 +37,7 @@ import {
 } from "./admission/index.js";
 import { agentUpstreamPortFromEnv } from "./agents/registry.js";
 import { normalizedCapabilities } from "./capabilities.js";
+import { controlDatabaseFrom } from "./control-data.js";
 import { timingSafeEqualStrings } from "./crypto.js";
 import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
 import { durableA2aGuardrailPort } from "./guardrails.js";
@@ -84,6 +85,10 @@ export interface AgentRuntimeBindings {
    * state, which is why it is not in the tenant database.
    */
   readonly CONTROL_DB?: D1Database;
+  /** Zero-D1 S4 (#880): the CONTROL storage posture (durable_object | d1_compat). */
+  readonly AGENT_RUNTIME_CONTROL_STORAGE?: string;
+  /** The gateway's singleton ControlDataObject namespace, bound CROSS-SCRIPT. */
+  readonly CONTROL_DATA?: DurableObjectNamespace;
   /**
    * OPERATOR config: JSON array of {@link AgentUpstream} rows (Rust
    * `config.agent_upstreams`).
@@ -1511,14 +1516,17 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
    * Deleting this wrap turns `test/durable/lifecycle.spec.ts` and
    * `apps/mcp/test/fleet-tenancy-suspension.test.ts` red.
    */
+  // #880 — resolve the CONTROL database through the S4 seam (CONTROL_DATA facade
+  // first, legacy CONTROL_DB fallback). env.DB is the TENANT database and stays as-is.
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
   const apiKeys: ApiKeyPort | undefined =
-    resolvedApiKeys === undefined || (env.DB === undefined && env.CONTROL_DB === undefined)
+    resolvedApiKeys === undefined || (env.DB === undefined && controlDb === undefined)
       ? resolvedApiKeys
-      : tenancyGatedApiKeyPort(resolvedApiKeys, d1LifecycleRowSource(env.CONTROL_DB, env.DB));
+      : tenancyGatedApiKeyPort(resolvedApiKeys, d1LifecycleRowSource(controlDb, env.DB));
 
   const workerIdentities: WorkerIdentityPort | undefined =
-    env.CONTROL_DB !== undefined
-      ? d1WorkerIdentityPort(env.CONTROL_DB)
+    controlDb !== undefined
+      ? d1WorkerIdentityPort(controlDb)
       : dev
         ? inMemoryWorkerIdentityPort(
             parseJsonVar<DevSelfHostedWorker[]>(env.FG_DEV_SELF_HOSTED_WORKERS, []),

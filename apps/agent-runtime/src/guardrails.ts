@@ -73,6 +73,8 @@ import {
   screenGuardrailPolicies,
 } from "@ferrogate/guardrails";
 
+import type { D1Database } from "@cloudflare/workers-types";
+import { controlDatabaseFrom } from "./control-data.js";
 import type { GuardrailDecision, GuardrailEvaluation, GuardrailPort } from "./ports.js";
 
 /** The CONTROL database binding this Worker reads guardrail policy from. */
@@ -137,7 +139,7 @@ export function forgetA2aGuardrailPolicies(env: object): void {
 }
 
 function controlDatabase(env: A2aGuardrailBindings): GuardrailPolicyDatabase | undefined {
-  const binding = env.CONTROL_DB;
+  const binding = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB as D1Database | undefined] });
   return typeof binding === "object" &&
     binding !== null &&
     typeof (binding as GuardrailPolicyDatabase).prepare === "function"

@@ -1628,6 +1628,12 @@ export function credentialId(actor: McpIdentityActor, serverName: string): strin
  * real deployment binds D1/KV/Secrets-Store-backed implementations here.
  */
 export interface McpEnv {
+  /** Control-plane storage posture: Durable Object by default, D1 compatibility when requested. */
+  MCP_CONTROL_STORAGE?: string;
+
+  /** Gateway-owned ControlDataObject namespace used by the control-plane facade. */
+  CONTROL_DATA?: DurableObjectNamespace;
+
   /**
    * DEV/TEST ONLY. When `"1"`, the app installs the in-memory ports above
    * (including a static API-key table). Any other value fails closed:
@@ -2084,7 +2090,7 @@ export function durableIdentityBound(env: McpEnv): boolean {
  * capability rather than an unready Worker.
  */
 export function durableAuthBound(env: McpEnv): boolean {
-  return env.DB !== undefined;
+  return controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] }) !== undefined;
 }
 
 /**
@@ -2214,7 +2220,9 @@ export function resolvePorts(env: McpEnv): McpPorts {
   // The mount is tested directly through D1R2AssetReader unit tests and through
   // the e2e test that seeds D1+R2 and drives SELF.fetch. Deleting the `assets`
   // line below turns `test/d1-r2-asset-reader.test.ts` red.
-  const tenantRouter = tenantResourceRouter(env);
+  const assetControlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  const tenantRouter =
+    assetControlDb === undefined ? undefined : tenantResourceRouter(env, assetControlDb);
   const assets: AssetReaderPort =
     env.ASSETS !== undefined && tenantRouter !== undefined
       ? new D1R2AssetReader((tenantId) => tenantRouter.databaseFor(tenantId), env.ASSETS)
@@ -2307,23 +2315,28 @@ export function resolvePorts(env: McpEnv): McpPorts {
  * gate mounted anywhere else would be untestable over `SELF`.
  */
 function durableApprovals(env: McpEnv): ApprovalPort {
-  if (env.DB === undefined) return new AutoApproval();
-  const tenantRouter = tenantResourceRouter(env);
-  return new D1ToolApprovals(env.DB, tenantRouter === undefined ? {} : { tenantRouter });
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  if (controlDb === undefined) return new AutoApproval();
+  const tenantRouter = tenantResourceRouter(env, controlDb);
+  return new D1ToolApprovals(controlDb, tenantRouter === undefined ? {} : { tenantRouter });
 }
 
-function tenantResourceRouter(env: McpEnv): DurableObjectTenantDatabaseRouter | undefined {
-  if (env.DB === undefined || env.TENANT_DATA === undefined) return undefined;
-  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, env.DB);
+function tenantResourceRouter(
+  env: McpEnv,
+  controlDb: D1Database,
+): DurableObjectTenantDatabaseRouter | undefined {
+  if (env.TENANT_DATA === undefined) return undefined;
+  return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
 }
 
 function durableAuth(env: McpEnv): AuthPort {
-  if (env.DB === undefined) return new UnboundAuth();
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  if (controlDb === undefined) return new UnboundAuth();
   const options: D1McpAuthOptions = {
-    router: tenantDatabaseRouter(env, env.DB),
+    router: tenantDatabaseRouter(env, controlDb),
   };
   return new D1McpAuth(
-    env.DB,
+    controlDb,
     env.FG_DEV_IN_MEMORY_PORTS === "1" ? { ...options, fallback: inMemoryPorts().auth } : options,
   );
 }
@@ -2372,13 +2385,15 @@ function durableAuth(env: McpEnv): AuthPort {
  * `test/fleet-tenancy-suspension.test.ts` red.
  */
 function durableLifecycle(env: McpEnv): TenancyLifecycleGatePort {
-  if (env.DB === undefined) return new UnboundLifecycleGate();
-  return new D1McpTenancyLifecycleGate(env.DB, tenantDatabaseRouter(env, env.DB));
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  if (controlDb === undefined) return new UnboundLifecycleGate();
+  return new D1McpTenancyLifecycleGate(controlDb, tenantDatabaseRouter(env, controlDb));
 }
 
 function durableAdmission(env: McpEnv): AdmissionPort {
-  if (env.DB === undefined) return ADMIT_ALL;
-  return admissionFromEnv(env, tenantDatabaseRouter(env, env.DB));
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  if (controlDb === undefined) return ADMIT_ALL;
+  return admissionFromEnv(env, tenantDatabaseRouter(env, controlDb));
 }
 
 /**
@@ -2483,9 +2498,11 @@ function tenantDatabaseRouter(env: McpEnv, controlDb: D1Database): TenantDatabas
  * {@link resolvePorts} turns `test/entitlements.test.ts` red.
  */
 function durableEntitlements(env: McpEnv): EntitlementPort {
-  if (env.DB === undefined) return inMemoryPorts().entitlements;
-  return new D1ToolEntitlements(env.DB, {
-    tenantDatabases: tenantDatabaseRouter(env, env.DB),
+  const controlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  if (controlDb === undefined) return inMemoryPorts().entitlements;
+  return new D1ToolEntitlements(controlDb, {
+    tenantDatabases: tenantDatabaseRouter(env, controlDb),
     ...(env.FG_DEV_IN_MEMORY_PORTS === "1" ? { fallback: inMemoryPorts().entitlements } : {}),
   });
 }
+import { controlDatabaseFrom } from "./control-data";

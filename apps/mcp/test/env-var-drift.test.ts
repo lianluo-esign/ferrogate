@@ -367,10 +367,12 @@ describe("the env-var drift gate itself", () => {
     expect([...DECLARED.vars.keys()].sort()).toEqual([
       "FG_DEV_IN_MEMORY_PORTS",
       "FG_DEV_MCP_GUARDRAILS",
+      "MCP_CONTROL_STORAGE",
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "ASSETS",
       "BILLING_DB",
+      "CONTROL_DATA",
       "DB",
       // #687's unified CLIENT session, the other axis from MCP_SESSION below.
       "MCP_CLIENT_SESSION",
@@ -547,7 +549,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(2);
+    expect(rows.length).toBe(3);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {

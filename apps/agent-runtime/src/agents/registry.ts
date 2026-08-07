@@ -108,6 +108,7 @@
  * independent filter applied on top by `ingress.ts::upstreamVisibleTo`.
  */
 import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
 
 // TYPE-ONLY, and it has to stay that way: `../ports.ts` imports the factories
 // below, so a VALUE import back into it would close a module cycle. Same rule
@@ -471,7 +472,7 @@ export function agentUpstreamPortFromEnv(
   env: AgentUpstreamRegistryBindings,
   varPort: AgentUpstreamPort,
 ): AgentUpstreamPort {
-  const db = env.CONTROL_DB;
+  const db = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
   // `typeof prepare` guards the same case `workflowCatalogFromEnv` guards: a
   // binding present but not a D1 database (a stub env in a unit test) must fall
   // back rather than throw on the request path.

@@ -58,6 +58,14 @@ name = "TENANT_DATA"
 class_name = "TenantDataObject"
 script_name = "ferrogate-gateway"
 
+# Zero-D1 S4 (#880): the singleton CONTROL object, bound cross-script from the
+# gateway script. The AGENT_RUNTIME_CONTROL_STORAGE posture stays d1_compat until
+# S5 backfills it — the facade is wired but CONTROL_DB remains the active source.
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+script_name = "ferrogate-gateway"
+
 # DO storage is the per-instance embedded SQLite backend (`new_sqlite_classes`,
 # NOT `new_classes`) — same requirement the Agents SDK has.
 [[migrations]]
@@ -65,6 +73,7 @@ tag = "v1"
 new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
 
 [vars]
+AGENT_RUNTIME_CONTROL_STORAGE = "d1_compat"
 # DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`.
 # Production MUST NOT set this: without it the Worker fails CLOSED — every
 # authenticated surface answers 503 until real ports are bound.
@@ -315,6 +324,7 @@ class_name = "RateLimiterDurableObject"
 script_name = "ferrogate-gateway"
 
 [env.unit.vars]
+AGENT_RUNTIME_CONTROL_STORAGE = "d1_compat"
 FG_DEV_IN_MEMORY_PORTS = "1"
 FG_REQUIRE_PRODUCTION_MTLS = "0"
 CONTAINER_GOVERNED_EGRESS_HOSTS = ""

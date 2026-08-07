@@ -337,6 +337,9 @@ export async function releaseAll(holds: readonly WalletHold[]): Promise<void> {
 export interface AdmissionBindings {
   /** The CONTROL database — `quota_policies`, `plans`, `tenants`. */
   readonly DB?: D1Database | undefined;
+  readonly BILLING_DB?: D1Database | undefined;
+  readonly MCP_CONTROL_STORAGE?: string | undefined;
+  readonly CONTROL_DATA?: DurableObjectNamespace | undefined;
   /** The SHARED `RateLimiterDurableObject` namespace (see `./counters.ts`). */
   readonly RATE_LIMIT?: RateLimiterNamespace | undefined;
 }
@@ -354,7 +357,7 @@ export function admissionFromEnv(
   env: AdmissionBindings,
   router?: TenantDatabaseRouter,
 ): AdmissionPort {
-  const db = env.DB;
+  const db = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
   if (db === undefined) return ADMIT_ALL;
   return new McpAdmissionGate({
     limiter: limiterForEnv(env),
@@ -368,3 +371,4 @@ export function admissionFromEnv(
 }
 
 export { NO_QUOTA_POLICIES };
+import { controlDatabaseFrom } from "../control-data";

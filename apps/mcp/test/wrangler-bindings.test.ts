@@ -149,7 +149,7 @@ describe("the BORROWED gateway namespaces (#666/#863)", () => {
   const borrowed = stanzas("durable_objects.bindings").filter((body) => !LOCAL(body));
 
   it("binds RATE_LIMIT and TENANT_DATA from apps/gateway", () => {
-    expect(borrowed.length).toBe(2);
+    expect(borrowed.length).toBe(3);
     const body = borrowed.find((candidate) => value(candidate, "name") === "RATE_LIMIT");
     const tenantData = borrowed.find((candidate) => value(candidate, "name") === "TENANT_DATA");
     if (body === undefined || tenantData === undefined) {

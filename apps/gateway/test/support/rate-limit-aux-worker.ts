@@ -87,10 +87,11 @@ function gatewayIdentity(gatewayAppRoot: URL): { name: string; compatibilityDate
  */
 export function gatewayRateLimiterAuxWorker(
   gatewayAppRoot: URL,
-  options: { readonly tenantData?: boolean } = {},
+  options: { readonly tenantData?: boolean; readonly controlData?: boolean } = {},
 ) {
   const { name, compatibilityDate } = gatewayIdentity(gatewayAppRoot);
   const includeTenantData = options.tenantData === true;
+  const includeControlData = options.controlData === true;
 
   // `stdin` rather than a checked-in entry file: the entry is two lines and
   // keeping it here means there is no second place for the export list to rot.
@@ -102,6 +103,9 @@ export function gatewayRateLimiterAuxWorker(
         'export { RateLimiterDurableObject } from "./src/ratelimit/durable-object.js";',
         ...(includeTenantData
           ? ['export { TenantDataObject } from "@ferrogate/storage/durable-objects";']
+          : []),
+        ...(includeControlData
+          ? ['export { ControlDataObject } from "@ferrogate/storage/durable-objects";']
           : []),
         "export default {",
         "  fetch() {",
@@ -138,6 +142,9 @@ export function gatewayRateLimiterAuxWorker(
   };
   if (includeTenantData) {
     durableObjects.TENANT_DATA = { className: "TenantDataObject", useSQLite: true };
+  }
+  if (includeControlData) {
+    durableObjects.CONTROL_DATA = { className: "ControlDataObject", useSQLite: true };
   }
 
   return {

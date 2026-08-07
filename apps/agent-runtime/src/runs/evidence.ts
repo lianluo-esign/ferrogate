@@ -19,6 +19,7 @@ import type {
   TenantObjectNamespaceLike,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { AgentRuntimeBindings, IsolationGrant } from "../ports.js";
 import type { StoredAgentRun, StoredRunEvent } from "./model.js";
 
@@ -137,7 +138,7 @@ function tenantAddress(
   env: AgentRuntimeBindings,
   tenantId: string,
 ): Promise<TenantObjectAddress | undefined> {
-  const controlDatabase = env.CONTROL_DB;
+  const controlDatabase = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
   if (controlDatabase === undefined) return Promise.resolve(undefined);
   let cache = TENANT_ADDRESS_CACHE.get(env);
   if (cache === undefined) {
@@ -179,7 +180,7 @@ async function tenantDatabase(env: AgentRuntimeBindings, tenantId: string): Prom
   return new DurableObjectD1Database(tenantId, stub).asD1Database();
 }
 function controlDatabase(env: AgentRuntimeBindings): D1Database | undefined {
-  return env.CONTROL_DB;
+  return controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
 }
 
 /** Write one agent run to the tenant object, then to the derived mirror. */
@@ -265,19 +266,17 @@ export async function persistAgentRunEvidence(
           .prepare(TENANT_MANAGED_SELECTION_UPSERT_SQL)
           .bind(sessionId, run.submitted_at_unix ?? 0, isolationJson),
         db.prepare(TENANT_MANAGED_POLICY_UPSERT_SQL).bind(sessionId, isolationJson),
-        db
-          .prepare(TENANT_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL)
-          .bind(
-            managedEvidence?.id ?? `managed:${sessionId}:${run.run_id}`,
-            managedEvidence?.occurredAtUnix ?? run.submitted_at_unix ?? run.started_at_unix ?? 0,
-            managedEvidence?.evidenceJson ??
-              JSON.stringify({
-                session_id: sessionId,
-                run_id: run.run_id,
-                tenant_id: run.tenant_id,
-                isolation_grant: isolation,
-              }),
-          ),
+        db.prepare(TENANT_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL).bind(
+          managedEvidence?.id ?? `managed:${sessionId}:${run.run_id}`,
+          managedEvidence?.occurredAtUnix ?? run.submitted_at_unix ?? run.started_at_unix ?? 0,
+          managedEvidence?.evidenceJson ??
+            JSON.stringify({
+              session_id: sessionId,
+              run_id: run.run_id,
+              tenant_id: run.tenant_id,
+              isolation_grant: isolation,
+            }),
+        ),
       );
     }
   }

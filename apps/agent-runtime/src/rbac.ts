@@ -68,10 +68,11 @@
  */
 import {
   DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
   type TenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "./control-data.js";
 import type { AuthContext } from "./ports.js";
 
 /**
@@ -224,9 +225,7 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
         .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
         .bind(row.role_id)
         .all();
-      const role = (shared.results ?? [])[0] as
-        | { permission_keys_json?: unknown }
-        | undefined;
+      const role = (shared.results ?? [])[0] as { permission_keys_json?: unknown } | undefined;
       if (role !== undefined) {
         valid.push({
           permission_keys_json:
@@ -259,11 +258,14 @@ export function rbacAuthorizerFromEnv(env: {
   CONTROL_DB?: unknown;
   TENANT_DATA?: unknown;
 }): RbacAuthorizerPort {
-  if (!isRbacDatabase(env.CONTROL_DB)) return new UnboundRbacAuthorizer();
+  const controlDb = controlDatabaseFrom(env, {
+    legacy: [env.CONTROL_DB as D1Database | undefined],
+  });
+  if (!isRbacDatabase(controlDb)) return new UnboundRbacAuthorizer();
   const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
   const tenantDatabases =
     namespace === undefined
       ? undefined
-      : new DurableObjectTenantDatabaseRouter(namespace, env.CONTROL_DB as D1Database);
-  return new D1RbacAuthorizer(env.CONTROL_DB, { tenantDatabases });
+      : new DurableObjectTenantDatabaseRouter(namespace, controlDb as unknown as D1Database);
+  return new D1RbacAuthorizer(controlDb, { tenantDatabases });
 }

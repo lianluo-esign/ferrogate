@@ -116,6 +116,7 @@ export default defineConfig({
         workers: [
           gatewayRateLimiterAuxWorker(new URL("../gateway/", import.meta.url), {
             tenantData: true,
+            controlData: true,
           }),
         ],
         bindings: {
