@@ -14,10 +14,43 @@
  */
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, resetD1, seedD1 } from "./d1.js";
+import { PlatformModelCatalogStore } from "../src/store/platform-model-catalog.js";
+import { applySchema, db, resetD1, seedD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
 
 const KEY = operatorKey.secret;
+
+/**
+ * Take `env.DB` back to a pre-0025 control database, and hand back the undo.
+ *
+ * The DDL is read out of `sqlite_master` rather than restated here, so it cannot
+ * drift from the migration; the undo must run in a `finally` because the next
+ * `beforeEach` `resetD1` DELETEs from these tables and would fault on their
+ * absence. Mirrors the proven helper in `admin-platform-catalog.test.ts`.
+ */
+async function dropPlatformTables(): Promise<() => Promise<void>> {
+  const handle = db();
+  const objects = await handle
+    .prepare(
+      `SELECT type, name, sql FROM sqlite_master
+        WHERE sql IS NOT NULL AND tbl_name LIKE 'platform!_%' ESCAPE '!'
+        ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name`,
+    )
+    .all<{ type: string; name: string; sql: string }>();
+  const tables = objects.results.filter((row) => row.type === "table").map((row) => row.name);
+  expect(tables.length, "0025 must have created the platform tables").toBe(4);
+  // Children before parents: the implicit DELETE a DROP performs is subject to
+  // the `ON DELETE RESTRICT` the offerings carry onto the channels.
+  const isChild = (table: string): boolean => table === "platform_catalog_offerings";
+  for (const table of [...tables.filter(isChild), ...tables.filter((t) => !isChild(t))]) {
+    await handle.exec(`DROP TABLE ${table}`);
+  }
+  return async () => {
+    for (const object of objects.results) {
+      await handle.exec(object.sql.replace(/\s+/g, " "));
+    }
+  };
+}
 
 interface StatusBody {
   readonly service: string;
@@ -136,6 +169,42 @@ describe("runtime status (real D1)", () => {
     expect(body.platform_providers).toBe(0);
     expect(body.platform_models).toBe(0);
     expect(body.platform_offerings).toBe(0);
+  });
+
+  it("counts() reads three zeros off the store when migration 0025 is absent (#893)", async () => {
+    // The `status()` endpoint above cannot hold this: the adapter's
+    // `#platformCatalogCounts` wraps the store in a blanket catch that also
+    // answers three zeros, so a broken `counts()` would still make /status pass.
+    // The pre-adoption test one up likewise runs with the schema APPLIED — the
+    // platform tables merely empty — so it never takes the `no such table`
+    // branch. This exercises that branch DIRECTLY.
+    const store = (): PlatformModelCatalogStore => new PlatformModelCatalogStore({ db: db() });
+
+    // Schema present: counts() reads REAL rows, so the zeros below cannot be a
+    // stub that always answers zero. Driven through the #889 route, not seeded.
+    const created = await SELF.fetch(
+      `${BASE}/admin/v1/providers`,
+      jsonRequest(KEY, "POST", {
+        id: "plat_chan",
+        name: "plat_chan",
+        kind: "openai-compatible",
+        base_url: "https://plat.example.test/v1",
+        enabled: true,
+      }),
+    );
+    expect(created.status, await created.clone().text()).toBe(201);
+    expect((await store().counts()).providers).toBe(1);
+
+    // Pre-0025 window: the tables are gone, so the COUNT throws `no such table:
+    // platform_*`, which counts() must classify (isMissingPlatformCatalogError)
+    // and answer as three zeros rather than rethrow. Inverting that classifier
+    // turns this into a throw and reddens the test.
+    const restore = await dropPlatformTables();
+    try {
+      expect(await store().counts()).toEqual({ providers: 0, models: 0, offerings: 0 });
+    } finally {
+      await restore();
+    }
   });
 
   it("still answers when a sub-source cannot be read (status is the debugging endpoint)", async () => {

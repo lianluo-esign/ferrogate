@@ -428,6 +428,114 @@ describe("provider import", () => {
     expect(client.requests.filter(({ spec }) => spec.method === "POST")).toHaveLength(firstCreates);
   });
 
+  test("--platform import ignores the tenant aggregate the route serves before adoption", async () => {
+    // The un-adopted platform deployment: an operator naming no tenant gets the
+    // TENANT-provider aggregate back from GET /admin/v1/providers (scope
+    // "tenant"), and it collides on name with the provider we are importing.
+    // The reconciliation must NOT treat that tenant row as an existing platform
+    // provider — doing so skips its create and maps the TENANT id into the
+    // offering, which then 404s because that id is not in the platform catalog.
+    const requests: RecordedRequest[] = [];
+    const platformProviders: Record<string, JsonValue>[] = [];
+    const platformModels: Record<string, JsonValue>[] = [];
+    const tenantAggregate = [{ id: "tenant-openai", name: "openai", scope: "tenant" }];
+    let adopted = false;
+    const client: FakeControlPlaneClient = {
+      requests,
+      async send(spec, context) {
+        requests.push({ spec, context });
+        if (spec.method === "GET" && spec.path === "/admin/v1/providers") {
+          return adopted
+            ? response({ object: "list", data: platformProviders, scope: "platform" })
+            : response({ object: "list", data: tenantAggregate, scope: "tenant" });
+        }
+        if (spec.method === "GET" && spec.path === "/admin/v1/models") {
+          return adopted
+            ? response({ object: "list", data: platformModels, scope: "platform" })
+            : response({ object: "list", data: [], scope: "tenant" });
+        }
+        if (spec.method === "POST" && spec.path === "/admin/v1/providers") {
+          adopted = true;
+          const body = objectBody(spec.body);
+          const row = { ...body, id: body.id ?? body.name ?? "plat-provider", scope: "platform" };
+          platformProviders.push(row);
+          return response({ object: "provider", provider: row, scope: "platform" }, 201);
+        }
+        if (spec.method === "POST" && spec.path === "/admin/v1/models") {
+          adopted = true;
+          const body = objectBody(spec.body);
+          const row = {
+            ...body,
+            id: body.id ?? body.name ?? "plat-model",
+            offerings: [],
+            scope: "platform",
+          };
+          platformModels.push(row);
+          return response({ object: "model", model: row, scope: "platform" }, 201);
+        }
+        const offeringPath = spec.path.match(/^\/admin\/v1\/models\/([^/]+)\/offerings$/);
+        if (spec.method === "POST" && offeringPath !== null) {
+          const modelId = decodeURIComponent(offeringPath[1] as string);
+          const body = objectBody(spec.body);
+          // The store's #requireModelAndProvider: an offering that binds a
+          // provider absent from the platform catalog is a 404. This is the
+          // exact partial-import failure the fix prevents.
+          if (!platformProviders.some((provider) => provider.id === body.provider_id)) {
+            throw new Error(`provider ${String(body.provider_id)} not found in platform catalog`);
+          }
+          const model = platformModels.find((candidate) => candidate.id === modelId);
+          const offerings = listOf(model?.offerings);
+          const row = { ...body, id: body.id ?? `${modelId}-off`, model_id: modelId };
+          if (model !== undefined) model.offerings = [...offerings, row];
+          return response({ object: "offering", offering: row, scope: "platform" }, 201);
+        }
+        throw new Error(`unexpected request ${spec.method} ${spec.path}`);
+      },
+      async sendRaw(spec, mediaType, context): Promise<RawApiResponse> {
+        requests.push({ spec, context, mediaType });
+        return { status: 200, bytes: new Uint8Array() };
+      },
+    };
+
+    const runtime = createTestRuntime({
+      client,
+      env: {
+        GATEWAY_PROVIDERS: JSON.stringify([
+          {
+            name: "openai",
+            kind: "openai",
+            base_url: "https://api.openai.com/v1",
+            api_key_var: "OPENAI_API_KEY",
+          },
+        ]),
+        GATEWAY_MODELS: JSON.stringify([
+          {
+            name: "fast",
+            provider: "openai",
+            provider_model: "gpt-4o",
+            input_price_per_1m: 0.25,
+            output_price_per_1m: 1.5,
+          },
+        ]),
+      },
+    });
+
+    expect(await main(["provider", "import", "--from-env", "--platform", "--json"], runtime)).toBe(
+      0,
+    );
+    // The colliding provider is CREATED in the platform catalog, not skipped as
+    // "already exists" from the tenant aggregate.
+    const providerPosts = requests.filter(
+      ({ spec }) => spec.method === "POST" && spec.path === "/admin/v1/providers",
+    );
+    expect(providerPosts.map(({ spec }) => objectBody(spec.body).id)).toEqual(["openai"]);
+    // ...so the offering binds the PLATFORM provider id, never the tenant one.
+    const offeringPosts = requests.filter(
+      ({ spec }) => spec.method === "POST" && spec.path.includes("/offerings"),
+    );
+    expect(offeringPosts.map(({ spec }) => objectBody(spec.body).provider_id)).toEqual(["openai"]);
+  });
+
   test("rejects a credential-shaped imported binding before listing", async () => {
     const runtime = createTestRuntime({
       env: {

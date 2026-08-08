@@ -235,6 +235,16 @@ function listBody(body: JsonValue): JsonValue[] {
   return arrayValue(objectValue(body).data);
 }
 
+/**
+ * The catalog scope a response was served at. #889 stamps `scope` on every
+ * catalog response (`"platform"` or `"tenant"`); `undefined` when the peer sent
+ * none. `providerImport` uses it to tell a platform LIST from the tenant
+ * aggregate the route falls back to before the platform catalog is adopted.
+ */
+function responseScope(body: JsonValue): string | undefined {
+  return stringValue(objectValue(body).scope);
+}
+
 function requiredPosition(args: Args, noun: string, index = 0): string {
   const value = args.positionals[index];
   if (value === undefined || value.trim() === "") {
@@ -912,9 +922,26 @@ async function providerImport(runtime: CliRuntime, args: Args): Promise<number> 
   }
 
   const session = await openSession(runtime, args);
-  const existingProviders = listBody(
-    (await send(session, { method: "GET", path: PROVIDERS_PATH, query: [] })).body,
-  ).map(objectValue);
+
+  // A `--platform` import writes to the platform catalog, but on a deployment
+  // that has NOT yet adopted it the #889 route answers a platform LIST with the
+  // TENANT aggregate (`scope: "tenant"`) — rows that do NOT live in the catalog
+  // we are about to write to. Reconciling against them would count a tenant
+  // provider whose name collides (e.g. "openai") as already-existing, map its
+  // TENANT id into the offering bodies, and then 404 on `createOffering` because
+  // that id is not a platform provider — leaving a half-imported platform
+  // catalog behind, the one thing this command must never do. So when the answer
+  // is not stamped with the platform scope we asked for, there are zero existing
+  // platform rows to reconcile against, and every row must be (re)created here.
+  const platformImport = args.getBoolean("platform");
+  const reconcileAgainst = (response: ApiResponse): Record<string, JsonValue>[] =>
+    platformImport && responseScope(response.body) !== "platform"
+      ? []
+      : listBody(response.body).map(objectValue);
+
+  const existingProviders = reconcileAgainst(
+    await send(session, { method: "GET", path: PROVIDERS_PATH, query: [] }),
+  );
   const providerIds = new Map<string, string>();
   let providersCreated = 0;
   let providersExisting = 0;
@@ -938,9 +965,12 @@ async function providerImport(runtime: CliRuntime, args: Args): Promise<number> 
     if (name !== undefined) providerIds.set(name, providerId ?? name);
   }
 
-  const existingModels = listBody(
-    (await send(session, { method: "GET", path: MODELS_PATH, query: [] })).body,
-  ).map(objectValue);
+  // The provider creates above adopt the platform catalog, so this LIST comes
+  // back platform-scoped and is reconciled normally; the guard still holds for a
+  // providers-empty import that has not adopted yet by the time models are read.
+  const existingModels = reconcileAgainst(
+    await send(session, { method: "GET", path: MODELS_PATH, query: [] }),
+  );
   let modelsCreated = 0;
   let modelsExisting = 0;
   let offeringsCreated = 0;
