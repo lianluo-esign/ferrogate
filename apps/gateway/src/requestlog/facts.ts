@@ -86,6 +86,15 @@ export interface RequestLogFacts {
    */
   readonly experimentId?: string | undefined;
   readonly experimentArm?: string | undefined;
+  /**
+   * #699 — the cost/quality dial's rendered, explainable routing decision.
+   *
+   * Contributed by the inference router, the only thing that runs the task
+   * classifier and knows which candidates cleared the quality floor. Absent for
+   * every request whose tenant did not opt the dial in, which keeps the log
+   * byte-identical for everyone who did not.
+   */
+  readonly routingDecision?: string | undefined;
 }
 
 const FACTS = new WeakMap<Request, RequestLogFacts>();

@@ -10,7 +10,7 @@
  */
 import { DurableObjectD1Database } from "@ferrogate/storage";
 import { tenantObjectAddressForEnv } from "../residency/carrier.js";
-import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
+import { type TenantDataBindings, tenantDataObjectFor } from "../tenancy/tenant-data.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
 
@@ -78,6 +78,7 @@ const REQUEST_LOG_UPDATE_SET = `DO UPDATE SET
   delegation_root = COALESCE(excluded.delegation_root, ${REQUEST_LOG_TABLE}.delegation_root),
   experiment_id = COALESCE(excluded.experiment_id, ${REQUEST_LOG_TABLE}.experiment_id),
   experiment_arm = COALESCE(excluded.experiment_arm, ${REQUEST_LOG_TABLE}.experiment_arm),
+  routing_decision = COALESCE(excluded.routing_decision, ${REQUEST_LOG_TABLE}.routing_decision),
   tenant = COALESCE(excluded.tenant, ${REQUEST_LOG_TABLE}.tenant),
   project = COALESCE(excluded.project, ${REQUEST_LOG_TABLE}.project),
   workspace = COALESCE(excluded.workspace, ${REQUEST_LOG_TABLE}.workspace),
@@ -103,7 +104,20 @@ const REQUEST_LOG_UPDATE_SET = `DO UPDATE SET
 /** Control-D1 projection write: the tenant-qualified key is authoritative. */
 export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
   projection_key, request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
-  experiment_id, experiment_arm,
+  experiment_id, experiment_arm, routing_decision,
+  tenant, project, workspace, api_key_id,
+  route, provider, logical_model, provider_model,
+  status_code, error_code, cache_status, latency_ms,
+  prompt_tokens, completion_tokens, total_tokens,
+  guardrail_verdict, guardrail_policy_id, streamed,
+  started_at_unix, completed_at_unix, request_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (projection_key) ${REQUEST_LOG_UPDATE_SET}`;
+
+/** Tenant-object write: one object contains one tenant, so request_id is enough. */
+export const TENANT_REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
+  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
+  experiment_id, experiment_arm, routing_decision,
   tenant, project, workspace, api_key_id,
   route, provider, logical_model, provider_model,
   status_code, error_code, cache_status, latency_ms,
@@ -111,19 +125,6 @@ export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
   guardrail_verdict, guardrail_policy_id, streamed,
   started_at_unix, completed_at_unix, request_json
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) ${REQUEST_LOG_UPDATE_SET}`;
-
-/** Tenant-object write: one object contains one tenant, so request_id is enough. */
-export const TENANT_REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
-  request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
-  experiment_id, experiment_arm,
-  tenant, project, workspace, api_key_id,
-  route, provider, logical_model, provider_model,
-  status_code, error_code, cache_status, latency_ms,
-  prompt_tokens, completion_tokens, total_tokens,
-  guardrail_verdict, guardrail_policy_id, streamed,
-  started_at_unix, completed_at_unix, request_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (request_id) ${REQUEST_LOG_UPDATE_SET}`;
 
 /** `undefined` → SQL NULL, so an unknown fact is stored as unknown. */
@@ -140,9 +141,7 @@ export function requestLogBindings(record: RequestLogRecord): (string | number |
 }
 
 /** Bound values for the tenant-object SQL, which has no projection key column. */
-export function tenantRequestLogBindings(
-  record: RequestLogRecord,
-): (string | number | null)[] {
+export function tenantRequestLogBindings(record: RequestLogRecord): (string | number | null)[] {
   return [
     record.requestId,
     bindOptional(record.traceId),
@@ -151,6 +150,7 @@ export function tenantRequestLogBindings(
     bindOptional(record.delegationRoot),
     bindOptional(record.experimentId),
     bindOptional(record.experimentArm),
+    bindOptional(record.routingDecision),
     bindOptional(record.tenantId),
     bindOptional(record.projectId),
     bindOptional(record.workspaceId),

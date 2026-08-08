@@ -45,10 +45,7 @@ import {
   writeOnlineEvalLegQuality,
 } from "../../src/evals/index.js";
 import type { PhysicalRoute } from "../../src/inference/ports.js";
-import {
-  NO_ROUTING_QUALITY,
-  orderCandidatesByStrategy,
-} from "../../src/inference/strategy.js";
+import { NO_ROUTING_QUALITY, orderCandidatesByStrategy } from "../../src/inference/strategy.js";
 import { controlDb, resetOnlineEvalTables } from "./harness.js";
 
 const TENANT = "tenant_a";
@@ -694,7 +691,7 @@ describe("the routing hot path reads the memo and nothing else", () => {
     const warm = routingQualityPortFrom({
       qualityFor: async () => ({
         ok: true,
-        quality: { verdictFor: () => ({ kind: "no_signal" }) },
+        quality: { verdictFor: () => ({ kind: "no_signal" }), costQualityRouting: false },
       }),
       peek: () => ({
         ok: true,
@@ -709,6 +706,7 @@ describe("the routing hot path reads the memo and nothing else", () => {
             bestProviderModel: "gpt-4o-mini",
             bestScoreCount: 20,
           }),
+          costQualityRouting: false,
         },
       }),
     }).ladderQuality(TENANT, "split-model");

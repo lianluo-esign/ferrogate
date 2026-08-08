@@ -71,6 +71,16 @@ export interface RequestLogRecord {
    */
   readonly experimentId?: string | undefined;
   readonly experimentArm?: string | undefined;
+  /**
+   * `#699` — the cost/quality dial's explainable routing decision, rendered to
+   * one flat line (`cost_quality task=… applied=… eligible=… filtered=…`).
+   *
+   * Absent for every request whose tenant did not opt the dial in. It records
+   * WHY a request got the model it did — the classifier verdict, the candidates
+   * that cleared the quality floor, and the ones dropped for lagging — so an
+   * operator can explain an auto-routed choice after the fact.
+   */
+  readonly routingDecision?: string | undefined;
   readonly tenantId?: string | undefined;
   readonly projectId?: string | undefined;
   readonly workspaceId?: string | undefined;
@@ -154,6 +164,7 @@ export function requestLogToWire(record: RequestLogRecord): RequestLogWire {
   put(wire, "delegation_root", record.delegationRoot);
   put(wire, "experiment_id", record.experimentId);
   put(wire, "experiment_arm", record.experimentArm);
+  put(wire, "routing_decision", record.routingDecision);
   put(wire, "tenant_id", record.tenantId);
   put(wire, "project_id", record.projectId);
   put(wire, "workspace_id", record.workspaceId);
@@ -225,6 +236,7 @@ export function requestLogFromWire(body: unknown): RequestLogRecord | undefined 
     delegationRoot: str(wire, "delegation_root"),
     experimentId: str(wire, "experiment_id"),
     experimentArm: str(wire, "experiment_arm"),
+    routingDecision: str(wire, "routing_decision"),
     tenantId: str(wire, "tenant_id"),
     projectId: str(wire, "project_id"),
     workspaceId: str(wire, "workspace_id"),

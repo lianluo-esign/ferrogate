@@ -153,6 +153,25 @@ export interface OnlineEvalPolicy {
    * effective coverage rate is `sampleRate * coveragePercent / 100`.
    */
   readonly coveragePercent: number;
+  /**
+   * #699 — the COST/QUALITY DIAL. When `true`, the router is allowed to ACT on
+   * this tenant's leg-quality aggregate for a request its task classifier calls
+   * EASY: it drops every below-floor (lagging) candidate and serves the
+   * CHEAPEST of the survivors instead of the operator's hand-written order.
+   *
+   * `false` is OFF and is the default, including for a tenant already opted into
+   * evaluation. Acting on the signal is a strictly larger consent than measuring
+   * it: sampling only reorders nothing, coverage only spends on a mirror, but
+   * this reaches into the served ladder and can pick a route the operator ranked
+   * below their primary. So it is its own opt-in, never implied by `enabled`,
+   * and with it off the router's behaviour is byte-identical to the pre-#699
+   * tree (which itself already includes the #894 demote pass for opted-in
+   * tenants — a PERMUTATION, never a filter). The FLOOR is the SAME relative
+   * predicate the demote pass uses (`regressionDrop` / `regressionMinSamples`);
+   * there is no absolute quality number here for the reason `policy.ts:20-46`
+   * gives.
+   */
+  readonly costQualityRouting: boolean;
 }
 
 /** Defaults for the two regression knobs, applied when a row omits them. */
@@ -173,6 +192,7 @@ export interface OnlineEvalPolicyRow {
   readonly regressionDrop?: unknown;
   readonly regressionMinSamples?: unknown;
   readonly coveragePercent?: unknown;
+  readonly costQualityRouting?: unknown;
 }
 
 /**
@@ -292,6 +312,14 @@ export function parseOnlineEvalPolicyRow(row: OnlineEvalPolicyRow): ParsedOnline
     };
   }
 
+  // #699 — the dial defaults OFF and reads through the same `truthy` coercion
+  // the `enabled` opt-in uses, so a D1 integer, a JSON boolean and the string
+  // `"on"` all mean the same thing. It is never validated as a range because it
+  // is a boolean: an unparseable value is `false`, i.e. the safe default, not a
+  // refusal — a broken dial value must not take a tenant's evaluation opt-in
+  // down with it.
+  const costQualityRouting = truthy(row.costQualityRouting);
+
   return {
     ok: true,
     policy: {
@@ -303,6 +331,7 @@ export function parseOnlineEvalPolicyRow(row: OnlineEvalPolicyRow): ParsedOnline
       regressionDrop,
       regressionMinSamples,
       coveragePercent,
+      costQualityRouting,
     },
   };
 }

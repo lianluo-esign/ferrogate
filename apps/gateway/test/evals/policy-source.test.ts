@@ -65,10 +65,28 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
         regressionMinSamples: 20,
         // #894 — off unless the row says otherwise.
         coveragePercent: 0,
+        // #699 — the cost/quality dial, off unless the row says otherwise.
+        costQualityRouting: false,
       },
     });
     expect(String(bound[0]?.[0])).toContain("scope_type = 'tenant' AND scope_id = ?");
     expect(bound[0]?.[1]).toBe("tenant_a");
+  });
+
+  it("reads the #699 cost/quality dial off the tenant's row", async () => {
+    // The SELECT must carry the column and the parser must coerce the SQLite
+    // integer. MUTATION: drop `online_eval_cost_quality_routing` from
+    // `ONLINE_EVAL_COLUMNS` (source.ts) and the dial reads back false.
+    const { db } = fakeDb({
+      tenant_a: { ...ENABLED_ROW, online_eval_cost_quality_routing: 1 },
+    });
+    const resolved = await d1OnlineEvalPolicySource(db).policyFor("tenant_a");
+    expect(resolved.ok && resolved.policy?.costQualityRouting).toBe(true);
+
+    // ANTI-VACUITY: absent column reads OFF, the default every deployment gets.
+    const { db: plain } = fakeDb({ tenant_a: ENABLED_ROW });
+    const off = await d1OnlineEvalPolicySource(plain).policyFor("tenant_a");
+    expect(off.ok && off.policy?.costQualityRouting).toBe(false);
   });
 
   it("reads a tenant with no row as 'did not opt in'", async () => {

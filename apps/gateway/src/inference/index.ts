@@ -50,6 +50,7 @@ export {
 export type { ShadowMirror } from "./shadow.js";
 export * from "./reliability.js";
 export * from "./strategy.js";
+export * from "./task-routing.js";
 export {
   DurableObjectProviderCircuit,
   ProviderCircuitDurableObject,

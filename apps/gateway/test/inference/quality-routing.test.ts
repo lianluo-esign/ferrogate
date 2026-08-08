@@ -221,3 +221,105 @@ describe("the router consumes the per-leg eval aggregate", () => {
     );
   });
 });
+
+/**
+ * #699 — the cost/quality dial, on the SAME wire (`harness` → `planUpstream` →
+ * `applyCostQualityDial` → `orderCandidatesByStrategy`), the OUTBOUND fetch the
+ * only mock. Every case pairs a dial-ON assertion with a dial-OFF one over the
+ * same routes and aggregate, so a green line means the DIAL fired and not that
+ * the ladder happened to order this way.
+ */
+function warmDialPort(aggregates: readonly OnlineEvalLegAggregate[]): RoutingQualityPort {
+  // Identical to `warmPort` but with the dial ON — the one bit #699 adds.
+  const quality = tenantLegQualityFrom(legQualityVerdicts(aggregates, POLICY), true);
+  return routingQualityPortFrom({
+    qualityFor: async () => ({ ok: true, quality }),
+    peek: (tenantId: string) => (tenantId === TENANT ? { ok: true, quality } : undefined),
+  });
+}
+
+async function servedByWith(
+  deps: InferenceDeps,
+  routes: readonly PhysicalRoute[],
+  body: unknown,
+): Promise<string> {
+  const app = harness(deps, routes);
+  const response = await app.post("/v1/chat/completions", body);
+  expect(response.status, await response.clone().text()).toBe(200);
+  return ((await response.json()) as { id: string }).id.replace("chatcmpl-", "");
+}
+
+describe("the cost/quality dial (#699)", () => {
+  const PREMIUM = route("premium", { priority: 0, inputPricePer1m: 100, outputPricePer1m: 100 });
+  const CHEAP = route("cheap", { priority: 1, inputPricePer1m: 1, outputPricePer1m: 1 });
+  const HARD_BODY = { ...BODY, tools: [{ type: "function", function: { name: "f" } }] };
+
+  it("routes an easy prompt to the cheapest candidate that clears the floor", async () => {
+    answerFromEachProvider();
+    const routes = [PREMIUM, CHEAP];
+    // Both legs are comparable (equal means), so neither is below the floor.
+    const aggregates = [cell("premium", 0.9), cell("cheap", 0.9)];
+
+    // Dial OFF is byte-identical to today: the model's `priority` strategy dials
+    // the priority-0 PREMIUM leg first, cost never entering the decision.
+    expect(
+      await servedBy({ caller: tenantCaller(), routingQuality: warmPort(aggregates) }, routes),
+    ).toBe("premium");
+
+    // Dial ON + an easy prompt overrides to lowest_cost over the floor-clearers.
+    expect(
+      await servedBy({ caller: tenantCaller(), routingQuality: warmDialPort(aggregates) }, routes),
+    ).toBe("cheap");
+  });
+
+  it("excludes a below-floor candidate from the cost pick, even when it is the cheapest leg", async () => {
+    answerFromEachProvider();
+    // `cheap` is the cheapest leg overall AND it lags; two comparable legs sit
+    // above the floor at different prices. Priorities are set so the dial-OFF
+    // and dial-ON answers DIFFER — the anti-vacuity this whole file is about.
+    const cheapLag = route("cheap", { priority: 2, inputPricePer1m: 1, outputPricePer1m: 1 });
+    const goodMid = route("goodmid", { priority: 1, inputPricePer1m: 50, outputPricePer1m: 50 });
+    const goodTop = route("goodtop", { priority: 0, inputPricePer1m: 100, outputPricePer1m: 100 });
+    const routes = [goodTop, goodMid, cheapLag];
+    const aggregates = [cell("goodtop", 0.9), cell("goodmid", 0.9), cell("cheap", 0.5)];
+
+    // Dial OFF: priority dials `goodtop` (priority 0) first; `cheap` is demoted
+    // by #894 but stays in the ladder. Cost never enters.
+    expect(
+      await servedBy({ caller: tenantCaller(), routingQuality: warmPort(aggregates) }, routes),
+    ).toBe("goodtop");
+
+    // Dial ON + easy: `cheap` is below the floor, so the cost pick runs over the
+    // survivors only and serves `goodmid` (50 < 100) — NOT the cheapest leg
+    // `cheap` (1), which the floor removed from consideration.
+    expect(
+      await servedBy({ caller: tenantCaller(), routingQuality: warmDialPort(aggregates) }, routes),
+    ).toBe("goodmid");
+  });
+
+  it("keeps the operator's hand-written ladder for a HARD prompt", async () => {
+    answerFromEachProvider();
+    const routes = [PREMIUM, CHEAP];
+    const aggregates = [cell("premium", 0.9), cell("cheap", 0.9)];
+
+    // A tool-calling body is HARD, so the dial does not cost-override: PREMIUM
+    // (priority 0) still serves.
+    expect(
+      await servedByWith(
+        { caller: tenantCaller(), routingQuality: warmDialPort(aggregates) },
+        routes,
+        HARD_BODY,
+      ),
+    ).toBe("premium");
+
+    // ANTI-VACUITY: the SAME routes and dial with an EASY body do cost-override,
+    // so the line above is the hard-task branch and not a dial that never fires.
+    expect(
+      await servedByWith(
+        { caller: tenantCaller(), routingQuality: warmDialPort(aggregates) },
+        routes,
+        BODY,
+      ),
+    ).toBe("cheap");
+  });
+});

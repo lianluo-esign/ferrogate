@@ -187,6 +187,11 @@ import type {
 import { coverageMirrorFor, shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
+import {
+  type CostQualityDecision,
+  applyCostQualityDial,
+  renderCostQualityDecision,
+} from "./task-routing.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
@@ -661,6 +666,14 @@ interface PlannedRequest {
     readonly body: Record<string, unknown>;
     readonly residencyPolicy: ResidencyPolicy | null;
   };
+  /**
+   * #699 — the cost/quality dial's EXPLAINABLE verdict for this request, or
+   * `undefined` when the tenant did not opt the dial in. Rides on the plan for
+   * the same reason `assignment` does: it is derived in `planUpstream` and the
+   * request-log seam is one funnel downstream (`dispatchCandidates`), so
+   * carrying it is the only way it reaches the log without a second peek.
+   */
+  readonly routingDecision?: CostQualityDecision | undefined;
 }
 
 /** `ModelEndpointKind` for the eligibility gate. */
@@ -855,9 +868,26 @@ function planUpstream(
     caller.scope.kind === "tenant"
       ? deps.routingQuality.ladderQuality(caller.scope.tenantId, logicalModel)
       : undefined;
+
+  // #699 — the cost/quality dial. Off (the default) leaves `narrowed.routes` and
+  // the model's own strategy untouched, so the ordering below is byte-identical
+  // to the pre-#699 tree. On + an EASY task drops the below-floor candidates and
+  // forces `lowest_cost` over the survivors, so the cheapest leg that cleared
+  // the SAME relative floor `demoteLaggingLegs` uses serves the request. The
+  // FILTER lives here, not in `orderCandidatesByStrategy`, which must stay a
+  // pure permutation that can never drop a candidate. It reuses the same synced
+  // `quality` peek — no second storage read, no await.
+  const dialed = applyCostQualityDial({
+    routes: narrowed.routes,
+    quality,
+    body,
+    estimated,
+  });
   const ordered = orderCandidatesByStrategy(
-    narrowed.routes,
-    (narrowed.routes[0] as PhysicalRoute).routingStrategy ?? DEFAULT_ROUTING_STRATEGY,
+    dialed.routes,
+    dialed.strategy ??
+      (narrowed.routes[0] as PhysicalRoute).routingStrategy ??
+      DEFAULT_ROUTING_STRATEGY,
     { estimatedUsage: estimated, metrics: deps.routingMetrics, quality },
   );
 
@@ -922,6 +952,7 @@ function planUpstream(
     ...(shadow === null ? {} : { shadow }),
     ...(assignment === null ? {} : { assignment }),
     coverageInput: { operation, logicalModel, body, residencyPolicy },
+    ...(dialed.decision === undefined ? {} : { routingDecision: dialed.decision }),
   };
 }
 
@@ -1216,6 +1247,16 @@ async function dispatchCandidates(
       experimentId: assignment.experimentId,
       experimentArm: servedArmFor(assignment, attributed),
     });
+  }
+
+  // #699 — the cost/quality dial's verdict, on the SAME log seam. Present only
+  // when the tenant opted the dial in, so a non-opted request's log stays
+  // byte-identical to before this slice. Rendered to the one flat TEXT line the
+  // request-log column stores; the classifier verdict, the surviving candidates
+  // and the filtered ones are all in it, which is what makes the routing choice
+  // explainable after the fact.
+  if (planned.routingDecision !== undefined) {
+    c.get("inferenceLog")({ routingDecision: renderCostQualityDecision(planned.routingDecision) });
   }
 
   if (!outcome.ok) {
