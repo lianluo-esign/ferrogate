@@ -348,6 +348,7 @@ async function tenantModelsForRequest(
   // synchronous `fallbackModels`.
   let platformResolver = envFallback;
   let platformInputs: ModelCatalogInputs | undefined;
+  let platformRevision: number | undefined;
   if (platformSource !== undefined) {
     let platform: PlatformModelCatalogLoadResult;
     try {
@@ -369,6 +370,7 @@ async function tenantModelsForRequest(
     }
     platformResolver = platform.models;
     platformInputs = platform.inputs;
+    platformRevision = platform.revision;
   }
 
   if (source === undefined || accessor.tenantId === null || parsedMode === "off") {
@@ -397,6 +399,7 @@ async function tenantModelsForRequest(
       env,
       fallback: platformResolver,
       ...(platformInputs === undefined ? {} : { platformInputs }),
+      ...(platformRevision === undefined ? {} : { platformRevision }),
     });
   } catch (error) {
     return {

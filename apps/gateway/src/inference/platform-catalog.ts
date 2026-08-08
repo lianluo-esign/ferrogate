@@ -1,5 +1,5 @@
 import { controlDatabaseFrom } from "../control-data.js";
-import { buildModelCatalog } from "./catalog.js";
+import { buildModelCatalog, cloudflareAccountFromEnv } from "./catalog.js";
 import type { ModelCatalogInputs, ModelRecord, ProviderRecord } from "./catalog.js";
 import { InMemoryModelResolver } from "./defaults.js";
 import type {
@@ -137,6 +137,14 @@ function isMissingPlatformCatalogError(error: unknown): boolean {
  * `env` is still passed to {@link buildModelCatalog} as `secrets` so a provider's
  * `api_key_var` resolves from Worker secrets and fails the route closed exactly
  * as `modelsFromEnv` does — the CONTROL_DATA facade holds no secrets.
+ *
+ * The account-level `[cloudflare]` block still lives in the deployment's
+ * `GATEWAY_CLOUDFLARE` var (the CONTROL_DATA tables carry per-provider AI-Gateway
+ * config but not the account id / base URLs). It is sourced from env and threaded
+ * to {@link buildModelCatalog} exactly as the tenant loader does with
+ * `inputs.cloudflare`; without it a platform provider that #889's CRUD legitimately
+ * persisted with a `cloudflare_ai_gateway` block would fail the WHOLE platform
+ * catalog build — a deployment-wide 503 — instead of routing through AI Gateway.
  */
 function buildPlatformCatalog(
   rows: readonly CatalogJoinRow[],
@@ -144,9 +152,13 @@ function buildPlatformCatalog(
 ): PlatformCatalogBuildResult {
   const projected = projectCatalog(rows, EMPTY_INPUTS);
   if (!projected.ok) return projected;
+  const cloudflare = cloudflareAccountFromEnv(
+    typeof env.GATEWAY_CLOUDFLARE === "string" ? env.GATEWAY_CLOUDFLARE : undefined,
+  );
+  if (!cloudflare.ok) return cloudflare;
   const providers: ProviderRecord[] = [...projected.providers.values()];
   const models: ModelRecord[] = projected.models;
-  const built = buildModelCatalog(providers, models, env);
+  const built = buildModelCatalog(providers, models, env, cloudflare.cloudflare);
   if (!built.ok) return built;
   return {
     ok: true,

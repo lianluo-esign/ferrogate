@@ -125,6 +125,7 @@ export interface CatalogJoinRow {
 
 interface CacheEntry {
   readonly revision: number;
+  readonly platformRevision: number | undefined;
   readonly resolver: ModelResolver;
   readonly expiresAt: number;
 }
@@ -519,6 +520,7 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
     env: InferenceBindings;
     fallback: ModelResolver;
     platformInputs?: ModelCatalogInputs;
+    platformRevision?: number;
   }): Promise<TenantModelCatalogLoadResult> {
     let revision: number;
     try {
@@ -541,7 +543,18 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
     }
     const now = this.#now();
     const cached = entries.get(input.tenantId);
-    if (cached !== undefined && cached.revision === revision && cached.expiresAt > now) {
+    // The cache key folds in the platform revision: a `platform`-kind leg is
+    // resolved against `platformInputs`, so a platform-catalog edit (which bumps
+    // the platform revision) must invalidate this entry even when the tenant's
+    // own revision is unchanged — otherwise a tenant using a platform-default
+    // model keeps routing to the old provider until the tenant's TTL expires
+    // (#890 revision-gate: visible immediately on a revision bump).
+    if (
+      cached !== undefined &&
+      cached.revision === revision &&
+      cached.platformRevision === input.platformRevision &&
+      cached.expiresAt > now
+    ) {
       return { ok: true, models: cached.resolver, revision };
     }
 
@@ -556,6 +569,7 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
     if (rows.length === 0) {
       entries.set(input.tenantId, {
         revision,
+        platformRevision: input.platformRevision,
         resolver: input.fallback,
         expiresAt: now + this.#ttlMs,
       });
@@ -566,6 +580,7 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
     if (!built.ok) return built;
     entries.set(input.tenantId, {
       revision,
+      platformRevision: input.platformRevision,
       resolver: built.resolver,
       expiresAt: now + this.#ttlMs,
     });

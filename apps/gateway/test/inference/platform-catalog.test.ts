@@ -193,6 +193,48 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     expect(loaded.revision).toBe(2);
   });
 
+  it("routes a platform provider through AI Gateway using the GATEWAY_CLOUDFLARE account block", async () => {
+    // #889's CRUD legitimately persists a platform provider with a
+    // `cloudflare_ai_gateway` block. The account id / base URLs it needs live in
+    // the deployment's `GATEWAY_CLOUDFLARE` var, not the CONTROL tables, so the
+    // platform loader must thread that account block into the build exactly as the
+    // tenant loader does — otherwise cloudflareAiGatewayRouting sees no account and
+    // fails the WHOLE platform catalog, a deployment-wide 503.
+    const db = fakeDb([
+      routeRow({ provider_cloudflare_ai_gateway_json: JSON.stringify({ gateway_id: "gw-plat" }) }),
+    ]);
+    const source = new ControlDataPlatformModelCatalogSource();
+
+    const loaded = await source.load({
+      env: controlEnv(db, { GATEWAY_CLOUDFLARE: JSON.stringify({ account_id: "acct-123" }) }),
+      fallback: emptyFallback(),
+    });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    // The routing is present and carries the env account id — proof the account
+    // block flowed through, not just that the build stopped failing.
+    expect(loaded.models.resolve("platform-model")?.cloudflareAiGateway).toMatchObject({
+      accountId: "acct-123",
+      gatewayId: "gw-plat",
+    });
+  });
+
+  it("fails the platform catalog closed when a cloudflare provider lacks the account block", async () => {
+    const db = fakeDb([
+      routeRow({ provider_cloudflare_ai_gateway_json: JSON.stringify({ gateway_id: "gw-plat" }) }),
+    ]);
+    const source = new ControlDataPlatformModelCatalogSource();
+
+    // No GATEWAY_CLOUDFLARE: the provider that asked to be routed cannot be, so
+    // the build refuses (fail-closed) rather than silently dropping the routing.
+    const loaded = await source.load({ env: controlEnv(db), fallback: emptyFallback() });
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) return;
+    expect(loaded.reason).toMatch(/GATEWAY_CLOUDFLARE/);
+  });
+
   it("reuses a same-revision catalog and reloads immediately after a revision bump", async () => {
     const db = fakeDb([routeRow()]);
     const source = new ControlDataPlatformModelCatalogSource({ now: () => 1000 });
@@ -325,8 +367,15 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     const source = new ControlDataPlatformModelCatalogSource();
 
     const loaded = await source.load({ env: controlEnv(db), fallback });
-    expect(loaded).toMatchObject({ ok: true, models: fallback, revision: 4 });
+    expect(loaded).toMatchObject({ ok: true, revision: 4 });
     if (!loaded.ok) return;
+    // `toBe(fallback)`, not `toMatchObject({ models: fallback })`: the resolver's
+    // only field is a private `#routes`, so a structural match compares zero
+    // enumerable properties and would pass for ANY resolver (even an empty one).
+    // A strict reference check is the only assertion that actually pins the env
+    // fallback being served for the adopted-but-empty catalog.
+    expect(loaded.models).toBe(fallback);
+    expect(loaded.models.resolve("env-model")?.provider).toBe("env-provider");
     expect(loaded.inputs.models).toHaveLength(0);
     expect(db.catalogReads).toBe(1);
   });
@@ -423,6 +472,89 @@ describe("tenant platform-kind arm against the platform catalog", () => {
       // The tenant offering's own upstream id still wins over the platform one.
       providerModel: "tenant-upstream",
     });
+  });
+
+  it("re-resolves a tenant platform-kind leg within the TTL when the platform revision bumps", async () => {
+    // #890 revision-gate: a platform-catalog edit bumps the platform revision to
+    // force IMMEDIATE visibility. A tenant using a platform-default model must see
+    // the new leg on its next load, not wait out its own 5s TTL. The tenant cache
+    // key therefore folds in the platform revision.
+    const clock = { now: 1000 };
+    const platformSource = new ControlDataPlatformModelCatalogSource({ now: () => clock.now });
+
+    // Platform catalog rev 10: shared-model -> platform-a.
+    const platformA = await platformSource.load({
+      env: controlEnv(
+        fakeDb(
+          [
+            routeRow({
+              model_name: "shared-model",
+              provider_name: "platform-a",
+              upstream_model_id: "upstream-a",
+            }),
+          ],
+          10,
+        ),
+      ),
+      fallback: emptyFallback(),
+    });
+    expect(platformA.ok).toBe(true);
+    if (!platformA.ok) return;
+
+    const tenantDb = fakeDb([tenantPlatformRow()]);
+    const tenant = new D1TenantModelCatalogSource({ now: () => clock.now });
+    // ONE env object across both loads: the tenant cache is keyed on it, so a new
+    // object per call would make this test vacuous (always a cache miss). Its
+    // PLATFORM_KEY secret satisfies both platform providers' api_key_var.
+    const tenantEnv = controlEnv(tenantDb);
+
+    const first = await tenant.load({
+      tenantId: "tenant-a",
+      db: tenantDb.db,
+      env: tenantEnv,
+      fallback: emptyFallback(),
+      platformInputs: platformA.inputs,
+      platformRevision: platformA.revision,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.models.resolve("shared-model")?.provider).toBe("platform-a");
+    expect(tenantDb.catalogReads).toBe(1);
+
+    // Operator edits the platform catalog: shared-model -> platform-b, rev 11.
+    const platformB = await platformSource.load({
+      env: controlEnv(
+        fakeDb(
+          [
+            routeRow({
+              model_name: "shared-model",
+              provider_name: "platform-b",
+              upstream_model_id: "upstream-b",
+            }),
+          ],
+          11,
+        ),
+      ),
+      fallback: emptyFallback(),
+    });
+    expect(platformB.ok).toBe(true);
+    if (!platformB.ok) return;
+
+    // Same tenant revision, same clock (well inside the TTL), same env object: the
+    // tenant revision alone would keep serving the cached platform-a leg. Only the
+    // platform revision changed (10 -> 11) — it must invalidate and re-resolve.
+    const second = await tenant.load({
+      tenantId: "tenant-a",
+      db: tenantDb.db,
+      env: tenantEnv,
+      fallback: emptyFallback(),
+      platformInputs: platformB.inputs,
+      platformRevision: platformB.revision,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.models.resolve("shared-model")?.provider).toBe("platform-b");
+    expect(tenantDb.catalogReads).toBe(2);
   });
 
   it("falls back to the env registry when the platform tables are empty", async () => {

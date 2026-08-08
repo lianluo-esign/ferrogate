@@ -967,7 +967,7 @@ export function buildModelCatalog(
  * an error once a provider row asks to be routed, which is where
  * {@link cloudflareAiGatewayRouting} refuses.
  */
-function cloudflareAccountFromEnv(
+export function cloudflareAccountFromEnv(
   raw: string | undefined,
 ): { ok: true; cloudflare?: CloudflareAccountRecord } | { ok: false; reason: string } {
   if (raw === undefined || raw.trim() === "") {

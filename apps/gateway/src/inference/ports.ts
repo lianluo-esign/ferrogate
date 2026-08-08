@@ -468,6 +468,15 @@ export interface TenantModelCatalogSource {
      * registry, the pre-#890 behavior.
      */
     platformInputs?: ModelCatalogInputs;
+    /**
+     * The platform catalog's revision (#890) at the time `platformInputs` was
+     * resolved. Folded into the tenant cache key so a platform-catalog edit —
+     * which bumps the platform revision to force immediate visibility — is
+     * reflected in a tenant's cached `platform`-kind legs on the very next load,
+     * rather than waiting out the tenant's own TTL. Absent when no platform
+     * source is mounted.
+     */
+    platformRevision?: number;
   }): Promise<TenantModelCatalogLoadResult>;
 }
 
