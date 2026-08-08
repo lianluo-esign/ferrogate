@@ -6130,6 +6130,120 @@
         }
       }
     },
+    "/admin/v1/config/import-model-catalog": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "importModelCatalog",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Bootstrap the platform model catalog from the GATEWAY_PROVIDERS/GATEWAY_MODELS env tables and the default rate card. Platform-operator only; idempotent and re-runnable.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "providers": {
+                    "description": "GATEWAY_PROVIDERS, as a JSON string or a parsed array. Falls back to the bound var when omitted.",
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "array", "items": { "type": "object" } }
+                    ]
+                  },
+                  "models": {
+                    "description": "GATEWAY_MODELS, as a JSON string or a parsed array. Falls back to the bound var when omitted.",
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "array", "items": { "type": "object" } }
+                    ]
+                  },
+                  "cloudflare": {
+                    "description": "The account-level [cloudflare] block, as a JSON string or object. Falls back to the bound var when omitted.",
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "object" }
+                    ]
+                  },
+                  "include_default_rate_card": {
+                    "type": "boolean",
+                    "description": "Also import withDefaultRateCard() as platform-kind priced offerings. Defaults to true."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import result: attempted rows, rows inserted by this call (0 on a re-run), resulting totals, and the new catalog revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": { "type": "string" },
+                    "scope": { "type": "string" },
+                    "include_default_rate_card": { "type": "boolean" },
+                    "attempted": { "$ref": "#/components/schemas/PlatformCatalogImportCounts" },
+                    "inserted": { "$ref": "#/components/schemas/PlatformCatalogImportCounts" },
+                    "counts": { "$ref": "#/components/schemas/PlatformCatalogImportCounts" },
+                    "revision": { "type": "integer" }
+                  },
+                  "required": ["object", "scope", "attempted", "inserted", "counts", "revision"]
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/drain": {
       "parameters": [
         {
@@ -23446,6 +23560,26 @@
       }
     },
     "schemas": {
+      "PlatformCatalogImportCounts": {
+        "type": "object",
+        "description": "Per-table row counts for the platform-catalog bootstrap import (#892).",
+        "required": [
+          "providers",
+          "models",
+          "offerings"
+        ],
+        "properties": {
+          "providers": {
+            "type": "integer"
+          },
+          "models": {
+            "type": "integer"
+          },
+          "offerings": {
+            "type": "integer"
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "required": [

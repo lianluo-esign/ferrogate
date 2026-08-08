@@ -98,6 +98,18 @@ const CATALOG_SQL = `
 /** The bootstrap registry: empty, so the tenant `platform` arm falls to env. */
 const EMPTY_INPUTS: ModelCatalogInputs = { providers: [], models: [] };
 
+/**
+ * Drop the price-only `platform-default` rows (#892): a `kind = 'platform'`
+ * channel carries the default rate card's PRICES but names no physical upstream,
+ * so it can never yield a working route. The remaining rows are the routable set,
+ * and the presence/empty decision MUST be made on THIS set — a catalog that holds
+ * only rate-card rows is empty for routing, so it has to fall to env rather than
+ * shadow it with an empty resolver (a deployment-wide 404, issue #892 review).
+ */
+function routableCatalogRows(rows: readonly CatalogJoinRow[]): CatalogJoinRow[] {
+  return rows.filter((row) => row.provider_kind !== "platform");
+}
+
 interface CacheEntry {
   readonly revision: number;
   readonly resolver: ModelResolver;
@@ -131,9 +143,21 @@ function isMissingPlatformCatalogError(error: unknown): boolean {
 /**
  * Flatten the platform rows into a resolver AND the parsed registry.
  *
- * Platform rows are real physical legs — `canonicalProviderKind` rejects a
- * `platform` kind at the write edge, so no row here carries the tenant-side
- * `platform` indirection and the shared projection never needs env inputs.
+ * Platform rows are real physical legs, with ONE exception introduced by the
+ * bootstrap import (#892): a `kind = 'platform'` channel (`platform-default`,
+ * `platform://default`) is the managed record of the default rate card — it
+ * carries PRICES but names no physical upstream, so it is a price row, not a
+ * routable leg. Those rows are EXCLUDED by {@link routableCatalogRows} BEFORE the
+ * caller decides presence and before this projection runs: they can never produce
+ * a working route (there is nowhere to dispatch), and feeding one to the shared
+ * projection's `provider_kind === "platform"` arm — which resolves a tenant-side
+ * indirection against an env registry this loader deliberately runs empty
+ * (`EMPTY_INPUTS`) — would fail the WHOLE platform build with a deployment-wide
+ * 503. Excluding them keeps the platform catalog's route set to the real
+ * providers the env pair (or an operator's CRUD) supplied, which is the parity
+ * invariant #892 asserts. `#889`'s admin CRUD still rejects a `platform` kind at
+ * the write edge; only the bulk import lays these price rows down.
+ *
  * `env` is still passed to {@link buildModelCatalog} as `secrets` so a provider's
  * `api_key_var` resolves from Worker secrets and fails the route closed exactly
  * as `modelsFromEnv` does — the CONTROL_DATA facade holds no secrets.
@@ -147,10 +171,13 @@ function isMissingPlatformCatalogError(error: unknown): boolean {
  * catalog build — a deployment-wide 503 — instead of routing through AI Gateway.
  */
 function buildPlatformCatalog(
-  rows: readonly CatalogJoinRow[],
+  routableRows: readonly CatalogJoinRow[],
   env: InferenceBindings,
 ): PlatformCatalogBuildResult {
-  const projected = projectCatalog(rows, EMPTY_INPUTS);
+  // `routableRows` has already had the price-only `platform-default` rows (#892)
+  // excluded by the caller (see `routableCatalogRows` and the docblock) so the
+  // presence/empty decision is made on the routable set, not the raw rows.
+  const projected = projectCatalog(routableRows, EMPTY_INPUTS);
   if (!projected.ok) return projected;
   const cloudflare = cloudflareAccountFromEnv(
     typeof env.GATEWAY_CLOUDFLARE === "string" ? env.GATEWAY_CLOUDFLARE : undefined,
@@ -227,11 +254,16 @@ export class ControlDataPlatformModelCatalogSource implements PlatformModelCatal
       return this.#lastGoodOrRefuse(cached, `platform catalog read failed: ${errorDetail(error)}`);
     }
 
-    // Zero rows ⇒ the catalog is adopted but empty: env is authoritative. Cache
-    // the env fallback under this revision so the steady state is O(revisions),
-    // not O(requests). An empty registry is threaded to the tenant `platform`
-    // arm so it falls to env too.
-    if (rows.length === 0) {
+    // Zero ROUTABLE rows ⇒ the catalog is adopted but empty for routing: env is
+    // authoritative. This must exclude the price-only `platform`-kind rate-card
+    // rows (#892) FIRST — a rate-card-only catalog has `rows.length > 0` but no
+    // routable leg, and treating it as authoritative would shadow env with an
+    // empty resolver (a deployment-wide 404, issue #892 review). Cache the env
+    // fallback under this revision so the steady state is O(revisions), not
+    // O(requests). An empty registry is threaded to the tenant `platform` arm so
+    // it falls to env too.
+    const routableRows = routableCatalogRows(rows);
+    if (routableRows.length === 0) {
       this.#byEnv.set(envKey, {
         revision,
         resolver: input.fallback,
@@ -241,7 +273,7 @@ export class ControlDataPlatformModelCatalogSource implements PlatformModelCatal
       return { ok: true, models: input.fallback, inputs: EMPTY_INPUTS, revision };
     }
 
-    const built = buildPlatformCatalog(rows, input.env);
+    const built = buildPlatformCatalog(routableRows, input.env);
     if (!built.ok) return built;
     this.#byEnv.set(envKey, {
       revision,

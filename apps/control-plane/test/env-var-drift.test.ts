@@ -330,6 +330,16 @@ const DOCUMENTED_BUT_UNDECLARED = [
   // NAMED here, because declaring the same operator-facing URL in two deploy
   // configs is how the two come to disagree.
   "BILLING_ALERTS_WEBHOOK_URL",
+  // #892 — the bootstrap model-catalog import's OPTIONAL fallback bindings. The
+  // data-plane env tables and account block live in `apps/gateway/wrangler.toml`
+  // (that Worker owns them); `POST /admin/v1/config/import-model-catalog` reads
+  // them here ONLY when the import request body omits a field. Declaring the same
+  // tables in a second Worker's `[vars]` is how the two come to disagree, so they
+  // are NAMED in this app's `wrangler.toml` prose and supplied per-call instead —
+  // exactly the `BILLING_ALERTS_WEBHOOK_URL` pattern above.
+  "GATEWAY_CLOUDFLARE",
+  "GATEWAY_MODELS",
+  "GATEWAY_PROVIDERS",
 ] as const;
 
 /**
@@ -482,12 +492,13 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   });
 
   it("keeps every documented-but-undeclared knob named in wrangler.toml", () => {
-    // Not vacuous: SEVEN entries today, counted off the table above — it was
-    // two before #738 added the four `SITE_DOMAIN_*` knobs and seven with
-    // #697's `BILLING_ALERTS_WEBHOOK_URL` fallback, and the stale "two" is the
-    // kind of drift this whole file exists to catch, so it does not get to
-    // live here.
-    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(7);
+    // Not vacuous: TEN entries today, counted off the table above — it was
+    // two before #738 added the four `SITE_DOMAIN_*` knobs, seven with #697's
+    // `BILLING_ALERTS_WEBHOOK_URL` fallback, and ten with #892's three
+    // `GATEWAY_*` bootstrap-import fallback bindings, and the stale count is the
+    // kind of drift this whole file exists to catch, so it does not get to live
+    // here.
+    expect(DOCUMENTED_BUT_UNDECLARED.length).toBe(10);
     for (const name of DOCUMENTED_BUT_UNDECLARED) {
       expect(mentionedInToml(name), `${name} is read but no longer documented`).toBe(true);
     }

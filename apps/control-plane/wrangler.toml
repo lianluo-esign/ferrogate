@@ -177,6 +177,25 @@ CONTROL_PLANE_SEED = "{}"
 SIEM_EXPORT_SINKS = "[]"
 
 # ---------------------------------------------------------------------------
+# Bootstrap model-catalog import (#892) — OPTIONAL fallback bindings
+# ---------------------------------------------------------------------------
+#
+# `POST /admin/v1/config/import-model-catalog` (`src/routes/admin_config_ops.ts`)
+# reads the deployed data-plane env tables and account block so an operator can
+# import them into the platform catalog:
+#
+#   GATEWAY_PROVIDERS   — the gateway provider table JSON;
+#   GATEWAY_MODELS      — the gateway model registry JSON;
+#   GATEWAY_CLOUDFLARE  — the account-level `[cloudflare]` block.
+#
+# They are DELIBERATELY NOT declared in `[vars]` here: the source of truth is
+# `apps/gateway/wrangler.toml`, and duplicating the tables into a second Worker's
+# committed config is how the two come to disagree. The import request body
+# carries the same three fields, so the normal flow supplies them per-call and
+# these bindings are read ONLY as an optional fallback when the body omits one.
+# Named here (not declared) so an operator can discover the knobs exist.
+
+# ---------------------------------------------------------------------------
 # Spend burn-rate anomaly + forecast alerts (#697) — `src/finops/notify.ts`
 # ---------------------------------------------------------------------------
 #

@@ -41,6 +41,10 @@ import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.j
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { type AuditAction, controlPlaneAuditJson, controlPlaneAuditStatement } from "./d1.js";
 import {
+  PLATFORM_DEFAULT_PROVIDER_ID,
+  type PlatformCatalogImportGraph,
+} from "./platform-catalog-import.js";
+import {
   type ModelCatalogInput,
   type ModelOfferingInput,
   type ProviderChannelInput,
@@ -73,6 +77,17 @@ export const PLATFORM_REVISION_TABLE = "platform_catalog_revisions";
 const PROVIDER_COLLECTION = "platform_providers";
 const MODEL_COLLECTION = "platform_models";
 const OFFERING_COLLECTION = "platform_offerings";
+
+/**
+ * Audit `collection` for the whole bootstrap import (#892).
+ *
+ * ONE row per import, not one per inserted table row: the import bumps the
+ * revision exactly once and appends exactly one audit event, so a re-run — which
+ * inserts nothing under `OR IGNORE` — still records that an operator ran it, and
+ * an auditor sees the import as the single operator action it was.
+ */
+const IMPORT_COLLECTION = "platform_catalog_import";
+const IMPORT_RECORD_ID = "platform:bootstrap-import";
 
 /**
  * How many times `#commit` rebuilds its batch after a rolled-back attempt.
@@ -473,11 +488,32 @@ export class PlatformModelCatalogStore {
         this.#db.prepare(`${MODEL_SELECT} ORDER BY created_at_unix ASC, id ASC`).all<ModelRow>(),
         this.#offeringRows(),
       ]);
+      // A `kind = 'platform'` channel is the bootstrap import's (#892) managed
+      // record of the default rate card: it carries PRICES but names no physical
+      // upstream (`platform://default`), so it is not a routable leg. #891's seed
+      // copies real channels VERBATIM and the tenant loader resolves a
+      // `platform`-kind row against the platform registry — which, with these
+      // price-only rows excluded from the platform route build, does not know the
+      // rate-card models. Seeding them would therefore give a tenant a channel it
+      // can never route through, so they are excluded here, keeping the seed to
+      // the "real channels stay real" invariant `seedTenantModelCatalogFromGraph`
+      // is built on. A model left with no routable offering is dropped with them;
+      // a model that never had any offering is preserved (pre-#892 behaviour).
+      const platformProviderIds = new Set(
+        providers.results.filter((row) => row.kind === "platform").map((row) => row.id),
+      );
+      const seedProviders = providers.results.filter((row) => !platformProviderIds.has(row.id));
+      const seedOfferings = offerings.filter((row) => !platformProviderIds.has(row.provider_id));
+      const modelsWithKeptOffering = new Set(seedOfferings.map((row) => row.model_id));
+      const modelsWithAnyOffering = new Set(offerings.map((row) => row.model_id));
+      const seedModels = models.results.filter(
+        (row) => modelsWithKeptOffering.has(row.id) || !modelsWithAnyOffering.has(row.id),
+      );
       return {
         revision: await this.#revision(),
-        providers: providers.results.map(seedProvider),
-        models: models.results.map(seedModel),
-        offerings: offerings.map(seedOffering),
+        providers: seedProviders.map(seedProvider),
+        models: seedModels.map(seedModel),
+        offerings: seedOfferings.map(seedOffering),
       };
     } catch (error) {
       if (isMissingPlatformCatalogError(error)) {
@@ -524,6 +560,285 @@ export class PlatformModelCatalogStore {
       }
       throw error;
     }
+  }
+
+  /**
+   * The bootstrap import (#892): write a whole provider/model/offering graph,
+   * bump the revision ONCE, append ONE audit row — all in one batch.
+   *
+   * IDEMPOTENT by construction: every row carries a deterministic id derived from
+   * its natural key (`platform:provider:<name>`, `platform:model:<name>`,
+   * `platform:offering:<model>:<provider>:<upstream>`) and every INSERT is
+   * `OR IGNORE`, so a re-run inserts nothing and the only thing that changes is
+   * the revision — exactly the invariant #892's parity test asserts.
+   *
+   * The batch shape mirrors {@link #commit} (revision init, mutations, revision
+   * bump, audit) with two differences dictated by the bulk shape:
+   *
+   *  - the mutation is MANY statements rather than one, so the revision bump is
+   *    UNCONDITIONAL (`#commit` guards it on the single mutation's `changes()`,
+   *    which is meaningless across a batch) — an import is an operator action
+   *    worth one revision whether or not it changed a row;
+   *  - the audit INSERT's `changes() = 1` guard therefore reads from the bump,
+   *    which the up-front `INSERT OR IGNORE` revision row guarantees is 1.
+   *
+   * Providers precede models precede offerings so the offering foreign keys are
+   * satisfied within the single transaction. Returns both the rows this call
+   * INSERTED (`0` on a re-run) and the resulting totals, which is the count
+   * verification shape an operator runs in production.
+   *
+   * ONE cross-run correction is not a no-op: when an earlier import wrote a
+   * `platform-default` rate-card PRIMARY offering for a model (the model had no
+   * env route then) and this import now carries a REAL provider offering for the
+   * same model — the advertised "re-run to sync env changes" flow, where a
+   * default-card name like `gpt-4o` is later added to `GATEWAY_MODELS` — the
+   * rate-card row still occupies the `ux_..._primary` slot, so the real primary's
+   * `INSERT OR IGNORE` would be silently dropped and the model would stay
+   * unroutable. The superseded `platform-default` offerings for such models are
+   * therefore DELETEd first (see {@link #purgeSupersededRateCardStatements}); the
+   * delete matches zero rows on a steady-state re-run, so idempotency holds.
+   */
+  async importGraph(
+    scope: CallerScope,
+    graph: PlatformCatalogImportGraph,
+  ): Promise<{
+    readonly revision: number;
+    readonly inserted: { providers: number; models: number; offerings: number };
+    readonly counts: { providers: number; models: number; offerings: number };
+  }> {
+    const providerInserts = graph.providers.map((provider) =>
+      this.#importProviderStatement(provider),
+    );
+    const modelInserts = graph.models.map((model) => this.#importModelStatement(model));
+    // Free the primary slot for any model this import now routes through a REAL
+    // provider, dropping the stale `platform-default` rate-card offering an
+    // earlier import left there (see the docblock). Ordered BEFORE the offering
+    // inserts so the real primary's INSERT wins the `ux_..._primary` index.
+    const rateCardPurges = this.#purgeSupersededRateCardStatements(graph);
+    const offeringInserts = graph.offerings.map((offering) =>
+      this.#importOfferingStatement(offering),
+    );
+    const mutations = [...providerInserts, ...modelInserts, ...rateCardPurges, ...offeringInserts];
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= PLATFORM_COMMIT_ATTEMPTS; attempt += 1) {
+      const now = Math.floor(Date.now() / 1000);
+      const revision = (await this.#revision()) + 1;
+      const record: StoreRecord = { id: IMPORT_RECORD_ID, scope: PLATFORM_SCOPE };
+      let results: readonly D1Result<unknown>[];
+      try {
+        results = await this.#db.batch([
+          this.#db
+            .prepare(
+              `INSERT OR IGNORE INTO ${PLATFORM_REVISION_TABLE} (id, revision, updated_at_unix)
+               VALUES (1, 0, ?)`,
+            )
+            .bind(now),
+          ...mutations,
+          this.#db
+            .prepare(
+              `UPDATE ${PLATFORM_REVISION_TABLE}
+                  SET revision = revision + 1, updated_at_unix = ?
+                WHERE id = 1
+                RETURNING revision`,
+            )
+            .bind(now),
+          await controlPlaneAuditStatement(this.#db, {
+            action: "create",
+            collection: IMPORT_COLLECTION,
+            record,
+            revision,
+            scope,
+            requestId: this.#requestId,
+            auditJson: controlPlaneAuditJson({
+              action: "create",
+              collection: IMPORT_COLLECTION,
+              record,
+              revision,
+              scope,
+            }),
+          }),
+        ]);
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+
+      // results: [init, ...mutations, bump, audit]. The mutation slice starts at 1.
+      const bumpIndex = 1 + mutations.length;
+      const bump = results[bumpIndex];
+      const bumped = Number(
+        (bump?.results?.[0] as { revision?: number | string } | undefined)?.revision ?? 0,
+      );
+      if (bumped !== revision) {
+        throw new Error(
+          `platform model catalog revision bumped to ${bumped}, audited as ${revision}`,
+        );
+      }
+      if (Number(results[bumpIndex + 1]?.meta.changes ?? 0) === 0) {
+        throw new Error(
+          "platform model catalog import audit row was not appended with the mutation",
+        );
+      }
+
+      const changesIn = (start: number, count: number): number => {
+        let total = 0;
+        for (let index = start; index < start + count; index += 1) {
+          total += Number(results[index]?.meta.changes ?? 0);
+        }
+        return total;
+      };
+      const providersInserted = changesIn(1, providerInserts.length);
+      const modelsInserted = changesIn(1 + providerInserts.length, modelInserts.length);
+      const offeringsInserted = changesIn(
+        1 + providerInserts.length + modelInserts.length + rateCardPurges.length,
+        offeringInserts.length,
+      );
+      return {
+        revision: bumped,
+        inserted: {
+          providers: providersInserted,
+          models: modelsInserted,
+          offerings: offeringsInserted,
+        },
+        counts: await this.counts(),
+      };
+    }
+    if (isConstraintError(lastError) && !isAuditAppendError(lastError)) {
+      throw new TenantCatalogConflictError("platform model catalog constraint violated");
+    }
+    throw new Error(
+      `platform model catalog import failed after ${PLATFORM_COMMIT_ATTEMPTS} attempts`,
+      { cause: lastError },
+    );
+  }
+
+  /**
+   * DELETE the stale `platform-default` rate-card offerings for every model this
+   * import routes through a REAL provider, so the real primary can take the
+   * `ux_..._primary` slot on re-run (see {@link importGraph}'s docblock).
+   *
+   * A model is "now real" when this graph carries any offering for it on a
+   * provider OTHER than `platform-default`; that offering supersedes the
+   * rate-card price row, which the data-plane loader already excludes from
+   * routing. On a steady-state re-run the model's only offering is the real one
+   * (the rate card was purged the first time round), so the DELETE matches zero
+   * rows and the run stays a no-op but for the revision.
+   */
+  #purgeSupersededRateCardStatements(graph: PlatformCatalogImportGraph): D1PreparedStatement[] {
+    const nowRealModelIds = new Set<string>();
+    for (const offering of graph.offerings) {
+      if (offering.provider_id !== PLATFORM_DEFAULT_PROVIDER_ID) {
+        nowRealModelIds.add(offering.model_id);
+      }
+    }
+    return [...nowRealModelIds].map((modelId) =>
+      this.#db
+        .prepare(
+          `DELETE FROM ${PLATFORM_OFFERING_TABLE}
+             WHERE model_id = ? AND provider_id = ?`,
+        )
+        .bind(modelId, PLATFORM_DEFAULT_PROVIDER_ID),
+    );
+  }
+
+  #importProviderStatement(provider: SeedProviderChannel): D1PreparedStatement {
+    const now = Math.floor(Date.now() / 1000);
+    return this.#db
+      .prepare(
+        `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
+           (id, name, kind, base_url, api_key_var, byok_alias,
+            auth_scheme, region, zero_data_retention, openrouter_http_referer,
+            openrouter_x_title, cloudflare_ai_gateway_json, enabled,
+            created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        provider.id,
+        provider.name,
+        provider.kind,
+        provider.base_url,
+        provider.api_key_var,
+        provider.byok_alias,
+        provider.auth_scheme,
+        provider.region,
+        provider.zero_data_retention,
+        provider.openrouter_http_referer,
+        provider.openrouter_x_title,
+        provider.cloudflare_ai_gateway_json,
+        provider.enabled,
+        now,
+        now,
+      );
+  }
+
+  #importModelStatement(model: SeedCatalogModel): D1PreparedStatement {
+    const now = Math.floor(Date.now() / 1000);
+    return this.#db
+      .prepare(
+        `INSERT OR IGNORE INTO ${PLATFORM_MODEL_TABLE}
+           (id, name, family, owned_by, capabilities_json,
+            context_window, routing_strategy, enabled, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        model.id,
+        model.name,
+        model.family,
+        model.owned_by,
+        model.capabilities_json,
+        model.context_window,
+        model.routing_strategy,
+        model.enabled,
+        now,
+        now,
+      );
+  }
+
+  #importOfferingStatement(
+    offering: PlatformCatalogImportGraph["offerings"][number],
+  ): D1PreparedStatement {
+    const now = Math.floor(Date.now() / 1000);
+    return this.#db
+      .prepare(
+        `INSERT OR IGNORE INTO ${PLATFORM_OFFERING_TABLE}
+           (id, model_id, provider_id, upstream_model_id, role,
+            priority, weight, canary_percent, shadow_percent, shadow_max_requests,
+            capabilities_json, context_window, region, zero_data_retention,
+            input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
+            cache_write_price_per_1m, reasoning_price_per_1m,
+            audio_second_price_per_1m, audio_character_price_per_1m,
+            currency, source, enabled, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        offering.id,
+        offering.model_id,
+        offering.provider_id,
+        offering.upstream_model_id,
+        offering.role,
+        offering.priority,
+        offering.weight,
+        offering.canary_percent,
+        offering.shadow_percent,
+        offering.shadow_max_requests,
+        offering.capabilities_json,
+        offering.context_window,
+        offering.region,
+        offering.zero_data_retention,
+        offering.input_price_per_1m,
+        offering.output_price_per_1m,
+        offering.cached_input_price_per_1m,
+        offering.cache_write_price_per_1m,
+        offering.reasoning_price_per_1m,
+        offering.audio_second_price_per_1m,
+        offering.audio_character_price_per_1m,
+        offering.currency,
+        offering.source,
+        offering.enabled,
+        now,
+        now,
+      );
   }
 
   async listProviders(): Promise<readonly CatalogRecord[]> {

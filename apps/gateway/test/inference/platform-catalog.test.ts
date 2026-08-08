@@ -380,6 +380,36 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     expect(db.catalogReads).toBe(1);
   });
 
+  it("serves the env fallback when the catalog holds ONLY rate-card price rows (#892)", async () => {
+    // The bootstrap import (#892) can write ONLY `kind='platform'` price rows —
+    // e.g. an import with no env providers/models but the default rate card on.
+    // Those rows carry prices but name no routable upstream. `rows.length > 0`,
+    // so a raw-count presence gate would treat the catalog as authoritative and
+    // shadow env with the EMPTY resolver the filter leaves behind — a
+    // deployment-wide 404. The presence decision must be made AFTER excluding
+    // the price rows, so this rate-card-only catalog falls to env.
+    const rateCardRow = routeRow({
+      model_name: "gpt-4o",
+      provider_name: "platform-default",
+      provider_kind: "platform",
+      provider_base_url: "platform://default",
+      provider_api_key_var: null,
+    });
+    const db = fakeDb([rateCardRow], 7);
+    const fallback = new InMemoryModelResolver([FALLBACK_ROUTE]);
+    const source = new ControlDataPlatformModelCatalogSource();
+
+    const loaded = await source.load({ env: controlEnv(db), fallback });
+    expect(loaded).toMatchObject({ ok: true, revision: 7 });
+    if (!loaded.ok) return;
+    // Strict reference: the env fallback is served, not a build over zero rows.
+    expect(loaded.models).toBe(fallback);
+    expect(loaded.models.resolve("env-model")?.provider).toBe("env-provider");
+    // The rate-card model does NOT become a phantom (route-less) authoritative model.
+    expect(loaded.models.resolve("gpt-4o")).toBeNull();
+    expect(loaded.inputs.models).toHaveLength(0);
+  });
+
   it("serves the env fallback when no control database is bound", async () => {
     const fallback = new InMemoryModelResolver([FALLBACK_ROUTE]);
     const source = new ControlDataPlatformModelCatalogSource();

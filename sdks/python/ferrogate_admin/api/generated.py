@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 312
+OPENAPI_OPERATION_COUNT: Final[int] = 313
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -925,6 +925,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/workspaces/{workspace_id}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
+    },
+    "importModelCatalog": {
+        "method": "POST",
+        "path": "/admin/v1/config/import-model-catalog",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "invalidateSemanticCachePolicy": {
         "method": "POST",
@@ -1998,6 +2004,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "getVirtualKey",
     "getWallet",
     "getWorkspace",
+    "importModelCatalog",
     "invalidateSemanticCachePolicy",
     "listAdminAgentCostBurn",
     "listAdminAgentRuns",
