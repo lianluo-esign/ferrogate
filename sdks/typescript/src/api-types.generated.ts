@@ -6472,6 +6472,12 @@ export interface components {
             observability: components["schemas"]["ObservabilityStatus"][];
             acme?: components["schemas"]["AdminAcmeStatus"] | null;
             prompt_templates: number;
+            /** @description Count of PLATFORM provider channels in the platform model catalog (#889/#893), counted distinctly from the tenant `providers` aggregate. Absent on a deployment predating #902 or without an applied control-catalog migration. */
+            platform_providers?: number;
+            /** @description Count of PLATFORM catalog models (#889/#893), distinct from the tenant `models` aggregate. Absent on a deployment predating #902. */
+            platform_models?: number;
+            /** @description Count of PLATFORM catalog offerings (#889/#893). Absent on a deployment predating #902. */
+            platform_offerings?: number;
         };
         StorageBackendEvidence: {
             provider: components["schemas"]["StorageProviderKind"];

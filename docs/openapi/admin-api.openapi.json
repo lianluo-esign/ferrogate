@@ -23861,6 +23861,21 @@
           "prompt_templates": {
             "type": "integer",
             "minimum": 0
+          },
+          "platform_providers": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Count of PLATFORM provider channels in the platform model catalog (#889/#893), counted distinctly from the tenant `providers` aggregate. Absent on a deployment predating #902 or without an applied control-catalog migration."
+          },
+          "platform_models": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Count of PLATFORM catalog models (#889/#893), distinct from the tenant `models` aggregate. Absent on a deployment predating #902."
+          },
+          "platform_offerings": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Count of PLATFORM catalog offerings (#889/#893). Absent on a deployment predating #902."
           }
         },
         "additionalProperties": false
