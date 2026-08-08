@@ -487,6 +487,45 @@ export class PlatformModelCatalogStore {
     }
   }
 
+  /**
+   * Row counts for `GET /admin/v1/status` (#893), one round-trip.
+   *
+   * A deployment that has NOT applied migration `0025` has no platform tables;
+   * that is "not adopted", never a 500 on the status endpoint an operator hits
+   * to find out what is wrong — so a missing table reads as three zeros, exactly
+   * as `isAdopted()` treats it. Every other error still propagates.
+   */
+  async counts(): Promise<{
+    readonly providers: number;
+    readonly models: number;
+    readonly offerings: number;
+  }> {
+    try {
+      const row = await this.#db
+        .prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM ${PLATFORM_PROVIDER_TABLE}) AS providers,
+             (SELECT COUNT(*) FROM ${PLATFORM_MODEL_TABLE}) AS models,
+             (SELECT COUNT(*) FROM ${PLATFORM_OFFERING_TABLE}) AS offerings`,
+        )
+        .first<{
+          providers: number | string;
+          models: number | string;
+          offerings: number | string;
+        }>();
+      return {
+        providers: Number(row?.providers ?? 0),
+        models: Number(row?.models ?? 0),
+        offerings: Number(row?.offerings ?? 0),
+      };
+    } catch (error) {
+      if (isMissingPlatformCatalogError(error)) {
+        return { providers: 0, models: 0, offerings: 0 };
+      }
+      throw error;
+    }
+  }
+
   async listProviders(): Promise<readonly CatalogRecord[]> {
     const result = await this.#db
       .prepare(`${PROVIDER_SELECT} ORDER BY created_at_unix ASC, id ASC`)

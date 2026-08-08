@@ -85,6 +85,7 @@ import {
   parseLifecycleStatus,
 } from "./store/lifecycle.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
+import { PlatformModelCatalogStore } from "./store/platform-model-catalog.js";
 import { SplitControlPlaneStore } from "./store/split.js";
 import { UnprovisionedTenantDatabaseRouter } from "./store/tenancy.js";
 
@@ -626,15 +627,18 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
   readonly #store: ControlPlaneStore;
   readonly #version: string;
   readonly #tenantDatabases: TenantDatabaseRouter | null;
+  readonly #controlDatabase: D1Database | null;
 
   constructor(
     store: ControlPlaneStore,
     version = "0.0.0",
     tenantDatabases: TenantDatabaseRouter | null = null,
+    controlDatabase: D1Database | null = null,
   ) {
     this.#store = store;
     this.#version = version;
     this.#tenantDatabases = tenantDatabases;
+    this.#controlDatabase = controlDatabase;
   }
 
   /**
@@ -696,6 +700,29 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
     }
   }
 
+  /**
+   * The PLATFORM catalog row counts (#893), kept DISTINCT from the tenant
+   * `providers`/`models` aggregates above — a platform channel is not a tenant
+   * provider, and folding one into the other would let an operator read a fleet
+   * total that is neither. Answers three zeros when the deployment has no control
+   * database or has not applied migration `0025`, matching the store's own
+   * "not adopted is not broken" treatment, so `/admin/v1/status` still answers.
+   */
+  async #platformCatalogCounts(): Promise<{
+    providers: number;
+    models: number;
+    offerings: number;
+  }> {
+    if (this.#controlDatabase === null) return { providers: 0, models: 0, offerings: 0 };
+    try {
+      return await new PlatformModelCatalogStore({ db: this.#controlDatabase }).counts();
+    } catch {
+      // Status is the debugging surface; a platform-catalog read failure must
+      // not sink the whole document.
+      return { providers: 0, models: 0, offerings: 0 };
+    }
+  }
+
   async status(): Promise<RuntimeStatus> {
     const [
       legacyProviders,
@@ -706,6 +733,7 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
       plugins,
       tools,
       snapshot,
+      platformCatalog,
     ] = await Promise.all([
       this.#count("providers"),
       this.#catalogProviderCount(),
@@ -715,6 +743,7 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
       this.#count("plugins"),
       this.#count("tools"),
       this.#activeSnapshot(),
+      this.#platformCatalogCounts(),
     ]);
     return {
       service: SERVICE_NAME,
@@ -729,6 +758,11 @@ export class StoreRuntimeStatus implements RuntimeStatusPort {
       prompt_templates: promptTemplates,
       plugins,
       tools,
+      // #893: the platform catalog, counted separately from the tenant
+      // aggregates — no silent folding into `providers`/`models`.
+      platform_providers: platformCatalog.providers,
+      platform_models: platformCatalog.models,
+      platform_offerings: platformCatalog.offerings,
       auth_required: true,
     };
   }
@@ -1512,7 +1546,7 @@ export function resolveDeps(
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.
     assetObjects: resolveAssetObjects(env),
-    runtime: new StoreRuntimeStatus(store, "0.0.0", tenantDatabases),
+    runtime: new StoreRuntimeStatus(store, "0.0.0", tenantDatabases, controlDatabase ?? null),
     txtResolver: resolveTxtResolver(env),
     // The certificate seam (#738). Its default answers `unconfigured` and makes
     // no outbound call, so a deployment that has not opted in gains no traffic.

@@ -428,6 +428,114 @@ describe("provider import", () => {
     expect(client.requests.filter(({ spec }) => spec.method === "POST")).toHaveLength(firstCreates);
   });
 
+  test("--platform import ignores the tenant aggregate the route serves before adoption", async () => {
+    // The un-adopted platform deployment: an operator naming no tenant gets the
+    // TENANT-provider aggregate back from GET /admin/v1/providers (scope
+    // "tenant"), and it collides on name with the provider we are importing.
+    // The reconciliation must NOT treat that tenant row as an existing platform
+    // provider — doing so skips its create and maps the TENANT id into the
+    // offering, which then 404s because that id is not in the platform catalog.
+    const requests: RecordedRequest[] = [];
+    const platformProviders: Record<string, JsonValue>[] = [];
+    const platformModels: Record<string, JsonValue>[] = [];
+    const tenantAggregate = [{ id: "tenant-openai", name: "openai", scope: "tenant" }];
+    let adopted = false;
+    const client: FakeControlPlaneClient = {
+      requests,
+      async send(spec, context) {
+        requests.push({ spec, context });
+        if (spec.method === "GET" && spec.path === "/admin/v1/providers") {
+          return adopted
+            ? response({ object: "list", data: platformProviders, scope: "platform" })
+            : response({ object: "list", data: tenantAggregate, scope: "tenant" });
+        }
+        if (spec.method === "GET" && spec.path === "/admin/v1/models") {
+          return adopted
+            ? response({ object: "list", data: platformModels, scope: "platform" })
+            : response({ object: "list", data: [], scope: "tenant" });
+        }
+        if (spec.method === "POST" && spec.path === "/admin/v1/providers") {
+          adopted = true;
+          const body = objectBody(spec.body);
+          const row = { ...body, id: body.id ?? body.name ?? "plat-provider", scope: "platform" };
+          platformProviders.push(row);
+          return response({ object: "provider", provider: row, scope: "platform" }, 201);
+        }
+        if (spec.method === "POST" && spec.path === "/admin/v1/models") {
+          adopted = true;
+          const body = objectBody(spec.body);
+          const row = {
+            ...body,
+            id: body.id ?? body.name ?? "plat-model",
+            offerings: [],
+            scope: "platform",
+          };
+          platformModels.push(row);
+          return response({ object: "model", model: row, scope: "platform" }, 201);
+        }
+        const offeringPath = spec.path.match(/^\/admin\/v1\/models\/([^/]+)\/offerings$/);
+        if (spec.method === "POST" && offeringPath !== null) {
+          const modelId = decodeURIComponent(offeringPath[1] as string);
+          const body = objectBody(spec.body);
+          // The store's #requireModelAndProvider: an offering that binds a
+          // provider absent from the platform catalog is a 404. This is the
+          // exact partial-import failure the fix prevents.
+          if (!platformProviders.some((provider) => provider.id === body.provider_id)) {
+            throw new Error(`provider ${String(body.provider_id)} not found in platform catalog`);
+          }
+          const model = platformModels.find((candidate) => candidate.id === modelId);
+          const offerings = listOf(model?.offerings);
+          const row = { ...body, id: body.id ?? `${modelId}-off`, model_id: modelId };
+          if (model !== undefined) model.offerings = [...offerings, row];
+          return response({ object: "offering", offering: row, scope: "platform" }, 201);
+        }
+        throw new Error(`unexpected request ${spec.method} ${spec.path}`);
+      },
+      async sendRaw(spec, mediaType, context): Promise<RawApiResponse> {
+        requests.push({ spec, context, mediaType });
+        return { status: 200, bytes: new Uint8Array() };
+      },
+    };
+
+    const runtime = createTestRuntime({
+      client,
+      env: {
+        GATEWAY_PROVIDERS: JSON.stringify([
+          {
+            name: "openai",
+            kind: "openai",
+            base_url: "https://api.openai.com/v1",
+            api_key_var: "OPENAI_API_KEY",
+          },
+        ]),
+        GATEWAY_MODELS: JSON.stringify([
+          {
+            name: "fast",
+            provider: "openai",
+            provider_model: "gpt-4o",
+            input_price_per_1m: 0.25,
+            output_price_per_1m: 1.5,
+          },
+        ]),
+      },
+    });
+
+    expect(await main(["provider", "import", "--from-env", "--platform", "--json"], runtime)).toBe(
+      0,
+    );
+    // The colliding provider is CREATED in the platform catalog, not skipped as
+    // "already exists" from the tenant aggregate.
+    const providerPosts = requests.filter(
+      ({ spec }) => spec.method === "POST" && spec.path === "/admin/v1/providers",
+    );
+    expect(providerPosts.map(({ spec }) => objectBody(spec.body).id)).toEqual(["openai"]);
+    // ...so the offering binds the PLATFORM provider id, never the tenant one.
+    const offeringPosts = requests.filter(
+      ({ spec }) => spec.method === "POST" && spec.path.includes("/offerings"),
+    );
+    expect(offeringPosts.map(({ spec }) => objectBody(spec.body).provider_id)).toEqual(["openai"]);
+  });
+
   test("rejects a credential-shaped imported binding before listing", async () => {
     const runtime = createTestRuntime({
       env: {
@@ -445,6 +553,181 @@ describe("provider import", () => {
     expect(await main(["provider", "import", "--from-env"], runtime)).toBe(2);
     expect(runtime.client.requests).toHaveLength(0);
     expect(`${runtime.stdout()}${runtime.stderr()}`).not.toContain("sk-live-key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #893: the catalog commands carry an explicit tenant scope.
+//
+// The Admin catalog route (#889) reads platform-vs-tenant scope from a
+// `tenant_id` query/body parameter, NOT from the `x-ferrogate-tenant` header
+// the global `--tenant` flag rides — so before #893 `--tenant` was a no-op for
+// these commands. The CLI cannot run under workerd (its suite is offline
+// plain-vitest), so the workerd round-trip is proved server-side in
+// apps/control-plane/test/admin-platform-catalog.test.ts; here we pin that the
+// CLI EMITS the requests that route expects: no tenant_id for `--platform`, and
+// tenant_id as a query param on reads/deletes and a body field on writes when a
+// tenant is selected. Inverting either arm reddens one of the two assertions.
+// ---------------------------------------------------------------------------
+
+const CATALOG_CRUD_SCRIPT = {
+  "POST /admin/v1/providers": ok({ object: "provider", provider: { id: "pchan" } }),
+  "GET /admin/v1/providers": ok({ object: "list", data: [{ id: "pchan" }] }),
+  "PATCH /admin/v1/providers/pchan": ok({ object: "provider", provider: { id: "pchan" } }),
+  "DELETE /admin/v1/providers/pchan": ok({ object: "provider", id: "pchan", deleted: true }),
+  "POST /admin/v1/models": ok({ object: "model", model: { id: "pmodel" } }),
+  "PATCH /admin/v1/models/pmodel": ok({ object: "model", model: { id: "pmodel" } }),
+  "DELETE /admin/v1/models/pmodel": ok({ object: "model", id: "pmodel", deleted: true }),
+  "POST /admin/v1/models/pmodel/offerings": ok({ object: "offering", offering: { id: "poff" } }),
+  "GET /admin/v1/models/pmodel/offerings": ok({ object: "list", data: [{ id: "poff" }] }),
+  "PATCH /admin/v1/models/pmodel/offerings/poff": ok({
+    object: "offering",
+    offering: { id: "poff" },
+  }),
+  "DELETE /admin/v1/models/pmodel/offerings/poff": ok({
+    object: "offering",
+    id: "poff",
+    deleted: true,
+  }),
+} as const;
+
+/** The `tenant_id` a recorded request carries, wherever the route reads it. */
+function scopeTenantOf(request: RecordedRequest): string | undefined {
+  const query = request.spec.query.find(([key]) => key === "tenant_id");
+  if (query !== undefined) return query[1];
+  const body = objectBody(request.spec.body);
+  return typeof body.tenant_id === "string" ? body.tenant_id : undefined;
+}
+
+/** Drive create -> list -> update -> delete for provider, model and offering. */
+async function driveCatalogCrud(
+  runtime: ReturnType<typeof createTestRuntime>,
+  scope: readonly string[],
+): Promise<void> {
+  const base = "https://pchan.example.test/v1";
+  expect(
+    await main(
+      [
+        "provider",
+        "add",
+        "--name",
+        "pchan",
+        "--kind",
+        "openai",
+        "--base-url",
+        base,
+        "--api-key-var",
+        "PCHAN_KEY",
+        ...scope,
+      ],
+      runtime,
+    ),
+  ).toBe(0);
+  expect(await main(["provider", "list", ...scope], runtime)).toBe(0);
+  expect(await main(["provider", "update", "pchan", "--region", "eu", ...scope], runtime)).toBe(0);
+  expect(await main(["provider", "rm", "pchan", ...scope], runtime)).toBe(0);
+  expect(
+    await main(["model", "add", "--name", "pmodel", "--family", "gpt", ...scope], runtime),
+  ).toBe(0);
+  expect(await main(["model", "update", "pmodel", "--family", "gpt-4", ...scope], runtime)).toBe(0);
+  expect(await main(["model", "rm", "pmodel", ...scope], runtime)).toBe(0);
+  expect(
+    await main(
+      [
+        "model",
+        "offering",
+        "add",
+        "pmodel",
+        "--provider",
+        "pchan",
+        "--upstream-model",
+        "gpt-4o",
+        "--role",
+        "primary",
+        ...scope,
+      ],
+      runtime,
+    ),
+  ).toBe(0);
+  expect(await main(["model", "offering", "ls", "pmodel", ...scope], runtime)).toBe(0);
+  expect(
+    await main(
+      ["model", "offering", "update", "pmodel", "poff", "--input-price", "0.3", ...scope],
+      runtime,
+    ),
+  ).toBe(0);
+  expect(await main(["model", "offering", "rm", "pmodel", "poff", ...scope], runtime)).toBe(0);
+}
+
+describe("catalog platform vs tenant scope (#893)", () => {
+  test("--platform drives full CRUD with NO tenant_id on any request", async () => {
+    const runtime = createTestRuntime({ script: CATALOG_CRUD_SCRIPT });
+    await driveCatalogCrud(runtime, ["--platform"]);
+
+    expect(runtime.client.requests).toHaveLength(11);
+    for (const request of runtime.client.requests) {
+      expect(
+        scopeTenantOf(request),
+        `${request.spec.method} ${request.spec.path} leaked a tenant_id under --platform`,
+      ).toBeUndefined();
+    }
+  });
+
+  test("a selected tenant stamps tenant_id: query on reads/deletes, body on writes", async () => {
+    const runtime = createTestRuntime({ script: CATALOG_CRUD_SCRIPT });
+    await driveCatalogCrud(runtime, ["--tenant", "t1"]);
+
+    expect(runtime.client.requests).toHaveLength(11);
+    for (const request of runtime.client.requests) {
+      expect(
+        scopeTenantOf(request),
+        `${request.spec.method} ${request.spec.path} dropped the selected tenant_id`,
+      ).toBe("t1");
+      const inQuery = request.spec.query.some(([key]) => key === "tenant_id");
+      const inBody = typeof objectBody(request.spec.body).tenant_id === "string";
+      if (request.spec.method === "GET" || request.spec.method === "DELETE") {
+        expect(inQuery, `${request.spec.method} must carry tenant_id in the query`).toBe(true);
+        expect(inBody, `${request.spec.method} must not carry a body tenant_id`).toBe(false);
+      } else {
+        expect(inBody, `${request.spec.method} must carry tenant_id in the body`).toBe(true);
+        expect(inQuery, `${request.spec.method} must not carry a query tenant_id`).toBe(false);
+      }
+    }
+  });
+
+  test("FERROGATE_TENANT scopes the call without an explicit flag", async () => {
+    const runtime = createTestRuntime({
+      script: { "GET /admin/v1/providers": ok({ object: "list", data: [] }) },
+      env: { FERROGATE_TENANT: "t7" },
+    });
+    expect(await main(["provider", "list"], runtime)).toBe(0);
+    expect(scopeTenantOf(runtime.client.requests[0] as RecordedRequest)).toBe("t7");
+  });
+
+  test("--platform overrides FERROGATE_TENANT so the platform catalog is reached", async () => {
+    const runtime = createTestRuntime({
+      script: { "GET /admin/v1/providers": ok({ object: "list", data: [] }) },
+      env: { FERROGATE_TENANT: "t7" },
+    });
+    expect(await main(["provider", "list", "--platform"], runtime)).toBe(0);
+    const request = runtime.client.requests[0] as RecordedRequest;
+    expect(scopeTenantOf(request)).toBeUndefined();
+    // ...and the abandoned tenant is not smuggled back through the header.
+    expect(request.context.tenant).toBeUndefined();
+  });
+
+  test("with neither a flag nor an env tenant, no tenant_id is sent (the key decides)", async () => {
+    const runtime = createTestRuntime({
+      script: { "GET /admin/v1/providers": ok({ object: "list", data: [] }) },
+    });
+    expect(await main(["provider", "list"], runtime)).toBe(0);
+    expect(scopeTenantOf(runtime.client.requests[0] as RecordedRequest)).toBeUndefined();
+  });
+
+  test("--platform and --tenant together is a usage error before any request", async () => {
+    const runtime = createTestRuntime();
+    expect(await main(["provider", "list", "--platform", "--tenant", "t1"], runtime)).toBe(2);
+    expect(runtime.client.requests).toHaveLength(0);
   });
 });
 

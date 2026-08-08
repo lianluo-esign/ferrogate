@@ -30,6 +30,24 @@ const JSON_FLAG: FlagSpec = {
   conflictsWith: ["output"],
 };
 
+/**
+ * Address the platform-wide catalog instead of a tenant's (#893).
+ *
+ * The Admin catalog route resolves platform-vs-tenant scope from the caller's
+ * key plus a `tenant_id` query/body parameter (#889), NOT from the
+ * `x-ferrogate-tenant` header the global `--tenant` flag rides — so these leaves
+ * emit `tenant_id` explicitly (see `stampScope`). `--platform` is the operator
+ * saying "no tenant": it drops any `--tenant`/`FERROGATE_TENANT` narrowing so a
+ * platform operator reaches the platform catalog, and it conflicts with an
+ * explicit `--tenant` because naming both scopes at once is incoherent.
+ */
+const PLATFORM_FLAG: FlagSpec = {
+  name: "platform",
+  kind: "boolean",
+  help: "Address the platform-wide catalog (omit any tenant scope)",
+  conflictsWith: ["tenant"],
+};
+
 const PROVIDER_FIELD_FLAGS: readonly FlagSpec[] = [
   { name: "name", kind: "string", valueName: "NAME", help: "Provider channel name" },
   { name: "kind", kind: "string", valueName: "KIND", help: "Provider kind" },
@@ -179,7 +197,7 @@ const OFFERING_FIELD_FLAGS: readonly FlagSpec[] = [
 ];
 
 function catalogFlags(extra: readonly FlagSpec[] = []): readonly FlagSpec[] {
-  return [...extra, ...GLOBAL_FLAGS, JSON_FLAG];
+  return [...extra, PLATFORM_FLAG, ...GLOBAL_FLAGS, JSON_FLAG];
 }
 
 function pathFor(base: string, ...segments: string[]): string {
@@ -215,6 +233,16 @@ function itemBody(body: JsonValue, key: string): Record<string, JsonValue> {
 function listBody(body: JsonValue): JsonValue[] {
   if (Array.isArray(body)) return [...body];
   return arrayValue(objectValue(body).data);
+}
+
+/**
+ * The catalog scope a response was served at. #889 stamps `scope` on every
+ * catalog response (`"platform"` or `"tenant"`); `undefined` when the peer sent
+ * none. `providerImport` uses it to tell a platform LIST from the tenant
+ * aggregate the route falls back to before the platform catalog is adopted.
+ */
+function responseScope(body: JsonValue): string | undefined {
+  return stringValue(objectValue(body).scope);
 }
 
 function requiredPosition(args: Args, noun: string, index = 0): string {
@@ -372,23 +400,67 @@ interface CatalogSession {
   readonly identity: ClientActionIdentity;
   readonly context: RequestContext;
   readonly format: OutputFormat;
+  /**
+   * The `tenant_id` every catalog request carries, or `undefined` for the
+   * platform catalog. `undefined` covers BOTH `--platform` (an operator dropping
+   * a tenant narrowing on purpose) and "no tenant selected at all" — in either
+   * case no `tenant_id` is sent and the route's key-derived scope decides.
+   */
+  readonly scopeTenantId?: string;
+}
+
+/**
+ * Resolve which catalog the leaf addresses.
+ *
+ * `--platform` wins and forces the platform catalog by SUPPRESSING any tenant
+ * (including one from `FERROGATE_TENANT`/a context), which is why it cannot be
+ * expressed as "just omit `--tenant`": an env tenant would otherwise silently
+ * re-narrow the call. Otherwise the effective tenant (flag > env > context) is
+ * the scope; when none is set, `undefined` lets the caller's key decide.
+ */
+function scopeTenantId(args: Args, effective: EffectiveContext): string | undefined {
+  return args.getBoolean("platform") ? undefined : effective.tenant;
 }
 
 async function openSession(runtime: CliRuntime, args: Args): Promise<CatalogSession> {
   const effective = await resolveEffective(runtime, args);
   const identity = ClientActionIdentity.mint(effective, runtime.io, fingerprintEnvFrom(runtime.io));
-  const context = await requestContextFor(runtime, effective, identity);
+  const baseContext = await requestContextFor(runtime, effective, identity);
+  const tenantId = scopeTenantId(args, effective);
+  // Under `--platform` the `x-ferrogate-tenant` header would name a tenant the
+  // scope explicitly abandons; drop it so the header cannot contradict the body.
+  const { tenant: _headerTenant, ...withoutTenant } = baseContext;
+  const context = tenantId === undefined ? withoutTenant : baseContext;
   return {
     runtime,
     effective,
     identity,
     context,
     format: args.getBoolean("json") ? "json" : effective.output,
+    ...(tenantId === undefined ? {} : { scopeTenantId: tenantId }),
   };
 }
 
+/**
+ * Stamp the resolved scope onto a request the way #889's route reads it:
+ * `tenant_id` as a query parameter on reads/deletes, and as a body field on
+ * writes. A platform scope (`tenantId === undefined`) stamps nothing, so the
+ * request carries no tenant and the operator key addresses the platform catalog.
+ */
+function stampScope(spec: RequestSpec, tenantId: string | undefined): RequestSpec {
+  if (tenantId === undefined) return spec;
+  if (spec.method === "POST" || spec.method === "PATCH" || spec.method === "PUT") {
+    const base = isObject(spec.body) ? spec.body : {};
+    return { ...spec, body: { ...base, tenant_id: tenantId } };
+  }
+  return { ...spec, query: [...spec.query, ["tenant_id", tenantId]] };
+}
+
 async function send(session: CatalogSession, spec: RequestSpec): Promise<ApiResponse> {
-  const response = await session.runtime.client.send(spec, session.context);
+  const response = await session.runtime.client.send(
+    stampScope(spec, session.scopeTenantId),
+    session.context,
+  );
   if (response.requestId !== undefined)
     session.runtime.io.stderr(`request-id: ${response.requestId}\n`);
   if (response.traceId !== undefined) session.runtime.io.stderr(`trace-id: ${response.traceId}\n`);
@@ -850,9 +922,26 @@ async function providerImport(runtime: CliRuntime, args: Args): Promise<number> 
   }
 
   const session = await openSession(runtime, args);
-  const existingProviders = listBody(
-    (await send(session, { method: "GET", path: PROVIDERS_PATH, query: [] })).body,
-  ).map(objectValue);
+
+  // A `--platform` import writes to the platform catalog, but on a deployment
+  // that has NOT yet adopted it the #889 route answers a platform LIST with the
+  // TENANT aggregate (`scope: "tenant"`) — rows that do NOT live in the catalog
+  // we are about to write to. Reconciling against them would count a tenant
+  // provider whose name collides (e.g. "openai") as already-existing, map its
+  // TENANT id into the offering bodies, and then 404 on `createOffering` because
+  // that id is not a platform provider — leaving a half-imported platform
+  // catalog behind, the one thing this command must never do. So when the answer
+  // is not stamped with the platform scope we asked for, there are zero existing
+  // platform rows to reconcile against, and every row must be (re)created here.
+  const platformImport = args.getBoolean("platform");
+  const reconcileAgainst = (response: ApiResponse): Record<string, JsonValue>[] =>
+    platformImport && responseScope(response.body) !== "platform"
+      ? []
+      : listBody(response.body).map(objectValue);
+
+  const existingProviders = reconcileAgainst(
+    await send(session, { method: "GET", path: PROVIDERS_PATH, query: [] }),
+  );
   const providerIds = new Map<string, string>();
   let providersCreated = 0;
   let providersExisting = 0;
@@ -876,9 +965,12 @@ async function providerImport(runtime: CliRuntime, args: Args): Promise<number> 
     if (name !== undefined) providerIds.set(name, providerId ?? name);
   }
 
-  const existingModels = listBody(
-    (await send(session, { method: "GET", path: MODELS_PATH, query: [] })).body,
-  ).map(objectValue);
+  // The provider creates above adopt the platform catalog, so this LIST comes
+  // back platform-scoped and is reconciled normally; the guard still holds for a
+  // providers-empty import that has not adopted yet by the time models are read.
+  const existingModels = reconcileAgainst(
+    await send(session, { method: "GET", path: MODELS_PATH, query: [] }),
+  );
   let modelsCreated = 0;
   let modelsExisting = 0;
   let offeringsCreated = 0;
