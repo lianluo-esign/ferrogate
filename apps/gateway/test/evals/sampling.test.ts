@@ -10,8 +10,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  type OnlineEvalPolicy,
   ONLINE_EVAL_SAMPLING_SALT,
+  type OnlineEvalPolicy,
   onlineEvalSamplingDecision,
   parseOnlineEvalPolicyRow,
   sampleBucket,
@@ -29,6 +29,7 @@ function policy(overrides: Partial<OnlineEvalPolicy> = {}): OnlineEvalPolicy {
     regressionDrop: 0.1,
     regressionMinSamples: 20,
     coveragePercent: 0,
+    costQualityRouting: false,
     ...overrides,
   };
 }
@@ -245,6 +246,9 @@ describe("the policy row parser fails CLOSED", () => {
         // measurement: mirroring to a second provider is a strictly larger
         // consent than sampling. See `evals/policy.ts`.
         coveragePercent: 0,
+        // #699 — the cost/quality dial likewise defaults OFF: acting on the
+        // signal is a strictly larger consent than measuring it.
+        costQualityRouting: false,
       },
     });
   });

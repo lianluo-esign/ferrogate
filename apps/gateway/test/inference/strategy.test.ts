@@ -179,10 +179,12 @@ describe("ProviderRoutingMetrics reproduces the Rust scoring", () => {
     expect(providerHealthRank(true, NO_ROUTING_OBSERVATIONS)).toBe(0);
     // Two observations is below the floor even at 100% failure — Rust refuses
     // to declare a provider unhealthy on a sample of two.
-    expect(providerHealthRank(true, { averageLatencyMs: 5, failureRate: 1, observedRequests: 2 }))
-      .toBe(0);
-    expect(providerHealthRank(true, { averageLatencyMs: 5, failureRate: 0.5, observedRequests: 3 }))
-      .toBe(1);
+    expect(
+      providerHealthRank(true, { averageLatencyMs: 5, failureRate: 1, observedRequests: 2 }),
+    ).toBe(0);
+    expect(
+      providerHealthRank(true, { averageLatencyMs: 5, failureRate: 0.5, observedRequests: 3 }),
+    ).toBe(1);
     expect(providerHealthRank(false, NO_ROUTING_OBSERVATIONS)).toBe(2);
   });
 
@@ -196,10 +198,11 @@ describe("ProviderRoutingMetrics reproduces the Rust scoring", () => {
   it("weights the balanced score exactly as balanced_route_score does", () => {
     // cost(0.15+0.60) + latency(250/1000) + failure(0.25*10)
     expect(
-      balancedRouteScore(
-        route({ provider: "a", inputPricePer1m: 0.15, outputPricePer1m: 0.6 }),
-        { averageLatencyMs: 250, failureRate: 0.25, observedRequests: 8 },
-      ),
+      balancedRouteScore(route({ provider: "a", inputPricePer1m: 0.15, outputPricePer1m: 0.6 }), {
+        averageLatencyMs: 250,
+        failureRate: 0.25,
+        observedRequests: 8,
+      }),
     ).toBeCloseTo(0.75 + 0.25 + 2.5, 12);
     // An UNPRICED route scores 1_000 here, not Infinity — `balanced` is meant
     // to keep using it, unlike `lowest_cost`.
@@ -215,10 +218,7 @@ describe("ProviderRoutingMetrics reproduces the Rust scoring", () => {
 // ---------------------------------------------------------------------------
 
 describe("weighted round-robin reproduces weighted_start_index", () => {
-  const group = [
-    route({ provider: "heavy", weight: 3 }),
-    route({ provider: "light", weight: 1 }),
-  ];
+  const group = [route({ provider: "heavy", weight: 3 }), route({ provider: "light", weight: 1 })];
 
   it("treats weight 0 (and absent) as 1, and floors the total at 1", () => {
     expect(totalWeight(group)).toBe(4);
@@ -392,8 +392,7 @@ describe("lowest_cost on the deployed request path", () => {
     // score both directly, then assert the router agrees with the winner.
     const estimated = { promptTokens: 20, completionTokens: 512, totalTokens: 532 };
     const scored = [...routes].sort(
-      (left, right) =>
-        routeEstimatedCost(left, estimated) - routeEstimatedCost(right, estimated),
+      (left, right) => routeEstimatedCost(left, estimated) - routeEstimatedCost(right, estimated),
     );
     const pricedWinner = (scored[0] as PhysicalRoute).provider;
     const unitWinner = [...routes].sort(
@@ -458,9 +457,7 @@ describe("the dispatch loop feeds ProviderRoutingMetrics", () => {
     // differs from the circuit breaker, which ignores a non-retryable 400 —
     // the two counters answer different questions and must not be merged.
     const routingMetrics = new SpyRoutingMetrics();
-    const provider = interceptProviderFetch(() =>
-      providerJson({ error: { message: "bad" } }, 400),
-    );
+    const provider = interceptProviderFetch(() => providerJson({ error: { message: "bad" } }, 400));
     try {
       await harness({ routingMetrics }, [route({ provider: "solo" })]).post(
         "/v1/chat/completions",
@@ -736,5 +733,40 @@ describe("GATEWAY_MODELS carries the F6 columns", () => {
       provider.restore();
     }
     expect(seen).toEqual(["zzz", "zzz", "zzz", "zzz"]);
+  });
+});
+
+describe("orderCandidatesByStrategy stays a pure, synchronous permutation (#699)", () => {
+  function leg(provider: string, overrides: Partial<PhysicalRoute> = {}): PhysicalRoute {
+    return {
+      logicalModel: "m",
+      provider,
+      providerModel: "gpt-4o-mini",
+      providerKind: "openai",
+      baseUrl: `https://${provider}.test/v1`,
+      apiKey: "sk-test",
+      enabled: true,
+      ...overrides,
+    };
+  }
+
+  it("returns a value, never a thenable — no awaited storage read was added", () => {
+    // #699's cost/quality FILTER lives in `handlers.ts::planUpstream`, NOT here,
+    // precisely so this function keeps returning synchronously. A regression
+    // that put a D1 read in front of ordering would have to make it async.
+    const result = orderCandidatesByStrategy([leg("a"), leg("b")], "priority", { cursor: 0 });
+    expect(Array.isArray(result)).toBe(true);
+    expect((result as unknown as { then?: unknown }).then).toBeUndefined();
+  });
+
+  it("never filters, even when the quality snapshot has the dial on and every leg lags", () => {
+    // The dial flag on `RoutingQuality` is #699's, but this permutation IGNORES
+    // it: a filter here would break the failover ladder's "reaches every
+    // candidate" contract. `demoteLaggingLegs` may only reorder.
+    const routes = [leg("a", { priority: 0 }), leg("b", { priority: 1 })];
+    const dialOnAllLag = { lags: (): boolean => true, costQualityRouting: true };
+    const ordered = orderCandidatesByStrategy(routes, "priority", { quality: dialOnAllLag });
+    expect(ordered).toHaveLength(routes.length);
+    expect([...ordered].map((r) => r.provider).sort()).toEqual(["a", "b"]);
   });
 });

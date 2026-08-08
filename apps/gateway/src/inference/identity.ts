@@ -320,6 +320,13 @@ export interface InferenceLogFacts {
    */
   readonly experimentId?: string | undefined;
   readonly experimentArm?: string | undefined;
+  /**
+   * #699 — the cost/quality dial's rendered decision, e.g.
+   * `cost_quality task=easy(short_single_turn) applied=true eligible=... filtered=...`.
+   * Only this app produces it: the classifier runs here and the candidate set is
+   * resolved here. Absent for every request whose tenant did not opt the dial in.
+   */
+  readonly routingDecision?: string | undefined;
 }
 
 /** A `log` sink for a request nobody is logging. */

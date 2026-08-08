@@ -59,6 +59,12 @@ import {
 export interface TenantLegQuality {
   /** SYNCHRONOUS and total. `no_signal` for anything not measured. */
   verdictFor(logicalModel: string, provider: string, providerModel: string): LegQualityVerdict;
+  /**
+   * #699 — this tenant's cost/quality dial, `false` unless the governance row
+   * turned it on. Rides on the snapshot so the router reads consent and signal
+   * from one peeked object.
+   */
+  readonly costQualityRouting: boolean;
 }
 
 /** The snapshot every failure arm resolves to. */
@@ -66,15 +72,20 @@ export const NO_LEG_QUALITY: TenantLegQuality = {
   verdictFor(): LegQualityVerdict {
     return NO_LEG_QUALITY_SIGNAL;
   },
+  costQualityRouting: false,
 };
 
-export function tenantLegQualityFrom(verdicts: Map<string, LegQualityVerdict>): TenantLegQuality {
+export function tenantLegQualityFrom(
+  verdicts: Map<string, LegQualityVerdict>,
+  costQualityRouting = false,
+): TenantLegQuality {
   return {
     verdictFor(logicalModel, provider, providerModel): LegQualityVerdict {
       return (
         verdicts.get(legQualityKey(logicalModel, provider, providerModel)) ?? NO_LEG_QUALITY_SIGNAL
       );
     },
+    costQualityRouting,
   };
 }
 
@@ -140,7 +151,13 @@ export function d1OnlineEvalLegQualitySource(
         }
         return { ok: false, detail };
       }
-      return { ok: true, quality: tenantLegQualityFrom(legQualityVerdicts(aggregates, policy)) };
+      return {
+        ok: true,
+        quality: tenantLegQualityFrom(
+          legQualityVerdicts(aggregates, policy),
+          policy.costQualityRouting,
+        ),
+      };
     },
     peek(): undefined {
       // D1 has no synchronous read; the memo below is what makes `peek` answer.
@@ -234,6 +251,8 @@ export function routingQualityPortFrom(source: OnlineEvalLegQualitySource): Rout
             quality.verdictFor(logicalModel, route.provider, route.providerModel).kind === "lagging"
           );
         },
+        // #699 — the dial travels with the predicate it gates.
+        costQualityRouting: quality.costQualityRouting,
       };
     },
   };

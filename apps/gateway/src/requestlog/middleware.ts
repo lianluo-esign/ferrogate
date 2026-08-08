@@ -157,6 +157,9 @@ export function requestLogRecordFrom(
     delegationRoot: facts.delegationRoot,
     experimentId: facts.experimentId,
     experimentArm: facts.experimentArm,
+    // #699 — the cost/quality dial's explainable decision, contributed by the
+    // inference router and present only for a tenant that opted the dial in.
+    routingDecision: facts.routingDecision,
     // The AUTHENTICATED tenancy, never a client-declared header. A
     // platform-operator credential carries none, and the row records that
     // absence rather than inventing a tenant — which is also what keeps the

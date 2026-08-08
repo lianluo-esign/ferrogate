@@ -451,6 +451,21 @@ export interface StrategyContext {
  */
 export interface RoutingQuality {
   lags(route: PhysicalRoute): boolean;
+  /**
+   * #699 — the tenant's COST/QUALITY DIAL, read off the same governance row the
+   * `lags` predicate's thresholds come from. Absent or `false` is OFF, which is
+   * the default and the pre-#699 behaviour: the router demotes lagging legs
+   * (#894, a permutation) but never FILTERS one and never overrides the
+   * operator's strategy with cost. It is carried HERE, on the resolved quality
+   * snapshot, rather than fetched separately, because the router already peeks
+   * this object synchronously and a second lookup would be a second seam that
+   * could disagree with the first about whether the tenant opted in.
+   *
+   * `orderCandidatesByStrategy` deliberately IGNORES this field — it stays a
+   * pure permutation. Only `handlers.ts::planUpstream`, which may filter, reads
+   * it (via {@link applyCostQualityDial}).
+   */
+  readonly costQualityRouting?: boolean;
 }
 
 /**
