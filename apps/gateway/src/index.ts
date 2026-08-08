@@ -46,6 +46,7 @@ import {
   dispatcherFromEnv,
   inferenceRouteModule,
   modelsFromEnv,
+  platformModelCatalogFromControlData,
   responseStateCommit,
   sweepResponseConversations,
   tenantModelCatalogFromD1,
@@ -214,6 +215,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
   inferenceRouteModule({
     models: modelsFromEnv,
     tenantCatalog: tenantModelCatalogFromD1(),
+    platformCatalog: platformModelCatalogFromControlData(),
     dispatcher: dispatcherFromEnv,
     usage,
   }),

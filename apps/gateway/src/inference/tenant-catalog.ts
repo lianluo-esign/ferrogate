@@ -80,7 +80,7 @@ const CATALOG_SQL = `
   WHERE m.tenant_id = ?
   ORDER BY m.name ASC, o.priority ASC, o.weight DESC, o.id ASC`;
 
-interface CatalogJoinRow {
+export interface CatalogJoinRow {
   readonly model_id: string;
   readonly model_name: string;
   readonly model_owned_by: string | null;
@@ -428,10 +428,23 @@ function asModelRecord(
     : schemaFailure(`model ${first.model_name}`, result);
 }
 
-function buildTenantCatalog(
+/**
+ * Group the join rows by model and project each group into a {@link ModelRecord}.
+ *
+ * Shared by the tenant loader and the platform loader (#890): the row shape and
+ * the projection are identical between the two catalogs — only the SQL that
+ * produced the rows differs. `inputs` supplies the env/platform registry the
+ * `provider_kind === "platform"` arm of {@link asModelRecord} resolves against;
+ * pass an empty registry when the rows carry no `platform` indirection (which is
+ * always the case for the platform catalog itself — those rows are real physical
+ * legs).
+ */
+export function projectCatalog(
   rows: readonly CatalogJoinRow[],
-  env: InferenceBindings,
-): CatalogBuildResult {
+  inputs: ModelCatalogInputs,
+):
+  | { ok: true; providers: Map<string, ProviderRecord>; models: ModelRecord[] }
+  | { ok: false; reason: string } {
   const byModel = new Map<string, CatalogJoinRow[]>();
   for (const row of rows) {
     if (!OFFERING_ROLES.has(row.offering_role)) {
@@ -445,14 +458,6 @@ function buildTenantCatalog(
     else group.push(row);
   }
 
-  const needsEnv = rows.some((row) => row.provider_kind === "platform");
-  let inputs: ModelCatalogInputs = { providers: [], models: [] };
-  if (needsEnv) {
-    const parsed = modelCatalogInputsFromEnv(env);
-    if (!parsed.ok) return parsed;
-    inputs = parsed.inputs;
-  }
-
   const providers = new Map<string, ProviderRecord>();
   const models: ModelRecord[] = [];
   for (const group of byModel.values()) {
@@ -460,8 +465,39 @@ function buildTenantCatalog(
     if (!result.ok) return result;
     models.push(result.model);
   }
+  return { ok: true, providers, models };
+}
 
-  const built = buildModelCatalog([...providers.values()], models, env, inputs.cloudflare);
+function buildTenantCatalog(
+  rows: readonly CatalogJoinRow[],
+  env: InferenceBindings,
+  platformInputs?: ModelCatalogInputs,
+): CatalogBuildResult {
+  // A `platform`-kind row is an indirection into the platform catalog. #890:
+  // resolve it against the platform catalog's inputs when they are non-empty,
+  // falling back to the env registry only when the platform tables are empty
+  // (the pre-#890 behavior, and the bootstrap posture).
+  const needsEnv = rows.some((row) => row.provider_kind === "platform");
+  let inputs: ModelCatalogInputs = { providers: [], models: [] };
+  if (needsEnv) {
+    if (platformInputs !== undefined && platformInputs.models.length > 0) {
+      inputs = platformInputs;
+    } else {
+      const parsed = modelCatalogInputsFromEnv(env);
+      if (!parsed.ok) return parsed;
+      inputs = parsed.inputs;
+    }
+  }
+
+  const projected = projectCatalog(rows, inputs);
+  if (!projected.ok) return projected;
+
+  const built = buildModelCatalog(
+    [...projected.providers.values()],
+    projected.models,
+    env,
+    inputs.cloudflare,
+  );
   if (!built.ok) return built;
   return { ok: true, resolver: new InMemoryModelResolver(built.routes) };
 }
@@ -482,6 +518,7 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
     db: D1Database;
     env: InferenceBindings;
     fallback: ModelResolver;
+    platformInputs?: ModelCatalogInputs;
   }): Promise<TenantModelCatalogLoadResult> {
     let revision: number;
     try {
@@ -525,7 +562,7 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
       return { ok: true, models: input.fallback, revision };
     }
 
-    const built = buildTenantCatalog(rows, input.env);
+    const built = buildTenantCatalog(rows, input.env, input.platformInputs);
     if (!built.ok) return built;
     entries.set(input.tenantId, {
       revision,

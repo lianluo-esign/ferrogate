@@ -30,7 +30,7 @@
  * per-request rebuild would throw away the isolate's warm state.
  */
 import type { Context, Hono } from "hono";
-import { assetDatabaseFromTenantResolver, D1AssetMetadataStore } from "../assets/d1.js";
+import { D1AssetMetadataStore, assetDatabaseFromTenantResolver } from "../assets/d1.js";
 import { assetDepsFromEnv } from "../assets/handlers.js";
 import { attributionDefaultsFor } from "../attribution/index.js";
 import {
@@ -55,6 +55,7 @@ import { tenantDatabaseOf } from "../tenancy/middleware.js";
 import { TENANT_DATABASE_VAR, type TenantDatabaseAccessor } from "../tenancy/ports.js";
 import { parseTenantDatabaseRoutingMode } from "../tenancy/resolver.js";
 import { storedAssetAudioObjects } from "./audio-objects.js";
+import type { ModelCatalogInputs } from "./catalog.js";
 import { emptyModelResolver } from "./defaults.js";
 import { errorResponse, reject } from "./errors.js";
 import { createInferenceRouter } from "./handlers.js";
@@ -69,6 +70,7 @@ import type {
   InferenceBindings,
   InferenceDeps,
   ModelResolver,
+  PlatformModelCatalogLoadResult,
   TenantModelCatalogLoadResult,
 } from "./ports.js";
 
@@ -313,13 +315,14 @@ type TenantModelsForRequest =
   | { readonly ok: true; readonly models?: ModelResolver }
   | { readonly ok: false; readonly reason: string; readonly code?: string };
 
-/** Resolve the tenant catalog before entering the inner Hono context. */
+/** Resolve the tenant and platform catalogs before entering the inner Hono context. */
 async function tenantModelsForRequest(
   c: Context<GatewayEnv>,
   deps: InferenceDeps,
 ): Promise<TenantModelsForRequest> {
   const source = deps.tenantCatalog;
-  if (source === undefined) return { ok: true };
+  const platformSource = deps.platformCatalog;
+  if (source === undefined && platformSource === undefined) return { ok: true };
 
   const accessor = tenantDatabaseOf(c);
   const rawMode = String(
@@ -334,8 +337,42 @@ async function tenantModelsForRequest(
       reason: `invalid GATEWAY_TENANT_DB_ROUTING value '${rawMode}'`,
     };
   }
-  if (accessor.tenantId === null || parsedMode === "off") {
-    return { ok: true, models: fallbackModels(deps, c.env) };
+
+  const env = c.env as unknown as InferenceBindings;
+  const envFallback = fallbackModels(deps, c.env);
+
+  // #890 — the platform (control-object) catalog is resolved ONCE per request
+  // and reused for BOTH the platform-operator answer and a catalog-less tenant's
+  // fallback. Platform rows present ⇒ authoritative; zero rows ⇒ `envFallback`
+  // (bootstrap). The async read is why it lands here rather than in the
+  // synchronous `fallbackModels`.
+  let platformResolver = envFallback;
+  let platformInputs: ModelCatalogInputs | undefined;
+  if (platformSource !== undefined) {
+    let platform: PlatformModelCatalogLoadResult;
+    try {
+      platform = await platformSource.load({ env, fallback: envFallback });
+    } catch (error) {
+      return {
+        ok: false,
+        // `controlDatabaseFrom` throws HttpError(503) on an unrecognized
+        // `GATEWAY_CONTROL_STORAGE`; surface its code rather than guessing.
+        code: error instanceof HttpError ? error.code : "model_catalog_unavailable",
+        reason:
+          error instanceof Error
+            ? error.message
+            : `platform catalog source failed: ${String(error)}`,
+      };
+    }
+    if (!platform.ok) {
+      return { ok: false, code: "model_catalog_unavailable", reason: platform.reason };
+    }
+    platformResolver = platform.models;
+    platformInputs = platform.inputs;
+  }
+
+  if (source === undefined || accessor.tenantId === null || parsedMode === "off") {
+    return { ok: true, models: platformResolver };
   }
 
   let db: D1Database;
@@ -357,8 +394,9 @@ async function tenantModelsForRequest(
     loaded = await source.load({
       tenantId: accessor.tenantId,
       db,
-      env: c.env as unknown as InferenceBindings,
-      fallback: fallbackModels(deps, c.env),
+      env,
+      fallback: platformResolver,
+      ...(platformInputs === undefined ? {} : { platformInputs }),
     });
   } catch (error) {
     return {
