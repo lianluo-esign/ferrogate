@@ -728,11 +728,24 @@ describe("FC-3 — the properties that make the shared reader trustworthy", () =
       ["agent-runtime", agentRuntimeGuardrailsSource],
       ["mcp", mcpGuardrailsSource],
     ] as const) {
-      const specifiers = [...source.matchAll(/from\s+"([^"]+)";/g)].map((match) => match[1] ?? "");
-      expect(specifiers.length, `${label}: the file must import something`).toBeGreaterThan(0);
-      for (const specifier of specifiers) {
+      const imports = [
+        ...source.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+"([^"]+)";?$/gm),
+      ].map((match) => ({ typeOnly: match[1] !== undefined, specifier: match[2] ?? "" }));
+      expect(imports.length, `${label}: the file must import something`).toBeGreaterThan(0);
+      for (const { typeOnly, specifier } of imports) {
+        // A type-only import is erased at compile time and pulls no runtime
+        // module graph — which is exactly what "stays a leaf" means. Only value
+        // imports can drag another module's graph in.
+        if (typeOnly) continue;
+        // Post-#880 the screening module resolves the CONTROL_DATA handle through
+        // its OWN thin `./control-data.js` adapter — a same-app module whose own
+        // leaf-ness is held by fleet-rbac-action.test.ts §4, not another Worker's
+        // graph.
         expect(
-          specifier === "@ferrogate/guardrails" || specifier === "./ports.js",
+          specifier === "@ferrogate/guardrails" ||
+            specifier === "./ports.js" ||
+            specifier === "./control-data" ||
+            specifier === "./control-data.js",
           `${label}: unexpected import ${specifier} — the fleet reader must stay a leaf`,
         ).toBe(true);
       }
