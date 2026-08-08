@@ -67,6 +67,9 @@ import {
   d1AgentUpstreamPort,
 } from "../../../agent-runtime/src/agents/registry.js";
 import registrySource from "../../../agent-runtime/src/agents/registry.ts?raw";
+// The CONTROL_DATA adapter (#880) registry.ts imports — read as TEXT to prove it
+// stays a same-app leaf, never imported for value here.
+import agentControlDataSource from "../../../agent-runtime/src/control-data.ts?raw";
 import {
   AGENT_UPSTREAM_COLLECTION,
   RESOURCE_TABLE,
@@ -248,14 +251,35 @@ describe("the two Workers reach the SAME rows", () => {
     // has no value imports. Asserted off its source text, not off its docblock,
     // because a docblock cannot go red.
     const imports = [...registrySource.matchAll(/^import\s+([\s\S]*?)\s+from\s+"([^"]+)";/gm)];
+    // Post-#880 registry.ts resolves the CONTROL_DATA handle through its OWN thin
+    // `../control-data.js` adapter — a same-app module (asserted a leaf below),
+    // not another Worker's graph.
     expect(imports.map(([, , specifier]) => specifier)).toEqual([
       "@ferrogate/storage",
+      "../control-data.js",
       "../ports.js",
     ]);
     const portsImport = imports.find(([, , specifier]) => specifier === "../ports.js");
     expect(portsImport, "registry.ts has no ports import").toBeDefined();
     if (portsImport === undefined) return;
     expect(portsImport[1]?.startsWith("type "), "registry.ts imports ports as VALUES").toBe(true);
+
+    // The `../control-data.js` exception is only sound if the adapter itself pulls
+    // no foreign Worker's graph: only `@ferrogate/*` packages or its own app's
+    // relative modules, never an `apps/` path or a `../../` cross-app escape.
+    const adapterImports = [
+      ...agentControlDataSource.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+"([^"]+)";?$/gm),
+    ].map((m) => ({ typeOnly: m[1] !== undefined, specifier: m[2] as string }));
+    for (const { typeOnly, specifier } of adapterImports) {
+      if (typeOnly) continue;
+      const sameApp =
+        specifier.startsWith("@ferrogate/") ||
+        (specifier.startsWith("./") && !specifier.startsWith("../"));
+      expect(
+        sameApp && !specifier.includes("apps/"),
+        `control-data.ts reaches outside its own app for value: ${specifier}`,
+      ).toBe(true);
+    }
   });
 });
 
