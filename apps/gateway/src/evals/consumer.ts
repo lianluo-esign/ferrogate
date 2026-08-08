@@ -69,6 +69,7 @@ import {
   writeOnlineEvalScores,
 } from "./d1.js";
 import { buildJudgeRequestBody, parseJudgeVerdict } from "./judge.js";
+import { refreshOnlineEvalLegQuality } from "./leg-quality.js";
 import { type OnlineEvalSample, onlineEvalSampleFromWire } from "./record.js";
 import type { OnlineEvalScoreRecord } from "./record.js";
 import { onlineEvalScorePoints, publishOnlineEvalScorePoints } from "./metrics.js";
@@ -266,6 +267,12 @@ export async function consumeOnlineEvalBatch(
     return { scored: 0, malformed, refusedResidency, unjudgeable, retried: false };
   }
 
+  // #894 — the tenants whose per-leg quality aggregate this batch invalidated.
+  // Collected inside the write loop and recomputed only AFTER the whole batch is
+  // durable: the aggregate is a projection of the scores, so recomputing it from
+  // a partially written batch would publish a mean over rows that a `retryAll`
+  // is about to re-derive.
+  const refreshed: string[] = [];
   try {
     if (deps.database !== undefined) {
       // Explicit database injection is the legacy/test seam. Production does
@@ -300,11 +307,31 @@ export async function consumeOnlineEvalBatch(
         }
         await writeTenantOnlineEvalScores(tenantDatabase, group);
         await writeOnlineEvalScoreProjections(projection, group);
+        refreshed.push(tenantId);
       }
     }
   } catch {
     batch.retryAll?.();
     return { scored: 0, malformed, refusedResidency, unjudgeable, retried: true };
+  }
+
+  // #894 — the rolling per-(provider, provider_model) aggregate the router
+  // reads, recomputed OFF the request path. Best-effort by construction: the
+  // judge has already been paid for and the scores are already durable, so a
+  // failed recompute must not retry the batch (which would re-judge every
+  // sample). The next batch, or the cron sweep, recomputes the same window.
+  for (const tenantId of refreshed) {
+    // The resolvers are passed THROUGH rather than re-defaulted, so the
+    // object-first guard inside `refreshOnlineEvalLegQuality` sees the identity
+    // it checks (`=== onlineEvalDatabaseFrom`) on a production env and a test's
+    // injected pair stays the same seam `regression.ts` offers.
+    await refreshOnlineEvalLegQuality(
+      env,
+      tenantId,
+      Math.floor(now() / 1000),
+      projectionDatabaseFor,
+      tenantDatabaseFor,
+    ).catch(() => 0);
   }
 
   // Analytics Engine, AFTER the durable write and never in front of it: the D1

@@ -266,10 +266,7 @@ export function routeEstimatedCost(
  * port of the Rust predicate, and so a future synchronous circuit snapshot has
  * somewhere to land without changing the ranking rule.
  */
-export function providerHealthRank(
-  circuitAllows: boolean,
-  score: ProviderRoutingScore,
-): 0 | 1 | 2 {
+export function providerHealthRank(circuitAllows: boolean, score: ProviderRoutingScore): 0 | 1 | 2 {
   if (!circuitAllows) {
     return 2;
   }
@@ -297,10 +294,7 @@ export function latencyRank(score: ProviderRoutingScore): number {
  * failing half its requests carries +5, which dominates any realistic latency
  * term.
  */
-export function balancedRouteScore(
-  route: PhysicalRoute,
-  score: ProviderRoutingScore,
-): number {
+export function balancedRouteScore(route: PhysicalRoute, score: ProviderRoutingScore): number {
   const input = route.inputPricePer1m;
   const output = route.outputPricePer1m;
   const cost = input !== undefined && output !== undefined ? input + output : 1_000;
@@ -424,6 +418,103 @@ export interface StrategyContext {
   readonly metrics?: RoutingMetrics | undefined;
   /** `model_route_counter.fetch_add` — injected so a test is deterministic. */
   readonly cursor?: number | undefined;
+  /**
+   * #894 — the ladder's per-leg online-eval verdicts, ALREADY RESOLVED.
+   *
+   * `undefined` for every request until an isolate has warmed the memo, and for
+   * every tenant that never opted into online evaluation, which is the ordering
+   * this function had before #894.
+   */
+  readonly quality?: RoutingQuality | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// #894 — the quality input, and why it is shaped as a resolved predicate
+// ---------------------------------------------------------------------------
+
+/**
+ * One ladder's quality verdicts, as a SYNCHRONOUS predicate.
+ *
+ * The implementation lives in `src/evals/quality-source.ts`; only this
+ * inference-owned interface is declared here, the same way
+ * {@link RoutingMetrics} is a port rather than an import of a metrics store.
+ * The evaluation slice may know about inference; inference may not know about
+ * the evaluation slice (`./identity.ts` states the rule for #693's leg
+ * publisher and it holds for this too).
+ *
+ * `lags` is "this leg's mean is at least the tenant's `regressionDrop` below the
+ * BEST leg of the same ladder, under the same judge and criterion, with the
+ * tenant's `regressionMinSamples` on both sides". It is never an absolute floor
+ * — `src/evals/policy.ts:20-46` on why an absolute quality number is meaningless
+ * — and an unmeasured leg answers `false`, i.e. "no reason to demote it", never
+ * "it is good".
+ */
+export interface RoutingQuality {
+  lags(route: PhysicalRoute): boolean;
+}
+
+/**
+ * The per-request resolver `handlers.ts` holds in `deps`.
+ *
+ * Returns `undefined` — not an empty {@link RoutingQuality} — when the memo is
+ * cold, so "we have no snapshot" and "the snapshot demotes nothing" stay
+ * distinguishable at the one place a test can assert them apart.
+ *
+ * MUST NOT do I/O: it is called from `planUpstream`, which is synchronous.
+ */
+export interface RoutingQualityPort {
+  ladderQuality(tenantId: string, logicalModel: string): RoutingQuality | undefined;
+}
+
+/** The port a deployment with no evaluation storage gets. */
+export const NO_ROUTING_QUALITY: RoutingQualityPort = {
+  ladderQuality(): undefined {
+    return undefined;
+  },
+};
+
+/**
+ * Move every lagging leg behind every non-lagging one, preserving the strategy's
+ * own order inside each part.
+ *
+ * A PERMUTATION, never a filter — the same invariant the four arms hold, and the
+ * reason it matters more here than there: a judge score is a noisy proxy
+ * (`src/evals/policy.ts`), so it may reorder a ladder and must never be able to
+ * remove the leg that would have served the request. A ladder whose legs ALL
+ * lag is returned untouched: "everything is behind everything" is not an
+ * ordering, and demoting the whole list would only cost the sort.
+ *
+ * ## The CANARY is exempt, and that is not a loophole
+ *
+ * `candidates.ts::applyCanary` puts the canary at the HEAD of the list for the
+ * sticky subset of callers it selected, and that head position survives
+ * `orderByPriorityRotation` because the canary is alone in its priority group.
+ * A quality partition with no exemption would move it straight to the tail for
+ * every one of those callers, so an operator-declared `canary_percent = 10`
+ * would silently divert 0% — and it could not recover, because a leg that stops
+ * being served stops accumulating scores. Worse, the thing the operator is
+ * running the canary to FIND OUT is exactly whether the new route is worse; a
+ * router that answers the question by cancelling the experiment has destroyed
+ * the evidence rather than acted on it.
+ *
+ * So a route carrying `canaryPercent` keeps whatever position the strategy gave
+ * it. The signal is not discarded — the leg aggregate still records it and
+ * `evals/regression.ts` still alerts on it — it just does not get to turn an
+ * operator's declared rollout off without the operator.
+ */
+function demoteLaggingLegs(
+  ordered: readonly PhysicalRoute[],
+  quality: RoutingQuality | undefined,
+): readonly PhysicalRoute[] {
+  if (quality === undefined) return ordered;
+  const lagging: PhysicalRoute[] = [];
+  const kept: PhysicalRoute[] = [];
+  for (const route of ordered) {
+    if (route.canaryPercent === undefined && quality.lags(route)) lagging.push(route);
+    else kept.push(route);
+  }
+  if (lagging.length === 0 || kept.length === 0) return ordered;
+  return [...kept, ...lagging];
 }
 
 /** The tail every Rust arm shares: priority ASC, weight DESC, then a total order. */
@@ -470,7 +561,21 @@ export function orderCandidatesByStrategy(
     return routes;
   }
   const metrics = context.metrics ?? NO_ROUTING_METRICS;
+  // #894 — applied to whatever the arm produced, not folded into each arm's
+  // comparator. Quality is a different KIND of input from cost and latency: it
+  // is a sampled, judge-derived proxy with a minimum-sample gate, so it can only
+  // ever say "this leg is measurably worse than a sibling", never "this leg
+  // ranks 0.13 better". A last-pass partition expresses exactly that and leaves
+  // all four arms' Rust-derived comparators byte-identical.
+  return demoteLaggingLegs(orderByStrategyArm(routes, strategy, context, metrics), context.quality);
+}
 
+function orderByStrategyArm(
+  routes: readonly PhysicalRoute[],
+  strategy: RoutingStrategy,
+  context: StrategyContext,
+  metrics: RoutingMetrics,
+): readonly PhysicalRoute[] {
   switch (strategy) {
     case "priority":
       return orderByPriorityRotation(routes, context.cursor ?? nextRoutingCursor());

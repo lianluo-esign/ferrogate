@@ -86,8 +86,7 @@ import { routePriceSettledCostUsd } from "../metering/route-price.js";
 import { type ResidencyPolicy, residencyViolations } from "../residency/policy.js";
 import { stickyKeyFor } from "./candidates.js";
 import { dispatchDeadline, readBoundedProviderBody } from "./dispatch.js";
-import { usageFromResponseBody, usageProviderKindFor } from "./usage.js";
-import type { ProviderUsage } from "./usage.js";
+import { callerCanUseProvider } from "./ports.js";
 import type {
   Caller,
   InferenceBindings,
@@ -95,6 +94,8 @@ import type {
   PhysicalRoute,
   ResolvedInferenceDeps,
 } from "./ports.js";
+import { usageFromResponseBody, usageProviderKindFor } from "./usage.js";
+import type { ProviderUsage } from "./usage.js";
 
 /**
  * The mirror one request selected, gathered on the primary path and moved into
@@ -136,6 +137,18 @@ export interface ShadowMirror {
    * having to know whether the success path already settled it.
    */
   readonly retain?: ((body: string | undefined) => void) | undefined;
+  /**
+   * #894 — override the budget key and cap this mirror is charged against.
+   *
+   * Absent ⇒ Rust's own pair, `(logicalModel, route.shadowMaxRequests ?? 0)`,
+   * which is what an EXPERIMENT mirror has always used. A candidate-coverage
+   * mirror needs its own: its route is a servable ladder candidate, so it
+   * carries no `shadowMaxRequests` at all and would charge a cap of `0` —
+   * "uncapped" — against the shared per-model key. Uncapped is exactly the
+   * property a mirror that spends real tokens on responses no client sees must
+   * not have.
+   */
+  readonly budget?: { readonly key: string; readonly limit: number } | undefined;
 }
 
 /** The identity half of a shadow leg's evidence row. See {@link ShadowMirror}. */
@@ -420,8 +433,8 @@ export async function runShadowMirror(
     // `ModelResolver.candidates` only yields enabled routes, so this is the
     // last gate here too. `0` is uncapped and costs no round trip.
     const admitted = await deps.shadowBudget.tryConsume(
-      mirror.logicalModel,
-      mirror.route.shadowMaxRequests ?? 0,
+      mirror.budget?.key ?? mirror.logicalModel,
+      mirror.budget?.limit ?? mirror.route.shadowMaxRequests ?? 0,
     );
     if (!admitted) {
       // #693 — RECORDED, not dropped. A budget refusal is the operator's own
@@ -572,4 +585,182 @@ function shadowLegCostUsd(
     outputPricePer1m: mirror.route.outputPricePer1m,
     cachedInputPricePer1m: mirror.route.cachedInputPricePer1m,
   });
+}
+
+// ---------------------------------------------------------------------------
+// #894 — CANDIDATE COVERAGE
+// ---------------------------------------------------------------------------
+
+/**
+ * The fleet backstop on coverage spend, per `(tenant, logical model)`.
+ *
+ * The TENANT's control is `OnlineEvalPolicy.coveragePercent`, which is the knob
+ * that decides whether coverage happens at all and how much of their sampled
+ * traffic it touches. This constant is the OPERATOR's floor under a
+ * misconfiguration — a tenant who sets 100 on a high-volume model still cannot
+ * turn the gateway into an unbounded second dispatcher.
+ *
+ * Same ledger, same semantics and the same caveat as every other shadow cap:
+ * with `SHADOW_BUDGET` bound it is a global count in the Durable Object; without
+ * it, it is a count PER LIVE ISOLATE (`ISOLATE_SHADOW_BUDGET`). "Cap per
+ * isolate" must never be read as "cap".
+ */
+export const COVERAGE_BUDGET_LIMIT = 500;
+
+/** `coverage:{tenant}:{logicalModel}` — never the experiment mirror's key. */
+export function coverageBudgetKey(tenantId: string, logicalModel: string): string {
+  return `coverage:${tenantId}:${logicalModel}`;
+}
+
+/**
+ * Rotates coverage across a ladder's non-primary candidates.
+ *
+ * A fixed `candidates[1]` would give the second-choice leg every coverage
+ * sample and leave the third and fourth permanently at `no_signal` — i.e. it
+ * would reproduce, one position further down, exactly the blind spot #894
+ * exists to remove. Module scope is the isolate, which is the same lifetime
+ * `nextRoutingCursor` uses for the priority rotation.
+ *
+ * MONOTONIC, and reduced modulo the ladder only at the point of USE. The first
+ * cut stored `(cursor + 1) % nonPrimary.length`, i.e. it reduced the SHARED
+ * cursor by the CURRENT ladder's length — so a two-leg ladder (one non-primary,
+ * `% 1 === 0`) reset the cursor to zero on every sample, and any short busy
+ * ladder clamped it into its own small range. A longer ladder sharing the
+ * isolate then started its rotation at position 0 or 1 essentially always and
+ * its deeper candidates stayed at `no_signal` for ever — reproducing the very
+ * blind spot the rotation exists to remove. Wraps like
+ * `strategy.ts::nextRoutingCursor`, for the same reason.
+ */
+let coverageCursor = 0;
+
+/**
+ * The coverage mirror for this request, or `null`.
+ *
+ * PURE except for the rotation cursor, and synchronous: it is called from
+ * `handlers.ts::dispatchCandidates` beside `spawnShadowMirror`, on the
+ * already-eligible, already-ordered SERVABLE ladder.
+ *
+ * ## What it is for
+ *
+ * `online_eval_scores` only ever contains rows for legs that SERVED (or that an
+ * experiment mirrored). A cheap candidate sitting at position 2 of a ladder is
+ * never routed to while position 0 is healthy, so it accumulates no scores, so
+ * `evals/leg-quality.ts` reports `no_signal` for it for ever. Coverage buys the
+ * missing population: the same prompt, to a non-primary candidate, scored by the
+ * same judge under the same criteria as the leg that served.
+ *
+ * ## Every gate it inherits, and the one it adds
+ *
+ *  - **The eval retention gate.** `coveragePercent` reaches this function only
+ *    through `InferenceRequestScope.coverageEvalPercent`, which `route-module.ts`
+ *    supplies only when `evals/shadow-leg.ts::shadowEvalRetentionRequested` is
+ *    true — i.e. only after the sampler's capture plan cleared opt-in, ZDR,
+ *    criteria and the sample bucket. A tenant that must not be sampled is never
+ *    covered, and neither is a request the sampler did not select.
+ *  - **Per-tenant opt-in.** `coveragePercent` defaults to 0 (OFF) for every
+ *    tenant including those already opted into evaluation; see
+ *    `evals/policy.ts` on why coverage is a strictly larger consent.
+ *  - **Residency (#681).** Re-applied here even though every candidate already
+ *    passed `eligibleCandidates(..., residencyPolicy)`: `shadowMirrorFor` exists
+ *    because a second dispatch leg silently escaped the policy once, and a
+ *    selector that relies on an upstream gate staying where it is would be the
+ *    same hole in a new place.
+ *  - **The credential's PROVIDER allow/deny list.** See below — this one is
+ *    added here rather than inherited, because nothing upstream applies it.
+ *  - **A PER-REQUEST bucket.** See below — deliberately NOT the sticky
+ *    per-caller bucket the canary and the experiment mirror use.
+ *  - **A budget**, {@link COVERAGE_BUDGET_LIMIT}, charged in `runShadowMirror`.
+ *
+ * It is `null` for a single-candidate ladder — there is no non-primary leg to
+ * cover — which is also why enabling coverage cannot change any deployment whose
+ * models resolve to one route.
+ *
+ * ## Why the provider allowlist is re-applied here
+ *
+ * `ports.ts::callerCanUseProvider` is consulted in exactly ONE place on the
+ * served path: `reliability.ts::dispatchWithFailover`, per candidate, where a
+ * refusal is TERMINAL (403 `provider_not_allowed`). `planUpstream`'s candidate
+ * list is deliberately NOT filtered by it — `identity.ts` records why an
+ * exclusion would be wrong there. That leaves the coverage mirror, which reads
+ * `planned.candidates`, free to dispatch the tenant's prompt to a provider the
+ * credential is explicitly forbidden to use, and to pay for the completion.
+ * Worse, the mirror is spawned BEFORE the ladder runs, so a request whose
+ * PRIMARY is denied — one the gateway is about to refuse with 403 and serve
+ * nothing for — would already have shipped the prompt to a second provider. So
+ * both halves are checked: a denied primary refuses coverage outright, and the
+ * non-primary set is filtered.
+ *
+ * The primary refusal is deliberately the CONSERVATIVE reading. A denied
+ * primary whose circuit is also open is skipped by `dispatchWithFailover`
+ * before the allowlist gate, so that one request would in fact be served by
+ * candidate 1 — and refusing coverage for it costs a measurement, while
+ * admitting it would mean guessing which candidate the breaker will pick from
+ * outside the ladder. Under-measuring is the safe error; spending is not.
+ *
+ * ## Why the bucket is per REQUEST, not per caller
+ *
+ * The canary and the experiment mirror are sticky per API key because a caller
+ * must get a CONSISTENT experience. Coverage is the opposite kind of thing: it
+ * is a measurement whose only consumer is `evals/leg-quality.ts`, which compares
+ * the covered leg's mean against the SERVED leg's mean. The served leg's scores
+ * come from every caller; a sticky coverage bucket would draw the covered leg's
+ * scores from one fixed caller subset, and the comparator would then be reading
+ * a difference between two prompt POPULATIONS as a difference between two
+ * providers — precisely the cross-population comparison `evals/policy.ts:20-46`
+ * forbids, and enough to demote a leg that is not worse. A sticky bucket also
+ * breaks the spend bound: with one API key, `coveragePercent = 5` mirrors either
+ * 0% or 100% of that tenant's sampled requests depending on a single hash.
+ *
+ * The key is therefore the per-request `samplingKey` (the client request id),
+ * which is uniform across callers and still deterministic — so the function
+ * stays testable and a redelivery cannot flip the decision.
+ */
+export function coverageMirrorFor(input: {
+  readonly candidates: readonly PhysicalRoute[];
+  readonly caller: Caller;
+  readonly tenantId: string;
+  readonly operation: InferenceOperation;
+  readonly logicalModel: string;
+  readonly body: Record<string, unknown>;
+  readonly coveragePercent: number;
+  readonly residencyPolicy: ResidencyPolicy | null;
+  /** The client request id — see the per-request bucket note above. */
+  readonly samplingKey: string;
+}): ShadowMirror | null {
+  if (!(input.coveragePercent > 0)) return null;
+  const primary = input.candidates[0];
+  if (primary === undefined) return null;
+  // A request whose primary the credential may not use is refused 403 by the
+  // ladder and serves nothing. It must not have spent money on a mirror first.
+  if (!callerCanUseProvider(input.caller, primary.provider)) return null;
+
+  const nonPrimary = input.candidates
+    .slice(1)
+    .filter((candidate) => callerCanUseProvider(input.caller, candidate.provider));
+  if (nonPrimary.length === 0) return null;
+
+  if (!shadowSampled(`${input.samplingKey}~coverage`, input.coveragePercent)) return null;
+
+  const cursor = coverageCursor;
+  coverageCursor = cursor >= Number.MAX_SAFE_INTEGER ? 0 : cursor + 1;
+  const rotated: PhysicalRoute[] = [];
+  for (let index = 0; index < nonPrimary.length; index += 1) {
+    rotated.push(nonPrimary[(cursor + index) % nonPrimary.length] as PhysicalRoute);
+  }
+
+  const route = rotated.find(
+    (candidate) => residencyViolations(candidate, input.residencyPolicy).length === 0,
+  );
+  if (route === undefined) return null;
+
+  return {
+    route,
+    operation: input.operation,
+    logicalModel: input.logicalModel,
+    body: input.body,
+    budget: {
+      key: coverageBudgetKey(input.tenantId, input.logicalModel),
+      limit: COVERAGE_BUDGET_LIMIT,
+    },
+  };
 }

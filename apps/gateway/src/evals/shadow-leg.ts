@@ -264,3 +264,141 @@ export function shadowArmSampleFrom(
     completionTruncated: captured.truncated,
   };
 }
+
+// ---------------------------------------------------------------------------
+// #894 — CANDIDATE COVERAGE, the same three seams one level over
+// ---------------------------------------------------------------------------
+
+/**
+ * The arm a coverage sample is filed under.
+ *
+ * DISTINCT from {@link SHADOW_EVAL_ARM} on purpose. `shadow` means "the mirror
+ * an EXPERIMENT declared", and the experiment reporting surface
+ * (`apps/control-plane/src/routes/admin_experiment.ts::QUALITY_AGGREGATE_SQL`,
+ * which groups on `experiment_arm`) — so
+ * filing coverage under `shadow` would make a phantom third population appear
+ * inside a real experiment's comparison. A coverage row carries no experiment at
+ * all: it is a measurement of a ROUTING candidate, read by
+ * `./leg-quality.ts` along `(provider, provider_model)`, and experiment
+ * reporting must not see it.
+ */
+export const COVERAGE_EVAL_ARM = "coverage";
+
+/**
+ * One coverage mirror, published by the inference router.
+ *
+ * Structurally {@link ShadowEvalLeg} minus `experimentId`, and that absence is
+ * the point — see {@link COVERAGE_EVAL_ARM}.
+ */
+export interface CoverageEvalLeg {
+  /** `{clientRequestId}~coverage~{provider}:{providerModel}`. */
+  readonly legId: string;
+  readonly logicalModel: string;
+  readonly provider: string;
+  readonly providerModel: string;
+  /** The mirrored body, or `undefined`. NEVER rejects; ALWAYS settles. */
+  readonly body: Promise<string | undefined>;
+}
+
+/**
+ * The tenant's coverage percentage for THIS request.
+ *
+ * Written by `./middleware.ts` inside the same `plan.capture` branch that calls
+ * {@link requestShadowEvalRetention}, so coverage inherits the entire retention
+ * gate rather than re-deciding any part of it: a request the sampler refused
+ * carries no percentage, and the router therefore mirrors nothing for coverage.
+ */
+const COVERAGE_PERCENTS = new WeakMap<Request, number>();
+
+/** The published coverage legs — plural, one per covered candidate. */
+const COVERAGE_LEGS = new WeakMap<Request, CoverageEvalLeg[]>();
+
+export function requestCoverageEval(request: Request, coveragePercent: number): void {
+  if (!(coveragePercent > 0)) return;
+  try {
+    COVERAGE_PERCENTS.set(request, coveragePercent);
+  } catch {
+    // A `WeakMap` rejects a non-object key. Costs the coverage sample, never
+    // the request — the same reading `requestShadowEvalRetention` takes.
+  }
+}
+
+/** `0` — i.e. OFF — for every request the sampler did not clear. */
+export function coverageEvalPercentFor(request: Request): number {
+  try {
+    return COVERAGE_PERCENTS.get(request) ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function publishCoverageEvalLeg(request: Request, leg: CoverageEvalLeg): void {
+  try {
+    const legs = COVERAGE_LEGS.get(request) ?? [];
+    legs.push(leg);
+    COVERAGE_LEGS.set(request, legs);
+  } catch {
+    // Best-effort at the seam, never a failed request.
+  }
+}
+
+/** Every coverage leg published for this request, oldest first. */
+export function coverageEvalLegsFor(request: Request): readonly CoverageEvalLeg[] {
+  try {
+    return COVERAGE_LEGS.get(request) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The COVERAGE arm's sample, derived from the served arm's.
+ *
+ * Identical in construction to {@link shadowArmSampleFrom} — same ceiling, same
+ * `undefined`-on-nothing-honest-to-score rule — and different in exactly two
+ * fields: the arm, and the experiment identity, which is DROPPED rather than
+ * copied. A coverage leg that inherited the served request's `experiment_id`
+ * would be counted by the experiment comparator as a third arm of an experiment
+ * it was never part of.
+ */
+export function coverageArmSampleFrom(
+  served: OnlineEvalSample,
+  leg: CoverageEvalLeg,
+  body: string | undefined,
+): OnlineEvalSample | undefined {
+  if (body === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body) as unknown;
+  } catch {
+    return undefined;
+  }
+  const completion = completionTextFrom(parsed);
+  if (completion === undefined) return undefined;
+  const captured = captureHead(completion);
+
+  const { experimentId: _experimentId, ...rest } = served;
+  return {
+    ...rest,
+    requestId: leg.legId,
+    provider: leg.provider,
+    logicalModel: leg.logicalModel,
+    providerModel: leg.providerModel,
+    experimentArm: COVERAGE_EVAL_ARM,
+    completion: captured.text,
+    completionTruncated: captured.truncated,
+  };
+}
+
+/** `{clientRequestId}~coverage~{provider}:{providerModel}` — the leg's id. */
+export function coverageLegId(
+  clientRequestId: string,
+  provider: string,
+  providerModel: string,
+): string {
+  // The candidate identity is IN the id because `online_eval_scores` is keyed
+  // `(request_id, criterion_id)`: two coverage legs on one request under a
+  // shared `{id}~coverage` would silently overwrite each other's score and the
+  // second candidate would look unmeasured.
+  return `${clientRequestId}~coverage~${provider}:${providerModel}`;
+}

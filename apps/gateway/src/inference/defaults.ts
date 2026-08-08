@@ -8,10 +8,7 @@
  * sense — they are the real code paths with an in-memory backing store, exactly
  * as `AppState` is an in-memory snapshot of the config in the Rust tree.
  */
-import {
-  openAiToAnthropicStream,
-  responsesNormalizeStream,
-} from "../streaming/index.js";
+import { openAiToAnthropicStream, responsesNormalizeStream } from "../streaming/index.js";
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { experimentObserverFor } from "../experiments/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
@@ -50,7 +47,8 @@ import type {
 } from "./ports.js";
 import { MAX_AUDIO_REFERENCE_BYTES, MAX_AUDIO_UPLOAD_BYTES } from "./schemas.js";
 import { ProviderRoutingMetrics } from "./strategy.js";
-import type { RoutingMetrics } from "./strategy.js";
+import type { RoutingMetrics, RoutingQualityPort } from "./strategy.js";
+import { routingQualityPortFor } from "../evals/quality-source.js";
 import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
 import { workersAiDispatcherFromEnv } from "./workers-ai.js";
 import type { WorkflowGateBindings } from "./workflow.js";
@@ -156,10 +154,7 @@ export class InMemoryModelResolver implements ModelResolver {
  * — i.e. the pre-wiring behavior, preserved bit for bit. Every resolver this
  * app ships implements `candidates` for real.
  */
-export function resolveCandidates(
-  models: ModelResolver,
-  model: string,
-): readonly PhysicalRoute[] {
+export function resolveCandidates(models: ModelResolver, model: string): readonly PhysicalRoute[] {
   if (typeof models.candidates === "function") {
     return models.candidates(model);
   }
@@ -346,9 +341,7 @@ function responsesProviderKind(providerKind: string): ResponsesStreamProviderKin
  *  - everything else → `null`, i.e. byte-for-byte passthrough.
  */
 export const defaultStreamNormalizers: StreamNormalizers = {
-  normalizerFor(
-    context: StreamNormalizerContext,
-  ): TransformStream<Uint8Array, Uint8Array> | null {
+  normalizerFor(context: StreamNormalizerContext): TransformStream<Uint8Array, Uint8Array> | null {
     switch (context.dialect) {
       case "anthropic.messages":
         return canonicalProviderKind(context.providerKind) === "anthropic"
@@ -449,6 +442,16 @@ export function resolveDeps(
     // score every provider `NO_ROUTING_OBSERVATIONS` forever — a metric with no
     // reader, which is the exact defect shape this wave exists to remove.
     routingMetrics: deps.routingMetrics ?? isolateRoutingMetrics,
+    // #894 — env-resolved like `shadowBudget`, and MEMO-ONLY: the port reads
+    // `peek` on the per-env online-eval quality source and never awaits, so
+    // `planUpstream` stays synchronous. `routingQualityPortFor` is imported
+    // from the module path rather than from `../evals/index.js` on purpose —
+    // the evals barrel re-exports the queue consumer, which imports this app's
+    // inference wiring, and the barrel would close that into a cycle.
+    routingQuality:
+      typeof deps.routingQuality === "function"
+        ? deps.routingQuality(env)
+        : (deps.routingQuality ?? routingQualityPortFor(env as never)),
     // The workflow GRAPH gate (certification finding D2). Env-resolved like
     // `circuit` and `shadowBudget`, and DEFAULT-ON: with `CONTROL_DB` bound the
     // gate reads the admin `agent-workflows` documents, with only
@@ -498,7 +501,6 @@ export function resolveDeps(
     responseStoreMode: deps.responseStoreMode ?? responseStoreMode(env["GATEWAY_RESPONSES_STORE"]),
     responseRetentionSeconds:
       deps.responseRetentionSeconds ??
-      ((tenantId: string) =>
-        resolveRetentionSeconds(env["GATEWAY_RESPONSES_RETENTION"], tenantId)),
+      ((tenantId: string) => resolveRetentionSeconds(env["GATEWAY_RESPONSES_RETENTION"], tenantId)),
   };
 }

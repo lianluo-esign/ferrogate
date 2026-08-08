@@ -28,6 +28,7 @@ function policy(overrides: Partial<OnlineEvalPolicy> = {}): OnlineEvalPolicy {
     criteria: CRITERIA,
     regressionDrop: 0.1,
     regressionMinSamples: 20,
+    coveragePercent: 0,
     ...overrides,
   };
 }
@@ -240,6 +241,10 @@ describe("the policy row parser fails CLOSED", () => {
         criteria: [{ id: "grounded", definition: "Is it supported by the context?" }],
         regressionDrop: 0.1,
         regressionMinSamples: 20,
+        // #894 — candidate coverage defaults OFF for a tenant that opted into
+        // measurement: mirroring to a second provider is a strictly larger
+        // consent than sampling. See `evals/policy.ts`.
+        coveragePercent: 0,
       },
     });
   });

@@ -73,8 +73,16 @@ import {
   onlineEvalSamplingDecision,
 } from "./policy.js";
 import type { OnlineEvalSample } from "./record.js";
-import { requestShadowEvalRetention, shadowArmSampleFrom, shadowEvalLegFor } from "./shadow-leg.js";
+import {
+  coverageArmSampleFrom,
+  coverageEvalLegsFor,
+  requestCoverageEval,
+  requestShadowEvalRetention,
+  shadowArmSampleFrom,
+  shadowEvalLegFor,
+} from "./shadow-leg.js";
 import type { OnlineEvalSink } from "./sink.js";
+import { warmLegQuality } from "./quality-source.js";
 import {
   type OnlineEvalBindings,
   type OnlineEvalPolicySource,
@@ -277,6 +285,40 @@ async function enqueueShadowArmSample(
   await sink.enqueue(shadow, { env: c.env });
 }
 
+/**
+ * #894 — enqueue one sample per CANDIDATE-COVERAGE leg this request mirrored.
+ *
+ * A no-op for every request that covered nothing, which is every request of
+ * every tenant that left `online_eval_coverage_percent` at 0: `coverageEvalLegsFor`
+ * answers an empty array and this costs one `WeakMap` lookup.
+ *
+ * Sequential rather than `Promise.all`, matching `enqueueShadowArmSample`'s
+ * shape: the legs settle independently and the sink is the same queue, so
+ * concurrency here would buy nothing and would make a partial failure harder to
+ * reason about.
+ */
+async function enqueueCoverageArmSamples(
+  c: Context<GatewayEnv>,
+  sink: OnlineEvalSink,
+  served: OnlineEvalSample,
+): Promise<void> {
+  const legs = coverageEvalLegsFor(c.req.raw);
+  if (legs.length === 0) return;
+  for (const leg of legs) {
+    const coverage = coverageArmSampleFrom(served, leg, await leg.body);
+    if (coverage === undefined) {
+      // DISTINCT from `shadow_arm_not_evaluable`: that one says an experiment's
+      // mirror produced nothing scoreable, this one says a ROUTING candidate
+      // was dispatched to and still has no score — which is the difference
+      // between an incomplete experiment and a candidate that will keep reading
+      // `no_signal` to the router no matter how much coverage is bought.
+      sink.skip("coverage_arm_not_evaluable");
+      continue;
+    }
+    await sink.enqueue(coverage, { env: c.env });
+  }
+}
+
 /** Mount the sampler. See the module docblock for the position and the rules. */
 export function onlineEvaluation(
   sink: OnlineEvalSink,
@@ -335,6 +377,11 @@ export function onlineEvaluation(
         // be sampled is never shadow-SCORED either, and nothing about the
         // mirror is retained for it. See `./shadow-leg.ts`.
         requestShadowEvalRetention(c.req.raw);
+        // #894 — CANDIDATE COVERAGE, in the same branch and therefore behind
+        // exactly the same four refusals. `0` (the default for every tenant
+        // that did not ask for coverage) writes nothing, so the router sees no
+        // coverage percentage and mirrors no non-primary candidate.
+        requestCoverageEval(c.req.raw, policy?.coveragePercent ?? 0);
         try {
           // Cloning tees the body stream; it reads nothing and awaits nothing.
           // A failure here (an already-disturbed body) costs the sample, never
@@ -367,16 +414,26 @@ export function onlineEvaluation(
     // even when the policy said "do not sample", or a tenant that opts in would
     // never be sampled at all.
     const warm = policies.policyFor(tenantId).catch(() => undefined);
+    // #894 — and the per-leg quality memo the ROUTER peeks, warmed in the same
+    // deferred window and for the same reason: `orderCandidatesByStrategy` is
+    // synchronous, so the only moment a snapshot can be fetched is after this
+    // request has already been served. Warmed unconditionally alongside the
+    // policy, including for a tenant whose capture plan refused this request —
+    // the memo is what the NEXT request reads, and gating it on being sampled
+    // would leave a 5%-sampled tenant's router cold 95% of the time.
+    const warmQuality = warmLegQuality(c.env as OnlineEvalBindings, tenantId).catch(
+      () => undefined,
+    );
 
     if (requestClone === undefined) {
-      defer(warm);
+      defer(Promise.all([warm, warmQuality]));
       return;
     }
 
     const response = c.res;
     if (!evaluableResponse(response)) {
       sink.skip("response_not_evaluable");
-      defer(warm);
+      defer(Promise.all([warm, warmQuality]));
       return;
     }
     // Cloned SYNCHRONOUSLY, while the response is still intact; read later.
@@ -388,7 +445,7 @@ export function onlineEvaluation(
     }
     if (responseClone === undefined) {
       sink.skip("response_not_evaluable");
-      defer(warm);
+      defer(Promise.all([warm, warmQuality]));
       return;
     }
 
@@ -452,6 +509,12 @@ export function onlineEvaluation(
           // spending a judge call on, and enqueuing it first would let a queue
           // failure on the served sample leave an orphan shadow population.
           await enqueueShadowArmSample(c, sink, sample);
+          // #894 — and every CANDIDATE-COVERAGE leg, last. Same ordering rule
+          // as the shadow arm and one more reason for it: a coverage population
+          // exists only to be compared against the leg that served, so a
+          // coverage sample enqueued before its control would be an orphan if
+          // the served enqueue failed.
+          await enqueueCoverageArmSamples(c, sink, sample);
         } catch {
           // The response has already been served. Nothing here may surface.
         }
