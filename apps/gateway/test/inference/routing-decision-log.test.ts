@@ -149,6 +149,26 @@ function chatBody(extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hi" }], ...extra });
 }
 
+/**
+ * Read THIS request's log row by the fixed id it was issued under, rather than
+ * assuming "the only row in the table".
+ *
+ * `storedRequestLogs()` returns the whole shared `CONTROL_DB.request_logs`, and
+ * a batched/full gateway run can schedule another test file into the same
+ * workerd isolate, whose write can land between this test's `beforeEach` reset
+ * and its read — the same shared-isolate class as the pre-existing
+ * `catalog.test.ts` pool flake. A `SELECT *`-then-`rows[0]` read would then
+ * inflate the count or return a foreign decision string. Keying on the request
+ * id this test alone controls (`fg-cq-*`, verified unique across the suite)
+ * makes the assertion depend only on the row this request wrote, so a
+ * concurrent row can neither be counted nor read in its place.
+ */
+async function decisionFor(requestId: string): Promise<string | null> {
+  const rows = (await storedRequestLogs()).filter((row) => row.request_id === requestId);
+  expect(rows, `exactly one request_logs row for ${requestId}`).toHaveLength(1);
+  return (rows[0] as unknown as { routing_decision: string | null }).routing_decision;
+}
+
 const COMPLETION = {
   id: "chatcmpl-cq",
   object: "chat.completion",
@@ -188,9 +208,7 @@ describe("the cost/quality dial writes an explainable decision to the request lo
     expect(response.status, await response.clone().text()).toBe(200);
     await gw.settle();
 
-    const rows = await storedRequestLogs();
-    expect(rows).toHaveLength(1);
-    const decision = (rows[0] as unknown as { routing_decision: string | null }).routing_decision;
+    const decision = await decisionFor("fg-cq-applied");
     expect(decision).toBe(
       "cost_quality task=easy(short_single_turn) applied=true eligible=good/gpt-4o-mini filtered=cheap/gpt-4o-mini",
     );
@@ -212,9 +230,7 @@ describe("the cost/quality dial writes an explainable decision to the request lo
     expect(response.status, await response.clone().text()).toBe(200);
     await gw.settle();
 
-    const decision = (
-      (await storedRequestLogs())[0] as unknown as { routing_decision: string | null }
-    ).routing_decision;
+    const decision = await decisionFor("fg-cq-hard");
     expect(decision).toContain("task=hard(tools_requested)");
     expect(decision).toContain("applied=false");
     expect(decision).toContain("note=hard_task_kept_ladder");
@@ -254,9 +270,7 @@ describe("the cost/quality dial writes an explainable decision to the request lo
     expect(response.status).toBe(200);
     await gw.settle();
 
-    const decision = (
-      (await storedRequestLogs())[0] as unknown as { routing_decision: string | null }
-    ).routing_decision;
+    const decision = await decisionFor("fg-cq-off");
     // The byte-identical-when-off guarantee reaches the log too: no column value.
     expect(decision).toBeNull();
   });
