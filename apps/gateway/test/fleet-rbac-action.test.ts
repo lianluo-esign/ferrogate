@@ -94,6 +94,10 @@ import {
 } from "../../mcp/src/rbac.js";
 import type { AuthContext as McpAuth } from "../../mcp/src/ports.js";
 import mcpRbacSource from "../../mcp/src/rbac.ts?raw";
+// The CONTROL_DATA adapters (#880) rbac.ts imports — read as TEXT to prove they
+// stay same-app leaves, never imported for value here.
+import agentControlDataSource from "../../agent-runtime/src/control-data.ts?raw";
+import mcpControlDataSource from "../../mcp/src/control-data.ts?raw";
 import {
   seedTenantRosterRows,
   tenantObjectPrivilegedBatch,
@@ -448,9 +452,13 @@ describe("§4 the imported authorizers pull no foreign module graph", () => {
     // shared `@ferrogate/storage` tenant-object router, a workspace package
     // this Worker's own bundle already carries — so the leaf property is now:
     // every import is either type-only (erased) or from that shared storage
-    // package. A relative value import, or any `apps/*` path, would drag a
-    // foreign Worker's ports and bindings into this bundle and would mean the
-    // authorizer this file exercises is not the thing its own Worker mounts.
+    // package. Post-#880 each authorizer also resolves the CONTROL_DATA handle
+    // for its permission read through its OWN thin `./control-data` adapter — a
+    // same-app module (asserted a leaf below), not another Worker's graph. Any
+    // OTHER relative value import, or any `apps/*` path, would drag a foreign
+    // Worker's ports and bindings into this bundle and would mean the authorizer
+    // this file exercises is not the thing its own Worker mounts.
+    const ALLOWED_LOCAL_ADAPTERS = new Set(["./control-data", "./control-data.js"]);
     for (const [name, source] of [
       ["apps/mcp/src/rbac.ts", mcpRbacSource],
       ["apps/agent-runtime/src/rbac.ts", agentRbacSource],
@@ -464,8 +472,34 @@ describe("§4 the imported authorizers pull no foreign module graph", () => {
       for (const { typeOnly, specifier } of imports) {
         if (typeOnly) continue;
         expect(
-          specifier.startsWith("@ferrogate/storage"),
-          `${name} gained a runtime import outside the shared storage package: ${specifier}`,
+          specifier.startsWith("@ferrogate/storage") || ALLOWED_LOCAL_ADAPTERS.has(specifier),
+          `${name} gained a runtime import outside the shared storage package or its own ./control-data adapter: ${specifier}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("the ./control-data adapters rbac imports are same-app leaves", () => {
+    // The `./control-data` exception above is only sound if the adapter itself
+    // pulls no foreign Worker's graph. It may lean on workspace `@ferrogate/*`
+    // packages and its OWN app's relative modules, but never another app: an
+    // `apps/` path or a `../../` escape would smuggle a sibling Worker's bundle
+    // in through the back door the authorizer just opened.
+    for (const [name, source] of [
+      ["apps/mcp/src/control-data.ts", mcpControlDataSource],
+      ["apps/agent-runtime/src/control-data.ts", agentControlDataSource],
+    ] as const) {
+      const imports = [
+        ...source.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+["']([^"']+)["'];?$/gm),
+      ].map((m) => ({ typeOnly: m[1] !== undefined, specifier: m[2] as string }));
+      for (const { typeOnly, specifier } of imports) {
+        if (typeOnly) continue;
+        const sameApp =
+          specifier.startsWith("@ferrogate/") ||
+          (specifier.startsWith("./") && !specifier.startsWith("../"));
+        expect(
+          sameApp && !specifier.includes("apps/"),
+          `${name} reaches outside its own app for value: ${specifier}`,
         ).toBe(true);
       }
     }
