@@ -24,6 +24,9 @@ interface StatusBody {
   readonly runtime: string;
   readonly snapshot: string;
   readonly providers: number;
+  readonly platform_providers: number;
+  readonly platform_models: number;
+  readonly platform_offerings: number;
   readonly auth_required: boolean;
 }
 
@@ -68,6 +71,71 @@ describe("runtime status (real D1)", () => {
   it("counts real rows from the durable store", async () => {
     await seedD1("providers", [{ id: "p1" }, { id: "p2" }]);
     expect((await status()).providers).toBe(2);
+  });
+
+  it("counts the platform catalog DISTINCTLY from the tenant providers (#893)", async () => {
+    // A tenant provider aggregate that is NOT the platform catalog: the two
+    // counts must not fold into one another.
+    await seedD1("providers", [{ id: "p1" }, { id: "p2" }]);
+
+    // Drive the real #889 platform CRUD as an operator with no tenant_id, so the
+    // count is read back from what the handlers actually wrote (raw seeding a
+    // COUNT would only prove the query agrees with the seed).
+    const provider = await SELF.fetch(
+      `${BASE}/admin/v1/providers`,
+      jsonRequest(KEY, "POST", {
+        id: "plat_chan",
+        name: "plat_chan",
+        kind: "openai-compatible",
+        base_url: "https://plat.example.test/v1",
+        enabled: true,
+      }),
+    );
+    expect(provider.status, await provider.clone().text()).toBe(201);
+
+    const model = await SELF.fetch(
+      `${BASE}/admin/v1/models`,
+      jsonRequest(KEY, "POST", {
+        id: "plat_model",
+        name: "plat_model",
+        family: "openai",
+        capabilities: ["chat"],
+        context_window: 128000,
+        routing_strategy: "priority",
+        enabled: true,
+      }),
+    );
+    expect(model.status, await model.clone().text()).toBe(201);
+
+    for (const id of ["plat_off_a", "plat_off_b"]) {
+      const offering = await SELF.fetch(
+        `${BASE}/admin/v1/models/plat_model/offerings`,
+        jsonRequest(KEY, "POST", {
+          id,
+          provider_id: "plat_chan",
+          upstream_model_id: `upstream-${id}`,
+          role: id === "plat_off_a" ? "primary" : "fallback",
+          priority: 0,
+          input_price_per_1m: 0.25,
+          output_price_per_1m: 0.5,
+        }),
+      );
+      expect(offering.status, await offering.clone().text()).toBe(201);
+    }
+
+    const body = await status();
+    expect(body.platform_providers).toBe(1);
+    expect(body.platform_models).toBe(1);
+    expect(body.platform_offerings).toBe(2);
+    // The tenant aggregate is untouched by the platform writes — no silent fold.
+    expect(body.providers).toBe(2);
+  });
+
+  it("reports zero platform catalog counts before anything is adopted (#893)", async () => {
+    const body = await status();
+    expect(body.platform_providers).toBe(0);
+    expect(body.platform_models).toBe(0);
+    expect(body.platform_offerings).toBe(0);
   });
 
   it("still answers when a sub-source cannot be read (status is the debugging endpoint)", async () => {
