@@ -149,6 +149,36 @@ describe("request assembly against /admin/v1/*", () => {
     expect((stub.calls[0]?.init.headers as Record<string, string>)["content-type"]).toBeUndefined();
   });
 
+  test("a multipart upload sends FormData and no hand-set content-type", async () => {
+    const stub = stubFetch(json({ id: "file-new" }));
+    await createFetchControlPlaneClient(stub.impl).send(
+      {
+        method: "POST",
+        path: "/v1/files",
+        query: [],
+        upload: {
+          fields: [["purpose", "batch"]],
+          file: {
+            fieldName: "file",
+            filename: "in.jsonl",
+            bytes: new TextEncoder().encode('{"a":1}\n'),
+          },
+        },
+      },
+      CONTEXT,
+    );
+    const init = stub.calls[0]?.init;
+    // The body is a FormData: `fetch` derives the multipart boundary from it, so
+    // the client must NOT set content-type (a hand-set one omits the boundary).
+    expect(init?.body).toBeInstanceOf(FormData);
+    expect((init?.headers as Record<string, string>)["content-type"]).toBeUndefined();
+    const form = init?.body as FormData;
+    expect(form.get("purpose")).toBe("batch");
+    const filePart = form.get("file");
+    expect(filePart).toBeInstanceOf(Blob);
+    expect(await (filePart as Blob).text()).toBe('{"a":1}\n');
+  });
+
   test("`sendRaw` asks for the export media type, not JSON", async () => {
     const stub = stubFetch(new Response(new Uint8Array([1, 2, 3])));
     const result = await createFetchControlPlaneClient(stub.impl).sendRaw(

@@ -20,6 +20,34 @@ import { type CaBundleReader, type FetchTlsOptions, createTlsPolicy } from "./tl
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
 
+/**
+ * One `multipart/form-data` file part: the raw bytes plus the field name and
+ * filename the server reads them under (`createFile`'s `file` field).
+ */
+export interface UploadFilePart {
+  /** The multipart field name carrying the bytes (e.g. `"file"`). */
+  readonly fieldName: string;
+  /** The `filename=` the part is announced with. */
+  readonly filename: string;
+  /** The bytes uploaded verbatim — never re-encoded. */
+  readonly bytes: Uint8Array;
+  /** The part's content type; omitted lets the runtime pick a default. */
+  readonly contentType?: string;
+}
+
+/**
+ * A `multipart/form-data` body: ordered text fields plus one file part.
+ *
+ * This is the ONE request shape a `RequestSpec.body` (a JSON document) cannot
+ * express, so it rides its own field. A spec carries a `body` XOR an `upload`,
+ * never both — {@link createFetchControlPlaneClient} sends whichever is set.
+ */
+export interface MultipartUpload {
+  /** Text form fields in declaration order (e.g. `[["purpose", "batch"]]`). */
+  readonly fields: readonly (readonly [string, string])[];
+  readonly file: UploadFilePart;
+}
+
 /** A fully-built request, independent of any HTTP client. */
 export interface RequestSpec {
   readonly method: HttpMethod;
@@ -27,6 +55,8 @@ export interface RequestSpec {
   /** Ordered, repeatable query parameters (`sort` is order-significant). */
   readonly query: readonly (readonly [string, string])[];
   readonly body?: JsonValue;
+  /** A `multipart/form-data` byte upload; mutually exclusive with `body`. */
+  readonly upload?: MultipartUpload;
 }
 
 /** What the transport needs to know about the caller for one invocation. */
@@ -324,8 +354,28 @@ export function createFetchControlPlaneClient(
     const headers: Record<string, string> = { ...context.headers, accept };
     if (context.token !== undefined) headers.authorization = `Bearer ${context.token}`;
     if (context.tenant !== undefined) headers["x-ferrogate-tenant"] = context.tenant;
-    if (spec.body !== undefined) headers["content-type"] = "application/json";
+    // A multipart upload sets NO content-type here on purpose: `fetch` derives
+    // the `multipart/form-data; boundary=…` header from the FormData body, and
+    // a hand-set one would omit the boundary and make the body unparseable.
+    if (spec.body !== undefined && spec.upload === undefined) {
+      headers["content-type"] = "application/json";
+    }
     return headers;
+  };
+
+  // JSON body XOR multipart upload XOR nothing. The FormData carries the file
+  // bytes verbatim under `file.fieldName` plus each text field in order.
+  const buildBody = (spec: RequestSpec): BodyInit | undefined => {
+    if (spec.upload !== undefined) {
+      const form = new FormData();
+      for (const [key, value] of spec.upload.fields) form.append(key, value);
+      const { fieldName, filename, bytes, contentType } = spec.upload.file;
+      const blob = new Blob([bytes], contentType === undefined ? {} : { type: contentType });
+      form.append(fieldName, blob, filename);
+      return form;
+    }
+    if (spec.body !== undefined) return JSON.stringify(spec.body);
+    return undefined;
   };
 
   const send = async (
@@ -340,10 +390,11 @@ export function createFetchControlPlaneClient(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), context.timeoutMillis);
     try {
+      const requestBody = buildBody(spec);
       const init: TlsRequestInit = {
         method: spec.method,
         headers: buildHeaders(context, spec, accept),
-        ...(spec.body === undefined ? {} : { body: JSON.stringify(spec.body) }),
+        ...(requestBody === undefined ? {} : { body: requestBody }),
         signal: controller.signal,
         ...(tls === undefined ? {} : { tls }),
       };

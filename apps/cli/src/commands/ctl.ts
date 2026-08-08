@@ -31,7 +31,7 @@ import {
   truncationNotice,
 } from "../output.js";
 import { DEFAULT_PAGE_SIZE, mergePages, nextPage, pageEnvelope } from "../paging.js";
-import type { ApiResponse, RequestContext, RequestSpec } from "../ports.js";
+import type { ApiResponse, MultipartUpload, RequestContext, RequestSpec } from "../ports.js";
 import { MutationPlan, type VerbOutput, renderGate } from "../receipt.js";
 import type { GroupDescriptor, ResourceInput, VerbDescriptor } from "../registry.js";
 import {
@@ -103,6 +103,50 @@ const CONFIRM_FLAG: FlagSpec = {
   conflictsWith: ["dry-run"],
 };
 
+/**
+ * `--output-file` exists only on a raw (byte-download) verb. It is a distinct
+ * flag from the global `--output` FORMAT flag on purpose: an octet-stream body
+ * has no table/json rendering, and reusing `--output` for a path would make the
+ * format parser swallow the filename.
+ */
+const OUTPUT_FILE_FLAG: FlagSpec = {
+  name: "output-file",
+  kind: "string",
+  valueName: "PATH",
+  help: "Write the raw response bytes to PATH instead of stdout ('-' = stdout)",
+};
+
+/** `--input-file` exists only on a multipart upload verb (`files create`). */
+const INPUT_FILE_FLAG: FlagSpec = {
+  name: "input-file",
+  kind: "string",
+  valueName: "PATH",
+  help: "Read the upload's file bytes from PATH",
+};
+
+/** One `--<field>` text-form flag an upload verb declares (e.g. `--purpose`). */
+function uploadTextFlag(field: string): FlagSpec {
+  return {
+    name: field,
+    kind: "string",
+    valueName: "VALUE",
+    help: `Multipart form field '${field}' (required)`,
+  };
+}
+
+/** The full flag set for one verb: shared flags plus the verb's conditional ones. */
+function flagsForVerb(verb: VerbDescriptor): FlagSpec[] {
+  const flags = [...RESOURCE_FLAGS];
+  if (requiresConfirmation(verb)) flags.push(CONFIRM_FLAG);
+  if (verb.responseMode.kind === "raw") flags.push(OUTPUT_FILE_FLAG);
+  if (verb.upload !== undefined) {
+    flags.push(INPUT_FILE_FLAG);
+    for (const field of verb.upload.textFields) flags.push(uploadTextFlag(field));
+  }
+  flags.push(...GLOBAL_FLAGS);
+  return flags;
+}
+
 // ---------------------------------------------------------------------------
 // Argument → ResourceInput
 // ---------------------------------------------------------------------------
@@ -124,6 +168,43 @@ async function readBody(runtime: CliRuntime, args: Args): Promise<JsonValue | un
       `request document is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+/** The last `/`-separated segment of a path, for the multipart `filename=`. */
+function baseName(path: string): string {
+  const cleaned = path.replace(/\/+$/, "");
+  const index = cleaned.lastIndexOf("/");
+  const name = index === -1 ? cleaned : cleaned.slice(index + 1);
+  return name === "" ? "upload" : name;
+}
+
+/**
+ * Gather a multipart upload from `--input-file` plus each declared text field.
+ *
+ * The bytes are read verbatim from a file (not stdin, which would force a UTF-8
+ * round-trip that corrupts binary uploads). Each text field is required: the
+ * server rejects the form without it, so a verb that could only fail without an
+ * argument must not let the operator type it without one.
+ */
+async function readUpload(
+  runtime: CliRuntime,
+  args: Args,
+  form: NonNullable<VerbDescriptor["upload"]>,
+): Promise<MultipartUpload> {
+  const path = args.getString("input-file");
+  if (path === undefined || path.trim() === "") {
+    throw CliError.usage("this upload verb requires --input-file PATH");
+  }
+  const bytes = await runtime.io.readFileBytes(path);
+  const fields: (readonly [string, string])[] = [];
+  for (const field of form.textFields) {
+    const value = args.getString(field);
+    if (value === undefined || value.trim() === "") {
+      throw CliError.usage(`--${field} is required for this upload`);
+    }
+    fields.push([field, value]);
+  }
+  return { fields, file: { fieldName: form.fileField, filename: baseName(path), bytes } };
 }
 
 /** Build the typed input, rejecting malformed `--filter`/`--sort` rather than dropping them. */
@@ -334,11 +415,7 @@ function groupUsage(group: GroupDescriptor): string {
 }
 
 function verbUsage(group: GroupDescriptor, verb: VerbDescriptor): string {
-  const flags = [
-    ...RESOURCE_FLAGS,
-    ...(requiresConfirmation(verb) ? [CONFIRM_FLAG] : []),
-    ...GLOBAL_FLAGS,
-  ];
+  const flags = flagsForVerb(verb);
   return (
     `usage: ferrogate ctl ${group.name} ${verb.name} [id...] [flags]\n\n${verb.about}\n` +
     `operation: ${verb.operationId ?? "(local)"}   effect: ${verb.effect}\n\nflags:\n` +
@@ -371,11 +448,7 @@ export async function runResource(runtime: CliRuntime, argv: readonly string[]):
     }
 
     const { group, verb } = resolveVerb(groupName, verbName);
-    const flags = [
-      ...RESOURCE_FLAGS,
-      ...(requiresConfirmation(verb) ? [CONFIRM_FLAG] : []),
-      ...GLOBAL_FLAGS,
-    ];
+    const flags = flagsForVerb(verb);
     const args = parseArgs(argv.slice(2), flags, {
       env: runtime.io.env,
       commandPath: `ferrogate ctl ${groupName} ${verbName}`,
@@ -414,7 +487,10 @@ async function execute(
     effective.nonInteractive,
   );
 
-  const input = await toResourceInput(runtime, args);
+  let input = await toResourceInput(runtime, args);
+  if (verb.upload !== undefined) {
+    input = { ...input, upload: await readUpload(runtime, args, verb.upload) };
+  }
   if (input.list.sorts.length > 0) runtime.io.stderr(`${SORT_NOT_HONORED_NOTICE}\n`);
 
   const spec = buildRequest(group.name, verb.name, input);
@@ -440,7 +516,13 @@ async function execute(
     const response = await runtime.client.sendRaw(spec, rawMediaType, context);
     if (response.requestId !== undefined) runtime.io.stderr(`request-id: ${response.requestId}\n`);
     if (response.traceId !== undefined) runtime.io.stderr(`trace-id: ${response.traceId}\n`);
-    runtime.io.stdoutBytes(response.bytes);
+    const destination = args.getString("output-file");
+    if (destination !== undefined && destination !== "-") {
+      await runtime.io.writeFileBytes(destination, response.bytes);
+      runtime.io.stderr(`wrote ${response.bytes.length} bytes to ${destination}\n`);
+    } else {
+      runtime.io.stdoutBytes(response.bytes);
+    }
     return 0;
   }
 
