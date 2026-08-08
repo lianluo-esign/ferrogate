@@ -937,10 +937,10 @@ function decodeTenantMigrationState(value: unknown): PersistedTenantMigrationSta
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the TWENTY files have 36
- *    between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
- *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015, 1 in 0016 and 2 in 0017) —
- *    36, not 18,
+ *    comment lines containing a `;` mid-prose, and the TWENTY-THREE files have
+ *    38 between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
+ *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015, 1 in 0016, 1 in 0017,
+ *    1 in 0018, 1 in 0021 and 1 in 0023) — 38, not 18,
  *    is the number that bounds this function's exposure. Splitting before
  *    stripping cuts statements in half at every one of them.
  *
@@ -1037,7 +1037,7 @@ export class TenantDataObject extends DurableObject {
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 183 statements
+    // gate inside `#migrate` is what keeps that from re-applying 431 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -2073,14 +2073,15 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 183 statements of the twenty files — 71 `CREATE TABLE IF
-   * NOT EXISTS`, 89 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 10 `ALTER TABLE … ADD
-   * COLUMN`, 6 ledger `INSERT` statements and one `DROP TABLE`. (Counted,
+   * re-running the 431 statements of the twenty-three files — 74 `CREATE TABLE IF
+   * NOT EXISTS`, 94 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 21 `ALTER TABLE … ADD
+   * COLUMN`, 6 ledger `INSERT` statements, 229 `CREATE TRIGGER` and one
+   * `DROP TABLE`. (Counted,
    * not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
    * whole census then went stale again the moment `0013_guardrail_evaluations.sql`
    * landed. `test/do/tenant-data-object.test.ts` re-derives these five numbers
-   * from `sql/d1-ts/tenant/` and asserts them. The ten ALTERs are the half that
+   * from `sql/d1-ts/tenant/` and asserts them. The twenty-one ALTERs are the half that
    * matters — the CREATEs are idempotent by construction and the ALTERs are not,
    * so the gate is load-bearing rather than an optimisation.)
    */

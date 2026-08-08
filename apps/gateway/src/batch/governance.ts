@@ -23,8 +23,11 @@
  *
  * - **RPM/TPM windows.** They are a per-minute admission device for interactive
  *   traffic; a batch is asynchronous by definition and its throughput is bounded
- *   instead by `GATEWAY_BATCH_MAX_LINES_PER_TICK` and the queue's own
- *   concurrency. Consuming a caller's RPM window from a background sweep would
+ *   instead by `DEFAULT_MAX_LINES_PER_TICK` (`../batch/executor.ts`, a constant
+ *   and deliberately not an env var — there is no deployment-time reason to
+ *   raise it and a wrong value costs paid provider calls) plus
+ *   `GATEWAY_BATCH_SWEEP_LIMIT` and the queue's own concurrency. Consuming a
+ *   caller's RPM window from a background sweep would
  *   also make a batch throttle the tenant's live traffic, which no OpenAI-
  *   compatible client expects.
  * - **The wallet RESERVATION (step 3b).** A reservation is a hold released by
@@ -64,8 +67,17 @@ import { residencyViolations } from "../residency/policy.js";
 import { type ResidencyBindings, residencyPolicySourceFromEnv } from "../residency/source.js";
 import { type TenancyBindings, resolverForEnv } from "../tenancy/index.js";
 
-/** Lines executed between two budget re-reads. See the module docs. */
-export const BATCH_BUDGET_RECHECK_LINES = 25;
+/**
+ * Lines executed between two budget re-reads. See the module docs.
+ *
+ * STRICTLY SMALLER than {@link DEFAULT_MAX_LINES_PER_TICK}, and that is a
+ * correctness constraint rather than a taste: the guard is evaluated at the top
+ * of the loop, so with the two numbers equal the counter only ever reaches
+ * `maxLinesPerTick - 1` and the re-check can never fire — the rung both module
+ * docblocks describe would be dead code, and a tenant whose budget is exhausted
+ * at line 2 of a tick would still pay for the other 23.
+ */
+export const BATCH_BUDGET_RECHECK_LINES = 10;
 
 /** A refusal, shaped exactly like the middleware's so the codes stay shared. */
 export interface BatchRefusal {

@@ -28,6 +28,13 @@
  * invocation with a fresh budget. It is also the only way a job survives an
  * eviction mid-flight.
  *
+ * The one tick that is NOT re-enqueued is the one that only asked the provider
+ * whether it had finished (`BatchTickResult.awaitingProvider`). That tick does
+ * no work, and with `max_batch_timeout = 5` its replacement message arrives
+ * almost immediately, so re-enqueuing it would busy-poll the upstream batch
+ * endpoint for the job's entire completion window. The Cron sweep owns that
+ * leg.
+ *
  * ## The retry rule
  *
  * Every message is ACKED, including one whose tick refused a job for budget,
@@ -196,7 +203,22 @@ export async function consumeBatchJobBatch(
     // More work left, and NOT "unclaimed": an unclaimed job is one another
     // invocation is already driving, and re-enqueuing it would spin the queue
     // against a lease that will not free for two minutes.
-    if (result.status !== "unclaimed" && CONTINUES.has(result.status)) {
+    //
+    // NOT `awaitingProvider` either, and that one is the difference between a
+    // fast path and a busy-poll. A NATIVE job sits at `in_progress` for as long
+    // as the provider takes — up to the 24-hour completion window — and its
+    // tick does no work at all beyond one `GET /v1/batches/{id}`. Re-enqueuing
+    // it produces the next message the instant this one is acked
+    // (`max_batch_timeout = 5`, `max_batch_size = 1`), so the job would drive
+    // one Worker invocation plus one upstream poll per round trip for a day.
+    // The Cron owns that leg by design — see `./sweep.ts`, which exists partly
+    // so "the consumer re-enqueues itself once a minute forever" is not the
+    // answer — and it re-claims the job on the very next tick.
+    if (
+      result.status !== "unclaimed" &&
+      result.awaitingProvider !== true &&
+      CONTINUES.has(result.status)
+    ) {
       if (await enqueueBatchJob(env, job.tenant_id, job.batch_id)) reenqueued += 1;
     }
   }

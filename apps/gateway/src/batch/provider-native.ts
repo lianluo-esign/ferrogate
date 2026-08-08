@@ -307,14 +307,27 @@ export async function submitNativeBatch(
   timeoutMs: number,
 ): Promise<NativeBatchOutcome> {
   const { family, route } = submission;
-  const body =
-    family === "anthropic"
-      ? { requests: [] }
-      : {
-          input_file_id: submission.inputFileId,
-          endpoint: submission.endpoint,
-          completion_window: submission.completionWindow,
-        };
+  if (family !== "openai") {
+    // REFUSED, not "submitted empty". The anthropic arm used to build
+    // `{ requests: [] }`, and the only thing keeping that unreachable was
+    // `nativeBatchSupportsEndpoint` returning false — which the docblock above
+    // invites a future slice to flip ("adding a third family is one entry in
+    // one table"). Flipping it would have POSTed an empty batch to Anthropic,
+    // taken back a real batch id, persisted it and later reported `completed`
+    // for a job whose input was never sent. A family with no submission body is
+    // a refusal, which the executor treats as retryable and the Cron surfaces
+    // rather than silently completing.
+    return {
+      ok: false,
+      code: "unsupported",
+      message: `${family} has no native batch submission; run the job on the local executor`,
+    };
+  }
+  const body = {
+    input_file_id: submission.inputFileId,
+    endpoint: submission.endpoint,
+    completion_window: submission.completionWindow,
+  };
   let response: Response;
   try {
     response = await http(batchesUrl(family, route), {

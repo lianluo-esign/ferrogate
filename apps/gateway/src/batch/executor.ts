@@ -50,6 +50,14 @@
  * that quietly produced 12,000 of 50,000 outputs is worse than one that says
  * why it stopped.
  *
+ * It still PUBLISHES those 12,000. Ending the job with no output file was a
+ * third option worse than either — the lines were dispatched, metered and
+ * billed, and a `failed`/`expired` row with no `output_file_id` makes them
+ * unreachable through both `/v1/batches/{id}` and `/v1/files`. So every
+ * terminal arm except cancellation calls {@link publishPartialResults} first;
+ * cancellation is the one exception, because a job the client abandoned must
+ * not leave output behind.
+ *
  * ## The retry rule, stated (the evals consumer's rule, restated for money)
  *
  *  - a line that cannot be PARSED becomes an error line. It cannot become valid
@@ -153,6 +161,15 @@ export interface BatchTickResult {
   readonly failed: number;
   /** True when the tick could not persist and the delivery must be retried. */
   readonly retry: boolean;
+  /**
+   * The tick did nothing but ask the PROVIDER whether it had finished.
+   *
+   * The queue consumer reads this and does NOT re-enqueue: a native job's poll
+   * leg belongs to the 1-minute Cron, and a zero-delay re-enqueue of a job the
+   * provider will be running for up to 24 hours is a self-sustaining loop of
+   * one Worker invocation plus one upstream GET per round trip, doing no work.
+   */
+  readonly awaitingProvider?: boolean | undefined;
   readonly detail?: string | undefined;
 }
 
@@ -304,6 +321,72 @@ async function publishJsonl(
   return created.ok ? created.body.id : undefined;
 }
 
+/**
+ * Publish whatever the job has ALREADY produced, without touching its status.
+ *
+ * Every terminal arm that is not `completed` — expiry, a mid-job budget
+ * refusal, an unreadable input — used to end the job with `output_file_id`
+ * unset, which strands every already-dispatched, already-METERED line in
+ * `batch_request_results` where no client can reach it. The tenant is billed
+ * for calls whose output is retrievable through neither `/v1/batches/{id}` nor
+ * `/v1/files`, which is strictly worse than both options the module docblock
+ * weighs; OpenAI publishes the partial output file on `expired` for the same
+ * reason. A job with no rows yet publishes nothing, so the pre-dispatch
+ * refusals are unchanged.
+ *
+ * A publication failure is LOGGED and swallowed rather than armed as a retry:
+ * the caller is on its way to a terminal status, and a job that cannot reach
+ * one because R2 refused a write would be re-claimed by every sweep forever.
+ */
+async function publishPartialResults(
+  store: BatchStore,
+  files: AssetService,
+  caller: AssetCaller,
+  batch: StoredBatch,
+): Promise<void> {
+  try {
+    const results = await store.listResults(batch.id);
+    if (results.length === 0) return;
+    const succeeded = results.filter((result) => result.succeeded);
+    const failed = results.filter((result) => !result.succeeded);
+    const outputFileId =
+      succeeded.length === 0
+        ? undefined
+        : await publishJsonl(
+            files,
+            caller,
+            batch.id,
+            "output",
+            renderJsonl(succeeded.map((result) => result.body)),
+          );
+    const errorFileId =
+      failed.length === 0
+        ? undefined
+        : await publishJsonl(
+            files,
+            caller,
+            batch.id,
+            "error",
+            renderJsonl(failed.map((result) => result.body)),
+          );
+    await store.saveProgress(batch.tenantId, batch.id, {
+      requestCounts: {
+        total: Math.max(batch.requestCounts.total, results.length),
+        completed: succeeded.length,
+        failed: failed.length,
+      },
+      ...(outputFileId !== undefined ? { outputFileId } : {}),
+      ...(errorFileId !== undefined ? { errorFileId } : {}),
+    });
+  } catch (error) {
+    console.warn(
+      `[ferrogate] batch ${batch.id}: the partial output could not be published: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
 /** Assemble both files from the durable result rows and finish the job. */
 async function finalize(
   store: BatchStore,
@@ -316,7 +399,28 @@ async function finalize(
   const finalizingRow =
     batch.status === "finalizing"
       ? batch
-      : ((await store.updateStatus(batch.tenantId, batch.id, "finalizing", nowUnix)) ?? batch);
+      : await store.updateStatus(batch.tenantId, batch.id, "finalizing", nowUnix);
+  if (finalizingRow === undefined) {
+    // The row LEFT the executable path while this tick was in flight — a client
+    // cancel that landed between `claim` and here, which `requestCancel` writes
+    // as `cancelling` (leased) or, on the non-atomic get-then-update race, as
+    // `cancelled` outright. `-> finalizing` is refused from both, and swallowing
+    // that refusal with `?? batch` published the output anyway: a batch the
+    // caller abandoned ended up `cancelled` WITH an `output_file_id`, breaking
+    // the invariant `advance()` step 1 and BATCH_STATUS_PREDECESSORS both state.
+    // Nothing is published and nothing is retried; the cancelling arm of the
+    // next tick finishes the transition.
+    const current = await store.get(batch.tenantId, batch.id);
+    return {
+      batchId: batch.id,
+      status: current?.status ?? batch.status,
+      mode: batch.executionMode ?? "local",
+      executed: 0,
+      failed: 0,
+      retry: false,
+      detail: "the batch left the executable path before it could be finalized",
+    };
+  }
 
   const results = await store.listResults(batch.id);
   const succeeded = results.filter((result) => result.succeeded);
@@ -383,12 +487,23 @@ async function finalize(
   };
 }
 
+/**
+ * End the job with the refusal on the row — and PUBLISH what it already ran.
+ *
+ * The publication is not a nicety: a job refused at line 12,000 of 50,000 has
+ * 12,000 paid, metered lines in `batch_request_results`, and a `failed` row
+ * with no `output_file_id` makes every one of them unreachable while still
+ * billing for them. See {@link publishPartialResults}.
+ */
 async function failJob(
   store: BatchStore,
+  files: AssetService,
+  caller: AssetCaller,
   batch: StoredBatch,
   refusal: BatchRefusal,
   nowUnix: number,
 ): Promise<BatchTickResult> {
+  await publishPartialResults(store, files, caller, batch);
   await store.saveProgress(batch.tenantId, batch.id, {
     failureCode: refusal.code,
     failureMessage: refusal.message,
@@ -641,9 +756,12 @@ async function advance(
   }
 
   // 2. The 24h completion window. Expiry is checked BEFORE spend: a job that
-  //    has run out of time must not pay for one more line first.
+  //    has run out of time must not pay for one more line first. What it HAS
+  //    already paid for is published — the lines are metered and durable, and
+  //    OpenAI publishes the partial output file on `expired` too.
   if (batch.expiresAtUnix <= nowUnix) {
     await cancelNativeBatchFor(env, files, caller, batch, resolved);
+    await publishPartialResults(store, files, caller, batch);
     const expired = await store.updateStatus(batch.tenantId, batch.id, "expired", nowUnix);
     return {
       batchId: batch.id,
@@ -660,7 +778,7 @@ async function advance(
   const admitted = await governance.admitSpend();
   if (!admitted.ok) {
     await cancelNativeBatchFor(env, files, caller, batch, resolved);
-    return failJob(store, batch, admitted, nowUnix);
+    return failJob(store, files, caller, batch, admitted, nowUnix);
   }
 
   // 4. Read the input. An unreadable input is the ONE thing that fails a whole
@@ -674,6 +792,8 @@ async function advance(
   if (!pulled.ok || pulled.bytes === null) {
     return failJob(
       store,
+      files,
+      caller,
       batch,
       {
         code: "batch_input_unreadable",
@@ -685,6 +805,8 @@ async function advance(
   if (pulled.bytes.byteLength > resolved.maxInputBytes) {
     return failJob(
       store,
+      files,
+      caller,
       batch,
       {
         code: "batch_input_too_large",
@@ -700,6 +822,8 @@ async function advance(
   if (operation === undefined) {
     return failJob(
       store,
+      files,
+      caller,
       batch,
       {
         code: "batch_endpoint_unsupported",
@@ -858,7 +982,7 @@ async function advanceNative(
   if (batch.providerBatchId === undefined) {
     // Residency BEFORE a single prompt byte leaves for the provider.
     const admitted = await governance.admitRoute(route);
-    if (!admitted.ok) return failJob(store, batch, admitted, nowUnix);
+    if (!admitted.ok) return failJob(store, files, caller, batch, admitted, nowUnix);
 
     const uploaded = await uploadNativeBatchInput(
       family,
@@ -917,6 +1041,10 @@ async function advanceNative(
       executed: 0,
       failed: 0,
       retry: false,
+      // The provider owns the work from here. The Cron polls it; the queue
+      // consumer must not, or it spins one invocation per round trip for the
+      // job's whole completion window.
+      awaitingProvider: true,
       detail: `submitted as ${submitted.providerBatchId}`,
     };
   }
@@ -936,12 +1064,15 @@ async function advanceNative(
       executed: 0,
       failed: 0,
       retry: false,
+      awaitingProvider: true,
       detail: "the provider is still running this batch",
     };
   }
   if (status.state === "failed") {
     return failJob(
       store,
+      files,
+      caller,
       batch,
       {
         code: "provider_error",
@@ -968,76 +1099,125 @@ async function advanceNative(
     };
   }
 
-  // Completed upstream. Pull the provider's own output JSONL, meter every line
-  // it reports (at the discounted price), and store the lines as ours.
-  const reference = status.outputFileId;
-  if (reference === undefined) {
+  // Completed upstream. BOTH of the provider's files are pulled, metered at the
+  // discounted price and stored as ours.
+  //
+  // OpenAI SPLITS a finished batch: `output_file_id` holds the lines that
+  // succeeded and `error_file_id` holds the ones that did not. Reading only the
+  // output file silently DESTROYS every upstream-errored line — the tenant is
+  // billed for n requests and can retrieve fewer, with no record that the rest
+  // existed — and, when every line failed, OpenAI answers `completed` with
+  // `output_file_id: null` and only an error file, which used to fail the whole
+  // job for "no output file" and discard results the provider had already
+  // charged for. The local path publishes both files for the same input, so
+  // anything less here makes the two execution modes disagree on observable
+  // output for the same job.
+  const references: { reference: string; fromErrorFile: boolean }[] = [];
+  if (status.outputFileId !== undefined) {
+    references.push({ reference: status.outputFileId, fromErrorFile: false });
+  }
+  if (status.errorFileId !== undefined) {
+    references.push({ reference: status.errorFileId, fromErrorFile: true });
+  }
+  if (references.length === 0) {
     return failJob(
       store,
+      files,
+      caller,
       batch,
       { code: "provider_error", message: "the provider completed the batch with no output file" },
       nowUnix,
     );
   }
-  const text = await downloadNativeBatchOutput(
-    family,
-    route,
-    reference,
-    resolved.http,
-    resolved.timeoutMs,
-    resolved.maxInputBytes,
-  );
-  if (text === undefined) {
-    return {
-      batchId: batch.id,
-      status: batch.status,
-      mode: "native",
-      executed: 0,
-      failed: 0,
-      retry: true,
-      detail: "the provider output could not be downloaded",
-    };
+
+  // The provider's files carry `custom_id`, not our physical line index, and
+  // two files each start their own numbering — so the input is what line
+  // indexes are resolved against. That keeps `(batch_id, line_index)` stable
+  // across a redelivery (the key that makes a re-run an overwrite rather than a
+  // doubled row) and keeps a result on the line the tenant asked it for.
+  const inputLines = jsonlLines(new TextDecoder().decode(inputBytes));
+  const indexByCustomId = new Map<string, number>();
+  for (const { index, raw } of inputLines) {
+    const parsed = parseBatchInputLine(raw, index, batch.endpoint);
+    const customId = parsed.ok ? parsed.line.customId : parsed.customId;
+    if (customId !== "" && !indexByCustomId.has(customId)) indexByCustomId.set(customId, index);
   }
+  let unmatched = inputLines.length;
 
   const results: StoredBatchResult[] = [];
-  for (const { index, raw } of jsonlLines(text)) {
-    let line: Record<string, unknown>;
-    try {
-      line = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const customId = typeof line.custom_id === "string" ? line.custom_id : "";
-    const response = line.response as { status_code?: unknown; body?: unknown } | null | undefined;
-    const statusCode = typeof response?.status_code === "number" ? response.status_code : 0;
-    const succeeded = line.error === null || line.error === undefined;
-    resolved.usage?.record(
-      usageForLine(
-        batch,
-        route,
-        batch.endpoint === "/v1/embeddings" ? "embeddings" : "chat.completions",
-        index,
-        statusCode,
-        response?.body,
-        NATIVE_BATCH_COST_MULTIPLIER,
-      ),
-      { env },
+  for (const { reference, fromErrorFile } of references) {
+    const text = await downloadNativeBatchOutput(
+      family,
+      route,
+      reference,
+      resolved.http,
+      resolved.timeoutMs,
+      resolved.maxInputBytes,
     );
-    results.push({
-      batchId: batch.id,
-      lineIndex: index,
-      customId,
-      succeeded,
-      body: line,
-      createdAtUnix: nowUnix,
-    });
+    if (text === undefined) {
+      // Nothing is persisted from a PARTIAL read: publishing the output file
+      // while the error file is unreadable would report a completed batch that
+      // is missing its failures. The provider still holds both; retry.
+      return {
+        batchId: batch.id,
+        status: batch.status,
+        mode: "native",
+        executed: 0,
+        failed: 0,
+        retry: true,
+        detail: "the provider output could not be downloaded",
+      };
+    }
+    for (const { raw } of jsonlLines(text)) {
+      let line: Record<string, unknown>;
+      try {
+        line = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const customId = typeof line.custom_id === "string" ? line.custom_id : "";
+      const response = line.response as
+        | { status_code?: unknown; body?: unknown }
+        | null
+        | undefined;
+      const statusCode = typeof response?.status_code === "number" ? response.status_code : 0;
+      // The LOCAL path's rule, restated: a non-2xx line is an error line even
+      // when the provider left `error` null. Classifying on `error` alone filed
+      // a 400 in the output file as a success and reported it as `completed`.
+      const errored = line.error !== null && line.error !== undefined;
+      const succeeded = !fromErrorFile && !errored && statusCode >= 200 && statusCode < 300;
+      const lineIndex = indexByCustomId.get(customId) ?? unmatched++;
+      resolved.usage?.record(
+        usageForLine(
+          batch,
+          route,
+          batch.endpoint === "/v1/embeddings" ? "embeddings" : "chat.completions",
+          lineIndex,
+          statusCode,
+          response?.body,
+          NATIVE_BATCH_COST_MULTIPLIER,
+        ),
+        { env },
+      );
+      results.push({
+        batchId: batch.id,
+        lineIndex,
+        customId,
+        succeeded,
+        body: line,
+        createdAtUnix: nowUnix,
+      });
+    }
   }
   await store.putResults(batch.id, results);
   const advanced =
     (await store.saveProgress(batch.tenantId, batch.id, {
-      nextLineIndex: results.length,
+      nextLineIndex: Math.max(inputLines.length, results.length),
       requestCounts: {
-        total: results.length,
+        // The INPUT's line count, not the provider's answer count: a provider
+        // that returned fewer lines than were submitted must not make the batch
+        // report a smaller total than the tenant sent.
+        total: Math.max(inputLines.length, results.length),
         completed: results.filter((result) => result.succeeded).length,
         failed: results.filter((result) => !result.succeeded).length,
       },
@@ -1172,7 +1352,7 @@ async function advanceLocal(
     })) ?? started;
 
   if (stoppedBy !== undefined) {
-    return failJob(store, advanced, stoppedBy, nowUnix);
+    return failJob(store, files, caller, advanced, stoppedBy, nowUnix);
   }
   const remaining = physicalLines.filter((line) => line.index >= nextCursor);
   if (remaining.length === 0) {

@@ -67,7 +67,7 @@ beforeEach(async () => {
 });
 
 /**
- * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0021.
+ * Every table `sql/d1-ts/tenant/*.sql` creates, as of migration 0023.
  *
  * Written out rather than derived from the migration text, for the reason
  * `packages/storage/test/d1/schema.test.ts` gives for its own list: a list
@@ -88,6 +88,10 @@ const TENANT_TABLES = [
   "asset_bundle_files",
   "asset_channels",
   "audit_events",
+  // #698 — `0022_batches` and `0023_batch_execution`. SQLite orders `_` (0x5F)
+  // before `e` (0x65), so `batch_request_results` sorts ahead of `batches`.
+  "batch_request_results",
+  "batches",
   "billing_events",
   "billing_ledger",
   "billing_report_outbox",
@@ -331,12 +335,16 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      files: 21,
-      statements: 414,
-      createTable: 72,
-      createIndex: 90,
+      // #698 slices 1-3: `0022_batches` (+1 table) and `0023_batch_execution`
+      // (+1 table, +11 `ALTER TABLE … ADD COLUMN`). The ALTERs are the half
+      // that matters — they are the statements the version gate exists to stop
+      // re-running, and they more than doubled.
+      files: 23,
+      statements: 431,
+      createTable: 74,
+      createIndex: 94,
       createUniqueIndex: 6,
-      alterTable: 10,
+      alterTable: 21,
       insert: 6,
     });
 
@@ -365,8 +373,9 @@ describe("the statement splitter", () => {
       "0017_worker_schedule_state": 1,
       "0018_usage_evaluation_audit": 1,
       "0021_tenant_backfill_fence": 1,
+      "0023_batch_execution": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(37);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(38);
 
     // Ordinary statements still have their terminator removed, while each
     // trigger stays whole because its body contains internal terminators.
@@ -388,7 +397,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(21);
+    expect(TENANT_MIGRATIONS.length).toBe(23);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({

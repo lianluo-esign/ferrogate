@@ -26,7 +26,10 @@ import {
   parseBatchInputLine,
   runBatchTick,
   runTenantBatchTicks,
+  submitNativeBatch,
 } from "../src/batch/index.js";
+import { BATCH_BUDGET_RECHECK_LINES } from "../src/batch/index.js";
+import { DEFAULT_MAX_LINES_PER_TICK } from "../src/batch/index.js";
 import type { PhysicalRoute, Usage, UsageSink } from "../src/inference/ports.js";
 
 const TENANT = "tenant_exec";
@@ -434,6 +437,53 @@ describe("batch executor — governance", () => {
     expect(stored?.outputFileId).toBeUndefined();
   });
 
+  test("the MID-TICK budget re-check fires and stops the tick where it fired", async () => {
+    // The rung both module docblocks describe. It was unreachable while
+    // BATCH_BUDGET_RECHECK_LINES equalled DEFAULT_MAX_LINES_PER_TICK: the guard
+    // runs at the top of the loop, so the counter only ever reached 24.
+    expect(BATCH_BUDGET_RECHECK_LINES).toBeLessThan(DEFAULT_MAX_LINES_PER_TICK);
+    let admissions = 0;
+    const fixture = await harness({
+      maxLinesPerTick: DEFAULT_MAX_LINES_PER_TICK,
+      governance: {
+        async admitSpend() {
+          admissions += 1;
+          // The tick's own opening check passes; the money runs out under it.
+          if (admissions === 1) return { ok: true };
+          return {
+            ok: false,
+            code: "monthly_budget_exceeded",
+            message: "quota policy monthly budget has been exhausted for this scope",
+          };
+        },
+        async admitRoute() {
+          return { ok: true };
+        },
+      },
+    });
+    const lines = Array.from({ length: DEFAULT_MAX_LINES_PER_TICK }, (_, index) =>
+      chatLine(`line_${index}`),
+    ).join("\n");
+    const batch = await fixture.createBatch(`${lines}\n`);
+
+    const result = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(result.status).toBe("failed");
+    // EXACTLY the re-check interval, not the whole slice. Before the fix this
+    // was 25 — every line of the tick paid for after the budget was gone.
+    expect(admissions).toBe(2);
+    expect(fixture.dispatched.count).toBe(BATCH_BUDGET_RECHECK_LINES);
+    expect(fixture.metered).toHaveLength(BATCH_BUDGET_RECHECK_LINES);
+
+    const stored = await fixture.store.get(TENANT, batch.id);
+    expect(stored?.failureCode).toBe("monthly_budget_exceeded");
+    // And the paid lines are RETRIEVABLE rather than stranded in the results
+    // table behind a `failed` row with no files.
+    expect(stored?.outputFileId).toBeDefined();
+    const output = (await fixture.fileText(stored?.outputFileId ?? "")).trim().split("\n");
+    expect(output).toHaveLength(BATCH_BUDGET_RECHECK_LINES);
+  });
+
   test("a residency refusal drops the line without dialling the provider", async () => {
     const fixture = await harness({
       governance: {
@@ -502,6 +552,65 @@ describe("batch executor — lifecycle", () => {
 
     expect(result.status).toBe("expired");
     expect(fixture.dispatched.count).toBe(0);
+  });
+
+  test("expiry PUBLISHES the lines it already paid for instead of stranding them", async () => {
+    // A job that ran one tick and then ran out of time has metered, durable
+    // result rows. Ending it with no `output_file_id` bills the tenant for
+    // output reachable through neither `/v1/batches/{id}` nor `/v1/files`.
+    let clock = START_UNIX;
+    const fixture = await harness({ maxLinesPerTick: 1, now: () => clock });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n${chatLine("b")}\n`);
+
+    const first = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+    expect(first.status).toBe("in_progress");
+    expect(fixture.dispatched.count).toBe(1);
+
+    clock = batch.expiresAtUnix + 1;
+    const second = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(second.status).toBe("expired");
+    // Still one paid call: expiry must not dispatch line b on the way out.
+    expect(fixture.dispatched.count).toBe(1);
+    const stored = await fixture.store.get(TENANT, batch.id);
+    expect(stored?.status).toBe("expired");
+    // THE assertion. Before the fix this was `undefined` while `listResults`
+    // held a metered row for line a.
+    expect(stored?.outputFileId).toBeDefined();
+    const output = (await fixture.fileText(stored?.outputFileId ?? "")).trim().split("\n");
+    expect(output).toHaveLength(1);
+    expect(JSON.parse(output[0] ?? "")).toMatchObject({ custom_id: "a" });
+  });
+
+  test("a cancel that lands MID-TICK publishes nothing, on this tick or the next", async () => {
+    // `requestCancel` is a get-then-update against a row the tick already holds
+    // the lease on, so `-> finalizing` is refused. Swallowing that refusal with
+    // `?? batch` used to publish the output anyway and leave a `cancelled`
+    // batch carrying an `output_file_id`.
+    const fixture = await harness();
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`);
+    const cancelMidFlight: BatchExecutorDeps = {
+      ...fixture.deps,
+      dispatcher: () => ({
+        async dispatch() {
+          await fixture.store.requestCancel(TENANT, batch.id, START_UNIX);
+          return upstreamOk();
+        },
+      }),
+    };
+
+    const first = await runBatchTick({}, TENANT, batch.id, cancelMidFlight);
+    expect(first.status).not.toBe("completed");
+    const midTick = await fixture.store.get(TENANT, batch.id);
+    expect(midTick?.status).toBe("cancelling");
+    expect(midTick?.outputFileId).toBeUndefined();
+    expect(midTick?.errorFileId).toBeUndefined();
+
+    const second = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+    expect(second.status).toBe("cancelled");
+    const stored = await fixture.store.get(TENANT, batch.id);
+    expect(stored?.status).toBe("cancelled");
+    expect(stored?.outputFileId).toBeUndefined();
   });
 
   test("runTenantBatchTicks advances every claimable job and skips terminal ones", async () => {
@@ -642,6 +751,223 @@ describe("batch executor — native path", () => {
     expect(fixture.dispatched.count).toBe(2);
   });
 
+  /**
+   * A finished upstream batch whose lines are SPLIT across the two files
+   * OpenAI publishes: `output_file_id` for the requests that succeeded,
+   * `error_file_id` for the ones that did not.
+   */
+  function splitHttp(
+    upstream: {
+      readonly outputFileId?: string | undefined;
+      readonly errorFileId?: string | undefined;
+      readonly output?: readonly string[] | undefined;
+      readonly errors?: readonly string[] | undefined;
+    },
+    calls: string[],
+  ) {
+    return async (input: string, init: RequestInit): Promise<Response> => {
+      calls.push(`${String(init.method ?? "GET")} ${input}`);
+      if (input.endsWith("/files") && init.method === "POST") {
+        return new Response(JSON.stringify({ id: "file-upstream" }), { status: 200 });
+      }
+      if (input.endsWith("/batches") && init.method === "POST") {
+        return new Response(JSON.stringify({ id: "batch_upstream" }), { status: 200 });
+      }
+      if (input.endsWith("/batches/batch_upstream")) {
+        return new Response(
+          JSON.stringify({
+            status: "completed",
+            ...(upstream.outputFileId === undefined
+              ? {}
+              : { output_file_id: upstream.outputFileId }),
+            ...(upstream.errorFileId === undefined ? {} : { error_file_id: upstream.errorFileId }),
+          }),
+          { status: 200 },
+        );
+      }
+      if (input.endsWith("/files/file-out/content")) {
+        return new Response(`${(upstream.output ?? []).join("\n")}\n`, { status: 200 });
+      }
+      if (input.endsWith("/files/file-err/content")) {
+        return new Response(`${(upstream.errors ?? []).join("\n")}\n`, { status: 200 });
+      }
+      return new Response("{}", { status: 404 });
+    };
+  }
+
+  function nativeOk(customId: string): string {
+    return JSON.stringify({
+      id: `req-${customId}`,
+      custom_id: customId,
+      response: {
+        status_code: 200,
+        body: { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      },
+      error: null,
+    });
+  }
+
+  test("the provider's ERROR file is pulled too; an errored line is not destroyed", async () => {
+    const calls: string[] = [];
+    const fixture = await harness({
+      nativePassthrough: true,
+      http: splitHttp(
+        {
+          outputFileId: "file-out",
+          errorFileId: "file-err",
+          output: [nativeOk("a")],
+          errors: [
+            JSON.stringify({
+              id: "req-b",
+              custom_id: "b",
+              response: null,
+              error: { code: "rate_limit_exceeded", message: "slow down" },
+            }),
+          ],
+        },
+        calls,
+      ),
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n${chatLine("b")}\n`);
+
+    await runBatchTick({}, TENANT, batch.id, fixture.deps);
+    const finished = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(finished.status).toBe("completed");
+    // THE call the passthrough never used to make.
+    expect(calls).toContain("GET https://upstream.test/v1/files/file-err/content");
+    const stored = await fixture.store.get(TENANT, batch.id);
+    // The tenant submitted TWO requests and both are accounted for. Before the
+    // fix this read `{ total: 1, completed: 1, failed: 0 }`.
+    expect(stored?.requestCounts).toEqual({ total: 2, completed: 1, failed: 1 });
+    expect(stored?.outputFileId).toBeDefined();
+    expect(stored?.errorFileId).toBeDefined();
+    const errors = (await fixture.fileText(stored?.errorFileId ?? "")).trim().split("\n");
+    expect(errors).toHaveLength(1);
+    expect(JSON.parse(errors[0] ?? "")).toMatchObject({ custom_id: "b" });
+    const output = (await fixture.fileText(stored?.outputFileId ?? "")).trim().split("\n");
+    expect(output).toHaveLength(1);
+    expect(JSON.parse(output[0] ?? "")).toMatchObject({ custom_id: "a" });
+  });
+
+  test("a batch whose every line failed upstream publishes the error file, not a dead job", async () => {
+    // OpenAI answers `completed` with `output_file_id: null` when nothing
+    // succeeded. That used to hit the "no output file" arm and kill the job,
+    // discarding results the provider had already produced and billed for.
+    const calls: string[] = [];
+    const fixture = await harness({
+      nativePassthrough: true,
+      http: splitHttp(
+        {
+          errorFileId: "file-err",
+          errors: [
+            JSON.stringify({
+              id: "req-a",
+              custom_id: "a",
+              response: null,
+              error: { code: "invalid_request", message: "bad" },
+            }),
+          ],
+        },
+        calls,
+      ),
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`);
+
+    await runBatchTick({}, TENANT, batch.id, fixture.deps);
+    const finished = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(finished.status).toBe("completed");
+    const stored = await fixture.store.get(TENANT, batch.id);
+    expect(stored?.failureCode).toBeUndefined();
+    expect(stored?.requestCounts).toEqual({ total: 1, completed: 0, failed: 1 });
+    expect(stored?.errorFileId).toBeDefined();
+    expect(stored?.outputFileId).toBeUndefined();
+  });
+
+  test("a non-2xx line in the provider's output file is an ERROR line, as it is locally", async () => {
+    const calls: string[] = [];
+    const fixture = await harness({
+      nativePassthrough: true,
+      http: splitHttp(
+        {
+          outputFileId: "file-out",
+          output: [
+            nativeOk("a"),
+            JSON.stringify({
+              id: "req-b",
+              custom_id: "b",
+              response: { status_code: 400, body: { error: { message: "nope" } } },
+              error: null,
+            }),
+          ],
+        },
+        calls,
+      ),
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n${chatLine("b")}\n`);
+
+    await runBatchTick({}, TENANT, batch.id, fixture.deps);
+    await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    const stored = await fixture.store.get(TENANT, batch.id);
+    // Classifying on `error` alone counted the 400 as a success.
+    expect(stored?.requestCounts).toEqual({ total: 2, completed: 1, failed: 1 });
+    const errors = (await fixture.fileText(stored?.errorFileId ?? "")).trim().split("\n");
+    expect(JSON.parse(errors[0] ?? "")).toMatchObject({ custom_id: "b" });
+    // Both lines are metered, at the discounted price, whatever their status.
+    expect(fixture.metered).toHaveLength(2);
+    expect(fixture.metered.map((usage) => usage.status).sort()).toEqual([200, 400]);
+  });
+
+  test("a cancelled native job tells the PROVIDER to stop", async () => {
+    const calls: string[] = [];
+    const fixture = await harness({
+      nativePassthrough: true,
+      http: splitHttp({ outputFileId: "file-out", output: [nativeOk("a")] }, calls),
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`, {
+      status: "cancelling",
+      executionMode: "native",
+      providerBatchId: "batch_upstream",
+    });
+
+    const result = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(result.status).toBe("cancelled");
+    // The upstream job is still running and still billing until it is told to
+    // stop. Every existing lifecycle test built a batch with NO providerBatchId,
+    // so `cancelNativeBatchFor` short-circuited on its first line.
+    expect(calls).toContain("POST https://upstream.test/v1/batches/batch_upstream/cancel");
+    expect((await fixture.store.get(TENANT, batch.id))?.outputFileId).toBeUndefined();
+  });
+
+  test("the anthropic arm REFUSES to submit rather than posting an empty request set", async () => {
+    const calls: string[] = [];
+    const outcome = await submitNativeBatch(
+      {
+        family: "anthropic",
+        route: { ...ROUTE, providerKind: "anthropic", baseUrl: "https://anthropic.test/v1" },
+        endpoint: "/v1/chat/completions",
+        inputFileId: "file-x",
+        completionWindow: "24h",
+      },
+      async (input, init) => {
+        calls.push(`${String(init.method ?? "GET")} ${input}`);
+        return new Response(JSON.stringify({ id: "msgbatch_1" }), { status: 200 });
+      },
+      1000,
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("unreachable");
+    expect(outcome.code).toBe("unsupported");
+    // NOTHING was sent. `{ requests: [] }` would have taken back a real batch
+    // id for a job whose input was never submitted, and later reported it
+    // `completed` with zero results.
+    expect(calls).toEqual([]);
+  });
+
   test("native passthrough switched off pins the job to the local executor", async () => {
     const calls: string[] = [];
     const fixture = await harness({
@@ -714,6 +1040,59 @@ describe("batch job queue", () => {
     expect(result.reenqueued).toBe(1);
     expect(sent).toEqual([{ object: "batch.job", tenant_id: TENANT, batch_id: batch.id }]);
     expect(fixture.dispatched.count).toBe(1);
+  });
+
+  test("a native job the provider is still running is NOT re-enqueued", async () => {
+    // Otherwise the consumer busy-polls the upstream batch endpoint for the
+    // job's whole 24h completion window: `advanceNative` returns the row's
+    // unchanged `in_progress`, which is in CONTINUES, and `max_batch_timeout`
+    // is 5s. The Cron owns the poll leg (see src/batch/sweep.ts).
+    const sent: unknown[] = [];
+    const calls: string[] = [];
+    const fixture = await harness({
+      nativePassthrough: true,
+      http: async (input: string, init: RequestInit) => {
+        calls.push(`${String(init.method ?? "GET")} ${input}`);
+        if (input.endsWith("/files") && init.method === "POST") {
+          return new Response(JSON.stringify({ id: "file-upstream" }), { status: 200 });
+        }
+        if (input.endsWith("/batches") && init.method === "POST") {
+          return new Response(JSON.stringify({ id: "batch_upstream" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ status: "in_progress" }), { status: 200 });
+      },
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`);
+    const env = {
+      BATCH_JOBS: {
+        async send(body: unknown) {
+          sent.push(body);
+        },
+        async sendBatch() {},
+      },
+    };
+    const deliver = () =>
+      consumeBatchJobBatch(
+        {
+          messages: [
+            { body: { object: "batch.job", tenant_id: TENANT, batch_id: batch.id }, ack() {} },
+          ],
+        },
+        env,
+        fixture.deps,
+      );
+
+    const submit = await deliver();
+    const poll = await deliver();
+
+    expect(submit.reenqueued).toBe(0);
+    expect(poll.reenqueued).toBe(0);
+    expect(sent).toEqual([]);
+    // The job is genuinely still running — this is not "it went terminal".
+    expect((await fixture.store.get(TENANT, batch.id))?.status).toBe("in_progress");
+    // One submit + one poll. A re-enqueuing consumer would multiply this by
+    // however many round trips fit in the completion window.
+    expect(calls.filter((call) => call.endsWith("/batches/batch_upstream"))).toHaveLength(1);
   });
 
   test("a completed job is NOT re-enqueued", async () => {

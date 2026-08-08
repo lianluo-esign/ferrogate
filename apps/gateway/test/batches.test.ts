@@ -1,9 +1,10 @@
 import { MemoryBatchStore } from "@ferrogate/storage";
 /** Focused `/v1/batches` lifecycle and isolation coverage for slice 1. */
 import { describe, expect, test } from "vitest";
+import openapiDocument from "../../../docs/openapi/admin-api.openapi.json";
 import { assetRouteModule, buildAssetService } from "../src/assets/index.js";
 import { InMemoryAssetMetadataStore } from "../src/assets/ports.js";
-import { batchRouteModule } from "../src/batch/index.js";
+import { BATCH_ENDPOINTS, batchRouteModule } from "../src/batch/index.js";
 import { createGatewayApp } from "../src/routes/index.js";
 
 const START_UNIX = 1_700_000_000;
@@ -14,6 +15,11 @@ const ENV = {
       key: "fg_batch_a",
       id: "key_batch_a",
       tenant_id: "tenant_batch_a",
+      // The project the executor's budget ladder has to charge against. It is
+      // stated here because `batchScopeChain` reads it off the ROW: without a
+      // project on the credential the persistence assertion below could not
+      // tell "carried through" from "there was never one".
+      project_id: "proj_batch_a",
       scopes: ["assets.read", "assets.write"],
     },
     {
@@ -71,6 +77,21 @@ function gateway() {
     ],
   });
 
+  // The `BATCH_JOBS` producer binding `createBatch` fires the fast path
+  // through. Structural, exactly as `batchJobQueueFrom` checks for it — a
+  // recorder that only had `send` would be rejected as not-a-queue and the
+  // enqueue assertion would pass for the wrong reason.
+  const sent: unknown[] = [];
+  const env = {
+    ...ENV,
+    BATCH_JOBS: {
+      async send(body: unknown) {
+        sent.push(body);
+      },
+      async sendBatch() {},
+    },
+  };
+
   const call = (
     path: string,
     init: RequestInit & { token?: string | null } = {},
@@ -79,7 +100,7 @@ function gateway() {
     const merged = new Headers(headers);
     if (token !== null) merged.set("authorization", `Bearer ${token}`);
     return Promise.resolve(
-      app.request(`https://gw.test${path}`, { ...rest, headers: merged }, ENV),
+      app.request(`https://gw.test${path}`, { ...rest, headers: merged }, env),
     );
   };
 
@@ -87,6 +108,8 @@ function gateway() {
     app,
     router,
     call,
+    batches,
+    sent,
     advance(seconds: number): void {
       clock += seconds;
     },
@@ -113,6 +136,125 @@ describe("batch route module wiring", () => {
     expect(router.registeredOperationIds()).toEqual(
       expect.arrayContaining(["createBatch", "retrieveBatch", "listBatches", "cancelBatch"]),
     );
+  });
+});
+
+describe("the PUBLISHED contract agrees with what createBatch accepts", () => {
+  /**
+   * The ratchet for the slice-2 narrowing, on the artifact CLIENTS are built
+   * from.
+   *
+   * `docs/openapi/admin-api.openapi.json` generates `sdks/typescript` and
+   * admin-console's `api-types.generated.ts` (README:127-133), so an enum value
+   * the handler now refuses is a union member an SDK consumer can pick, that
+   * typechecks, that validates against the published contract — and that gets a
+   * 400 at runtime. Nothing else catches it: `control-plane-parity.test.ts`
+   * compares operation IDs, and `runtime-api-contract.json` (the document
+   * `contract.test.ts` censuses) carries no request schemas at all.
+   */
+  const createEndpointEnum = (): readonly string[] => {
+    const document = openapiDocument as unknown as {
+      paths: Record<
+        string,
+        {
+          post: {
+            requestBody: {
+              content: Record<
+                string,
+                { schema: { properties: { endpoint: { enum?: readonly string[] } } } }
+              >;
+            };
+          };
+        }
+      >;
+    };
+    const declared =
+      document.paths["/v1/batches"]?.post.requestBody.content["application/json"]?.schema.properties
+        .endpoint.enum;
+    if (declared === undefined) {
+      throw new Error(
+        "the published contract no longer declares an `endpoint` enum for createBatch",
+      );
+    }
+    return declared;
+  };
+
+  test("the createBatch endpoint enum is exactly BATCH_ENDPOINTS", () => {
+    expect([...createEndpointEnum()].sort()).toEqual([...BATCH_ENDPOINTS].sort());
+  });
+
+  test("the Batch RESPONSE enum stays a superset, because old rows are still readable", () => {
+    // Deliberately NOT trimmed with the request enum: rows created before the
+    // narrowing carry `/v1/completions` and `retrieveBatch` still returns them,
+    // so a generated reader that could not parse the value would fail on a real
+    // response. The assertion pins that this is a decision and not an oversight.
+    const schema = (
+      openapiDocument as unknown as {
+        components: {
+          schemas: { Batch: { properties: { endpoint: { enum: readonly string[] } } } };
+        };
+      }
+    ).components.schemas.Batch.properties.endpoint.enum;
+    for (const endpoint of BATCH_ENDPOINTS) expect(schema).toContain(endpoint);
+    expect(schema).toContain("/v1/completions");
+  });
+});
+
+describe("createBatch hands the executor what it needs (#698 slice 2)", () => {
+  test("persists the creating scope chain and asks BATCH_JOBS for a tick", async () => {
+    const fixture = gateway();
+    const inputFileId = await createFile(fixture.call);
+
+    const response = await fixture.call("/v1/batches", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        input_file_id: inputFileId,
+        endpoint: "/v1/chat/completions",
+        completion_window: "24h",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const created = (await response.json()) as BatchResponse;
+
+    // 1. THE SCOPE CHAIN. The executor has no request and therefore no
+    //    `AuthContext`; per governance.ts this row is "the only surviving
+    //    record of WHO is spending". A wrong key or an empty project silently
+    //    degrades every budget rung to a different (or tenant-only) scope,
+    //    and none of it is visible on the wire projection — so it is asserted
+    //    against the STORE, not against the response body.
+    const stored = await fixture.batches.get("tenant_batch_a", created.id);
+    expect(stored).toBeDefined();
+    expect(stored?.apiKeyId).toBe("key_batch_a");
+    expect(stored?.projectId).toBe("proj_batch_a");
+    expect(stored?.nextLineIndex).toBe(0);
+
+    // 2. THE FAST PATH. Dropping the enqueue downgrades every batch to the
+    //    1-minute cron with nothing red — the executor suite cannot see it,
+    //    because it constructs `StoredBatch` rows directly.
+    expect(fixture.sent).toEqual([
+      { object: "batch.job", tenant_id: "tenant_batch_a", batch_id: created.id },
+    ]);
+  });
+
+  test("a create that is REFUSED enqueues nothing", async () => {
+    // The other half: an enqueue moved above the validation would ask for a
+    // tick on a batch that was never created.
+    const fixture = gateway();
+    const inputFileId = await createFile(fixture.call);
+
+    const refused = await fixture.call("/v1/batches", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        input_file_id: inputFileId,
+        endpoint: "/v1/completions",
+        completion_window: "24h",
+      }),
+    });
+
+    expect(refused.status).toBe(400);
+    expect(fixture.sent).toEqual([]);
   });
 });
 
