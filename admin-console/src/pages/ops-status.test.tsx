@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import OpsStatusPage from "@/pages/ops-status";
@@ -53,12 +53,20 @@ describe("OpsStatusPage", () => {
       http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(legacy)),
     );
 
-    renderWithProviders(<OpsStatusPage />);
+    const { container } = renderWithProviders(<OpsStatusPage />);
 
+    // Scope every query to THIS render's container. `adminStatus()` also yields
+    // "3 / 4" and renders a "Platform catalog" section, so the preceding test's
+    // tree — should a rare React-18 concurrent-unmount race leave it briefly in
+    // document.body past cleanup() — would otherwise satisfy the `screen`-wide
+    // anchor and fail the negative assertion (a genuine, if intermittent, red).
+    // Asserting within `container` makes this test hold on its own render alone,
+    // independent of sibling test ordering.
+    const board = within(container);
     // The tenant board still renders...
-    expect(await screen.findByText("3 / 4")).toBeInTheDocument();
+    expect(await board.findByText("3 / 4")).toBeInTheDocument();
     // ...but the platform section is absent.
-    expect(screen.queryByText("Platform catalog")).not.toBeInTheDocument();
+    expect(board.queryByText("Platform catalog")).not.toBeInTheDocument();
   });
 
   it("flags reload_required when ACME needs a listener reload (#265)", async () => {
