@@ -123,15 +123,11 @@ A dynamic workflow cycle is done only when all of these are true:
 
 ## Parallel / Autonomous Mode
 
-This document governs a single serial slice. When the loop is run autonomously
-and **fans work out across multiple parallel subagents**, the additional binding
-constraints — GitHub Projects GraphQL quota discipline, the 3-agent concurrency
-ceiling, worktree isolation and slice separation, the cherry-pick integration
-flow, advancing sub-issues only to **In review** (never further — a code-review
-agent owns **In review** and a test agent owns **Testing** and **Done**), the
-shared bounce-back edge to **Ready**, and **mandatory worktree cleanup** to bound
-disk use — live in `docs/autonomous-dev-loop.md`. Follow that document in
-addition to this one.
+This document governs a single serial slice. When work is fanned out across
+**multiple parallel subagents**, additional constraints still apply: worktree
+isolation and slice separation, a bounded concurrency ceiling, the cherry-pick
+integration flow, and **mandatory worktree cleanup** to bound disk use. Work is
+tracked against GitHub milestones rather than a project board.
 
 ## Non-Goals
 

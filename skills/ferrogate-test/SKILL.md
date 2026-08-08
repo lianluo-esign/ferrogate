@@ -10,14 +10,9 @@ tool or needs end-to-end validation evidence for FerroGate admin and gateway
 APIs. To decide *which* test layer a change needs and how test findings feed the
 issue queue, use the `ferrogate-test-strategy` skill.
 
-**Role context (three-agent board loop).** This is the tooling of the **test
-gate**, the third session of the loop in `docs/autonomous-dev-loop.md`: it
-watches the Project board's **Testing** lane (`74839551`), owns *all* end-to-end
-proof (no other role runs E2E), and moves each item to **Done** (`98236657`) or
-back to **Ready** (`61e4505c`) with the `gate-rejected` label. Upstream roles:
-`ferrogate-dev-loop` (code generation, stops at In review) and
-`ferrogate-code-review` (In review → Testing). All three at a glance:
-`ferrogate-multi-agent-loop`.
+**Role context.** This is the tooling of the **test gate**: it owns *all*
+end-to-end proof (no other role runs E2E) and produces the release-grade
+evidence that lets a milestone's issues be closed as verified.
 
 ## Tool Contract
 

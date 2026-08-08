@@ -327,11 +327,10 @@ the TypeScript implementation and describe the earlier system; treat
 FerroGate is built for human maintainers and AI coding agents working together.
 The best contributions are small, issue-linked slices that can be reviewed,
 tested, and explained from the operator's point of view. Day-to-day development
-runs as cooperating agent roles — one generating code, one reviewing it, one
-testing it end to end; the contract is in
-[`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md).
+is organized around GitHub milestones, each grouping the issues that make up a
+shippable increment.
 
-Two conventions from it are worth knowing even for a one-off human patch:
+Two conventions are worth knowing even for a one-off human patch:
 
 - **Say what you did not verify.** Commits carry `Tested:` and `Not-tested:`
   trailers, and a handoff that reads as verified when it is not costs a whole

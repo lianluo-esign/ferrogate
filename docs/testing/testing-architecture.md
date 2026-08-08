@@ -315,8 +315,8 @@ because they are properties of the *unmutated* run:
 
 ### Who owns which half
 
-Under speed mode the dev lane writes tests it does not run, so "mutate it and
-watch it go red" is not currently a dev-lane proof step. It splits:
+Under speed mode the author writes tests they do not run, so "mutate it and
+watch it go red" is not currently an authoring proof step. It splits:
 
 - **Author (design obligation):** write the assertion so that mutating the line
   *would* red it, and say in the commit which mutation it is aimed at. Claim
