@@ -1520,7 +1520,7 @@
           "name": "tenant_id",
           "in": "query",
           "required": false,
-          "description": "Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant.",
+          "description": "Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog.",
           "schema": {
             "type": "string",
             "minLength": 1
@@ -1647,7 +1647,7 @@
           "name": "tenant_id",
           "in": "query",
           "required": false,
-          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "description": "Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog.",
           "schema": {
             "type": "string",
             "minLength": 1
@@ -3935,7 +3935,7 @@
           "name": "tenant_id",
           "in": "query",
           "required": false,
-          "description": "Required for platform-operator item requests; tenant-scoped callers are restricted to their own tenant.",
+          "description": "Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog.",
           "schema": {
             "type": "string",
             "minLength": 1
@@ -4063,7 +4063,7 @@
           "name": "tenant_id",
           "in": "query",
           "required": false,
-          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "description": "Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog.",
           "schema": {
             "type": "string",
             "minLength": 1
@@ -4222,7 +4222,7 @@
           "name": "tenant_id",
           "in": "query",
           "required": false,
-          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "description": "Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog.",
           "schema": {
             "type": "string",
             "minLength": 1
@@ -4322,7 +4322,7 @@
           "name": "tenant_id",
           "in": "query",
           "required": false,
-          "description": "Required for platform-operator requests; tenant-scoped callers are restricted to their own tenant.",
+          "description": "Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog.",
           "schema": {
             "type": "string",
             "minLength": 1
@@ -22884,7 +22884,7 @@
         "content": {
           "application/json": {
             "schema": {
-              "$ref": "#/components/schemas/DeleteResponse"
+              "$ref": "#/components/schemas/CatalogDeleteResponse"
             }
           }
         }
@@ -24038,6 +24038,14 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Present and `platform` on platform-catalog rows, which carry no `tenant_id`."
           }
         },
         "additionalProperties": true
@@ -25055,6 +25063,14 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Present and `platform` on platform-catalog rows, which carry no `tenant_id`."
           }
         },
         "additionalProperties": true
@@ -25989,6 +26005,36 @@
         },
         "additionalProperties": false
       },
+      "CatalogDeleteResponse": {
+        "description": "A catalog delete acknowledgement: `DeleteResponse` plus the #889 `scope` discriminator. Separate from `DeleteResponse` because the other operations that return that schema are not served by the catalog handlers and never emit `scope`.",
+        "type": "object",
+        "required": [
+          "object",
+          "id",
+          "deleted"
+        ],
+        "properties": {
+          "object": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean",
+            "const": true
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminTenantRef": {
         "type": "object",
         "required": [
@@ -26737,6 +26783,14 @@
           },
           "provider": {
             "$ref": "#/components/schemas/AdminProvider"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
           }
         },
         "additionalProperties": false
@@ -26867,6 +26921,14 @@
           },
           "model": {
             "$ref": "#/components/schemas/Model"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
           }
         },
         "additionalProperties": false
@@ -27298,6 +27360,14 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Present and `platform` on platform-catalog rows, which carry no `tenant_id`."
           }
         },
         "additionalProperties": true
@@ -27315,6 +27385,14 @@
           },
           "offering": {
             "$ref": "#/components/schemas/AdminOffering"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
           }
         },
         "additionalProperties": false
@@ -27347,6 +27425,14 @@
           "limit": {
             "type": "integer",
             "minimum": 1
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
           }
         },
         "additionalProperties": false
@@ -27988,6 +28074,14 @@
           "limit": {
             "type": "integer",
             "minimum": 1
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
           }
         },
         "additionalProperties": false
@@ -28161,6 +28255,14 @@
           "limit": {
             "type": "integer",
             "minimum": 1
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "tenant"
+            ],
+            "description": "Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889."
           }
         },
         "additionalProperties": false

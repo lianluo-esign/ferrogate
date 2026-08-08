@@ -1376,6 +1376,86 @@ export async function appendControlPlaneAudit(
 }
 
 /**
+ * The guarded audit INSERT, for a caller that batches it with its own mutation.
+ *
+ * Extracted from `runControlPlaneMutationWithAudit` so a caller whose mutation
+ * is MORE than one statement can still put the audit row in the SAME batch
+ * rather than appending it after a commit that already happened
+ * (`PlatformModelCatalogStore.#commit` batches a revision init, the mutation
+ * and a revision bump).
+ *
+ * Two contracts the caller must honour:
+ *
+ *  - `changes() = 1` refers to the statement IMMEDIATELY BEFORE this one in the
+ *    batch, so that statement must be the one whose success this audit row
+ *    claims. Anything else and the guard is decorative.
+ *  - the chain head is read HERE, so the returned statement is only valid for
+ *    the attempt that built it. A concurrent append makes the INSERT collide
+ *    with `ux_audit_events_chain_seq`, D1 rolls the whole batch back, and the
+ *    caller must rebuild from the new head — which is why every caller wraps
+ *    this in an `AUDIT_APPEND_ATTEMPTS` loop.
+ */
+export async function controlPlaneAuditStatement(
+  db: D1Database,
+  options: ControlPlaneAuditOptions,
+): Promise<D1PreparedStatement> {
+  const tenantId = typeof options.record.tenant_id === "string" ? options.record.tenant_id : null;
+  const auditJson = options.auditJson ?? controlPlaneAuditJson(options);
+  const chainKey = auditChainKey(tenantId);
+  const id = options.newId?.() ?? crypto.randomUUID();
+  const requestId = options.requestId ?? "";
+  const occurredAt = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const projectionKey = auditProjectionKey(tenantId, id);
+
+  const head = await db
+    .prepare(
+      `SELECT seq, row_hash FROM ${AUDIT_TABLE}
+        WHERE chain_key = ? AND seq IS NOT NULL
+        ORDER BY seq DESC LIMIT 1`,
+    )
+    .bind(chainKey)
+    .first<{ seq: number; row_hash: string | null }>();
+  const seq = (head?.seq ?? 0) + 1;
+  const prevHash = head?.row_hash ?? AUDIT_CHAIN_GENESIS_HASH;
+  const rowHash = await auditRowHash({
+    chain_key: chainKey,
+    seq,
+    prev_hash: prevHash,
+    id,
+    request_id: requestId,
+    agent_run_id: null,
+    tenant: tenantId,
+    occurred_at_unix: occurredAt,
+    audit_json: auditJson,
+  });
+
+  return db
+    .prepare(
+      `INSERT INTO ${AUDIT_TABLE}
+         (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
+          chain_key, seq, prev_hash, row_hash)
+       SELECT ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?
+        WHERE changes() = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM ${AUDIT_TABLE} WHERE projection_key = ?
+          )`,
+    )
+    .bind(
+      projectionKey,
+      id,
+      requestId,
+      tenantId,
+      occurredAt,
+      auditJson,
+      chainKey,
+      seq,
+      prevHash,
+      rowHash,
+      projectionKey,
+    );
+}
+
+/**
  * Apply one control-plane mutation and append its audit row in one D1 batch.
  *
  * The mutation must be a single top-level UPDATE/INSERT/DELETE statement. The
@@ -1389,65 +1469,10 @@ export async function runControlPlaneMutationWithAudit(
   mutation: () => D1PreparedStatement,
   options: ControlPlaneAuditOptions,
 ): Promise<boolean> {
-  const tenantId = typeof options.record.tenant_id === "string" ? options.record.tenant_id : null;
-  const auditJson = options.auditJson ?? controlPlaneAuditJson(options);
-  const chainKey = auditChainKey(tenantId);
-  const id = options.newId?.() ?? crypto.randomUUID();
-  const requestId = options.requestId ?? "";
-  const occurredAt = options.now?.() ?? Math.floor(Date.now() / 1000);
-  const projectionKey = auditProjectionKey(tenantId, id);
-
   for (let attempt = 1; attempt <= AUDIT_APPEND_ATTEMPTS; attempt += 1) {
     try {
-      const head = await db
-        .prepare(
-          `SELECT seq, row_hash FROM ${AUDIT_TABLE}
-            WHERE chain_key = ? AND seq IS NOT NULL
-            ORDER BY seq DESC LIMIT 1`,
-        )
-        .bind(chainKey)
-        .first<{ seq: number; row_hash: string | null }>();
-      const seq = (head?.seq ?? 0) + 1;
-      const prevHash = head?.row_hash ?? AUDIT_CHAIN_GENESIS_HASH;
-      const rowHash = await auditRowHash({
-        chain_key: chainKey,
-        seq,
-        prev_hash: prevHash,
-        id,
-        request_id: requestId,
-        agent_run_id: null,
-        tenant: tenantId,
-        occurred_at_unix: occurredAt,
-        audit_json: auditJson,
-      });
-
-      const results = await db.batch([
-        mutation(),
-        db
-          .prepare(
-            `INSERT INTO ${AUDIT_TABLE}
-               (projection_key, id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json,
-                chain_key, seq, prev_hash, row_hash)
-             SELECT ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?
-              WHERE changes() = 1
-                AND NOT EXISTS (
-                  SELECT 1 FROM ${AUDIT_TABLE} WHERE projection_key = ?
-                )`,
-          )
-          .bind(
-            projectionKey,
-            id,
-            requestId,
-            tenantId,
-            occurredAt,
-            auditJson,
-            chainKey,
-            seq,
-            prevHash,
-            rowHash,
-            projectionKey,
-          ),
-      ]);
+      const audit = await controlPlaneAuditStatement(db, options);
+      const results = await db.batch([mutation(), audit]);
       return Number(results[0]?.meta.changes ?? 0) > 0;
     } catch (error) {
       if (attempt === AUDIT_APPEND_ATTEMPTS) {

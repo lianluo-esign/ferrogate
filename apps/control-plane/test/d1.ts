@@ -58,9 +58,7 @@ async function touchedObjectTenants(): Promise<readonly string[]> {
     "SELECT tenant_id AS t FROM tenant_databases",
   ];
   for (const sql of sources) {
-    const rows = await db()
-      .prepare(sql)
-      .all<{ t: string | null }>();
+    const rows = await db().prepare(sql).all<{ t: string | null }>();
     for (const row of rows.results) {
       if (typeof row.t === "string" && row.t.trim() !== "") tenants.add(row.t);
     }
@@ -150,6 +148,15 @@ export async function resetD1(): Promise<void> {
     // produces.
     db().prepare("DELETE FROM tenant_databases"),
     db().prepare("DELETE FROM tenants"),
+    // #889's platform catalog. The REVISION row is the dangerous leftover: a
+    // test that asserts "the write bumped the revision from 0" would pass on a
+    // previous test's counter, and an id reused across tests would collide with
+    // a row nothing created in this test. Offerings first — they hold
+    // `ON DELETE RESTRICT` onto the channels.
+    db().prepare("DELETE FROM platform_catalog_offerings"),
+    db().prepare("DELETE FROM platform_catalog_models"),
+    db().prepare("DELETE FROM platform_provider_channels"),
+    db().prepare("DELETE FROM platform_catalog_revisions"),
   ]);
 
   // `resetD1` is used by suites that do not also call `resetTenantD1`, while

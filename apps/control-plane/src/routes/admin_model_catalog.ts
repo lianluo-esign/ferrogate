@@ -2,6 +2,10 @@ import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
+import {
+  PlatformModelCatalogStore,
+  isMissingPlatformCatalogError,
+} from "../store/platform-model-catalog.js";
 import { matchesFilters, matchesSearch } from "../store/query.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
 import {
@@ -94,7 +98,28 @@ function inputTenant(body: Body): string | null {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
-function targetTenant(c: Parameters<Handler>[0], body?: Body): string {
+/**
+ * Which catalog one request addresses (#889).
+ *
+ * The same operation ids serve two stores now, so every handler resolves this
+ * first and every response carries `scope` — a 2xx whose meaning depends on
+ * which credential asked is not a contract.
+ */
+type CatalogScope =
+  | { readonly kind: "platform" }
+  | { readonly kind: "tenant"; readonly tenantId: string };
+
+/**
+ * A tenant-scoped caller can NEVER reach the platform catalog: the fence below
+ * returns before the platform branch is considered, and it returns 404 rather
+ * than 403 for a foreign tenant id so a probe cannot distinguish "not yours"
+ * from "does not exist". A platform operator that names no tenant used to get
+ * `400 tenant_id is required`; that request now addresses the platform catalog
+ * — but only once the deployment has adopted one, which is what
+ * `platformCatalogAdopted` decides. This function reports the INTENT; it does
+ * not know whether there is a platform catalog to serve it.
+ */
+function targetScope(c: Parameters<Handler>[0], body?: Body): CatalogScope {
   const scope = scopeOf(c);
   const queryTenant = new URL(c.req.url).searchParams.get("tenant_id")?.trim() ?? null;
   const bodyTenant = inputTenant(body ?? {});
@@ -105,7 +130,7 @@ function targetTenant(c: Parameters<Handler>[0], body?: Body): string {
     ) {
       throw new HttpError(404, "not_found", "catalog item not found");
     }
-    return scope.tenantId;
+    return { kind: "tenant", tenantId: scope.tenantId };
   }
   if (
     bodyTenant !== null &&
@@ -116,10 +141,12 @@ function targetTenant(c: Parameters<Handler>[0], body?: Body): string {
     throw new HttpError(400, "invalid_request", "tenant_id query and body values must match");
   }
   const selected = bodyTenant ?? (queryTenant ? queryTenant : null);
-  if (selected === null) {
-    throw new HttpError(400, "invalid_request", "tenant_id is required for a platform operator");
-  }
-  return selected;
+  return selected === null ? { kind: "platform" } : { kind: "tenant", tenantId: selected };
+}
+
+/** Attach the `scope` discriminator to any catalog response body. */
+function scoped(body: object, target: CatalogScope): Record<string, unknown> {
+  return { ...body, scope: target.kind };
 }
 
 async function listTenants(c: Parameters<Handler>[0]): Promise<readonly string[]> {
@@ -163,6 +190,87 @@ async function catalogStore(
   );
 }
 
+/**
+ * The platform catalog store, over the CONTROL_DATA facade.
+ *
+ * `deps.controlDatabase` IS that facade (`control-data.ts::controlDatabaseFrom`
+ * resolves the Durable Object handle when the posture says so, the legacy D1
+ * binding otherwise), so there is deliberately no second resolver here and no
+ * reference to `env.DB`.
+ */
+function platformCatalogStore(c: Parameters<Handler>[0]): PlatformModelCatalogStore {
+  const deps = depsOf(c);
+  if (deps.controlDatabase === null) {
+    throw new HttpError(
+      503,
+      "control_database_unavailable",
+      "control database is required for the platform catalog",
+    );
+  }
+  return new PlatformModelCatalogStore({
+    db: deps.controlDatabase,
+    requestId: c.get("requestId") ?? null,
+  });
+}
+
+/**
+ * Does a platform operator that named no tenant mean the platform catalog?
+ *
+ * ONE predicate for every catalog operation, LIST and item alike, because the
+ * alternative is incoherent: decided per resource, a session can be shown the
+ * platform provider list and the tenant-aggregate model list at the same time,
+ * and posting an offering that binds one to the other 404s.
+ *
+ * The tie-break is `PlatformModelCatalogStore.isAdopted()` — has anything ever
+ * been written to the platform catalog — and not "does it have rows right now",
+ * so emptying the catalog on purpose does not silently revert the whole surface
+ * to tenant semantics. What it buys is that a deployment which has NOT adopted
+ * it behaves exactly as it did before #889:
+ *
+ *  - LIST keeps the per-tenant aggregate (or the legacy document collection),
+ *    both of which an operator may depend on and neither of which is reachable
+ *    any other way: `filterAndList` drops the `tenant_id` filter and there is
+ *    no "all tenants" tenant id;
+ *  - the 15 ITEM operations keep answering `400 tenant_id is required`. That
+ *    400 matters more than it looks: `404` on a DELETE is the canonical
+ *    "already gone", so redirecting an un-adopted deployment's item operations
+ *    here would turn a cleanup script that forgot `tenant_id` from loudly
+ *    broken into silently reporting every tenant provider as deleted.
+ *
+ * Once a deployment HAS adopted the catalog, an id with no `tenant_id` is a
+ * platform id and `404` is the honest answer for one that is not there; that
+ * residual change of meaning is the feature, and `scope` on every 2xx says
+ * which store answered.
+ */
+async function platformCatalogAdopted(c: Parameters<Handler>[0]): Promise<boolean> {
+  if (depsOf(c).controlDatabase === null) return false;
+  return platformCatalogStore(c).isAdopted();
+}
+
+/** The platform rows a LIST should serve, or `null` to keep the pre-#889 answer. */
+async function platformRowsForList(
+  c: Parameters<Handler>[0],
+  target: CatalogScope,
+  read: (store: PlatformModelCatalogStore) => Promise<readonly StoreRecord[]>,
+): Promise<readonly StoreRecord[] | null> {
+  if (target.kind !== "platform" || !(await platformCatalogAdopted(c))) return null;
+  return read(platformCatalogStore(c));
+}
+
+/**
+ * The platform store for an ITEM operation, or the pre-#889 400.
+ *
+ * Creating the FIRST platform provider or model is what adoption IS, so those
+ * two go straight to `platformCatalogStore`; everything else — including
+ * creating an offering, which needs a platform model to hang off — is gated.
+ */
+async function platformItemStore(c: Parameters<Handler>[0]): Promise<PlatformModelCatalogStore> {
+  if (!(await platformCatalogAdopted(c))) {
+    throw new HttpError(400, "invalid_request", "tenant_id is required for a platform operator");
+  }
+  return platformCatalogStore(c);
+}
+
 async function optionalCatalogStore(
   c: Parameters<Handler>[0],
   tenantId: string,
@@ -184,6 +292,15 @@ async function optionalCatalogStore(
   });
 }
 
+/**
+ * The pre-catalog document collection.
+ *
+ * `scope` is taken from the scope the DOCUMENTS were read at, not stamped as a
+ * constant: `deps.store.list` filters to one tenant for a tenant-scoped read,
+ * but a platform operator's read is the un-attributed platform-wide view of the
+ * collection, and labelling that `tenant` would attribute rows to a tenant the
+ * response cannot name.
+ */
 async function legacyList(
   c: Parameters<Handler>[0],
   collection: string,
@@ -192,7 +309,9 @@ async function legacyList(
   const deps = depsOf(c);
   const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
   const page = await deps.store.list(collection, scope, query);
-  return json(c, 200, listResponse(page, query));
+  const target: CatalogScope =
+    scope.kind === "tenant" ? { kind: "tenant", tenantId: scope.tenantId } : { kind: "platform" };
+  return json(c, 200, scoped(listResponse(page, query), target));
 }
 
 function catalogHandler(handler: Handler): Handler {
@@ -200,6 +319,16 @@ function catalogHandler(handler: Handler): Handler {
     try {
       return await handler(c);
     } catch (error) {
+      // Migration 0025 not applied yet. Reads degrade to the pre-#889 answer in
+      // `platformCatalogAdopted`; a WRITE cannot, and "not deployed yet" is a
+      // 503 an operator can retry, not a 500 that reads as a bug.
+      if (isMissingPlatformCatalogError(error)) {
+        throw new HttpError(
+          503,
+          "control_database_unavailable",
+          "the platform model catalog schema is not applied to the control database yet",
+        );
+      }
       if (error instanceof TenantCatalogNotFoundError) {
         throw new HttpError(404, "not_found", error.message);
       }
@@ -214,7 +343,11 @@ function catalogHandler(handler: Handler): Handler {
   };
 }
 
-function filterAndList(c: Parameters<Handler>[0], records: readonly StoreRecord[]): Response {
+function filterAndList(
+  c: Parameters<Handler>[0],
+  records: readonly StoreRecord[],
+  target: CatalogScope,
+): Response {
   const query = parseListQuery(
     new URL(c.req.url),
     depsOf(c).listDefaultLimit,
@@ -225,7 +358,7 @@ function filterAndList(c: Parameters<Handler>[0], records: readonly StoreRecord[
     (record) => matchesSearch(record, query.search) && matchesFilters(record, filters),
   );
   const page = query.paginate ? filtered.slice(query.offset, query.offset + query.limit) : filtered;
-  return json(c, 200, listResponse({ items: page, total: filtered.length }, query));
+  return json(c, 200, scoped(listResponse({ items: page, total: filtered.length }, query), target));
 }
 
 function providerInput(body: Body, id: string): ProviderChannelInput {
@@ -288,6 +421,9 @@ function offeringInput(body: Body, id: string): ModelOfferingInput {
 }
 
 async function providerList(c: Parameters<Handler>[0]): Promise<Response> {
+  const target = targetScope(c);
+  const platformRows = await platformRowsForList(c, target, (store) => store.listProviders());
+  if (platformRows !== null) return filterAndList(c, platformRows, target);
   const tenantIds = await listTenants(c);
   if (tenantIds.length === 0) return legacyList(c, "providers");
   const rows: StoreRecord[] = [];
@@ -298,27 +434,33 @@ async function providerList(c: Parameters<Handler>[0]): Promise<Response> {
     }
     rows.push(...(await store.listProviders(tenantId)));
   }
-  return filterAndList(c, rows);
+  return filterAndList(c, rows, { kind: "tenant", tenantId: tenantIds[0] ?? "" });
 }
 
 async function providerCreate(c: Parameters<Handler>[0]): Promise<Response> {
   const body = asBody(await readJson(c, providerCreateSchema));
-  const tenantId = targetTenant(c, body);
+  const target = targetScope(c, body);
   const id = (body.id as string | undefined) ?? crypto.randomUUID();
-  const record = await (await catalogStore(c, tenantId)).createProvider(
-    tenantId,
-    scopeOf(c),
-    providerInput(body, id),
-  );
-  return json(c, 201, adminItem("provider", record));
+  const record =
+    target.kind === "platform"
+      ? await platformCatalogStore(c).createProvider(scopeOf(c), providerInput(body, id))
+      : await (await catalogStore(c, target.tenantId)).createProvider(
+          target.tenantId,
+          scopeOf(c),
+          providerInput(body, id),
+        );
+  return json(c, 201, scoped(adminItem("provider", record), target));
 }
 
 async function providerRead(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const id = pathParam(c, "id");
-  const record = await (await catalogStore(c, tenantId)).getProvider(tenantId, id);
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).getProvider(id)
+      : await (await catalogStore(c, target.tenantId)).getProvider(target.tenantId, id);
   if (record === null) throw new TenantCatalogNotFoundError(`provider ${id} not found`);
-  return json(c, 200, adminItem("provider", record));
+  return json(c, 200, scoped(adminItem("provider", record), target));
 }
 
 async function providerUpdate(
@@ -328,29 +470,42 @@ async function providerUpdate(
   const body = asBody(
     await readJson(c, action === "replace" ? providerCreateSchema : providerUpdateSchema),
   );
-  const tenantId = targetTenant(c, body);
+  const target = targetScope(c, body);
   const id = pathParam(c, "id");
-  const record = await (await catalogStore(c, tenantId)).updateProvider(
-    tenantId,
-    scopeOf(c),
-    id,
-    body as Partial<ProviderChannelInput>,
-    action,
-  );
+  const input = body as Partial<ProviderChannelInput>;
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).updateProvider(scopeOf(c), id, input, action)
+      : await (await catalogStore(c, target.tenantId)).updateProvider(
+          target.tenantId,
+          scopeOf(c),
+          id,
+          input,
+          action,
+        );
   if (record === null) throw new TenantCatalogNotFoundError(`provider ${id} not found`);
-  return json(c, 200, adminItem("provider", record));
+  return json(c, 200, scoped(adminItem("provider", record), target));
 }
 
 async function providerDelete(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const id = pathParam(c, "id");
-  if (!(await (await catalogStore(c, tenantId)).deleteProvider(tenantId, scopeOf(c), id))) {
-    throw new TenantCatalogNotFoundError(`provider ${id} not found`);
-  }
-  return json(c, 200, adminDeleted("provider", id));
+  const deleted =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).deleteProvider(scopeOf(c), id)
+      : await (await catalogStore(c, target.tenantId)).deleteProvider(
+          target.tenantId,
+          scopeOf(c),
+          id,
+        );
+  if (!deleted) throw new TenantCatalogNotFoundError(`provider ${id} not found`);
+  return json(c, 200, scoped(adminDeleted("provider", id), target));
 }
 
 async function modelList(c: Parameters<Handler>[0]): Promise<Response> {
+  const target = targetScope(c);
+  const platformRows = await platformRowsForList(c, target, (store) => store.listModels());
+  if (platformRows !== null) return filterAndList(c, platformRows, target);
   const tenantIds = await listTenants(c);
   if (tenantIds.length === 0) return legacyList(c, "models");
   const rows: StoreRecord[] = [];
@@ -361,27 +516,33 @@ async function modelList(c: Parameters<Handler>[0]): Promise<Response> {
     }
     rows.push(...(await store.listModels(tenantId)));
   }
-  return filterAndList(c, rows);
+  return filterAndList(c, rows, { kind: "tenant", tenantId: tenantIds[0] ?? "" });
 }
 
 async function modelCreate(c: Parameters<Handler>[0]): Promise<Response> {
   const body = asBody(await readJson(c, modelCreateSchema));
-  const tenantId = targetTenant(c, body);
+  const target = targetScope(c, body);
   const id = (body.id as string | undefined) ?? crypto.randomUUID();
-  const record = await (await catalogStore(c, tenantId)).createModel(
-    tenantId,
-    scopeOf(c),
-    modelInput(body, id),
-  );
-  return json(c, 201, adminItem("model", record));
+  const record =
+    target.kind === "platform"
+      ? await platformCatalogStore(c).createModel(scopeOf(c), modelInput(body, id))
+      : await (await catalogStore(c, target.tenantId)).createModel(
+          target.tenantId,
+          scopeOf(c),
+          modelInput(body, id),
+        );
+  return json(c, 201, scoped(adminItem("model", record), target));
 }
 
 async function modelRead(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const id = pathParam(c, "id");
-  const record = await (await catalogStore(c, tenantId)).getModel(tenantId, id);
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).getModel(id)
+      : await (await catalogStore(c, target.tenantId)).getModel(target.tenantId, id);
   if (record === null) throw new TenantCatalogNotFoundError(`model ${id} not found`);
-  return json(c, 200, adminItem("model", record));
+  return json(c, 200, scoped(adminItem("model", record), target));
 }
 
 async function modelUpdate(
@@ -391,56 +552,75 @@ async function modelUpdate(
   const body = asBody(
     await readJson(c, action === "replace" ? modelCreateSchema : modelUpdateSchema),
   );
-  const tenantId = targetTenant(c, body);
+  const target = targetScope(c, body);
   const id = pathParam(c, "id");
-  const record = await (await catalogStore(c, tenantId)).updateModel(
-    tenantId,
-    scopeOf(c),
-    id,
-    body as Partial<ModelCatalogInput>,
-    action,
-  );
+  const input = body as Partial<ModelCatalogInput>;
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).updateModel(scopeOf(c), id, input, action)
+      : await (await catalogStore(c, target.tenantId)).updateModel(
+          target.tenantId,
+          scopeOf(c),
+          id,
+          input,
+          action,
+        );
   if (record === null) throw new TenantCatalogNotFoundError(`model ${id} not found`);
-  return json(c, 200, adminItem("model", record));
+  return json(c, 200, scoped(adminItem("model", record), target));
 }
 
 async function modelDelete(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const id = pathParam(c, "id");
-  if (!(await (await catalogStore(c, tenantId)).deleteModel(tenantId, scopeOf(c), id))) {
-    throw new TenantCatalogNotFoundError(`model ${id} not found`);
-  }
-  return json(c, 200, adminDeleted("model", id));
+  const deleted =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).deleteModel(scopeOf(c), id)
+      : await (await catalogStore(c, target.tenantId)).deleteModel(target.tenantId, scopeOf(c), id);
+  if (!deleted) throw new TenantCatalogNotFoundError(`model ${id} not found`);
+  return json(c, 200, scoped(adminDeleted("model", id), target));
 }
 
 async function offeringList(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const modelId = pathParam(c, "model_id");
-  const rows = await (await catalogStore(c, tenantId)).listOfferings(tenantId, modelId);
-  return filterAndList(c, rows);
+  const rows =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).listOfferings(modelId)
+      : await (await catalogStore(c, target.tenantId)).listOfferings(target.tenantId, modelId);
+  return filterAndList(c, rows, target);
 }
 
 async function offeringRead(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const modelId = pathParam(c, "model_id");
   const id = pathParam(c, "offering_id");
-  const record = await (await catalogStore(c, tenantId)).getOffering(tenantId, modelId, id);
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).getOffering(modelId, id)
+      : await (await catalogStore(c, target.tenantId)).getOffering(target.tenantId, modelId, id);
   if (record === null) throw new TenantCatalogNotFoundError(`offering ${id} not found`);
-  return json(c, 200, adminItem("offering", record));
+  return json(c, 200, scoped(adminItem("offering", record), target));
 }
 
 async function offeringCreate(c: Parameters<Handler>[0]): Promise<Response> {
   const body = asBody(await readJson(c, offeringCreateSchema));
-  const tenantId = targetTenant(c, body);
+  const target = targetScope(c, body);
   const modelId = pathParam(c, "model_id");
   const id = (body.id as string | undefined) ?? crypto.randomUUID();
-  const record = await (await catalogStore(c, tenantId)).createOffering(
-    tenantId,
-    scopeOf(c),
-    modelId,
-    offeringInput(body, id),
-  );
-  return json(c, 201, adminItem("offering", record));
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).createOffering(
+          scopeOf(c),
+          modelId,
+          offeringInput(body, id),
+        )
+      : await (await catalogStore(c, target.tenantId)).createOffering(
+          target.tenantId,
+          scopeOf(c),
+          modelId,
+          offeringInput(body, id),
+        );
+  return json(c, 201, scoped(adminItem("offering", record), target));
 }
 
 async function offeringUpdate(
@@ -450,31 +630,40 @@ async function offeringUpdate(
   const body = asBody(
     await readJson(c, action === "replace" ? offeringCreateSchema : offeringUpdateSchema),
   );
-  const tenantId = targetTenant(c, body);
+  const target = targetScope(c, body);
   const modelId = pathParam(c, "model_id");
   const id = pathParam(c, "offering_id");
-  const record = await (await catalogStore(c, tenantId)).updateOffering(
-    tenantId,
-    scopeOf(c),
-    modelId,
-    id,
-    body as Partial<ModelOfferingInput>,
-    action,
-  );
+  const input = body as Partial<ModelOfferingInput>;
+  const record =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).updateOffering(scopeOf(c), modelId, id, input, action)
+      : await (await catalogStore(c, target.tenantId)).updateOffering(
+          target.tenantId,
+          scopeOf(c),
+          modelId,
+          id,
+          input,
+          action,
+        );
   if (record === null) throw new TenantCatalogNotFoundError(`offering ${id} not found`);
-  return json(c, 200, adminItem("offering", record));
+  return json(c, 200, scoped(adminItem("offering", record), target));
 }
 
 async function offeringDelete(c: Parameters<Handler>[0]): Promise<Response> {
-  const tenantId = targetTenant(c);
+  const target = targetScope(c);
   const modelId = pathParam(c, "model_id");
   const id = pathParam(c, "offering_id");
-  if (
-    !(await (await catalogStore(c, tenantId)).deleteOffering(tenantId, scopeOf(c), modelId, id))
-  ) {
-    throw new TenantCatalogNotFoundError(`offering ${id} not found`);
-  }
-  return json(c, 200, adminDeleted("offering", id));
+  const deleted =
+    target.kind === "platform"
+      ? await (await platformItemStore(c)).deleteOffering(scopeOf(c), modelId, id)
+      : await (await catalogStore(c, target.tenantId)).deleteOffering(
+          target.tenantId,
+          scopeOf(c),
+          modelId,
+          id,
+        );
+  if (!deleted) throw new TenantCatalogNotFoundError(`offering ${id} not found`);
+  return json(c, 200, scoped(adminDeleted("offering", id), target));
 }
 
 function wrapped(handler: Handler): Handler {
