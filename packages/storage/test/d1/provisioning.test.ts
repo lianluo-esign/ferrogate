@@ -27,6 +27,7 @@ import {
   DEFAULT_TENANT_MODEL_CATALOG,
   MODEL_CATALOG_SEED_MARK,
   type TenantDatabaseRouter,
+  type TenantModelCatalogSeedGraph,
   describeTenantStorage,
   listTenantModelCatalog,
   provisionTenantStorage,
@@ -320,6 +321,282 @@ describe("catalog seeding is best effort", () => {
     const registration = await new ControlDatabaseTenantRegistry(env.CONTROL_DB).get(TENANT_A);
     expect(registration?.status).toBe("incomplete");
     expect(registration?.catalogSeededAtUnix).toBeUndefined();
+  });
+});
+
+/**
+ * A managed platform graph with REAL channels (#891): two real providers, two
+ * models, and — the shape the compiled-in card cannot represent — a model with
+ * two offerings (primary + fallback) across two providers. Every column the
+ * verbatim copy must preserve is set to a value the DEFAULT card never uses, so
+ * a seed that silently fell back to the card would fail the assertions below
+ * rather than pass them vacuously.
+ */
+function platformSeedGraph(revision = 7): TenantModelCatalogSeedGraph {
+  const provider = (id: string, name: string, kind: string, baseUrl: string, keyVar: string) => ({
+    id,
+    name,
+    kind,
+    base_url: baseUrl,
+    api_key_var: keyVar,
+    byok_alias: null,
+    auth_scheme: null,
+    region: null,
+    zero_data_retention: null,
+    openrouter_http_referer: null,
+    openrouter_x_title: null,
+    cloudflare_ai_gateway_json: null,
+    enabled: 1,
+  });
+  const model = (id: string, name: string) => ({
+    id,
+    name,
+    family: null,
+    owned_by: null,
+    capabilities_json: "[]",
+    context_window: null,
+    routing_strategy: "priority",
+    enabled: 1,
+  });
+  const offering = (
+    id: string,
+    modelId: string,
+    providerId: string,
+    upstream: string,
+    role: string,
+    priority: number,
+    input: number,
+    output: number,
+  ) => ({
+    id,
+    model_id: modelId,
+    provider_id: providerId,
+    upstream_model_id: upstream,
+    role,
+    priority,
+    weight: 1,
+    canary_percent: null,
+    shadow_percent: null,
+    shadow_max_requests: null,
+    capabilities_json: null,
+    context_window: null,
+    region: null,
+    zero_data_retention: null,
+    input_price_per_1m: input,
+    output_price_per_1m: output,
+    cached_input_price_per_1m: null,
+    cache_write_price_per_1m: null,
+    reasoning_price_per_1m: null,
+    audio_second_price_per_1m: null,
+    audio_character_price_per_1m: null,
+    currency: "USD",
+    enabled: 1,
+  });
+  return {
+    revision,
+    providers: [
+      provider("p-openai", "OpenAI", "openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+      provider(
+        "p-anthropic",
+        "Anthropic",
+        "anthropic",
+        "https://api.anthropic.com",
+        "ANTHROPIC_API_KEY",
+      ),
+    ],
+    models: [model("m-4o", "gpt-4o"), model("m-opus", "claude-opus-4")],
+    offerings: [
+      offering("o-4o-primary", "m-4o", "p-openai", "gpt-4o", "primary", 0, 2.5, 10.0),
+      offering(
+        "o-4o-fallback",
+        "m-4o",
+        "p-anthropic",
+        "claude-3-5-sonnet",
+        "fallback",
+        10,
+        3.0,
+        15.0,
+      ),
+      offering("o-opus", "m-opus", "p-anthropic", "claude-opus-4", "primary", 0, 15.0, 75.0),
+    ],
+  };
+}
+
+describe("seeding from the platform catalog graph (#891)", () => {
+  test("copies the full 3-entity graph verbatim, with real channels and platform_seed source", async () => {
+    await registerTenant(TENANT_A);
+    const graph = platformSeedGraph();
+
+    const outcome = await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: async () => graph,
+    });
+    expect(outcome.status).toBe("ready");
+    expect(outcome.catalogSeeded).toBe(true);
+    // One model row per logical model — NOT the 16-entry card. If the seed had
+    // fallen back to the card this would be 16.
+    expect(outcome.catalogEntries).toBe(graph.models.length);
+    expect(outcome.catalogEntries).not.toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
+
+    const handle = await router.forTenant(TENANT_A);
+
+    // (1) REAL channels stay real: an `openai`-kind channel with its base_url and
+    // credential reference carried across — not the `platform`-kind indirection
+    // the fallback card produces.
+    const channels = await handle.db
+      .prepare(
+        "SELECT name, kind, base_url, api_key_var FROM provider_channels WHERE tenant_id = ? ORDER BY kind",
+      )
+      .bind(TENANT_A)
+      .all<{ name: string; kind: string; base_url: string; api_key_var: string | null }>();
+    expect(channels.results).toEqual([
+      {
+        name: "Anthropic",
+        kind: "anthropic",
+        base_url: "https://api.anthropic.com",
+        api_key_var: "ANTHROPIC_API_KEY",
+      },
+      {
+        name: "OpenAI",
+        kind: "openai",
+        base_url: "https://api.openai.com/v1",
+        api_key_var: "OPENAI_API_KEY",
+      },
+    ]);
+    // The fallback card's `platform`-kind channel must be ABSENT here — this is
+    // the graph copy, not the card.
+    expect(channels.results.some((row) => row.kind === "platform")).toBe(false);
+
+    // (2) Every offering role is preserved — the card can only make one primary
+    // per model, so a fallback row is proof the graph was copied.
+    const offerings = await handle.db
+      .prepare("SELECT role, source FROM catalog_model_offerings WHERE tenant_id = ? ORDER BY role")
+      .bind(TENANT_A)
+      .all<{ role: string; source: string }>();
+    expect(offerings.results.map((row) => row.role).sort()).toEqual([
+      "fallback",
+      "primary",
+      "primary",
+    ]);
+    // (3) source is forced to platform_seed on EVERY copied offering.
+    expect(offerings.results.every((row) => row.source === "platform_seed")).toBe(true);
+
+    // (4) The primary resolves priced from the graph, through the named channel.
+    const resolved = await resolveTenantModel(handle.db, TENANT_A, "gpt-4o");
+    expect(resolved?.provider).toBe("OpenAI");
+    expect(resolved?.providerModel).toBe("gpt-4o");
+    expect(resolved?.inputPricePer1m).toBe(2.5);
+    expect(resolved?.source).toBe("platform_seed");
+  });
+
+  test("records the platform revision and row counts in the seed mark detail", async () => {
+    await registerTenant(TENANT_A);
+    const graph = platformSeedGraph(42);
+
+    await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: async () => graph,
+    });
+
+    const handle = await router.forTenant(TENANT_A);
+    const mark = await handle.db
+      .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+      .bind(TENANT_A, MODEL_CATALOG_SEED_MARK)
+      .first<{ detail: string }>();
+    // The exact revision and counts, not merely "non-empty": an operator uses
+    // this to tell WHICH platform catalog seeded the tenant. Inverting the
+    // revision (42 -> anything else) must fail this.
+    expect(mark?.detail).toBe("revision=42;providers=2;models=2;offerings=3");
+    // And it must NEVER be the legacy empty-seed marker the repair path removes.
+    expect(mark?.detail).not.toBe("entries=0");
+  });
+
+  test("an empty platform graph falls back to the compiled-in card (bootstrap)", async () => {
+    await registerTenant(TENANT_A);
+
+    const outcome = await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: async () => ({ revision: 0, providers: [], models: [], offerings: [] }),
+    });
+
+    expect(outcome.status).toBe("ready");
+    // Zero platform rows => the legacy card seed still runs, unchanged.
+    expect(outcome.catalogEntries).toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
+    const handle = await router.forTenant(TENANT_A);
+    const mark = await handle.db
+      .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
+      .bind(TENANT_A, MODEL_CATALOG_SEED_MARK)
+      .first<{ detail: string }>();
+    expect(mark?.detail).toBe(`entries=${DEFAULT_TENANT_MODEL_CATALOG.length}`);
+    // The card's `*`-provider indirection channel, not a real one.
+    const platformChannel = await handle.db
+      .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'platform'")
+      .bind(TENANT_A)
+      .first<{ kind: string }>();
+    expect(platformChannel?.kind).toBe("platform");
+  });
+
+  test("re-provisioning after a tenant edit does NOT revert the graph seed", async () => {
+    await registerTenant(TENANT_A);
+    const graph = platformSeedGraph();
+    await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: async () => graph,
+    });
+
+    const handle = await router.forTenant(TENANT_A);
+    // The tenant edits its copy: delete a model and re-price another.
+    await handle.db
+      .prepare("DELETE FROM catalog_models WHERE tenant_id = ? AND name = ?")
+      .bind(TENANT_A, "claude-opus-4")
+      .run();
+    await handle.db
+      .prepare(
+        "UPDATE catalog_model_offerings SET input_price_per_1m = 1.0 " +
+          "WHERE tenant_id = ? AND model_id = ? AND role = 'primary'",
+      )
+      .bind(TENANT_A, `${TENANT_A}:model:m-4o`)
+      .run();
+
+    const second = await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW + 60,
+      catalogGraphLoader: async () => graph,
+    });
+    expect(second.catalogSeeded).toBe(false);
+    // The deletion stays deleted and the re-price stays — the mark gate holds
+    // for the graph path exactly as it does for the card path.
+    expect(await resolveTenantModel(handle.db, TENANT_A, "claude-opus-4")).toBeUndefined();
+    expect((await resolveTenantModel(handle.db, TENANT_A, "gpt-4o"))?.inputPricePer1m).toBe(1.0);
+  });
+
+  test("the loader is resolved lazily: an already-seeded tenant never re-reads the platform catalog", async () => {
+    await registerTenant(TENANT_A);
+    let reads = 0;
+    const loader = async (): Promise<ReturnType<typeof platformSeedGraph>> => {
+      reads += 1;
+      return platformSeedGraph();
+    };
+
+    // First provision needs a seed, so the loader runs exactly once.
+    const first = await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: loader,
+    });
+    expect(first.catalogSeeded).toBe(true);
+    expect(reads).toBe(1);
+
+    // Every subsequent provision (the PUT/PATCH repair points, the plan-change
+    // hook) is a no-op seed, gated on the mark BEFORE the loader — so the
+    // unbounded platform-catalog export never runs again. If the loader were
+    // resolved eagerly (the pre-fix shape) `reads` would climb to 3 here.
+    for (const at of [NOW + 60, NOW + 120]) {
+      const again = await provisionTenantStorage(router, TENANT_A, {
+        nowUnix: at,
+        catalogGraphLoader: loader,
+      });
+      expect(again.catalogSeeded).toBe(false);
+    }
+    expect(reads).toBe(1);
   });
 });
 

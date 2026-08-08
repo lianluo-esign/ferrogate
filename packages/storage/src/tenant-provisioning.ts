@@ -74,9 +74,15 @@ import { parseLifecycleStatus } from "./lifecycle-status.js";
 import {
   DEFAULT_TENANT_MODEL_CATALOG,
   type TenantModelCatalogEntry,
+  type TenantModelCatalogSeedGraph,
   listTenantModelCatalog,
-  seedTenantModelCatalog,
+  seedTenantCatalogPreferringGraph,
 } from "./tenant-model-catalog.js";
+import type {
+  TenantJurisdiction,
+  TenantLocationHint,
+  TenantObjectAddress,
+} from "./tenant-placement.js";
 import {
   ControlDatabaseTenantRegistry,
   type TenantDatabaseRegistration,
@@ -84,11 +90,6 @@ import {
   type TenantDatabaseSource,
   type TenantProvisioningStatus,
 } from "./tenant-router.js";
-import type {
-  TenantJurisdiction,
-  TenantLocationHint,
-  TenantObjectAddress,
-} from "./tenant-placement.js";
 
 /** What one provisioning run did. Every field is an observation, not a plan. */
 export interface TenantProvisioningOutcome {
@@ -116,6 +117,22 @@ export interface TenantProvisioningOptions {
   readonly nowUnix?: number;
   /** Seed content. Defaults to the platform card in `./tenant-model-catalog.ts`. */
   readonly catalog?: readonly TenantModelCatalogEntry[];
+  /**
+   * A LAZY loader for the MANAGED platform catalog graph (#889) to seed from (#891).
+   *
+   * It is a loader rather than the graph itself so the (unbounded) platform
+   * catalog READ happens ONLY when a seed will actually run — an already-seeded
+   * tenant, which is every PUT/PATCH repair point and every provision-hook
+   * re-run, short-circuits inside the seed-once gate before this is ever called.
+   * When it resolves to a graph with offerings that graph is copied verbatim in
+   * preference to {@link catalog}; when it is absent, resolves to `undefined`, or
+   * yields no offerings, the seed falls back to the compiled-in card, so a
+   * deployment that has never adopted the platform catalog — or one whose catalog
+   * read failed — still onboards. The control plane reads this graph through the
+   * CONTROL_DATA facade and passes it DOWN as data — `@ferrogate/storage` never
+   * names a `platform_*` table, which keeps the Zero-D1 seam intact.
+   */
+  readonly catalogGraphLoader?: () => Promise<TenantModelCatalogSeedGraph | undefined>;
   /**
    * The `locationHint` the object was addressed with, recorded for audit. A
    * Durable Object is homed near its first `get()` and CANNOT be moved
@@ -352,11 +369,17 @@ export async function provisionTenantStorage(
     // failed document write.
     let catalogStepComplete = false;
     try {
-      const seed = await seedTenantModelCatalog(
+      // Prefer the managed platform graph (#891) when it carries offerings; an
+      // empty, absent, or unreadable graph falls back to the compiled-in card,
+      // so this lands independently of the platform-catalog import. The loader is
+      // resolved inside the shared seed-once gate, so an already-seeded tenant
+      // never triggers the platform-catalog read at all.
+      const seed = await seedTenantCatalogPreferringGraph(
         handle.db,
         tenantId,
         nowUnix,
         options.catalog ?? DEFAULT_TENANT_MODEL_CATALOG,
+        options.catalogGraphLoader,
       );
       const catalog = await listTenantModelCatalog(handle.db, tenantId);
       if (catalog.length === 0) {
