@@ -55,6 +55,14 @@ const CONTROL_ONLY = [
   "tenant_agent_cost_rollups",
   "tenant_spend_rollups",
   "tenant_asset_rollups",
+  // #889: the platform default catalog. These are the control-side twins of
+  // the tenant `provider_channels`/`catalog_models`/`catalog_model_offerings`
+  // graph, and this list is what proves a tenant database can never contain
+  // them — "tenants never see platform rows" held at the schema level.
+  "platform_provider_channels",
+  "platform_catalog_models",
+  "platform_catalog_offerings",
+  "platform_catalog_revisions",
   "guardrail_policy_revisions",
   "guardrail_policy_bindings",
   "siem_export_cursors", // 0005

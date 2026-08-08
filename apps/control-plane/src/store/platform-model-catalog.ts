@@ -1,76 +1,71 @@
-import type { TenantDatabaseRouter } from "@ferrogate/storage";
+/**
+ * The platform default model catalog (#889, epic #810).
+ *
+ * This is `TenantModelCatalogStore` with the tenant column removed. The tenant
+ * store lives in a tenant database and qualifies every key and edge with
+ * `tenant_id` because a shared or legacy router can put several tenants in one
+ * database. The platform catalog lives in the CONTROL database, which has
+ * exactly one occupant, so the qualifier would be a constant.
+ *
+ * Two structural consequences follow, and they are the whole reason this is a
+ * sibling module rather than a parameter on the tenant one:
+ *
+ *  1. **No audit outbox.** The tenant store writes its audit intent into a
+ *     tenant-local `catalog_audit_outbox` and reconciles it into the control
+ *     database afterwards, because the mutation and the audit chain live in
+ *     DIFFERENT databases and cannot share a transaction. Here they are the
+ *     same database, so the mutation + revision bump are one batch and the
+ *     audit row is appended straight after it with `appendControlPlaneAudit`.
+ *  2. **No tenant on the record.** `controlPlaneAuditJson` derives both
+ *     `resource_tenant_id` and the audit `chain_key` from `record.tenant_id`,
+ *     so a platform record deliberately carries none: these mutations join the
+ *     platform (null-tenant) audit chain alongside every other platform-scoped
+ *     admin write, which is exactly where an operator looks for them.
+ *
+ * The handle passed in as `db` MUST be the CONTROL_DATA facade
+ * (`deps.controlDatabase`, resolved by `control-data.ts::controlDatabaseFrom`),
+ * never a raw `env.DB` — that is the Zero-D1 seam #879 introduced and the
+ * reason this store takes a database rather than reaching for a binding.
+ */
 import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { type AuditAction, appendControlPlaneAudit, controlPlaneAuditJson } from "./d1.js";
+import {
+  type ModelCatalogInput,
+  type ModelOfferingInput,
+  type ProviderChannelInput,
+  TenantCatalogConflictError,
+  TenantCatalogNotFoundError,
+  TenantCatalogValidationError,
+  boolSql,
+  boolValue,
+  hasOwn,
+  isConstraintError,
+  jsonArray,
+  parsedArray,
+  providerCompatibility,
+  urlIsValid,
+} from "./tenant-model-catalog.js";
 
-export class TenantCatalogNotFoundError extends Error {
-  override readonly name = "TenantCatalogNotFoundError";
-}
+export const PLATFORM_PROVIDER_TABLE = "platform_provider_channels";
+export const PLATFORM_MODEL_TABLE = "platform_catalog_models";
+export const PLATFORM_OFFERING_TABLE = "platform_catalog_offerings";
+export const PLATFORM_REVISION_TABLE = "platform_catalog_revisions";
 
-export class TenantCatalogConflictError extends Error {
-  override readonly name = "TenantCatalogConflictError";
-}
-
-export class TenantCatalogValidationError extends Error {
-  override readonly name = "TenantCatalogValidationError";
-}
-
-export interface ProviderChannelInput {
-  readonly id: string;
-  readonly name: string;
-  readonly kind: string;
-  readonly base_url: string;
-  readonly api_key_var?: string | null;
-  readonly byok_alias?: string | null;
-  readonly auth_scheme?: "bearer" | "x-api-key" | null;
-  readonly region?: string | null;
-  readonly zero_data_retention?: boolean | null;
-  readonly openrouter_http_referer?: string | null;
-  readonly openrouter_x_title?: string | null;
-  readonly cloudflare_ai_gateway?: unknown;
-  readonly enabled?: boolean;
-}
-
-export interface ModelCatalogInput {
-  readonly id: string;
-  readonly name: string;
-  readonly family?: string | null;
-  readonly owned_by?: string | null;
-  readonly capabilities?: readonly string[];
-  readonly context_window?: number | null;
-  readonly routing_strategy?: "priority" | "lowest_cost" | "lowest_latency" | "balanced";
-  readonly enabled?: boolean;
-}
-
-export interface ModelOfferingInput {
-  readonly id: string;
-  readonly provider_id: string;
-  readonly upstream_model_id: string;
-  readonly role?: "primary" | "fallback" | "canary" | "shadow";
-  readonly priority?: number;
-  readonly weight?: number;
-  readonly canary_percent?: number | null;
-  readonly shadow_percent?: number | null;
-  readonly shadow_max_requests?: number | null;
-  readonly capabilities?: readonly string[] | null;
-  readonly context_window?: number | null;
-  readonly region?: string | null;
-  readonly zero_data_retention?: boolean | null;
-  readonly input_price_per_1m?: number | null;
-  readonly output_price_per_1m?: number | null;
-  readonly cached_input_price_per_1m?: number | null;
-  readonly cache_write_price_per_1m?: number | null;
-  readonly reasoning_price_per_1m?: number | null;
-  readonly audio_second_price_per_1m?: number | null;
-  readonly audio_character_price_per_1m?: number | null;
-  readonly currency?: string;
-  readonly source?: string;
-  readonly enabled?: boolean;
-}
+/**
+ * Audit `collection` values.
+ *
+ * Deliberately NOT the tenant store's `providers`/`models`/`offerings`: those
+ * names already appear on the platform audit chain for the legacy document
+ * collections, and an auditor reading the chain must be able to tell a write
+ * to the platform catalog from a write to a tenant's.
+ */
+const PROVIDER_COLLECTION = "platform_providers";
+const MODEL_COLLECTION = "platform_models";
+const OFFERING_COLLECTION = "platform_offerings";
 
 interface ProviderRow {
   readonly id: string;
-  readonly tenant_id: string;
   readonly name: string;
   readonly kind: string;
   readonly base_url: string;
@@ -87,7 +82,6 @@ interface ProviderRow {
 
 interface ModelRow {
   readonly id: string;
-  readonly tenant_id: string;
   readonly name: string;
   readonly family: string | null;
   readonly owned_by: string | null;
@@ -99,7 +93,6 @@ interface ModelRow {
 
 interface OfferingRow {
   readonly id: string;
-  readonly tenant_id: string;
   readonly model_id: string;
   readonly provider_id: string;
   readonly provider_name: string | null;
@@ -126,29 +119,9 @@ interface OfferingRow {
   readonly enabled: number;
 }
 
-interface CatalogAuditOutboxRow {
-  readonly id: string;
-  readonly tenant_id: string;
-  readonly revision: number | string;
-  readonly action: AuditAction;
-  readonly collection: string;
-  readonly record_json: string;
-  readonly audit_json: string;
-  readonly request_id: string;
-  readonly actor_scope: string;
-  readonly actor_tenant_id: string | null;
-}
-
-export interface TenantCatalogAuditSweepReport {
-  readonly scanned: number;
-  readonly reconciled: number;
-  readonly failed: number;
-  readonly skipped: "control_database_unavailable" | null;
-}
-
-export interface TenantModelCatalogStoreOptions {
+export interface PlatformModelCatalogStoreOptions {
+  /** MUST be the CONTROL_DATA facade handle, not a raw `env.DB`. */
   readonly db: D1Database;
-  readonly controlDatabase: D1Database;
   readonly requestId?: string | null;
 }
 
@@ -156,18 +129,18 @@ type CatalogRecord = StoreRecord;
 type UpdateField = readonly [string, string | number | null];
 
 const PROVIDER_SELECT = `
-  SELECT id, tenant_id, name, kind, base_url, api_key_var, byok_alias,
+  SELECT id, name, kind, base_url, api_key_var, byok_alias,
          auth_scheme, region, zero_data_retention, openrouter_http_referer,
          openrouter_x_title, cloudflare_ai_gateway_json, enabled
-    FROM provider_channels`;
+    FROM ${PLATFORM_PROVIDER_TABLE}`;
 
 const MODEL_SELECT = `
-  SELECT id, tenant_id, name, family, owned_by, capabilities_json,
+  SELECT id, name, family, owned_by, capabilities_json,
          context_window, routing_strategy, enabled
-    FROM catalog_models`;
+    FROM ${PLATFORM_MODEL_TABLE}`;
 
 const OFFERING_SELECT = `
-  SELECT o.id, o.tenant_id, o.model_id, o.provider_id, p.name AS provider_name,
+  SELECT o.id, o.model_id, o.provider_id, p.name AS provider_name,
          o.upstream_model_id, o.role, o.priority, o.weight, o.canary_percent,
          o.shadow_percent, o.shadow_max_requests, o.capabilities_json,
          o.context_window, o.region, o.zero_data_retention,
@@ -175,150 +148,24 @@ const OFFERING_SELECT = `
          o.cached_input_price_per_1m, o.cache_write_price_per_1m,
          o.reasoning_price_per_1m, o.audio_second_price_per_1m,
          o.audio_character_price_per_1m, o.currency, o.source, o.enabled
-    FROM catalog_model_offerings o
-    LEFT JOIN provider_channels p
-      ON p.tenant_id = o.tenant_id AND p.id = o.provider_id`;
+    FROM ${PLATFORM_OFFERING_TABLE} o
+    LEFT JOIN ${PLATFORM_PROVIDER_TABLE} p
+      ON p.id = o.provider_id`;
 
-/** Deliver durable catalog audit entries and remove only successfully delivered rows. */
-export async function reconcileTenantCatalogAudit(
-  db: D1Database,
-  controlDatabase: D1Database,
-  tenantId: string,
-): Promise<void> {
-  const pending = await db
-    .prepare(
-      `SELECT id, tenant_id, revision, action, collection, record_json, audit_json,
-              request_id, actor_scope, actor_tenant_id
-         FROM catalog_audit_outbox
-        WHERE tenant_id = ?
-        ORDER BY revision ASC, id ASC`,
-    )
-    .bind(tenantId)
-    .all<CatalogAuditOutboxRow>();
-
-  for (const row of pending.results) {
-    try {
-      const record = JSON.parse(row.record_json) as StoreRecord;
-      const scope: CallerScope =
-        row.actor_scope === "tenant" && row.actor_tenant_id !== null
-          ? { kind: "tenant", tenantId: row.actor_tenant_id }
-          : { kind: "platform_operator" };
-      await appendControlPlaneAudit(controlDatabase, {
-        action: row.action,
-        collection: row.collection,
-        record,
-        revision: Number(row.revision),
-        scope,
-        requestId: row.request_id,
-        auditJson: row.audit_json,
-        newId: () => row.id,
-      });
-      await db
-        .prepare("DELETE FROM catalog_audit_outbox WHERE tenant_id = ? AND id = ?")
-        .bind(tenantId, row.id)
-        .run();
-    } catch (error) {
-      await db
-        .prepare(
-          "UPDATE catalog_audit_outbox SET attempt_count = attempt_count + 1 WHERE tenant_id = ? AND id = ?",
-        )
-        .bind(tenantId, row.id)
-        .run()
-        .catch(() => undefined);
-      throw error;
-    }
-  }
-}
-
-/** Reconcile every provisioned tenant so delivery does not depend on a write. */
-export async function reconcileProvisionedTenantCatalogAudits(
-  router: TenantDatabaseRouter,
-  controlDatabase: D1Database,
-): Promise<TenantCatalogAuditSweepReport> {
-  let tenantIds: readonly string[];
-  try {
-    tenantIds = await router.provisionedTenants();
-  } catch (error) {
-    console.warn("control-plane: tenant catalog audit roster lookup failed", error);
-    return { scanned: 0, reconciled: 0, failed: 1, skipped: null };
-  }
-
-  let reconciled = 0;
-  let failed = 0;
-  for (const tenantId of tenantIds) {
-    try {
-      const handle = await router.forTenant(tenantId);
-      await reconcileTenantCatalogAudit(handle.db, controlDatabase, tenantId);
-      reconciled += 1;
-    } catch (error) {
-      failed += 1;
-      console.warn(
-        `control-plane: tenant catalog audit reconciliation failed for ${tenantId}`,
-        error,
-      );
-    }
-  }
-  return { scanned: tenantIds.length, reconciled, failed, skipped: null };
-}
-
-export function hasOwn(input: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(input, key);
-}
-
-export function boolValue(value: number | boolean | null | undefined, fallback = false): boolean {
-  if (value === null || value === undefined) return fallback;
-  return value === true || value === 1;
-}
-
-export function boolSql(
-  value: boolean | null | undefined,
-  fallback: number | null = 1,
-): number | null {
-  if (value === null) return null;
-  if (value === undefined) return fallback;
-  return value ? 1 : 0;
-}
-
-export function providerCompatibility(kind: string): "openai-compatible" | "dedicated" {
-  return canonicalProviderKind(kind) === "openai-compatible" ? "openai-compatible" : "dedicated";
-}
-
-export function jsonArray(value: unknown, field: string, fallback = "[]"): string {
-  if (value === undefined) return fallback;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new TenantCatalogValidationError(`${field} must be an array of strings`);
-  }
-  return JSON.stringify(value);
-}
-
-export function parsedArray(value: string | null): readonly string[] {
-  if (value === null || value === "") return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export function isConstraintError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /constraint|unique|foreign key|check failed/i.test(message);
-}
-
-export function urlIsValid(value: string): boolean {
-  try {
-    new URL(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/**
+ * `scope` replaces the tenant store's `tenant_id` on every projected record.
+ *
+ * It is not decoration: the route layer answers the SAME operation ids for both
+ * catalogs, so a caller that reads a record must be able to tell which store
+ * produced it, and a filter or console that keyed off `tenant_id` gets an
+ * explicit "platform" rather than a silently missing field.
+ */
+const PLATFORM_SCOPE = "platform" as const;
 
 function providerRecord(row: ProviderRow): CatalogRecord {
   return {
     id: row.id,
-    tenant_id: row.tenant_id,
+    scope: PLATFORM_SCOPE,
     name: row.name,
     kind: row.kind,
     compatibility: providerCompatibility(row.kind),
@@ -340,7 +187,7 @@ function providerRecord(row: ProviderRow): CatalogRecord {
 function offeringRecord(row: OfferingRow): CatalogRecord {
   return {
     id: row.id,
-    tenant_id: row.tenant_id,
+    scope: PLATFORM_SCOPE,
     model_id: row.model_id,
     provider_id: row.provider_id,
     provider: row.provider_name,
@@ -390,7 +237,7 @@ function modelRecord(row: ModelRow, offerings: readonly OfferingRow[]): CatalogR
   const primary = offerings.find((offering) => offering.role === "primary") ?? offerings[0];
   return {
     id: row.id,
-    tenant_id: row.tenant_id,
+    scope: PLATFORM_SCOPE,
     name: row.name,
     family: row.family,
     owned_by: row.owned_by,
@@ -409,7 +256,6 @@ function updateStatement(
   db: D1Database,
   table: string,
   fields: readonly UpdateField[],
-  tenantId: string,
   id: string,
   now: number,
   ignoreConflicts = false,
@@ -420,60 +266,62 @@ function updateStatement(
     .prepare(
       `${verb} ${table}
           SET ${assignments}, updated_at_unix = ?
-        WHERE tenant_id = ? AND id = ?`,
+        WHERE id = ?`,
     )
-    .bind(...fields.map(([, value]) => value), now, tenantId, id);
+    .bind(...fields.map(([, value]) => value), now, id);
 }
 
-export class TenantModelCatalogStore {
+/** The nullable per-million price columns an offering carries. */
+const PRICE_COLUMNS = [
+  "input_price_per_1m",
+  "output_price_per_1m",
+  "cached_input_price_per_1m",
+  "cache_write_price_per_1m",
+  "reasoning_price_per_1m",
+  "audio_second_price_per_1m",
+  "audio_character_price_per_1m",
+] as const;
+
+export class PlatformModelCatalogStore {
   readonly #db: D1Database;
-  readonly #controlDatabase: D1Database;
   readonly #requestId: string;
 
-  constructor(options: TenantModelCatalogStoreOptions) {
+  constructor(options: PlatformModelCatalogStoreOptions) {
     this.#db = options.db;
-    this.#controlDatabase = options.controlDatabase;
     this.#requestId = options.requestId ?? "";
   }
 
-  async listProviders(tenantId: string): Promise<readonly CatalogRecord[]> {
+  async listProviders(): Promise<readonly CatalogRecord[]> {
     const result = await this.#db
-      .prepare(`${PROVIDER_SELECT} WHERE tenant_id = ? ORDER BY created_at_unix ASC, id ASC`)
-      .bind(tenantId)
+      .prepare(`${PROVIDER_SELECT} ORDER BY created_at_unix ASC, id ASC`)
       .all<ProviderRow>();
     return result.results.map(providerRecord);
   }
 
-  async getProvider(tenantId: string, id: string): Promise<CatalogRecord | null> {
-    const row = await this.#providerRow(tenantId, id);
+  async getProvider(id: string): Promise<CatalogRecord | null> {
+    const row = await this.#providerRow(id);
     return row === null ? null : providerRecord(row);
   }
 
-  async createProvider(
-    tenantId: string,
-    scope: CallerScope,
-    input: ProviderChannelInput,
-  ): Promise<CatalogRecord> {
+  async createProvider(scope: CallerScope, input: ProviderChannelInput): Promise<CatalogRecord> {
     const normalized = this.#validateProvider(input);
     const now = Math.floor(Date.now() / 1000);
     await this.#commit(
-      tenantId,
       scope,
       "create",
-      "providers",
-      { id: input.id, tenant_id: tenantId },
+      PROVIDER_COLLECTION,
+      { id: input.id, scope: PLATFORM_SCOPE },
       this.#db
         .prepare(
-          `INSERT OR IGNORE INTO provider_channels
-             (id, tenant_id, name, kind, base_url, api_key_var, byok_alias,
+          `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
+             (id, name, kind, base_url, api_key_var, byok_alias,
               auth_scheme, region, zero_data_retention, openrouter_http_referer,
               openrouter_x_title, cloudflare_ai_gateway_json, enabled,
               created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
-          tenantId,
           normalized.name,
           normalized.kind,
           normalized.base_url,
@@ -493,27 +341,23 @@ export class TenantModelCatalogStore {
         ),
       true,
     );
-    const stored = await this.getProvider(tenantId, input.id);
-    if (stored === null) throw new Error(`provider ${input.id} disappeared after create`);
+    const stored = await this.getProvider(input.id);
+    if (stored === null) throw new Error(`platform provider ${input.id} disappeared after create`);
     return stored;
   }
 
   async updateProvider(
-    tenantId: string,
     scope: CallerScope,
     id: string,
     input: Partial<ProviderChannelInput>,
     action: "replace" | "merge",
   ): Promise<CatalogRecord | null> {
-    const current = await this.#providerRow(tenantId, id);
+    const current = await this.#providerRow(id);
     if (current === null) return null;
     const fields: UpdateField[] = [];
     if (action === "replace") {
       const name = this.#requiredText(input.name ?? current.name, "name");
-      const kind = canonicalProviderKind(input.kind ?? current.kind);
-      if (kind === null) {
-        throw new TenantCatalogValidationError(`unsupported provider kind: ${input.kind}`);
-      }
+      const kind = this.#requiredKind(input.kind ?? current.kind);
       const baseUrl = this.#requiredText(input.base_url ?? current.base_url, "base_url");
       if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
       fields.push(["name", name], ["kind", kind], ["base_url", baseUrl]);
@@ -533,12 +377,7 @@ export class TenantModelCatalogStore {
       fields.push(["enabled", boolSql(input.enabled)]);
     } else {
       if (input.name !== undefined) fields.push(["name", this.#requiredText(input.name, "name")]);
-      if (input.kind !== undefined) {
-        const kind = canonicalProviderKind(input.kind);
-        if (kind === null)
-          throw new TenantCatalogValidationError(`unsupported provider kind: ${input.kind}`);
-        fields.push(["kind", kind]);
-      }
+      if (input.kind !== undefined) fields.push(["kind", this.#requiredKind(input.kind)]);
       if (input.base_url !== undefined) {
         const baseUrl = this.#requiredText(input.base_url, "base_url");
         if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
@@ -569,75 +408,68 @@ export class TenantModelCatalogStore {
     }
     if (fields.length === 0) fields.push(["name", current.name]);
     const changed = await this.#commit(
-      tenantId,
       scope,
       action,
-      "providers",
-      { id, tenant_id: tenantId },
+      PROVIDER_COLLECTION,
+      { id, scope: PLATFORM_SCOPE },
       updateStatement(
         this.#db,
-        "provider_channels",
+        PLATFORM_PROVIDER_TABLE,
         fields,
-        tenantId,
         id,
         Math.floor(Date.now() / 1000),
         true,
       ),
       true,
     );
-    return changed ? this.getProvider(tenantId, id) : null;
+    return changed ? this.getProvider(id) : null;
   }
 
-  async deleteProvider(tenantId: string, scope: CallerScope, id: string): Promise<boolean> {
-    if ((await this.#providerRow(tenantId, id)) === null) return false;
-    const live = await this.#db
-      .prepare(
-        "SELECT 1 AS present FROM catalog_model_offerings WHERE tenant_id = ? AND provider_id = ? LIMIT 1",
-      )
-      .bind(tenantId, id)
-      .first<{ present: number }>();
-    if (live !== null) throw new TenantCatalogConflictError(`provider ${id} has live offerings`);
+  async deleteProvider(scope: CallerScope, id: string): Promise<boolean> {
+    if ((await this.#providerRow(id)) === null) return false;
+    if (await this.#providerHasOfferings(id)) {
+      throw new TenantCatalogConflictError(`platform provider ${id} has live offerings`);
+    }
     const deleted = await this.#commit(
-      tenantId,
       scope,
       "remove",
-      "providers",
-      { id, tenant_id: tenantId },
+      PROVIDER_COLLECTION,
+      { id, scope: PLATFORM_SCOPE },
       this.#db
         .prepare(
-          `DELETE FROM provider_channels
-            WHERE tenant_id = ? AND id = ?
+          `DELETE FROM ${PLATFORM_PROVIDER_TABLE}
+            WHERE id = ?
               AND NOT EXISTS (
-                SELECT 1 FROM catalog_model_offerings
-                 WHERE tenant_id = ? AND provider_id = ?
+                SELECT 1 FROM ${PLATFORM_OFFERING_TABLE} WHERE provider_id = ?
               )`,
         )
-        .bind(tenantId, id, tenantId, id),
+        .bind(id, id),
     );
     if (deleted) return true;
 
-    // The preflight and guarded DELETE are deliberately separate reads around
-    // one atomic batch. If an offering appeared in that window, the guarded
-    // DELETE is a no-op and must still be reported as a live-reference conflict.
-    if ((await this.#providerRow(tenantId, id)) === null) return false;
-    const liveAfter = await this.#db
-      .prepare(
-        "SELECT 1 AS present FROM catalog_model_offerings WHERE tenant_id = ? AND provider_id = ? LIMIT 1",
-      )
-      .bind(tenantId, id)
-      .first<{ present: number }>();
+    // Same two-phase read as the tenant store: the preflight and the guarded
+    // DELETE bracket one atomic batch, so an offering created in that window
+    // turns the DELETE into a no-op that must still report the conflict rather
+    // than a bare 404. `ON DELETE RESTRICT` alone would surface as an opaque
+    // constraint error with no way to tell the two cases apart.
+    if ((await this.#providerRow(id)) === null) return false;
     throw new TenantCatalogConflictError(
-      liveAfter === null
-        ? `provider ${id} could not be deleted`
-        : `provider ${id} has live offerings`,
+      (await this.#providerHasOfferings(id))
+        ? `platform provider ${id} has live offerings`
+        : `platform provider ${id} could not be deleted`,
     );
   }
 
-  async #providerRow(tenantId: string, id: string): Promise<ProviderRow | null> {
-    return this.#db
-      .prepare(`${PROVIDER_SELECT} WHERE tenant_id = ? AND id = ?`)
-      .bind(tenantId, id)
-      .first<ProviderRow>();
+  async #providerHasOfferings(id: string): Promise<boolean> {
+    const live = await this.#db
+      .prepare(`SELECT 1 AS present FROM ${PLATFORM_OFFERING_TABLE} WHERE provider_id = ? LIMIT 1`)
+      .bind(id)
+      .first<{ present: number }>();
+    return live !== null;
+  }
+
+  async #providerRow(id: string): Promise<ProviderRow | null> {
+    return this.#db.prepare(`${PROVIDER_SELECT} WHERE id = ?`).bind(id).first<ProviderRow>();
   }
 
   #requiredText(value: string, field: string): string {
@@ -647,23 +479,31 @@ export class TenantModelCatalogStore {
     return value.trim();
   }
 
+  /**
+   * `kind` is validated by the SAME `canonicalProviderKind` the tenant store
+   * uses, which is what rejects `"platform"` here: that kind is a tenant-side
+   * indirection INTO this catalog, so a platform channel claiming it would
+   * point the platform default at itself.
+   */
+  #requiredKind(kind: string): string {
+    const canonical = canonicalProviderKind(kind);
+    if (canonical === null) {
+      throw new TenantCatalogValidationError(`unsupported provider kind: ${kind}`);
+    }
+    return canonical;
+  }
+
   #validateProvider(input: ProviderChannelInput): { name: string; kind: string; base_url: string } {
     const name = this.#requiredText(input.name, "name");
     const baseUrl = this.#requiredText(input.base_url, "base_url");
     if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
-    const kind = canonicalProviderKind(input.kind);
-    if (kind === null)
-      throw new TenantCatalogValidationError(`unsupported provider kind: ${input.kind}`);
-    return { name, kind, base_url: baseUrl };
+    return { name, kind: this.#requiredKind(input.kind), base_url: baseUrl };
   }
 
-  async listModels(tenantId: string): Promise<readonly CatalogRecord[]> {
+  async listModels(): Promise<readonly CatalogRecord[]> {
     const [models, offerings] = await Promise.all([
-      this.#db
-        .prepare(`${MODEL_SELECT} WHERE tenant_id = ? ORDER BY created_at_unix ASC, id ASC`)
-        .bind(tenantId)
-        .all<ModelRow>(),
-      this.#offeringRows(tenantId),
+      this.#db.prepare(`${MODEL_SELECT} ORDER BY created_at_unix ASC, id ASC`).all<ModelRow>(),
+      this.#offeringRows(),
     ]);
     const byModel = new Map<string, OfferingRow[]>();
     for (const offering of offerings) {
@@ -674,34 +514,28 @@ export class TenantModelCatalogStore {
     return models.results.map((model) => modelRecord(model, byModel.get(model.id) ?? []));
   }
 
-  async getModel(tenantId: string, id: string): Promise<CatalogRecord | null> {
-    const row = await this.#modelRow(tenantId, id);
-    return row === null ? null : modelRecord(row, await this.#offeringRows(tenantId, id));
+  async getModel(id: string): Promise<CatalogRecord | null> {
+    const row = await this.#modelRow(id);
+    return row === null ? null : modelRecord(row, await this.#offeringRows(id));
   }
 
-  async createModel(
-    tenantId: string,
-    scope: CallerScope,
-    input: ModelCatalogInput,
-  ): Promise<CatalogRecord> {
+  async createModel(scope: CallerScope, input: ModelCatalogInput): Promise<CatalogRecord> {
     const normalized = this.#validateModel(input);
     const now = Math.floor(Date.now() / 1000);
     await this.#commit(
-      tenantId,
       scope,
       "create",
-      "models",
-      { id: input.id, tenant_id: tenantId },
+      MODEL_COLLECTION,
+      { id: input.id, scope: PLATFORM_SCOPE },
       this.#db
         .prepare(
-          `INSERT OR IGNORE INTO catalog_models
-             (id, tenant_id, name, family, owned_by, capabilities_json,
+          `INSERT OR IGNORE INTO ${PLATFORM_MODEL_TABLE}
+             (id, name, family, owned_by, capabilities_json,
               context_window, routing_strategy, enabled, created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
-          tenantId,
           normalized.name,
           input.family ?? null,
           input.owned_by ?? null,
@@ -714,26 +548,23 @@ export class TenantModelCatalogStore {
         ),
       true,
     );
-    const stored = await this.getModel(tenantId, input.id);
-    if (stored === null) throw new Error(`model ${input.id} disappeared after create`);
+    const stored = await this.getModel(input.id);
+    if (stored === null) throw new Error(`platform model ${input.id} disappeared after create`);
     return stored;
   }
 
   async updateModel(
-    tenantId: string,
     scope: CallerScope,
     id: string,
     input: Partial<ModelCatalogInput>,
     action: "replace" | "merge",
   ): Promise<CatalogRecord | null> {
-    const current = await this.#modelRow(tenantId, id);
+    const current = await this.#modelRow(id);
     if (current === null) return null;
     const fields: UpdateField[] = [];
     if (action === "replace") {
       const contextWindow = input.context_window ?? null;
-      if (contextWindow !== null && (!Number.isInteger(contextWindow) || contextWindow <= 0)) {
-        throw new TenantCatalogValidationError("context_window must be a positive integer");
-      }
+      this.#requireContextWindow(contextWindow);
       fields.push(
         ["name", this.#requiredText(input.name ?? current.name, "name")],
         ["family", input.family ?? null],
@@ -751,109 +582,94 @@ export class TenantModelCatalogStore {
         fields.push(["capabilities_json", jsonArray(input.capabilities, "capabilities")]);
       }
       if (input.context_window !== undefined) {
-        if (
-          input.context_window !== null &&
-          (!Number.isInteger(input.context_window) || input.context_window <= 0)
-        ) {
-          throw new TenantCatalogValidationError("context_window must be a positive integer");
-        }
+        this.#requireContextWindow(input.context_window);
         fields.push(["context_window", input.context_window]);
       }
-      if (input.routing_strategy !== undefined)
+      if (input.routing_strategy !== undefined) {
         fields.push(["routing_strategy", input.routing_strategy]);
+      }
       if (input.enabled !== undefined) fields.push(["enabled", boolSql(input.enabled)]);
     }
     if (fields.length === 0) fields.push(["name", current.name]);
     const changed = await this.#commit(
-      tenantId,
       scope,
       action,
-      "models",
-      { id, tenant_id: tenantId },
+      MODEL_COLLECTION,
+      { id, scope: PLATFORM_SCOPE },
       updateStatement(
         this.#db,
-        "catalog_models",
+        PLATFORM_MODEL_TABLE,
         fields,
-        tenantId,
         id,
         Math.floor(Date.now() / 1000),
         true,
       ),
       true,
     );
-    return changed ? this.getModel(tenantId, id) : null;
+    return changed ? this.getModel(id) : null;
   }
 
-  async deleteModel(tenantId: string, scope: CallerScope, id: string): Promise<boolean> {
-    if ((await this.#modelRow(tenantId, id)) === null) return false;
+  async deleteModel(scope: CallerScope, id: string): Promise<boolean> {
+    if ((await this.#modelRow(id)) === null) return false;
     return this.#commit(
-      tenantId,
       scope,
       "remove",
-      "models",
-      { id, tenant_id: tenantId },
-      this.#db
-        .prepare("DELETE FROM catalog_models WHERE tenant_id = ? AND id = ?")
-        .bind(tenantId, id),
+      MODEL_COLLECTION,
+      { id, scope: PLATFORM_SCOPE },
+      this.#db.prepare(`DELETE FROM ${PLATFORM_MODEL_TABLE} WHERE id = ?`).bind(id),
     );
   }
 
-  async #modelRow(tenantId: string, id: string): Promise<ModelRow | null> {
-    return this.#db
-      .prepare(`${MODEL_SELECT} WHERE tenant_id = ? AND id = ?`)
-      .bind(tenantId, id)
-      .first<ModelRow>();
+  async #modelRow(id: string): Promise<ModelRow | null> {
+    return this.#db.prepare(`${MODEL_SELECT} WHERE id = ?`).bind(id).first<ModelRow>();
+  }
+
+  #requireContextWindow(value: number | null | undefined): void {
+    if (value !== null && value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+      throw new TenantCatalogValidationError("context_window must be a positive integer");
+    }
   }
 
   #validateModel(input: ModelCatalogInput): { name: string } {
     const name = this.#requiredText(input.name, "name");
-    if (
-      input.context_window !== undefined &&
-      input.context_window !== null &&
-      (!Number.isInteger(input.context_window) || input.context_window <= 0)
-    ) {
-      throw new TenantCatalogValidationError("context_window must be a positive integer");
-    }
+    this.#requireContextWindow(input.context_window);
     return { name };
   }
 
-  async listOfferings(tenantId: string, modelId: string): Promise<readonly CatalogRecord[]> {
-    if ((await this.#modelRow(tenantId, modelId)) === null) {
+  async listOfferings(modelId: string): Promise<readonly CatalogRecord[]> {
+    if ((await this.#modelRow(modelId)) === null) {
       throw new TenantCatalogNotFoundError(`model ${modelId} not found`);
     }
-    return (await this.#offeringRows(tenantId, modelId)).map(offeringRecord);
+    return (await this.#offeringRows(modelId)).map(offeringRecord);
   }
 
   async createOffering(
-    tenantId: string,
     scope: CallerScope,
     modelId: string,
     input: ModelOfferingInput,
   ): Promise<CatalogRecord> {
-    await this.#requireModelAndProvider(tenantId, modelId, input.provider_id);
+    await this.#requireModelAndProvider(modelId, input.provider_id);
     const values = this.#validatedOffering(input);
     const now = Math.floor(Date.now() / 1000);
     await this.#commit(
-      tenantId,
       scope,
       "create",
-      "offerings",
-      { id: input.id, tenant_id: tenantId },
+      OFFERING_COLLECTION,
+      { id: input.id, scope: PLATFORM_SCOPE },
       this.#db
         .prepare(
-          `INSERT OR IGNORE INTO catalog_model_offerings
-             (id, tenant_id, model_id, provider_id, upstream_model_id, role,
+          `INSERT OR IGNORE INTO ${PLATFORM_OFFERING_TABLE}
+             (id, model_id, provider_id, upstream_model_id, role,
               priority, weight, canary_percent, shadow_percent, shadow_max_requests,
               capabilities_json, context_window, region, zero_data_retention,
               input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
               cache_write_price_per_1m, reasoning_price_per_1m,
               audio_second_price_per_1m, audio_character_price_per_1m,
               currency, source, enabled, created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
-          tenantId,
           modelId,
           input.provider_id,
           input.upstream_model_id,
@@ -884,20 +700,19 @@ export class TenantModelCatalogStore {
         ),
       true,
     );
-    const stored = await this.#offeringRow(tenantId, modelId, input.id);
-    if (stored === null) throw new Error(`offering ${input.id} disappeared after create`);
+    const stored = await this.#offeringRow(modelId, input.id);
+    if (stored === null) throw new Error(`platform offering ${input.id} disappeared after create`);
     return offeringRecord(stored);
   }
 
   async updateOffering(
-    tenantId: string,
     scope: CallerScope,
     modelId: string,
     id: string,
     input: Partial<ModelOfferingInput>,
     action: "replace" | "merge",
   ): Promise<CatalogRecord | null> {
-    const current = await this.#offeringRow(tenantId, modelId, id);
+    const current = await this.#offeringRow(modelId, id);
     if (current === null) return null;
     const replacing = action === "replace";
     const role: NonNullable<ModelOfferingInput["role"]> =
@@ -918,10 +733,7 @@ export class TenantModelCatalogStore {
       canary_percent: canaryPercent,
       shadow_percent: shadowPercent,
     });
-    if (
-      input.provider_id !== undefined &&
-      (await this.#providerRow(tenantId, input.provider_id)) === null
-    ) {
+    if (input.provider_id !== undefined && (await this.#providerRow(input.provider_id)) === null) {
       throw new TenantCatalogNotFoundError(`provider ${input.provider_id} not found`);
     }
     const fields: UpdateField[] = [];
@@ -945,15 +757,7 @@ export class TenantModelCatalogStore {
         ["region", input.region ?? null],
         ["zero_data_retention", boolSql(input.zero_data_retention, null)],
       );
-      for (const column of [
-        "input_price_per_1m",
-        "output_price_per_1m",
-        "cached_input_price_per_1m",
-        "cache_write_price_per_1m",
-        "reasoning_price_per_1m",
-        "audio_second_price_per_1m",
-        "audio_character_price_per_1m",
-      ] as const) {
+      for (const column of PRICE_COLUMNS) {
         fields.push([column, input[column] ?? null]);
       }
       fields.push(["currency", input.currency ?? "USD"]);
@@ -970,8 +774,9 @@ export class TenantModelCatalogStore {
     push("weight", input.weight);
     if (!replacing && hasOwn(input, "canary_percent")) push("canary_percent", input.canary_percent);
     if (!replacing && hasOwn(input, "shadow_percent")) push("shadow_percent", input.shadow_percent);
-    if (!replacing && hasOwn(input, "shadow_max_requests"))
+    if (!replacing && hasOwn(input, "shadow_max_requests")) {
       push("shadow_max_requests", input.shadow_max_requests);
+    }
     if (!replacing && input.capabilities !== undefined) {
       fields.push([
         "capabilities_json",
@@ -983,15 +788,7 @@ export class TenantModelCatalogStore {
     if (!replacing && hasOwn(input, "zero_data_retention")) {
       fields.push(["zero_data_retention", boolSql(input.zero_data_retention, null)]);
     }
-    for (const column of [
-      "input_price_per_1m",
-      "output_price_per_1m",
-      "cached_input_price_per_1m",
-      "cache_write_price_per_1m",
-      "reasoning_price_per_1m",
-      "audio_second_price_per_1m",
-      "audio_character_price_per_1m",
-    ] as const) {
+    for (const column of PRICE_COLUMNS) {
       if (!replacing && hasOwn(input, column)) fields.push([column, input[column] ?? null]);
     }
     push("currency", input.currency);
@@ -999,48 +796,38 @@ export class TenantModelCatalogStore {
     if (!replacing && input.enabled !== undefined) fields.push(["enabled", boolSql(input.enabled)]);
     if (fields.length === 0) fields.push(["upstream_model_id", current.upstream_model_id]);
     const changed = await this.#commit(
-      tenantId,
       scope,
       action,
-      "offerings",
-      { id, tenant_id: tenantId },
+      OFFERING_COLLECTION,
+      { id, scope: PLATFORM_SCOPE },
       updateStatement(
         this.#db,
-        "catalog_model_offerings",
+        PLATFORM_OFFERING_TABLE,
         fields,
-        tenantId,
         id,
         Math.floor(Date.now() / 1000),
         true,
       ),
       true,
     );
-    return changed ? this.getOffering(tenantId, modelId, id) : null;
+    return changed ? this.getOffering(modelId, id) : null;
   }
 
-  async deleteOffering(
-    tenantId: string,
-    scope: CallerScope,
-    modelId: string,
-    id: string,
-  ): Promise<boolean> {
-    if ((await this.#offeringRow(tenantId, modelId, id)) === null) return false;
+  async deleteOffering(scope: CallerScope, modelId: string, id: string): Promise<boolean> {
+    if ((await this.#offeringRow(modelId, id)) === null) return false;
     return this.#commit(
-      tenantId,
       scope,
       "remove",
-      "offerings",
-      { id, tenant_id: tenantId },
+      OFFERING_COLLECTION,
+      { id, scope: PLATFORM_SCOPE },
       this.#db
-        .prepare(
-          "DELETE FROM catalog_model_offerings WHERE tenant_id = ? AND model_id = ? AND id = ?",
-        )
-        .bind(tenantId, modelId, id),
+        .prepare(`DELETE FROM ${PLATFORM_OFFERING_TABLE} WHERE model_id = ? AND id = ?`)
+        .bind(modelId, id),
     );
   }
 
-  async getOffering(tenantId: string, modelId: string, id: string): Promise<CatalogRecord | null> {
-    const row = await this.#offeringRow(tenantId, modelId, id);
+  async getOffering(modelId: string, id: string): Promise<CatalogRecord | null> {
+    const row = await this.#offeringRow(modelId, id);
     return row === null ? null : offeringRecord(row);
   }
 
@@ -1084,39 +871,44 @@ export class TenantModelCatalogStore {
     };
   }
 
-  async #offeringRows(tenantId: string, modelId?: string): Promise<readonly OfferingRow[]> {
-    const suffix =
-      modelId === undefined ? "WHERE o.tenant_id = ?" : "WHERE o.tenant_id = ? AND o.model_id = ?";
+  async #offeringRows(modelId?: string): Promise<readonly OfferingRow[]> {
+    const suffix = modelId === undefined ? "" : "WHERE o.model_id = ?";
     const statement = this.#db.prepare(
       `${OFFERING_SELECT} ${suffix} ORDER BY o.priority ASC, o.id ASC`,
     );
     return modelId === undefined
-      ? (await statement.bind(tenantId).all<OfferingRow>()).results
-      : (await statement.bind(tenantId, modelId).all<OfferingRow>()).results;
+      ? (await statement.all<OfferingRow>()).results
+      : (await statement.bind(modelId).all<OfferingRow>()).results;
   }
 
-  async #offeringRow(tenantId: string, modelId: string, id: string): Promise<OfferingRow | null> {
+  async #offeringRow(modelId: string, id: string): Promise<OfferingRow | null> {
     return this.#db
-      .prepare(`${OFFERING_SELECT} WHERE o.tenant_id = ? AND o.model_id = ? AND o.id = ?`)
-      .bind(tenantId, modelId, id)
+      .prepare(`${OFFERING_SELECT} WHERE o.model_id = ? AND o.id = ?`)
+      .bind(modelId, id)
       .first<OfferingRow>();
   }
 
-  async #requireModelAndProvider(
-    tenantId: string,
-    modelId: string,
-    providerId: string,
-  ): Promise<void> {
-    if ((await this.#modelRow(tenantId, modelId)) === null) {
+  async #requireModelAndProvider(modelId: string, providerId: string): Promise<void> {
+    if ((await this.#modelRow(modelId)) === null) {
       throw new TenantCatalogNotFoundError(`model ${modelId} not found`);
     }
-    if ((await this.#providerRow(tenantId, providerId)) === null) {
+    if ((await this.#providerRow(providerId)) === null) {
       throw new TenantCatalogNotFoundError(`provider ${providerId} not found`);
     }
   }
 
+  /**
+   * One mutation, one revision bump, one audit row.
+   *
+   * The revision UPDATE is guarded by `changes() > 0` from the mutation that
+   * precedes it in the SAME batch, so a no-op mutation (an `OR IGNORE` that hit
+   * a unique index, a CAS that lost) cannot advance the revision or produce
+   * audit evidence for a transition that did not happen. The audit append runs
+   * after the batch rather than inside it because `appendControlPlaneAudit`
+   * needs to read the chain head and retry on a sequence conflict; it is
+   * idempotent on its projection key, so a retry cannot double-record.
+   */
   async #commit(
-    tenantId: string,
     scope: CallerScope,
     action: AuditAction,
     collection: string,
@@ -1125,58 +917,34 @@ export class TenantModelCatalogStore {
     requireMutation = false,
   ): Promise<boolean> {
     const now = Math.floor(Date.now() / 1000);
-    await reconcileTenantCatalogAudit(this.#db, this.#controlDatabase, tenantId);
-    const outboxId = crypto.randomUUID();
-    const auditJson = controlPlaneAuditJson({ action, collection, record, revision: 0, scope });
     let results: readonly D1Result<unknown>[];
     try {
       results = await this.#db.batch([
         this.#db
           .prepare(
-            `INSERT OR IGNORE INTO catalog_revisions (tenant_id, id, revision, updated_at_unix)
-             VALUES (?, 1, 0, ?)`,
+            `INSERT OR IGNORE INTO ${PLATFORM_REVISION_TABLE} (id, revision, updated_at_unix)
+             VALUES (1, 0, ?)`,
           )
-          .bind(tenantId, now),
+          .bind(now),
         mutation,
         this.#db
           .prepare(
-            `UPDATE catalog_revisions
+            `UPDATE ${PLATFORM_REVISION_TABLE}
                 SET revision = revision + 1, updated_at_unix = ?
-              WHERE tenant_id = ? AND id = 1 AND changes() > 0
+              WHERE id = 1 AND changes() > 0
               RETURNING revision`,
           )
-          .bind(now, tenantId),
-        this.#db
-          .prepare(
-            `INSERT INTO catalog_audit_outbox
-                (id, tenant_id, revision, action, collection, record_json, audit_json,
-                 request_id, actor_scope, actor_tenant_id, created_at_unix)
-             SELECT ?, tenant_id, revision, ?, ?, ?, json_set(?, '$.revision', revision), ?, ?, ?, ?
-               FROM catalog_revisions
-              WHERE tenant_id = ? AND id = 1 AND changes() > 0`,
-          )
-          .bind(
-            outboxId,
-            action,
-            collection,
-            JSON.stringify(record),
-            auditJson,
-            this.#requestId,
-            scope.kind,
-            scope.kind === "tenant" ? scope.tenantId : null,
-            now,
-            tenantId,
-          ),
+          .bind(now),
       ]);
     } catch (error) {
       if (isConstraintError(error)) {
-        throw new TenantCatalogConflictError("tenant model catalog constraint violated");
+        throw new TenantCatalogConflictError("platform model catalog constraint violated");
       }
       throw error;
     }
     const mutationResult = results[1];
     if (requireMutation && Number(mutationResult?.meta.changes ?? 0) === 0) {
-      throw new TenantCatalogConflictError("tenant model catalog constraint violated");
+      throw new TenantCatalogConflictError("platform model catalog constraint violated");
     }
     const bump = results[2];
     if (bump === undefined || Number(bump.meta.changes ?? 0) === 0) return false;
@@ -1184,13 +952,17 @@ export class TenantModelCatalogStore {
       (bump.results[0] as { revision?: number | string } | undefined)?.revision ?? 0,
     );
     if (revision <= 0) {
-      throw new Error("tenant model catalog revision bump did not return its revision");
+      throw new Error("platform model catalog revision bump did not return its revision");
     }
-    const outbox = results[3];
-    if (outbox === undefined || Number(outbox.meta.changes ?? 0) === 0) {
-      throw new Error("tenant model catalog audit outbox did not record the mutation");
-    }
-    await reconcileTenantCatalogAudit(this.#db, this.#controlDatabase, tenantId);
+    await appendControlPlaneAudit(this.#db, {
+      action,
+      collection,
+      record,
+      revision,
+      scope,
+      requestId: this.#requestId,
+      auditJson: controlPlaneAuditJson({ action, collection, record, revision, scope }),
+    });
     return true;
   }
 }
