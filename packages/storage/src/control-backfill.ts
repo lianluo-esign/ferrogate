@@ -20,9 +20,14 @@
  *    `backfillControlData(a, b)` and `backfillControlData(b, a)` are the two
  *    directions the design's rollback note relies on.
  *  - **Per-table row-count + checksum verification.** After the copy every
- *    table gets a {@link ControlTableReceipt} on BOTH sides, compared with the
- *    same type-preserving, order-independent SHA-256 the tenant backfill uses,
- *    so a silent divergence is a reported mismatch rather than a lost row.
+ *    table gets a {@link ControlTableReceipt} on BOTH sides. The checksum is a
+ *    deterministic SHA-256 chain folded over the primary-key-ordered pages in a
+ *    SINGLE STREAMING PASS (peak memory is one page, not the whole table), each
+ *    page hashed with the tenant backfill's type-preserving row checksum. Both
+ *    backends read the same key order in the same page size, so a silent
+ *    divergence is a reported mismatch rather than a lost row — and a
+ *    high-volume append table (request_logs, audit_events, billing_ledger, the
+ *    usage rollups) is verified without materialising millions of rows.
  *
  * SECURITY: the table and key-column names are a FROZEN static allow-list. A
  * table name reaches a SQL string only after it has been selected from this
@@ -68,8 +73,20 @@ function table(name: string, keyColumns: readonly string[]): ControlBackfillTabl
 }
 
 /**
- * Every live control table, keyed by its primary key, in `sqlite_master` name
- * order.
+ * Every live control table, keyed by its primary key, in FOREIGN-KEY DEPENDENCY
+ * order: a parent table always precedes any table that references it.
+ *
+ * The order is load-bearing, not cosmetic. `ControlDataObject`'s SQLite storage
+ * enforces foreign keys (they are on by default and cannot be disabled inside a
+ * transaction), and `INSERT OR IGNORE` suppresses only UNIQUE/PK/NOT NULL/CHECK
+ * conflicts — NOT foreign-key failures. So a child row copied before its parent
+ * exists aborts the whole backfill with `FOREIGN KEY constraint failed`. The two
+ * dependencies in the control schema are therefore ordered by hand:
+ *   - `platform_catalog_offerings` (FK → `platform_catalog_models` and
+ *     `platform_provider_channels`, migration 0025) follows both parents;
+ *   - `guardrail_check_evaluations` (FK → `guardrail_evaluations(projection_key)`,
+ *     migration 0015) follows its parent.
+ * Every other table is otherwise in `sqlite_master` name order.
  *
  * Derived from the full `sql/d1-ts/control/*.sql` apply — including the
  * `*_legacy` tables that migration `0016` renamed and left in place as
@@ -96,8 +113,10 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("control_plane_resources", ["resource_kind", "resource_id"]),
   table("delegation_revocations_legacy", ["tenant", "subject"]),
   table("experiment_shadow_legs", ["projection_key"]),
-  table("guardrail_check_evaluations", ["projection_key"]),
+  // Parent before child: guardrail_check_evaluations FK → guardrail_evaluations
+  // (projection_key), migration 0015.
   table("guardrail_evaluations", ["projection_key"]),
+  table("guardrail_check_evaluations", ["projection_key"]),
   table("guardrail_policy_bindings", ["policy_id"]),
   table("guardrail_policy_revisions", ["policy_id", "revision"]),
   table("managed_worker_isolation_evidence", ["projection_key"]),
@@ -119,10 +138,12 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("online_eval_scores", ["projection_key"]),
   table("permissions", ["id"]),
   table("plans", ["id"]),
+  // Parents before child: platform_catalog_offerings FK → platform_catalog_models
+  // AND platform_provider_channels, migration 0025.
   table("platform_catalog_models", ["id"]),
+  table("platform_provider_channels", ["id"]),
   table("platform_catalog_offerings", ["id"]),
   table("platform_catalog_revisions", ["id"]),
-  table("platform_provider_channels", ["id"]),
   table("quota_policies", ["id"]),
   table("request_logs", ["projection_key"]),
   table("roles", ["id"]),
@@ -283,21 +304,55 @@ async function copyTable(
   return { table: spec.name, sourceRows, copied };
 }
 
-/** A row-count + checksum receipt for one table, or `undefined` if it is absent. */
+/** Rows read per page when computing a receipt; fixed so both backends chain identically. */
+const RECEIPT_PAGE_SIZE = 500;
+
+/** SHA-256 of a UTF-8 string, lower-case hex. */
+async function sha256Hex(input: string): Promise<string> {
+  const runtimeCrypto = (
+    globalThis as unknown as {
+      crypto?: { subtle: { digest(algorithm: string, data: Uint8Array): Promise<ArrayBuffer> } };
+    }
+  ).crypto;
+  if (runtimeCrypto === undefined) {
+    throw new Error("Web Crypto is required for control backfill receipts");
+  }
+  const digest = await runtimeCrypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  let hex = "";
+  for (const byte of new Uint8Array(digest)) hex += byte.toString(16).padStart(2, "0");
+  return hex;
+}
+
+/**
+ * A row-count + checksum receipt for one table, or `undefined` if it is absent.
+ *
+ * The checksum is computed in a SINGLE STREAMING PASS: each primary-key-ordered
+ * page is hashed with the tenant backfill's type-preserving row checksum, then
+ * folded into a rolling SHA-256 chain. Peak memory is one {@link RECEIPT_PAGE_SIZE}
+ * page rather than the whole table, so an unbounded append table (request_logs,
+ * audit_events, billing_ledger, the usage rollups) is verified without
+ * materialising millions of rows in the Worker heap. Because both backends read
+ * the same key order in the same page size, the chain is deterministic and a
+ * genuine divergence — a changed value that leaves the row count unchanged
+ * included — is a reported mismatch.
+ */
 async function tableReceipt(
   db: D1Database,
   spec: ControlBackfillTable,
 ): Promise<ControlTableReceipt | undefined> {
   if (!(await tableExists(db, spec.name))) return undefined;
   const columns = await tableColumns(db, spec.name);
-  const rows: CanonicalRow[] = [];
-  const pageSize = 500;
-  for (let offset = 0; ; offset += pageSize) {
-    const page = await readPage(db, spec.name, columns, spec.keyColumns, pageSize, offset);
-    rows.push(...page);
-    if (page.length < pageSize) break;
+  let rowCount = 0;
+  let chain = await sha256Hex(`ferrogate-control-backfill-receipt-v1:${spec.name}`);
+  for (let offset = 0; ; offset += RECEIPT_PAGE_SIZE) {
+    const page = await readPage(db, spec.name, columns, spec.keyColumns, RECEIPT_PAGE_SIZE, offset);
+    if (page.length === 0) break;
+    rowCount += page.length;
+    const pageChecksum = await checksumRows(page, columns);
+    chain = await sha256Hex(`${chain}|${offset}:${pageChecksum}`);
+    if (page.length < RECEIPT_PAGE_SIZE) break;
   }
-  return { table: spec.name, rowCount: rows.length, checksum: await checksumRows(rows, columns) };
+  return { table: spec.name, rowCount, checksum: chain };
 }
 
 /** Receipts for every manifest table present in a database, in manifest order. */
@@ -317,10 +372,13 @@ export async function controlBackfillReceipts(
  * Copy the whole CONTROL database from `source` into `destination`, then verify.
  *
  * Tables absent from the source are recorded in `skipped` rather than failing,
- * so a source that predates a migration still completes; a table that exists at
- * the source but not the destination surfaces as a `missing_destination`
- * mismatch in the comparison. `ok` is the single boolean a caller gates the
- * cut-over on.
+ * so a source that predates a migration still completes AND still passes: the
+ * verification is scoped to the tables that were actually present at the source,
+ * so a manifest table the source lacks (which the freshly-migrated destination
+ * has as an empty table) is NOT spuriously reported as `missing_source`. A table
+ * that exists at the source but NOT the destination is still in that scope, so
+ * it surfaces as a `missing_destination` mismatch. `ok` is the single boolean a
+ * caller gates the cut-over on.
  */
 export async function backfillControlData(
   source: D1Database,
@@ -330,15 +388,21 @@ export async function backfillControlData(
   const pageSize = assertPositivePageSize(options.pageSize ?? DEFAULT_PAGE_SIZE);
   const tables: ControlBackfillTableResult[] = [];
   const skipped: string[] = [];
+  const presentTables: ControlBackfillTable[] = [];
   for (const spec of CONTROL_BACKFILL_TABLES) {
     if (!(await tableExists(source, spec.name))) {
       skipped.push(spec.name);
       continue;
     }
+    presentTables.push(spec);
     tables.push(await copyTable(source, destination, spec, pageSize));
   }
-  const sourceReceipts = await controlBackfillReceipts(source);
-  const destinationReceipts = await controlBackfillReceipts(destination);
+  // Verify only the tables the source actually had. A manifest table the source
+  // predates is excluded from BOTH receipts, so it cannot become a spurious
+  // `missing_source`; a source-present table missing at the destination is still
+  // in scope and still surfaces as `missing_destination`.
+  const sourceReceipts = await controlBackfillReceipts(source, presentTables);
+  const destinationReceipts = await controlBackfillReceipts(destination, presentTables);
   const comparison = compareTableReceipts(sourceReceipts, destinationReceipts);
   return {
     tables,

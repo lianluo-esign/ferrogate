@@ -11,10 +11,15 @@
  *  * a real copy through the `D1Database` facade lands every seeded row and the
  *    per-table row-count + checksum receipts agree across the two backends;
  *  * running the copy AGAIN inserts nothing and leaves the counts unchanged —
- *    idempotency by primary key, the property the issue names;
+ *    idempotency by primary key, the property the issue names (and the object is
+ *    asserted non-empty first, so a copier that never wrote could not pass it);
+ *  * a foreign-keyed child (platform_catalog_offerings) copies AFTER its parents,
+ *    which the object's enforced foreign keys would otherwise abort — proving the
+ *    manifest is in FK-dependency order, not name order;
  *  * the copy runs in the REVERSE direction too (object → D1);
- *  * the verification is NOT vacuous: a row present at the source and missing at
- *    the destination is a reported mismatch, and disappears once re-copied.
+ *  * the verification is NOT vacuous on EITHER leg: an extra source row trips the
+ *    row-count leg, and an in-place value change (same row count) trips the
+ *    checksum leg.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -196,6 +201,15 @@ describe("copies the control database into the object", () => {
     await backfillControlData(env.CONTROL_DB, objectDb());
     const before = await subsetSnapshot(objectDb());
 
+    // The first backfill must actually have LANDED the seeded rows — otherwise a
+    // copier that never writes would leave before/after both empty and this test
+    // would pass vacuously. Assert the object holds them before re-running.
+    expect(before).toEqual({
+      tenants: 2,
+      control_plane_replay_floors_legacy: 2,
+      tenant_provider_credentials_legacy: 1,
+    });
+
     const second = await backfillControlData(env.CONTROL_DB, objectDb());
     const after = await subsetSnapshot(objectDb());
 
@@ -236,6 +250,92 @@ describe("copies the control database into the object", () => {
       .bind("bf-t3")
       .first<{ id: string }>();
     expect(landed?.id).toBe("bf-t3");
+  });
+
+  test("the checksum leg is a discriminator — an in-place value change is reported", async () => {
+    await backfillControlData(env.CONTROL_DB, objectDb());
+
+    // Change a value at the source WITHOUT changing the row count: the row-count
+    // leg cannot see this, so only the checksum leg can catch it. (This is the
+    // mutation that a constant/short-circuited checksum would silently pass.)
+    await env.CONTROL_DB.prepare("UPDATE tenants SET name = ? WHERE id = ?")
+      .bind("Renamed In Place", "bf-t1")
+      .run();
+
+    const diverged = compareTableReceipts(
+      await controlBackfillReceipts(env.CONTROL_DB, SUBSET),
+      await controlBackfillReceipts(objectDb(), SUBSET),
+    );
+    expect(diverged.ok).toBe(false);
+    const tenantsMismatch = diverged.mismatches.find((m) => m.table === "tenants");
+    // Row counts still agree (2 vs 2), so the ONLY thing that can flag this is
+    // the checksum.
+    expect(tenantsMismatch?.reason).toBe("checksum");
+    expect(diverged.mismatches.some((m) => m.table === "tenants" && m.reason === "row_count")).toBe(
+      false,
+    );
+  });
+
+  test("copies a foreign-keyed child after its parents (FK-dependency order)", async () => {
+    // platform_catalog_offerings.model_id FK → platform_catalog_models and
+    // .provider_id FK → platform_provider_channels (migration 0025). The object
+    // enforces foreign keys and INSERT OR IGNORE does NOT suppress FK failures,
+    // so if the manifest copied the child before its parents the backfill would
+    // abort with `FOREIGN KEY constraint failed`. This proves the manifest order
+    // holds the parents first.
+    const PLATFORM_NAMES = [
+      "platform_catalog_offerings",
+      "platform_catalog_models",
+      "platform_provider_channels",
+    ] as const;
+    const PLATFORM_SUBSET: ControlBackfillTable[] = CONTROL_BACKFILL_TABLES.filter((t) =>
+      (PLATFORM_NAMES as readonly string[]).includes(t.name),
+    );
+    // Clean both backends child-first so a re-run cannot collide on PK/UNIQUE.
+    for (const db of [env.CONTROL_DB, objectDb()]) {
+      for (const name of PLATFORM_NAMES) {
+        await db.prepare(`DELETE FROM ${name}`).run();
+      }
+    }
+
+    await env.CONTROL_DB.batch([
+      env.CONTROL_DB.prepare(
+        "INSERT INTO platform_provider_channels (id, name, kind, base_url) VALUES (?, ?, ?, ?)",
+      ).bind("bf-prov-1", "backfill-provider-one", "openai", "https://api.example.test"),
+      env.CONTROL_DB.prepare("INSERT INTO platform_catalog_models (id, name) VALUES (?, ?)").bind(
+        "bf-model-1",
+        "backfill-model-one",
+      ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO platform_catalog_offerings (id, model_id, provider_id, upstream_model_id) " +
+          "VALUES (?, ?, ?, ?)",
+      ).bind("bf-off-1", "bf-model-1", "bf-prov-1", "gpt-x"),
+    ]);
+
+    // The copy must COMPLETE — under the pre-fix alphabetical order this threw.
+    const report = await backfillControlData(env.CONTROL_DB, objectDb());
+
+    const landed = await objectDb()
+      .prepare("SELECT model_id, provider_id FROM platform_catalog_offerings WHERE id = ?")
+      .bind("bf-off-1")
+      .first<{ model_id: string; provider_id: string }>();
+    expect(landed).toEqual({ model_id: "bf-model-1", provider_id: "bf-prov-1" });
+
+    // Scoped to the platform tables, the two backends agree.
+    const cmp = compareTableReceipts(
+      await controlBackfillReceipts(env.CONTROL_DB, PLATFORM_SUBSET),
+      await controlBackfillReceipts(objectDb(), PLATFORM_SUBSET),
+    );
+    expect(cmp.mismatches).toEqual([]);
+    // The offering was reported copied, not silently skipped.
+    const offeringResult = report.tables.find((t) => t.table === "platform_catalog_offerings");
+    expect(offeringResult).toMatchObject({ sourceRows: 1, copied: 1 });
+
+    // Leave the shared object clean for other files (child-first).
+    for (const name of PLATFORM_NAMES) {
+      await objectDb().prepare(`DELETE FROM ${name}`).run();
+      await env.CONTROL_DB.prepare(`DELETE FROM ${name}`).run();
+    }
   });
 
   test("runs in the reverse direction too (object → D1)", async () => {
