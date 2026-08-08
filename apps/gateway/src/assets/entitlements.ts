@@ -41,6 +41,7 @@
  * and the config leg never widens a durable decision).
  */
 import type { AssetEntitlements, AssetEntitlementsPort } from "./handlers.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   DurableObjectTenantDatabaseRouter,
   backfillTenantConfigurationPolicy,
@@ -132,7 +133,7 @@ export class D1AssetEntitlements implements AssetEntitlementsPort {
       tenantDatabases?: TenantDatabaseRouter | undefined;
     } = {},
   ): D1AssetEntitlements | null {
-    const binding = env[CONTROL_DATABASE_BINDING];
+    const binding = controlDatabaseFrom(env);
     if (!isEntitlementsDatabase(binding)) return null;
     const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
     const tenantDatabases =

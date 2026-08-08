@@ -23,7 +23,7 @@ import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 
 const OPERATOR = operatorKey.secret;
-const DEFAULT_CONTROL_STORAGE = "d1_compat";
+const DEFAULT_CONTROL_STORAGE = "durable_object";
 
 interface JsonBody {
   readonly [key: string]: unknown;

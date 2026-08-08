@@ -639,31 +639,34 @@ describe("every name wrangler.toml declares is read by the source", () => {
     expect(dead, "a binding is declared but nothing in src/ reads it").toEqual([]);
   });
 
-  it("FC-1's durable drain needed NO new binding — wave 22 is wrangler-INERT", () => {
+  it("FC-1's durable drain reads the CONTROL object, and the D1 stanza is gone (S5)", () => {
     // Stated as an assertion rather than as prose in a commit message, because
     // "we added a binding and forgot the deploy config" is a failure mode that
-    // only appears in production. The gateway's drain now reads the durable
-    // `runtime-state/drain` document, and it does so through `CONTROL_DB` —
-    // a binding this Worker ALREADY declared and already reads for RBAC, the
-    // guardrail policy store and the agent-upstream registry.
-    //
-    // So there is nothing new to place in `CLOUD-VERIFICATION.md`: no stanza,
-    // no placeholder id, no `[[migrations]]` tag, no `src/worker.ts` re-export.
-    // If a future change moves that read onto a NEW binding, the two halves
-    // below disagree and this is red before the deploy is attempted.
-    expect(DECLARED.bindings.get("CONTROL_DB"), "CONTROL_DB stanza in wrangler.toml").toBe(
-      "[[d1_databases]]",
-    );
+    // only appears in production. The gateway's drain reads the durable
+    // `runtime-state/drain` document, and since Zero-D1 S5 (#881) it does so
+    // through the singleton CONTROL object (`CONTROL_DATA`) via the
+    // `controlDatabaseFrom` seam — NOT the retired `[[d1_databases]] CONTROL_DB`
+    // stanza, which this commit deleted along with the `d1_compat` path.
+    expect(
+      DECLARED.bindings.get("CONTROL_DB"),
+      "the CONTROL_DB D1 stanza must be gone after S5",
+    ).toBeUndefined();
+    expect(
+      DECLARED.bindings.get("CONTROL_DATA"),
+      "CONTROL_DATA durable-object stanza in wrangler.toml",
+    ).toBe("[[durable_objects.bindings]]");
     const readiness = [...CODE.entries()].find(([path]) => path.endsWith("routes/readiness.ts"));
     expect(readiness, "src/routes/readiness.ts").toBeDefined();
     const source = (readiness as [string, string])[1];
-    expect(source, "the drain resolver must read the DECLARED control binding").toMatch(
-      /CONTROL_DB/,
+    // The drain resolver reaches control storage through the seam, not a raw
+    // binding read, and still targets the `control_plane_resources` document.
+    expect(source, "the drain resolver must resolve control through the seam").toMatch(
+      /controlDatabaseFrom/,
     );
     expect(source).toContain("control_plane_resources");
-    // And the whole read set stays inside what wrangler.toml knows about: no
-    // binding name appears in the drain modules that the deploy config does not
-    // declare (or explicitly except).
+    // The whole read set stays inside what wrangler.toml knows about. The drain
+    // modules themselves now read only the deploy-time override; the CONTROL
+    // object is resolved inside `control-data.ts`, not here.
     const drainReads = new Set<string>();
     for (const path of ["routes/readiness.ts", "routes/drain.ts"]) {
       const entry = [...CODE.entries()].find(([p]) => p.endsWith(path));
@@ -674,13 +677,8 @@ describe("every name wrangler.toml declares is read by the source", () => {
         drainReads.add(name as string);
       }
     }
-    // Non-vacuity first: an empty set would make the loop below assert nothing,
-    // which is the shape this repository keeps finding. BOTH drain sources must
-    // be visible here — the durable binding and the deploy-time override.
-    expect([...drainReads].sort(), "the drain's env read set").toEqual([
-      "CONTROL_DB",
-      "GATEWAY_DRAIN",
-    ]);
+    // Non-vacuity first: an empty set would make the loop below assert nothing.
+    expect([...drainReads].sort(), "the drain's env read set").toEqual(["GATEWAY_DRAIN"]);
     for (const name of drainReads) {
       expect(
         DECLARED.bindings.has(name) ||
@@ -799,9 +797,10 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // mean the comparison stopped working.
     expect(overridden.sort()).toEqual(
       [
-        // #878: the harness/vitest.config pin GATEWAY_CONTROL_STORAGE to
-        // `d1_compat`, overriding the committed `durable_object`.
-        "GATEWAY_CONTROL_STORAGE",
+        // #881 (Zero-D1 S5): the vitest.config pin of GATEWAY_CONTROL_STORAGE to
+        // `d1_compat` is GONE — `durable_object` is the only posture and the
+        // committed value now reaches the runner unchanged, so it is no longer
+        // overridden.
         "GATEWAY_NATIVE_API_KEYS",
         "GATEWAY_STATIC_API_KEYS",
         "SELF_HOSTED_WORKER_REGISTRY",
@@ -884,8 +883,13 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // while the overridden set stays at 6. Blank is INERT: the sweep falls
     // back to DEFAULT_BATCH_SWEEP_PER_TENANT rather than to no sweep at all,
     // so a deployment that never sets it still recovers stalled batch jobs.
+    //
+    // #881 (Zero-D1 S5): 61 -> 62, overridden 6 -> 5. The vitest.config pin of
+    // GATEWAY_CONTROL_STORAGE to `d1_compat` is gone (`durable_object` is the
+    // only posture now), so the committed `durable_object` reaches the runner
+    // unchanged and becomes observable rather than overridden.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(61);
-    expect(rows.length - observable.length).toBe(6);
+    expect(observable.length).toBe(62);
+    expect(rows.length - observable.length).toBe(5);
   });
 });

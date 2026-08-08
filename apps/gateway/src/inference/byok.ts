@@ -59,6 +59,7 @@ import {
   type TenantCredentialStore,
   byokKeyringFromEnvAsync,
 } from "@ferrogate/secrets";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   DurableObjectTenantDatabaseRouter,
   backfillTenantConfigurationPolicy,
@@ -124,7 +125,7 @@ export type ByokPortsFactory = (env: InferenceBindings) => ByokPorts | null;
  * which is where this key most belongs.
  */
 export function byokPortsFromEnv(env: InferenceBindings): ByokPorts | null {
-  const db = env.CONTROL_DB as D1Database | undefined;
+  const db = controlDatabaseFrom(env);
   const namespace = (env as InferenceBindings & { readonly TENANT_DATA?: TenantDataNamespace })
     .TENANT_DATA;
   if (db === undefined || typeof db.prepare !== "function" || namespace === undefined) return null;

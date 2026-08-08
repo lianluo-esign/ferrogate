@@ -9,6 +9,7 @@
  * object when a mirror write is interrupted.
  */
 import type { ShadowLegErrorCode, ShadowLegRecord } from "./record.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
 
 export const EXPERIMENT_SHADOW_LEG_TABLE = "experiment_shadow_legs";
@@ -96,20 +97,14 @@ export interface ExperimentDatabase {
   prepare(query: string): ExperimentPreparedStatement;
 }
 
-/** `env.CONTROL_DB` (or its `BILLING_DB` alias), when it really is a binding. */
+/** The CONTROL database facade, when it really is a binding. */
 export function experimentDatabaseFrom(env: unknown): ExperimentDatabase | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const bindings = env as { CONTROL_DB?: unknown; BILLING_DB?: unknown };
-  for (const candidate of [bindings.CONTROL_DB, bindings.BILLING_DB]) {
-    if (
-      typeof candidate === "object" &&
-      candidate !== null &&
-      typeof (candidate as ExperimentDatabase).prepare === "function"
-    ) {
-      return candidate as ExperimentDatabase;
-    }
-  }
-  return undefined;
+  const candidate = controlDatabaseFrom(env);
+  return typeof candidate === "object" &&
+    candidate !== null &&
+    typeof (candidate as ExperimentDatabase).prepare === "function"
+    ? (candidate as unknown as ExperimentDatabase)
+    : undefined;
 }
 
 /** Resolve the authoritative object database for one tenant. */

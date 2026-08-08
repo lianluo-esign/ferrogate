@@ -16,6 +16,7 @@
  * revision bump, an env leg where a platform leg exists).
  */
 import { describe, expect, it } from "vitest";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { InMemoryModelResolver } from "../../src/inference/defaults.js";
 import {
   ControlDataPlatformModelCatalogSource,
@@ -55,28 +56,43 @@ function fakeDb(rows: CatalogRow[], revision: number | null = 2): FakeDatabase {
     failCatalog: false,
     missing: false,
   };
-  const chain = {
+  // Zero-D1 S5 (#881): the source reads through the CONTROL_DATA facade, which
+  // routes BOTH `.first()` (revision) and `.all()` (catalog) through one object
+  // `query` RPC. The fake therefore distinguishes the two reads by SQL rather
+  // than by method: the revision statement mentions `platform_catalog_revisions`.
+  const revisionResult = (): CatalogRow[] => {
+    state.revisionReads += 1;
+    if (state.missing) {
+      throw new Error("D1_ERROR: no such table: main.platform_catalog_revisions");
+    }
+    if (state.failRevision) throw new Error("revision backend unavailable");
+    return state.revision === null ? [] : [{ revision: state.revision }];
+  };
+  const catalogResult = (): CatalogRow[] => {
+    state.catalogReads += 1;
+    if (state.missing) {
+      throw new Error("D1_ERROR: no such table: main.platform_catalog_models");
+    }
+    if (state.failCatalog) throw new Error("catalog backend unavailable");
+    return state.rows;
+  };
+  // The tenant source reads this handle DIRECTLY, distinguishing revision from
+  // catalog by method (`.first()` vs `.all()`). The platform source reads it
+  // through the CONTROL_DATA facade, which routes both through one `query`
+  // (a `.all()` on this fake), so the revision read is disambiguated by SQL.
+  const chainFor = (sql: string) => ({
     bind() {
-      return chain;
+      return chainFor(sql);
     },
     async first<T>() {
-      state.revisionReads += 1;
-      if (state.missing) {
-        throw new Error("D1_ERROR: no such table: main.platform_catalog_revisions");
-      }
-      if (state.failRevision) throw new Error("revision backend unavailable");
-      return (state.revision === null ? null : { revision: state.revision }) as T;
+      return (revisionResult()[0] ?? null) as T;
     },
     async all<T>() {
-      state.catalogReads += 1;
-      if (state.missing) {
-        throw new Error("D1_ERROR: no such table: main.platform_catalog_models");
-      }
-      if (state.failCatalog) throw new Error("catalog backend unavailable");
-      return { results: state.rows as T[] };
+      const isRevision = sql.includes("platform_catalog_revisions");
+      return { results: (isRevision ? revisionResult() : catalogResult()) as T[] };
     },
-  };
-  state.db = { prepare: () => chain } as unknown as D1Database;
+  });
+  state.db = { prepare: (sql: string) => chainFor(sql) } as unknown as D1Database;
   return state;
 }
 
@@ -132,8 +148,10 @@ function controlEnv(
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    GATEWAY_CONTROL_STORAGE: "d1_compat",
-    CONTROL_DB: db.db,
+    // Zero-D1 S5 (#881): the catalog source reads the CONTROL_DATA object. The
+    // fixture DB is adapted into a namespace double so the resolver reads it
+    // through the same facade production uses.
+    CONTROL_DATA: controlNamespaceOverD1(db.db),
     PLATFORM_KEY: "sk-platform",
     ...extra,
   };
@@ -415,7 +433,7 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     const source = new ControlDataPlatformModelCatalogSource();
 
     const loaded = await source.load({
-      env: { GATEWAY_CONTROL_STORAGE: "d1_compat" },
+      env: {},
       fallback,
     });
     expect(loaded.ok).toBe(true);

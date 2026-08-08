@@ -272,9 +272,7 @@ export function rbacAuthorizerFromEnv(env: {
   CONTROL_DATA?: DurableObjectNamespace;
   TENANT_DATA?: unknown;
 }): RbacAuthorizerPort {
-  const controlDb = controlDatabaseFrom(env, {
-    legacy: [env.DB as D1Database | undefined, env.BILLING_DB as D1Database | undefined],
-  });
+  const controlDb = controlDatabaseFrom(env);
   if (!isRbacDatabase(controlDb)) return new UnboundRbacAuthorizer();
   const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
   const tenantDatabases =

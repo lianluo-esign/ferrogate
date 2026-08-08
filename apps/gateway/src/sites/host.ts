@@ -44,6 +44,7 @@
  * serve path. The provisioning half is tracked separately; see the PR for #738.
  */
 import type { Context, MiddlewareHandler } from "hono";
+import { controlDatabaseFrom } from "../control-data.js";
 import { assetDepsFromEnv } from "../assets/handlers.js";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
@@ -131,7 +132,7 @@ export interface SiteDomainRoutingOptions extends SiteServerOptions {
 
 /** `env.CONTROL_DB`, when it really is a D1-shaped binding. */
 function controlDatabase(env: Record<string, unknown>): SiteDomainDatabase | null {
-  const candidate = (env as SiteDomainBindings).CONTROL_DB;
+  const candidate = controlDatabaseFrom(env);
   if (candidate === null || typeof candidate !== "object") return null;
   return typeof (candidate as SiteDomainDatabase).prepare === "function"
     ? (candidate as SiteDomainDatabase)

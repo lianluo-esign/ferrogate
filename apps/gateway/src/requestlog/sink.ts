@@ -44,6 +44,7 @@ import {
   writeRequestLogs,
   writeTenantRequestLogs,
 } from "./d1.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
 
@@ -119,7 +120,7 @@ export function requestLogQueueFrom(env: unknown): RequestLogQueue | undefined {
 /** `env.CONTROL_DB`, when it really is the derived projection D1 binding. */
 export function requestLogDatabaseFrom(env: unknown): RequestLogDatabase | undefined {
   if (typeof env !== "object" || env === null) return undefined;
-  const candidate = (env as RequestLogBindings).CONTROL_DB;
+  const candidate = controlDatabaseFrom(env);
   return isDatabase(candidate) ? candidate : undefined;
 }
 

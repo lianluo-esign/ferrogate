@@ -237,9 +237,7 @@ export class D1GuardrailPolicyStore implements AsyncGuardrailPolicyStore {
     env: Record<string, unknown>,
     options: { now?: () => number } = {},
   ): D1GuardrailPolicyStore | null {
-    const binding = controlDatabaseFrom(env, {
-      legacy: [env[CONTROL_DATABASE_BINDING]],
-    });
+    const binding = controlDatabaseFrom(env);
     return isGuardrailDatabase(binding) ? new D1GuardrailPolicyStore(binding, options) : null;
   }
 

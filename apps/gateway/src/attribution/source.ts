@@ -39,6 +39,7 @@
  * SPEND limit must not also, invisibly, switch off an ATTRIBUTION requirement.
  */
 import { type AttributionPolicy, parseAttributionPolicy, parseMissingTagAction } from "./policy.js";
+import { controlDatabaseFrom } from "../control-data.js";
 
 /** The `quota_policies` columns this module reads, named once. */
 const ATTRIBUTION_COLUMNS = "required_tags_json, on_missing_tags";
@@ -276,7 +277,7 @@ export function attributionPolicySourceFromEnv(env: AttributionBindings): Attrib
   const key = env as unknown as object;
   const memoized = SOURCES.get(key);
   if (memoized !== undefined) return memoized;
-  const db = env.CONTROL_DB ?? env.BILLING_DB;
+  const db = controlDatabaseFrom(env);
   const source = cachedAttributionPolicySource(
     db === undefined ? attributionPolicySourceFromVars(env) : d1AttributionPolicySource(db),
   );

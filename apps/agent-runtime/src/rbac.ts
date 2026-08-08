@@ -258,9 +258,7 @@ export function rbacAuthorizerFromEnv(env: {
   CONTROL_DB?: unknown;
   TENANT_DATA?: unknown;
 }): RbacAuthorizerPort {
-  const controlDb = controlDatabaseFrom(env, {
-    legacy: [env.CONTROL_DB as D1Database | undefined],
-  });
+  const controlDb = controlDatabaseFrom(env);
   if (!isRbacDatabase(controlDb)) return new UnboundRbacAuthorizer();
   const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
   const tenantDatabases =

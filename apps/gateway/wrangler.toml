@@ -1128,81 +1128,20 @@ database_id = "replace-at-deploy-tenant"
 migrations_dir = "../../sql/d1-ts/tenant"
 
 # ---------------------------------------------------------------------------
-# D1 — the CONTROL compatibility database for unscoped billing reads/writes
+# Zero-D1 S5 (#881): the CONTROL D1 stanzas are DELETED
 #
-# Read as `env.BILLING_DB` by `meteringBindingsFromEnv` (src/metering/
-# runtime.ts). Tenant-scoped requests use `TENANT_DATA` and settle billing plus
-# wallet state in that object's transaction; this binding remains the
-# compatibility/projection path for unscoped callers and legacy control rows.
-#
-# WHY IT REMAINS: cross-tenant administration and older deployments still need
-# a bounded compatibility surface while rows are projected into tenant objects.
-# It is not a second tenant billing authority. The tenant migration defines the
-# authoritative billing events, ledger and outbox alongside wallet tables.
-#
-# What breaks without it: only unscoped compatibility billing loses its durable
-# D1 target. Tenant-scoped settlement remains on `TENANT_DATA`; the sink records
-# the missing compatibility binding instead of treating it as a tenant store.
-#
-# The compatibility columns are additive and are applied by migration 0020.
-# Older rows may remain nullable until a tenant can be recovered from its
-# payload; new tenant-authoritative rows always carry an explicit tenant_id.
-#
-# `database_name` / `database_id` are DOCUMENTED PLACEHOLDERS, exactly as the
-# tenant block above. `wrangler dev --local` and `vitest-pool-workers` ignore
-# the id and provision a local SQLite file per binding.
+# Two `[[d1_databases]]` stanzas used to sit here — `binding = "BILLING_DB"`
+# and `binding = "CONTROL_DB"`, both aliasing the one `ferrogate-control`
+# database. Both are gone. Every reader that used them —
+# `meteringBindingsFromEnv` (unscoped billing settlement/projection),
+# `D1RbacAuthorizer` (permissions/roles/tenant_role_bindings),
+# `D1GuardrailPolicyStore` (guardrail_policy_revisions/bindings), and
+# `D1SiteDomainDirectory` (site_domains, #738) — now resolves the singleton
+# `CONTROL_DATA` Durable Object facade exclusively. There is no `d1_compat`
+# fallback: `GATEWAY_CONTROL_STORAGE = "durable_object"` is the only
+# resolvable posture. The `ferrogate-tenant` `DB` stanza above (epic
+# #821/#824) is the only D1 binding this Worker keeps.
 # ---------------------------------------------------------------------------
-[[d1_databases]]
-binding = "BILLING_DB"
-database_name = "ferrogate-control"
-database_id = "replace-at-deploy"
-migrations_dir = "../../sql/d1-ts/control"
-
-# ---------------------------------------------------------------------------
-# D1 — the CONTROL database, under its PURPOSE-NEUTRAL name
-#
-# THE SAME DATABASE AS `BILLING_DB` ABOVE — same `database_name`, same
-# `database_id`, so `wrangler dev --local` and `vitest-pool-workers` resolve
-# both bindings to one SQLite file and a deploy substitutes one real id for
-# both. This is an ALIAS, deliberately, not a second database.
-#
-# Why an alias exists at all: `BILLING_DB` is named for what metering writes,
-# and two things that are not metering now read the same control database —
-#
-#   `permissions` / `roles` / `tenant_role_bindings`
-#       read by `D1RbacAuthorizer` (src/adapters.ts), the port of
-#       `state_rbac.rs::tenant_has_permission_result`.
-#   `guardrail_policy_revisions` / `guardrail_policy_bindings`
-#       read by `D1GuardrailPolicyStore` (src/guardrails/binding.ts).
-#   `site_domains` / `site_domain_verifications`
-#       read by `D1SiteDomainDirectory` (src/sites/domains.ts, issue #738) to
-#       route a request that arrived on a VERIFIED custom hostname to the
-#       tenant's published site. Written by `apps/control-plane`'s
-#       `/admin/v1/site-domains` family, which is why both Workers have to
-#       resolve this binding to the same database.
-#
-# Reading a role grant out of a binding called `BILLING_DB` would be a lie in
-# the one place a reader most needs the truth, and renaming `BILLING_DB` would
-# silently break every deployment whose secrets/config already name it. The
-# alias costs one line of TOML and no runtime object (workerd hands out two
-# handles to the same database).
-#
-# `meteringBindingsFromEnv` still reads `BILLING_DB` and ONLY `BILLING_DB`:
-# metering's binding contract is unchanged by this entry.
-#
-# What breaks without it: `depsFromEnv` finds no `CONTROL_DB` and falls back to
-# the `TENANT_RBAC_ACTIONS` var for RBAC, and `guardrailDepsFromEnv` falls back
-# to the `GATEWAY_GUARDRAIL_POLICIES` var — the pre-D1 config path, which is
-# still correct, just not durable. Neither fails open: an absent var grants
-# nothing. The custom-domain router likewise finds no directory and passes
-# every authority straight through, so NO site is served on a custom hostname
-# — never "every hostname serves a site".
-# ---------------------------------------------------------------------------
-[[d1_databases]]
-binding = "CONTROL_DB"
-database_name = "ferrogate-control"
-database_id = "replace-at-deploy"
-migrations_dir = "../../sql/d1-ts/control"
 
 # ---------------------------------------------------------------------------
 # Queues — the billing report fan-out

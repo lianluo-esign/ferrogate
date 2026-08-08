@@ -76,6 +76,7 @@
  * divergence here a divergence in production.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import agentRuntimeApp from "../../agent-runtime/src/index.js";
@@ -140,6 +141,7 @@ const tenantDb = (): D1Database => tenantObjectDb(TENANT);
 const siblingEnv = (): Record<string, unknown> => ({
   DB: tenantDb(),
   CONTROL_DB: control(),
+  CONTROL_DATA: controlNamespace(),
   TENANT_DATA: bindings().TENANT_DATA,
 });
 
@@ -392,7 +394,8 @@ const UNAVAILABLE: Record<string, Wire> = {
 
 beforeAll(async () => {
   const b = bindings();
-  await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first
+  // wake; there is no control D1 to migrate here.
 });
 
 beforeEach(async () => {

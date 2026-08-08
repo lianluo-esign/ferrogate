@@ -37,6 +37,7 @@ import {
   type StoredQuotaPolicy,
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   WALLET_RESERVATION_ACTIVE,
   boolFromSqlite,
@@ -692,7 +693,7 @@ export function d1QuotaPolicySource(
  * source of truth per deployment, chosen by which binding exists.
  */
 export function quotaPolicySourceFromEnv(env: QuotaBindings): QuotaPolicySource {
-  const db = env.CONTROL_DB ?? env.BILLING_DB;
+  const db = controlDatabaseFrom(env);
   return db === undefined ? quotaPolicySourceFromVars(env) : d1QuotaPolicySource(db);
 }
 

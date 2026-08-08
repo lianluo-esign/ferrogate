@@ -32,6 +32,7 @@
  * control.
  */
 import { env as poolEnv } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
@@ -132,6 +133,7 @@ function gateway(options: { readonly signingKey?: string | null } = {}): Harness
     // The REAL control database: the request-log row and the revocation lookup
     // both go through the same D1 the deployed Worker uses.
     CONTROL_DB: bindings["CONTROL_DB"],
+    CONTROL_DATA: controlNamespace(),
     // Tenant-attributed request evidence is authoritative in the tenant object;
     // keep this composition-root harness on the same binding path as the
     // deployed gateway so its projection assertions remain meaningful.

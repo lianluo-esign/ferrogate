@@ -14,6 +14,7 @@
  * coverage; this file exists to hold the two implementations together.
  */
 import { env } from "cloudflare:test";
+import { failingControlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
@@ -379,6 +380,6 @@ describe("guardrailDepsFromEnv reads the durable tables", () => {
         throw new Error("D1_ERROR: control database is unreachable");
       },
     };
-    await expect(guardrailDepsFromEnv({ CONTROL_DB: failing })).rejects.toThrow(/unreachable/);
+    await expect(guardrailDepsFromEnv({ CONTROL_DATA: failingControlNamespace() })).rejects.toThrow(/unreachable/);
   });
 });

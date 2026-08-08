@@ -18,10 +18,10 @@
 # answer `503 agent_runtime_unavailable`. They pass only because the D1 branch
 # exists and is mounted.
 #
-# `apps/agent-runtime/wrangler.toml` cannot carry the two `[[d1_databases]]`
-# stanzas yet: composition-root files belong to the integrate step. The exact
-# lines to copy are written out in `src/ports.ts` on `resolveDeps` ("WIRING"),
-# and repeated below.
+# The control authority is the cross-script `CONTROL_DATA` object bound below;
+# the tenant authority is the `DB` D1 stanza. The exact shapes the deployed
+# `apps/agent-runtime/wrangler.toml` carries are written out in `src/ports.ts`
+# on `resolveDeps` ("WIRING").
 
 name = "ferrogate-agent-runtime-durable-harness"
 main = "../../../src/worker.ts"
@@ -44,6 +44,19 @@ class_name = "WorkerPlane"
 name = "TENANT_DATA"
 class_name = "TenantDataObject"
 
+# Zero-D1 S5 (#881): the CONTROL schema is the singleton ControlDataObject, not
+# a `[[d1_databases]] CONTROL_DB` stanza. `src/control-data.ts` resolves it off
+# `env.CONTROL_DATA`, so this harness binds it cross-script from the gateway aux
+# worker (`vitest.config.ts` publishes it under `ferrogate-gateway`), exactly as
+# the deployed `apps/agent-runtime/wrangler.toml` binds it cross-script. The DO
+# self-migrates the whole control schema on construction, so no migration stanza
+# and no `applyD1Migrations` seed it — `setup.ts` writes directly through the
+# facade.
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+script_name = "ferrogate-gateway"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["AgentRunState", "WorkerPlane", "TenantDataObject"]
@@ -55,21 +68,12 @@ new_sqlite_classes = ["AgentRunState", "WorkerPlane", "TenantDataObject"]
 #                 own credential table. Same binding name and schema
 #                 `apps/gateway/wrangler.toml` declares, so one key
 #                 authenticates identically on both Workers.
-#   CONTROL_DB  — the CONTROL schema. `self_hosted_worker_registrations` lives
-#                 here: a self-hosted worker is registered by the control plane
-#                 and is account-global operator state, not tenant data.
 # ===========================================================================
 [[d1_databases]]
 binding = "DB"
 database_name = "ferrogate-tenant"
 database_id = "agent-runtime-durable-harness-tenant"
 migrations_dir = "../../../../../sql/d1-ts/tenant"
-
-[[d1_databases]]
-binding = "CONTROL_DB"
-database_name = "ferrogate-control"
-database_id = "agent-runtime-durable-harness-control"
-migrations_dir = "../../../../../sql/d1-ts/control"
 # ===========================================================================
 
 [vars]
@@ -85,8 +89,8 @@ FG_DEV_A2A_GUARDRAILS = ""
 
 # The OPERATOR A2A upstream catalog (Rust `config.agent_upstreams`).
 #
-# INERT IN THIS HARNESS, and deliberately left declared to say so: `CONTROL_DB`
-# is bound above, and with a control database the durable
+# INERT IN THIS HARNESS, and deliberately left declared to say so: `CONTROL_DATA`
+# is bound above, and with a control object the durable
 # `control_plane_resources` documents of kind `agent-upstreams` are the WHOLE
 # registry (`src/agents/registry.ts`) — the var is not merged over them, because
 # a union would keep dispatching to an id the operator deleted. So every

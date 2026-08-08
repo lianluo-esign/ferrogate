@@ -417,7 +417,8 @@ describe("the env-var drift gate itself", () => {
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "AGENT_RUN_STATE",
       "CONTROL_DATA",
-      "CONTROL_DB",
+      // Zero-D1 S5 (#881): the `CONTROL_DB` D1 stanza is deleted; control reads
+      // resolve the CONTROL_DATA object.
       "DB",
       // Cross-script, pointed at `ferrogate-gateway` (#666). It is in this list
       // because it is LIVE; while it was commented out it was not.
@@ -464,13 +465,18 @@ describe("every var the source reads is declared or explicitly excepted", () => 
     expect(silent).toEqual([...UNDOCUMENTED].sort());
   });
 
-  it("declares live D1 authorities for the deployed Worker", () => {
+  it("declares the tenant D1 authority and the CONTROL object, not a control D1", () => {
+    // Zero-D1 S5 (#881): the `CONTROL_DB` D1 stanza (and its control
+    // `migrations_dir`) is deleted. The only D1 authority left is the tenant
+    // `DB` (epic #821/#824); control reads resolve the singleton CONTROL_DATA
+    // Durable Object.
     expect(DECLARED.bindings.has("DB")).toBe(true);
-    expect(DECLARED.bindings.has("CONTROL_DB")).toBe(true);
+    expect(DECLARED.bindings.has("CONTROL_DB")).toBe(false);
+    expect(DECLARED.bindings.get("CONTROL_DATA")).toBe("[[durable_objects.bindings]]");
     expect(WRANGLER_TOML).toContain('binding = "DB"');
-    expect(WRANGLER_TOML).toContain('binding = "CONTROL_DB"');
+    expect(WRANGLER_TOML).not.toContain('binding = "CONTROL_DB"');
     expect(WRANGLER_TOML).toContain('migrations_dir = "../../sql/d1-ts/tenant"');
-    expect(WRANGLER_TOML).toContain('migrations_dir = "../../sql/d1-ts/control"');
+    expect(WRANGLER_TOML).not.toContain('migrations_dir = "../../sql/d1-ts/control"');
   });
 
   /**

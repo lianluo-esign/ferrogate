@@ -30,6 +30,7 @@
  * real consumer from the bytes the real producer emitted.
  */
 import { env as poolEnv } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
@@ -252,6 +253,7 @@ describe("a sampled canary response is scored AS the canary arm", () => {
       } as never,
       {
         CONTROL_DB: controlDb(),
+        CONTROL_DATA: controlNamespace(),
         TENANT_DATA: (poolEnv as unknown as Record<string, unknown>).TENANT_DATA,
         GATEWAY_PROVIDERS: JSON.stringify(JUDGE_PROVIDERS),
         GATEWAY_MODELS: JSON.stringify(JUDGE_MODELS),

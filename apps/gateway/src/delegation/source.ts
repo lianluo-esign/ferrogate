@@ -41,6 +41,7 @@ import {
   d1DelegationRevocationSource,
   importDelegationKey,
 } from "@ferrogate/identity";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   DurableObjectTenantDatabaseRouter,
   backfillTenantConfigurationPolicy,
@@ -101,7 +102,7 @@ async function resolveVerifier(env: DelegationBindings): Promise<DelegationVerif
   const imported = await importDelegationKey(secret);
   if (!imported.ok) return { state: "misconfigured", detail: imported.detail };
 
-  const db = env.CONTROL_DB ?? env.BILLING_DB;
+  const db = controlDatabaseFrom(env);
   const namespace = env.TENANT_DATA;
   if (db === undefined || namespace === undefined) {
     return {

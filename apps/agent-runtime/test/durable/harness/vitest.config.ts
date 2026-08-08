@@ -2,9 +2,18 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { gatewayRateLimiterAuxWorker } from "../../../../gateway/test/support/rate-limit-aux-worker.js";
 
 /** `test/durable/` — where the specs live; this file sits one level below. */
 const SUITE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * `apps/gateway/` as a directory URL. The harness binds `CONTROL_DATA`
+ * cross-script (Zero-D1 S5, #881), so the aux worker below publishes the
+ * `ControlDataObject` class under the gateway's script name — the same shape
+ * `apps/agent-runtime/vitest.config.ts` uses for `TENANT_DATA` / `RATE_LIMIT`.
+ */
+const GATEWAY_APP_ROOT = new URL("../../../../gateway/", import.meta.url);
 
 /**
  * Vitest project for the DURABLE-PORTS suite, pointed at `harness/wrangler.toml`
@@ -39,14 +48,15 @@ const SUITE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SQL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../sql/d1-ts");
 
 const tenantMigrations = await readD1Migrations(join(SQL_ROOT, "tenant"));
-const controlMigrations = await readD1Migrations(join(SQL_ROOT, "control"));
 
-if (tenantMigrations.length === 0 || controlMigrations.length === 0) {
+if (tenantMigrations.length === 0) {
   // A silently-empty migration set would make every spec fail with "no such
-  // table" and look like a code bug. Fail here, where the cause is.
+  // table" and look like a code bug. Fail here, where the cause is. The CONTROL
+  // schema is no longer read here: the `ControlDataObject` compiles its own
+  // migrations in and self-applies them (Zero-D1 S5, #881).
   throw new Error(
-    "no D1 migrations found under sql/d1-ts/{tenant,control}; the durable harness " +
-      "cannot prove a mount against schemas that were never applied",
+    "no D1 migrations found under sql/d1-ts/tenant; the durable harness " +
+      "cannot prove a mount against a tenant schema that was never applied",
   );
 }
 
@@ -56,9 +66,13 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: "./harness/wrangler.toml" },
       miniflare: {
+        // The `ferrogate-gateway` script the harness's cross-script
+        // `[[durable_objects.bindings]] CONTROL_DATA` points at. It carries the
+        // real `ControlDataObject`, so `setup.ts` seeds the SAME singleton the
+        // deployed Worker reads through `env.CONTROL_DATA`.
+        workers: [gatewayRateLimiterAuxWorker(GATEWAY_APP_ROOT, { controlData: true })],
         bindings: {
           TENANT_MIGRATIONS: tenantMigrations,
-          CONTROL_MIGRATIONS: controlMigrations,
         },
       },
     }),

@@ -1,4 +1,5 @@
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "./control-data.js";
 import { evidenceProjectionKey } from "./requestlog/d1.js";
 
 const MANAGED_EVIDENCE_TABLE = "managed_worker_isolation_evidence";
@@ -8,14 +9,6 @@ interface ManagedEvidenceRow {
   readonly id: string;
   readonly occurred_at_unix: number;
   readonly evidence_json: string;
-}
-
-function controlDatabaseFrom(env: unknown): D1Database | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const db = (env as { CONTROL_DB?: unknown }).CONTROL_DB;
-  return typeof db === "object" && db !== null && typeof (db as D1Database).prepare === "function"
-    ? (db as D1Database)
-    : undefined;
 }
 
 /** Repair the control mirror of tenant-authoritative managed isolation evidence. */

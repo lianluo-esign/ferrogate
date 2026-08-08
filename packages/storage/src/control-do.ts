@@ -52,6 +52,27 @@ export interface ControlDataNamespaceLike {
  * `batch()` (one `transactionSync` inside the object), different backend.
  */
 export function controlDataObjectDatabase(namespace: ControlDataNamespaceLike): D1Database {
-  const stub = namespace.get(namespace.idFromName(CONTROL_DATA_ADDRESS));
-  return new DurableObjectD1Database(CONTROL_DATA_ADDRESS, stub).asD1Database();
+  // Resolve a FRESH stub per top-level operation rather than capturing one at
+  // construction. A `DurableObjectStub` is request-bound — its I/O objects
+  // "cannot be accessed from a different request's handler" (workerd) — and the
+  // control database, unlike a per-request tenant handle, is memoized across
+  // requests by its consumers (the tenancy resolver, the site-domain directory,
+  // the guardrail store, …). A single cached stub would therefore throw
+  // "Cannot perform I/O on behalf of a different request" on the SECOND request
+  // that reused the cached facade. Re-addressing `idFromName("control")` per
+  // operation is cheap (it is a routing lookup, not a wake) and keeps every
+  // query in the context of the request that issued it. The tenant path avoids
+  // this by resolving a new handle per request via `forTenant`; the singleton
+  // control facade has no such per-request resolution, so it lazies here.
+  const fresh = (): D1Database => {
+    const stub = namespace.get(namespace.idFromName(CONTROL_DATA_ADDRESS));
+    return new DurableObjectD1Database(CONTROL_DATA_ADDRESS, stub).asD1Database();
+  };
+  return new Proxy({} as D1Database, {
+    get(_target, prop) {
+      const db = fresh() as unknown as Record<string | symbol, unknown>;
+      const value = db[prop];
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(db) : value;
+    },
+  });
 }

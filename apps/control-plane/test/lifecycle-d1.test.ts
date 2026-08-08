@@ -22,7 +22,7 @@
  *  - absence is not suspension;
  *  - a lookup that FAILS is 503, never an implicit allow.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env as testEnv } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { JsonTenancyLifecycleGate, resolveLifecycle } from "../src/adapters.js";
 import type { ApiOperation } from "../src/contract.js";
@@ -444,12 +444,12 @@ describe("resolveLifecycle", () => {
   const store: ControlPlaneStore = new MemoryControlPlaneStore();
 
   it("builds the durable gate when the control database is in play", () => {
-    const env = { DB: db() } as unknown as ControlPlaneBindings;
+    const env = { CONTROL_DATA: (testEnv as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA } as unknown as ControlPlaneBindings;
     expect(resolveLifecycle(env, store)).toBeInstanceOf(StoreTenancyLifecycleGate);
   });
 
   it("builds the declarative gate when the memory store is asked for by name", () => {
-    const env = { DB: db(), CONTROL_PLANE_STORE: "memory" } as unknown as ControlPlaneBindings;
+    const env = { CONTROL_DATA: (testEnv as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA, CONTROL_PLANE_STORE: "memory" } as unknown as ControlPlaneBindings;
     expect(resolveLifecycle(env, store)).toBeInstanceOf(JsonTenancyLifecycleGate);
   });
 

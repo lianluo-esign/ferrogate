@@ -113,7 +113,7 @@ function interruptedRouter(): TenantDatabaseRouter {
 }
 
 beforeAll(async () => {
-  await applyD1Migrations(db(), bindings.TEST_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its control schema.
   await applyD1Migrations(bindings.LEGACY_TENANT_DB, bindings.TEST_TENANT_D1_SCHEMA);
 });
 

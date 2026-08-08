@@ -55,6 +55,7 @@ import {
   writeGuardrailEvidence,
   writeTenantGuardrailEvidence,
 } from "./evidence-d1.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { GuardrailEvidenceEnvelope } from "./evidence-wire.js";
 import { guardrailEvidenceToWire } from "./evidence-wire.js";
 import type { GuardrailCheckEvidence, GuardrailEvidence, GuardrailEvidenceSink } from "./ports.js";
@@ -149,7 +150,7 @@ export function guardrailEvidenceQueueFrom(env: unknown): GuardrailEvidenceQueue
 /** `env.CONTROL_DB`, when it really is a D1 binding. */
 export function guardrailEvidenceDatabaseFrom(env: unknown): GuardrailEvidenceDatabase | undefined {
   if (typeof env !== "object" || env === null) return undefined;
-  const candidate = (env as GuardrailEvidenceBindings).CONTROL_DB;
+  const candidate = controlDatabaseFrom(env);
   return isDatabase(candidate) ? candidate : undefined;
 }
 

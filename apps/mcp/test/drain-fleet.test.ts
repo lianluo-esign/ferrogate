@@ -64,6 +64,7 @@
  * paragraph.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 // --- apps/agent-runtime: the OTHER enforcer's real resolver ----------------
@@ -194,7 +195,7 @@ async function agentRuntimeRefusal(): Promise<{
   code: string;
   message: string;
 } | null> {
-  const state = await arResolveDrain({ CONTROL_DB: control() });
+  const state = await arResolveDrain({ CONTROL_DB: control(), CONTROL_DATA: controlNamespace() });
   return arDrainRefusal(state);
 }
 
@@ -202,7 +203,8 @@ async function agentRuntimeRefusal(): Promise<{
 
 beforeAll(async () => {
   const b = bindings();
-  await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first
+  // wake; there is no control D1 to migrate here.
 });
 
 beforeEach(async () => {
@@ -325,8 +327,8 @@ describe("FC-1 the two enforcers refuse identically", () => {
 
   it("resolves the SAME durable document, byte for byte, from both resolvers", async () => {
     await adminSetDrain(true, "shared reason");
-    const mcpState = await resolveDrain({ DB: control() });
-    const arState = await arResolveDrain({ CONTROL_DB: control() });
+    const mcpState = await resolveDrain({ DB: control(), CONTROL_DATA: controlNamespace() });
+    const arState = await arResolveDrain({ CONTROL_DB: control(), CONTROL_DATA: controlNamespace() });
     expect(mcpState).toEqual(arState);
     expect(mcpState.source).toBe("durable");
     expect(mcpState.reason).toBe("shared reason");
@@ -345,10 +347,12 @@ describe("FC-1 the two enforcers refuse identically", () => {
     expect(AR_GUARDED).not.toContain("pollSelfHostedWorkerRun");
   });
 
-  it("the cross-app drain modules stay leaves", () => {
-    // This file pulls two other Workers' modules into ONE test bundle. That is
-    // only sound while neither imports anything: an `import` added to either
-    // would drag that Worker's module graph in here and make the coupling real.
+  it("the cross-app drain modules import only the control seam", () => {
+    // This file pulls two other Workers' modules into ONE test bundle. Since
+    // Zero-D1 S5 (#881) the drain resolves control storage through the
+    // `controlDatabaseFrom` seam (the `CONTROL_DB` D1 binding it used to read
+    // directly is gone), so each module carries EXACTLY that one import and
+    // nothing else — no other Worker's module graph is dragged in here.
     for (const [name, source] of [
       ["apps/mcp/src/drain.ts", mcpDrainSource],
       ["apps/agent-runtime/src/drain.ts", arDrainSource],
@@ -356,7 +360,9 @@ describe("FC-1 the two enforcers refuse identically", () => {
       const imports = source
         .split("\n")
         .filter((line) => /^\s*import\s/.test(line) && !/^\s*\*/.test(line));
-      expect(imports, `${name} must stay a leaf`).toEqual([]);
+      expect(imports, `${name} must import only the control seam`).toEqual([
+        'import { controlDatabaseFrom } from "./control-data.js";',
+      ]);
     }
   });
 });

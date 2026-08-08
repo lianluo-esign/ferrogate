@@ -47,6 +47,7 @@ import {
   type ResidencyPolicyRow,
   parseResidencyPolicyRow,
 } from "./policy.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   TENANT_JURISDICTIONS,
   TENANT_LOCATION_HINTS,
@@ -364,7 +365,7 @@ export function residencyPolicySourceFromEnv(env: ResidencyBindings): ResidencyP
   const key = env as unknown as object;
   const memoized = SOURCES.get(key);
   if (memoized !== undefined) return memoized;
-  const db = env.CONTROL_DB ?? env.BILLING_DB;
+  const db = controlDatabaseFrom(env);
   const source = cachedResidencyPolicySource(
     db === undefined ? residencyPolicySourceFromVars(env) : d1ResidencyPolicySource(db),
   );

@@ -22,44 +22,46 @@ function controlNamespace(onAddress: (name: unknown, id: unknown) => void) {
 }
 
 describe("control-plane CONTROL storage seam", () => {
-  it("uses the CONTROL_DATA facade by default and honors d1_compat", () => {
-    const legacy = { prepare: () => undefined } as unknown as D1Database;
+  it("resolves the CONTROL_DATA facade, and rejects d1_compat and other unknown postures", () => {
+    // Zero-D1 S5 (#881): `durable_object` is the only posture; there is no
+    // `DB` (`ferrogate-control`) legacy fallback and no `d1_compat` leg.
     const addresses: unknown[][] = [];
     const namespace = controlNamespace((name, id) => addresses.push([name, id]));
 
-    const facade = controlDatabaseFrom({ CONTROL_DATA: namespace, DB: legacy });
+    const facade = controlDatabaseFrom({ CONTROL_DATA: namespace });
     expect(facade).toBeDefined();
-    expect(facade).not.toBe(legacy);
+    // Accessing a method resolves (addresses) the singleton "control" object.
+    void (facade as D1Database).prepare;
     expect(addresses[0]?.[0]).toBe("control");
 
-    expect(
-      controlDatabaseFrom({
-        CONTROL_PLANE_CONTROL_STORAGE: "d1_compat",
-        CONTROL_DATA: namespace,
-        DB: legacy,
-      }),
-    ).toBe(legacy);
-    expect(controlDatabaseFrom({ DB: legacy })).toBe(legacy);
-  });
+    // No CONTROL_DATA bound ⇒ undefined, never a fall-through to a legacy binding.
+    expect(controlDatabaseFrom({})).toBeUndefined();
 
-  it("fails closed for an unknown posture", () => {
-    let error: unknown;
-    try {
-      controlDatabaseFrom({ CONTROL_PLANE_CONTROL_STORAGE: "invalid" });
-    } catch (caught) {
-      error = caught;
+    for (const mode of ["d1_compat", "invalid"]) {
+      let error: unknown;
+      try {
+        controlDatabaseFrom({ CONTROL_PLANE_CONTROL_STORAGE: mode });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, `mode ${mode} must be refused`).toMatchObject({
+        status: 503,
+        code: CONTROL_STORAGE_MISCONFIGURED,
+      });
     }
-    expect(error).toMatchObject({ status: 503, code: CONTROL_STORAGE_MISCONFIGURED });
   });
 
   it("makes resolveStore construct over the resolved CONTROL_DATA facade", () => {
-    const legacy = { prepare: () => undefined } as unknown as D1Database;
     const addresses: unknown[][] = [];
     const namespace = controlNamespace((name, id) => addresses.push([name, id]));
 
-    const store = resolveStore({ DB: legacy, CONTROL_DATA: namespace } as ControlPlaneBindings);
-
+    const store = resolveStore({ CONTROL_DATA: namespace } as ControlPlaneBindings);
     expect(store).toBeDefined();
+
+    // The facade resolves the DO stub lazily (per operation), so accessing a
+    // method on the SAME resolution the store is built over is what addresses
+    // the singleton "control" object.
+    void (controlDatabaseFrom({ CONTROL_DATA: namespace }) as D1Database).prepare;
     expect(addresses.some(([name]) => name === "control")).toBe(true);
     expect(addresses.some(([name]) => name === "get")).toBe(true);
   });

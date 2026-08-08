@@ -45,6 +45,7 @@
  * point-in-time measurement wants anyway.
  */
 import type { OnlineEvalScoreRecord } from "./record.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
 
 export const ONLINE_EVAL_SCORE_TABLE = "online_eval_scores";
@@ -198,19 +199,16 @@ export async function writeOnlineEvalScoreProjections(
   );
 }
 
-/** `env.CONTROL_DB` (or its `BILLING_DB` alias), when it really is a D1 binding. */
+/** The CONTROL database facade, when it really is a D1 binding. */
 export function onlineEvalDatabaseFrom(env: unknown): OnlineEvalScoreDatabase | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const bindings = env as { CONTROL_DB?: unknown; BILLING_DB?: unknown };
-  for (const candidate of [bindings.CONTROL_DB, bindings.BILLING_DB]) {
-    if (
-      typeof candidate === "object" &&
-      candidate !== null &&
-      typeof (candidate as OnlineEvalScoreDatabase).prepare === "function" &&
-      typeof (candidate as OnlineEvalScoreDatabase).batch === "function"
-    ) {
-      return candidate as OnlineEvalScoreDatabase;
-    }
+  const candidate = controlDatabaseFrom(env);
+  if (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    typeof (candidate as OnlineEvalScoreDatabase).prepare === "function" &&
+    typeof (candidate as OnlineEvalScoreDatabase).batch === "function"
+  ) {
+    return candidate as unknown as OnlineEvalScoreDatabase;
   }
   return undefined;
 }

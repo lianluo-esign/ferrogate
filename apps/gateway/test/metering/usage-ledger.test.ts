@@ -21,6 +21,7 @@
  * "the loop" goes red.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, test } from "vitest";
 import { periodMonthFromUnix } from "@ferrogate/storage";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
@@ -332,7 +333,7 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     const sink = sinkFor(queue);
     const failedEnv = {
       ...bindings(queue),
-      CONTROL_DB: failingControl,
+      CONTROL_DATA: controlNamespaceOverD1(failingControl),
     };
 
     sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
@@ -486,7 +487,7 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     failingControl.failure = new Error("control projection unavailable");
     const sink = sinkFor(queue);
     const tenantDb = tenantObjectDb("tenant_a");
-    const failedEnv = { ...bindings(queue), CONTROL_DB: failingControl };
+    const failedEnv = { ...bindings(queue), CONTROL_DATA: controlNamespaceOverD1(failingControl) };
 
     for (let index = 0; index < 3; index += 1) {
       const requestId = `fg-projection-page-${index}`;
@@ -526,7 +527,7 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
 
     sink.record(usageFixture({ requestId }));
     await sink.flush({
-      env: { ...bindings(queue), CONTROL_DB: failingControl },
+      env: { ...bindings(queue), CONTROL_DATA: controlNamespaceOverD1(failingControl) },
       attribution: { ...ATTRIBUTION, requestId },
       usageDatabase: tenantDb,
     });

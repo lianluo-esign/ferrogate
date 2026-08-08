@@ -41,6 +41,7 @@
  * implementations, which is what makes the 404 here the deployed answer.
  */
 import { SELF, env } from "cloudflare:test";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { AGENT_UPSTREAM_COLLECTION, RESOURCE_TABLE } from "../../src/routes/agent-upstreams.js";
@@ -159,6 +160,7 @@ async function discover(
       GATEWAY_NATIVE_API_KEYS: NATIVE_API_KEYS,
       GATEWAY_STATIC_API_KEYS: STATIC_API_KEYS,
       CONTROL_DB: controlDb(),
+      CONTROL_DATA: bindings.CONTROL_DATA,
       ...overrides,
     },
   );
@@ -334,7 +336,7 @@ describe("failure direction: every failure REMOVES an upstream", () => {
     expect(
       endpointsOf(
         await discover("fg_operator", {
-          CONTROL_DB: broken,
+          CONTROL_DATA: controlNamespaceOverD1(broken),
           GATEWAY_AGENT_UPSTREAMS: JSON.stringify([COMPROMISED]),
         }),
       ),

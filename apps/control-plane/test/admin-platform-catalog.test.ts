@@ -24,7 +24,7 @@ import { applyTenantSchema } from "./tenant-db.js";
 const OPERATOR = operatorKey.secret;
 
 /** The posture `wrangler.toml` pins for this app today; restored after every test. */
-const DEFAULT_CONTROL_STORAGE = "d1_compat";
+const DEFAULT_CONTROL_STORAGE = "durable_object";
 
 interface JsonBody {
   readonly [key: string]: unknown;
@@ -679,9 +679,10 @@ describe("platform model catalog admin surface", () => {
       expect(await platformRevision(facade)).toBe(1);
       expect(await platformAuditCollections(facade)).toEqual(["platform_providers"]);
 
-      // The legacy D1 leg must be untouched: if the store had reached for
-      // `env.DB` instead of the facade the row would be here.
-      expect(await platformIds("platform_provider_channels", db())).toEqual([]);
+      // Zero-D1 S5 (#881): there is no legacy `env.DB` leg any more — the object
+      // facade IS the control database, so `db()` and `controlObjectDb()`
+      // address the same singleton and both show the write.
+      expect(await platformIds("platform_provider_channels", db())).toEqual(["do_channel"]);
 
       const read = await request(OPERATOR, "GET", "/admin/v1/providers/do_channel");
       expect(read.status).toBe(200);

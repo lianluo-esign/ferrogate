@@ -16,6 +16,7 @@
  *     to an ephemeral key.
  */
 import { env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { D1McpAuth } from "../src/auth.js";
@@ -496,6 +497,7 @@ describe("identity key material", () => {
 
 describe("resolvePorts binding postures", () => {
   const base: McpEnv = {
+    CONTROL_DATA: controlNamespace(),
     DB,
     TENANT_DATA,
     MCP_OAUTH_KV: KV,
@@ -528,7 +530,9 @@ describe("resolvePorts binding postures", () => {
     expect(resolvePorts({ ...base, ASSETS, TENANT_DATA: undefined }).assets).toBeInstanceOf(
       InMemoryAssets,
     );
-    expect(resolvePorts({ ...base, ASSETS, DB: undefined }).assets).toBeInstanceOf(InMemoryAssets);
+    expect(resolvePorts({ ...base, ASSETS, CONTROL_DATA: undefined }).assets).toBeInstanceOf(
+      InMemoryAssets,
+    );
 
     const dev = resolvePorts({ ...base, ASSETS, FG_DEV_IN_MEMORY_PORTS: "1" });
     expect(dev.assets).toBeInstanceOf(InMemoryAssets);

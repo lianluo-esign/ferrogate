@@ -19,6 +19,7 @@
  *     buy with an in-statement predicate.
  */
 import { env } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   ASSET_CREATE_WITHIN_QUOTA_SQL,
@@ -609,7 +610,7 @@ describe("D1AssetAuditSink", () => {
   });
 
   test("a CONTROL_DB without TENANT_DATA fails closed for tenant audit", async () => {
-    const sink = assetAuditSinkFromEnv({ CONTROL_DB: control() });
+    const sink = assetAuditSinkFromEnv({ CONTROL_DATA: controlNamespace() });
     if (sink === null) throw new Error("expected the configured audit sink");
     if (sink.flush === undefined) throw new Error("expected the configured audit sink to flush");
     sink.record(auditEvent());

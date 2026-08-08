@@ -102,6 +102,7 @@
  * scope.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -353,6 +354,7 @@ function agentRuntimeEnv(): Record<string, unknown> {
   agentRuntimeEnvSingleton ??= {
     DB: tenantDb(),
     CONTROL_DB: control(),
+    CONTROL_DATA: controlNamespace(),
     // Non-empty and NOT the upstream's host: a sealed tier would also refuse
     // the forward, but with a message naming no host, and a test that cannot
     // tell WHICH endpoint was about to be contacted proves less.
@@ -538,7 +540,7 @@ let fixture: Fixture;
 const originalVar = getMcpEnvVar("FG_DEV_MCP_GUARDRAILS");
 
 beforeAll(async () => {
-  await applyD1Migrations(control(), bindings().TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first wake.
   await applyD1Migrations(tenantDb(), bindings().TEST_TENANT_D1_SCHEMA);
 });
 

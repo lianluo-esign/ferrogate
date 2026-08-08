@@ -332,54 +332,58 @@ describe("D1RbacAuthorizer — an outage is not a decision", () => {
 // ---------------------------------------------------------------------------
 
 describe("depsFromEnv wires the durable authorizer", () => {
-  it("builds a D1RbacAuthorizer when CONTROL_DB is bound, and not otherwise", () => {
+  it("builds a D1RbacAuthorizer when CONTROL_DATA is bound, and not otherwise", () => {
     expect(depsFromEnv(bindings as never).rbac).toBeInstanceOf(D1RbacAuthorizer);
-    // Removing the `[[d1_databases]] CONTROL_DB` block from wrangler.toml, or
-    // the `D1RbacAuthorizer.fromEnv(...) ??` from `depsFromEnv`, turns the
-    // first assertion red while leaving the whole decision table above green.
-    const withoutBinding = { ...bindings, CONTROL_DB: undefined };
+    // Removing the `[[durable_objects.bindings]] CONTROL_DATA` stanza from
+    // wrangler.toml, or the `D1RbacAuthorizer.fromEnv(...) ??` from
+    // `depsFromEnv`, turns the first assertion red while leaving the whole
+    // decision table above green.
+    const withoutBinding = { ...bindings, CONTROL_DATA: undefined };
     expect(depsFromEnv(withoutBinding as never).rbac).toBeInstanceOf(ConfiguredRbacAuthorizer);
   });
 });
 
 describe("CONTROL storage seam", () => {
-  it("defaults to the CONTROL_DATA facade, supports d1_compat, and rejects illegal modes", () => {
+  it("resolves the CONTROL_DATA facade, and rejects d1_compat and other illegal modes", async () => {
+    // Zero-D1 S5 (#881): `durable_object` is the ONLY posture. There is no
+    // `d1_compat` leg and no `CONTROL_DB`/`BILLING_DB` fallback — `d1_compat` is
+    // now an illegal value like any other, not a rollback path.
     let addressedName: string | undefined;
-    let addressedId: unknown;
     const namespace = {
       idFromName(name: string) {
         addressedName = name;
         return "control-id";
       },
-      get(id: unknown) {
-        addressedId = id;
+      get() {
         return {
           query: async () => ({ results: [] }),
           batch: async () => [],
         };
       },
     };
-    const legacy = { prepare: () => undefined };
 
-    const facade = controlDatabaseFrom({ CONTROL_DATA: namespace, CONTROL_DB: legacy });
-    expect(facade).not.toBe(legacy);
+    const facade = controlDatabaseFrom({ CONTROL_DATA: namespace });
+    expect(facade).toBeDefined();
+    // The facade addresses the singleton "control" object when first used.
+    await (facade as D1Database).prepare("SELECT 1").all();
     expect(addressedName).toBe("control");
-    expect(addressedId).toBe("control-id");
-    expect(
-      controlDatabaseFrom({
-        GATEWAY_CONTROL_STORAGE: "d1_compat",
-        CONTROL_DATA: namespace,
-        CONTROL_DB: legacy,
-      }),
-    ).toBe(legacy);
 
-    let error: unknown;
-    try {
-      controlDatabaseFrom({ GATEWAY_CONTROL_STORAGE: "invalid", CONTROL_DB: legacy });
-    } catch (caught) {
-      error = caught;
+    // No CONTROL_DATA bound ⇒ undefined (the optional reads' config path),
+    // never a fall-through to a legacy binding.
+    expect(controlDatabaseFrom({})).toBeUndefined();
+
+    for (const mode of ["d1_compat", "invalid"]) {
+      let error: unknown;
+      try {
+        controlDatabaseFrom({ GATEWAY_CONTROL_STORAGE: mode, CONTROL_DATA: namespace });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, `mode ${mode} must be refused`).toMatchObject({
+        status: 503,
+        code: CONTROL_STORAGE_MISCONFIGURED,
+      });
     }
-    expect(error).toMatchObject({ status: 503, code: CONTROL_STORAGE_MISCONFIGURED });
   });
 });
 

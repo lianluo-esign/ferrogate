@@ -1,4 +1,4 @@
-import type { D1Database, DurableObjectNamespace } from "@cloudflare/workers-types";
+import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import { describe, expect, it, vi } from "vitest";
 import { CONTROL_STORAGE_MISCONFIGURED, controlDatabaseFrom } from "../src/control-data.js";
 
@@ -10,34 +10,33 @@ function fakeControlData(): DurableObjectNamespace {
 }
 
 describe("MCP control database seam", () => {
-  const legacyDb = { prepare: vi.fn() } as unknown as D1Database;
-
   it("uses the CONTROL_DATA facade by default", () => {
-    const result = controlDatabaseFrom({ CONTROL_DATA: fakeControlData() }, { legacy: [legacyDb] });
+    const result = controlDatabaseFrom({ CONTROL_DATA: fakeControlData() });
 
     expect(result).toBeDefined();
-    expect(result).not.toBe(legacyDb);
   });
 
-  it("uses the legacy D1 control database in d1_compat mode and when unbound", () => {
-    expect(
-      controlDatabaseFrom(
-        { MCP_CONTROL_STORAGE: "d1_compat", CONTROL_DATA: fakeControlData() },
-        { legacy: [legacyDb] },
-      ),
-    ).toBe(legacyDb);
-    expect(controlDatabaseFrom({}, { legacy: [legacyDb] })).toBe(legacyDb);
-    expect(controlDatabaseFrom({ MCP_CONTROL_STORAGE: "d1_compat" })).toBeUndefined();
+  it("returns undefined when CONTROL_DATA is unbound", () => {
+    // Zero-D1 S5 (#881): the Durable Object is the only backend; there is no
+    // `DB`/`BILLING_DB` legacy fallback, so an env with no CONTROL_DATA resolves
+    // to `undefined`.
+    expect(controlDatabaseFrom({})).toBeUndefined();
   });
 
-  it("fails closed on an unknown storage posture", () => {
-    let error: unknown;
-    try {
-      controlDatabaseFrom({ MCP_CONTROL_STORAGE: "unknown" });
-    } catch (caught) {
-      error = caught;
+  it("fails closed on d1_compat (now retired) and any other unknown posture", () => {
+    // `d1_compat` was the S2–S4 rollback posture; S5 deleted it, so it is an
+    // illegal value like any other rather than a legacy fallback.
+    for (const mode of ["d1_compat", "unknown"]) {
+      let error: unknown;
+      try {
+        controlDatabaseFrom({ MCP_CONTROL_STORAGE: mode });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, `mode ${mode} must be refused`).toMatchObject({
+        status: 503,
+        code: CONTROL_STORAGE_MISCONFIGURED,
+      });
     }
-
-    expect(error).toMatchObject({ status: 503, code: CONTROL_STORAGE_MISCONFIGURED });
   });
 });

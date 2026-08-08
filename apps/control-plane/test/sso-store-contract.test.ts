@@ -38,7 +38,7 @@ import { applySchema, db } from "./d1.js";
  */
 function store() {
   const deps = {
-    controlDatabase: (env as unknown as { DB: D1Database }).DB,
+    controlDatabase: db(),
   } as unknown as ControlPlaneDeps;
   return samlPorts(new ControlPlaneIdentityRepository(deps)).flows;
 }

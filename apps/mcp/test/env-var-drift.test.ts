@@ -343,11 +343,11 @@ const UNDOCUMENTED = ["FG_DEV_MCP_DURABLE_UPSTREAMS"] as const;
 
 /**
  * Declared names read through a renamed parameter, invisible to the
- * `env`-anchored scanner. `BILLING_DB` is passed as part of the environment to
- * billing's shared resolver, so its concrete property read lives in the
- * package rather than this app's composition root.
+ * `env`-anchored scanner. Zero-D1 S5 (#881) deleted the `BILLING_DB` D1 stanza
+ * (control billing compatibility): every control read now resolves the
+ * CONTROL_DATA object, so no binding is read indirectly any more.
  */
-const READ_INDIRECTLY: readonly string[] = ["BILLING_DB"];
+const READ_INDIRECTLY: readonly string[] = [];
 
 describe("the env-var drift gate itself", () => {
   it("inlined the real source tree — an empty scan would assert nothing", () => {
@@ -371,9 +371,9 @@ describe("the env-var drift gate itself", () => {
     ]);
     expect([...DECLARED.bindings.keys()].sort()).toEqual([
       "ASSETS",
-      "BILLING_DB",
+      // Zero-D1 S5 (#881): the `DB` and `BILLING_DB` control D1 stanzas are
+      // deleted; control reads resolve the CONTROL_DATA object.
       "CONTROL_DATA",
-      "DB",
       // #687's unified CLIENT session, the other axis from MCP_SESSION below.
       "MCP_CLIENT_SESSION",
       "MCP_OAUTH_FLOWS",

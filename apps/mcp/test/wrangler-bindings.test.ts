@@ -185,15 +185,18 @@ describe("wave 24 — the S5 entitlement ladder needs no new binding, ASSERTED",
    * fall back to `InMemoryEntitlements` in production, denying nobody. That is
    * the R1 shape again, one level down, and only the committed text can see it.
    */
-  it("declares the CONTROL D1 binding the entitlement ladder reads", () => {
-    const d1 = stanzas("d1_databases");
-    expect(d1.length, "no [[d1_databases]] stanza in the committed config").toBeGreaterThan(0);
-    const control = d1.filter((body) => value(body, "binding") === "DB");
-    expect(control.length, 'no [[d1_databases]] declares binding = "DB"').toBe(1);
-    expect(value(control[0] as string[], "database_name")).toBe("ferrogate-control");
-    // The id is a deploy-time PLACEHOLDER by design (CLOUD-VERIFICATION §B).
-    // Pinning it stops a real account id from being committed by accident.
-    expect(value(control[0] as string[], "database_id")).toBe("PLACEHOLDER_SET_AT_DEPLOY_TIME");
+  it("declares the CONTROL object the entitlement ladder reads, and no control D1", () => {
+    // Zero-D1 S5 (#881): the `[[d1_databases]] binding = "DB"` /
+    // `binding = "BILLING_DB"` (`ferrogate-control`) stanzas are DELETED. mcp
+    // now binds no D1 at all; the entitlement ladder resolves the singleton
+    // ControlDataObject through `CONTROL_DATA`, bound cross-script from the
+    // gateway script.
+    expect(stanzas("d1_databases").length, "mcp must declare no [[d1_databases]] stanza").toBe(0);
+    const objects = stanzas("durable_objects.bindings");
+    const control = objects.filter((body) => value(body, "name") === "CONTROL_DATA");
+    expect(control.length, 'no [[durable_objects.bindings]] declares name = "CONTROL_DATA"').toBe(1);
+    expect(value(control[0] as string[], "class_name")).toBe("ControlDataObject");
+    expect(value(control[0] as string[], "script_name")).toBe("ferrogate-gateway");
   });
 
   /**

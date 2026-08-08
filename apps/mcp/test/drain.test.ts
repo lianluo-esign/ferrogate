@@ -21,6 +21,7 @@
  *     drain var and so cannot exercise the `GATEWAY_DRAIN` arm behaviourally.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -95,7 +96,8 @@ async function clearDrain(): Promise<void> {
 
 beforeAll(async () => {
   const b = bindings();
-  await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first
+  // wake; there is no control D1 to migrate here.
   await applyD1Migrations(b.TENANT_DB_A, b.TEST_TENANT_D1_SCHEMA);
 });
 
@@ -218,7 +220,7 @@ describe("FAIL CLOSED — a drain lookup that cannot be answered refuses", () =>
 
   it("refuses on a corrupt document rather than serving traffic", async () => {
     await setRawDrainDocument("{not json");
-    const state = await resolveDrain({ DB: control() });
+    const state = await resolveDrain({ CONTROL_DATA: controlNamespace() });
     expect(state.source).toBe("unavailable");
     expect(drainRefusal(state)?.code).toBe("drain_state_unavailable");
   });
@@ -236,11 +238,11 @@ describe("the document parse is strict in both directions", () => {
   it("only the JSON boolean true drains", async () => {
     for (const value of ["true", 1, "yes", null, undefined]) {
       await setRawDrainDocument({ id: DRAIN_ID, draining: value, tenant_id: null });
-      const state = await resolveDrain({ DB: control() });
+      const state = await resolveDrain({ CONTROL_DATA: controlNamespace() });
       expect(state.draining, `draining: ${JSON.stringify(value)}`).toBe(false);
     }
     await setDrain(true);
-    expect((await resolveDrain({ DB: control() })).draining).toBe(true);
+    expect((await resolveDrain({ CONTROL_DATA: controlNamespace() })).draining).toBe(true);
   });
 
   it("IGNORES a tenant-attributed drain row", async () => {
@@ -255,14 +257,14 @@ describe("the document parse is strict in both directions", () => {
       reason: "hostile",
       tenant_id: "tenant-b",
     });
-    const state = await resolveDrain({ DB: control() });
+    const state = await resolveDrain({ CONTROL_DATA: controlNamespace() });
     expect(state.draining).toBe(false);
     expect(drainRefusal(state)).toBeNull();
   });
 
   it("carries the operator's reason through", async () => {
     await setDrain(true, "pre-migration");
-    const state = await resolveDrain({ DB: control() });
+    const state = await resolveDrain({ CONTROL_DATA: controlNamespace() });
     expect(state).toEqual({
       draining: true,
       accepting_new_requests: false,

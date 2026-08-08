@@ -27,6 +27,7 @@
  * on the read. This test pins that property against the D1+R2 path.
  */
 import { SELF, env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
@@ -173,6 +174,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     });
 
     const ports = resolvePorts({
+      CONTROL_DATA: controlNamespace(),
       ASSETS,
       DB,
       TENANT_DATA,
@@ -197,6 +199,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
 
     // Build a minimal env with both bindings and NO dev-mode flag.
     const mcpEnv: McpEnv = {
+      CONTROL_DATA: controlNamespace(),
       ASSETS,
       DB,
       TENANT_DATA,
@@ -210,6 +213,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     const TENANT_DATA = tenantDataNamespace(env);
 
     const mcpEnv: McpEnv = {
+      CONTROL_DATA: controlNamespace(),
       DB,
       TENANT_DATA: tenantDataNamespace(env),
       // ASSETS deliberately absent
@@ -222,6 +226,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     const { ASSETS, DB } = requireBindings(bindings);
 
     const mcpEnv: McpEnv = {
+      CONTROL_DATA: controlNamespace(),
       ASSETS,
       DB,
       // TENANT_DATA deliberately absent

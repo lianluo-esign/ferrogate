@@ -90,7 +90,7 @@ export async function resolveUpstreams(
   if (!durableUpstreamsBound(env)) return ports.upstreams;
   const namespace = env.TENANT_DATA;
   if (namespace === undefined) return ports.upstreams;
-  const controlDb = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  const controlDb = controlDatabaseFrom(env);
   if (controlDb === undefined) return ports.upstreams;
   const tenantRouter = new DurableObjectTenantDatabaseRouter(namespace, controlDb);
   const configs = await loadServerCatalog(namespace, tenantId, controlDb, tenantRouter);

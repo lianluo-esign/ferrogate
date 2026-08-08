@@ -62,6 +62,7 @@
 
 /** The `control_plane_resources` table the admin API writes. */
 export const RESOURCE_TABLE = "control_plane_resources";
+import { controlDatabaseFrom } from "./control-data.js";
 /** `resource_kind` of the singleton runtime-state rows. */
 export const DRAIN_COLLECTION = "runtime-state";
 /** `resource_id` of the singleton drain row. */
@@ -242,7 +243,7 @@ export async function resolveDrain(
   env: DrainBindings | undefined,
   deployVar = false,
 ): Promise<DrainState> {
-  const durable = await readDurableDrain(env?.CONTROL_DB);
+  const durable = await readDurableDrain(controlDatabaseFrom(env));
   return combineDrain(durable, deployVar);
 }
 

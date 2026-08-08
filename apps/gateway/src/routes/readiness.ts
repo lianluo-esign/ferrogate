@@ -109,6 +109,7 @@
  * that no-sync implies, because the decision table reads them.
  */
 import { configSnapshotId } from "@ferrogate/config";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { Context } from "hono";
 import type { GatewayEnv } from "../ports.js";
 
@@ -326,7 +327,7 @@ export function combineDrain(durable: DrainState, deployVar: boolean): DrainStat
 export async function resolveDrainState(
   env: ReadinessBindings | undefined,
 ): Promise<DrainState> {
-  const durable = await readDurableDrain(env?.CONTROL_DB);
+  const durable = await readDurableDrain(controlDatabaseFrom(env));
   return combineDrain(durable, drainStatus(env).draining);
 }
 

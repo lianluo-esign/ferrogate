@@ -766,7 +766,7 @@ export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
 
 /** `null` when neither `CONTROL_DB` nor `DB` is bound. */
 export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): LifecycleRowSource | null {
-  const control = env[CONTROL_DATABASE_BINDING];
+  const control = controlDatabaseFrom(env);
   const tenant = env[TENANT_DATABASE_BINDING];
   const controlDb = isLifecycleDatabase(control) ? control : undefined;
   const tenantDb = isLifecycleDatabase(tenant) ? tenant : undefined;
@@ -952,9 +952,7 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
       tenantDatabases?: TenantDatabaseRouter | undefined;
     } = {},
   ): D1RbacAuthorizer | null {
-    const binding = controlDatabaseFrom(env, {
-      legacy: [env[CONTROL_DATABASE_BINDING]],
-    });
+    const binding = controlDatabaseFrom(env);
     if (!isRbacDatabase(binding)) return null;
     const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
     const tenantDatabases =

@@ -139,7 +139,7 @@ export function forgetA2aGuardrailPolicies(env: object): void {
 }
 
 function controlDatabase(env: A2aGuardrailBindings): GuardrailPolicyDatabase | undefined {
-  const binding = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB as D1Database | undefined] });
+  const binding = controlDatabaseFrom(env);
   return typeof binding === "object" &&
     binding !== null &&
     typeof (binding as GuardrailPolicyDatabase).prepare === "function"
