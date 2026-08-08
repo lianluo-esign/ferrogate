@@ -31,6 +31,34 @@ describe("OpsStatusPage", () => {
     expect(screen.getByText("gateway.example.com")).toBeInTheDocument();
     expect(screen.getByText("Cluster")).toBeInTheDocument();
     expect(screen.getByText("state_loaded")).toBeInTheDocument();
+
+    // #893 platform catalog counts, distinct from the tenant aggregates above.
+    expect(screen.getByText("Platform catalog")).toBeInTheDocument();
+    expect(screen.getByText("Platform channels")).toBeInTheDocument();
+    // Platform providers=2 renders its own tile, NOT folded into providers 3/4.
+    expect(screen.getByText("2")).toBeInTheDocument(); // platform channels
+    expect(screen.getByText("5")).toBeInTheDocument(); // platform models
+    expect(screen.getByText("8")).toBeInTheDocument(); // platform offerings
+  });
+
+  it("hides the platform catalog section when the deployment omits the counts", async () => {
+    // A gateway predating #902 returns no platform_* fields; the section must
+    // not render empty/undefined tiles (falsifies an unconditional render).
+    const base = adminStatus();
+    const legacy = { ...base } as Record<string, unknown>;
+    delete legacy.platform_providers;
+    delete legacy.platform_models;
+    delete legacy.platform_offerings;
+    server.use(
+      http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(legacy)),
+    );
+
+    renderWithProviders(<OpsStatusPage />);
+
+    // The tenant board still renders...
+    expect(await screen.findByText("3 / 4")).toBeInTheDocument();
+    // ...but the platform section is absent.
+    expect(screen.queryByText("Platform catalog")).not.toBeInTheDocument();
   });
 
   it("flags reload_required when ACME needs a listener reload (#265)", async () => {

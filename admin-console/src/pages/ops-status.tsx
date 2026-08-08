@@ -292,6 +292,44 @@ export default function OpsStatusPage() {
             <StatTile label={t("page.opsStatus.stat.tools")} value={data.tools} />
           </div>
 
+          {/* Platform model catalog (#893): the FLEET catalog #889 introduced,
+              counted distinctly from the tenant aggregates above — a platform
+              channel is not a tenant provider. GET /admin/v1/status reports
+              these unscoped, so this read-only view is visible to any admin
+              without a platform-operator session (which the console cannot yet
+              mint). Rendered only when the deployment reports them, so a gateway
+              predating #902 shows no empty tiles. */}
+          {data.platform_providers !== undefined ||
+          data.platform_models !== undefined ||
+          data.platform_offerings !== undefined ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  {t("page.opsStatus.platform.title")}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <StatTile
+                    label={t("page.opsStatus.stat.platformProviders")}
+                    value={data.platform_providers ?? 0}
+                    hint={t("page.opsStatus.hint.platformCatalog")}
+                  />
+                  <StatTile
+                    label={t("page.opsStatus.stat.platformModels")}
+                    value={data.platform_models ?? 0}
+                    hint={t("page.opsStatus.hint.platformCatalog")}
+                  />
+                  <StatTile
+                    label={t("page.opsStatus.stat.platformOfferings")}
+                    value={data.platform_offerings ?? 0}
+                    hint={t("page.opsStatus.hint.platformCatalog")}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
           <div className="grid gap-4 lg:grid-cols-2">
             <AcmeCard acme={data.acme} />
             <ClusterCard cluster={data.cluster} />

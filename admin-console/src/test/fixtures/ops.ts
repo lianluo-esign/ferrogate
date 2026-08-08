@@ -34,6 +34,9 @@ export function adminStatus(
     extensions: 1,
     active_extensions: 1,
     tools: 6,
+    platform_providers: 2,
+    platform_models: 5,
+    platform_offerings: 8,
     auth_required: true,
     storage: {
       provider: "postgres",
