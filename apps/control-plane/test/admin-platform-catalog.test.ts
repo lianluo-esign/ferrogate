@@ -73,6 +73,38 @@ async function wipePlatformCatalog(handle: D1Database): Promise<void> {
   ]);
 }
 
+/**
+ * Take `env.DB` back to a pre-0025 control database, and hand back the undo.
+ *
+ * The DDL is read out of `sqlite_master` rather than restated here, so this
+ * cannot drift from the migration; `resetD1` in the next `beforeEach` DELETEs
+ * from these tables, which is why the undo must run in a `finally`.
+ */
+async function dropPlatformTables(): Promise<() => Promise<void>> {
+  const handle = db();
+  const objects = await handle
+    .prepare(
+      `SELECT type, name, sql FROM sqlite_master
+        WHERE sql IS NOT NULL AND tbl_name LIKE 'platform!_%' ESCAPE '!'
+        ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name`,
+    )
+    .all<{ type: string; name: string; sql: string }>();
+  const tables = objects.results.filter((row) => row.type === "table").map((row) => row.name);
+  expect(tables.length, "0025 must have created the platform tables").toBe(4);
+  expect(objects.results.length, "and its indexes, which the undo must restore").toBeGreaterThan(4);
+  // Children before parents: the implicit DELETE a DROP performs is subject to
+  // the same `ON DELETE RESTRICT` the offerings carry onto the channels.
+  const isChild = (table: string): boolean => table === "platform_catalog_offerings";
+  for (const table of [...tables.filter(isChild), ...tables.filter((t) => !isChild(t))]) {
+    await handle.exec(`DROP TABLE ${table}`);
+  }
+  return async () => {
+    for (const object of objects.results) {
+      await handle.exec(object.sql.replace(/\s+/g, " "));
+    }
+  };
+}
+
 async function platformRevision(handle: D1Database = db()): Promise<number> {
   const row = await handle
     .prepare("SELECT revision FROM platform_catalog_revisions WHERE id = 1")
@@ -87,20 +119,45 @@ async function platformIds(table: string, handle: D1Database = db()): Promise<re
   return rows.results.map((row) => row.id);
 }
 
-/** Audit rows this catalog wrote, newest last, read straight out of the chain. */
-async function platformAuditCollections(handle: D1Database = db()): Promise<readonly string[]> {
+/**
+ * Audit rows this catalog wrote, oldest first, read straight out of the chain.
+ *
+ * Returns the whole tuple, not just the collection: `revision` is the ONLY
+ * thing that ties an audit row to the catalog state it describes — it is what
+ * #890's seeder and #891's loader key off — and `action` is what tells a remove
+ * from a create. Asserting the collection alone left both free to be wrong.
+ */
+interface PlatformAuditRow {
+  readonly collection: string;
+  readonly action: string;
+  readonly revision: number;
+  readonly resource_id: string;
+}
+
+async function platformAuditRows(handle: D1Database = db()): Promise<readonly PlatformAuditRow[]> {
   const rows = await handle
     .prepare("SELECT audit_json, tenant FROM audit_events ORDER BY seq ASC")
     .all<{ audit_json: string; tenant: string | null }>();
-  const collections: string[] = [];
+  const events: PlatformAuditRow[] = [];
   for (const row of rows.results) {
-    const parsed = JSON.parse(row.audit_json) as { collection?: string };
+    const parsed = JSON.parse(row.audit_json) as Partial<PlatformAuditRow> & {
+      resource_tenant_id?: unknown;
+    };
     if (typeof parsed.collection === "string" && parsed.collection.startsWith("platform_")) {
       expect(row.tenant, "a platform catalog audit row must not be tenant-attributed").toBeNull();
-      collections.push(parsed.collection);
+      events.push({
+        collection: parsed.collection,
+        action: String(parsed.action),
+        revision: Number(parsed.revision),
+        resource_id: String(parsed.resource_id),
+      });
     }
   }
-  return collections;
+  return events;
+}
+
+async function platformAuditCollections(handle: D1Database = db()): Promise<readonly string[]> {
+  return (await platformAuditRows(handle)).map((row) => row.collection);
 }
 
 async function createPlatformProvider(
@@ -265,12 +322,11 @@ describe("platform model catalog admin surface", () => {
 
   it("bumps the platform revision and appends exactly one audit row per write", async () => {
     expect(await platformRevision()).toBe(0);
-    expect(await platformAuditCollections()).toEqual([]);
+    expect(await platformAuditRows()).toEqual([]);
 
     expect((await createPlatformProvider("rev_channel")).status).toBe(201);
     const afterProvider = await platformRevision();
     expect(afterProvider).toBe(1);
-    expect(await platformAuditCollections()).toEqual(["platform_providers"]);
 
     expect((await createPlatformModel("rev_model")).status).toBe(201);
     const afterModel = await platformRevision();
@@ -288,12 +344,62 @@ describe("platform model catalog admin surface", () => {
     ).toBe(200);
     expect(await platformRevision()).toBe(afterOffering + 1);
 
-    expect(await platformAuditCollections()).toEqual([
-      "platform_providers",
-      "platform_models",
-      "platform_offerings",
-      "platform_models",
+    expect((await request(OPERATOR, "DELETE", "/admin/v1/models/rev_model")).status).toBe(200);
+    const afterDelete = await platformRevision();
+    expect(afterDelete).toBe(afterOffering + 2);
+
+    // The WHOLE tuple, because each field is load-bearing and none of them is
+    // held by any other assertion: `revision` is what a reader compares against
+    // the stamp to decide its cache is stale, `action` is what distinguishes a
+    // removal from a creation in the chain, and `resource_id` is what names the
+    // row the entry is about.
+    expect(await platformAuditRows()).toEqual([
+      {
+        collection: "platform_providers",
+        action: "create",
+        revision: 1,
+        resource_id: "rev_channel",
+      },
+      { collection: "platform_models", action: "create", revision: 2, resource_id: "rev_model" },
+      {
+        collection: "platform_offerings",
+        action: "create",
+        revision: 3,
+        resource_id: "rev_offering",
+      },
+      { collection: "platform_models", action: "merge", revision: 4, resource_id: "rev_model" },
+      { collection: "platform_models", action: "remove", revision: 5, resource_id: "rev_model" },
     ]);
+    expect(afterDelete).toBe(5);
+  });
+
+  it("rolls the mutation back when the audit row cannot be written", async () => {
+    // The audit append and the mutation must be ONE batch. With the audit
+    // appended after a committed batch instead, this leaves `orphan_channel` in
+    // the table and the revision at 1 while the caller is told it failed —
+    // a committed change with no audit evidence, and #890/#891 acting on a
+    // revision no auditor can explain.
+    // The abort message names the table for the same reason a real failure
+    // does — the one expected here is
+    // `UNIQUE constraint failed: audit_events.chain_key, audit_events.seq`.
+    await db().exec(
+      "CREATE TRIGGER block_audit_append BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'audit_events append rejected'); END",
+    );
+    try {
+      const blocked = await createPlatformProvider("orphan_channel");
+      expect(blocked.status, JSON.stringify(blocked.body)).toBe(500);
+    } finally {
+      await db().exec("DROP TRIGGER IF EXISTS block_audit_append");
+    }
+
+    expect(await platformIds("platform_provider_channels")).toEqual([]);
+    expect(await platformRevision()).toBe(0);
+    expect(await platformAuditRows()).toEqual([]);
+
+    // And the store is not wedged: the same write succeeds once audit works.
+    expect((await createPlatformProvider("orphan_channel")).status).toBe(201);
+    expect(await platformIds("platform_provider_channels")).toEqual(["orphan_channel"]);
+    expect(await platformRevision()).toBe(1);
   });
 
   it("refuses to delete a platform channel with live offerings and leaves the revision alone", async () => {
@@ -436,6 +542,128 @@ describe("platform model catalog admin surface", () => {
     expect((platformList.body.data as JsonBody[]).map((row) => row.id)).toEqual([
       "late_platform_channel",
     ]);
+  });
+
+  it("keeps the pre-#889 400 on item operations until the catalog is adopted", async () => {
+    const tenantId = `tenant_platform_item_${crypto.randomUUID().slice(0, 8)}`;
+    await provisionTenant(tenantId);
+    const tenantQuery = `tenant_id=${encodeURIComponent(tenantId)}`;
+    const created = await request(OPERATOR, "POST", `/admin/v1/providers?${tenantQuery}`, {
+      id: "tenant_item_channel",
+      name: "tenant_item_channel",
+      kind: "openai-compatible",
+      base_url: "https://tenant-item.example.test/v1",
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+
+    // The id the operator's own LIST just handed back. Answering 404 here is
+    // not a harmless relabelling of the old 400: 404 on a DELETE is the
+    // canonical "already gone", so a cleanup script that omits `tenant_id`
+    // would report every tenant provider as removed while the rows stand.
+    const listed = await request(OPERATOR, "GET", "/admin/v1/providers");
+    expect(listed.body.scope).toBe("tenant");
+    expect((listed.body.data as JsonBody[]).map((row) => row.id)).toContain("tenant_item_channel");
+
+    for (const [method, body] of [
+      ["GET", undefined],
+      ["PATCH", { region: "eu-west-1" }],
+      ["DELETE", undefined],
+    ] as const) {
+      const response = await request(
+        OPERATOR,
+        method,
+        "/admin/v1/providers/tenant_item_channel",
+        body,
+      );
+      expect(response.status, `${method} without tenant_id before adoption`).toBe(400);
+      expect((response.body.error as JsonBody).code).toBe("invalid_request");
+    }
+    const offerings = await request(OPERATOR, "GET", "/admin/v1/models/anything/offerings");
+    expect(offerings.status).toBe(400);
+
+    // Adopting the catalog is what changes the meaning of a bare id, and the
+    // tenant row is untouched by any of it.
+    expect((await createPlatformProvider("adopting_channel")).status).toBe(201);
+    const afterAdoption = await request(OPERATOR, "GET", "/admin/v1/providers/tenant_item_channel");
+    expect(afterAdoption.status).toBe(404);
+    const tenantRows = await request(OPERATOR, "GET", `/admin/v1/providers?${tenantQuery}`);
+    expect((tenantRows.body.data as JsonBody[]).map((row) => row.id)).toContain(
+      "tenant_item_channel",
+    );
+  });
+
+  it("answers the provider and model lists from the SAME catalog", async () => {
+    const tenantId = `tenant_platform_pair_${crypto.randomUUID().slice(0, 8)}`;
+    await provisionTenant(tenantId);
+
+    // One platform PROVIDER and no platform models. Deciding precedence per
+    // resource shows this session the platform provider list and the tenant
+    // aggregate model list at once — and `POST /models/<tenant model>/offerings`
+    // with a platform `provider_id` then 404s, because the two pages it was
+    // just served are not addressable together.
+    expect((await createPlatformProvider("pair_channel")).status).toBe(201);
+
+    const providers = await request(OPERATOR, "GET", "/admin/v1/providers");
+    const models = await request(OPERATOR, "GET", "/admin/v1/models");
+    expect(providers.status).toBe(200);
+    expect(models.status).toBe(200);
+    expect(providers.body.scope).toBe("platform");
+    expect(models.body.scope).toBe("platform");
+    expect((models.body.data as JsonBody[]).map((row) => row.id)).toEqual([]);
+
+    // The mirror case: platform models, no platform providers, same answer.
+    expect((await request(OPERATOR, "DELETE", "/admin/v1/providers/pair_channel")).status).toBe(
+      200,
+    );
+    expect((await createPlatformModel("pair_model")).status).toBe(201);
+    const providersAgain = await request(OPERATOR, "GET", "/admin/v1/providers");
+    const modelsAgain = await request(OPERATOR, "GET", "/admin/v1/models");
+    expect(providersAgain.body.scope).toBe("platform");
+    expect(modelsAgain.body.scope).toBe("platform");
+    expect((providersAgain.body.data as JsonBody[]).map((row) => row.id)).toEqual([]);
+    expect((modelsAgain.body.data as JsonBody[]).map((row) => row.id)).toEqual(["pair_model"]);
+  });
+
+  it("labels the legacy document collection by the scope it was read at", async () => {
+    // Zero provisioned tenants and an empty platform catalog: the answer is
+    // `deps.store.list("providers", …)`, the platform operator's un-attributed
+    // view of the pre-catalog documents. Calling that `tenant` attributes rows
+    // to a tenant the response cannot name.
+    expect(await platformIds("platform_provider_channels")).toEqual([]);
+    const legacy = await request(OPERATOR, "GET", "/admin/v1/providers");
+    expect(legacy.status, JSON.stringify(legacy.body)).toBe(200);
+    expect(legacy.body.scope).toBe("platform");
+
+    const legacyModels = await request(OPERATOR, "GET", "/admin/v1/models");
+    expect(legacyModels.status).toBe(200);
+    expect(legacyModels.body.scope).toBe("platform");
+  });
+
+  it("degrades to the pre-#889 answer when migration 0025 is not applied yet", async () => {
+    // `wrangler.toml` pins `d1_compat`, whose migrations are applied by a
+    // separate `wrangler d1 migrations apply` step rather than by
+    // `wrangler deploy`, so a new Worker really can meet an old control
+    // database. Two operator LIST endpoints that worked before this slice must
+    // not 500 in that window.
+    const restore = await dropPlatformTables();
+    try {
+      const providers = await request(OPERATOR, "GET", "/admin/v1/providers");
+      expect(providers.status, JSON.stringify(providers.body)).toBe(200);
+      const models = await request(OPERATOR, "GET", "/admin/v1/models");
+      expect(models.status, JSON.stringify(models.body)).toBe(200);
+
+      // Item operations keep their pre-#889 400, not a 500 either.
+      const item = await request(OPERATOR, "GET", "/admin/v1/providers/anything");
+      expect(item.status, JSON.stringify(item.body)).toBe(400);
+
+      // A WRITE cannot be served at all, but "not deployed yet" is a 503 an
+      // operator can act on rather than an opaque 500.
+      const write = await createPlatformProvider("premigration_channel");
+      expect(write.status, JSON.stringify(write.body)).toBe(503);
+    } finally {
+      await restore();
+    }
+    expect((await request(OPERATOR, "GET", "/admin/v1/providers")).status).toBe(200);
   });
 
   it("writes the platform catalog through the CONTROL_DATA object under the durable_object posture", async () => {

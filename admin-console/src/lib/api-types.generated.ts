@@ -517,7 +517,7 @@ export interface paths {
     "/admin/v1/providers": {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: {
@@ -549,7 +549,7 @@ export interface paths {
     "/admin/v1/providers/{id}": {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -1320,7 +1320,7 @@ export interface paths {
     "/admin/v1/models": {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: {
@@ -1355,7 +1355,7 @@ export interface paths {
     "/admin/v1/models/{id}": {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -1380,7 +1380,7 @@ export interface paths {
     "/admin/v1/models/{model_id}/offerings": {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -1403,7 +1403,7 @@ export interface paths {
     "/admin/v1/models/{model_id}/offerings/{offering_id}": {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -7010,8 +7010,15 @@ export interface components {
             id: string;
             /** @constant */
             deleted: true;
+        };
+        /** @description A catalog delete acknowledgement: `DeleteResponse` plus the #889 `scope` discriminator. Separate from `DeleteResponse` because the other operations that return that schema are not served by the catalog handlers and never emit `scope`. */
+        CatalogDeleteResponse: {
+            object: string;
+            id: string;
+            /** @constant */
+            deleted: true;
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -7188,7 +7195,7 @@ export interface components {
             object: "provider";
             provider: components["schemas"]["AdminProvider"];
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -7222,7 +7229,7 @@ export interface components {
             object: "model";
             model: components["schemas"]["Model"];
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -7320,7 +7327,7 @@ export interface components {
             object: "offering";
             offering: components["schemas"]["AdminOffering"];
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -7333,7 +7340,7 @@ export interface components {
             offset?: number;
             limit?: number;
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -7511,7 +7518,7 @@ export interface components {
             offset?: number;
             limit?: number;
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -7557,7 +7564,7 @@ export interface components {
             offset?: number;
             limit?: number;
             /**
-             * @description Which catalog answered: `platform` for the platform default catalog (a platform operator with no `tenant_id`), `tenant` otherwise. Absent on responses written before #889.
+             * @description Which catalog answered this request: `platform` when the answer is the platform default catalog — or, on the legacy document collection, the un-attributed platform-wide view — and `tenant` when it is one tenant's catalog. Absent on responses written before #889.
              * @enum {string}
              */
             scope?: "platform" | "tenant";
@@ -11471,7 +11478,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["DeleteResponse"];
+                "application/json": components["schemas"]["CatalogDeleteResponse"];
             };
         };
         /** @description API key mutation response. */
@@ -12755,7 +12762,7 @@ export interface operations {
     listAdminProviders: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
                 /** @description Case-insensitive match against provider name or kind. */
                 search?: string;
@@ -12796,7 +12803,7 @@ export interface operations {
     createAdminProvider: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: {
@@ -12827,7 +12834,7 @@ export interface operations {
     getAdminProvider: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -12847,7 +12854,7 @@ export interface operations {
     replaceAdminProvider: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -12869,7 +12876,7 @@ export interface operations {
     deleteAdminProvider: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -12890,7 +12897,7 @@ export interface operations {
     patchAdminProvider: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14191,7 +14198,7 @@ export interface operations {
     listAdminModels: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
                 /** @description Case-insensitive match against model name, provider, or provider model. */
                 search?: string;
@@ -14232,7 +14239,7 @@ export interface operations {
     createAdminModel: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: {
@@ -14263,7 +14270,7 @@ export interface operations {
     getAdminModel: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14283,7 +14290,7 @@ export interface operations {
     replaceAdminModel: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14305,7 +14312,7 @@ export interface operations {
     deleteAdminModel: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14326,7 +14333,7 @@ export interface operations {
     patchAdminModel: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14348,7 +14355,7 @@ export interface operations {
     listAdminModelOfferings: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14368,7 +14375,7 @@ export interface operations {
     createAdminModelOffering: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14391,7 +14398,7 @@ export interface operations {
     getAdminModelOffering: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14412,7 +14419,7 @@ export interface operations {
     replaceAdminModelOffering: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14435,7 +14442,7 @@ export interface operations {
     deleteAdminModelOffering: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;
@@ -14457,7 +14464,7 @@ export interface operations {
     patchAdminModelOffering: {
         parameters: {
             query?: {
-                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889) rather than a tenant's, and the response's `scope` field says which was served. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
+                /** @description Selects the tenant catalog. Optional: a platform operator that omits it addresses the PLATFORM default catalog (#889), but only on a deployment that has ADOPTED one — that is, once anything has ever been written to it. Until then the request keeps its pre-#889 behaviour: the per-tenant aggregate for the two list operations, `400 tenant_id is required` for the item operations. The response's `scope` field says which catalog answered. Tenant-scoped callers are restricted to their own tenant and can never reach the platform catalog. */
                 tenant_id?: string;
             };
             header?: never;

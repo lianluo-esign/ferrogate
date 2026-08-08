@@ -14,8 +14,12 @@
  *     tenant-local `catalog_audit_outbox` and reconciles it into the control
  *     database afterwards, because the mutation and the audit chain live in
  *     DIFFERENT databases and cannot share a transaction. Here they are the
- *     same database, so the mutation + revision bump are one batch and the
- *     audit row is appended straight after it with `appendControlPlaneAudit`.
+ *     same database, so no outbox is needed — but the audit row must then
+ *     actually be IN the batch: `#commit` batches the revision init, the
+ *     mutation, the revision bump and the audit INSERT together, exactly as
+ *     `runControlPlaneMutationWithAudit` does for single-statement control
+ *     mutations, so a rejected audit append rolls the mutation back instead of
+ *     leaving a committed change with an advanced revision and no evidence.
  *  2. **No tenant on the record.** `controlPlaneAuditJson` derives both
  *     `resource_tenant_id` and the audit `chain_key` from `record.tenant_id`,
  *     so a platform record deliberately carries none: these mutations join the
@@ -29,7 +33,7 @@
  */
 import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import { type AuditAction, appendControlPlaneAudit, controlPlaneAuditJson } from "./d1.js";
+import { type AuditAction, controlPlaneAuditJson, controlPlaneAuditStatement } from "./d1.js";
 import {
   type ModelCatalogInput,
   type ModelOfferingInput,
@@ -63,6 +67,45 @@ export const PLATFORM_REVISION_TABLE = "platform_catalog_revisions";
 const PROVIDER_COLLECTION = "platform_providers";
 const MODEL_COLLECTION = "platform_models";
 const OFFERING_COLLECTION = "platform_offerings";
+
+/**
+ * How many times `#commit` rebuilds its batch after a rolled-back attempt.
+ *
+ * Same budget `appendControlPlaneAudit` and `runControlPlaneMutationWithAudit`
+ * use, and for the same reason: the only expected failure is two writers
+ * claiming the same position on the platform audit chain.
+ */
+const PLATFORM_COMMIT_ATTEMPTS = 5;
+
+/**
+ * The control database has migration `0025` but not these tables yet.
+ *
+ * Real on the shipped posture: `wrangler.toml` pins
+ * `CONTROL_PLANE_CONTROL_STORAGE = "d1_compat"`, whose migrations are applied
+ * by a separate `wrangler d1 migrations apply` step rather than by
+ * `wrangler deploy`, so there is a window in which the Worker is new and the
+ * database is not. In that window the platform catalog is simply absent, which
+ * is a different thing from broken.
+ */
+export function isMissingPlatformCatalogError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*(main\.)?platform_/i.test(message);
+}
+
+/**
+ * Did the AUDIT statement bring the batch down, rather than the mutation?
+ *
+ * `#commit` batches the two together, so `isConstraintError` alone can no
+ * longer be read as "the caller's write conflicted": the expected constraint
+ * failure in that batch is `UNIQUE constraint failed: audit_events.chain_key,
+ * audit_events.seq` — two writers claiming one chain position, which is nobody's
+ * request being wrong. Answering that `409 catalog conflict` would send an
+ * operator to look at their payload instead of at the audit chain.
+ */
+function isAuditAppendError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /audit_events/i.test(message);
+}
 
 interface ProviderRow {
   readonly id: string;
@@ -289,6 +332,40 @@ export class PlatformModelCatalogStore {
   constructor(options: PlatformModelCatalogStoreOptions) {
     this.#db = options.db;
     this.#requestId = options.requestId ?? "";
+  }
+
+  /**
+   * Has this deployment ADOPTED the platform catalog?
+   *
+   * The admin surface answers the same operation ids for two stores, and the
+   * question "which one does a platform operator that named no tenant mean?"
+   * has no answer that is right for every deployment. This is the tie-break,
+   * and it is deliberately ONE predicate for providers, models and offerings
+   * alike: deciding it per resource would let one session be shown the platform
+   * provider list and the tenant-aggregate model list at once, and binding a
+   * model from one to a provider from the other is a 404.
+   *
+   * `true` once anything has been written here — the revision row survives
+   * deleting every row back out again, so a catalog emptied on purpose stays
+   * adopted rather than silently reverting the whole surface to tenant
+   * semantics. `false` on a deployment that has never used it, including one
+   * where migration `0025` has not been applied yet: a missing table means "not
+   * adopted", never a 500 on a read path that worked before #889.
+   */
+  async isAdopted(): Promise<boolean> {
+    try {
+      const row = await this.#db
+        .prepare(
+          `SELECT (EXISTS (SELECT 1 FROM ${PLATFORM_REVISION_TABLE} WHERE id = 1)
+                OR EXISTS (SELECT 1 FROM ${PLATFORM_PROVIDER_TABLE})
+                OR EXISTS (SELECT 1 FROM ${PLATFORM_MODEL_TABLE})) AS adopted`,
+        )
+        .first<{ adopted: number }>();
+      return Number(row?.adopted ?? 0) === 1;
+    } catch (error) {
+      if (isMissingPlatformCatalogError(error)) return false;
+      throw error;
+    }
   }
 
   async listProviders(): Promise<readonly CatalogRecord[]> {
@@ -898,15 +975,27 @@ export class PlatformModelCatalogStore {
   }
 
   /**
-   * One mutation, one revision bump, one audit row.
+   * One mutation, one revision bump, one audit row — in ONE batch.
    *
    * The revision UPDATE is guarded by `changes() > 0` from the mutation that
-   * precedes it in the SAME batch, so a no-op mutation (an `OR IGNORE` that hit
-   * a unique index, a CAS that lost) cannot advance the revision or produce
-   * audit evidence for a transition that did not happen. The audit append runs
-   * after the batch rather than inside it because `appendControlPlaneAudit`
-   * needs to read the chain head and retry on a sequence conflict; it is
-   * idempotent on its projection key, so a retry cannot double-record.
+   * precedes it in the SAME batch, and the audit INSERT is guarded by
+   * `changes() = 1` from that revision UPDATE, so a no-op mutation (an
+   * `OR IGNORE` that hit a unique index, a guarded DELETE that lost its race)
+   * cannot advance the revision or produce audit evidence for a transition that
+   * did not happen — and, the direction that matters, an audit row that cannot
+   * be written takes the mutation and the revision bump down with it instead of
+   * leaving a committed change with no audit trail and an advanced revision for
+   * #890's seeder and #891's loader to act on.
+   *
+   * `revision` therefore has to be known BEFORE the batch, so it is read here
+   * and the bump's `RETURNING revision` is checked against it afterwards. The
+   * read is not a CAS and does not need to be: every writer that bumps this
+   * counter also appends to the platform (null-tenant) audit chain, so a
+   * concurrent bump necessarily collides with `ux_audit_events_chain_seq`,
+   * rolls the whole batch back, and lands on the retry below with a fresh head
+   * AND a fresh revision. The equality check is the backstop for a bump that
+   * arrived some other way; it can only fire on a batch that already committed,
+   * which is why it is an internal error and not a status code.
    */
   async #commit(
     scope: CallerScope,
@@ -916,53 +1005,75 @@ export class PlatformModelCatalogStore {
     mutation: D1PreparedStatement,
     requireMutation = false,
   ): Promise<boolean> {
-    const now = Math.floor(Date.now() / 1000);
-    let results: readonly D1Result<unknown>[];
-    try {
-      results = await this.#db.batch([
-        this.#db
-          .prepare(
-            `INSERT OR IGNORE INTO ${PLATFORM_REVISION_TABLE} (id, revision, updated_at_unix)
-             VALUES (1, 0, ?)`,
-          )
-          .bind(now),
-        mutation,
-        this.#db
-          .prepare(
-            `UPDATE ${PLATFORM_REVISION_TABLE}
-                SET revision = revision + 1, updated_at_unix = ?
-              WHERE id = 1 AND changes() > 0
-              RETURNING revision`,
-          )
-          .bind(now),
-      ]);
-    } catch (error) {
-      if (isConstraintError(error)) {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= PLATFORM_COMMIT_ATTEMPTS; attempt += 1) {
+      const now = Math.floor(Date.now() / 1000);
+      const revision = (await this.#revision()) + 1;
+      let results: readonly D1Result<unknown>[];
+      try {
+        results = await this.#db.batch([
+          this.#db
+            .prepare(
+              `INSERT OR IGNORE INTO ${PLATFORM_REVISION_TABLE} (id, revision, updated_at_unix)
+               VALUES (1, 0, ?)`,
+            )
+            .bind(now),
+          mutation,
+          this.#db
+            .prepare(
+              `UPDATE ${PLATFORM_REVISION_TABLE}
+                  SET revision = revision + 1, updated_at_unix = ?
+                WHERE id = 1 AND changes() > 0
+                RETURNING revision`,
+            )
+            .bind(now),
+          await controlPlaneAuditStatement(this.#db, {
+            action,
+            collection,
+            record,
+            revision,
+            scope,
+            requestId: this.#requestId,
+            auditJson: controlPlaneAuditJson({ action, collection, record, revision, scope }),
+          }),
+        ]);
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+      const mutationResult = results[1];
+      if (requireMutation && Number(mutationResult?.meta.changes ?? 0) === 0) {
         throw new TenantCatalogConflictError("platform model catalog constraint violated");
       }
-      throw error;
+      const bump = results[2];
+      if (bump === undefined || Number(bump.meta.changes ?? 0) === 0) return false;
+      const bumped = Number(
+        (bump.results[0] as { revision?: number | string } | undefined)?.revision ?? 0,
+      );
+      if (bumped !== revision) {
+        throw new Error(
+          `platform model catalog revision bumped to ${bumped}, audited as ${revision}`,
+        );
+      }
+      if (Number(results[3]?.meta.changes ?? 0) === 0) {
+        throw new Error("platform model catalog audit row was not appended with the mutation");
+      }
+      return true;
     }
-    const mutationResult = results[1];
-    if (requireMutation && Number(mutationResult?.meta.changes ?? 0) === 0) {
+    if (isConstraintError(lastError) && !isAuditAppendError(lastError)) {
       throw new TenantCatalogConflictError("platform model catalog constraint violated");
     }
-    const bump = results[2];
-    if (bump === undefined || Number(bump.meta.changes ?? 0) === 0) return false;
-    const revision = Number(
-      (bump.results[0] as { revision?: number | string } | undefined)?.revision ?? 0,
+    throw new Error(
+      `platform model catalog: ${action} ${collection}/${String(record.id)} failed after ${PLATFORM_COMMIT_ATTEMPTS} attempts`,
+      { cause: lastError },
     );
-    if (revision <= 0) {
-      throw new Error("platform model catalog revision bump did not return its revision");
-    }
-    await appendControlPlaneAudit(this.#db, {
-      action,
-      collection,
-      record,
-      revision,
-      scope,
-      requestId: this.#requestId,
-      auditJson: controlPlaneAuditJson({ action, collection, record, revision, scope }),
-    });
-    return true;
+  }
+
+  /** The current catalog revision; `0` before the first mutation. */
+  async #revision(): Promise<number> {
+    const row = await this.#db
+      .prepare(`SELECT revision FROM ${PLATFORM_REVISION_TABLE} WHERE id = 1`)
+      .first<{ revision: number | string }>();
+    return Number(row?.revision ?? 0);
   }
 }
