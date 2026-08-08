@@ -15,7 +15,7 @@
  */
 import type { JsonValue } from "@ferrogate/core";
 import { CliError } from "./errors.js";
-import type { HttpMethod, RequestSpec } from "./ports.js";
+import type { HttpMethod, MultipartUpload, RequestSpec } from "./ports.js";
 
 // ---------------------------------------------------------------------------
 // Descriptors
@@ -32,6 +32,20 @@ export type ResponseMode =
   | { readonly kind: "structured" }
   | { readonly kind: "raw"; readonly mediaType: string };
 
+/**
+ * The `multipart/form-data` shape an upload verb builds from CLI flags.
+ *
+ * The bytes come from `--input-file`; each named text field is read from its own
+ * `--<field>` flag (e.g. `createFile` declares `fileField: "file"` and
+ * `textFields: ["purpose"]`, so it consumes `--input-file` and `--purpose`).
+ */
+export interface UploadForm {
+  /** The multipart field name the uploaded bytes are sent under. */
+  readonly fileField: string;
+  /** Required text form fields, each supplied via `--<name>`. */
+  readonly textFields: readonly string[];
+}
+
 export interface VerbDescriptor {
   readonly name: string;
   readonly about: string;
@@ -42,6 +56,8 @@ export interface VerbDescriptor {
   readonly responseMode: ResponseMode;
   /** Required query values supplied as positional segments (asset-channels set). */
   readonly positionalQuerySegments: number;
+  /** Set on a multipart byte-upload verb (`createFile`); drives ctl's flags. */
+  readonly upload?: UploadForm;
 }
 
 export interface GroupDescriptor {
@@ -85,6 +101,23 @@ export function rawRead(
 /** A state-changing verb; its only renderable output is a `MutationReceipt`. */
 export function mutating(name: string, about: string, operationId: string): VerbDescriptor {
   return { ...base, name, about, operationId, effect: "mutating" };
+}
+
+/**
+ * A state-changing verb whose request body is a `multipart/form-data` byte
+ * upload rather than a JSON document (`createFile`).
+ *
+ * It is `mutating` like any other write, so it still emits a `MutationReceipt`;
+ * the `upload` form only tells the dispatcher to gather bytes + text fields from
+ * `--input-file`/`--<field>` instead of `--data`/`--file`.
+ */
+export function upload(
+  name: string,
+  about: string,
+  operationId: string,
+  form: UploadForm,
+): VerbDescriptor {
+  return { ...base, name, about, operationId, effect: "mutating", upload: form };
 }
 
 /** A state-changing verb gated behind an explicit `--yes`/prompt. */
@@ -166,6 +199,8 @@ export interface ResourceInput {
   readonly segments: readonly string[];
   readonly body?: JsonValue;
   readonly list: ListParams;
+  /** The gathered multipart payload for an upload verb (`createFile`). */
+  readonly upload?: MultipartUpload;
 }
 
 export function resourceInput(init: Partial<ResourceInput> = {}): ResourceInput {
@@ -173,6 +208,7 @@ export function resourceInput(init: Partial<ResourceInput> = {}): ResourceInput 
     segments: init.segments ?? [],
     ...(init.body === undefined ? {} : { body: init.body }),
     list: init.list ?? new ListParams(),
+    ...(init.upload === undefined ? {} : { upload: init.upload }),
   };
 }
 
@@ -184,6 +220,16 @@ function requireBody(input: ResourceInput, verb: string): JsonValue {
     );
   }
   return input.body;
+}
+
+/** The gathered multipart payload, or a usage error naming the verb. */
+function requireUpload(input: ResourceInput, verb: string): MultipartUpload {
+  if (input.upload === undefined) {
+    throw CliError.usage(
+      `verb '${verb}' is a byte upload; provide the file with --input-file and its form fields`,
+    );
+  }
+  return input.upload;
 }
 
 /** The first id segment, or a usage error naming the resource. */
@@ -250,6 +296,11 @@ export class ResourceApi {
 
   action(segments: readonly string[], body?: JsonValue): RequestSpec {
     return this.mutate("POST", segments, body);
+  }
+
+  /** `POST` a `multipart/form-data` byte upload to the collection or item path. */
+  uploadTo(segments: readonly string[], upload: MultipartUpload): RequestSpec {
+    return { method: "POST", path: this.itemPath(segments), query: [], upload };
   }
 }
 
@@ -410,6 +461,12 @@ const ASSET_PRESIGN = new ResourceApi("/v1/assets/presign");
 const SITE_DOMAINS = new ResourceApi("/admin/v1/site-domains");
 /** #743 — the OPERATOR asset surface, distinct from the tenant `/v1/assets`. */
 const ASSET_FLEET = new ResourceApi("/admin/v1/assets");
+
+// #698 — the OpenAI-compatible Files and Batch data-plane surfaces. Files are
+// backed by the tenant's reserved asset family; a batch references an uploaded
+// `input_file_id` and yields an `output_file_id`, so the two land as one group.
+const FILES = new ResourceApi("/v1/files");
+const BATCHES = new ResourceApi("/v1/batches");
 
 const PROMPT_TEMPLATES = new ResourceApi("/admin/v1/prompt-templates");
 const PROMPTS = new ResourceApi("/v1/prompts");
@@ -1307,6 +1364,82 @@ export const GROUPS: readonly GroupDescriptor[] = [
         }
         default:
           throw CliError.usage(`verb '${verb}' is not an asset-fleet verb`);
+      }
+    },
+  },
+
+  // --- files & batches (OpenAI-compatible data plane, #698) --------------
+  /**
+   * The OpenAI-compatible Files surface (`/v1/files`).
+   *
+   * `create` is a MULTIPART byte upload (`--input-file PATH --purpose VALUE`)
+   * and `download` writes the stored bytes to stdout or `--output-file`; the
+   * other three are ordinary JSON reads/deletes. The upload and download halves
+   * ship together with `batches` because a batch consumes an uploaded
+   * `input_file_id` and returns an `output_file_id` the caller downloads.
+   */
+  {
+    name: "files",
+    about: "Upload, list, download, and delete OpenAI-compatible files",
+    verbs: [
+      read("list", "List files", "listFiles"),
+      upload(
+        "create",
+        "Upload a file (multipart: --input-file PATH --purpose VALUE)",
+        "createFile",
+        { fileField: "file", textFields: ["purpose"] },
+      ),
+      read("get", "Show a file's metadata", "getFile"),
+      rawRead(
+        "download",
+        "Download a file's raw bytes (to stdout, or --output-file PATH)",
+        "getFileContent",
+        "application/octet-stream",
+      ),
+      mutating("delete", "Delete a file", "deleteFile"),
+    ],
+    build: (verb, input) => {
+      switch (verb) {
+        case "list":
+          return FILES.read([], input.list);
+        case "create":
+          return FILES.uploadTo([], requireUpload(input, verb));
+        case "get":
+          return FILES.get([firstSegment(input, "file")]);
+        case "download":
+          return FILES.read([firstSegment(input, "file"), "content"], input.list);
+        case "delete":
+          return buildItemDelete(FILES, "file", input);
+        default:
+          throw CliError.usage(`verb '${verb}' is not a files verb`);
+      }
+    },
+  },
+  {
+    name: "batches",
+    about: "Create, list, retrieve, and cancel OpenAI-compatible batch jobs",
+    verbs: [
+      read("list", "List batch jobs", "listBatches"),
+      mutating(
+        "create",
+        "Create a batch job (references an uploaded input_file_id)",
+        "createBatch",
+      ),
+      read("get", "Retrieve one batch job", "retrieveBatch"),
+      mutating("cancel", "Cancel a batch job", "cancelBatch"),
+    ],
+    build: (verb, input) => {
+      switch (verb) {
+        case "list":
+          return BATCHES.read([], input.list);
+        case "create":
+          return BATCHES.create(requireBody(input, verb));
+        case "get":
+          return BATCHES.get([firstSegment(input, "batch")]);
+        case "cancel":
+          return buildItemAction(BATCHES, "batch", "cancel", input);
+        default:
+          throw CliError.usage(`verb '${verb}' is not a batches verb`);
       }
     },
   },
