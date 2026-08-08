@@ -49,6 +49,7 @@ import type { ExperimentObserver } from "../experiments/index.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import type { AudioObjectSource } from "./audio-objects.js";
 import type { ByokPorts, ByokPortsFactory } from "./byok.js";
+import type { ModelCatalogInputs } from "./catalog.js";
 import type { ConversationStore } from "./conversation-store.js";
 import type { ResponseStoreMode } from "./conversation.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
@@ -460,12 +461,63 @@ export interface TenantModelCatalogSource {
     db: D1Database;
     env: InferenceBindings;
     fallback: ModelResolver;
+    /**
+     * The platform catalog's parsed registry (#890), used to resolve a tenant
+     * offering on a `platform`-kind channel against the platform physical leg.
+     * Absent or empty ⇒ the tenant `platform` arm falls back to the env
+     * registry, the pre-#890 behavior.
+     */
+    platformInputs?: ModelCatalogInputs;
+    /**
+     * The platform catalog's revision (#890) at the time `platformInputs` was
+     * resolved. Folded into the tenant cache key so a platform-catalog edit —
+     * which bumps the platform revision to force immediate visibility — is
+     * reflected in a tenant's cached `platform`-kind legs on the very next load,
+     * rather than waiting out the tenant's own TTL. Absent when no platform
+     * source is mounted.
+     */
+    platformRevision?: number;
   }): Promise<TenantModelCatalogLoadResult>;
 }
 
 /** A tenant catalog load either produces a resolver or refuses the request. */
 export type TenantModelCatalogLoadResult =
   | { readonly ok: true; readonly models: ModelResolver; readonly revision?: number }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * The asynchronous platform (control-object) catalog source used by the outer
+ * route module (#890).
+ *
+ * The platform catalog is the deployment-wide default: its rows are the model
+ * registry a platform-operator request and a catalog-less tenant both see. It is
+ * resolved from the CONTROL_DATA facade once per request and reused for both the
+ * platform-operator answer and a tenant's `fallback`.
+ */
+export interface PlatformModelCatalogSource {
+  load(input: {
+    env: InferenceBindings;
+    /**
+     * The env registry to serve when the platform tables are empty or absent
+     * (the bootstrap posture) — i.e. `modelsFromEnv`. The platform loader never
+     * fabricates an empty catalog when a control read fails; it serves the last
+     * good catalog or refuses.
+     */
+    fallback: ModelResolver;
+  }): Promise<PlatformModelCatalogLoadResult>;
+}
+
+/**
+ * A platform catalog load produces a resolver AND the parsed registry (so the
+ * tenant loader can resolve its `platform`-kind rows against it), or refuses.
+ */
+export type PlatformModelCatalogLoadResult =
+  | {
+      readonly ok: true;
+      readonly models: ModelResolver;
+      readonly inputs: ModelCatalogInputs;
+      readonly revision?: number;
+    }
   | { readonly ok: false; readonly reason: string };
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1187,13 @@ export interface InferenceDeps {
   readonly models?: ModelResolver | ModelResolverFactory;
   /** The per-tenant D1 catalog source, mounted by the deployed route module. */
   readonly tenantCatalog?: TenantModelCatalogSource;
+  /**
+   * The platform (control-object) catalog source (#890), mounted by the
+   * deployed route module. Absent ⇒ the platform resolver is `modelsFromEnv`,
+   * i.e. the pre-#890 env-only behavior; every unit suite that injects its own
+   * ports is therefore unaffected.
+   */
+  readonly platformCatalog?: PlatformModelCatalogSource;
   readonly adapters?: AdapterRegistry;
   /**
    * The provider egress, or a factory resolved per Worker `env` — the same

@@ -1036,6 +1036,25 @@ const CONTROLS: readonly FleetControl[] = [
   },
   {
     /**
+     * Platform default model catalog routing and its operator CRUD surface
+     * (#889, #890). The control plane writes the platform catalog into the
+     * CONTROL database and the gateway data plane reads the same four tables
+     * through `controlDatabaseFrom` before resolving platform model candidates —
+     * the same authoritative-when-present rule the tenant catalog above uses.
+     */
+    id: "platform-model-catalog",
+    title: "the platform-owned provider, model and offering catalog",
+    required: "self",
+    enforcement: /PlatformModelCatalogStore|platformModelCatalogFromControlData/,
+    authorityTables: [
+      "platform_provider_channels",
+      "platform_catalog_models",
+      "platform_catalog_offerings",
+      "platform_catalog_revisions",
+    ],
+  },
+  {
+    /**
      * The tenant-owned MCP server catalog (Zero-D1). `apps/control-plane`
      * authors it through the admin CRUD surface and `apps/mcp` resolves which
      * upstream server a tenant's call reaches from the SAME tenant-object
