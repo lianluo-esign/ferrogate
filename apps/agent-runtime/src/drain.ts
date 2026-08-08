@@ -227,7 +227,7 @@ export async function readDurableDrain(db: D1Database | undefined): Promise<Drai
 
 /** Bindings this module reads. */
 export interface DrainBindings {
-  readonly CONTROL_DB?: D1Database | undefined;
+  readonly CONTROL_DATA?: unknown;
 }
 
 /**

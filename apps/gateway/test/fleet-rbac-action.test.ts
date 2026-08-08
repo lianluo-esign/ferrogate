@@ -238,7 +238,10 @@ async function fleetDecisions(
     gateway: await new GatewayRbac(db as unknown as RbacDatabase, {
       tenantDatabases: tenantObjectRouter(),
     }).authorize(gatewayAuth(tenantId, operator), action),
-    mcp: await mcpRbacFromEnv({ CONTROL_DATA: controlNamespaceOverD1(db), TENANT_DATA: tenantData }).authorize(
+    mcp: await mcpRbacFromEnv({
+      CONTROL_DATA: controlNamespaceOverD1(db) as DurableObjectNamespace,
+      TENANT_DATA: tenantData,
+    }).authorize(
       mcpAuth(tenantId, operator),
       action,
     ),

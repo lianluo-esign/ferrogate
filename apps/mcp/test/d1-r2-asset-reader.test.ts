@@ -174,7 +174,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     });
 
     const ports = resolvePorts({
-      CONTROL_DATA: controlNamespace(),
+      CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
       ASSETS,
       DB,
       TENANT_DATA,
@@ -199,7 +199,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
 
     // Build a minimal env with both bindings and NO dev-mode flag.
     const mcpEnv: McpEnv = {
-      CONTROL_DATA: controlNamespace(),
+      CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
       ASSETS,
       DB,
       TENANT_DATA,
@@ -213,7 +213,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     const TENANT_DATA = tenantDataNamespace(env);
 
     const mcpEnv: McpEnv = {
-      CONTROL_DATA: controlNamespace(),
+      CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
       DB,
       TENANT_DATA: tenantDataNamespace(env),
       // ASSETS deliberately absent
@@ -226,7 +226,7 @@ describe("D1R2AssetReader — production asset reader mount", () => {
     const { ASSETS, DB } = requireBindings(bindings);
 
     const mcpEnv: McpEnv = {
-      CONTROL_DATA: controlNamespace(),
+      CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
       ASSETS,
       DB,
       // TENANT_DATA deliberately absent

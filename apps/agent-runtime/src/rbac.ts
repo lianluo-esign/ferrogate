@@ -255,7 +255,7 @@ export class UnboundRbacAuthorizer implements RbacAuthorizerPort {
  * `apps/gateway` reads. Absent ⇒ {@link UnboundRbacAuthorizer}.
  */
 export function rbacAuthorizerFromEnv(env: {
-  CONTROL_DB?: unknown;
+  CONTROL_DATA?: unknown;
   TENANT_DATA?: unknown;
 }): RbacAuthorizerPort {
   const controlDb = controlDatabaseFrom(env);

@@ -860,9 +860,6 @@ export function rbacDenialMessage(rbacAction: string): string {
   return `tenant roles do not grant required action ${rbacAction}`;
 }
 
-/** Binding name of the CONTROL D1 holding the RBAC graph (`wrangler.toml`). */
-export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
-
 /** The two statements `D1RbacAuthorizer` issues. Exported so a test can pin them. */
 export const RBAC_PERMISSION_EXISTS_SQL = "SELECT 1 AS present FROM permissions WHERE key = ?1";
 // ONE template literal rather than the `"SELECT …" + "FROM …"` concatenation

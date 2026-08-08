@@ -79,9 +79,6 @@ export interface GuardrailStatement {
   run(): Promise<unknown>;
 }
 
-/** Binding name of the CONTROL D1 (see `wrangler.toml`). */
-export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
-
 function isGuardrailDatabase(value: unknown): value is GuardrailDatabase {
   return (
     typeof value === "object" &&

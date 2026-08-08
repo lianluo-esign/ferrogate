@@ -121,7 +121,7 @@ describe("#801 MCP non-dev D1 asset egress", () => {
     const tenant = tenantDatabase(TENANT_DATA, TENANT);
     await seedAsset(tenant, ASSETS);
 
-    const ports = resolvePorts({ ASSETS, BILLING_DB, DB, TENANT_DATA, CONTROL_DATA: controlNamespace() } satisfies McpEnv);
+    const ports = resolvePorts({ ASSETS, BILLING_DB, DB, TENANT_DATA, CONTROL_DATA: controlNamespace() as DurableObjectNamespace } satisfies McpEnv);
     const result = await readAssetForMcp(ports, context(), "cli_tool", "deploy", "1.0.0");
     expect(result.ok).toBe(true);
     expect(ports.assetEgress.meter.constructor.name).toBe("LedgerAssetEgressMeter");
@@ -152,7 +152,7 @@ describe("#801 MCP non-dev D1 asset egress", () => {
       BILLING_DB,
       DB,
       TENANT_DATA,
-      CONTROL_DATA: controlNamespace(),
+      CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
     } satisfies McpEnv);
     const result = await readAssetForMcp(ports, context(), "cli_tool", "deploy", "1.0.0");
     expect(result.ok).toBe(true);

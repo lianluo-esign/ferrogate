@@ -756,15 +756,6 @@ export function assetBundleIndexStoreFromEnv(
 // ---------------------------------------------------------------------------
 
 /**
- * Binding name of the CONTROL D1 projection. Tenant-attributed asset evidence
- * is authoritative in the owning TenantDataObject; control D1 keeps the
- * tenant-qualified copy so fleet readers can discover it without a
- * cross-object SQL query. The legacy constructor supports shared-development
- * deployments and tests.
- */
-export const CONTROL_DATABASE_BINDING_FOR_AUDIT = "CONTROL_DB";
-
-/**
  * `id` is generated at RECORD time, not at flush time, so a retried object
  * append is idempotent — an audit trail that double-counts a yank is as
  * misleading as one that misses it.

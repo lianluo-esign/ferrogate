@@ -77,9 +77,6 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { controlDatabaseFrom } from "./control-data.js";
 import type { GuardrailDecision, GuardrailEvaluation, GuardrailPort } from "./ports.js";
 
-/** The CONTROL database binding this Worker reads guardrail policy from. */
-export const A2A_GUARDRAIL_DATABASE_BINDING = "CONTROL_DB";
-
 /**
  * The statements this Worker's screening ISSUES, restated here rather than
  * imported.

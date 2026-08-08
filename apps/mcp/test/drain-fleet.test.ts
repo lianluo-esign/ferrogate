@@ -195,7 +195,7 @@ async function agentRuntimeRefusal(): Promise<{
   code: string;
   message: string;
 } | null> {
-  const state = await arResolveDrain({ CONTROL_DB: control(), CONTROL_DATA: controlNamespace() });
+  const state = await arResolveDrain({ CONTROL_DATA: controlNamespace() });
   return arDrainRefusal(state);
 }
 
@@ -327,8 +327,8 @@ describe("FC-1 the two enforcers refuse identically", () => {
 
   it("resolves the SAME durable document, byte for byte, from both resolvers", async () => {
     await adminSetDrain(true, "shared reason");
-    const mcpState = await resolveDrain({ DB: control(), CONTROL_DATA: controlNamespace() });
-    const arState = await arResolveDrain({ CONTROL_DB: control(), CONTROL_DATA: controlNamespace() });
+    const mcpState = await resolveDrain({ CONTROL_DATA: controlNamespace() });
+    const arState = await arResolveDrain({ CONTROL_DATA: controlNamespace() });
     expect(mcpState).toEqual(arState);
     expect(mcpState.source).toBe("durable");
     expect(mcpState.reason).toBe("shared reason");

@@ -497,7 +497,7 @@ describe("identity key material", () => {
 
 describe("resolvePorts binding postures", () => {
   const base: McpEnv = {
-    CONTROL_DATA: controlNamespace(),
+    CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
     DB,
     TENANT_DATA,
     MCP_OAUTH_KV: KV,
