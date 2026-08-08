@@ -131,9 +131,20 @@ function isMissingPlatformCatalogError(error: unknown): boolean {
 /**
  * Flatten the platform rows into a resolver AND the parsed registry.
  *
- * Platform rows are real physical legs — `canonicalProviderKind` rejects a
- * `platform` kind at the write edge, so no row here carries the tenant-side
- * `platform` indirection and the shared projection never needs env inputs.
+ * Platform rows are real physical legs, with ONE exception introduced by the
+ * bootstrap import (#892): a `kind = 'platform'` channel (`platform-default`,
+ * `platform://default`) is the managed record of the default rate card — it
+ * carries PRICES but names no physical upstream, so it is a price row, not a
+ * routable leg. Those rows are EXCLUDED here before projection: they can never
+ * produce a working route (there is nowhere to dispatch), and feeding one to the
+ * shared projection's `provider_kind === "platform"` arm — which resolves a
+ * tenant-side indirection against an env registry this loader deliberately runs
+ * empty (`EMPTY_INPUTS`) — would fail the WHOLE platform build with a
+ * deployment-wide 503. Excluding them keeps the platform catalog's route set to
+ * the real providers the env pair (or an operator's CRUD) supplied, which is the
+ * parity invariant #892 asserts. `#889`'s admin CRUD still rejects a `platform`
+ * kind at the write edge; only the bulk import lays these price rows down.
+ *
  * `env` is still passed to {@link buildModelCatalog} as `secrets` so a provider's
  * `api_key_var` resolves from Worker secrets and fails the route closed exactly
  * as `modelsFromEnv` does — the CONTROL_DATA facade holds no secrets.
@@ -150,7 +161,9 @@ function buildPlatformCatalog(
   rows: readonly CatalogJoinRow[],
   env: InferenceBindings,
 ): PlatformCatalogBuildResult {
-  const projected = projectCatalog(rows, EMPTY_INPUTS);
+  // Drop the price-only `platform-default` rows (#892) — see the docblock.
+  const routableRows = rows.filter((row) => row.provider_kind !== "platform");
+  const projected = projectCatalog(routableRows, EMPTY_INPUTS);
   if (!projected.ok) return projected;
   const cloudflare = cloudflareAccountFromEnv(
     typeof env.GATEWAY_CLOUDFLARE === "string" ? env.GATEWAY_CLOUDFLARE : undefined,

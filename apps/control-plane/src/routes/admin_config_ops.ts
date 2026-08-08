@@ -19,6 +19,7 @@
  * `validate` is deliberately side-effect free: it answers whether a config
  * WOULD load, and never installs it.
  */
+import { PriceBook } from "@ferrogate/billing";
 import {
   configSnapshotId,
   loadConfigFromObject,
@@ -26,14 +27,26 @@ import {
   validateConfigAsync,
 } from "@ferrogate/config";
 import { z } from "zod";
+import { modelCatalogInputsFromEnv } from "../../../gateway/src/inference/catalog.js";
 import { HttpError } from "../middleware/errors.js";
+import {
+  type PlatformCatalogImportGraph,
+  envInputsToImportGraph,
+  importGraphReferentialError,
+  mergeImportGraphs,
+  rateCardToImportGraph,
+} from "../store/platform-catalog-import.js";
+import {
+  PlatformModelCatalogStore,
+  isMissingPlatformCatalogError,
+} from "../store/platform-model-catalog.js";
 import {
   DRAIN_COLLECTION,
   DRAIN_ID,
   drainDocument,
   parseDrainDocument,
 } from "../store/runtime_state.js";
-import { type GroupModule, crudGroup, json, readJson, scopeOf } from "./resource.js";
+import { type GroupModule, crudGroup, depsOf, json, readJson, scopeOf } from "./resource.js";
 
 /**
  * State row backing `GET`/`POST /admin/v1/drain`, keyed by a singleton id.
@@ -64,6 +77,43 @@ export const configReloadRequestSchema = z
   .passthrough();
 
 export const configValidateRequestSchema = z.record(z.unknown());
+
+/**
+ * `POST /admin/v1/config/import-model-catalog` body (#892).
+ *
+ * The env pair is supplied here rather than read only from this Worker's own
+ * bindings: the import is a one-shot bootstrap an operator runs with the values
+ * they are migrating, and pasting them keeps the control-plane Worker from
+ * holding a second, drift-prone copy of the gateway's `GATEWAY_*` vars. Each of
+ * `providers`/`models`/`cloudflare` may be the raw JSON string (exactly as the
+ * var holds it) or an already-parsed array/object; an omitted field falls back to
+ * the matching binding when the deployment chose to bind it. `.strict()` for the
+ * same reason every other body in this file is: a misspelled key fails loudly.
+ */
+export const configImportModelCatalogRequestSchema = z
+  .object({
+    providers: z.union([z.string(), z.array(z.unknown())]).optional(),
+    models: z.union([z.string(), z.array(z.unknown())]).optional(),
+    cloudflare: z.union([z.string(), z.record(z.unknown())]).optional(),
+    /** Also import `withDefaultRateCard()` as platform-kind price rows. Default `true`. */
+    include_default_rate_card: z.boolean().optional(),
+  })
+  .strict();
+
+const EMPTY_IMPORT_GRAPH: PlatformCatalogImportGraph = {
+  providers: [],
+  models: [],
+  offerings: [],
+};
+
+/** A body field or the matching binding, normalized to the JSON string the parser reads. */
+function importEnvString(
+  bodyValue: string | readonly unknown[] | Record<string, unknown> | undefined,
+  boundValue: string | undefined,
+): string | undefined {
+  if (bodyValue === undefined) return boundValue;
+  return typeof bodyValue === "string" ? bodyValue : JSON.stringify(bodyValue);
+}
 
 export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [], {
   /**
@@ -272,6 +322,123 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
       // is that enforcement lands on each Worker's NEXT request — not that it
       // has already landed everywhere.
       propagation: "on_next_request_per_worker",
+    });
+  },
+
+  /**
+   * Bootstrap the platform model catalog from the env tables + default rate card
+   * (#892, epic #810) — PLATFORM-OPERATOR ONLY, idempotent, re-runnable.
+   *
+   * ## Why it lives here and why it is platform-operator only
+   *
+   * #889–#891 made the platform catalog authoritative-when-present, but a real
+   * deployment's catalog still lives in `GATEWAY_PROVIDERS`/`GATEWAY_MODELS` and
+   * `PriceBook.withDefaultRateCard()`. Until those are imported the managed path
+   * serves nobody and the env path can never be demoted. This is the one
+   * operation that fills it. Like {@link setAdminDrain} it is deployment-wide
+   * state a tenant credential must never touch, so the SAME fence guards it: a
+   * non-platform caller is `403 tenant_scope_denied` and never reaches the store.
+   *
+   * ## Idempotent by construction
+   *
+   * The env pair is parsed with the SAME `modelCatalogInputsFromEnv` the data
+   * plane uses, turned into deterministic-id rows
+   * ({@link envInputsToImportGraph}), and written under `INSERT OR IGNORE`
+   * ({@link PlatformModelCatalogStore.importGraph}) with ONE revision bump and
+   * ONE audit row. A re-run inserts nothing and only advances the revision. The
+   * default rate card becomes `platform`-kind priced offerings
+   * ({@link rateCardToImportGraph}); those price rows are excluded from the
+   * data-plane route build and from tenant seeds (see the store), so they record
+   * the card without pretending to be routable legs.
+   *
+   * ## Deploy order
+   *
+   * Run this (verify the reported counts), THEN — as a SEPARATE, deferred
+   * Zero-D1-S5 follow-up — the `GATEWAY_*` vars MAY be emptied. This operation
+   * does not touch env handling; the gateway still falls back to the env tables
+   * whenever the platform catalog is empty.
+   */
+  importModelCatalog: async (c) => {
+    const scope = scopeOf(c);
+    if (scope.kind !== "platform_operator") {
+      throw new HttpError(
+        403,
+        "tenant_scope_denied",
+        "the platform model catalog is deployment-wide state; a tenant-scoped credential cannot import it",
+      );
+    }
+    const deps = depsOf(c);
+    if (deps.controlDatabase === null) {
+      throw new HttpError(
+        503,
+        "control_database_unavailable",
+        "control database is required for the platform catalog",
+      );
+    }
+
+    const body = await readJson(c, configImportModelCatalogRequestSchema);
+    const envLike = {
+      GATEWAY_PROVIDERS: importEnvString(body.providers, c.env.GATEWAY_PROVIDERS),
+      GATEWAY_MODELS: importEnvString(body.models, c.env.GATEWAY_MODELS),
+      GATEWAY_CLOUDFLARE: importEnvString(body.cloudflare, c.env.GATEWAY_CLOUDFLARE),
+    };
+    const parsed = modelCatalogInputsFromEnv(
+      envLike as Parameters<typeof modelCatalogInputsFromEnv>[0],
+    );
+    if (!parsed.ok) {
+      throw new HttpError(400, "invalid_request_body", `env catalog is invalid: ${parsed.reason}`);
+    }
+
+    const includeCard = body.include_default_rate_card ?? true;
+    const envGraph = envInputsToImportGraph(parsed.inputs.providers, parsed.inputs.models);
+    const envModelNames = new Set(parsed.inputs.models.map((model) => model.name));
+    const cardGraph = includeCard
+      ? rateCardToImportGraph(PriceBook.withDefaultRateCard(), envModelNames)
+      : EMPTY_IMPORT_GRAPH;
+    const graph = mergeImportGraphs(envGraph, cardGraph);
+
+    const referentialError = importGraphReferentialError(graph);
+    if (referentialError !== null) {
+      throw new HttpError(
+        400,
+        "invalid_request_body",
+        `env catalog is invalid: ${referentialError}`,
+      );
+    }
+
+    const store = new PlatformModelCatalogStore({
+      db: deps.controlDatabase,
+      requestId: c.get("requestId") ?? null,
+    });
+    let result: Awaited<ReturnType<PlatformModelCatalogStore["importGraph"]>>;
+    try {
+      result = await store.importGraph(scope, graph);
+    } catch (error) {
+      if (isMissingPlatformCatalogError(error)) {
+        throw new HttpError(
+          503,
+          "control_database_unavailable",
+          "the platform model catalog schema is not applied to the control database yet",
+        );
+      }
+      throw error;
+    }
+
+    return json(c, 200, {
+      object: "platform_catalog_import",
+      scope: "platform",
+      include_default_rate_card: includeCard,
+      // Rows the graph carried (attempted), rows this call actually INSERTED
+      // (0 on a re-run), and the resulting totals — the count verification shape
+      // an operator runs in production.
+      attempted: {
+        providers: graph.providers.length,
+        models: graph.models.length,
+        offerings: graph.offerings.length,
+      },
+      inserted: result.inserted,
+      counts: result.counts,
+      revision: result.revision,
     });
   },
 });

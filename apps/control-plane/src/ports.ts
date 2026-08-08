@@ -752,6 +752,24 @@ export interface ControlPlaneBindings {
    * writes nothing. Every other operation on this Worker is unaffected.
    */
   readonly ASSETS?: R2Bucket;
+  /**
+   * The deployed gateway provider table, for the bootstrap import (#892).
+   *
+   * The import (`POST /admin/v1/config/import-model-catalog`) reads the SAME
+   * `GATEWAY_PROVIDERS` JSON the data plane parses and writes it into the platform
+   * catalog. It is OPTIONAL and normally supplied in the request BODY — an
+   * operator pastes the values they are importing rather than this Worker holding
+   * a second, drift-prone copy of the gateway's vars. It is declared here so a
+   * deployment that DOES choose to bind it can run the import with no body; when
+   * unbound and the body omits it, the import simply imports nothing from the env
+   * pair. The paired provider SECRETS are never needed: the import stores the
+   * `api_key_var` NAME, not the credential.
+   */
+  readonly GATEWAY_PROVIDERS?: string;
+  /** The deployed gateway model registry, for the bootstrap import (#892). See {@link GATEWAY_PROVIDERS}. */
+  readonly GATEWAY_MODELS?: string;
+  /** The deployed account-level `[cloudflare]` block, for the bootstrap import (#892). See {@link GATEWAY_PROVIDERS}. */
+  readonly GATEWAY_CLOUDFLARE?: string;
 }
 
 /** Per-request context values set by the middleware chain. */

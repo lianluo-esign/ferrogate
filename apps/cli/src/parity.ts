@@ -407,6 +407,22 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
     reason:
       "authors DESTRUCTIVE retention rules (age-based deletion); lands with the #744 asset-lifecycle follow-up and its confirmation UX",
   },
+  // ---------------------------------------------------------------------
+  // #892 — the platform-catalog bootstrap import
+  // (`POST /admin/v1/config/import-model-catalog`). A one-shot operator action
+  // whose body is the deployment's `GATEWAY_PROVIDERS`/`GATEWAY_MODELS` JSON
+  // (potentially large, pasted rather than argv'd), and whose natural home is a
+  // `ctl catalog import` verb alongside the #893 `--platform` catalog surface,
+  // not a standalone group. The verb's argument grammar (how the env pair is
+  // supplied — a file path, stdin, or the values inline) is the design that must
+  // settle first, exactly like the #677/#698 output-file rows above. Delete this
+  // row when that verb lands; `buildReport` flags a stale exclusion.
+  {
+    operationId: "importModelCatalog",
+    owner: "platform catalog family (#892, #365 parity chain)",
+    reason:
+      "one-shot platform-catalog bootstrap import; its verb takes the env-pair JSON from a file/stdin rather than argv and lands with the #893 catalog surface — tracked as the #892 CLI follow-up",
+  },
 ];
 
 /** The coverable and non-coverable operation sets parsed from an OpenAPI document. */

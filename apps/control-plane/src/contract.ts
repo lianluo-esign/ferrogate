@@ -122,9 +122,10 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * `GET /v1/batches/{batch_id}`, `POST /v1/batches/{batch_id}/cancel`), COUNTED
  * off the merged `docs/openapi/runtime-api-contract.json` (which is also the
  * number `packages/schemas`' `OPENAPI_OPERATION_COUNT` pins) rather than
- * incremented.
+ * incremented. 312 -> 313 with #892's `POST /admin/v1/config/import-model-catalog`,
+ * the platform-catalog bootstrap import.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 312;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 313;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -156,8 +157,12 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 312;
  * why this number is RE-DERIVED by counting `/admin/v1/` paths in
  * `docs/openapi/runtime-api-contract.json` after every merge rather than
  * incremented from whichever side happened to land first.
+ *
+ * 240 -> 241 with #892's `POST /admin/v1/config/import-model-catalog`, the
+ * platform-catalog bootstrap import, which `apps/control-plane` owns like the
+ * rest of the `admin_config_ops` group.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 240;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 241;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

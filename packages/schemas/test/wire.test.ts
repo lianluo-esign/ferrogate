@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(312);
+    expect(OPENAPI_OPERATION_COUNT).toBe(313);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -321,12 +321,18 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // 266 against a 276-operation document and main wrote 268 against a
     // 278-operation one, and neither is the merged truth.
     //
+    // #892's `POST /admin/v1/config/import-model-catalog` is the same story yet
+    // again: the platform-catalog bootstrap import's request/response are inline
+    // Zod / plain JSON at the config-ops route, not a cross-plane wire shape, so
+    // `seeded` is unchanged and the shortfall moves 302 -> 303 purely because the
+    // operation count moved 312 -> 313.
+    //
     // The right-hand side is what to trust: `OPENAPI_OPERATION_COUNT` (pinned
     // against the committed JSON by the assertion above) minus a COUNTED
-    // `seeded`, i.e. 312 - 10 = 302. The running sum is narrative, and
+    // `seeded`, i.e. 313 - 10 = 303. The running sum is narrative, and
     // #703/#737, then #743/#689, then #743/#693, and now #693/#697 landing in
     // parallel is exactly why it must not be the source: this branch wrote 270
     // and main wrote 269, and 271 is the value the merged document produces.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(302);
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(303);
   });
 });
