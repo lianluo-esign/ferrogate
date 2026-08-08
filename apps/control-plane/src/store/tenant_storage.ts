@@ -61,12 +61,13 @@
  * ones, and every one of them bills for storage forever.
  */
 import {
+  type TenantJurisdiction,
   locationHintFromCloudflareSignal,
   provisionTenantStorage,
   tenantJurisdictionForResidencyRegions,
-  type TenantJurisdiction,
 } from "@ferrogate/storage";
 import type { ControlPlaneDeps } from "../ports.js";
+import { PlatformModelCatalogStore } from "./platform-model-catalog.js";
 
 interface CloudflareRequest extends Request {
   readonly cf?: {
@@ -137,6 +138,16 @@ export async function provisionTenantStorageFor(
       colo: cf?.colo,
     });
     const jurisdiction = await tenantJurisdictionFromPolicy(deps.controlDatabase, tenantId);
+    // The MANAGED platform catalog (#891) is the seed source when this
+    // deployment has adopted it. It is read HERE, over the CONTROL_DATA facade
+    // (the Zero-D1 seam #879), and passed DOWN to `provisionTenantStorage` as
+    // plain data, so `@ferrogate/storage` never names a `platform_*` table.
+    // `exportForSeed` returns an empty graph when the catalog is absent or
+    // un-adopted, and `provisionTenantStorage` then falls back to the
+    // compiled-in card — so this stays independent of the import slice.
+    const catalogGraph = await new PlatformModelCatalogStore({
+      db: deps.controlDatabase,
+    }).exportForSeed();
     const outcome = await provisionTenantStorage(
       deps.tenantStorage ?? deps.tenantDatabases,
       tenantId,
@@ -145,6 +156,7 @@ export async function provisionTenantStorageFor(
         locationHintSource: placement.source,
         locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
         ...(jurisdiction === undefined ? {} : { jurisdiction }),
+        catalogGraph,
       },
     );
     return outcome.status === "ready";

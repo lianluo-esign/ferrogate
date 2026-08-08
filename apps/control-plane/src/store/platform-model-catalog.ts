@@ -31,6 +31,12 @@
  * never a raw `env.DB` — that is the Zero-D1 seam #879 introduced and the
  * reason this store takes a database rather than reaching for a binding.
  */
+import type {
+  SeedCatalogModel,
+  SeedCatalogOffering,
+  SeedProviderChannel,
+  TenantModelCatalogSeedGraph,
+} from "@ferrogate/storage";
 import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { type AuditAction, controlPlaneAuditJson, controlPlaneAuditStatement } from "./d1.js";
@@ -205,6 +211,81 @@ const OFFERING_SELECT = `
  */
 const PLATFORM_SCOPE = "platform" as const;
 
+/**
+ * Raw provider columns for the provisioning seed (#891).
+ *
+ * Every column is carried verbatim — including the credential references
+ * `providerRecord` collapses into `has_api_key` — because a seed is a COPY, and
+ * the tenant `provider_channels` table has the same columns to receive them.
+ */
+function seedProvider(row: ProviderRow): SeedProviderChannel {
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    base_url: row.base_url,
+    api_key_var: row.api_key_var,
+    byok_alias: row.byok_alias,
+    auth_scheme: row.auth_scheme,
+    region: row.region,
+    zero_data_retention: row.zero_data_retention,
+    openrouter_http_referer: row.openrouter_http_referer,
+    openrouter_x_title: row.openrouter_x_title,
+    cloudflare_ai_gateway_json: row.cloudflare_ai_gateway_json,
+    enabled: row.enabled,
+  };
+}
+
+/** Raw model columns for the provisioning seed (#891). */
+function seedModel(row: ModelRow): SeedCatalogModel {
+  return {
+    id: row.id,
+    name: row.name,
+    family: row.family,
+    owned_by: row.owned_by,
+    capabilities_json: row.capabilities_json,
+    context_window: row.context_window,
+    routing_strategy: row.routing_strategy,
+    enabled: row.enabled,
+  };
+}
+
+/**
+ * Raw offering columns for the provisioning seed (#891).
+ *
+ * The join-derived `provider_name` is dropped and the raw `provider_id` kept —
+ * the seed re-qualifies ids by tenant. The platform `source` column is dropped
+ * too: the seed writer forces `platform_seed` so a tenant edit stays
+ * distinguishable from an untouched seed row.
+ */
+function seedOffering(row: OfferingRow): SeedCatalogOffering {
+  return {
+    id: row.id,
+    model_id: row.model_id,
+    provider_id: row.provider_id,
+    upstream_model_id: row.upstream_model_id,
+    role: row.role,
+    priority: row.priority,
+    weight: row.weight,
+    canary_percent: row.canary_percent,
+    shadow_percent: row.shadow_percent,
+    shadow_max_requests: row.shadow_max_requests,
+    capabilities_json: row.capabilities_json,
+    context_window: row.context_window,
+    region: row.region,
+    zero_data_retention: row.zero_data_retention,
+    input_price_per_1m: row.input_price_per_1m,
+    output_price_per_1m: row.output_price_per_1m,
+    cached_input_price_per_1m: row.cached_input_price_per_1m,
+    cache_write_price_per_1m: row.cache_write_price_per_1m,
+    reasoning_price_per_1m: row.reasoning_price_per_1m,
+    audio_second_price_per_1m: row.audio_second_price_per_1m,
+    audio_character_price_per_1m: row.audio_character_price_per_1m,
+    currency: row.currency,
+    enabled: row.enabled,
+  };
+}
+
 function providerRecord(row: ProviderRow): CatalogRecord {
   return {
     id: row.id,
@@ -364,6 +445,44 @@ export class PlatformModelCatalogStore {
       return Number(row?.adopted ?? 0) === 1;
     } catch (error) {
       if (isMissingPlatformCatalogError(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * The full 3-entity graph as the tenant provisioning seed copies it (#891).
+   *
+   * Deliberately NOT the masked {@link providerRecord}/{@link offeringRecord}
+   * projections the admin surface returns: a seed is a verbatim COPY, so this
+   * carries the raw storage columns — `api_key_var`/`byok_alias` intact rather
+   * than a `has_api_key` boolean, every offering role and price rather than one
+   * primary per model. The `revision` is read in the same window so the caller
+   * can record WHICH platform catalog seeded a tenant.
+   *
+   * An absent catalog (migration `0025` not applied yet — the `d1_compat`
+   * window `isMissingPlatformCatalogError` describes) is an EMPTY graph, never a
+   * throw: the provisioner reads that as "not adopted" and seeds the compiled-in
+   * card, exactly as {@link isAdopted} returns `false` there.
+   */
+  async exportForSeed(): Promise<TenantModelCatalogSeedGraph> {
+    try {
+      const [providers, models, offerings] = await Promise.all([
+        this.#db
+          .prepare(`${PROVIDER_SELECT} ORDER BY created_at_unix ASC, id ASC`)
+          .all<ProviderRow>(),
+        this.#db.prepare(`${MODEL_SELECT} ORDER BY created_at_unix ASC, id ASC`).all<ModelRow>(),
+        this.#offeringRows(),
+      ]);
+      return {
+        revision: await this.#revision(),
+        providers: providers.results.map(seedProvider),
+        models: models.results.map(seedModel),
+        offerings: offerings.map(seedOffering),
+      };
+    } catch (error) {
+      if (isMissingPlatformCatalogError(error)) {
+        return { revision: 0, providers: [], models: [], offerings: [] };
+      }
       throw error;
     }
   }

@@ -301,6 +301,97 @@ export type StoredTenantModelCatalogEntry = Omit<
   readonly source: string;
 };
 
+/**
+ * One provider channel copied VERBATIM from the platform catalog (#889/#891).
+ *
+ * The columns are the raw storage columns, not the masked projection the admin
+ * surface returns: a seed is a copy, so `api_key_var`/`byok_alias` are carried
+ * across intact rather than collapsed into a `has_api_key` boolean. The `id` is
+ * the PLATFORM id; {@link seedTenantModelCatalogFromGraph} qualifies it with the
+ * tenant before writing, exactly as `0009`'s conversion qualified the legacy
+ * card's provider names.
+ */
+export interface SeedProviderChannel {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: string;
+  readonly base_url: string;
+  readonly api_key_var: string | null;
+  readonly byok_alias: string | null;
+  readonly auth_scheme: string | null;
+  readonly region: string | null;
+  readonly zero_data_retention: number | null;
+  readonly openrouter_http_referer: string | null;
+  readonly openrouter_x_title: string | null;
+  readonly cloudflare_ai_gateway_json: string | null;
+  readonly enabled: number;
+}
+
+/** One logical model copied verbatim from the platform catalog (#889/#891). */
+export interface SeedCatalogModel {
+  readonly id: string;
+  readonly name: string;
+  readonly family: string | null;
+  readonly owned_by: string | null;
+  readonly capabilities_json: string;
+  readonly context_window: number | null;
+  readonly routing_strategy: string;
+  readonly enabled: number;
+}
+
+/**
+ * One priced offering copied verbatim from the platform catalog (#889/#891).
+ *
+ * `model_id`/`provider_id` are PLATFORM ids and are re-qualified with the tenant
+ * on write. The platform `source` column is deliberately NOT carried: every
+ * seeded offering is written with {@link CATALOG_SOURCE_PLATFORM_SEED} so a
+ * tenant edit is later distinguishable from an untouched seed row regardless of
+ * how the platform operator labelled the source of the managed row.
+ */
+export interface SeedCatalogOffering {
+  readonly id: string;
+  readonly model_id: string;
+  readonly provider_id: string;
+  readonly upstream_model_id: string;
+  readonly role: string;
+  readonly priority: number;
+  readonly weight: number;
+  readonly canary_percent: number | null;
+  readonly shadow_percent: number | null;
+  readonly shadow_max_requests: number | null;
+  readonly capabilities_json: string | null;
+  readonly context_window: number | null;
+  readonly region: string | null;
+  readonly zero_data_retention: number | null;
+  readonly input_price_per_1m: number | null;
+  readonly output_price_per_1m: number | null;
+  readonly cached_input_price_per_1m: number | null;
+  readonly cache_write_price_per_1m: number | null;
+  readonly reasoning_price_per_1m: number | null;
+  readonly audio_second_price_per_1m: number | null;
+  readonly audio_character_price_per_1m: number | null;
+  readonly currency: string;
+  readonly enabled: number;
+}
+
+/**
+ * The full 3-entity platform catalog graph, as {@link seedTenantModelCatalogFromGraph}
+ * copies it into a new tenant (#891).
+ *
+ * The `revision` is the platform catalog's revision at read time; it is recorded
+ * in the seed mark's `detail` so an operator can tell WHICH platform catalog
+ * seeded a tenant. This type lives in `@ferrogate/storage` and is filled by the
+ * control plane's `PlatformModelCatalogStore.exportForSeed()` — the storage
+ * package never names a `platform_*` table itself, which keeps the Zero-D1 seam
+ * (#879) and the control/tenant table-family split intact.
+ */
+export interface TenantModelCatalogSeedGraph {
+  readonly providers: readonly SeedProviderChannel[];
+  readonly models: readonly SeedCatalogModel[];
+  readonly offerings: readonly SeedCatalogOffering[];
+  readonly revision: number;
+}
+
 /** What {@link seedTenantModelCatalog} did. */
 export interface TenantModelCatalogSeedOutcome {
   /** `false` when the mark was already present, i.e. this call was the no-op. */
@@ -355,7 +446,90 @@ export async function seedTenantModelCatalog(
   nowUnix: number,
   entries: readonly TenantModelCatalogEntry[] = DEFAULT_TENANT_MODEL_CATALOG,
 ): Promise<TenantModelCatalogSeedOutcome> {
+  // Refuse the empty seed BEFORE building any statement, so a caller that
+  // deliberately passes `[]` (a forced-incomplete provisioning) never prepares
+  // rows it will not write.
   if (entries.length === 0) {
+    throw StorageError.runtime(
+      "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
+    );
+  }
+  return applyCatalogSeed(
+    db,
+    tenantId,
+    nowUnix,
+    buildCardSeedBatch(db, tenantId, nowUnix, entries),
+  );
+}
+
+/**
+ * Seed one tenant's catalog from the managed platform catalog graph (#891).
+ *
+ * The full 3-entity graph is copied VERBATIM: real provider channels stay real
+ * (their `kind`/`base_url`/`api_key_var` are carried across, not collapsed to a
+ * `platform` indirection channel — that collapse is the FALLBACK card's shape,
+ * not the managed catalog's), every model and every offering role is preserved,
+ * and each offering keeps its own price. The only rewrites are the id
+ * qualifications every tenant-scoped row needs (a shared/legacy database can
+ * hold several tenants under one global primary key) and `source`, which is
+ * forced to {@link CATALOG_SOURCE_PLATFORM_SEED} so a later tenant edit is
+ * distinguishable from an untouched seed row.
+ *
+ * The seed-once mark machinery is SHARED with {@link seedTenantModelCatalog}:
+ * this is not a second seed path that could re-seed a tenant, it is the same
+ * gate with a different batch and a mark `detail` that records the platform
+ * revision and the row counts (never `entries=0`, so it can never be mistaken
+ * for the legacy empty-seed marker the repair path removes).
+ *
+ * @throws {@link StorageError} `runtime` if the graph has no offerings (the
+ *   caller is expected to fall back to the card for an empty platform catalog)
+ *   or if the batch comes back short.
+ */
+export async function seedTenantModelCatalogFromGraph(
+  db: D1Database,
+  tenantId: string,
+  nowUnix: number,
+  graph: TenantModelCatalogSeedGraph,
+): Promise<TenantModelCatalogSeedOutcome> {
+  // A graph with no offerings is the "empty platform catalog" the caller should
+  // have fallen back to the card for; refuse before building any statement.
+  if (graph.offerings.length === 0) {
+    throw StorageError.runtime(
+      "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
+    );
+  }
+  return applyCatalogSeed(db, tenantId, nowUnix, buildGraphSeedBatch(db, tenantId, nowUnix, graph));
+}
+
+/**
+ * The catalog rows one seed will INSERT, plus what its mark records.
+ *
+ * Both seed paths — the compiled-in card and the managed graph — reduce to one
+ * of these, so the mark-gate, the empty-seed repair, the claim/RETURNING race
+ * handling and the batch bookkeeping live in exactly one place
+ * ({@link applyCatalogSeed}) and cannot drift between the two.
+ */
+interface CatalogSeedBatch {
+  /** `tenant_provisioning_marks.detail`. NEVER `entries=0` — see the repair path. */
+  readonly markDetail: string;
+  /** The count the empty-seed guard rejects on. `0` refuses before any write. */
+  readonly entryCount: number;
+  readonly channelStatements: readonly D1PreparedStatement[];
+  readonly modelStatements: readonly D1PreparedStatement[];
+  readonly offeringStatements: readonly D1PreparedStatement[];
+}
+
+/**
+ * The shared seed core. See {@link seedTenantModelCatalog}'s docblock for the
+ * mark-before-batch reasoning; the only per-path input is the {@link CatalogSeedBatch}.
+ */
+async function applyCatalogSeed(
+  db: D1Database,
+  tenantId: string,
+  nowUnix: number,
+  batch: CatalogSeedBatch,
+): Promise<TenantModelCatalogSeedOutcome> {
+  if (batch.entryCount === 0) {
     throw StorageError.runtime(
       "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
     );
@@ -395,12 +569,7 @@ export async function seedTenantModelCatalog(
       "INSERT OR IGNORE INTO tenant_provisioning_marks " +
         "(tenant_id, mark, detail, applied_at_unix) VALUES (?, ?, ?, ?) RETURNING mark",
     )
-    .bind(tenantId, MODEL_CATALOG_SEED_MARK, `entries=${entries.length}`, nowUnix);
-
-  const providers = new Map<string, string>();
-  for (const entry of entries) {
-    providers.set(entry.provider, providerChannelId(tenantId, entry.provider));
-  }
+    .bind(tenantId, MODEL_CATALOG_SEED_MARK, batch.markDetail, nowUnix);
 
   const ensureRevision = db
     .prepare(
@@ -408,6 +577,56 @@ export async function seedTenantModelCatalog(
         "(tenant_id, id, revision, updated_at_unix) VALUES (?, 1, 1, ?)",
     )
     .bind(tenantId, nowUnix);
+
+  const results = await db.batch([
+    claim,
+    ensureRevision,
+    ...batch.channelStatements,
+    ...batch.modelStatements,
+    ...batch.offeringStatements,
+  ]);
+
+  const expectedResults =
+    2 +
+    batch.channelStatements.length +
+    batch.modelStatements.length +
+    batch.offeringStatements.length;
+  if (results.length !== expectedResults) {
+    throw StorageError.runtime(
+      `seeding the tenant model catalog expected ${expectedResults} statement results and ` +
+        `got ${results.length}; refusing to report a seed whose outcome cannot be read`,
+    );
+  }
+  const claimed = (results[0]?.results ?? []).length > 0;
+  if (!claimed) {
+    // Lost the race described in the docblock: another provisioner claimed the
+    // mark between this call's pre-read and its batch. Its rows are the same
+    // platform seed, so nothing was clobbered — but the WINNER's timestamp is
+    // the honest answer to "when", not this call's clock.
+    return {
+      seeded: false,
+      inserted: 0,
+      seededAtUnix: (await readSeedMark(db, tenantId)) ?? nowUnix,
+    };
+  }
+  const inserted = results
+    .slice(2 + batch.channelStatements.length + batch.modelStatements.length)
+    .reduce((total, result) => total + (result.meta?.changes ?? 0), 0);
+  return { seeded: true, inserted, seededAtUnix: nowUnix };
+}
+
+/** The compiled-in card as a seed batch: one `*`-provider channel per model. */
+function buildCardSeedBatch(
+  db: D1Database,
+  tenantId: string,
+  nowUnix: number,
+  entries: readonly TenantModelCatalogEntry[],
+): CatalogSeedBatch {
+  const providers = new Map<string, string>();
+  for (const entry of entries) {
+    providers.set(entry.provider, providerChannelId(tenantId, entry.provider));
+  }
+
   const ensureChannel = db.prepare(
     "INSERT OR IGNORE INTO provider_channels " +
       "(id, tenant_id, name, kind, base_url, created_at_unix, updated_at_unix) " +
@@ -467,38 +686,130 @@ export async function seedTenantModelCatalog(
     ),
   );
 
-  const results = await db.batch([
-    claim,
-    ensureRevision,
-    ...channelStatements,
-    ...modelStatements,
-    ...offeringStatements,
-  ]);
+  return {
+    markDetail: `entries=${entries.length}`,
+    entryCount: entries.length,
+    channelStatements,
+    modelStatements,
+    offeringStatements,
+  };
+}
 
-  const expectedResults =
-    2 + channelStatements.length + modelStatements.length + offeringStatements.length;
-  if (results.length !== expectedResults) {
-    throw StorageError.runtime(
-      `seeding the tenant model catalog expected ${expectedResults} statement results and ` +
-        `got ${results.length}; refusing to report a seed whose outcome cannot be read`,
-    );
-  }
-  const claimed = (results[0]?.results ?? []).length > 0;
-  if (!claimed) {
-    // Lost the race described in the docblock: another provisioner claimed the
-    // mark between this call's pre-read and its batch. Its rows are the same
-    // platform card, so nothing was clobbered — but the WINNER's timestamp is
-    // the honest answer to "when", not this call's clock.
-    return {
-      seeded: false,
-      inserted: 0,
-      seededAtUnix: (await readSeedMark(db, tenantId)) ?? nowUnix,
-    };
-  }
-  const inserted = results
-    .slice(2 + channelStatements.length + modelStatements.length)
-    .reduce((total, result) => total + (result.meta?.changes ?? 0), 0);
-  return { seeded: true, inserted, seededAtUnix: nowUnix };
+/** `${tenantId}:offering:${platformOfferingId}` — the tenant-qualified offering id. */
+function catalogOfferingIdFor(tenantId: string, offeringId: string): string {
+  return `${tenantId}:offering:${offeringId}`;
+}
+
+/**
+ * The managed platform graph as a seed batch: real channels stay real, every
+ * role and price is preserved, ids are tenant-qualified, `source` is forced.
+ */
+function buildGraphSeedBatch(
+  db: D1Database,
+  tenantId: string,
+  nowUnix: number,
+  graph: TenantModelCatalogSeedGraph,
+): CatalogSeedBatch {
+  const ensureChannel = db.prepare(
+    "INSERT OR IGNORE INTO provider_channels " +
+      "(id, tenant_id, name, kind, base_url, api_key_var, byok_alias, auth_scheme, region, " +
+      "zero_data_retention, openrouter_http_referer, openrouter_x_title, " +
+      "cloudflare_ai_gateway_json, enabled, created_at_unix, updated_at_unix) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const ensureModel = db.prepare(
+    "INSERT OR IGNORE INTO catalog_models " +
+      "(id, tenant_id, name, family, owned_by, capabilities_json, context_window, " +
+      "routing_strategy, enabled, created_at_unix, updated_at_unix) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const ensureOffering = db.prepare(
+    "INSERT OR IGNORE INTO catalog_model_offerings " +
+      "(id, tenant_id, model_id, provider_id, upstream_model_id, role, priority, weight, " +
+      "canary_percent, shadow_percent, shadow_max_requests, capabilities_json, context_window, " +
+      "region, zero_data_retention, input_price_per_1m, output_price_per_1m, " +
+      "cached_input_price_per_1m, cache_write_price_per_1m, reasoning_price_per_1m, " +
+      "audio_second_price_per_1m, audio_character_price_per_1m, currency, source, enabled, " +
+      "created_at_unix, updated_at_unix) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+
+  const channelStatements = graph.providers.map((provider) =>
+    ensureChannel.bind(
+      providerChannelId(tenantId, provider.id),
+      tenantId,
+      provider.name,
+      provider.kind,
+      provider.base_url,
+      provider.api_key_var,
+      provider.byok_alias,
+      provider.auth_scheme,
+      provider.region,
+      provider.zero_data_retention,
+      provider.openrouter_http_referer,
+      provider.openrouter_x_title,
+      provider.cloudflare_ai_gateway_json,
+      provider.enabled,
+      nowUnix,
+      nowUnix,
+    ),
+  );
+  const modelStatements = graph.models.map((model) =>
+    ensureModel.bind(
+      catalogModelId(tenantId, model.id),
+      tenantId,
+      model.name,
+      model.family,
+      model.owned_by,
+      model.capabilities_json,
+      model.context_window,
+      model.routing_strategy,
+      model.enabled,
+      nowUnix,
+      nowUnix,
+    ),
+  );
+  const offeringStatements = graph.offerings.map((offering) =>
+    ensureOffering.bind(
+      catalogOfferingIdFor(tenantId, offering.id),
+      tenantId,
+      catalogModelId(tenantId, offering.model_id),
+      providerChannelId(tenantId, offering.provider_id),
+      offering.upstream_model_id,
+      offering.role,
+      offering.priority,
+      offering.weight,
+      offering.canary_percent,
+      offering.shadow_percent,
+      offering.shadow_max_requests,
+      offering.capabilities_json,
+      offering.context_window,
+      offering.region,
+      offering.zero_data_retention,
+      offering.input_price_per_1m,
+      offering.output_price_per_1m,
+      offering.cached_input_price_per_1m,
+      offering.cache_write_price_per_1m,
+      offering.reasoning_price_per_1m,
+      offering.audio_second_price_per_1m,
+      offering.audio_character_price_per_1m,
+      offering.currency,
+      CATALOG_SOURCE_PLATFORM_SEED,
+      offering.enabled,
+      nowUnix,
+      nowUnix,
+    ),
+  );
+
+  return {
+    markDetail:
+      `revision=${graph.revision};providers=${graph.providers.length};` +
+      `models=${graph.models.length};offerings=${graph.offerings.length}`,
+    entryCount: graph.offerings.length,
+    channelStatements,
+    modelStatements,
+    offeringStatements,
+  };
 }
 
 /** When the catalog seed ran for this tenant, or `undefined` if it never has. */

@@ -300,6 +300,139 @@ describe("POST /v1/admin/register (console self-service)", () => {
   });
 });
 
+/**
+ * #891: with the managed platform catalog adopted, a new tenant is seeded from
+ * the platform graph rather than the compiled-in card.
+ *
+ * The platform rows are written with RAW SQL into `env.DB` — the same handle the
+ * `d1_compat` CONTROL_DATA facade the Worker resolves reads — because a fixture
+ * built with `PlatformModelCatalogStore` (the code under test) could not show
+ * that provisioning reads what is actually in the table. The assertions below
+ * are platform-SPECIFIC on purpose: a real `openai` channel, `source =
+ * platform_seed`, and a mark detail carrying the revision — none of which the
+ * DEFAULT card produces, so a silent fallback fails rather than passes.
+ */
+async function seedPlatformCatalog(revision: number): Promise<void> {
+  await db().batch([
+    db().prepare(
+      "INSERT INTO platform_provider_channels " +
+        "(id, name, kind, base_url, api_key_var, enabled, created_at_unix, updated_at_unix) " +
+        "VALUES ('p-openai', 'OpenAI', 'openai', 'https://api.openai.com/v1', 'OPENAI_API_KEY', 1, 1, 1)",
+    ),
+    db().prepare(
+      "INSERT INTO platform_catalog_models " +
+        "(id, name, capabilities_json, routing_strategy, enabled, created_at_unix, updated_at_unix) " +
+        "VALUES ('m-4o', 'gpt-4o', '[]', 'priority', 1, 1, 1)",
+    ),
+    // `source = 'admin'` here proves the seed FORCES 'platform_seed' on the copy
+    // rather than carrying the platform label across.
+    db().prepare(
+      "INSERT INTO platform_catalog_offerings " +
+        "(id, model_id, provider_id, upstream_model_id, role, priority, weight, " +
+        "input_price_per_1m, output_price_per_1m, currency, source, enabled, " +
+        "created_at_unix, updated_at_unix) " +
+        "VALUES ('o-4o', 'm-4o', 'p-openai', 'gpt-4o', 'primary', 0, 1, 2.5, 10.0, 'USD', 'admin', 1, 1, 1)",
+    ),
+    db()
+      .prepare(
+        "INSERT INTO platform_catalog_revisions (id, revision, updated_at_unix) VALUES (1, ?, 1)",
+      )
+      .bind(revision),
+  ]);
+}
+
+async function assertSeededFromPlatform(tenantId: string, revision: number): Promise<void> {
+  const handle = await router().forTenant(tenantId);
+
+  // A real `openai` channel with its base_url carried across — not the card's
+  // `platform`-kind indirection channel.
+  const channel = await handle.db
+    .prepare("SELECT kind, base_url FROM provider_channels WHERE tenant_id = ? AND kind = 'openai'")
+    .bind(tenantId)
+    .first<{ kind: string; base_url: string }>();
+  expect(channel?.base_url).toBe("https://api.openai.com/v1");
+
+  // The copied graph, not the 16-entry card.
+  const catalog = await listTenantModelCatalog(handle.db, tenantId);
+  expect(catalog).toHaveLength(1);
+  expect(catalog.length).not.toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
+
+  const model = await resolveTenantModel(handle.db, tenantId, "gpt-4o");
+  expect(model?.inputPricePer1m).toBe(2.5);
+  expect(model?.provider).toBe("OpenAI");
+  expect(model?.source).toBe("platform_seed");
+
+  // The mark records WHICH platform catalog seeded the tenant.
+  const mark = await handle.db
+    .prepare(
+      "SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = 'model_catalog_seed'",
+    )
+    .bind(tenantId)
+    .first<{ detail: string }>();
+  expect(mark?.detail).toBe(`revision=${revision};providers=1;models=1;offerings=1`);
+}
+
+describe("seeding from the platform catalog (#891)", () => {
+  it("POST /admin/v1/tenant-accounts seeds the platform graph, not the card", async () => {
+    await seedPlatformCatalog(5);
+    const tenantId = freshTenantId("platformcrud");
+
+    const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: tenantId, name: "Platformy", slug: `platformy-${tenantId}` }),
+    });
+    expect(created.status).toBe(201);
+
+    await assertSeededFromPlatform(tenantId, 5);
+  });
+
+  it("the self-service register path also seeds the platform graph", async () => {
+    await seedPlatformCatalog(9);
+
+    const response = await consoleApp.request(
+      `${BASE}/v1/admin/register`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "platform-founder@example.test",
+          password: "correct horse battery",
+          organization_name: "Platform Self Service Co",
+        }),
+      },
+      env,
+    );
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { tenant: { id: string } };
+
+    await assertSeededFromPlatform(body.tenant.id, 9);
+  });
+
+  it("with ZERO platform rows the legacy card seed still runs (pinned)", async () => {
+    // No `seedPlatformCatalog` — `resetD1` left the platform tables empty, so
+    // this is the bootstrap fallback and it must be the 16-entry card.
+    const tenantId = freshTenantId("nocatalog");
+    const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: tenantId, name: "Cardy", slug: `cardy-${tenantId}` }),
+    });
+    expect(created.status).toBe(201);
+
+    const handle = await router().forTenant(tenantId);
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
+      DEFAULT_TENANT_MODEL_CATALOG.length,
+    );
+    // The card's `platform`-kind indirection channel, never a real `openai` one.
+    const platformChannel = await handle.db
+      .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'platform'")
+      .bind(tenantId)
+      .first<{ kind: string }>();
+    expect(platformChannel?.kind).toBe("platform");
+  });
+});
+
 describe("junk objects", () => {
   it("an id with no tenants row gets NO state row — nothing addresses its object", async () => {
     // First touch is the provisioning event, so a typo or a probe would create a
