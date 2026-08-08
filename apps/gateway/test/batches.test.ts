@@ -221,6 +221,21 @@ describe("OpenAI-compatible batch lifecycle", () => {
     expect(rejectedEndpoint.status).toBe(400);
     expect(await errorCode(rejectedEndpoint)).toBe("invalid_request");
 
+    // #698 slice 2 narrowed the set: the executor has no legacy completions
+    // operation, so a batch it could never run is refused at creation instead
+    // of sitting at `validating` until its 24-hour window expires.
+    const legacyCompletions = await fixture.call("/v1/batches", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        input_file_id: inputFileId,
+        endpoint: "/v1/completions",
+        completion_window: "24h",
+      }),
+    });
+    expect(legacyCompletions.status).toBe(400);
+    expect(await errorCode(legacyCompletions)).toBe("invalid_request");
+
     const rejectedWindow = await fixture.call("/v1/batches", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -247,7 +262,7 @@ describe("batch tenant isolation", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         input_file_id: inputFileId,
-        endpoint: "/v1/completions",
+        endpoint: "/v1/chat/completions",
         completion_window: "24h",
       }),
     });
