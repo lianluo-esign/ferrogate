@@ -483,6 +483,24 @@ export const NO_ROUTING_QUALITY: RoutingQualityPort = {
  * remove the leg that would have served the request. A ladder whose legs ALL
  * lag is returned untouched: "everything is behind everything" is not an
  * ordering, and demoting the whole list would only cost the sort.
+ *
+ * ## The CANARY is exempt, and that is not a loophole
+ *
+ * `candidates.ts::applyCanary` puts the canary at the HEAD of the list for the
+ * sticky subset of callers it selected, and that head position survives
+ * `orderByPriorityRotation` because the canary is alone in its priority group.
+ * A quality partition with no exemption would move it straight to the tail for
+ * every one of those callers, so an operator-declared `canary_percent = 10`
+ * would silently divert 0% — and it could not recover, because a leg that stops
+ * being served stops accumulating scores. Worse, the thing the operator is
+ * running the canary to FIND OUT is exactly whether the new route is worse; a
+ * router that answers the question by cancelling the experiment has destroyed
+ * the evidence rather than acted on it.
+ *
+ * So a route carrying `canaryPercent` keeps whatever position the strategy gave
+ * it. The signal is not discarded — the leg aggregate still records it and
+ * `evals/regression.ts` still alerts on it — it just does not get to turn an
+ * operator's declared rollout off without the operator.
  */
 function demoteLaggingLegs(
   ordered: readonly PhysicalRoute[],
@@ -492,7 +510,7 @@ function demoteLaggingLegs(
   const lagging: PhysicalRoute[] = [];
   const kept: PhysicalRoute[] = [];
   for (const route of ordered) {
-    if (quality.lags(route)) lagging.push(route);
+    if (route.canaryPercent === undefined && quality.lags(route)) lagging.push(route);
     else kept.push(route);
   }
   if (lagging.length === 0 || kept.length === 0) return ordered;

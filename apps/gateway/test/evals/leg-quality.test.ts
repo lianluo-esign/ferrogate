@@ -33,16 +33,22 @@ import {
   type OnlineEvalPolicySource,
   cachedOnlineEvalLegQualitySource,
   d1OnlineEvalLegQualitySource,
+  legQualityKey,
   legQualityVerdicts,
   onlineEvalLegAggregates,
   onlineEvalScoreProjectionBindings,
   readOnlineEvalLegQuality,
   refreshOnlineEvalLegQuality,
+  routingQualityPortFor,
   routingQualityPortFrom,
+  sweepAllOnlineEvalRegressions,
   writeOnlineEvalLegQuality,
 } from "../../src/evals/index.js";
 import type { PhysicalRoute } from "../../src/inference/ports.js";
-import { orderCandidatesByStrategy } from "../../src/inference/strategy.js";
+import {
+  NO_ROUTING_QUALITY,
+  orderCandidatesByStrategy,
+} from "../../src/inference/strategy.js";
 import { controlDb, resetOnlineEvalTables } from "./harness.js";
 
 const TENANT = "tenant_a";
@@ -51,6 +57,14 @@ const POLICY = {
   regressionDrop: DEFAULT_REGRESSION_DROP,
   regressionMinSamples: DEFAULT_REGRESSION_MIN_SAMPLES,
 };
+
+/** The `GATEWAY_ONLINE_EVAL_POLICIES` wire row for {@link TENANT}. */
+const OPT_IN_ROW = {
+  enabled: true,
+  sample_rate: 1,
+  judge_model: "judge-model",
+  criteria: [{ id: "grounded", definition: "grounded?" }],
+} as const;
 
 function aggregate(overrides: Partial<OnlineEvalLegAggregate> = {}): OnlineEvalLegAggregate {
   return {
@@ -74,6 +88,8 @@ async function seedLeg(input: {
   readonly score: number;
   readonly atUnix?: number;
   readonly criterionId?: string;
+  /** `undefined` = the SERVED arm; `"coverage"` / `"shadow"` are the mirrors. */
+  readonly arm?: string;
 }): Promise<void> {
   const db = controlDb();
   const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
@@ -91,6 +107,7 @@ async function seedLeg(input: {
           provider: input.provider,
           logicalModel: "split-model",
           providerModel: input.providerModel,
+          ...(input.arm === undefined ? {} : { experimentArm: input.arm }),
           samplingKey: `fg-${input.provider}-${index}`,
           samplingUnit: "request",
           sampleRate: 1,
@@ -101,6 +118,15 @@ async function seedLeg(input: {
       ),
     ),
   );
+}
+
+/** `legQualityKey`'s spelling, so a test never hand-rolls the NUL separator. */
+function key(
+  provider: string,
+  providerModel = "gpt-4o-mini",
+  logicalModel = "split-model",
+): string {
+  return legQualityKey(logicalModel, provider, providerModel);
 }
 
 async function storedLegQuality(): Promise<Record<string, unknown>[]> {
@@ -200,27 +226,147 @@ describe("the per-leg aggregate, against the real schema", () => {
     expect(rows[0]?.["score_total"]).toBeCloseTo(18, 6);
   });
 
-  it("prunes a cell whose scores have all aged out", async () => {
+  it("prunes a cell whose scores have all aged out, beside a live one", async () => {
     await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
     await writeOnlineEvalLegQuality(
       controlDb(),
+      TENANT,
       await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX),
       NOW_UNIX,
     );
     expect(await storedLegQuality()).toHaveLength(1);
 
     // A week later the scores are outside the window, so the recompute produces
-    // nothing — and the stale cell must go rather than steer the router for ever
-    // on a number nobody can reproduce.
+    // nothing for `openai-main` — and the stale cell must go rather than steer
+    // the router for ever on a number nobody can reproduce.
     const later = NOW_UNIX + LEG_QUALITY_WINDOW_SECONDS + 10;
     await writeOnlineEvalLegQuality(
       controlDb(),
-      // One live cell for a DIFFERENT leg, so the batch is non-empty and the
-      // prune actually runs.
+      TENANT,
       [aggregate({ provider: "azure-eu" })],
       later,
     );
     expect((await storedLegQuality()).map((row) => row["provider"])).toEqual(["azure-eu"]);
+  });
+
+  it("prunes the LAST cell when the tenant's whole aggregate ages out", async () => {
+    // THE CASE THE TEST ABOVE CANNOT REACH, and the one that matters most: a
+    // tenant who turned evaluation off or went quiet. The recompute is EMPTY,
+    // so a prune appended only `if (aggregates.length > 0)` never runs and the
+    // last value the leg ever had keeps its `lagging` verdict for ever —
+    // `d1OnlineEvalLegQualitySource` would serve it to the router indefinitely,
+    // and `sweepAllOnlineEvalRegressions` cannot recover it because
+    // `ONLINE_EVAL_ACTIVE_TENANTS_SQL` only returns tenants that HAVE scores in
+    // the window, i.e. precisely not this one.
+    await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
+    const refresh = (atUnix: number): Promise<number> =>
+      refreshOnlineEvalLegQuality(
+        {},
+        TENANT,
+        atUnix,
+        () => controlDb() as never,
+        () => undefined,
+      );
+    expect(await refresh(NOW_UNIX)).toBe(1);
+    expect(await storedLegQuality()).toHaveLength(1);
+
+    const later = NOW_UNIX + LEG_QUALITY_WINDOW_SECONDS + 10;
+    expect(await onlineEvalLegAggregates(controlDb(), TENANT, later)).toEqual([]);
+    expect(await refresh(later)).toBe(0);
+    expect(await storedLegQuality()).toEqual([]);
+  });
+
+  it("prunes only the refreshing tenant's cells", async () => {
+    // ANTI-VACUITY for the unconditional prune: it is bound to the tenant being
+    // refreshed, so an empty recompute for one tenant may not wipe another's.
+    await writeOnlineEvalLegQuality(controlDb(), TENANT, [aggregate()], NOW_UNIX);
+    await writeOnlineEvalLegQuality(
+      controlDb(),
+      "tenant_b",
+      [aggregate({ tenantId: "tenant_b", provider: "azure-eu" })],
+      NOW_UNIX,
+    );
+    expect(await storedLegQuality()).toHaveLength(2);
+
+    const later = NOW_UNIX + LEG_QUALITY_WINDOW_SECONDS + 10;
+    await writeOnlineEvalLegQuality(controlDb(), TENANT, [], later);
+    expect(await readOnlineEvalLegQuality(controlDb(), TENANT)).toEqual([]);
+    expect(await readOnlineEvalLegQuality(controlDb(), "tenant_b")).toHaveLength(1);
+  });
+
+  it("keeps a COVERAGE score in the ladder aggregate and drops a SHADOW one", async () => {
+    // `servableCandidates` strips every `shadowPercent` route from the ladder,
+    // so an experiment's shadow provider can never serve — but
+    // `shadowArmSampleFrom` files its score under the SAME `logical_model`. If
+    // it were aggregated it could DEFINE the `best` bar and demote a servable
+    // sibling on a gap the tenant's own `regressionDrop` says is not real.
+    // Coverage is the opposite: a covered leg IS a servable candidate.
+    await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
+    await seedLeg({
+      provider: "azure-eu",
+      providerModel: "gpt-4o-mini",
+      count: 20,
+      score: 0.85,
+      arm: "coverage",
+    });
+    await seedLeg({
+      provider: "anthropic-us",
+      providerModel: "claude",
+      count: 20,
+      score: 1,
+      arm: "shadow",
+    });
+
+    const rows = await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX);
+    expect(rows.map((row) => row.provider).sort()).toEqual(["azure-eu", "openai-main"]);
+
+    // The consequence the exclusion exists for. Best ROUTABLE leg is 0.90, so
+    // `azure-eu`'s 0.85 is a 0.05 gap — inside the tenant's 0.10 threshold.
+    const verdicts = legQualityVerdicts(rows, POLICY);
+    expect(verdicts.get(key("azure-eu"))).toEqual({ kind: "comparable", scoreCount: 20 });
+    // ANTI-VACUITY: the SAME comparator, handed the unroutable shadow cell as
+    // well, DOES demote it (1.00 - 0.85 >= 0.10) — so the `comparable` above is
+    // the SQL filter doing its job, not a comparator that cannot say `lagging`.
+    const withShadow = legQualityVerdicts(
+      [
+        ...rows,
+        // 1.00 against azure-eu's 0.85 — a 0.15 gap, clear of the 0.10
+        // threshold and of float noise in the SQL-computed SUM.
+        aggregate({
+          provider: "anthropic-us",
+          providerModel: "claude",
+          scoreTotal: 20,
+          scoreCount: 20,
+        }),
+      ],
+      POLICY,
+    );
+    expect(withShadow.get(key("azure-eu"))).toMatchObject({
+      kind: "lagging",
+      bestProvider: "anthropic-us",
+    });
+  });
+
+  it("is populated by the CRON sweep, not only by a direct call", async () => {
+    // The off-request-path hook `regression.ts::sweepAllOnlineEvalRegressions`
+    // makes on every tick. Without it, a tenant whose queue batches have gone
+    // quiet keeps whatever the projection last held, and every deployment where
+    // the consumer hook regressed would still look green.
+    await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
+    await seedLeg({ provider: "azure-eu", providerModel: "gpt-4o-mini", count: 20, score: 0.5 });
+    expect(await storedLegQuality()).toEqual([]);
+
+    await sweepAllOnlineEvalRegressions(
+      { GATEWAY_ONLINE_EVAL_POLICIES: JSON.stringify([{ tenant_id: TENANT, ...OPT_IN_ROW }]) },
+      NOW_UNIX,
+      () => controlDb() as never,
+      () => controlDb() as never,
+    );
+
+    const rows = await storedLegQuality();
+    expect(rows.map((row) => row["provider"])).toEqual(["azure-eu", "openai-main"]);
+    // And it is the ROUTER-readable projection, under this tenant.
+    expect(await readOnlineEvalLegQuality(controlDb(), TENANT)).toHaveLength(2);
   });
 
   it("refuses to aggregate the shared table when the tenant object is absent", async () => {
@@ -511,6 +657,19 @@ describe("the routing hot path reads the memo and nothing else", () => {
     // be able to remove the leg that would have served the request.
     expect(ordered).toHaveLength(2);
     expect(new Set(ordered.map((r) => r.provider))).toEqual(new Set(["a", "b"]));
+  });
+
+  it("gives a deployment with no evaluation storage the named empty port", () => {
+    // `NO_ROUTING_QUALITY` is the one value `defaults.ts` can hand the router
+    // when nothing durable is bound, and naming it is only worth anything if
+    // something reaches it: an unconfigured env must resolve to it BY IDENTITY,
+    // and it must answer "no quality input" rather than "every leg is fine".
+    expect(routingQualityPortFor({} as never)).toBe(NO_ROUTING_QUALITY);
+    expect(NO_ROUTING_QUALITY.ladderQuality(TENANT, "split-model")).toBeUndefined();
+    // ANTI-VACUITY: a CONFIGURED env does not get it.
+    expect(routingQualityPortFor({ CONTROL_DB: controlDb() } as never)).not.toBe(
+      NO_ROUTING_QUALITY,
+    );
   });
 
   it("asks the port synchronously and never awaits storage", () => {

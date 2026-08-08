@@ -274,7 +274,8 @@ export function shadowArmSampleFrom(
  *
  * DISTINCT from {@link SHADOW_EVAL_ARM} on purpose. `shadow` means "the mirror
  * an EXPERIMENT declared", and the experiment reporting surface
- * (`admin_experiment.ts::QUALITY_AGGREGATE_SQL`) groups on `experiment_arm` — so
+ * (`apps/control-plane/src/routes/admin_experiment.ts::QUALITY_AGGREGATE_SQL`,
+ * which groups on `experiment_arm`) — so
  * filing coverage under `shadow` would make a phantom third population appear
  * inside a real experiment's comparison. A coverage row carries no experiment at
  * all: it is a measurement of a ROUTING candidate, read by

@@ -38,12 +38,13 @@
  * plane down.
  */
 import type { PhysicalRoute } from "../inference/ports.js";
+import { NO_ROUTING_QUALITY } from "../inference/strategy.js";
 import type { RoutingQuality, RoutingQualityPort } from "../inference/strategy.js";
 import { type OnlineEvalScoreDatabase, onlineEvalDatabaseFrom } from "./d1.js";
 import {
   type LegQualityVerdict,
-  type OnlineEvalLegAggregate,
   NO_LEG_QUALITY_SIGNAL,
+  type OnlineEvalLegAggregate,
   legQualityKey,
   legQualityVerdicts,
   readOnlineEvalLegQuality,
@@ -238,9 +239,20 @@ export function routingQualityPortFrom(source: OnlineEvalLegQualitySource): Rout
   };
 }
 
-/** `defaults.ts`'s env-resolved default. */
+/**
+ * `defaults.ts`'s env-resolved default.
+ *
+ * A deployment with no evaluation storage gets {@link NO_ROUTING_QUALITY} by
+ * IDENTITY rather than a port wrapped around {@link NO_ONLINE_EVAL_LEG_QUALITY}.
+ * The two are behaviourally identical for the router (both leave every ladder in
+ * the strategy's order), and the point of naming the unconfigured case is that
+ * `deps.routingQuality === NO_ROUTING_QUALITY` is a thing a test can assert —
+ * which is not true of an anonymous closure over an empty snapshot.
+ */
 export function routingQualityPortFor(env: OnlineEvalBindings): RoutingQualityPort {
-  return routingQualityPortFrom(onlineEvalLegQualitySourceFromEnv(env));
+  const source = onlineEvalLegQualitySourceFromEnv(env);
+  if (source === NO_ONLINE_EVAL_LEG_QUALITY) return NO_ROUTING_QUALITY;
+  return routingQualityPortFrom(source);
 }
 
 /** Warm one tenant's snapshot. Called from the DEFERRED half of the sampler. */

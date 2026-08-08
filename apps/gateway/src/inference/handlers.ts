@@ -49,6 +49,11 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import type { z } from "zod";
+// #894 — the module path, not `../evals/index.js`: the evals barrel re-exports
+// the queue consumer, which imports this app's inference wiring, and the barrel
+// would close that into a cycle. `defaults.ts` imports `quality-source.js` the
+// same way and for the same reason.
+import { coverageLegId } from "../evals/shadow-leg.js";
 import {
   type ExperimentAssignment,
   experimentAssignmentFor,
@@ -127,8 +132,8 @@ import {
 import type { EstimatedUsage } from "./estimate.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
 import type {
-  InferenceLogFacts,
   InferenceCoverageEvalLeg,
+  InferenceLogFacts,
   InferenceShadowEvalLeg,
   TokenAdmissionHandle,
   TokenGovernor,
@@ -957,14 +962,24 @@ function withCoverageObservation(
     body: planned.coverageInput.body,
     coveragePercent: c.get("inferenceCoveragePercent"),
     residencyPolicy: planned.coverageInput.residencyPolicy,
+    // PER REQUEST, not per caller — `shadow.ts::coverageMirrorFor` states why a
+    // sticky coverage bucket makes the comparator read a population difference
+    // as a provider difference.
+    samplingKey: c.get("requestId"),
   });
   if (mirror === null) return null;
 
-  // DERIVED once, here, and carrying the covered candidate's identity: two
-  // coverage legs on one request would otherwise collide on the score table's
+  // DERIVED once, here, THROUGH the named constructor: two coverage legs on one
+  // request would otherwise collide on the score table's
   // `(request_id, criterion_id)` key and the second candidate would silently
-  // read as unmeasured. See `evals/shadow-leg.ts::CoverageEvalLeg`.
-  const legId = `${c.get("requestId")}~coverage~${mirror.route.provider}:${mirror.route.providerModel}`;
+  // read as unmeasured. Inlining the template literal here left
+  // `evals/shadow-leg.ts::coverageLegId` — the thing a future reader finds and
+  // edits — with no callers and the format with two definitions.
+  const legId = coverageLegId(
+    c.get("requestId"),
+    mirror.route.provider,
+    mirror.route.providerModel,
+  );
   let settle: ((body: string | undefined) => void) | undefined;
   const body = new Promise<string | undefined>((resolve) => {
     settle = resolve;

@@ -97,6 +97,33 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
     expect(await d1OnlineEvalPolicySource(db).policyFor("tenant_a")).toMatchObject({ ok: false });
   });
 
+  it("refuses an out-of-range coverage percent rather than clamping it", async () => {
+    // #894 — VALIDATED, not clamped. `500` is a typo, and reading it silently
+    // as "always" would mirror every sampled request to a second provider and
+    // bill the tenant for it. A refusal reads as `ok: false`, which the sampler
+    // treats as "sample nothing" — the safe direction for both controls.
+    for (const bad of [500, -1, 100.5]) {
+      const { db } = fakeDb({
+        tenant_a: { ...ENABLED_ROW, online_eval_coverage_percent: bad },
+      });
+      expect(
+        await d1OnlineEvalPolicySource(db).policyFor("tenant_a"),
+        `coverage_percent ${bad} must be refused`,
+      ).toMatchObject({ ok: false });
+    }
+    // ANTI-VACUITY: the boundary values are ACCEPTED, so the refusals above are
+    // the range check and not a row shape the parser rejects for another reason.
+    for (const good of [0, 100, 5]) {
+      const { db } = fakeDb({
+        tenant_a: { ...ENABLED_ROW, online_eval_coverage_percent: good },
+      });
+      expect(await d1OnlineEvalPolicySource(db).policyFor("tenant_a")).toMatchObject({
+        ok: true,
+        policy: { coveragePercent: good },
+      });
+    }
+  });
+
   it("refuses a row that opted in and then said nothing usable", async () => {
     const { db } = fakeDb({
       tenant_a: { online_eval_enabled: 1, online_eval_criteria_json: "not json" },

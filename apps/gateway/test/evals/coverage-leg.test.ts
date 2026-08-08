@@ -31,14 +31,25 @@
  * | `shadow.ts::coverageMirrorFor`: BOTH the `coveragePercent > 0` guard removed AND `shadowSampled(…, 100)` | `spends nothing for a tenant that did not ask for coverage` |
  *
  * The last row is deliberate: the money guarantee is held by TWO independent
- * guards (the explicit zero check and the sticky sampler, which never selects at
- * 0%), so removing either one alone leaves the test green. That is belt and
- * braces on the one behaviour in this slice that spends the tenant's money, not
- * a vacuous assertion — removing both together turns it red.
+ * guards (the explicit zero check and the per-request sampler, which never
+ * selects at 0%), so removing either one alone leaves the test green. That is
+ * belt and braces on the one behaviour in this slice that spends the tenant's
+ * money, not a vacuous assertion — removing both together turns it red.
+ *
+ * The selector's own refusals — the credential's provider allowlist, the
+ * residency re-check, the budget key and the rotation — are held by
+ * `test/inference/coverage-mirror.test.ts`, which can build the ladders this
+ * end-to-end harness cannot.
  */
 import { createExecutionContext, env as poolEnv, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { onlineEvalLegAggregates } from "../../src/evals/index.js";
+import type { OnlineEvalSample } from "../../src/evals/index.js";
+import {
+  coverageArmSampleFrom,
+  onlineEvalLegAggregates,
+  readOnlineEvalLegQuality,
+  shadowArmSampleFrom,
+} from "../../src/evals/index.js";
 import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
@@ -336,6 +347,67 @@ describe("candidate coverage buys a score for a leg that never served", () => {
     );
     expect(aggregates.map((row) => row.provider).sort()).toEqual(["azure-eu", "openai-main"]);
     expect(new Set(aggregates.map((row) => row.logicalModel))).toEqual(new Set(["ladder-model"]));
+
+    // THE CONSUMER HOOK. `consumeOnlineEvalBatch` PROJECTS the aggregate after
+    // the scores are durable, and this is the only place that call is driven
+    // from the deployed entry point. Without it the table stays empty in every
+    // deployment, every leg reads `no_signal`, and the whole slice is a no-op
+    // with a green suite — so this reads the PROJECTION, not the recompute.
+    const projected = await readOnlineEvalLegQuality(controlDb(), "tenant_optin");
+    expect(projected.map((row) => row.provider).sort()).toEqual(["azure-eu", "openai-main"]);
+    expect(projected.every((row) => row.scoreCount > 0)).toBe(true);
+  });
+
+  it("files the coverage sample under NO experiment, even inside a real one", async () => {
+    // ANTI-VACUITY for the `experiment_id` assertion above, which passes in that
+    // test whether or not the code drops the field: its served sample carries no
+    // experiment, so `undefined` is trivially true. Here the SERVED sample does
+    // carry one, so the assertion can only pass if `coverageArmSampleFrom`
+    // actually strips it — the defect its docblock names (a coverage row read by
+    // the experiment comparator as a phantom third arm).
+    const served: OnlineEvalSample = {
+      requestId: "fg-served",
+      tenantId: "tenant_optin",
+      prompt: "what is the capital of France?",
+      completion: PRIMARY_ANSWER,
+      judgeModel: "judge-model",
+      criteria: CRITERIA,
+      samplingKey: "fg-served",
+      samplingUnit: "request" as const,
+      sampleRate: 1,
+      promptTruncated: false,
+      completionTruncated: false,
+      sampledAtUnix: 1_800_000_000,
+      provider: "openai-main",
+      logicalModel: "ladder-model",
+      providerModel: "gpt-4o-mini-2024-07-18",
+      experimentId: "exp_live",
+      experimentArm: "control",
+    };
+    const leg = {
+      legId: "fg-served~coverage~azure-eu:gpt-4o-mini-azure",
+      logicalModel: "ladder-model",
+      provider: "azure-eu",
+      providerModel: "gpt-4o-mini-azure",
+      body: Promise.resolve(undefined),
+    };
+    const body = JSON.stringify({
+      choices: [{ index: 0, message: { role: "assistant", content: FALLBACK_ANSWER } }],
+    });
+
+    const sample = coverageArmSampleFrom(served, leg, body);
+    expect(sample).toBeDefined();
+    expect(sample?.experimentId).toBeUndefined();
+    expect(Object.hasOwn(sample as object, "experimentId")).toBe(false);
+    expect(sample?.experimentArm).toBe("coverage");
+    expect(sample?.provider).toBe("azure-eu");
+    // ANTI-VACUITY for THIS test: the shadow constructor over the same served
+    // sample DOES carry an experiment id, so the `undefined` above is the
+    // coverage constructor stripping it, not a served fixture that never had one.
+    expect(served.experimentId).toBe("exp_live");
+    expect(
+      shadowArmSampleFrom(served, { ...leg, experimentId: "exp_live" }, body)?.experimentId,
+    ).toBe("exp_live");
   });
 
   it("spends nothing for a tenant that did not ask for coverage", async () => {

@@ -66,12 +66,13 @@
  * double counts.
  */
 import {
-  type OnlineEvalScoreDatabase,
   ONLINE_EVAL_SCORE_TABLE,
+  type OnlineEvalScoreDatabase,
   onlineEvalDatabaseFrom,
   onlineEvalTenantDatabaseFrom,
 } from "./d1.js";
 import type { OnlineEvalPolicy } from "./policy.js";
+import { SHADOW_EVAL_ARM } from "./shadow-leg.js";
 
 export const ONLINE_EVAL_LEG_QUALITY_TABLE = "online_eval_leg_quality";
 
@@ -105,6 +106,20 @@ export interface OnlineEvalLegAggregate {
  * score table (a sample whose route could not be attributed writes NULL), and a
  * NULL grouping key is not a leg anybody can route to — so they are excluded in
  * the WHERE rather than grouped as a phantom row.
+ *
+ * ## Why the `shadow` arm is excluded, and only that arm
+ *
+ * `./shadow-leg.ts::shadowArmSampleFrom` files an EXPERIMENT mirror's score
+ * under the served request's `logical_model` — the same ladder — with the
+ * mirror's own `(provider, provider_model)`. But
+ * `inference/candidates.ts::servableCandidates` strips every route carrying
+ * `shadowPercent` from the ladder, so that provider can NEVER serve a client.
+ * Leaving it in would let an unroutable leg DEFINE the `best` bar in
+ * {@link legQualityVerdicts} and demote a servable sibling that is inside the
+ * tenant's own `regressionDrop` of the best ROUTABLE leg — i.e. on a gap the
+ * tenant has declared is not real. The `coverage` arm is deliberately KEPT: a
+ * covered leg is a servable candidate of this ladder, and buying its score is
+ * the whole point of #894.
  */
 export const ONLINE_EVAL_LEG_WINDOW_AGGREGATE_SQL = `SELECT
   criterion_id, judge_model, logical_model, provider, provider_model,
@@ -115,6 +130,7 @@ WHERE tenant = ?1 AND scored_at_unix >= ?2
   AND provider IS NOT NULL AND provider <> ''
   AND provider_model IS NOT NULL AND provider_model <> ''
   AND logical_model IS NOT NULL AND logical_model <> ''
+  AND (experiment_arm IS NULL OR experiment_arm <> '${SHADOW_EVAL_ARM}')
 GROUP BY criterion_id, judge_model, logical_model, provider, provider_model`;
 
 /** Replace, never accumulate — see the module docs on redelivery. */
@@ -214,9 +230,22 @@ export function onlineEvalLegQualityBindings(
   ];
 }
 
-/** Write one tenant's recomputed cells and prune the ones that aged out. */
+/**
+ * Write one tenant's recomputed cells and prune the ones that aged out.
+ *
+ * `tenantId` is a PARAMETER rather than read off `aggregates[0]`, and the prune
+ * is UNCONDITIONAL. An empty recompute is not "nothing to do": it is the exact
+ * state the prune exists for — every score of every leg has aged out of the
+ * seven-day window, so without a prune the last cell the tenant ever had would
+ * sit in the table for ever and keep steering the router on a number nobody can
+ * reproduce, and no other path recovers it (`./regression.ts`'s cron sweep only
+ * iterates tenants that HAVE scores in the window, which is precisely not this
+ * tenant). Deriving the tenant from the first aggregate made the empty case
+ * unreachable, which is how it was missed.
+ */
 export async function writeOnlineEvalLegQuality(
   db: OnlineEvalScoreDatabase,
+  tenantId: string,
   aggregates: readonly OnlineEvalLegAggregate[],
   nowUnix: number,
 ): Promise<void> {
@@ -225,14 +254,9 @@ export async function writeOnlineEvalLegQuality(
   const statements = aggregates.map((aggregate) =>
     upsert.bind(...onlineEvalLegQualityBindings(aggregate, windowStartUnix, nowUnix)),
   );
-  if (aggregates.length > 0) {
-    // The tenant fence is the bound `tenant` on every row; the prune below is
-    // bound to the same tenant, so one tenant's refresh can never remove
-    // another's cells.
-    const tenantId = (aggregates[0] as OnlineEvalLegAggregate).tenantId;
-    statements.push(db.prepare(ONLINE_EVAL_LEG_QUALITY_PRUNE_SQL).bind(tenantId, nowUnix));
-  }
-  if (statements.length === 0) return;
+  // The tenant fence is the bound `tenant` on every row; the prune is bound to
+  // the same tenant, so one tenant's refresh can never remove another's cells.
+  statements.push(db.prepare(ONLINE_EVAL_LEG_QUALITY_PRUNE_SQL).bind(tenantId, nowUnix));
   await db.batch(statements);
 }
 
@@ -268,7 +292,7 @@ export async function refreshOnlineEvalLegQuality(
 
   try {
     const aggregates = await onlineEvalLegAggregates(source, tenantId, nowUnix);
-    await writeOnlineEvalLegQuality(projection, aggregates, nowUnix);
+    await writeOnlineEvalLegQuality(projection, tenantId, aggregates, nowUnix);
     return aggregates.length;
   } catch {
     // A schema that predates this migration, or a D1 blip. The next queue batch
