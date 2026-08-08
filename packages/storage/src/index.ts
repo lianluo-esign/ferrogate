@@ -206,6 +206,14 @@ export * from "./tenant-dispatch.js";
 /** Resumable shared-D1 to Durable-Object backfill manifest and receipts. */
 export * from "./tenant-backfill.js";
 /**
+ * Zero-D1 S5 (#881): the audited, idempotent CONTROL D1 → `ControlDataObject`
+ * whole-database backfill — static manifest keyed by primary key, re-runnable in
+ * either direction, per-table row-count + checksum receipts. A plain
+ * `D1Database` consumer like the tenant backfills, so it stays node-importable
+ * and never drags `cloudflare:workers` into this barrel.
+ */
+export * from "./control-backfill.js";
+/**
  * TENANT ONBOARDING (#820): the tenant's own model catalog and the seeder that
  * fills it once, plus the provisioner that refuses an unregistered tenant BEFORE
  * addressing its object, records resumable state on `tenant_databases`, and
