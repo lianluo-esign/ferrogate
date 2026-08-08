@@ -264,9 +264,8 @@ API contract 在 `docs/openapi/`。`docs/` 下的其他文档早于 TypeScript �
 ## 参与贡献
 
 FerroGate 面向人类维护者和 AI 编码 agent 协作而构建。最好的贡献是小而与
-issue 关联的切片，能够被评审、被测试，并能从运维视角讲清楚。日常开发以协作的
-agent 角色运行 —— 一个写代码，一个评审，一个做端到端测试；契约见
-[`docs/autonomous-dev-loop.md`](docs/autonomous-dev-loop.md)。
+issue 关联的切片，能够被评审、被测试，并能从运维视角讲清楚。日常开发以 GitHub
+milestone 组织，每个 milestone 汇集构成一个可发布增量的若干 issue。
 
 其中两条约定即使对一次性的人工补丁也值得知道：
 
