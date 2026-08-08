@@ -62,6 +62,7 @@
  */
 import {
   type TenantJurisdiction,
+  type TenantModelCatalogSeedGraph,
   locationHintFromCloudflareSignal,
   provisionTenantStorage,
   tenantJurisdictionForResidencyRegions,
@@ -116,6 +117,31 @@ export async function tenantJurisdictionFromPolicy(
 }
 
 /**
+ * Read the managed platform catalog for the provisioning seed, degrading ANY
+ * read fault to the card fallback (#891).
+ *
+ * `exportForSeed` already treats an ABSENT catalog — the `d1_compat` migration
+ * window where the Worker is new and migration `0025`'s tables are not applied
+ * yet — as an empty graph. This widens that tolerance to EVERY read fault: the
+ * same "new Worker, old DB" window can also raise `no such column` when a future
+ * migration adds a column the new `PROVIDER_SELECT` references, and a platform
+ * catalog read fault must never fail tenant onboarding, which did not depend on
+ * it at all before this slice. Returning `undefined` makes `provisionTenantStorage`
+ * seed the compiled-in card and STILL run — writing its roster row and reporting
+ * its own outcome — instead of the caller's outer catch swallowing the throw and
+ * returning `false` before provisioning was ever attempted.
+ */
+async function exportPlatformCatalogSeed(
+  controlDatabase: D1Database,
+): Promise<TenantModelCatalogSeedGraph | undefined> {
+  try {
+    return await new PlatformModelCatalogStore({ db: controlDatabase }).exportForSeed();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Provision (or resume) one tenant's storage, best-effort.
  *
  * Returns `true` when the tenant's storage is confirmed ready. `false` means the
@@ -131,23 +157,22 @@ export async function provisionTenantStorageFor(
   request?: Request,
 ): Promise<boolean> {
   if (deps.controlDatabase === null) return false;
+  const controlDatabase = deps.controlDatabase;
   try {
     const cf = (request as CloudflareRequest | undefined)?.cf;
     const placement = locationHintFromCloudflareSignal({
       continent: cf?.continent,
       colo: cf?.colo,
     });
-    const jurisdiction = await tenantJurisdictionFromPolicy(deps.controlDatabase, tenantId);
+    const jurisdiction = await tenantJurisdictionFromPolicy(controlDatabase, tenantId);
     // The MANAGED platform catalog (#891) is the seed source when this
-    // deployment has adopted it. It is read HERE, over the CONTROL_DATA facade
-    // (the Zero-D1 seam #879), and passed DOWN to `provisionTenantStorage` as
-    // plain data, so `@ferrogate/storage` never names a `platform_*` table.
-    // `exportForSeed` returns an empty graph when the catalog is absent or
-    // un-adopted, and `provisionTenantStorage` then falls back to the
-    // compiled-in card — so this stays independent of the import slice.
-    const catalogGraph = await new PlatformModelCatalogStore({
-      db: deps.controlDatabase,
-    }).exportForSeed();
+    // deployment has adopted it. It is read over the CONTROL_DATA facade (the
+    // Zero-D1 seam #879) and passed DOWN to `provisionTenantStorage` as plain
+    // data, so `@ferrogate/storage` never names a `platform_*` table. The read is
+    // a LAZY loader: `provisionTenantStorage` only invokes it when a seed will
+    // actually run, so an already-seeded tenant (every PUT/PATCH repair point)
+    // never pays for the export, and a failed read degrades to the card rather
+    // than failing onboarding — see `exportPlatformCatalogSeed`.
     const outcome = await provisionTenantStorage(
       deps.tenantStorage ?? deps.tenantDatabases,
       tenantId,
@@ -156,7 +181,7 @@ export async function provisionTenantStorageFor(
         locationHintSource: placement.source,
         locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
         ...(jurisdiction === undefined ? {} : { jurisdiction }),
-        catalogGraph,
+        catalogGraphLoader: () => exportPlatformCatalogSeed(controlDatabase),
       },
     );
     return outcome.status === "ready";

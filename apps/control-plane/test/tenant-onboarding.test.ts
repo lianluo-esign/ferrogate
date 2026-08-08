@@ -48,6 +48,7 @@ import {
 } from "../src/middleware/errors.js";
 import type { ControlPlaneBindings, ControlPlaneEnv } from "../src/ports.js";
 import { mountAdminConsoleSession } from "../src/session/index.js";
+import { provisionTenantStorageFor } from "../src/store/tenant_storage.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm } from "./harness.js";
 import { applyTenantSchema, resetTenantD1 } from "./tenant-db.js";
@@ -407,6 +408,85 @@ describe("seeding from the platform catalog (#891)", () => {
     const body = (await response.json()) as { tenant: { id: string } };
 
     await assertSeededFromPlatform(body.tenant.id, 9);
+  });
+
+  it("a NON-missing-table platform read fault falls back to the card, it does not fail onboarding", async () => {
+    // The regression this guards: `exportForSeed` tolerates a missing platform
+    // TABLE (the d1_compat migration window), but the SAME window can raise
+    // `no such column` when a new Worker's PROVIDER_SELECT references a column a
+    // pending migration has not added yet. Before the fix that throw was caught
+    // by `provisionTenantStorageFor`'s outer catch, which returned `false`
+    // BEFORE `provisionTenantStorage` ran — so the tenant got NO storage, NO
+    // roster row, and NOT the documented card fallback. Onboarding must not
+    // depend on platform-catalog read health.
+    await seedPlatformCatalog(7); // adopted, so a healthy read WOULD seed the graph
+    const tenantId = freshTenantId("readfault");
+    // A `tenants` row with no object seed yet, so the lazy loader is actually
+    // invoked (an already-seeded tenant would short-circuit before it).
+    await db()
+      .prepare(
+        "INSERT INTO tenants (id, name, slug, status, plan_id) VALUES (?, ?, ?, 'active', 'free')",
+      )
+      .bind(tenantId, "Read Fault", `readfault-${tenantId}`)
+      .run();
+
+    const deps = resolveDeps(env as unknown as ControlPlaneBindings, { requestId: "readfault" });
+    const realControl = deps.controlDatabase;
+    if (realControl === null) throw new Error("expected a control database under store=d1");
+    // A statement whose reads reject with a non-missing-table D1 error, returned
+    // ONLY for the platform_* catalog SELECTs; everything else delegates to the
+    // real control handle unchanged.
+    const faultMessage = "D1_ERROR: no such column: platform_provider_channels.some_pending_column";
+    const faultStatement = {
+      bind: () => faultStatement,
+      all: async () => {
+        throw new Error(faultMessage);
+      },
+      first: async () => {
+        throw new Error(faultMessage);
+      },
+      run: async () => {
+        throw new Error(faultMessage);
+      },
+    } as unknown as D1PreparedStatement;
+    const faultyControl = new Proxy(realControl, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string): D1PreparedStatement =>
+            /\bplatform_/i.test(sql) ? faultStatement : target.prepare(sql);
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const provisioned = await provisionTenantStorageFor(
+      { ...deps, controlDatabase: faultyControl },
+      tenantId,
+    );
+    // It did NOT fail: storage is ready, from the card.
+    expect(provisioned).toBe(true);
+    const state = await registry().get(tenantId);
+    expect(state?.status).toBe("ready");
+
+    const handle = await router().forTenant(tenantId);
+    // The CARD, not the platform graph — the fault degraded to the fallback.
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
+      DEFAULT_TENANT_MODEL_CATALOG.length,
+    );
+    // The card's `platform`-kind indirection channel is present; the graph's real
+    // `openai` channel (which a healthy read of the seeded catalog would have
+    // copied) is absent — proof the graph read was skipped, not merely empty.
+    const platformChannel = await handle.db
+      .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'platform'")
+      .bind(tenantId)
+      .first<{ kind: string }>();
+    expect(platformChannel?.kind).toBe("platform");
+    const openaiChannel = await handle.db
+      .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'openai'")
+      .bind(tenantId)
+      .first<{ kind: string }>();
+    expect(openaiChannel).toBeNull();
   });
 
   it("with ZERO platform rows the legacy card seed still runs (pinned)", async () => {

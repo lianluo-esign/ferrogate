@@ -454,10 +454,7 @@ export async function seedTenantModelCatalog(
       "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
     );
   }
-  return applyCatalogSeed(
-    db,
-    tenantId,
-    nowUnix,
+  return applyCatalogSeed(db, tenantId, nowUnix, async () =>
     buildCardSeedBatch(db, tenantId, nowUnix, entries),
   );
 }
@@ -498,7 +495,43 @@ export async function seedTenantModelCatalogFromGraph(
       "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
     );
   }
-  return applyCatalogSeed(db, tenantId, nowUnix, buildGraphSeedBatch(db, tenantId, nowUnix, graph));
+  return applyCatalogSeed(db, tenantId, nowUnix, async () =>
+    buildGraphSeedBatch(db, tenantId, nowUnix, graph),
+  );
+}
+
+/**
+ * Seed a tenant from the managed platform catalog when it carries offerings,
+ * else from the compiled-in card (#891) — resolving the platform graph LAZILY.
+ *
+ * `loadGraph` is invoked at most once, and ONLY after the shared seed-once gate
+ * (inside {@link applyCatalogSeed}) has decided this tenant actually needs a
+ * seed. An already-seeded tenant — every PUT/PATCH repair point, and every
+ * plan-change mutation that runs the provision hook — returns before the loader
+ * is ever called, so the full platform-catalog export never runs on a path where
+ * the seed is a guaranteed no-op. The loader may resolve to `undefined` (its own
+ * read failed, or the catalog is un-adopted) to fall back to the card WITHOUT
+ * failing onboarding — which is why the choice between graph and card is made
+ * here rather than by the caller: the caller cannot know whether a seed is even
+ * needed without duplicating the gate this shares with every other seed path.
+ *
+ * @throws {@link StorageError} `runtime` if a seed IS needed and neither the
+ *   graph nor the card yields any entry (the empty-seed guard in
+ *   {@link applyCatalogSeed}).
+ */
+export async function seedTenantCatalogPreferringGraph(
+  db: D1Database,
+  tenantId: string,
+  nowUnix: number,
+  card: readonly TenantModelCatalogEntry[],
+  loadGraph?: () => Promise<TenantModelCatalogSeedGraph | undefined>,
+): Promise<TenantModelCatalogSeedOutcome> {
+  return applyCatalogSeed(db, tenantId, nowUnix, async () => {
+    const graph = loadGraph === undefined ? undefined : await loadGraph();
+    return graph !== undefined && graph.offerings.length > 0
+      ? buildGraphSeedBatch(db, tenantId, nowUnix, graph)
+      : buildCardSeedBatch(db, tenantId, nowUnix, card);
+  });
 }
 
 /**
@@ -527,14 +560,8 @@ async function applyCatalogSeed(
   db: D1Database,
   tenantId: string,
   nowUnix: number,
-  batch: CatalogSeedBatch,
+  buildBatch: () => Promise<CatalogSeedBatch>,
 ): Promise<TenantModelCatalogSeedOutcome> {
-  if (batch.entryCount === 0) {
-    throw StorageError.runtime(
-      "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
-    );
-  }
-
   const already = await readSeedMark(db, tenantId);
   if (already !== undefined) {
     const catalog = await listTenantModelCatalog(db, tenantId);
@@ -562,6 +589,19 @@ async function applyCatalogSeed(
         `tenant ${tenantId} has a model catalog seed mark but no catalog rows, and the empty mark could not be repaired safely; retry provisioning`,
       );
     }
+  }
+
+  // Resolve the batch — and, on the managed-graph path, the platform-catalog
+  // READ that fills it — ONLY now, after the seed-once gate above has decided a
+  // seed will actually run. An already-seeded tenant returned above without
+  // paying for it, which is the whole point of taking a factory rather than a
+  // pre-built batch. The empty-seed guard stays here so it holds for every
+  // caller (the entry helpers also refuse empties before this, belt and braces).
+  const batch = await buildBatch();
+  if (batch.entryCount === 0) {
+    throw StorageError.runtime(
+      "catalog seed requires at least one entry; refusing to write a seed mark for an empty catalog",
+    );
   }
 
   const claim = db

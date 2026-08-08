@@ -429,7 +429,7 @@ describe("seeding from the platform catalog graph (#891)", () => {
 
     const outcome = await provisionTenantStorage(router, TENANT_A, {
       nowUnix: NOW,
-      catalogGraph: graph,
+      catalogGraphLoader: async () => graph,
     });
     expect(outcome.status).toBe("ready");
     expect(outcome.catalogSeeded).toBe(true);
@@ -493,7 +493,10 @@ describe("seeding from the platform catalog graph (#891)", () => {
     await registerTenant(TENANT_A);
     const graph = platformSeedGraph(42);
 
-    await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW, catalogGraph: graph });
+    await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: async () => graph,
+    });
 
     const handle = await router.forTenant(TENANT_A);
     const mark = await handle.db
@@ -513,7 +516,7 @@ describe("seeding from the platform catalog graph (#891)", () => {
 
     const outcome = await provisionTenantStorage(router, TENANT_A, {
       nowUnix: NOW,
-      catalogGraph: { revision: 0, providers: [], models: [], offerings: [] },
+      catalogGraphLoader: async () => ({ revision: 0, providers: [], models: [], offerings: [] }),
     });
 
     expect(outcome.status).toBe("ready");
@@ -536,7 +539,10 @@ describe("seeding from the platform catalog graph (#891)", () => {
   test("re-provisioning after a tenant edit does NOT revert the graph seed", async () => {
     await registerTenant(TENANT_A);
     const graph = platformSeedGraph();
-    await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW, catalogGraph: graph });
+    await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: async () => graph,
+    });
 
     const handle = await router.forTenant(TENANT_A);
     // The tenant edits its copy: delete a model and re-price another.
@@ -554,13 +560,43 @@ describe("seeding from the platform catalog graph (#891)", () => {
 
     const second = await provisionTenantStorage(router, TENANT_A, {
       nowUnix: NOW + 60,
-      catalogGraph: graph,
+      catalogGraphLoader: async () => graph,
     });
     expect(second.catalogSeeded).toBe(false);
     // The deletion stays deleted and the re-price stays — the mark gate holds
     // for the graph path exactly as it does for the card path.
     expect(await resolveTenantModel(handle.db, TENANT_A, "claude-opus-4")).toBeUndefined();
     expect((await resolveTenantModel(handle.db, TENANT_A, "gpt-4o"))?.inputPricePer1m).toBe(1.0);
+  });
+
+  test("the loader is resolved lazily: an already-seeded tenant never re-reads the platform catalog", async () => {
+    await registerTenant(TENANT_A);
+    let reads = 0;
+    const loader = async (): Promise<ReturnType<typeof platformSeedGraph>> => {
+      reads += 1;
+      return platformSeedGraph();
+    };
+
+    // First provision needs a seed, so the loader runs exactly once.
+    const first = await provisionTenantStorage(router, TENANT_A, {
+      nowUnix: NOW,
+      catalogGraphLoader: loader,
+    });
+    expect(first.catalogSeeded).toBe(true);
+    expect(reads).toBe(1);
+
+    // Every subsequent provision (the PUT/PATCH repair points, the plan-change
+    // hook) is a no-op seed, gated on the mark BEFORE the loader — so the
+    // unbounded platform-catalog export never runs again. If the loader were
+    // resolved eagerly (the pre-fix shape) `reads` would climb to 3 here.
+    for (const at of [NOW + 60, NOW + 120]) {
+      const again = await provisionTenantStorage(router, TENANT_A, {
+        nowUnix: at,
+        catalogGraphLoader: loader,
+      });
+      expect(again.catalogSeeded).toBe(false);
+    }
+    expect(reads).toBe(1);
   });
 });
 
