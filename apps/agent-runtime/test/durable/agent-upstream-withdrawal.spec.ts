@@ -258,10 +258,13 @@ afterAll(() => {
  * dispatch to resolve NOTHING.
  */
 describe("nothing committed to the harness wrangler.toml reaches this suite", () => {
-  it("binds a real CONTROL_DB, which is what selects the durable branch", () => {
-    // `agentUpstreamPortFromEnv` falls back to the var port unless a D1 binding
-    // with a callable `prepare` is present. Asserting this first means a later
-    // GREEN cannot come from the harness quietly losing its database.
+  it("binds a real CONTROL_DATA object, which is what selects the durable branch", () => {
+    // `agentUpstreamPortFromEnv` falls back to the var port unless the control
+    // authority resolves. Zero-D1 S5 (#881): that authority is the singleton
+    // CONTROL_DATA object, surfaced to the specs as the `env.CONTROL_DB` facade
+    // with a callable `prepare`. Asserting this first means a later GREEN cannot
+    // come from the harness quietly losing its control store.
+    expect(env.CONTROL_DATA).toBeDefined();
     expect(typeof (env.CONTROL_DB as D1Database | undefined)?.prepare).toBe("function");
   });
 

@@ -151,6 +151,7 @@ import {
   applyWorkflowProviderConstraint,
   enforceWorkflowGraphPolicy,
 } from "@ferrogate/policy";
+import { controlDatabaseFrom } from "../control-data.js";
 import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
 import { reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
@@ -692,7 +693,7 @@ export function d1WorkflowCatalog(
  * with no database at all.
  */
 export function workflowCatalogFromEnv(env: WorkflowGateBindings): WorkflowCatalogSource {
-  const db = env.CONTROL_DB;
+  const db = controlDatabaseFrom(env);
   const skillPackages = env.GATEWAY_SKILL_PACKAGES;
   if (db === undefined || typeof db.prepare !== "function") {
     const workflows = workflowsFromSkillPackages(skillPackages);
@@ -948,7 +949,7 @@ export function d1WorkflowRunHistory(
 
 /** The history for a Worker `env`; {@link NO_WORKFLOW_HISTORY} with no `CONTROL_DB`. */
 export function workflowHistoryFromEnv(env: WorkflowGateBindings): WorkflowRunHistory {
-  const db = env.CONTROL_DB;
+  const db = controlDatabaseFrom(env);
   return db === undefined || typeof db.prepare !== "function"
     ? NO_WORKFLOW_HISTORY
     : d1WorkflowRunHistory(

@@ -49,6 +49,7 @@ import {
   type OnlineEvalPolicyRow,
   parseOnlineEvalPolicyRow,
 } from "./policy.js";
+import { controlDatabaseFrom } from "../control-data.js";
 
 /** The `quota_policies` columns this module reads, named once. */
 const ONLINE_EVAL_COLUMNS =
@@ -302,7 +303,7 @@ export function onlineEvalPolicySourceFromEnv(env: OnlineEvalBindings): OnlineEv
   const key = env as unknown as object;
   const memoized = SOURCES.get(key);
   if (memoized !== undefined) return memoized;
-  const db = env.CONTROL_DB ?? env.BILLING_DB;
+  const db = controlDatabaseFrom(env);
   const source = cachedOnlineEvalPolicySource(
     db === undefined ? onlineEvalPolicySourceFromVars(env) : d1OnlineEvalPolicySource(db),
   );

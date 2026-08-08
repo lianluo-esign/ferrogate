@@ -138,7 +138,7 @@ function tenantAddress(
   env: AgentRuntimeBindings,
   tenantId: string,
 ): Promise<TenantObjectAddress | undefined> {
-  const controlDatabase = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
+  const controlDatabase = controlDatabaseFrom(env);
   if (controlDatabase === undefined) return Promise.resolve(undefined);
   let cache = TENANT_ADDRESS_CACHE.get(env);
   if (cache === undefined) {
@@ -180,7 +180,7 @@ async function tenantDatabase(env: AgentRuntimeBindings, tenantId: string): Prom
   return new DurableObjectD1Database(tenantId, stub).asD1Database();
 }
 function controlDatabase(env: AgentRuntimeBindings): D1Database | undefined {
-  return controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
+  return controlDatabaseFrom(env);
 }
 
 /** Write one agent run to the tenant object, then to the derived mirror. */

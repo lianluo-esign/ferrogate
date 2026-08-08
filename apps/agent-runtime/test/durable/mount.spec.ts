@@ -50,6 +50,10 @@ describe("the durable ports are mounted on the deployed composition root", () =>
     expect(env.FG_DEV_API_KEYS).toBeUndefined();
     expect(env.FG_DEV_SELF_HOSTED_WORKERS).toBeUndefined();
     expect(env.DB).toBeDefined();
+    // Zero-D1 S5 (#881): the control authority is the singleton CONTROL_DATA
+    // object, not a `[[d1_databases]] CONTROL_DB` stanza. `env.CONTROL_DB` is
+    // the facade `setup.ts` aliases over it; both must be present.
+    expect(env.CONTROL_DATA).toBeDefined();
     expect(env.CONTROL_DB).toBeDefined();
   });
 

@@ -37,6 +37,7 @@
  * only a tap on the way through.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import handler from "../../src/worker.js";
 import { RecordingDatabase, RecordingQueue, applyControlMigration } from "./d1-harness.js";
@@ -78,7 +79,7 @@ describe("MOUNT: the [triggers] cron handler reaches the durable billing outbox"
 
     await scheduledOf()(
       { cron: "* * * * *", scheduledTime: Date.now(), noRetry: () => undefined } as never,
-      { ...(env as unknown as Record<string, unknown>), BILLING_DB: db, BILLING: queue } as never,
+      { ...(env as unknown as Record<string, unknown>), CONTROL_DATA: controlNamespaceOverD1(db), BILLING: queue } as never,
       ctx,
     );
     await waitOnExecutionContext(ctx);

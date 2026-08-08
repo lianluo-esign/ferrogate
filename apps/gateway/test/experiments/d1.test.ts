@@ -1,4 +1,5 @@
 import { env } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   D1ExperimentObserver,
@@ -70,6 +71,7 @@ describe("tenant-authoritative experiment legs", () => {
     await sweepExperimentProjections(
       {
         CONTROL_DB: controlDb(),
+        CONTROL_DATA: controlNamespace(),
         TENANT_DATA: (env as unknown as { TENANT_DATA: unknown }).TENANT_DATA,
       },
       ["tenant_a"],
@@ -99,6 +101,7 @@ describe("tenant-authoritative experiment legs", () => {
     await sweepExperimentProjections(
       {
         CONTROL_DB: controlDb(),
+        CONTROL_DATA: controlNamespace(),
         TENANT_DATA: (env as unknown as { TENANT_DATA: unknown }).TENANT_DATA,
       },
       ["tenant_a"],

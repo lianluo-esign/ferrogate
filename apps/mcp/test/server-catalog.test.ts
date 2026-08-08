@@ -67,7 +67,8 @@ interface ControlSchemaBindings {
 // mean something.
 beforeAll(async () => {
   const bindings = env as unknown as ControlSchemaBindings;
-  await applyD1Migrations(bindings.DB, bindings.TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first
+  // wake; there is no control D1 to migrate here.
 });
 
 /**

@@ -42,19 +42,11 @@ const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), 
  */
 const migrations = await readD1Migrations("../../sql/d1-ts/tenant");
 
-/**
- * The FULL control-migration set, wrangler-style. `test/setup-d1.ts` used to
- * apply a hand-curated subset of `sql/d1-ts/control/` and the list rotted:
- * `0012_tenant_storage_provisioning.sql` (the `storage_backend` column the
- * tenancy resolver reads on EVERY authenticated request since #819 turned
- * `durable_object` routing on) was never added, so the whole suite answered
- * `503 quota_resolution_unavailable` — ~199 failures with one cause.
- * `readD1Migrations` + `applyD1Migrations` is the same name-bookkept
- * application `wrangler d1 migrations apply` performs in production and the
- * same shape the mcp and storage harnesses already use; there is no list here
- * to forget.
- */
-const controlMigrations = await readD1Migrations("../../sql/d1-ts/control");
+// Zero-D1 S5 (#881): the control database is the `ControlDataObject`
+// (`env.CONTROL_DATA`), which applies its own inlined 27-file control schema on
+// first wake. There is no CONTROL_DB D1 binding to migrate any more, so this
+// harness no longer reads `sql/d1-ts/control` — the schema-verbatim guarantee
+// lives in `packages/storage/test/do/control-data-object.test.ts` instead.
 
 /**
  * Test fixtures for the contract-driven auth middleware.
@@ -167,10 +159,9 @@ export default defineConfig({
       remoteBindings: false,
       miniflare: {
         bindings: {
-          // The main suite's D1 fixtures intentionally exercise the rollback
-          // posture. Production defaults to CONTROL_DATA in wrangler.toml;
-          // control-data.test.ts covers that default with a namespace double.
-          GATEWAY_CONTROL_STORAGE: "d1_compat",
+          // Zero-D1 S5 (#881): no pin. The committed `durable_object` posture is
+          // the only one now, and the suite seeds/reads control fixtures through
+          // the CONTROL_DATA object (see test/setup-d1.ts), not a D1 rollback.
           GATEWAY_NATIVE_API_KEYS: JSON.stringify(NATIVE_API_KEYS),
           GATEWAY_STATIC_API_KEYS: JSON.stringify(STATIC_API_KEYS),
           SELF_HOSTED_WORKER_REGISTRY: JSON.stringify(SELF_HOSTED_WORKER_REGISTRY),
@@ -187,7 +178,6 @@ export default defineConfig({
           GATEWAY_PROVIDERS: "[]",
           GATEWAY_MODELS: "[]",
           TEST_D1_SCHEMA: migrations,
-          TEST_CONTROL_D1_SCHEMA: controlMigrations,
           // The COMMITTED deploy config, verbatim, so a test can assert against
           // the parts of it that no binding surfaces. `[triggers] crons` is the
           // one that matters: workerd never dispatches a scheduled event under

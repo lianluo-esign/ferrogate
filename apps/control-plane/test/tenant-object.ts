@@ -4,21 +4,22 @@ import type { TenantDataNamespace, TenantDataStatement } from "@ferrogate/storag
 import { db } from "./d1.js";
 
 interface TenantObjectBindings {
-  readonly DB: D1Database;
   readonly TENANT_DATA: TenantDataNamespace;
 }
 
 function bindings(): TenantObjectBindings {
   const value = env as unknown as Partial<TenantObjectBindings>;
-  if (value.DB === undefined || value.TENANT_DATA === undefined) {
-    throw new Error("control-plane tenant fixtures require DB and TENANT_DATA bindings");
+  if (value.TENANT_DATA === undefined) {
+    throw new Error("control-plane tenant fixtures require the TENANT_DATA binding");
   }
   return value as TenantObjectBindings;
 }
 
 export function tenantObjectRouter(): DurableObjectTenantDatabaseRouter {
-  const value = bindings();
-  return new DurableObjectTenantDatabaseRouter(value.TENANT_DATA, value.DB);
+  // Zero-D1 S5 (#881): the tenant router reads the `tenant_databases` roster out
+  // of the control database, which is now the CONTROL_DATA object facade
+  // (`db()`), not the retired `env.DB` control D1.
+  return new DurableObjectTenantDatabaseRouter(bindings().TENANT_DATA, db());
 }
 
 export function tenantObjectDb(tenantId: string): D1Database {

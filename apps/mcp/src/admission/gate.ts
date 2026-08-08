@@ -357,7 +357,7 @@ export function admissionFromEnv(
   env: AdmissionBindings,
   router?: TenantDatabaseRouter,
 ): AdmissionPort {
-  const db = controlDatabaseFrom(env, { legacy: [env.DB, env.BILLING_DB] });
+  const db = controlDatabaseFrom(env);
   if (db === undefined) return ADMIT_ALL;
   return new McpAdmissionGate({
     limiter: limiterForEnv(env),

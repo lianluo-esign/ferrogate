@@ -30,6 +30,7 @@
  * authenticated; `503` for a dependency this deployment cannot reach.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -79,7 +80,8 @@ let fixture: Fixture;
 
 beforeAll(async () => {
   const b = bindings();
-  await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first
+  // wake; there is no control D1 to migrate here.
   await applyD1Migrations(b.TENANT_DB_A, b.TEST_TENANT_D1_SCHEMA);
   // The table probe in `src/auth.ts` is cached per D1 handle for the life of
   // the isolate, and another test file may already have driven a request that
@@ -422,10 +424,10 @@ describe("the durable row DECIDES — a dev key can never overrule it", () => {
 
 describe("readiness now tracks the binding, not the dev flag", () => {
   it("a Worker with only the control database bound is READY", () => {
-    expect(durableAuthBound({ DB: control() })).toBe(true);
-    expect(portsBound({ DB: control() })).toBe(true);
+    expect(durableAuthBound({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace })).toBe(true);
+    expect(portsBound({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace })).toBe(true);
     // ...and the port it reports on really is the durable one.
-    expect(resolvePorts({ DB: control() }).auth).toBeInstanceOf(D1McpAuth);
+    expect(resolvePorts({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace }).auth).toBeInstanceOf(D1McpAuth);
   });
 
   it("a Worker with NO database and no dev flag is still not ready", () => {

@@ -433,7 +433,8 @@ describe("the env-var drift gate itself", () => {
     // `legacyTenantDatabase`. It leaves this list when the backfill retires
     // the stanza (Zero-D1 S3, #879).
     expect([...DECLARED.bindings.keys()]).toEqual([
-      "DB",
+      // Zero-D1 S5 (#881): the `DB` (`ferrogate-control`) stanza is deleted;
+      // control reads resolve the CONTROL_DATA object.
       "LEGACY_TENANT_DB",
       "PROMPT_LABELS",
       "AUDIT_ANCHORS",
@@ -446,7 +447,7 @@ describe("the env-var drift gate itself", () => {
     // Two reads in two different shapes, so a regression in either arm of the
     // scanner shrinks the read set loudly instead of silently.
     expect(READS.named.has("CONTROL_PLANE_SEED")).toBe(true);
-    expect(READS.named.has("DB")).toBe(true);
+    expect(READS.named.has("CONTROL_DATA")).toBe(true);
   });
 });
 

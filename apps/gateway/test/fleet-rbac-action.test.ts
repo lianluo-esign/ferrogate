@@ -61,6 +61,7 @@
  * them turns this file red and forces the ledger to move with the code.
  */
 import { SELF, env } from "cloudflare:test";
+import { controlNamespaceOverD1 } from "./support/control-namespace.js";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -237,11 +238,14 @@ async function fleetDecisions(
     gateway: await new GatewayRbac(db as unknown as RbacDatabase, {
       tenantDatabases: tenantObjectRouter(),
     }).authorize(gatewayAuth(tenantId, operator), action),
-    mcp: await mcpRbacFromEnv({ DB: db, TENANT_DATA: tenantData }).authorize(
+    mcp: await mcpRbacFromEnv({
+      CONTROL_DATA: controlNamespaceOverD1(db) as DurableObjectNamespace,
+      TENANT_DATA: tenantData,
+    }).authorize(
       mcpAuth(tenantId, operator),
       action,
     ),
-    "agent-runtime": await agentRbacFromEnv({ CONTROL_DB: db, TENANT_DATA: tenantData }).authorize(
+    "agent-runtime": await agentRbacFromEnv({ CONTROL_DATA: controlNamespaceOverD1(db), TENANT_DATA: tenantData }).authorize(
       agentAuth(tenantId, operator),
       action,
     ),

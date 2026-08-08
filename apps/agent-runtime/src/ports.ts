@@ -1518,7 +1518,7 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
    */
   // #880 — resolve the CONTROL database through the S4 seam (CONTROL_DATA facade
   // first, legacy CONTROL_DB fallback). env.DB is the TENANT database and stays as-is.
-  const controlDb = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
+  const controlDb = controlDatabaseFrom(env);
   const apiKeys: ApiKeyPort | undefined =
     resolvedApiKeys === undefined || (env.DB === undefined && controlDb === undefined)
       ? resolvedApiKeys

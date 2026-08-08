@@ -14,6 +14,7 @@
  * does not do that for you.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
+import { controlDataObjectDatabase } from "@ferrogate/storage";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings, StoreRecord } from "../src/ports.js";
 import { SIEM_CURSOR_TABLE } from "../src/siem/cursor.js";
@@ -67,19 +68,47 @@ async function touchedObjectTenants(): Promise<readonly string[]> {
 }
 
 interface D1TestBindings {
-  readonly DB: D1Database;
-  readonly TEST_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
+  readonly CONTROL_DATA: unknown;
 }
+
+// Zero-D1 S5 (#881): the control database is the singleton ControlDataObject.
+// The `[[d1_databases]] DB` (`ferrogate-control`) stanza is deleted and
+// `src/store/d1.ts` reads the CONTROL_DATA facade. This harness resolves a
+// fresh-per-operation facade over that object (a lazy Proxy, so a request-bound
+// DO stub is never reused across requests) with `exec()` support for the
+// truncation helpers, and every seed lands in the object the Worker reads.
+const controlAlias = new Proxy({} as D1Database, {
+  get(_target, prop) {
+    const handle = controlDataObjectDatabase(
+      (env as unknown as D1TestBindings).CONTROL_DATA as never,
+    ) as unknown as Record<string | symbol, unknown>;
+    if (prop === "exec") {
+      return async (sql: string): Promise<{ count: number; duration: number }> => {
+        const statements = sql
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line !== "");
+        for (const statement of statements) {
+          await (handle.prepare as (s: string) => { run(): Promise<unknown> })(statement).run();
+        }
+        return { count: statements.length, duration: 0 };
+      };
+    }
+    const value = handle[prop];
+    return typeof value === "function" ? value.bind(handle) : value;
+  },
+});
 
 /** The database the Worker under test writes through. */
 export function db(): D1Database {
-  return (env as unknown as D1TestBindings).DB;
+  return controlAlias;
 }
 
-/** Apply `sql/d1-ts/control/`. Call once per file, in `beforeAll`. */
+/** Wake the control object so its schema is applied. Call once per file, in `beforeAll`. */
 export async function applySchema(): Promise<void> {
-  const bindings = env as unknown as D1TestBindings;
-  await applyD1Migrations(bindings.DB, bindings.TEST_D1_SCHEMA);
+  // The ControlDataObject applies its inlined control schema on first wake; a
+  // single query triggers it so `beforeAll` callers can assume the tables exist.
+  await controlAlias.prepare("SELECT 1 AS one").all();
 }
 
 /**

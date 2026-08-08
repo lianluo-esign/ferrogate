@@ -767,7 +767,7 @@ export interface WorkflowCatalogBindings {
  */
 export function workflowCatalogFromEnv(env: WorkflowCatalogBindings): WorkflowCatalogPort {
   const overlay = decodeWorkflowTable(env.AGENT_WORKFLOWS);
-  const db = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
+  const db = controlDatabaseFrom(env);
   if (db === undefined || typeof db.prepare !== "function") {
     return {
       async forTenant(): Promise<readonly ToolWorkflowGraph[]> {

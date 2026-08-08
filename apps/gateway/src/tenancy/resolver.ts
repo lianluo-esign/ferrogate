@@ -196,7 +196,7 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
   // mode anyway, because a gateway with no CONTROL_DB cannot answer the fleet
   // views at all and should say so at configuration time rather than at the
   // first admin fan-out.
-  const controlDb = controlDatabaseFrom(env, { legacy: [env.CONTROL_DB] });
+  const controlDb = controlDatabaseFrom(env);
   if (controlDb === undefined) {
     throw misconfigured(
       [

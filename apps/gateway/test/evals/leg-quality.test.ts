@@ -22,6 +22,7 @@
  * | `strategy.ts`: `demoteLaggingLegs` returns `ordered` unchanged                 | `moves a lagging leg behind its comparable sibling` |
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "../support/control-namespace.js";
 
 import {
   DEFAULT_REGRESSION_DROP,
@@ -664,7 +665,7 @@ describe("the routing hot path reads the memo and nothing else", () => {
     expect(routingQualityPortFor({} as never)).toBe(NO_ROUTING_QUALITY);
     expect(NO_ROUTING_QUALITY.ladderQuality(TENANT, "split-model")).toBeUndefined();
     // ANTI-VACUITY: a CONFIGURED env does not get it.
-    expect(routingQualityPortFor({ CONTROL_DB: controlDb() } as never)).not.toBe(
+    expect(routingQualityPortFor({ CONTROL_DATA: controlNamespace() } as never)).not.toBe(
       NO_ROUTING_QUALITY,
     );
   });

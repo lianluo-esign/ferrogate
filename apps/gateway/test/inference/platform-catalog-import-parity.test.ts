@@ -1,4 +1,5 @@
 import { PriceBook } from "@ferrogate/billing";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 /**
  * Bootstrap-import parity (#892): a platform catalog built from the IMPORTED env
  * pair must produce the SAME flattened `PhysicalRoute` set the env tables produce
@@ -83,7 +84,6 @@ const MODELS = [
 
 function envPair(): Record<string, unknown> {
   return {
-    GATEWAY_CONTROL_STORAGE: "d1_compat",
     GATEWAY_PROVIDERS: JSON.stringify(PROVIDERS),
     GATEWAY_MODELS: JSON.stringify(MODELS),
     OPENAI_KEY: "sk-openai-test",
@@ -176,7 +176,15 @@ function fakeControlDb(
       return { results: rows as T[] };
     },
   };
-  return { db: { prepare: () => chain } as unknown as D1Database, revision };
+  const chainFor = (sql: string) => ({
+    bind() { return chainFor(sql); },
+    async first<T>() { return { revision: state.revision } as T; },
+    async all<T>() {
+      return { results: (sql.includes("platform_catalog_revisions") ? [{ revision: state.revision }] : rows) as T[] };
+    },
+  });
+  void chain;
+  return { db: { prepare: (sql: string) => chainFor(sql) } as unknown as D1Database, revision };
 }
 
 /** A route as a stable key so two flattened sets compare order-independently. */
@@ -210,7 +218,7 @@ describe("platform catalog bootstrap-import parity (#892)", () => {
     expect(graph.providers.some((provider) => provider.kind === "platform")).toBe(true);
 
     const control = fakeControlDb(joinRows(graph), 1);
-    const loadEnv = { ...env, CONTROL_DB: control.db };
+    const loadEnv = { ...env, CONTROL_DATA: controlNamespaceOverD1(control.db) };
     const source = new ControlDataPlatformModelCatalogSource();
     const loaded = await source.load({
       env: loadEnv as never,
@@ -238,7 +246,7 @@ describe("platform catalog bootstrap-import parity (#892)", () => {
 
     // Re-reading at a bumped revision yields the identical set — "running it
     // twice changes nothing but the revision".
-    const reloadEnv = { ...loadEnv, CONTROL_DB: fakeControlDb(joinRows(graph), 2).db };
+    const reloadEnv = { ...loadEnv, CONTROL_DATA: controlNamespaceOverD1(fakeControlDb(joinRows(graph), 2).db) };
     const reloaded = await source.load({ env: reloadEnv as never, fallback: emptyModelResolver });
     expect(reloaded.ok).toBe(true);
     if (!reloaded.ok) return;

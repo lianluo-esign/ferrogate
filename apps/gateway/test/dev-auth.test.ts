@@ -16,6 +16,7 @@
  * mistake is enough to turn it on.
  */
 import { env } from "cloudflare:test";
+import { controlNamespace } from "./support/control-namespace.js";
 import { describe, expect, it } from "vitest";
 import app from "../src/index.js";
 import {
@@ -120,7 +121,7 @@ describe("the development key, once all three conditions hold", () => {
     const res = await app.request(
       `${BASE}/v1/models`,
       { headers: { authorization: `Bearer ${DEV_KEY}` } },
-      { ...ENABLED, CONTROL_DB: real.CONTROL_DB, TENANT_DATA: real.TENANT_DATA },
+      { ...ENABLED, CONTROL_DB: real.CONTROL_DB, CONTROL_DATA: controlNamespace(), TENANT_DATA: real.TENANT_DATA },
     );
     expect(res.status).toBe(200);
     // No models are configured in this env, so the listing is empty — the point

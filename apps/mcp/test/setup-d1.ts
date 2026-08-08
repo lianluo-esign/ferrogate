@@ -35,44 +35,76 @@
  * `d1_migrations`.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
+import { controlDataObjectDatabase } from "@ferrogate/storage";
 import { beforeAll } from "vitest";
 
 import { forgetControlTableProbe } from "../src/auth.js";
 
 interface McpTestBindings {
-  readonly DB?: D1Database;
-  readonly BILLING_DB?: D1Database;
-  readonly TENANT_DB_A?: D1Database;
-  readonly TEST_CONTROL_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
+  DB?: D1Database;
+  BILLING_DB?: D1Database;
+  CONTROL_DATA?: unknown;
+  TENANT_DB_A?: D1Database;
   readonly TEST_TENANT_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
 }
 
+const bindings = env as unknown as McpTestBindings;
+
+if (bindings.CONTROL_DATA === undefined) {
+  // Loud, never a silent skip: the control object is bound cross-script from
+  // the gateway aux worker (`vitest.config.ts`), so an absent one means the
+  // wiring was removed and the suite is about to prove something other than
+  // what it claims.
+  throw new Error(
+    "mcp test setup: `CONTROL_DATA` is not bound — vitest.config.ts must bind the " +
+      "cross-script ControlDataObject (Zero-D1 S5, #881).",
+  );
+}
+
+// Zero-D1 S5 (#881): the control database is the singleton ControlDataObject.
+// The mcp `[[d1_databases]] DB` / `BILLING_DB` (`ferrogate-control`) stanzas are
+// deleted; `src/control-data.ts` reads `CONTROL_DATA`. The legacy binding names
+// are aliased AT MODULE LOAD to a fresh-per-call facade over that object so
+// fixtures that seed `env.DB` / `env.BILLING_DB` land in the object the code
+// reads. A lazy Proxy avoids reusing a request-bound DO stub across requests.
+const controlAlias = new Proxy({} as D1Database, {
+  get(_target, prop) {
+    const db = controlDataObjectDatabase(bindings.CONTROL_DATA as never) as unknown as Record<
+      string | symbol,
+      unknown
+    >;
+    if (prop === "exec") {
+      return async (sql: string): Promise<{ count: number; duration: number }> => {
+        const statements = sql
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line !== "");
+        for (const statement of statements) {
+          await (db.prepare as (s: string) => { run(): Promise<unknown> })(statement).run();
+        }
+        return { count: statements.length, duration: 0 };
+      };
+    }
+    const value = db[prop];
+    return typeof value === "function" ? value.bind(db) : value;
+  },
+});
+bindings.DB = controlAlias;
+bindings.BILLING_DB = controlAlias;
+
 beforeAll(async () => {
-  const bindings = env as unknown as McpTestBindings;
-  const { DB, BILLING_DB, TENANT_DB_A, TEST_CONTROL_D1_SCHEMA, TEST_TENANT_D1_SCHEMA } = bindings;
-  if (
-    DB === undefined ||
-    TENANT_DB_A === undefined ||
-    TEST_CONTROL_D1_SCHEMA === undefined ||
-    TEST_TENANT_D1_SCHEMA === undefined
-  ) {
-    // Loud, never a silent skip: all required bindings come from `wrangler.toml` +
-    // `vitest.config.ts`, so an absent one means the wiring was removed and the
-    // suite is about to prove something other than what it claims.
+  const { TENANT_DB_A, TEST_TENANT_D1_SCHEMA } = bindings;
+  if (TENANT_DB_A === undefined || TEST_TENANT_D1_SCHEMA === undefined) {
     throw new Error(
-      "mcp test setup: expected the `DB` and `TENANT_DB_A` bindings plus " +
-        "`TEST_CONTROL_D1_SCHEMA` / `TEST_TENANT_D1_SCHEMA`. " +
-        "See src/lifecycle.ts for why this suite runs against a real, MIGRATED D1.",
+      "mcp test setup: expected the `TENANT_DB_A` binding and `TEST_TENANT_D1_SCHEMA` " +
+        "(vitest.config.ts). See src/lifecycle.ts for why this suite runs against real, " +
+        "migrated storage.",
     );
   }
-  await applyD1Migrations(DB, TEST_CONTROL_D1_SCHEMA);
-  if (BILLING_DB !== undefined && BILLING_DB !== DB) {
-    await applyD1Migrations(BILLING_DB, TEST_CONTROL_D1_SCHEMA);
-  }
   await applyD1Migrations(TENANT_DB_A, TEST_TENANT_D1_SCHEMA);
-  // `src/auth.ts` caches its table probe per D1 handle for the life of the
-  // isolate. Forgetting it here is what an isolate recycle does after a
-  // migration lands, and without it a file whose first request preceded the
-  // migration would remember "these tables do not exist" for the whole run.
-  forgetControlTableProbe(DB);
+  // `src/auth.ts` caches its table probe per control handle for the life of the
+  // isolate. Forgetting it here is what an isolate recycle does after a schema
+  // lands, so a file whose first request preceded the seed does not remember
+  // "these tables do not exist" for the whole run.
+  forgetControlTableProbe(controlAlias);
 });

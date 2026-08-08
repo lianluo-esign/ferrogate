@@ -163,12 +163,11 @@ compatibility_flags = ["nodejs_compat"]
 # ---------------------------------------------------------------------------
 
 [vars]
-# Zero-D1 S3: the CONTROL_DATA facade is WIRED (the seam resolves it, the binding
-# is declared), but the active control-store source stays the flat `DB` until S5
-# backfills CONTROL_DATA and cuts over. S5 is where "flip the posture var default"
-# to "durable_object" lands (design §4, slice S5) — doing it here would read an
-# empty object. `d1_compat` is the current, correct posture.
-CONTROL_PLANE_CONTROL_STORAGE = "d1_compat"
+# Zero-D1 S5 (#881): the backfill has populated CONTROL_DATA and the cut-over is
+# done. `durable_object` is the only resolvable posture — the legacy `DB`
+# fallback and its `[[d1_databases]]` stanza are gone. There is no `d1_compat`
+# leg to fall back to.
+CONTROL_PLANE_CONTROL_STORAGE = "durable_object"
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"
 TENANCY_LIFECYCLE = "{}"
@@ -230,42 +229,17 @@ SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS = "5"
 # here rather than declared so an operator can discover the knobs exist.
 
 # ---------------------------------------------------------------------------
-# D1: the control database
+# D1: legacy tenant compatibility only
 # ---------------------------------------------------------------------------
 #
-# `env.DB` is the native binding that replaces BOTH legacy paths at once
-# (`docs/legacy/inventory-edge-control.md` §7 "Inside a Worker most of this
-# collapses to native bindings", §9.3):
+# Zero-D1 S5 (#881) deleted the CONTROL database stanza (`binding = "DB"`,
+# `database_name = "ferrogate-control"`). The control store now reads
+# `CONTROL_DATA` (the singleton ControlDataObject) exclusively; there is no
+# `env.DB` control binding and no `d1_compat` fallback. `src/store/d1.ts`
+# resolves the control facade, not a `[[d1_databases]]` binding.
 #
-#   * the D1 REST client (`ferrogate-cloudflare::d1`) — admin/low-volume
-#     create/list/query, which had no transactions and no `RETURNING`; and
-#   * the `workers/d1-proxy` Worker (#450/#455) — the atomic hot path, a
-#     bearer-gated HTTP front over `env.DB.batch([...])` and
-#     `prepare().bind().all()` with `RETURNING`.
-#
-# Both become direct `env.DB` calls here, so `D1_PROXY_TOKEN` and the proxy's
-# base URL disappear with it — there is no longer an HTTP hop to authenticate.
-#
-# `src/store/d1.ts` reads this binding. Every admin collection persists into the
-# schema's generic `control_plane_resources` document table (`resource_kind` =
-# the collection, `document_json` = the whole record) and every applied mutation
-# appends an `audit_events` row — both tables are the control-database
-# migration's, unchanged: `sql/d1-ts/control/0001_init_control.sql`.
-#
-# `migrations_dir` points at that same directory, so
-# `wrangler d1 migrations apply ferrogate-control [--local]` provisions exactly
-# the DDL the test suite applies (`vitest.config.ts` reads it with
-# `readD1Migrations`). Tests and deploys therefore cannot run different schemas.
-#
-# `database_id` is a DOCUMENTED PLACEHOLDER, not a real resource. `wrangler
-# deploy` will refuse it, which is deliberate: the id must be supplied by
-# whoever provisions the database (`wrangler d1 create ferrogate-control`),
-# never invented and committed here.
-[[d1_databases]]
-binding = "DB"
-database_name = "ferrogate-control"
-database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
-migrations_dir = "../../sql/d1-ts/control"
+# The only `[[d1_databases]]` stanza that survives here is LEGACY_TENANT_DB,
+# which belongs to the per-tenant migration epic (#821/#824), not to Zero-D1.
 
 # LEGACY_TENANT_DB is the pre-M9 shared tenant database. It is retained only
 # while issue #824 runs its tenant-by-tenant backfill; the migration writes a

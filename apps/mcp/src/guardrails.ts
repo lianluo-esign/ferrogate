@@ -126,7 +126,7 @@ const GUARDRAIL_SQL: GuardrailPolicySql = {
 export const MCP_MANAGED_ACTION_SCOPE_CLASS = "mcp" as const;
 
 export interface McpGuardrailBindings {
-  readonly DB?: unknown;
+  readonly CONTROL_DATA?: unknown;
 }
 
 /** Drop the memoized snapshot. Test affordance; an isolate recycle does the same. */
@@ -135,7 +135,7 @@ export function forgetMcpGuardrailPolicies(env: object): void {
 }
 
 function controlDatabase(env: McpGuardrailBindings): GuardrailPolicyDatabase | undefined {
-  const binding = env.DB;
+  const binding = controlDatabaseFrom(env);
   return typeof binding === "object" &&
     binding !== null &&
     typeof (binding as GuardrailPolicyDatabase).prepare === "function"

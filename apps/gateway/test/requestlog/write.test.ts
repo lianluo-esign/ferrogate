@@ -496,6 +496,7 @@ describe("the data plane does not depend on the evidence path", () => {
         GATEWAY_NATIVE_API_KEYS: LOG_TENANT_KEY,
         REQUEST_LOG: undefined,
         CONTROL_DB: undefined,
+        CONTROL_DATA: undefined,
       },
       ctx,
     );

@@ -76,6 +76,7 @@
  * tenant — a Rust quirk documented in `./agent-discovery.ts`).
  */
 import type { AuthContext } from "../ports.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import { callerScope } from "../ports.js";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type {
@@ -371,7 +372,7 @@ export async function agentUpstreamsForCaller(
   auth: AuthContext | null,
   parseVar: (raw: string | undefined) => readonly AgentUpstreamRecord[],
 ): Promise<readonly AgentUpstreamRecord[]> {
-  const db = env?.CONTROL_DB;
+  const db = controlDatabaseFrom(env);
   if (db === undefined) return parseVar(env?.GATEWAY_AGENT_UPSTREAMS);
   // An unauthenticated caller is confined to a tenant no row can carry, exactly
   // as `callerScope` confines an unclassified credential — it therefore sees

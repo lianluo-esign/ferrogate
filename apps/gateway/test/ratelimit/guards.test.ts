@@ -37,6 +37,7 @@
  * single-tenant deploys, so it is still worth its coverage.
  */
 import { SELF, env } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { MiddlewareHandler } from "hono";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -981,6 +982,7 @@ describe("monthly token budget: MOUNTED on the inference path", () => {
         GATEWAY_MODELS: "[]",
         DB: db,
         CONTROL_DB: bindings.CONTROL_DB,
+        CONTROL_DATA: controlNamespace(),
         TENANT_DATA: bindings.TENANT_DATA,
         RATE_LIMIT: bindings.RATE_LIMIT,
       },

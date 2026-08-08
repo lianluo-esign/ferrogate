@@ -175,7 +175,8 @@ async function toolsCall(key: string): Promise<{ status: number; body: JsonBody 
 
 beforeAll(async () => {
   const b = bindings();
-  await applyD1Migrations(b.DB, b.TEST_CONTROL_D1_SCHEMA);
+  // Zero-D1 S5 (#881): the ControlDataObject self-applies its schema on first
+  // wake; there is no control D1 to migrate here.
 });
 
 beforeEach(async () => {

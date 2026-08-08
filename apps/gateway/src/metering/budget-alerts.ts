@@ -255,10 +255,7 @@ export interface BudgetAlertPorts {
 export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined {
   const config = budgetAlertConfigFromEnv(env);
   if (config === undefined) return undefined;
-  const bindings = env as { CONTROL_DB?: unknown; BILLING_DB?: unknown };
-  const controlDb = controlDatabaseFrom(env, {
-    legacy: [bindings.CONTROL_DB, bindings.BILLING_DB],
-  });
+  const controlDb = controlDatabaseFrom(env);
   if (controlDb === undefined || typeof env !== "object" || env === null) return undefined;
   const namespace = (env as { TENANT_DATA?: TenantDataNamespace }).TENANT_DATA;
   if (namespace === undefined) return undefined;

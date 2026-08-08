@@ -35,6 +35,7 @@
  * here seeds a score row.
  */
 import { createExecutionContext, env as poolEnv, waitOnExecutionContext } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { shadowEvalLegFor } from "../../src/evals/index.js";
 import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
@@ -340,6 +341,7 @@ describe("a control+shadow split scores BOTH arms under one instrument", () => {
       } as never,
       {
         CONTROL_DB: controlDb(),
+        CONTROL_DATA: controlNamespace(),
         TENANT_DATA: (poolEnv as unknown as Record<string, unknown>).TENANT_DATA,
         GATEWAY_PROVIDERS: JSON.stringify(JUDGE_PROVIDERS),
         GATEWAY_MODELS: JSON.stringify(JUDGE_MODELS),

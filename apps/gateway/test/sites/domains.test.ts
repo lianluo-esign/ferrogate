@@ -39,6 +39,7 @@ import { buildTar } from "../assets/archives.js";
 import { CTX, callerFor, harness } from "../assets/helpers.js";
 
 const CONTROL_DB = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
+const CONTROL_DATA = (env as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA;
 
 /** A fixed "now" for the middleware, so verification expiry is deterministic. */
 const NOW = 1_800_000_000;
@@ -177,7 +178,7 @@ async function twoTenantGateway(options: GatewayOptions = {}) {
   const call = (url: string, token?: string): Promise<Response> => {
     const headers = new Headers();
     if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
-    return Promise.resolve(app.request(url, { headers }, { ...KEYS, CONTROL_DB }));
+    return Promise.resolve(app.request(url, { headers }, { ...KEYS, CONTROL_DB, CONTROL_DATA }));
   };
   return { ...h, call };
 }

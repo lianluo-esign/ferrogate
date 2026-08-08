@@ -140,6 +140,7 @@ const ASSET_POLICY = {
 const STORAGE = env as unknown as {
   DB: unknown;
   CONTROL_DB: unknown;
+  CONTROL_DATA: unknown;
   TENANT_DATA: unknown;
   ASSETS: unknown;
 };
@@ -157,6 +158,7 @@ const ENV: Record<string, unknown> = {
   GATEWAY_GUARDRAIL_POLICIES: JSON.stringify([ASSET_POLICY]),
   DB: STORAGE.DB,
   CONTROL_DB: STORAGE.CONTROL_DB,
+  CONTROL_DATA: STORAGE.CONTROL_DATA,
   TENANT_DATA: STORAGE.TENANT_DATA,
   ASSETS: STORAGE.ASSETS,
 };

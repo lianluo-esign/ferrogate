@@ -79,9 +79,6 @@ export interface GuardrailStatement {
   run(): Promise<unknown>;
 }
 
-/** Binding name of the CONTROL D1 (see `wrangler.toml`). */
-export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
-
 function isGuardrailDatabase(value: unknown): value is GuardrailDatabase {
   return (
     typeof value === "object" &&
@@ -237,9 +234,7 @@ export class D1GuardrailPolicyStore implements AsyncGuardrailPolicyStore {
     env: Record<string, unknown>,
     options: { now?: () => number } = {},
   ): D1GuardrailPolicyStore | null {
-    const binding = controlDatabaseFrom(env, {
-      legacy: [env[CONTROL_DATABASE_BINDING]],
-    });
+    const binding = controlDatabaseFrom(env);
     return isGuardrailDatabase(binding) ? new D1GuardrailPolicyStore(binding, options) : null;
   }
 

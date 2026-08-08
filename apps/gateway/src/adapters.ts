@@ -766,7 +766,7 @@ export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
 
 /** `null` when neither `CONTROL_DB` nor `DB` is bound. */
 export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): LifecycleRowSource | null {
-  const control = env[CONTROL_DATABASE_BINDING];
+  const control = controlDatabaseFrom(env);
   const tenant = env[TENANT_DATABASE_BINDING];
   const controlDb = isLifecycleDatabase(control) ? control : undefined;
   const tenantDb = isLifecycleDatabase(tenant) ? tenant : undefined;
@@ -860,9 +860,6 @@ export function rbacDenialMessage(rbacAction: string): string {
   return `tenant roles do not grant required action ${rbacAction}`;
 }
 
-/** Binding name of the CONTROL D1 holding the RBAC graph (`wrangler.toml`). */
-export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
-
 /** The two statements `D1RbacAuthorizer` issues. Exported so a test can pin them. */
 export const RBAC_PERMISSION_EXISTS_SQL = "SELECT 1 AS present FROM permissions WHERE key = ?1";
 // ONE template literal rather than the `"SELECT …" + "FROM …"` concatenation
@@ -952,9 +949,7 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
       tenantDatabases?: TenantDatabaseRouter | undefined;
     } = {},
   ): D1RbacAuthorizer | null {
-    const binding = controlDatabaseFrom(env, {
-      legacy: [env[CONTROL_DATABASE_BINDING]],
-    });
+    const binding = controlDatabaseFrom(env);
     if (!isRbacDatabase(binding)) return null;
     const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
     const tenantDatabases =

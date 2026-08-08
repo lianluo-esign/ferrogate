@@ -30,6 +30,7 @@
  * what `src/index.ts` does.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { RequestIdFactory } from "../../src/inference/index.js";
@@ -131,7 +132,7 @@ function durableGateway(
   const bindings: Record<string, unknown> = {
     ...(env as unknown as Record<string, unknown>),
     BILLING: queue,
-    ...(options.database !== undefined ? { BILLING_DB: options.database } : {}),
+    ...(options.database !== undefined ? { CONTROL_DATA: controlNamespaceOverD1(options.database) } : {}),
   };
 
   const sink = createMeteringUsageSink({
@@ -1020,10 +1021,20 @@ describe("durable metering — an outage keeps the charge", () => {
     expect(h.sink.stats.deliveryFailures).toBe(1);
   });
 
-  it("never lets a D1 outage reach the client", async () => {
+  it("never lets a metering-write D1 outage reach the client", async () => {
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
+    // Zero-D1 S5 (#881): the metering ledger and the control authority are now
+    // ONE object (`CONTROL_DATA`). This case is about a failure of the metering
+    // WRITE — the `batch` that lands the ledger row — AFTER admission has
+    // already authorized the request off the same object. So reads succeed
+    // against the live control store and only the ledger batch faults; a total
+    // control outage (reads down too) is a different scenario, and fail-closing
+    // it at admission is correct, not a leak. `failBatchIndex` poisons the first
+    // statement of the ledger batch, so the fault surfaces as a real D1 batch
+    // rejection the drain already swallows — never a synthetic throw that leaks
+    // past `waitUntil`.
     const database = new RecordingDatabase();
-    database.failure = new Error("D1_ERROR: network");
+    database.failBatchIndex = 0;
     const h = durableGateway({ database });
 
     const response = await h.call("/v1/chat/completions", {

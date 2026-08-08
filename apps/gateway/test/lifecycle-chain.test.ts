@@ -456,7 +456,9 @@ describe("D1TenancyLifecycleGate", () => {
   it("is `null` from an env with neither database bound", () => {
     expect(D1TenancyLifecycleGate.fromEnv({})).toBeNull();
     expect(D1TenancyLifecycleGate.fromEnv({ DB: {} })).toBeNull();
-    expect(D1TenancyLifecycleGate.fromEnv({ CONTROL_DB: db("CONTROL_DB") })).not.toBeNull();
+    expect(
+      D1TenancyLifecycleGate.fromEnv({ CONTROL_DATA: bindings.CONTROL_DATA }),
+    ).not.toBeNull();
   });
 });
 

@@ -18,6 +18,7 @@
  * are read back out of the real control D1.
  */
 import { env as poolEnv } from "cloudflare:test";
+import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -52,6 +53,7 @@ const MODELS = [{ name: "judge-model", provider: "openai-judge", provider_model:
 function env(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     CONTROL_DB: controlDb(),
+    CONTROL_DATA: controlNamespace(),
     TENANT_DATA: (poolEnv as unknown as Record<string, unknown>).TENANT_DATA,
     GATEWAY_PROVIDERS: JSON.stringify(PROVIDERS),
     GATEWAY_MODELS: JSON.stringify(MODELS),

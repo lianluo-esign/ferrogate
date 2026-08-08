@@ -14,12 +14,40 @@
  * change to the hash format breaks these specs instead of silently passing.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
-import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
+import { DurableObjectTenantDatabaseRouter, controlDataObjectDatabase } from "@ferrogate/storage";
 import {
   hashVirtualApiKeySecret,
   virtualApiKeyLast4,
   virtualApiKeyPrefix,
 } from "../../src/durable/hash.js";
+
+/**
+ * Zero-D1 S5 (#881): the CONTROL schema is the singleton `ControlDataObject`,
+ * bound cross-script as `env.CONTROL_DATA` (`harness/wrangler.toml`). The
+ * durable specs still seed and assert through `env.CONTROL_DB`, so that name is
+ * aliased AT MODULE LOAD to a fresh-per-access facade over the object the code
+ * reads. A lazy Proxy avoids reusing a request-bound DO stub across requests,
+ * and the object self-migrates its whole control schema on construction, so no
+ * `applyD1Migrations` seeds it.
+ */
+const harnessBindings = env as unknown as { CONTROL_DATA?: unknown; CONTROL_DB?: D1Database };
+if (harnessBindings.CONTROL_DATA === undefined) {
+  throw new Error(
+    "durable harness: `CONTROL_DATA` is not bound — harness/vitest.config.ts must publish the " +
+      "cross-script ControlDataObject (Zero-D1 S5, #881).",
+  );
+}
+const controlAlias = new Proxy({} as D1Database, {
+  get(_target, prop) {
+    const db = controlDataObjectDatabase(harnessBindings.CONTROL_DATA as never) as unknown as Record<
+      string | symbol,
+      unknown
+    >;
+    const value = db[prop];
+    return typeof value === "function" ? value.bind(db) : value;
+  },
+});
+harnessBindings.CONTROL_DB = controlAlias;
 
 /**
  * The six internal callbacks and the body builder for each, re-exported from
@@ -211,7 +239,8 @@ let prepared = false;
 export async function setupDurablePorts(): Promise<void> {
   if (prepared) return;
   await applyD1Migrations(env.DB, env.TENANT_MIGRATIONS);
-  await applyD1Migrations(env.CONTROL_DB, env.CONTROL_MIGRATIONS);
+  // The CONTROL schema self-applies inside the ControlDataObject; nothing to
+  // migrate here. `env.CONTROL_DB` is the facade aliased above (#881).
 
   for (const row of SEED_KEYS) {
     const secret = row.secret;

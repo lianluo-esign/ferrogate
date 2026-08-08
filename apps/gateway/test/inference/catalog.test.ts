@@ -17,6 +17,7 @@
  * contract router and the auth guard are all the real ones.
  */
 import { describe, expect, it } from "vitest";
+import { controlNamespace } from "../support/control-namespace.js";
 import app from "../../src/index.js";
 import {
   InMemoryUsageSink,
@@ -95,6 +96,7 @@ const MODELS: readonly ModelRecord[] = [
 /** Worker bindings: the two tables, the two secrets they NAME, and one key. */
 const ENV = {
   GATEWAY_PROVIDERS: JSON.stringify(PROVIDERS),
+  CONTROL_DATA: controlNamespace(),
   GATEWAY_MODELS: JSON.stringify(MODELS),
   ANTHROPIC_AUTH_TOKEN: RELAY_TOKEN,
   OPENAI_API_KEY: OPENAI_TOKEN,

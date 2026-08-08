@@ -45,6 +45,7 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { SemanticResponseCache } from "../../src/cache/semantic.js";
+import { cacheGovernanceSourceFromEnv } from "../../src/cache/governance.js";
 import { MemoryResponseCacheStore } from "../../src/cache/store.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { CACHE_STATUS_HEADER, responseCache } from "../../src/middleware/response-cache.js";
@@ -52,11 +53,13 @@ import { createGatewayApp } from "../../src/routes/index.js";
 import { ALL_ROUTES, fixedRequestIds } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
 import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
+import { controlNamespace } from "../support/control-namespace.js";
 
 const BASE = "https://gw.test";
 const CHAT = `${BASE}/v1/chat/completions`;
 
 const CONTROL_DB = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
+const CONTROL_DATA = controlNamespace();
 const TENANT_DATA = (env as unknown as { TENANT_DATA: TenantDataNamespace }).TENANT_DATA;
 
 /** Two tenants, two credentials — the partition a governed cache must keep. */
@@ -131,7 +134,7 @@ function gateway(
   // A FRESH env object per gateway: `guardrailPolicyFingerprint` memoizes on
   // the env identity, and reusing one would carry a memo across a test that
   // changes durable state.
-  const fullEnv = { ...DEPLOYMENT_VARS, CONTROL_DB, TENANT_DATA, ...overrides };
+  const fullEnv = { ...DEPLOYMENT_VARS, CONTROL_DB, CONTROL_DATA, TENANT_DATA, ...overrides };
   return {
     post: (key, prompt) =>
       app.request(
@@ -526,5 +529,34 @@ describe("an unreadable governance table fails closed", () => {
     } finally {
       provider.restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #881 regression — the control store resolves through the CONTROL_DATA facade
+// ---------------------------------------------------------------------------
+
+describe("cacheGovernanceSourceFromEnv resolves control through the CONTROL_DATA facade (#881)", () => {
+  it("mounts under the production posture: CONTROL_DATA bound, legacy CONTROL_DB gone", () => {
+    // The regression this pins: this seam read `env.CONTROL_DB` directly, so the
+    // S5 cut-over that deletes the CONTROL_DB stanza made it resolve `undefined`
+    // and return null — SILENTLY unmounting every tenant's semantic-cache policy
+    // in production while every test that injects a CONTROL_DB stayed green.
+    const source = cacheGovernanceSourceFromEnv({
+      GATEWAY_CONTROL_STORAGE: "durable_object",
+      CONTROL_DATA: controlNamespace(),
+      TENANT_DATA,
+    });
+    expect(source).not.toBeNull();
+  });
+
+  it("stays a var-only deployment when neither CONTROL_DATA nor CONTROL_DB is bound", () => {
+    // Preserves the documented absent-binding behaviour: an unbound deployment
+    // is a var-only deployment, not a fail-closed outage.
+    const source = cacheGovernanceSourceFromEnv({
+      GATEWAY_CONTROL_STORAGE: "durable_object",
+      TENANT_DATA,
+    });
+    expect(source).toBeNull();
   });
 });

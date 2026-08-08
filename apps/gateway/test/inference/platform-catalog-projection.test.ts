@@ -214,12 +214,11 @@ describe("platform model catalog projected into the data plane (#890)", () => {
   });
 
   it("lets the env registry win when no platform catalog is bound (bootstrap)", async () => {
-    // No control database (both legacy candidates unbound; they map to the same
-    // `ferrogate-control` db) and a real env model: `controlDatabaseFrom`
-    // returns undefined ⇒ bootstrap ⇒ the env registry is authoritative.
+    // No control object bound (`CONTROL_DATA` unset) and a real env model:
+    // `controlDatabaseFrom` returns undefined ⇒ bootstrap ⇒ the env registry is
+    // authoritative.
     const call = gateway({
-      CONTROL_DB: undefined,
-      BILLING_DB: undefined,
+      CONTROL_DATA: undefined,
       GATEWAY_PROVIDERS: JSON.stringify([
         {
           name: "env-provider",

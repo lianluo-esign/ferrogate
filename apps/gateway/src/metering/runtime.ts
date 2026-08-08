@@ -106,7 +106,7 @@ export function meteringDatabaseFrom(
     return undefined;
   }
   const bindings = env as MeteringBindings;
-  const candidate = controlDatabaseFrom(env, { legacy: [bindings.BILLING_DB] });
+  const candidate = controlDatabaseFrom(env);
   return isMeteringDatabase(candidate) ? candidate : undefined;
 }
 
@@ -147,10 +147,7 @@ export interface MeteringBindingResolver {
 /** Resolve the control database used for tenant-derived fleet projections. */
 export function meteringProjectionDatabaseFrom(env: unknown): D1Database | undefined {
   if (typeof env !== "object" || env === null) return undefined;
-  const bindings = env as MeteringBindings;
-  const candidate = controlDatabaseFrom(env, {
-    legacy: [bindings.CONTROL_DB, bindings.BILLING_DB],
-  });
+  const candidate = controlDatabaseFrom(env);
   return isMeteringDatabase(candidate) ? (candidate as unknown as D1Database) : undefined;
 }
 

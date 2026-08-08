@@ -86,9 +86,7 @@ import {
   backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
-
-/** Binding name of the CONTROL D1. Same constant `guardrails/d1.ts` uses. */
-export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
+import { controlDatabaseFrom } from "../control-data.js";
 
 /** The scope kinds a governance row may be written for. */
 export const CACHE_GOVERNANCE_SCOPE_KINDS = ["tenant"] as const;
@@ -305,7 +303,7 @@ export function d1CacheGovernanceSource(db: CacheGovernanceDatabase): CacheGover
 export function cacheGovernanceSourceFromEnv(
   env: Record<string, unknown> | undefined,
 ): CacheGovernanceSource | null {
-  const binding = env?.[CONTROL_DATABASE_BINDING];
+  const binding = controlDatabaseFrom(env);
   const namespace = env?.TENANT_DATA as TenantDataNamespace | undefined;
   if (!isGovernanceDatabase(binding) || namespace === undefined) return null;
   const controlDb = binding as D1Database;

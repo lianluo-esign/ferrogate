@@ -1149,7 +1149,7 @@ function controlDatabaseFor(
 ): D1Database | undefined {
   if (resolvedControlDatabase !== undefined) return resolvedControlDatabase;
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return undefined;
-  return controlDatabaseFrom(env, { legacy: [env.DB] });
+  return controlDatabaseFrom(env);
 }
 
 export function resolveStore(
@@ -1291,7 +1291,9 @@ export function resolveLifecycle(
     parseJson<Record<string, LifecycleStatus>>(env.TENANCY_LIFECYCLE, {}),
   );
   if (env.CONTROL_PLANE_STORE?.trim().toLowerCase() === "memory") return declarative;
-  if (env.DB === undefined || env.DB === null) return declarative;
+  // Zero-D1 S5 (#881): the durable lifecycle gate is active whenever the CONTROL
+  // object is resolvable, not the retired `env.DB` control D1.
+  if (controlDatabaseFrom(env) === undefined) return declarative;
   return new StoreTenancyLifecycleGate(store, declarative);
 }
 
@@ -1431,7 +1433,12 @@ export function resolveTenantObjectOperator(
   env: ControlPlaneBindings,
   resolvedControlDatabase?: D1Database,
 ): TenantObjectOperator | null {
-  const controlDb = controlDatabaseFor(env, resolvedControlDatabase);
+  // The tenant-object router reads the `tenant_databases` roster out of the
+  // CONTROL object, which exists independently of the document-store choice —
+  // so it must resolve `CONTROL_DATA` even under `CONTROL_PLANE_STORE = "memory"`
+  // (which `controlDatabaseFor` deliberately vetoes for the DOCUMENT store).
+  // Zero-D1 S5 (#881): this is the object, never the retired `env.DB` control D1.
+  const controlDb = resolvedControlDatabase ?? controlDatabaseFrom(env);
   if (env.TENANT_DATA === undefined || controlDb === undefined) return null;
   return new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb);
 }

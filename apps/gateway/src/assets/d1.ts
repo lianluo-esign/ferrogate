@@ -66,6 +66,7 @@
  * when the whole durable half of `@ferrogate/storage` is mounted, not before.
  */
 import { randomHex128 } from "./hash.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   requireAtomicBatch,
   type TenantDataStub,
@@ -755,15 +756,6 @@ export function assetBundleIndexStoreFromEnv(
 // ---------------------------------------------------------------------------
 
 /**
- * Binding name of the CONTROL D1 projection. Tenant-attributed asset evidence
- * is authoritative in the owning TenantDataObject; control D1 keeps the
- * tenant-qualified copy so fleet readers can discover it without a
- * cross-object SQL query. The legacy constructor supports shared-development
- * deployments and tests.
- */
-export const CONTROL_DATABASE_BINDING_FOR_AUDIT = "CONTROL_DB";
-
-/**
  * `id` is generated at RECORD time, not at flush time, so a retried object
  * append is idempotent — an audit trail that double-counts a yank is as
  * misleading as one that misses it.
@@ -1011,7 +1003,7 @@ export async function sweepAssetAuditProjections(
   limit = 500,
 ): Promise<void> {
   const candidate =
-    typeof env === "object" && env !== null ? (env as { CONTROL_DB?: unknown }).CONTROL_DB : undefined;
+    controlDatabaseFrom(env);
   if (!isAssetDatabase(candidate)) return;
   const projection = candidate;
   const pageSize = Math.max(1, Math.trunc(limit));
@@ -1082,7 +1074,7 @@ export async function sweepAssetAuditProjections(
  * `buildAssetService` keeps the bounded in-memory sink for local dev.
  */
 export function assetAuditSinkFromEnv(env: Record<string, unknown>): AssetAuditSink | null {
-  const db = env[CONTROL_DATABASE_BINDING_FOR_AUDIT];
+  const db = controlDatabaseFrom(env);
   if (!isAssetDatabase(db)) return null;
   const bindings = env as TenantDataBindings;
   const tenantAuditFor =

@@ -58,9 +58,9 @@ name = "TENANT_DATA"
 class_name = "TenantDataObject"
 script_name = "ferrogate-gateway"
 
-# Zero-D1 S4 (#880): the singleton CONTROL object, bound cross-script from the
-# gateway script. The AGENT_RUNTIME_CONTROL_STORAGE posture stays d1_compat until
-# S5 backfills it — the facade is wired but CONTROL_DB remains the active source.
+# Zero-D1 S5 (#881): the singleton CONTROL object, bound cross-script from the
+# gateway script. The backfill/cut-over is done — AGENT_RUNTIME_CONTROL_STORAGE
+# is `durable_object` and CONTROL_DATA is the only control-plane source.
 [[durable_objects.bindings]]
 name = "CONTROL_DATA"
 class_name = "ControlDataObject"
@@ -73,7 +73,7 @@ tag = "v1"
 new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
 
 [vars]
-AGENT_RUNTIME_CONTROL_STORAGE = "d1_compat"
+AGENT_RUNTIME_CONTROL_STORAGE = "durable_object"
 # DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`.
 # Production MUST NOT set this: without it the Worker fails CLOSED — every
 # authenticated surface answers 503 until real ports are bound.
@@ -155,11 +155,14 @@ FG_DEV_A2A_GUARDRAILS = ""
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# D1 — the two CREDENTIAL AUTHORITIES (`resolveDeps` in `src/ports.ts`)
+# D1 — the tenant CREDENTIAL AUTHORITY (`resolveDeps` in `src/ports.ts`)
 #
 #   DB          tenant schema  -> `api_keys`  (`d1ApiKeyPort`)
-#   CONTROL_DB  control schema -> `self_hosted_worker_registrations`
-#                                 (`d1WorkerIdentityPort`)
+#
+# Zero-D1 S5 (#881) deleted the CONTROL_DB stanza
+# (`database_name = "ferrogate-control"`): worker-identity control reads now
+# resolve through the `CONTROL_DATA` DO facade, never a D1 binding. Only the
+# `ferrogate-tenant` DB stanza (epic #821/#824) remains.
 #
 # A BOUND DATABASE WINS OVER `FG_DEV_IN_MEMORY_PORTS`, deliberately: a
 # deployment that provisions real databases but forgets to delete the dev flag
@@ -184,12 +187,6 @@ binding = "DB"
 database_name = "ferrogate-tenant"
 database_id = "replace-at-deploy-tenant"
 migrations_dir = "../../sql/d1-ts/tenant"
-
-[[d1_databases]]
-binding = "CONTROL_DB"
-database_name = "ferrogate-control"
-database_id = "replace-at-deploy"
-migrations_dir = "../../sql/d1-ts/control"
 # ---------------------------------------------------------------------------
 
 # ===========================================================================
@@ -324,7 +321,7 @@ class_name = "RateLimiterDurableObject"
 script_name = "ferrogate-gateway"
 
 [env.unit.vars]
-AGENT_RUNTIME_CONTROL_STORAGE = "d1_compat"
+AGENT_RUNTIME_CONTROL_STORAGE = "durable_object"
 FG_DEV_IN_MEMORY_PORTS = "1"
 FG_REQUIRE_PRODUCTION_MTLS = "0"
 CONTAINER_GOVERNED_EGRESS_HOSTS = ""

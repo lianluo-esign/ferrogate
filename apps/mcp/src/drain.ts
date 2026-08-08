@@ -68,6 +68,7 @@
  * another), and `drain-fleet.test.ts` compares the copies as DATA so they
  * cannot drift.
  */
+import { controlDatabaseFrom } from "./control-data.js";
 
 /** The `control_plane_resources` table the admin API writes. */
 export const RESOURCE_TABLE = "control_plane_resources";
@@ -235,7 +236,7 @@ export async function readDurableDrain(db: D1Database | undefined): Promise<Drai
 
 /** Bindings this module reads. */
 export interface DrainBindings {
-  readonly DB?: D1Database | undefined;
+  readonly CONTROL_DATA?: unknown;
 }
 
 /**
@@ -251,7 +252,7 @@ export async function resolveDrain(
   env: DrainBindings | undefined,
   deployVar = false,
 ): Promise<DrainState> {
-  const durable = await readDurableDrain(env?.DB);
+  const durable = await readDurableDrain(controlDatabaseFrom(env));
   return combineDrain(durable, deployVar);
 }
 

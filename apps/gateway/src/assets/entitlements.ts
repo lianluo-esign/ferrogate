@@ -41,6 +41,7 @@
  * and the config leg never widens a durable decision).
  */
 import type { AssetEntitlements, AssetEntitlementsPort } from "./handlers.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   DurableObjectTenantDatabaseRouter,
   backfillTenantConfigurationPolicy,
@@ -50,9 +51,6 @@ import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 /** Rust permission key for the role half of `tenant_can_host` (issue #182). */
 export const ASSET_HOST_PERMISSION = "assets.host";
-
-/** Binding name of the CONTROL D1 (see `wrangler.toml`). */
-export const CONTROL_DATABASE_BINDING = "CONTROL_DB";
 
 /** The subset of `D1Database` this port reads; a live binding satisfies it. */
 export interface EntitlementsDatabase {
@@ -132,7 +130,7 @@ export class D1AssetEntitlements implements AssetEntitlementsPort {
       tenantDatabases?: TenantDatabaseRouter | undefined;
     } = {},
   ): D1AssetEntitlements | null {
-    const binding = env[CONTROL_DATABASE_BINDING];
+    const binding = controlDatabaseFrom(env);
     if (!isEntitlementsDatabase(binding)) return null;
     const namespace = env.TENANT_DATA as TenantDataNamespace | undefined;
     const tenantDatabases =
