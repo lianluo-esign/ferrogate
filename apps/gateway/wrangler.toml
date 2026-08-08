@@ -483,6 +483,25 @@ GATEWAY_WALLET_HOLD_CREDITS = ""
 GATEWAY_BUDGET_HOLD_USD = ""
 
 # ---------------------------------------------------------------------------
+# [vars] — the batch executor's recovery sweep (#698, slice 2)
+#
+# GATEWAY_BATCH_SWEEP_LIMIT is read by `batchSweepLimitFromEnv`
+# (src/batch/sweep.ts): how many claimable batch jobs ONE tenant may be advanced
+# by on ONE Cron tick. It bounds the worst case of the recovery path, which is
+# the leg that can dispatch paid provider calls with no client waiting — a
+# tenant with 500 stalled jobs must not turn one minute's Cron into 500
+# sequential job ticks inside a single Worker invocation.
+#
+# It is a CEILING on jobs, not on lines: each job is separately bounded to
+# `DEFAULT_MAX_LINES_PER_TICK` lines by the executor, and the queue leg (which
+# re-enqueues itself) is what actually drives throughput. Unset or not a
+# positive integer ⇒ DEFAULT_BATCH_SWEEP_PER_TENANT (5) — a bad value is
+# IGNORED rather than applied, because a 0 would silently disable recovery for
+# every tenant and strand exactly the jobs whose queue message was lost.
+# ---------------------------------------------------------------------------
+GATEWAY_BATCH_SWEEP_LIMIT = ""
+
+# ---------------------------------------------------------------------------
 # [vars] — provider reliability (circuit breaker + retry), the `PROVIDER_CIRCUIT`
 # companion
 #
@@ -1324,6 +1343,53 @@ dead_letter_queue = "replace-at-deploy-ferrogate-online-eval-dlq"
 [[queues.producers]]
 binding = "SCHEDULE_ALARMS"
 queue = "replace-at-deploy-ferrogate-schedule-alarms"
+
+# ---------------------------------------------------------------------------
+# Queues — the batch-job executor  (#698, slices 2/3)
+#
+# Read as `env.BATCH_JOBS` by `batchJobQueueFrom` (src/batch/queue.ts). Produced
+# from `createBatch` on `ctx.waitUntil` and, for a job with work left, from the
+# consumer itself.
+#
+# PRODUCER **AND** CONSUMER, like `REQUEST_LOG` and `ONLINE_EVAL` above and for
+# the same reason: the model catalogue, the provider credentials, the tenant
+# databases and the R2 asset bucket are all already bound to THIS Worker, so a
+# second deploy unit would buy nothing but a second copy of the credentials.
+#
+# THE QUEUE IS THE THROUGHPUT LEG, NOT THE CORRECTNESS LEG. With this binding
+# absent `enqueueBatchJob` is a documented no-op and the 1-minute
+# `[triggers] crons` sweep (`sweepBatchExecution`) still advances every job — it
+# just advances one tick per minute per job instead of back-to-back. Nothing is
+# lost, which is why the producer never fails a `createBatch`.
+#
+# The body is `BatchJobWire` (src/batch/queue.ts), discriminated by
+# `object = "batch.job"`. `src/index.ts::gatewayQueue` routes on that field
+# rather than on the queue NAME, because these names are placeholders the deploy
+# step substitutes.
+#
+# `max_batch_size` is 1, and that is the point: one message is one batch job,
+# and a job tick can dispatch up to 25 paid provider calls. Batching ten of them
+# into one invocation would put 250 upstream calls behind a single Worker CPU
+# budget and lose all of them to one timeout. `max_batch_timeout` is 5 so a job
+# starts within seconds of creation. `max_retries` is 2 because the consumer
+# only ever arms a retry for a DURABLE-WRITE failure — a redelivery re-runs a
+# tick, and the `(batch_id, line_index)` results key makes that an overwrite
+# rather than a doubled bill, but it is still a paid re-dispatch of the tail of
+# one tick and must not loop.
+#
+# `queue` / `dead_letter_queue` are DOCUMENTED PLACEHOLDERS; the deploy step
+# substitutes the real queues (`wrangler queues create …`).
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "BATCH_JOBS"
+queue = "replace-at-deploy-ferrogate-batch-jobs"
+
+[[queues.consumers]]
+queue = "replace-at-deploy-ferrogate-batch-jobs"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 2
+dead_letter_queue = "replace-at-deploy-ferrogate-batch-jobs-dlq"
 
 # ---------------------------------------------------------------------------
 # Durable Objects — the rate-limit / quota counters

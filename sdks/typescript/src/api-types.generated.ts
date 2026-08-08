@@ -9823,7 +9823,10 @@ export interface components {
             id: string;
             /** @constant */
             object: "batch";
-            /** @enum {string} */
+            /**
+             * @description A SUPERSET of what `createBatch` accepts: `/v1/completions` is no longer creatable (#698 slice 2), but rows created before the narrowing are still returned by `retrieveBatch` and `listBatches`, so a client must still be able to read one. Trimming it here would make the reader unable to parse its own history.
+             * @enum {string}
+             */
             endpoint: "/v1/chat/completions" | "/v1/embeddings" | "/v1/completions";
             errors?: null;
             input_file_id: string;
@@ -21087,8 +21090,11 @@ export interface operations {
             content: {
                 "application/json": {
                     input_file_id: string;
-                    /** @enum {string} */
-                    endpoint: "/v1/chat/completions" | "/v1/embeddings" | "/v1/completions";
+                    /**
+                     * @description The endpoint every line of the input JSONL runs against. `/v1/completions` was accepted before #698 slice 2 and is REJECTED with 400 `invalid_request` now: the gateway's inference module has no legacy completions operation, so such a batch could only sit at `validating` until its 24-hour window expired.
+                     * @enum {string}
+                     */
+                    endpoint: "/v1/chat/completions" | "/v1/embeddings";
                     /** @constant */
                     completion_window: "24h";
                     metadata?: {

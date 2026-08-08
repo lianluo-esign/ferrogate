@@ -23,7 +23,13 @@ import {
   sweepAssetRetentionForTenants,
 } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
-import { batchRouteModule } from "./batch/index.js";
+import {
+  batchJobFromWire,
+  batchRouteModule,
+  consumeBatchJobBatch,
+  sweepBatchExecution,
+} from "./batch/index.js";
+import type { BatchJobMessageBatch } from "./batch/index.js";
 import { delegationChain } from "./delegation/index.js";
 import {
   consumeOnlineEvalBatch,
@@ -568,6 +574,17 @@ export async function gatewayScheduled(
   // one that can be skipped without consequence: it never throws, and a
   // quality measurement must not be able to delay money recovery.
   await sweepAllOnlineEvalRegressions(env, Math.floor(Date.now() / 1000));
+  // #698 slice 2/3 — advance every tenant's claimable batch jobs.
+  //
+  // LAST on the tick, and only when the tenant registry resolved, for the same
+  // reason the eval regression sweep is next-to-last: it is the most expensive
+  // thing here (it can dispatch paid provider calls) and it must never be able
+  // to delay money recovery. `sweepBatchExecution` never throws and takes a
+  // per-tenant lease, so overlapping with the Queue consumer is safe by
+  // construction rather than by scheduling luck.
+  if (tenantIds !== undefined) {
+    await sweepBatchExecution(env, tenantIds, { usage });
+  }
 }
 
 /**
@@ -642,8 +659,20 @@ export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown):
   if (evalMessages.length > 0) {
     await consumeOnlineEvalBatch(view(evalMessages), env);
   }
+  // #698 — the THIRD queue on this entry point. Same rule as the second: the
+  // partition is on the body's `object` discriminator (`batch.job`), not on
+  // `batch.queue`, because the queue names in `wrangler.toml` are placeholders
+  // the deploy step substitutes per account.
+  const batchJobs = batch.messages.filter(
+    (message) => batchJobFromWire(message.body) !== undefined,
+  );
+  if (batchJobs.length > 0) {
+    await consumeBatchJobBatch(view(batchJobs) as BatchJobMessageBatch, env, { usage });
+  }
   const rest = batch.messages.filter(
-    (message) => onlineEvalSampleFromWire(message.body) === undefined,
+    (message) =>
+      onlineEvalSampleFromWire(message.body) === undefined &&
+      batchJobFromWire(message.body) === undefined,
   );
   if (rest.length > 0) {
     await consumeRequestLogBatch(view(rest) as RequestLogMessageBatch, env);

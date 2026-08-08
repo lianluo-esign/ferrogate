@@ -485,7 +485,10 @@ describe("the env-var drift gate itself", () => {
     // is what goes wrong when two branches each add one.
     // #878 added `GATEWAY_CONTROL_STORAGE` (the Zero-D1 S2 control-storage
     // posture) ⇒ 66, re-counted off the merged file with the same grep.
-    expect(DECLARED.vars.size).toBe(66);
+    // #698 added `GATEWAY_BATCH_SWEEP_LIMIT` (the batch executor's per-tenant
+    // cron sweep ceiling) ⇒ 67, re-counted off the merged file with the same
+    // grep rather than incremented.
+    expect(DECLARED.vars.size).toBe(67);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -781,7 +784,8 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // #740: + `ASSET_GUARDRAIL_MODES`, `ASSET_GUARDRAIL_MAX_SCREEN_BYTES`,
     // re-counted off the merged file with the same grep ⇒ 65.
     // #878: + `GATEWAY_CONTROL_STORAGE` ⇒ 66.
-    expect(rows.length).toBe(66);
+    // #698: + `GATEWAY_BATCH_SWEEP_LIMIT` ⇒ 67, re-counted with the same grep.
+    expect(rows.length).toBe(67);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -874,8 +878,14 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // `rows.length - overridden` off the MERGED file (65 - 5) — #740's two
     // asset-guardrail knobs are committed BLANK and are not overridden by the
     // test runner, so both are observable.
+    //
+    // #698: + `GATEWAY_BATCH_SWEEP_LIMIT`, committed BLANK and not overridden
+    // by the test runner, so it is observable and the count moves 60 -> 61
+    // while the overridden set stays at 6. Blank is INERT: the sweep falls
+    // back to DEFAULT_BATCH_SWEEP_PER_TENANT rather than to no sweep at all,
+    // so a deployment that never sets it still recovers stalled batch jobs.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(60);
+    expect(observable.length).toBe(61);
     expect(rows.length - observable.length).toBe(6);
   });
 });

@@ -25,13 +25,18 @@ import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import { tenantDatabaseOf } from "../tenancy/middleware.js";
+import { enqueueBatchJob } from "./queue.js";
 
-/** Endpoints whose request format the future executor will serve. */
-export const BATCH_ENDPOINTS = [
-  "/v1/chat/completions",
-  "/v1/embeddings",
-  "/v1/completions",
-] as const;
+/**
+ * Endpoints the executor can actually run.
+ *
+ * `/v1/completions` was accepted by slice 1 and is REMOVED here (#698 slice 2).
+ * The gateway's inference module serves chat/embeddings/responses and has no
+ * legacy completions operation, so a batch created against it could be accepted
+ * and then never executed — a job that sits at `validating` until its 24-hour
+ * window expires is a worse answer to the caller than a 400 at creation time.
+ */
+export const BATCH_ENDPOINTS = ["/v1/chat/completions", "/v1/embeddings"] as const;
 
 type BatchEndpoint = (typeof BATCH_ENDPOINTS)[number];
 
@@ -101,6 +106,17 @@ interface BatchResources {
 
 function unixNow(now: (() => number) | undefined): number {
   return now?.() ?? Math.floor(Date.now() / 1000);
+}
+
+/** `c.executionCtx` without the throw (`app.request()` creates none). */
+function executionContextOf(
+  c: Context<GatewayEnv>,
+): { waitUntil(work: Promise<unknown>): void } | undefined {
+  try {
+    return c.executionCtx;
+  } catch {
+    return undefined;
+  }
 }
 
 function nullTimestamp(value: number | undefined): number | null {
@@ -263,11 +279,25 @@ export function batchRouteModule(options: BatchRouteModuleOptions = {}): RouteMo
           metadata: { ...(body.metadata ?? {}) },
           createdAtUnix,
           expiresAtUnix: createdAtUnix + 24 * 60 * 60,
+          // The scope chain the executor re-applies the budget ladder against.
+          // It has no request and therefore no `AuthContext`, so this is the
+          // only surviving record of WHO is spending. See `./governance.ts`.
+          apiKeyId: caller.apiKeyId ?? "",
+          projectId: caller.projectId,
+          nextLineIndex: 0,
+          attemptCount: 0,
         };
         await resources.store.create(batch);
 
-        // SLICE-2 EXECUTOR SEAM: claim this validating row, read its JSONL,
-        // dispatch each request, meter per line, and publish output/error files.
+        // The slice-2 executor, asked for on `waitUntil` so the client is not
+        // held while a queue send happens. With no `BATCH_JOBS` binding this
+        // is a documented no-op and the 1-minute Cron sweep picks the job up
+        // instead — which is why it is fire-and-forget and never awaited into
+        // the response.
+        const enqueue = enqueueBatchJob(c.env, batch.tenantId, batch.id);
+        const ctx = executionContextOf(c);
+        if (ctx !== undefined) ctx.waitUntil(enqueue);
+        else await enqueue;
         return json(batchObject(batch), 200);
       });
 
@@ -307,23 +337,17 @@ export function batchRouteModule(options: BatchRouteModuleOptions = {}): RouteMo
         if (current === undefined) raiseMissingBatch(batchId);
         if (current.status === "cancelled") return json(batchObject(current));
 
-        // Slice 1 has no executor, so cancellation completes synchronously.
-        // With an executor this would be `cancelling` → `cancelled`.
-        const cancelled = await resources.store.updateStatus(
-          caller.tenantId,
-          batchId,
-          "cancelled",
-          now(),
-        );
+        // Slice 2: the store decides between the two arms on the row's LEASE.
+        // An unleased job has no tick running on it and is cancelled outright;
+        // a leased one goes to `cancelling` and the executor that owns it
+        // finishes the transition, so an abandoned job never publishes output.
+        // Both are visible to the caller as OpenAI's own two-step.
+        const cancelled = await resources.store.requestCancel(caller.tenantId, batchId, now());
         if (cancelled === undefined) {
           // A distinct refusal code, not `invalid_request`: the gateway maps
           // `invalid_request` to 400 everywhere else, and the fleet ratchet
           // (test 4.1) requires one status per refusal code across all Workers.
-          throw new HttpError(
-            409,
-            "batch_not_cancellable",
-            `batch ${batchId} cannot be cancelled`,
-          );
+          throw new HttpError(409, "batch_not_cancellable", `batch ${batchId} cannot be cancelled`);
         }
         return json(batchObject(cancelled));
       });

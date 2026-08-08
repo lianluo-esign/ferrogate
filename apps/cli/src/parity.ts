@@ -329,6 +329,37 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
       "downloads raw bytes, not a JSON document — the same output-file grammar gap as exportAdminCostRecords; lands with the #698 files group",
   },
   // ---------------------------------------------------------------------
+  // Batch API (#698). Four public data-plane operations added by batches
+  // slice 1 and served end to end by the executor slice (2/3). A batch verb
+  // is only usable once the `files` verbs it consumes exist (createBatch
+  // references an uploaded `input_file_id`; retrieve/list return an
+  // `output_file_id` the caller then downloads), so the batches CLI group
+  // lands together with the files group as one dedicated CLI follow-up, not
+  // piecemeal here — the same reasoning that keeps the files rows above.
+  // ---------------------------------------------------------------------
+  {
+    operationId: "createBatch",
+    owner: "batches/files family (#698)",
+    reason:
+      "references an uploaded input_file_id, so the verb is unusable until the #698 files CLI group exists; lands with it as one batches/files CLI slice",
+  },
+  {
+    operationId: "listBatches",
+    owner: "batches/files family (#698)",
+    reason: "batches verbs land as one group with the #698 files CLI slice",
+  },
+  {
+    operationId: "retrieveBatch",
+    owner: "batches/files family (#698)",
+    reason:
+      "returns an output_file_id the caller downloads through the files verbs; lands with the #698 files CLI slice",
+  },
+  {
+    operationId: "cancelBatch",
+    owner: "batches/files family (#698)",
+    reason: "batches verbs land as one group with the #698 files CLI slice",
+  },
+  // ---------------------------------------------------------------------
   // Tenant-data operator lifecycle (#828). Audited SQL reads, JSONL export
   // pages and a DESTRUCTIVE restore against one tenant's Durable Object —
   // operator tooling whose confirmation/audit UX is specified by #828, not
