@@ -80,6 +80,16 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import agentRuntimeApp from "../../agent-runtime/src/index.js";
 import gatewayApp from "../../gateway/src/index.js";
+// The gateway memoizes the RESOLVED credential in an isolate-wide 30s key cache
+// (default-ON; `apps/gateway/src/keys/cache.ts` DEFAULT_API_KEY_CACHE_TTL_SECONDS).
+// The two taxonomy tests below mutate the CREDENTIAL row directly (unlike the
+// tenant/project lifecycle tests, which the gateway reads LIVE via
+// D1TenancyLifecycleGate). Without invalidating the cache after the row UPDATE,
+// the gateway keeps serving the stale "resolved" entry and re-answers 501
+// (admitted) instead of the post-mutation 401/403. This models the cache's
+// explicit control-plane invalidation signal; it is the sibling-consistent
+// pattern used by test/keys/resolver.test.ts and test/ratelimit/*.test.ts.
+import { resetSharedApiKeyCache } from "../../gateway/src/keys/index.js";
 import { hashApiKeySecret } from "../src/auth.js";
 import { rpcRequest, seedFixture, setMcpEnvVar } from "./fixtures.js";
 import {
@@ -389,6 +399,14 @@ beforeEach(async () => {
   // The MCP upstream catalog + the recorded-call sink `tools/call` needs.
   seedFixture({ tenantId: TENANT });
   await seedCredential();
+  // Every test re-seeds the SAME `sha256:` key with fresh row state, but the
+  // gateway's isolate-wide key cache is not re-seeded — so a resolution cached
+  // by a prior test (e.g. a disabled/under-scoped credential from the taxonomy
+  // block) would otherwise leak forward and make a clean-slate test refuse for
+  // the previous test's reason. Reset here so each test starts from the live
+  // row. (Insufficient on its own for the taxonomy tests, which warm the cache
+  // AFTER this hook via a positive control — those reset again post-mutation.)
+  resetSharedApiKeyCache();
 });
 
 describe("FC-2 — one tenant suspension, every Worker that spends", () => {
@@ -454,8 +472,19 @@ describe("the 401-vs-403 taxonomy survives the new gate", () => {
     // stay indistinguishable from an unknown one (401), while suspending a
     // TENANCY is authenticated-but-forbidden (403). A lifecycle gate that
     // reported 403 for a dead key would leak key existence.
+
+    // Positive control: the LIVE credential is admitted on all three doors
+    // first, so the 401s below are proven to be caused by the disable, not by a
+    // fleet that was already refusing. (This also warms the gateway key cache,
+    // which is exactly why the reset must come AFTER the UPDATEs, not before.)
+    expect(await fleet(), "the fleet did not admit the live credential").toEqual(ADMITTED);
+
     await tenantDb().prepare("UPDATE api_keys SET enabled = 0 WHERE id = 'key-fc2'").run();
     await control().prepare("UPDATE api_key_directory SET enabled = 0 WHERE id = 'key-fc2'").run();
+    // The gateway's isolate-wide key cache still holds the pre-disable resolved
+    // credential from the positive control above; invalidate it so the door
+    // re-resolves the now-disabled row (the mcp/agent-runtime doors read live).
+    resetSharedApiKeyCache();
 
     const answers = await fleet();
     for (const [name, wire] of Object.entries(answers)) {
@@ -467,10 +496,23 @@ describe("the 401-vs-403 taxonomy survives the new gate", () => {
   it("an under-scoped credential is still 403 scope_denied, not tenancy_suspended", async () => {
     // The other half: a 403 must still name the right cause. Scoped for
     // nothing this fleet serves.
+
+    // Positive control: with `tools.read` still in scope the gateway ADMITS
+    // (501 capability_not_offered) — proving the 403 below is the scope gate
+    // firing, not a pre-existing refusal. This warms the key cache too.
+    expect(await gatewayDoor(), "the gateway did not admit the in-scope credential").toEqual(
+      ADMITTED.gateway,
+    );
+
     await tenantDb()
       .prepare("UPDATE api_keys SET scopes_json = ?1 WHERE id = 'key-fc2'")
       .bind(JSON.stringify(["skills.read"]))
       .run();
+    // Invalidate the resolved-credential cache warmed by the positive control,
+    // so the gateway re-resolves the newly under-scoped row and its scope gate
+    // (which runs before the dropped-capability 501) fires.
+    resetSharedApiKeyCache();
+
     const gateway = await gatewayDoor();
     expect(gateway.status).toBe(403);
     expect(gateway.code).not.toBe("tenancy_suspended");
