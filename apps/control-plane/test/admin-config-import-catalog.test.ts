@@ -225,6 +225,60 @@ describe("platform catalog bootstrap import (#892)", () => {
     expect(await platformRevision()).toBe(2);
   });
 
+  it("promotes a rate-card-only model to a real route when a re-import adds it to env (#892)", async () => {
+    // Import #1: real providers but NO env models, rate card on. `gpt-4o` is a
+    // default-card name, so it lands as a `platform-default` PRIMARY price row —
+    // priced, but with no routable upstream.
+    const first = await request(OPERATOR, "POST", IMPORT_PATH, {
+      providers: PROVIDERS,
+      models: [],
+      include_default_rate_card: true,
+    });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    const cardPrimary = await db()
+      .prepare("SELECT role, provider_id FROM platform_catalog_offerings WHERE id = ?")
+      .bind("platform:offering:gpt-4o:platform-default:gpt-4o")
+      .first<{ role: string; provider_id: string }>();
+    expect(cardPrimary?.role).toBe("primary");
+    expect(cardPrimary?.provider_id).toBe("platform:provider:platform-default");
+
+    // Import #2: the operator adds gpt-4o to GATEWAY_MODELS and re-runs — the
+    // advertised "sync env changes" flow. The rate card now EXCLUDES gpt-4o, and
+    // the real env primary must take the `ux_..._primary` slot the stale card row
+    // held; without the purge its INSERT OR IGNORE would be dropped and gpt-4o
+    // would stay unroutable (only the excluded platform-default offering).
+    const second = await request(OPERATOR, "POST", IMPORT_PATH, {
+      providers: PROVIDERS,
+      models: [
+        { name: "gpt-4o", provider: "openai", provider_model: "gpt-4o", capabilities: ["chat"] },
+      ],
+      include_default_rate_card: true,
+    });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    // The transition inserts the real primary — not a pure no-op re-run.
+    expect((second.body.inserted as { offerings: number }).offerings).toBeGreaterThanOrEqual(1);
+
+    // The stale platform-default price offering is gone.
+    const stale = await db()
+      .prepare("SELECT id FROM platform_catalog_offerings WHERE id = ?")
+      .bind("platform:offering:gpt-4o:platform-default:gpt-4o")
+      .first<{ id: string }>();
+    expect(stale).toBeNull();
+
+    // gpt-4o now has exactly ONE primary, on the REAL openai channel — routable.
+    const primaries = (
+      await db()
+        .prepare(
+          "SELECT id, provider_id FROM platform_catalog_offerings WHERE model_id = ? AND role = 'primary'",
+        )
+        .bind("platform:model:gpt-4o")
+        .all<{ id: string; provider_id: string }>()
+    ).results;
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0]?.id).toBe("platform:offering:gpt-4o:openai:gpt-4o");
+    expect(primaries[0]?.provider_id).toBe("platform:provider:openai");
+  });
+
   it("omits the rate card when include_default_rate_card is false", async () => {
     const response = await request(OPERATOR, "POST", IMPORT_PATH, importBody(false));
     expect(response.status).toBe(200);

@@ -40,7 +40,10 @@ import type {
 import { canonicalProviderKind } from "../../../gateway/src/inference/adapters.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { type AuditAction, controlPlaneAuditJson, controlPlaneAuditStatement } from "./d1.js";
-import type { PlatformCatalogImportGraph } from "./platform-catalog-import.js";
+import {
+  PLATFORM_DEFAULT_PROVIDER_ID,
+  type PlatformCatalogImportGraph,
+} from "./platform-catalog-import.js";
 import {
   type ModelCatalogInput,
   type ModelOfferingInput,
@@ -583,6 +586,17 @@ export class PlatformModelCatalogStore {
    * satisfied within the single transaction. Returns both the rows this call
    * INSERTED (`0` on a re-run) and the resulting totals, which is the count
    * verification shape an operator runs in production.
+   *
+   * ONE cross-run correction is not a no-op: when an earlier import wrote a
+   * `platform-default` rate-card PRIMARY offering for a model (the model had no
+   * env route then) and this import now carries a REAL provider offering for the
+   * same model — the advertised "re-run to sync env changes" flow, where a
+   * default-card name like `gpt-4o` is later added to `GATEWAY_MODELS` — the
+   * rate-card row still occupies the `ux_..._primary` slot, so the real primary's
+   * `INSERT OR IGNORE` would be silently dropped and the model would stay
+   * unroutable. The superseded `platform-default` offerings for such models are
+   * therefore DELETEd first (see {@link #purgeSupersededRateCardStatements}); the
+   * delete matches zero rows on a steady-state re-run, so idempotency holds.
    */
   async importGraph(
     scope: CallerScope,
@@ -596,10 +610,15 @@ export class PlatformModelCatalogStore {
       this.#importProviderStatement(provider),
     );
     const modelInserts = graph.models.map((model) => this.#importModelStatement(model));
+    // Free the primary slot for any model this import now routes through a REAL
+    // provider, dropping the stale `platform-default` rate-card offering an
+    // earlier import left there (see the docblock). Ordered BEFORE the offering
+    // inserts so the real primary's INSERT wins the `ux_..._primary` index.
+    const rateCardPurges = this.#purgeSupersededRateCardStatements(graph);
     const offeringInserts = graph.offerings.map((offering) =>
       this.#importOfferingStatement(offering),
     );
-    const mutations = [...providerInserts, ...modelInserts, ...offeringInserts];
+    const mutations = [...providerInserts, ...modelInserts, ...rateCardPurges, ...offeringInserts];
 
     let lastError: unknown;
     for (let attempt = 1; attempt <= PLATFORM_COMMIT_ATTEMPTS; attempt += 1) {
@@ -672,7 +691,7 @@ export class PlatformModelCatalogStore {
       const providersInserted = changesIn(1, providerInserts.length);
       const modelsInserted = changesIn(1 + providerInserts.length, modelInserts.length);
       const offeringsInserted = changesIn(
-        1 + providerInserts.length + modelInserts.length,
+        1 + providerInserts.length + modelInserts.length + rateCardPurges.length,
         offeringInserts.length,
       );
       return {
@@ -691,6 +710,35 @@ export class PlatformModelCatalogStore {
     throw new Error(
       `platform model catalog import failed after ${PLATFORM_COMMIT_ATTEMPTS} attempts`,
       { cause: lastError },
+    );
+  }
+
+  /**
+   * DELETE the stale `platform-default` rate-card offerings for every model this
+   * import routes through a REAL provider, so the real primary can take the
+   * `ux_..._primary` slot on re-run (see {@link importGraph}'s docblock).
+   *
+   * A model is "now real" when this graph carries any offering for it on a
+   * provider OTHER than `platform-default`; that offering supersedes the
+   * rate-card price row, which the data-plane loader already excludes from
+   * routing. On a steady-state re-run the model's only offering is the real one
+   * (the rate card was purged the first time round), so the DELETE matches zero
+   * rows and the run stays a no-op but for the revision.
+   */
+  #purgeSupersededRateCardStatements(graph: PlatformCatalogImportGraph): D1PreparedStatement[] {
+    const nowRealModelIds = new Set<string>();
+    for (const offering of graph.offerings) {
+      if (offering.provider_id !== PLATFORM_DEFAULT_PROVIDER_ID) {
+        nowRealModelIds.add(offering.model_id);
+      }
+    }
+    return [...nowRealModelIds].map((modelId) =>
+      this.#db
+        .prepare(
+          `DELETE FROM ${PLATFORM_OFFERING_TABLE}
+             WHERE model_id = ? AND provider_id = ?`,
+        )
+        .bind(modelId, PLATFORM_DEFAULT_PROVIDER_ID),
     );
   }
 
