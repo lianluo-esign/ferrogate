@@ -63,6 +63,8 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
         criteria: CRITERIA,
         regressionDrop: 0.1,
         regressionMinSamples: 20,
+        // #894 — off unless the row says otherwise.
+        coveragePercent: 0,
       },
     });
     expect(String(bound[0]?.[0])).toContain("scope_type = 'tenant' AND scope_id = ?");

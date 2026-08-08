@@ -54,7 +54,7 @@ import {
 const ONLINE_EVAL_COLUMNS =
   "online_eval_enabled, online_eval_sample_rate, online_eval_sampling_unit, " +
   "online_eval_judge_model, online_eval_criteria_json, online_eval_regression_drop, " +
-  "online_eval_regression_min_samples";
+  "online_eval_regression_min_samples, online_eval_coverage_percent";
 
 /**
  * The lookup, by AUTHENTICATED tenant. `scope_id = ?` is a bound equality — the
@@ -118,6 +118,7 @@ interface WireOnlineEvalPolicy {
   readonly criteria?: unknown;
   readonly regression_drop?: unknown;
   readonly regression_min_samples?: unknown;
+  readonly coverage_percent?: unknown;
 }
 
 function rowFromWire(row: WireOnlineEvalPolicy): OnlineEvalPolicyRow {
@@ -129,6 +130,7 @@ function rowFromWire(row: WireOnlineEvalPolicy): OnlineEvalPolicyRow {
     criteria: row.criteria,
     regressionDrop: row.regression_drop,
     regressionMinSamples: row.regression_min_samples,
+    coveragePercent: row.coverage_percent,
   };
 }
 
@@ -203,6 +205,7 @@ export function d1OnlineEvalPolicySource(db: OnlineEvalDatabase): OnlineEvalPoli
         criteria: jsonColumn(row["online_eval_criteria_json"]),
         regressionDrop: row["online_eval_regression_drop"],
         regressionMinSamples: row["online_eval_regression_min_samples"],
+        coveragePercent: row["online_eval_coverage_percent"],
       });
       return parsed.ok
         ? { ok: true, policy: parsed.policy }

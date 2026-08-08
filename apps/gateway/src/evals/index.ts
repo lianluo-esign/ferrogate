@@ -50,6 +50,9 @@
  * | `d1.ts`         | `online_eval_scores` / `online_eval_regressions`         |
  * | `consumer.ts`   | the queue consumer: judge → D1 → Analytics Engine        |
  * | `regression.ts` | the cron-side regression detector                        |
+ * | `leg-quality.ts`| #894 — the per-(provider, provider_model) aggregate and  |
+ * |                 | the RELATIVE candidate-vs-ladder-best comparator         |
+ * | `quality-source.ts` | #894 — the router-consumable peek/warm memo over it  |
  *
  * ============================================================================
  * THE FOUR PROPERTIES THIS SLICE IS BUILT AROUND
@@ -182,6 +185,53 @@ export {
   shadowEvalRetentionRequested,
 } from "./shadow-leg.js";
 export type { ShadowEvalLeg } from "./shadow-leg.js";
+
+export {
+  COVERAGE_EVAL_ARM,
+  coverageArmSampleFrom,
+  coverageEvalLegsFor,
+  coverageEvalPercentFor,
+  publishCoverageEvalLeg,
+  requestCoverageEval,
+} from "./shadow-leg.js";
+export type { CoverageEvalLeg } from "./shadow-leg.js";
+
+// #894 — the per-leg aggregate. See the file table above.
+export {
+  LEG_QUALITY_WINDOW_SECONDS,
+  NO_LEG_QUALITY_SIGNAL,
+  ONLINE_EVAL_LEG_QUALITY_PRUNE_SQL,
+  ONLINE_EVAL_LEG_QUALITY_SELECT_SQL,
+  ONLINE_EVAL_LEG_QUALITY_TABLE,
+  ONLINE_EVAL_LEG_QUALITY_UPSERT_SQL,
+  ONLINE_EVAL_LEG_WINDOW_AGGREGATE_SQL,
+  legQualityKey,
+  legQualityVerdicts,
+  onlineEvalLegAggregates,
+  onlineEvalLegQualityBindings,
+  readOnlineEvalLegQuality,
+  refreshOnlineEvalLegQuality,
+  writeOnlineEvalLegQuality,
+} from "./leg-quality.js";
+export type { LegQualityVerdict, OnlineEvalLegAggregate } from "./leg-quality.js";
+
+export {
+  DEFAULT_LEG_QUALITY_TTL_MS,
+  NO_LEG_QUALITY,
+  NO_ONLINE_EVAL_LEG_QUALITY,
+  cachedOnlineEvalLegQualitySource,
+  d1OnlineEvalLegQualitySource,
+  onlineEvalLegQualitySourceFromEnv,
+  routingQualityPortFor,
+  routingQualityPortFrom,
+  tenantLegQualityFrom,
+  warmLegQuality,
+} from "./quality-source.js";
+export type {
+  LegQualityResolution,
+  OnlineEvalLegQualitySource,
+  TenantLegQuality,
+} from "./quality-source.js";
 
 export {
   JUDGE_SYSTEM_PROMPT,

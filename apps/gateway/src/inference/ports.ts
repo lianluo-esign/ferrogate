@@ -52,7 +52,7 @@ import type { ByokPorts, ByokPortsFactory } from "./byok.js";
 import type { ConversationStore } from "./conversation-store.js";
 import type { ResponseStoreMode } from "./conversation.js";
 import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
-import type { RoutingMetrics, RoutingStrategy } from "./strategy.js";
+import type { RoutingMetrics, RoutingQualityPort, RoutingStrategy } from "./strategy.js";
 import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
 
 export type ProviderAuthScheme = "bearer" | "x-api-key";
@@ -1187,6 +1187,21 @@ export interface InferenceDeps {
    */
   readonly routingMetrics?: RoutingMetrics;
   /**
+   * Issue #894 — the per-leg online-eval quality verdicts candidate ordering
+   * may demote a lagging leg on.
+   *
+   * Absent ⇒ resolved from the env in `defaults.ts`, exactly like
+   * `shadowBudget` and `experiments`: the D1 binding only exists per request
+   * while this object is built per router.
+   *
+   * SYNCHRONOUS by contract. `planUpstream` is not a `Promise` at any of its
+   * seven call sites, and this port is read from inside it, so an implementation
+   * that awaited storage would be a database round trip in front of the client's
+   * first upstream byte. `src/evals/quality-source.ts` answers from an isolate
+   * memo warmed after the response.
+   */
+  readonly routingQuality?: RoutingQualityPort | ((env: InferenceBindings) => RoutingQualityPort);
+  /**
    * `[[agent_workflows]]` — the graph gate's configuration table
    * (`src/inference/workflow.ts`). Absent ⇒ built per Worker `env`: the
    * `control_plane_resources` documents `apps/control-plane`'s
@@ -1271,6 +1286,8 @@ export interface ResolvedInferenceDeps {
   readonly circuit: ProviderCircuit;
   readonly shadowBudget: AsyncShadowBudgetLedger;
   readonly routingMetrics: RoutingMetrics;
+  /** Issue #894 — memo-only per-leg quality verdicts; never does I/O. */
+  readonly routingQuality: RoutingQualityPort;
   readonly workflows: WorkflowCatalogSource;
   readonly workflowHistory: WorkflowRunHistory;
   readonly nowUnixSeconds: () => number;

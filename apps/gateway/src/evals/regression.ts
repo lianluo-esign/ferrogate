@@ -74,6 +74,7 @@ import {
 } from "./d1.js";
 import { evidenceProjectionKey } from "../requestlog/d1.js";
 import { ONLINE_EVAL_REGRESSION_METRIC, publishOnlineEvalScorePoints } from "./metrics.js";
+import { refreshOnlineEvalLegQuality } from "./leg-quality.js";
 import type { OnlineEvalPolicy } from "./policy.js";
 import { type OnlineEvalBindings, onlineEvalPolicySourceFromEnv } from "./source.js";
 
@@ -379,6 +380,15 @@ export async function sweepAllOnlineEvalRegressions(
     );
     detected += result.detected;
     claimed += result.claimed;
+    // #894 — the same tick refreshes the per-LEG projection the router reads.
+    // Here as well as in the queue consumer because the consumer only fires when
+    // a tenant is being scored, and a leg whose scores all aged out of the
+    // window would otherwise keep its last value until the next sample arrived.
+    // `refreshOnlineEvalLegQuality` never throws; the `catch` is depth, not a
+    // second failure mode.
+    await refreshOnlineEvalLegQuality(env, tenantId, nowUnix, database, tenantDatabase).catch(
+      () => 0,
+    );
   }
   return { detected, claimed };
 }

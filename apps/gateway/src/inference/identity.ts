@@ -125,9 +125,7 @@ export function callerFromAuth(
     ...(allowedModels !== undefined && allowedModels.length > 0 ? { allowedModels } : {}),
     // Same rule, same direction: an empty `allowed_providers` is "no allowlist"
     // in Rust (`allowed_providers.is_empty() || ...`), never "no provider".
-    ...(allowedProviders !== undefined && allowedProviders.length > 0
-      ? { allowedProviders }
-      : {}),
+    ...(allowedProviders !== undefined && allowedProviders.length > 0 ? { allowedProviders } : {}),
     // #681 — the TENANT residency policy, resolved by `residency/middleware.ts`
     // on the OUTER app and handed in by `route-module.ts`. It is a PARAMETER
     // rather than something read off `auth` because it is not a property of the
@@ -243,6 +241,37 @@ export interface InferenceRequestScope {
    * nothing retained anywhere.
    */
   readonly scoreShadowLeg?: ((leg: InferenceShadowEvalLeg) => void) | undefined;
+  /**
+   * #894 — the tenant's CANDIDATE-COVERAGE percentage for this request, or
+   * absent.
+   *
+   * Supplied by `route-module.ts` from the SAME gate as
+   * {@link scoreShadowLeg}: the online-eval sampler marked this request for
+   * content capture, and the tenant's policy sets a non-zero
+   * `online_eval_coverage_percent`. Absent — the overwhelmingly common case —
+   * means no non-primary candidate is mirrored and nothing extra is spent.
+   */
+  readonly coverageEvalPercent?: number | undefined;
+  /** #894 — where a coverage mirror is published, one per covered candidate. */
+  readonly scoreCoverageLeg?: ((leg: InferenceCoverageEvalLeg) => void) | undefined;
+}
+
+/**
+ * A coverage mirror as the inference path publishes it (#894).
+ *
+ * Structurally a subset of `src/evals/shadow-leg.ts::CoverageEvalLeg`, declared
+ * separately for the reason {@link InferenceShadowEvalLeg} gives: this module
+ * must not import the evaluation slice, and the compiler still checks the two
+ * agree at the one place they meet, `route-module.ts`.
+ */
+export interface InferenceCoverageEvalLeg {
+  readonly legId: string;
+  readonly logicalModel: string;
+  /** The COVERED candidate's provider, never the served route's. */
+  readonly provider: string;
+  readonly providerModel: string;
+  /** The mirrored body, or `undefined`. NEVER rejects; ALWAYS settles. */
+  readonly body: Promise<string | undefined>;
 }
 
 /**

@@ -134,6 +134,25 @@ export interface OnlineEvalPolicy {
   readonly regressionDrop: number;
   /** Minimum scored samples in BOTH windows before a drop is believed. */
   readonly regressionMinSamples: number;
+  /**
+   * #894 — CANDIDATE COVERAGE. The percentage of this tenant's sampled requests
+   * that are additionally mirrored to a NON-PRIMARY candidate of the same
+   * failover ladder, so that candidate accumulates scores under the same judge
+   * and the same criteria as the leg that served.
+   *
+   * `0` is OFF and is the default, including for a tenant already opted into
+   * evaluation. Coverage is a strictly larger consent than sampling: sampling
+   * copies a prompt and a response that already exist to a judge, while coverage
+   * SENDS THE PROMPT TO A SECOND PROVIDER and pays for a completion no client
+   * will ever see. Defaulting it on for anyone who opted into measurement would
+   * be spending their money and exporting their prompts on the strength of a
+   * different decision.
+   *
+   * It rides on top of `sampleRate`, never around it: coverage is only ever
+   * considered for an exchange the capture plan already cleared, so a tenant's
+   * effective coverage rate is `sampleRate * coveragePercent / 100`.
+   */
+  readonly coveragePercent: number;
 }
 
 /** Defaults for the two regression knobs, applied when a row omits them. */
@@ -153,6 +172,7 @@ export interface OnlineEvalPolicyRow {
   readonly criteria?: unknown;
   readonly regressionDrop?: unknown;
   readonly regressionMinSamples?: unknown;
+  readonly coveragePercent?: unknown;
 }
 
 /**
@@ -261,6 +281,17 @@ export function parseOnlineEvalPolicyRow(row: OnlineEvalPolicyRow): ParsedOnline
     return { ok: false, detail: "regression min samples must be a positive integer" };
   }
 
+  // #894 — a percentage, matching `PhysicalRoute.shadowPercent`, and validated
+  // rather than clamped: a row that says `500` is a typo whose silent reading as
+  // "always" would mirror every sampled request to a second provider.
+  const coveragePercent = finiteNumber(row.coveragePercent) ?? 0;
+  if (coveragePercent < 0 || coveragePercent > 100) {
+    return {
+      ok: false,
+      detail: `coverage percent must be in [0, 100], got ${row.coveragePercent}`,
+    };
+  }
+
   return {
     ok: true,
     policy: {
@@ -271,6 +302,7 @@ export function parseOnlineEvalPolicyRow(row: OnlineEvalPolicyRow): ParsedOnline
       criteria,
       regressionDrop,
       regressionMinSamples,
+      coveragePercent,
     },
   };
 }

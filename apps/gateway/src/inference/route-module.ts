@@ -33,7 +33,12 @@ import type { Context, Hono } from "hono";
 import { assetDatabaseFromTenantResolver, D1AssetMetadataStore } from "../assets/d1.js";
 import { assetDepsFromEnv } from "../assets/handlers.js";
 import { attributionDefaultsFor } from "../attribution/index.js";
-import { publishShadowEvalLeg, shadowEvalRetentionRequested } from "../evals/shadow-leg.js";
+import {
+  coverageEvalPercentFor,
+  publishCoverageEvalLeg,
+  publishShadowEvalLeg,
+  shadowEvalRetentionRequested,
+} from "../evals/shadow-leg.js";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
 import {
@@ -271,7 +276,17 @@ function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): vo
     // Spelled as a conditional SPREAD rather than an `undefined`-valued key so
     // an ungated deployment cannot satisfy an `in` check on the scope.
     ...(shadowEvalRetentionRequested(request)
-      ? { scoreShadowLeg: (leg) => publishShadowEvalLeg(request, leg) }
+      ? {
+          scoreShadowLeg: (leg) => publishShadowEvalLeg(request, leg),
+          // #894 — candidate coverage rides on the SAME gate, deliberately:
+          // mirroring a non-primary candidate spends provider tokens and ships
+          // the prompt to a second provider, so it may only happen on an
+          // exchange the sampler has already cleared for capture. `0` when the
+          // tenant left `online_eval_coverage_percent` at its default, which is
+          // every tenant that did not ask for it.
+          coverageEvalPercent: coverageEvalPercentFor(request),
+          scoreCoverageLeg: (leg) => publishCoverageEvalLeg(request, leg),
+        }
       : {}),
   });
 }

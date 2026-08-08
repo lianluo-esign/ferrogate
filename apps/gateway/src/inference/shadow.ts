@@ -136,6 +136,18 @@ export interface ShadowMirror {
    * having to know whether the success path already settled it.
    */
   readonly retain?: ((body: string | undefined) => void) | undefined;
+  /**
+   * #894 — override the budget key and cap this mirror is charged against.
+   *
+   * Absent ⇒ Rust's own pair, `(logicalModel, route.shadowMaxRequests ?? 0)`,
+   * which is what an EXPERIMENT mirror has always used. A candidate-coverage
+   * mirror needs its own: its route is a servable ladder candidate, so it
+   * carries no `shadowMaxRequests` at all and would charge a cap of `0` —
+   * "uncapped" — against the shared per-model key. Uncapped is exactly the
+   * property a mirror that spends real tokens on responses no client sees must
+   * not have.
+   */
+  readonly budget?: { readonly key: string; readonly limit: number } | undefined;
 }
 
 /** The identity half of a shadow leg's evidence row. See {@link ShadowMirror}. */
@@ -420,8 +432,8 @@ export async function runShadowMirror(
     // `ModelResolver.candidates` only yields enabled routes, so this is the
     // last gate here too. `0` is uncapped and costs no round trip.
     const admitted = await deps.shadowBudget.tryConsume(
-      mirror.logicalModel,
-      mirror.route.shadowMaxRequests ?? 0,
+      mirror.budget?.key ?? mirror.logicalModel,
+      mirror.budget?.limit ?? mirror.route.shadowMaxRequests ?? 0,
     );
     if (!admitted) {
       // #693 — RECORDED, not dropped. A budget refusal is the operator's own
@@ -572,4 +584,121 @@ function shadowLegCostUsd(
     outputPricePer1m: mirror.route.outputPricePer1m,
     cachedInputPricePer1m: mirror.route.cachedInputPricePer1m,
   });
+}
+
+// ---------------------------------------------------------------------------
+// #894 — CANDIDATE COVERAGE
+// ---------------------------------------------------------------------------
+
+/**
+ * The fleet backstop on coverage spend, per `(tenant, logical model)`.
+ *
+ * The TENANT's control is `OnlineEvalPolicy.coveragePercent`, which is the knob
+ * that decides whether coverage happens at all and how much of their sampled
+ * traffic it touches. This constant is the OPERATOR's floor under a
+ * misconfiguration — a tenant who sets 100 on a high-volume model still cannot
+ * turn the gateway into an unbounded second dispatcher.
+ *
+ * Same ledger, same semantics and the same caveat as every other shadow cap:
+ * with `SHADOW_BUDGET` bound it is a global count in the Durable Object; without
+ * it, it is a count PER LIVE ISOLATE (`ISOLATE_SHADOW_BUDGET`). "Cap per
+ * isolate" must never be read as "cap".
+ */
+export const COVERAGE_BUDGET_LIMIT = 500;
+
+/** `coverage:{tenant}:{logicalModel}` — never the experiment mirror's key. */
+export function coverageBudgetKey(tenantId: string, logicalModel: string): string {
+  return `coverage:${tenantId}:${logicalModel}`;
+}
+
+/**
+ * Rotates coverage across a ladder's non-primary candidates.
+ *
+ * A fixed `candidates[1]` would give the second-choice leg every coverage
+ * sample and leave the third and fourth permanently at `no_signal` — i.e. it
+ * would reproduce, one position further down, exactly the blind spot #894
+ * exists to remove. Module scope is the isolate, which is the same lifetime
+ * `nextRoutingCursor` uses for the priority rotation.
+ */
+let coverageCursor = 0;
+
+/**
+ * The coverage mirror for this request, or `null`.
+ *
+ * PURE except for the rotation cursor, and synchronous: it is called from
+ * `handlers.ts::dispatchCandidates` beside `spawnShadowMirror`, on the
+ * already-eligible, already-ordered SERVABLE ladder.
+ *
+ * ## What it is for
+ *
+ * `online_eval_scores` only ever contains rows for legs that SERVED (or that an
+ * experiment mirrored). A cheap candidate sitting at position 2 of a ladder is
+ * never routed to while position 0 is healthy, so it accumulates no scores, so
+ * `evals/leg-quality.ts` reports `no_signal` for it for ever. Coverage buys the
+ * missing population: the same prompt, to a non-primary candidate, scored by the
+ * same judge under the same criteria as the leg that served.
+ *
+ * ## Every gate it inherits, and the one it adds
+ *
+ *  - **The eval retention gate.** `coveragePercent` reaches this function only
+ *    through `InferenceRequestScope.coverageEvalPercent`, which `route-module.ts`
+ *    supplies only when `evals/shadow-leg.ts::shadowEvalRetentionRequested` is
+ *    true — i.e. only after the sampler's capture plan cleared opt-in, ZDR,
+ *    criteria and the sample bucket. A tenant that must not be sampled is never
+ *    covered, and neither is a request the sampler did not select.
+ *  - **Per-tenant opt-in.** `coveragePercent` defaults to 0 (OFF) for every
+ *    tenant including those already opted into evaluation; see
+ *    `evals/policy.ts` on why coverage is a strictly larger consent.
+ *  - **Residency (#681).** Re-applied here even though every candidate already
+ *    passed `eligibleCandidates(..., residencyPolicy)`: `shadowMirrorFor` exists
+ *    because a second dispatch leg silently escaped the policy once, and a
+ *    selector that relies on an upstream gate staying where it is would be the
+ *    same hole in a new place.
+ *  - **A sticky bucket**, so coverage lands on a stable fraction of callers
+ *    rather than a random fraction of every caller's traffic.
+ *  - **A budget**, {@link COVERAGE_BUDGET_LIMIT}, charged in `runShadowMirror`.
+ *
+ * It is `null` for a single-candidate ladder — there is no non-primary leg to
+ * cover — which is also why enabling coverage cannot change any deployment whose
+ * models resolve to one route.
+ */
+export function coverageMirrorFor(input: {
+  readonly candidates: readonly PhysicalRoute[];
+  readonly caller: Caller;
+  readonly tenantId: string;
+  readonly operation: InferenceOperation;
+  readonly logicalModel: string;
+  readonly body: Record<string, unknown>;
+  readonly coveragePercent: number;
+  readonly residencyPolicy: ResidencyPolicy | null;
+}): ShadowMirror | null {
+  if (!(input.coveragePercent > 0)) return null;
+  const nonPrimary = input.candidates.slice(1);
+  if (nonPrimary.length === 0) return null;
+
+  const stickyKey = stickyKeyFor(input.caller);
+  if (stickyKey === null) return null;
+  if (!shadowSampled(`${stickyKey}~coverage`, input.coveragePercent)) return null;
+
+  const rotated: PhysicalRoute[] = [];
+  for (let index = 0; index < nonPrimary.length; index += 1) {
+    rotated.push(nonPrimary[(coverageCursor + index) % nonPrimary.length] as PhysicalRoute);
+  }
+  coverageCursor = (coverageCursor + 1) % nonPrimary.length;
+
+  const route = rotated.find(
+    (candidate) => residencyViolations(candidate, input.residencyPolicy).length === 0,
+  );
+  if (route === undefined) return null;
+
+  return {
+    route,
+    operation: input.operation,
+    logicalModel: input.logicalModel,
+    body: input.body,
+    budget: {
+      key: coverageBudgetKey(input.tenantId, input.logicalModel),
+      limit: COVERAGE_BUDGET_LIMIT,
+    },
+  };
 }

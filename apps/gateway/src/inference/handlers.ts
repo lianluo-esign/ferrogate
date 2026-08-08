@@ -56,6 +56,7 @@ import {
 } from "../experiments/index.js";
 import { conversationReplayScreenerFor } from "../guardrails/conversation-replay.js";
 import { effectiveResidencyPolicy } from "../residency/policy.js";
+import type { ResidencyPolicy } from "../residency/policy.js";
 import { genAiOperationForRouteLabel, observeGenAiInvocation } from "../telemetry/genai.js";
 import { parseAudioObjectReference } from "./audio-objects.js";
 import { byokScopedModels } from "./byok.js";
@@ -127,6 +128,7 @@ import type { EstimatedUsage } from "./estimate.js";
 import { inferenceRequestScope, noInferenceLog, unmeteredTokenGovernor } from "./identity.js";
 import type {
   InferenceLogFacts,
+  InferenceCoverageEvalLeg,
   InferenceShadowEvalLeg,
   TokenAdmissionHandle,
   TokenGovernor,
@@ -177,7 +179,7 @@ import type {
   OpenAiModelList,
   RequestMetadata,
 } from "./schemas.js";
-import { shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
+import { coverageMirrorFor, shadowMirrorFor, spawnShadowMirror } from "./shadow.js";
 import type { ShadowMirror } from "./shadow.js";
 import { DEFAULT_ROUTING_STRATEGY, orderCandidatesByStrategy } from "./strategy.js";
 import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
@@ -235,6 +237,19 @@ export interface InferenceEnv {
      * response is discarded exactly as it always was.
      */
     inferenceShadowEval: ((leg: InferenceShadowEvalLeg) => void) | undefined;
+
+    /**
+     * #894 — where a CANDIDATE-COVERAGE mirror is published, and the tenant's
+     * coverage percentage.
+     *
+     * Both are `undefined`/`0` unless the sampler cleared this exchange for
+     * capture AND the tenant set a non-zero `online_eval_coverage_percent`.
+     * Coverage is the only thing in this app that dispatches to a provider the
+     * client did not select and no experiment declared, so it is gated twice
+     * over and defaults off both times.
+     */
+    inferenceCoverageEval: ((leg: InferenceCoverageEvalLeg) => void) | undefined;
+    inferenceCoveragePercent: number;
 
     /**
      * replaces `c.req.raw`.
@@ -623,6 +638,24 @@ interface PlannedRequest {
    * time dispatch runs.
    */
   readonly assignment?: ExperimentAssignment | undefined;
+  /**
+   * #894 — the four facts `dispatchCandidates` needs to select a CANDIDATE-
+   * COVERAGE mirror, carried on the plan because none of them survives the trip
+   * into that function otherwise.
+   *
+   * The selection itself is NOT done here: it depends on the tenant's coverage
+   * percentage, which arrives on the request scope (`identity.ts`) rather than
+   * in `deps`, and reading a request-scoped value from `planUpstream` would put
+   * the sampler's gate behind a second, differently-shaped lookup. The mirror
+   * for an EXPERIMENT is chosen here instead precisely because it has the
+   * opposite dependency: it is declared on the ROUTE.
+   */
+  readonly coverageInput: {
+    readonly operation: InferenceOperation;
+    readonly logicalModel: string;
+    readonly body: Record<string, unknown>;
+    readonly residencyPolicy: ResidencyPolicy | null;
+  };
 }
 
 /** `ModelEndpointKind` for the eligibility gate. */
@@ -804,10 +837,23 @@ function planUpstream(
   // cannot influence ordering"). The strategy is a property of the registry
   // ENTRY, so every leg carries the same value and the first survivor is as good
   // a place to read it as any; absent ⇒ `"priority"`, the pre-strategy order.
+  // #894 — the ONLY quality input on this path, and it is a memo READ. The port
+  // is `peek`-backed (`src/evals/quality-source.ts`), so this line adds no
+  // await, no promise and no storage round trip to `planUpstream`, which is the
+  // constraint that decided the whole shape: seven call sites take its return
+  // value as a value, not as a `Promise`.
+  //
+  // Platform-operator credentials carry no tenancy, so there is no tenant whose
+  // criteria and thresholds the comparison could be made under, and they get the
+  // pre-#894 ordering.
+  const quality =
+    caller.scope.kind === "tenant"
+      ? deps.routingQuality.ladderQuality(caller.scope.tenantId, logicalModel)
+      : undefined;
   const ordered = orderCandidatesByStrategy(
     narrowed.routes,
     (narrowed.routes[0] as PhysicalRoute).routingStrategy ?? DEFAULT_ROUTING_STRATEGY,
-    { estimatedUsage: estimated, metrics: deps.routingMetrics },
+    { estimatedUsage: estimated, metrics: deps.routingMetrics, quality },
   );
 
   const candidates: Array<AttemptCandidate & { readonly adapter: ProviderAdapter }> = [];
@@ -870,7 +916,67 @@ function planUpstream(
     candidates,
     ...(shadow === null ? {} : { shadow }),
     ...(assignment === null ? {} : { assignment }),
+    coverageInput: { operation, logicalModel, body, residencyPolicy },
   };
+}
+
+/**
+ * #894 — the CANDIDATE-COVERAGE mirror for this request, wired for scoring, or
+ * `null`.
+ *
+ * The coverage analogue of {@link withShadowObservation}, and deliberately
+ * SHORTER than it, because a coverage leg is not an experiment arm: it records
+ * no `experiment_shadow_legs` row (it leaves `ShadowMirror.observation` unset,
+ * so `runShadowMirror` records nothing), it carries no `experimentId`, and the
+ * only thing it produces is a score row under the `coverage` arm that
+ * `evals/leg-quality.ts` reads along `(provider, provider_model)`.
+ *
+ * `null` unless `c.get("inferenceCoverageEval")` is present, which
+ * `route-module.ts` supplies only behind the sampler's retention gate. So the
+ * whole of this function is a `WeakMap` miss on every request of every tenant
+ * that did not opt in.
+ */
+function withCoverageObservation(
+  c: InferenceContext,
+  planned: PlannedRequest,
+): ShadowMirror | null {
+  const publish = c.get("inferenceCoverageEval");
+  if (publish === undefined) return null;
+  const caller = c.get("inferenceCaller");
+  if (caller.scope.kind !== "tenant") return null;
+
+  const mirror = coverageMirrorFor({
+    // The SERVABLE ladder, in the order the strategy produced — so "non-primary"
+    // means "a leg this request would only have reached by failing over", which
+    // is exactly the population that has no scores.
+    candidates: planned.candidates.map((candidate) => candidate.route),
+    caller,
+    tenantId: caller.scope.tenantId,
+    operation: planned.coverageInput.operation,
+    logicalModel: planned.coverageInput.logicalModel,
+    body: planned.coverageInput.body,
+    coveragePercent: c.get("inferenceCoveragePercent"),
+    residencyPolicy: planned.coverageInput.residencyPolicy,
+  });
+  if (mirror === null) return null;
+
+  // DERIVED once, here, and carrying the covered candidate's identity: two
+  // coverage legs on one request would otherwise collide on the score table's
+  // `(request_id, criterion_id)` key and the second candidate would silently
+  // read as unmeasured. See `evals/shadow-leg.ts::CoverageEvalLeg`.
+  const legId = `${c.get("requestId")}~coverage~${mirror.route.provider}:${mirror.route.providerModel}`;
+  let settle: ((body: string | undefined) => void) | undefined;
+  const body = new Promise<string | undefined>((resolve) => {
+    settle = resolve;
+  });
+  publish({
+    legId,
+    logicalModel: mirror.logicalModel,
+    provider: mirror.route.provider,
+    providerModel: mirror.route.providerModel,
+    body,
+  });
+  return { ...mirror, retain: settle ?? ((): void => undefined) };
 }
 
 /**
@@ -1015,6 +1121,16 @@ async function dispatchCandidates(
     // work to `ctx.waitUntil`, and swallows every failure — see `shadow.ts`
     // for the five mechanisms that keep a mirror off the client's response.
     spawnShadowMirror(deps, withShadowObservation(c, planned.shadow, planned), executionCtxOf(c));
+  }
+  // #894 — and the CANDIDATE-COVERAGE mirror, fired from the same one place and
+  // with the same fire-and-forget shape. Separate from the experiment mirror
+  // above because the two answer different questions and are budgeted, gated and
+  // arm-labelled differently: that one measures an arm an operator declared,
+  // this one buys a score for a ladder candidate that would otherwise never be
+  // routed to. A request can carry both.
+  const coverage = withCoverageObservation(c, planned);
+  if (coverage !== null) {
+    spawnShadowMirror(deps, coverage, executionCtxOf(c));
   }
   // `auth.can_use_provider` — the credential's PROVIDER allowlist. Read from the
   // per-request caller (the same value `planUpstream` gates the model on) rather
@@ -1733,6 +1849,9 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     // #693 — `undefined` unless the online-eval sampler asked for this request's
     // mirror to be retained. See `InferenceRequestScope.scoreShadowLeg`.
     c.set("inferenceShadowEval", scope?.scoreShadowLeg);
+    // #894 — same gate, same absence-is-off reading; see the var's own docs.
+    c.set("inferenceCoverageEval", scope?.scoreCoverageLeg);
+    c.set("inferenceCoveragePercent", scope?.coverageEvalPercent ?? 0);
 
     // Per-tenant BYOK (issue #682) — substitute the CALLING TENANT's own
     // provider credential for the platform one before anything is planned.
