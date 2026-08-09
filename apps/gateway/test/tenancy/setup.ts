@@ -1,15 +1,24 @@
 /**
  * Shared setup for the tenancy suite.
  *
- * Applies the DEPLOYED migrations (`sql/d1-ts/control` + `sql/d1-ts/tenant`,
- * read by `harness/vitest.config.ts` with `readD1Migrations`) to the REAL D1
- * databases `workerd` bound from `harness/wrangler.toml`, and seeds the CONTROL
- * database's `tenant_databases` registry with the six cases the specs assert on.
+ * Applies the DEPLOYED tenant migrations (`sql/d1-ts/tenant`, read by
+ * `harness/vitest.config.ts` with `readD1Migrations`) to the REAL per-tenant D1
+ * databases `workerd` bound from `harness/wrangler.toml`, applies the control
+ * migrations to the raw `CONTROL_DB` handle the schema-split introspection specs
+ * read, and seeds the `tenant_databases` registry the router actually reads.
+ *
+ * Since Zero-D1 S5 (#914) that registry lives in the singleton `CONTROL_DATA`
+ * object, NOT the native `CONTROL_DB` D1 — the router resolves its control store
+ * through `controlDatabaseFrom(env)`, which wraps `env.CONTROL_DATA` in the
+ * D1-shaped facade. So the seeding goes through that same facade (the object
+ * self-migrates its schema on the first query), exactly as `test/setup-d1.ts`
+ * seeds the main suite's roster. Seeding the native `CONTROL_DB` here would land
+ * the rows in a store the router never reads and every tenant would fail closed.
  *
  * Nothing here fakes a database, a binding, or a router.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
-import { ControlDatabaseTenantRegistry } from "@ferrogate/storage";
+import { ControlDatabaseTenantRegistry, controlDataObjectDatabase } from "@ferrogate/storage";
 
 /** Registered, `TENANT_DB_ACME` is declared in `harness/wrangler.toml`. */
 export const TENANT_ACME = "tenant_acme";
@@ -42,11 +51,18 @@ const NOW = 1_700_000_000;
  * is bookkept in `d1_migrations` and `upsert` is idempotent by tenant id.
  */
 export async function setupTenancy(): Promise<void> {
+  // Migrate the RAW `CONTROL_DB` handle so the schema-split introspection specs
+  // can read its `sqlite_master`; migrate the per-tenant D1s for the isolation
+  // proofs. The `CONTROL_DATA` object needs no step here — it self-migrates on
+  // the first facade query below.
   await applyD1Migrations(env.CONTROL_DB, env.CONTROL_MIGRATIONS);
   await applyD1Migrations(env.TENANT_DB_ACME, env.TENANT_MIGRATIONS);
   await applyD1Migrations(env.TENANT_DB_GLOBEX, env.TENANT_MIGRATIONS);
 
-  const registry = new ControlDatabaseTenantRegistry(env.CONTROL_DB);
+  // Seed through the CONTROL_DATA facade — the store the router reads via
+  // `controlDatabaseFrom(env)`. The first upsert wakes the object and applies
+  // its schema.
+  const registry = new ControlDatabaseTenantRegistry(controlDataObjectDatabase(env.CONTROL_DATA));
   await registry.upsert(
     {
       tenantId: TENANT_ACME,
