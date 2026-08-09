@@ -6,6 +6,10 @@
   description: Token4AI Cloud, FerroGate AI Gateway, TypeScript on Cloudflare Workers, agent-native AI traffic infrastructure.
 -->
 
+<p align="center">
+  <img src="docs/assets/ferrogate-logo.svg" alt="FerroGate" width="440" />
+</p>
+
 # FerroGate
 
 **语言：** [English](README.md) | 简体中文

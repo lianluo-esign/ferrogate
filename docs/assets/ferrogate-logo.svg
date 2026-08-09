@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" role="img" aria-label="FerroGate">
+  <title>FerroGate</title>
+  <defs>
+    <style>
+      .trace { fill: none; stroke: #1E5FE0; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
+      .node  { fill: #1E5FE0; }
+      .navy  { fill: #26303F; }
+      .blue  { fill: #1E5FE0; }
+      .word  { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-weight: 700; font-size: 66px; letter-spacing: -1px; }
+    </style>
+  </defs>
+
+  <!-- converging circuit traces (inputs flowing into the gate) -->
+  <g class="trace">
+    <path d="M14 50 H54 L92 80" />
+    <path d="M14 80 H92" />
+    <path d="M14 110 H54 L92 80" />
+  </g>
+  <circle class="node" cx="14" cy="50" r="5.5" />
+  <circle class="node" cx="14" cy="80" r="5.5" />
+  <circle class="node" cx="14" cy="110" r="5.5" />
+
+  <!-- FG gate glyph -->
+  <!-- F (navy) -->
+  <g class="navy">
+    <rect x="96"  y="47" width="13" height="66" rx="2" />
+    <rect x="96"  y="47" width="30" height="13" rx="2" />
+    <rect x="96"  y="73" width="22" height="13" rx="2" />
+  </g>
+  <!-- G (blue) -->
+  <g class="blue">
+    <rect x="130" y="47"  width="34" height="13" rx="2" />
+    <rect x="130" y="47"  width="13" height="66" rx="2" />
+    <rect x="130" y="100" width="34" height="13" rx="2" />
+    <rect x="151" y="82"  width="13" height="31" rx="2" />
+    <rect x="145" y="82"  width="19" height="12" rx="2" />
+  </g>
+
+  <!-- wordmark -->
+  <text x="206" y="103" class="word"><tspan fill="#26303F">Ferro</tspan><tspan fill="#1E5FE0">Gate</tspan></text>
+</svg>
