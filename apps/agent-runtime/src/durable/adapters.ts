@@ -13,7 +13,7 @@
  *
  * | port | binding | table | schema |
  * |---|---|---|---|
- * | {@link d1ApiKeyPort} | `DB` | `api_keys` | `sql/d1-ts/tenant` |
+ * | {@link twoHopApiKeyPort} | `CONTROL_DATA` → `TENANT_DATA` | `api_key_directory` → `api_keys` | `sql/d1-ts/{control,tenant}` |
  * | {@link d1WorkerIdentityPort} | `CONTROL_DB` | `self_hosted_worker_registrations` | `sql/d1-ts/control` |
  *
  * The split is not cosmetic. `api_keys` is the tenant's own credential table
@@ -53,29 +53,11 @@ import type {
   WorkerIdentityResolution,
 } from "../ports.js";
 import { type FrameOpenResult, type SealedWorkerFrame, openWorkerFrame } from "../workers/frame.js";
-import { sha256Hex, verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
+import { sha256Hex } from "./hash.js";
 
 // ---------------------------------------------------------------------------
 // Tenant credentials — `api_keys`, the TENANT database
 // ---------------------------------------------------------------------------
-
-/**
- * The prefix lookup, mirroring Rust `find_api_key_records_by_prefix`.
- *
- * `key_prefix` is indexed (`idx_api_keys_prefix`), so this is one index seek
- * regardless of table size. It is a plain equality bind — never string
- * interpolation, never `LIKE` — so a presented value cannot become SQL and
- * cannot widen the candidate set with a wildcard character.
- *
- * It deliberately does NOT filter on `enabled` / `revoked_at_unix` /
- * `expires_at_unix` in SQL: Rust evaluates liveness after the fetch, and
- * keeping that in code the tests can reach is what makes the 401-vs-403
- * decision reviewable instead of hidden in a WHERE clause.
- */
-const FIND_KEYS_BY_PREFIX_SQL =
-  "SELECT id, tenant_id, workspace_id, project_id, key_hash, last4, enabled, " +
-  "scopes_json, request_limit_per_minute, expires_at_unix, revoked_at_unix " +
-  "FROM api_keys WHERE key_prefix = ?";
 
 /** A row of `api_keys` as D1 hands it back. */
 interface ApiKeyRow {
@@ -111,28 +93,6 @@ function parseScopes(raw: string | null): readonly string[] {
   } catch {
     return [];
   }
-}
-
-/** Rust `api_key_record_is_active`. */
-function keyRowIsActive(row: ApiKeyRow, nowUnixSeconds: number): boolean {
-  if ((row.enabled ?? 0) === 0) return false;
-  if (row.revoked_at_unix !== null && row.revoked_at_unix !== undefined) return false;
-  // Rust: `expires_at.is_none_or(|expires_at| expires_at > now)` — an expiry
-  // exactly equal to now is EXPIRED.
-  if (
-    row.expires_at_unix !== null &&
-    row.expires_at_unix !== undefined &&
-    row.expires_at_unix <= nowUnixSeconds
-  ) {
-    return false;
-  }
-  return true;
-}
-
-/** Rust `api_key_record_last4_matches`: a blank `last4` column matches anything. */
-function last4Matches(row: ApiKeyRow, presentedKey: string): boolean {
-  const last4 = row.last4 ?? "";
-  return last4 === "" || presentedKey.endsWith(last4);
 }
 
 /**
@@ -173,72 +133,9 @@ export interface D1ApiKeyPortOptions {
 }
 
 /**
- * The durable {@link ApiKeyPort}: `api_keys` in the tenant D1 database.
- *
- * Resolution order is Rust's, and the outcomes are the ones `resolveOrThrow`
- * already renders:
- *
- * | presented credential                    | outcome         | HTTP |
- * |-----------------------------------------|-----------------|------|
- * | no `key_prefix` (blank) / no row matches | `unknown`       | 401  |
- * | prefix matches, `key_hash` does not      | `unknown`       | 401  |
- * | hash matches, `enabled = 0`              | `key_suspended` | 401  |
- * | hash matches, `revoked_at_unix` set      | `key_suspended` | 401  |
- * | hash matches, `expires_at_unix <= now`   | `key_suspended` | 401  |
- * | hash matches, live                       | `resolved`      | —    |
- * | D1 unreachable / query failed            | `unavailable`   | 503  |
- *
- * **`key_suspended` is 401, not 403.** It is a distinct outcome purely so the
- * reason is nameable in code; `src/middleware/auth.ts::resolveOrThrow`
- * collapses it onto the identical `401 invalid_api_key` an unknown key gets, so
- * key state is never disclosed. Static operator-authored keys are the
- * documented 403 exception and they do not live in this table.
- *
- * A hash MATCH is decided before liveness so a suspended key is reported as
- * suspended rather than silently as unknown; both answer 401, so this is
- * observability, not a behavior difference.
- */
-export function d1ApiKeyPort(db: D1Database, options: D1ApiKeyPortOptions = {}): ApiKeyPort {
-  const nowUnixSeconds = options.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000));
-
-  return {
-    async resolve(presentedKey: string): Promise<ApiKeyResolution> {
-      const prefix = virtualApiKeyPrefix(presentedKey);
-      if (prefix === null) return { outcome: "unknown" };
-
-      let rows: ApiKeyRow[];
-      try {
-        const result = await db.prepare(FIND_KEYS_BY_PREFIX_SQL).bind(prefix).all<ApiKeyRow>();
-        rows = result.results ?? [];
-      } catch (error) {
-        // FAIL CLOSED, and say so: a credential authority that could not be
-        // consulted has admitted nobody. 503, never a silent fallback to a
-        // permissive table.
-        return {
-          outcome: "unavailable",
-          detail: `api_keys lookup failed: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-
-      const now = nowUnixSeconds();
-      for (const row of rows) {
-        if (!last4Matches(row, presentedKey.trim())) continue;
-        const storedHash = row.key_hash;
-        if (storedHash === null || storedHash === undefined) continue;
-        if (!(await verifyStoredKeyHash(presentedKey.trim(), storedHash))) continue;
-        // From here the caller HOLDS this key. Everything below is state.
-        if (!keyRowIsActive(row, now)) return { outcome: "key_suspended" };
-        return { outcome: "resolved", auth: authContextFromRow(row) };
-      }
-      return { outcome: "unknown" };
-    },
-  };
-}
-
-/**
  * The durable {@link ApiKeyPort} over the TWO-HOP directory model (#821).
  *
- * The single-hop {@link d1ApiKeyPort} read `api_keys` straight off `env.DB` — the
+ * The former single-hop `d1ApiKeyPort` read `api_keys` straight off `env.DB` — the
  * ferrogate-tenant D1. That premise ("a Worker cannot open a tenant database by
  * uuid at runtime, so credentials must live in one flat table") was wrong: a
  * Worker selects a database by BINDING NAME, and the credential→tenant map lives

@@ -38,6 +38,7 @@ import {
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
 import {
+  type TenantDatabaseRouter,
   WALLET_RESERVATION_ACTIVE,
   boolFromSqlite,
   optionalNumber,
@@ -676,6 +677,65 @@ export function d1SpendSource(
 export function spendSourceFromEnv(env: SpendBindings): SpendSource {
   const db = d1Binding(env.DB);
   return db === undefined ? NO_SPEND_SOURCE : d1SpendSource(db);
+}
+
+/**
+ * The routed {@link SpendSource}: the CALLER tenant's own Durable Object, where
+ * the metering sink writes its `usage_monthly_rollups` and the wallet lives
+ * (#821). The exact mirror of `apps/gateway`'s `defaultSpendSource` routed arm.
+ *
+ * `committedSpendUsd` reads a rollup for whatever scope the budget ladder names
+ * (`tenant`/`project`/`workspace`/`key`), but ALL of a tenant's rollups live in
+ * that tenant's object, so the object is addressed by the CALLER's tenant id
+ * rather than by the rung's scope — the same handle the wallet leg reserves in.
+ * Until this existed the ladder read `env.DB`, a database a routed deployment
+ * never writes, so every budgeted scope read as `0` spent and every wallet as
+ * `null`, and both gates ran as dead code.
+ *
+ * `walletBalanceCredits(tenantId)` is passed the subject's tenant, which is the
+ * caller tenant, and carries the same cross-check the gateway makes: a handle
+ * that resolved to a different tenant is an outage (`ok: false` → 503), never a
+ * read of the wrong balance.
+ */
+export function routedSpendSource(
+  router: TenantDatabaseRouter,
+  callerTenantId: string,
+): SpendSource {
+  return {
+    async committedSpendUsd(
+      scopeKind: QuotaScopeKind,
+      scopeId: string,
+      periodMonth: string,
+    ): Promise<MonthlySpendReading> {
+      try {
+        const handle = await router.forTenant(callerTenantId);
+        return d1SpendSource(handle.db).committedSpendUsd(scopeKind, scopeId, periodMonth);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `routed tenant spend unavailable: ${detail}` };
+      }
+    },
+    async walletBalanceCredits(tenantId: string): Promise<WalletBalanceReading> {
+      try {
+        const handle = await router.forTenant(tenantId);
+        if (handle.tenantId !== tenantId) {
+          // Reading one tenant's balance to admit another is a denial (or an
+          // admission) taken against the wrong money — the same refusal the
+          // gateway's routed spend source raises.
+          return {
+            ok: false,
+            detail:
+              `the routed tenant database is tenant ${handle.tenantId}'s but this balance check ` +
+              `is for tenant ${tenantId}; refusing rather than reading the wrong wallet`,
+          };
+        }
+        return d1SpendSource(handle.db).walletBalanceCredits(tenantId);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { ok: false, detail: `routed tenant wallet unavailable: ${detail}` };
+      }
+    },
+  };
 }
 
 /**

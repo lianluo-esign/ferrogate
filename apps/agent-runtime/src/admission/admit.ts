@@ -45,6 +45,7 @@
  * `finally` cannot cover: an isolate that dies mid-request.
  */
 import type { QuotaScopeChain } from "@ferrogate/policy";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext } from "../ports.js";
@@ -59,12 +60,14 @@ import {
   monthlyBudgetCharges,
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
+  routedSpendSource,
   spendSourceFromEnv,
 } from "./quota.js";
 import {
   type WalletAdmission,
   type WalletAdmissionBindings,
   type WalletHold,
+  routedWalletAdmission,
   walletAdmissionFromEnv,
   walletHoldId,
 } from "./wallet.js";
@@ -175,6 +178,17 @@ export interface AdmissionDeps {
   readonly wallet?: WalletAdmission;
   readonly counter?: RequestCounter;
   readonly nowUnixSeconds?: () => number;
+  /**
+   * The per-tenant Durable Object router (#821). Present ⇒ the MONEY legs — the
+   * monthly-budget rollups and the prepaid wallet, both {@link SpendSource} and
+   * the no-oversell guard — route to the CALLER tenant's own object rather than
+   * the shared `env.DB`, exactly as `apps/gateway`'s admission does. Absent ⇒
+   * the `env.DB` fallback below, which is the `"off"`/no-`TENANT_DATA` posture.
+   *
+   * An injected `spend`/`wallet` still WINS over the router, so a test can pin
+   * either leg without providing a routable object.
+   */
+  readonly router?: TenantDatabaseRouter;
 }
 
 /**
@@ -221,14 +235,30 @@ export function admissionPort(
   deps: AdmissionDeps & { readonly env: AdmissionBindings },
 ): AdmissionPort {
   const quotas = deps.quotas ?? quotaPolicySourceFromEnv(deps.env);
-  const spend = deps.spend ?? spendSourceFromEnv(deps.env);
-  const wallet = deps.wallet ?? walletAdmissionFromEnv(deps.env);
   const counter = deps.counter ?? counterFromEnv(deps.env);
   const now = deps.nowUnixSeconds ?? ((): number => Math.floor(Date.now() / 1000));
+  const router = deps.router;
+  // The `env.DB` fallbacks, kept for the `"off"`/no-`TENANT_DATA` posture (and
+  // for a credential that carries no tenant to route on). Reading them here is
+  // also what keeps the `env.DB` binding declared-and-read.
+  const legacySpend = deps.spend ?? spendSourceFromEnv(deps.env);
+  const legacyWallet = deps.wallet ?? walletAdmissionFromEnv(deps.env);
 
   return {
     async admit({ auth, requestId }: AdmissionRequest): Promise<AdmissionGrant> {
       const subject = subjectFor(auth);
+
+      // The MONEY legs route to the CALLER tenant's own object when a router is
+      // bound and the subject carries a tenant. An injected `spend`/`wallet`
+      // still wins (a test pinning either leg). A tenant-less credential and a
+      // no-router deployment both fall back to the shared `env.DB` legs.
+      const callerTenantId = subject.chain.tenantId;
+      const routeMoney =
+        router !== undefined && callerTenantId !== undefined && callerTenantId !== "";
+      const spend =
+        deps.spend ?? (routeMoney ? routedSpendSource(router, callerTenantId) : legacySpend);
+      const wallet =
+        deps.wallet ?? (routeMoney ? routedWalletAdmission(router) : legacyWallet);
 
       const resolution = await resolveQuotaWindows(quotas, subject);
       if (!resolution.ok) {

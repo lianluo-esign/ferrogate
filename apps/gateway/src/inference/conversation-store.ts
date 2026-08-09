@@ -9,6 +9,8 @@
  * caller-supplied id. There is no code path that resolves a `response_id`
  * alone.
  */
+import type { TenancyBindings } from "../tenancy/ports.js";
+import { parseTenantDatabaseRoutingMode, resolverForEnv } from "../tenancy/resolver.js";
 import { type ConversationOwner, MAX_CONVERSATION_TURNS, outputItemsOf } from "./conversation.js";
 
 /** One persisted turn. */
@@ -415,8 +417,60 @@ function tenantDatabaseOf(env: unknown): D1Database | undefined {
 }
 
 /**
- * The production resolver: the tenant database when it is bound, and
- * {@link NO_CONVERSATION_STORE} otherwise.
+ * The routed store (#821 PR2a): each read/write resolves the OWNER tenant's own
+ * database through the same router `tenantDatabaseOf(c)` uses, so multi-turn
+ * chaining reads and writes `responses_conversations` in that tenant's own
+ * Durable Object rather than the shared `env.DB` a routed deployment never
+ * writes. `conversationStoreFromEnv`'s docblock called this its own deferred
+ * slice; this is that slice.
+ *
+ * The tenant fence in the SQL stays exactly as strict — it is the isolation the
+ * `"off"`/`shared_development` posture still leans on, and a routed object
+ * holds one tenant's rows anyway, so the two defences compose rather than
+ * duplicate.
+ *
+ * `resolverForEnv` is memoized per `env`, and `forTenant` under the routed
+ * default is a pure `idFromName`, so this costs an allocation per call and no
+ * extra round trip. A routing failure throws from the method and is rendered by
+ * the responses handler exactly as an `env.DB` outage was.
+ */
+class RoutedConversationStore implements ConversationStore {
+  constructor(private readonly env: unknown) {}
+
+  private async store(tenantId: string): Promise<D1ConversationStore> {
+    const handle = await resolverForEnv(this.env as TenancyBindings).forTenant(tenantId);
+    return new D1ConversationStore(handle.db);
+  }
+
+  async chain(
+    owner: ConversationOwner,
+    responseId: string,
+    nowUnix: number,
+  ): Promise<ChainResolution> {
+    return (await this.store(owner.tenantId)).chain(owner, responseId, nowUnix);
+  }
+
+  async append(owner: ConversationOwner, turn: StoredResponseTurn): Promise<void> {
+    return (await this.store(owner.tenantId)).append(owner, turn);
+  }
+
+  async get(
+    owner: ConversationOwner,
+    responseId: string,
+    nowUnix: number,
+  ): Promise<StoredResponseTurn | null> {
+    return (await this.store(owner.tenantId)).get(owner, responseId, nowUnix);
+  }
+
+  async remove(owner: ConversationOwner, responseId: string, nowUnix: number): Promise<boolean> {
+    return (await this.store(owner.tenantId)).remove(owner, responseId, nowUnix);
+  }
+}
+
+/**
+ * The production resolver: the caller tenant's OWN database under the routed
+ * default, the shared `env.DB` under `"off"`, and {@link NO_CONVERSATION_STORE}
+ * when no tenant storage is bound at all.
  *
  * Fail-closed by construction — a deployment that binds nothing REFUSES
  * `store: true` and `previous_response_id` (503 `response_store_disabled`)
@@ -424,8 +478,22 @@ function tenantDatabaseOf(env: unknown): D1Database | undefined {
  * `/v1/responses` request exactly as it did before this slice.
  */
 export function conversationStoreFromEnv(env: unknown): ConversationStore {
-  const db = tenantDatabaseOf(env);
-  return db === undefined ? NO_CONVERSATION_STORE : new D1ConversationStore(db);
+  const routing = (env as { GATEWAY_TENANT_DB_ROUTING?: unknown } | undefined)
+    ?.GATEWAY_TENANT_DB_ROUTING;
+  const mode = parseTenantDatabaseRoutingMode(typeof routing === "string" ? routing : undefined);
+  // Explicit `"off"`: the shared `env.DB` IS the tenant database, so read it
+  // directly. This is the legacy arm the later stanza-removal PR deletes.
+  if (mode === "off") {
+    const db = tenantDatabaseOf(env);
+    return db === undefined ? NO_CONVERSATION_STORE : new D1ConversationStore(db);
+  }
+  // Routed (the `durable_object` default and the `binding*` modes). With NO
+  // tenant storage bound at all — no `TENANT_DATA` namespace AND no shared
+  // `env.DB` — there is nowhere any tenant's rows could live, so it fails closed
+  // exactly as the unbound `env.DB` case did. Otherwise route per owner tenant.
+  const hasTenantData = (env as { TENANT_DATA?: unknown } | undefined)?.TENANT_DATA !== undefined;
+  if (!hasTenantData && tenantDatabaseOf(env) === undefined) return NO_CONVERSATION_STORE;
+  return new RoutedConversationStore(env);
 }
 
 // ---------------------------------------------------------------------------

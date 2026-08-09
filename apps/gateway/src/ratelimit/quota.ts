@@ -913,14 +913,18 @@ export function spendSourceFromEnv(env: SpendBindings): SpendSource {
  * every leg of one admission decision reads the database that leg's rows are
  * actually written to.
  *
- * ## Why the rollup leg is deliberately NOT routed with it
+ * ## The rollup leg is PASSED THROUGH — the caller routes it
  *
- * `usage_monthly_rollups` is a tenant-schema table too, but the gateway's own
- * metering sink still WRITES it to `env.DB` (`../metering/d1.ts`,
- * `../metering/runtime.ts`). Routing the read without moving the write would
- * recreate the exact defect one table over: a budget enforced against rows
- * nothing writes. So step 2 stays self-consistent on `DB` until the sink moves,
- * and that pairing is stated here rather than left for a reader to infer.
+ * `usage_monthly_rollups` is a tenant-schema table too, and the metering sink
+ * now WRITES it to the tenant object (`../metering/usage-ledger.ts::
+ * usageDatabaseFrom(env, tenantId)` → `TENANT_DATA`), not `env.DB`. So this
+ * source passes `committedSpendUsd` through UNCHANGED from the `rollups` it is
+ * handed, letting the CALLER pick the rollup database: under the
+ * `durable_object` default `../ratelimit/middleware.ts::defaultSpendSource`
+ * supplies a tenant-DO-routed rollups source, so BOTH legs of one decision read
+ * the same object the sink writes — the rule above, held for the rollup leg too.
+ * (An earlier revision of this note claimed the sink still wrote `env.DB`; that
+ * is stale — the tenant-scoped rollup write moved to the object.)
  *
  * @param rollups the source for `committedSpendUsd` — unchanged.
  * @param walletDb resolves the database holding THIS tenant's `wallets` row.

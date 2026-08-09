@@ -43,7 +43,7 @@ import { type ApiOperation, operationById } from "../src/contract.js";
 import type { AuthContext, GatewayBindings, LifecycleDecision } from "../src/ports.js";
 import { createGatewayApp } from "../src/routes/index.js";
 import { seedApiKey, testSecret } from "./keys/seed.js";
-import { seedTenantRosterRows } from "./tenant-object.js";
+import { seedTenantRosterRows, tenantObjectDb } from "./tenant-object.js";
 
 const BASE = "https://gateway.test";
 const bindings = env as unknown as Record<string, unknown>;
@@ -93,6 +93,50 @@ async function seedWorkspace(
     .run();
 }
 
+/**
+ * The ROUTED seeds (#821 PR2a): under the `durable_object` default the gate
+ * reads `projects`/`workspaces` from the caller tenant's OWN object, so the
+ * MOUNT tests (driven through `SELF`/`depsFromEnv` against the real bindings)
+ * seed there rather than into the shared `env.DB` the D1-row-source unit tests
+ * above still use.
+ */
+async function seedProjectInObject(id: string, tenantId: string, status: string): Promise<void> {
+  await tenantObjectDb(tenantId)
+    .prepare(
+      "INSERT OR REPLACE INTO projects (id, tenant_id, name, slug, status) " +
+        "VALUES (?1, ?2, ?1, ?1, ?3)",
+    )
+    .bind(id, tenantId, status)
+    .run();
+}
+
+async function seedWorkspaceInObject(
+  id: string,
+  projectId: string,
+  tenantId: string,
+  status: string,
+): Promise<void> {
+  await tenantObjectDb(tenantId)
+    .prepare(
+      "INSERT OR REPLACE INTO workspaces (id, project_id, tenant_id, name, slug, status) " +
+        "VALUES (?1, ?2, ?3, ?1, ?1, ?4)",
+    )
+    .bind(id, projectId, tenantId, status)
+    .run();
+}
+
+/** Wipe the routed `projects`/`workspaces` a MOUNT test seeded into an object. */
+async function clearObjectHierarchy(tenantIds: readonly string[]): Promise<void> {
+  for (const tenantId of tenantIds) {
+    const object = tenantObjectDb(tenantId);
+    // The object facade rejects `exec()` — one transaction via `batch()`.
+    await object.batch([
+      object.prepare("DELETE FROM workspaces"),
+      object.prepare("DELETE FROM projects"),
+    ]);
+  }
+}
+
 async function clearRows(): Promise<void> {
   await db("DB").exec("DELETE FROM workspaces");
   await db("DB").exec("DELETE FROM projects");
@@ -102,12 +146,18 @@ async function clearRows(): Promise<void> {
 
 beforeEach(async () => {
   await clearRows();
-  // `tenant_chain` is not a vitest.config fixture tenant, so `test/setup-d1.ts`
-  // seeds no `tenant_databases` roster row for it — and a request the lifecycle
-  // gate ADMITS then 503s downstream when the backend-dispatching router cannot
-  // place the tenant. (Roster rows survive `clearRows`, which touches only
-  // workspaces/projects/api_keys/tenants.)
-  await seedTenantRosterRows(["tenant_chain"]);
+  // `tenant_chain`/`t_mounted` are not vitest.config fixture tenants, so
+  // `test/setup-d1.ts` seeds no `tenant_databases` roster row for them — and a
+  // request the lifecycle gate ADMITS then 503s downstream when the
+  // backend-dispatching router cannot place the tenant. (Roster rows survive
+  // `clearRows`, which touches only workspaces/projects/api_keys/tenants.)
+  //
+  // #821 PR2a: they are registered as `durable_object`, so the routed lifecycle
+  // gate reads their `projects`/`workspaces` from the tenant OBJECT — which the
+  // MOUNT tests seed and this loop clears (those rows survive `clearRows`, which
+  // only touches the shared `env.DB`).
+  await seedTenantRosterRows(["tenant_chain", "t_mounted"]);
+  await clearObjectHierarchy(["tenant_chain", "t_mounted"]);
 });
 afterEach(clearRows);
 
@@ -607,8 +657,10 @@ describe("an UNAVAILABLE lifecycle lookup is 503 at the HTTP boundary", () => {
 describe("the durable chain gate is MOUNTED on the exported Worker", () => {
   it("depsFromEnv composes the durable leg with the config leg", async () => {
     // Constructed from the REAL bindings, so this fails if `depsFromEnv` drops
-    // `D1TenancyLifecycleGate` — no bespoke app, no injected port.
-    await seedProject("p_mounted", "t_mounted", "suspended");
+    // `D1TenancyLifecycleGate` — no bespoke app, no injected port. #821 PR2a:
+    // the project lives in `t_mounted`'s own object, where the routed gate reads.
+    await seedTenant("t_mounted", "active");
+    await seedProjectInObject("p_mounted", "t_mounted", "suspended");
     const deps = depsFromEnv(env as unknown as GatewayBindings);
     const decision = await deps.lifecycle.admit(
       auth({ tenantId: "t_mounted", projectId: "p_mounted" }),
@@ -621,7 +673,7 @@ describe("the durable chain gate is MOUNTED on the exported Worker", () => {
     // The end-to-end shape of the gap this closes: before the chain walk this
     // request was ADMITTED, because only the tenant tier was read.
     await seedTenant("tenant_chain", "active");
-    await seedProject("project_chain", "tenant_chain", "suspended");
+    await seedProjectInObject("project_chain", "tenant_chain", "suspended");
     const secret = testSecret("lifecycle-chain-suspended");
     await seedApiKey({
       id: "key_chain_suspended",
@@ -645,7 +697,7 @@ describe("the durable chain gate is MOUNTED on the exported Worker", () => {
     // Without this arm "403" would prove nothing — every unauthenticated or
     // misrouted request is also not-a-200.
     await seedTenant("tenant_chain", "active");
-    await seedProject("project_chain", "tenant_chain", "active");
+    await seedProjectInObject("project_chain", "tenant_chain", "active");
     const secret = testSecret("lifecycle-chain-active");
     await seedApiKey({
       id: "key_chain_active",
@@ -666,8 +718,8 @@ describe("the durable chain gate is MOUNTED on the exported Worker", () => {
 
   it("a suspended WORKSPACE is caught even though no id but the workspace is inactive", async () => {
     await seedTenant("tenant_chain", "active");
-    await seedProject("project_chain", "tenant_chain", "active");
-    await seedWorkspace("workspace_chain", "project_chain", "tenant_chain", "deleted");
+    await seedProjectInObject("project_chain", "tenant_chain", "active");
+    await seedWorkspaceInObject("workspace_chain", "project_chain", "tenant_chain", "deleted");
     const secret = testSecret("lifecycle-chain-workspace");
     await seedApiKey({
       id: "key_chain_workspace",
