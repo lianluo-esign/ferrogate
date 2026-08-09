@@ -1,4 +1,5 @@
 import { useRef, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { AsyncStatus } from "@/components/ui/async-status";
 import { MoreHorizontal } from "lucide-react";
 import { TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
@@ -32,6 +33,8 @@ interface ResourceTableProps<T extends Record<string, unknown>> {
   readOnly?: boolean;
   emptyLabel?: string;
   rowLabel?: (row: T) => string;
+  /** Row-nav (#912): when set, each row's FIRST column links to this target. */
+  rowHref?: (row: T) => string;
   onEdit?: (row: T, trigger?: HTMLElement | null) => void;
   onDelete?: (row: T, trigger?: HTMLElement | null) => void;
   renderActions?: (row: T) => ReactNode;
@@ -110,6 +113,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
   readOnly,
   emptyLabel,
   rowLabel,
+  rowHref,
   onEdit,
   onDelete,
   renderActions,
@@ -118,6 +122,17 @@ export function ResourceTable<T extends Record<string, unknown>>({
   const isDesktop = useMediaQuery("(min-width: 1024px)");
   const hasActions = !readOnly && Boolean(onEdit || onDelete || renderActions);
   const labelFor = (row: T) => rowLabel?.(row) ?? rawColumnValue(columns[0], row);
+  // Row-nav (#912): the first column links to `rowHref(row)` when provided,
+  // otherwise renders its plain value. Applied to both the desktop table and the
+  // compact record view so a row is navigable at every breakpoint.
+  const linkWrap = (content: ReactNode, row: T): ReactNode =>
+    rowHref ? (
+      <Link to={rowHref(row)} className="font-medium text-primary hover:underline">
+        {content}
+      </Link>
+    ) : (
+      content
+    );
   // Column headers prefer the typed catalog key (migrated resources) and fall
   // back to the legacy inline literal for resources not yet migrated (#348).
   const headerFor = (column: ColumnConfig<T>) =>
@@ -157,10 +172,14 @@ export function ResourceTable<T extends Record<string, unknown>>({
           return (
             <article key={`${label}-${rowIndex}`} className="rounded-md border px-3 py-2">
               <dl className="divide-y">
-                {summaryColumns.map((column) => (
+                {summaryColumns.map((column, columnIndex) => (
                   <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
                     <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
-                    <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column), t)}</dd>
+                    <dd className="min-w-0 break-words text-sm">
+                      {columnIndex === 0
+                        ? linkWrap(columnValue(column, row, true, headerFor(column), t), row)
+                        : columnValue(column, row, true, headerFor(column), t)}
+                    </dd>
                   </div>
                 ))}
               </dl>
@@ -227,9 +246,11 @@ export function ResourceTable<T extends Record<string, unknown>>({
               const label = labelFor(row);
               return (
                 <TableRow key={`${label}-${rowIndex}`}>
-                  {columns.map((column) => (
+                  {columns.map((column, columnIndex) => (
                     <TableCell key={column.key} className="min-w-0 overflow-hidden">
-                      {columnValue(column, row, false, headerFor(column), t)}
+                      {columnIndex === 0
+                        ? linkWrap(columnValue(column, row, false, headerFor(column), t), row)
+                        : columnValue(column, row, false, headerFor(column), t)}
                     </TableCell>
                   ))}
                   {hasActions ? (

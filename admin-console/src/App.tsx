@@ -49,6 +49,7 @@ const McpIdentitiesPage = lazy(() => import("@/pages/mcp-identities"));
 const ToolsCatalogPage = lazy(() => import("@/pages/tools-catalog"));
 const PluginToolsPage = lazy(() => import("@/pages/plugin-tools"));
 const ToolSessionsPage = lazy(() => import("@/pages/tool-sessions"));
+const ModelOfferingsPage = lazy(() => import("@/pages/model-offerings"));
 const ResourceRoutePage = lazy(() => import("@/pages/resource-route"));
 
 const queryClient = new QueryClient({
@@ -152,6 +153,10 @@ function App() {
                 <Route path={APP_ROUTES.tools} element={routeElement(ToolsCatalogPage)} />
                 <Route path={APP_ROUTES.pluginTools} element={routeElement(PluginToolsPage)} />
                 <Route path={APP_ROUTES.toolSessions} element={routeElement(ToolSessionsPage)} />
+                <Route
+                  path={APP_ROUTES.modelOfferings}
+                  element={routeElement(ModelOfferingsPage)}
+                />
                 {Object.values(RESOURCE_ROUTE_PATHS).map((path) => (
                   <Route key={path} path={path} element={routeElement(ResourceRoutePage)} />
                 ))}
