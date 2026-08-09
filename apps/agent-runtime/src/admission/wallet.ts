@@ -128,55 +128,10 @@ export const NO_WALLET_ADMISSION: WalletAdmission = {
   },
 };
 
-/** Tunables for {@link d1WalletAdmission}. */
+/** Tunables for {@link routedWalletAdmission}. */
 export interface WalletAdmissionOptions {
   readonly holdCredits?: number | undefined;
   readonly ttlSeconds?: number | undefined;
-}
-
-/**
- * The tenant-database handle for this deployment's `DB` binding.
- *
- * `source: "shared_development"` is the honest label: this app declares ONE
- * tenant database, so every tenant's wallet lives in it today.
- * `supportsAtomicBatch` is `true` because a NATIVE D1 binding really does run
- * `batch()` as one transaction and really does return `RETURNING` rows — the
- * only property `requireAtomicBatch` gates on, and the only one the guard's
- * correctness depends on.
- *
- * The `tenantId` on the handle is load-bearing, not decorative:
- * `D1WalletStore.assertTenant` refuses any write whose `tenant_id` disagrees
- * with it, so a routing bug can never write one tenant's hold against another's
- * balance. Building the handle PER REQUEST from the authenticated tenant is
- * what arms that tripwire.
- */
-export function agentRuntimeTenantHandle(db: D1Database, tenantId: string): TenantDatabaseHandle {
-  return { tenantId, db, source: "shared_development", supportsAtomicBatch: true };
-}
-
-/** `env.DB`, but only when it is really a D1 binding (a `[vars]` `DB` is a string). */
-function walletDatabase(env: WalletAdmissionBindings): D1Database | undefined {
-  const candidate = env.DB;
-  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
-}
-
-/**
- * The durable guard: `@ferrogate/storage`'s `D1WalletStore`, per request, on
- * the tenant database.
- *
- * The store is constructed per call because the handle carries the tenant
- * identity `assertTenant` checks. It holds no state of its own, so this costs
- * an object allocation, not a round trip.
- *
- * `source: "shared_development"` — the `GATEWAY_TENANT_DB_ROUTING = "off"`
- * posture, i.e. the shared `env.DB`. Under the routed default this is not on the
- * path: {@link routedWalletAdmission} takes the tenant's OWN Durable Object.
- */
-export function d1WalletAdmission(
-  db: D1Database,
-  options: WalletAdmissionOptions = {},
-): WalletAdmission {
-  return walletAdmissionOverHandle(async (tenantId) => agentRuntimeTenantHandle(db, tenantId), options);
 }
 
 /**
@@ -289,17 +244,6 @@ function walletAdmissionOverHandle(
       };
     },
   };
-}
-
-/**
- * The guard the request path gets: the durable D1 one whenever the tenant
- * database is bound, {@link NO_WALLET_ADMISSION} otherwise.
- *
- * Binding `DB` can therefore only ever TIGHTEN admission, never loosen it.
- */
-export function walletAdmissionFromEnv(env: WalletAdmissionBindings): WalletAdmission {
-  const db = walletDatabase(env);
-  return db === undefined ? NO_WALLET_ADMISSION : d1WalletAdmission(db);
 }
 
 /** The hold id for a request. Stable, so a retried admission is idempotent. */
