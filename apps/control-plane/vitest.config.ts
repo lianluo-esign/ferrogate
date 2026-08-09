@@ -83,7 +83,7 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: "./wrangler.toml" },
       miniflare: {
-        d1Databases: ["TENANT_DB_A", "TENANT_DB_B", "LEGACY_TENANT_DB"],
+        d1Databases: ["TENANT_DB_A", "TENANT_DB_B"],
         // The `ferrogate-gateway` script this Worker's committed
         // `[[durable_objects.bindings]] TENANT_DATA` points at with
         // `script_name` (#820). Without it workerd refuses to START the session

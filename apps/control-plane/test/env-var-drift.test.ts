@@ -426,16 +426,14 @@ describe("the env-var drift gate itself", () => {
     // roster and seed their model catalog — into the object the data plane will
     // read, not one of its own. See the stanza's comment in `wrangler.toml` for
     // why it carries no `[[migrations]]` entry and no `src/worker.ts` re-export.
-    // `LEGACY_TENANT_DB` is the SECOND d1 binding: the pre-M9 shared tenant
-    // database, retained only while #824 runs its tenant-by-tenant backfill
-    // (see its stanza's comment in `wrangler.toml`); `resolveTenantDatabases`
-    // reads it as the `legacyShared` arm and `resolveDeps` exposes it as
-    // `legacyTenantDatabase`. It leaves this list when the backfill retires
-    // the stanza (Zero-D1 S3, #879).
+    // `LEGACY_TENANT_DB` — the pre-M9 shared tenant D1 (`ferrogate-tenant`) — has
+    // LEFT this list. #821 PR2d deleted its stanza once the tenant-by-tenant
+    // backfill that was its only reader retired (the `migrateTenantStorage` route
+    // now answers 410 Gone), so this Worker binds NO D1 database at all.
     expect([...DECLARED.bindings.keys()]).toEqual([
       // Zero-D1 S5 (#881): the `DB` (`ferrogate-control`) stanza is deleted;
-      // control reads resolve the CONTROL_DATA object.
-      "LEGACY_TENANT_DB",
+      // control reads resolve the CONTROL_DATA object. #821 PR2d then deleted the
+      // last d1 stanza, `LEGACY_TENANT_DB`.
       "PROMPT_LABELS",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",

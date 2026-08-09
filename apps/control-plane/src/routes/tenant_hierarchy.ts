@@ -35,11 +35,7 @@ import {
   isDenied,
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
-import {
-  LIFECYCLE_STATUS_ALL,
-  type LifecycleStatus,
-  TENANT_LOCATION_HINTS,
-} from "@ferrogate/storage";
+import { LIFECYCLE_STATUS_ALL, type LifecycleStatus } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { StoreConflictError, type StoreRecord } from "../ports.js";
@@ -54,7 +50,6 @@ import {
   tenantOf,
   workspaceTenantRow,
 } from "../store/tenancy.js";
-import { TenantBackfillError, runTenantStorageMigration } from "../store/tenant-backfill.js";
 import { provisionTenantStorageFor } from "../store/tenant_storage.js";
 import {
   type GroupModule,
@@ -103,13 +98,6 @@ export const workspaceSchema = adminRecordSchema.extend({
 export const tenantPlanAssignmentSchema = z.object({
   plan_id: z.string().trim().min(1),
   effective_at: z.number().int().min(0).optional(),
-});
-
-export const tenantStorageMigrationSchema = z.object({
-  action: z.enum(["start", "resume", "verify", "cutover", "rollback", "status"]),
-  location_hint: z.enum(TENANT_LOCATION_HINTS),
-  page_size: z.number().int().min(1).max(500).optional(),
-  retention_seconds: z.number().int().min(60).max(31_536_000).optional(),
 });
 
 const TENANT_ACCOUNTS = "tenant-accounts";
@@ -389,6 +377,14 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       return json(c, 200, adminItem("tenant_account", stored));
     },
 
+    // #821 PR2d retired the shared `ferrogate-tenant` D1 (`LEGACY_TENANT_DB`)
+    // that was this backfill's MIGRATION SOURCE — every tenant now lives in its
+    // own Durable Object, so there is nothing left to copy FROM. The operation
+    // stays in the contract (deleting it would drift the OpenAPI and break every
+    // generated client) but the handler is now terminal: it answers 410 Gone
+    // rather than resolving a binding that no longer exists. Platform-operator
+    // auth is still checked first so a caller learns "you are not allowed" before
+    // "this is gone", exactly as it did while the route was live.
     migrateTenantStorage: async (c) => {
       const auth = c.get("auth");
       if (auth === null || auth === undefined || !auth.platformOperator) {
@@ -398,43 +394,11 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
           "tenant storage migration is restricted to platform operators",
         );
       }
-      const deps = c.get("deps");
-      const controlDatabase = deps.controlDatabase;
-      const legacyTenantDatabase = deps.legacyTenantDatabase;
-      const destinationRouter = deps.tenantStorage;
-      if (
-        controlDatabase === null ||
-        legacyTenantDatabase === null ||
-        legacyTenantDatabase === undefined ||
-        destinationRouter === undefined
-      ) {
-        throw new HttpError(
-          503,
-          "tenant_storage_migration_unavailable",
-          "tenant storage migration requires control, legacy shared-D1, and Durable Object bindings",
-        );
-      }
-      const tenantId = pathParam(c, "tenant_id");
-      const body = await readJson(c, tenantStorageMigrationSchema);
-      try {
-        const migrated = await runTenantStorageMigration({
-          controlDatabase,
-          legacyTenantDatabase,
-          destinationRouter,
-          tenantId,
-          action: body.action,
-          locationHint: body.location_hint,
-          requestId: c.get("requestId"),
-          pageSize: body.page_size,
-          retentionSeconds: body.retention_seconds,
-        });
-        return json(c, 200, migrated);
-      } catch (error) {
-        if (error instanceof TenantBackfillError) {
-          throw new HttpError(error.statusCode, error.code, error.message);
-        }
-        throw error;
-      }
+      throw new HttpError(
+        410,
+        "tenant_storage_backfill_retired",
+        "tenant storage backfill is retired: the shared tenant D1 migration source was removed once every tenant was cut over to its Durable Object; there is nothing left to migrate",
+      );
     },
 
     /**
