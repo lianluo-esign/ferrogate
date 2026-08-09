@@ -155,38 +155,29 @@ FG_DEV_A2A_GUARDRAILS = ""
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# D1 — the tenant CREDENTIAL AUTHORITY (`resolveDeps` in `src/ports.ts`)
+# Zero-D1 #821 PR2-delete: the tenant `[[d1_databases]] DB` stanza is DELETED
 #
-#   DB          tenant schema  -> `api_keys`  (`d1ApiKeyPort`)
+# The shared `ferrogate-tenant` D1 (the `DB` binding) used to sit here. It is
+# gone. Every tenant-schema table (`sql/d1-ts/tenant/`) — `api_keys`, wallets +
+# `wallet_reservations`, `usage_monthly_rollups`, `projects`/`workspaces`
+# lifecycle rows — now lives ONLY in that tenant's own SQLite-backed Durable
+# Object (`env.TENANT_DATA.idFromName(tenantId)`, `@ferrogate/storage`'s
+# `TenantDataObject`). `resolveDeps` (src/ports.ts) routes ALL of them through
+# the `DurableObjectTenantDatabaseRouter`: the two-hop credential leg
+# (`twoHopApiKeyPort`), the admission money legs (`routedSpendSource` /
+# `routedWalletAdmission`) and the lifecycle project/workspace tiers
+# (`lifecycleRowSourceFor`). Nothing in `src/` reads `env.DB` any more — the
+# `"off"`/no-`TENANT_DATA` fallback arms that were its only readers are deleted.
 #
-# Zero-D1 S5 (#881) deleted the CONTROL_DB stanza
-# (`database_name = "ferrogate-control"`): worker-identity control reads now
-# resolve through the `CONTROL_DATA` DO facade, never a D1 binding. Only the
-# `ferrogate-tenant` DB stanza (epic #821/#824) remains.
+# DEPLOY GATE (IRREVERSIBLE): before deploying, the control roster must show a
+# 100% tenant cutover — zero tenants with `migration_state ∈ {shared, copying,
+# verifying}` and every tenant `storage_backend = 'durable_object'`; otherwise a
+# not-yet-cut-over tenant's data is dropped when the shared D1 goes away.
 #
-# A BOUND DATABASE WINS OVER `FG_DEV_IN_MEMORY_PORTS`, deliberately: a
-# deployment that provisions real databases but forgets to delete the dev flag
-# must still get the real databases (`docs/rewrite/parity-audit-dead-packages.md`
-# §7.2 — a durable identity store bypassed by one leftover variable). With
-# NEITHER a database nor the dev flag, `resolveDeps` returns undefined and every
-# authenticated surface answers `503 agent_runtime_unavailable`. There is no
-# permissive default.
-#
-# LIVE. These bindings are the deployed authorities for credentials, worker
-# identity and the control-plane evidence mirror. `database_id` stays a
-# PLACEHOLDER here: the deploy step supplies the account's real database UUID,
-# and no real resource identifier is invented or committed.
-#
-# The default unit suite selects `[env.unit]` below. Wrangler environments do
-# not inherit D1 bindings, so that environment deliberately has no D1 stanza;
-# the durable harness binds these same authorities and applies the migrations
-# from `sql/d1-ts/**` before exercising the durable branch.
-# ---------------------------------------------------------------------------
-[[d1_databases]]
-binding = "DB"
-database_name = "ferrogate-tenant"
-database_id = "replace-at-deploy-tenant"
-migrations_dir = "../../sql/d1-ts/tenant"
+# Zero-D1 S5 (#881) already deleted the CONTROL_DB stanza
+# (`database_name = "ferrogate-control"`): worker-identity control reads resolve
+# through the `CONTROL_DATA` DO facade. This Worker now declares NO
+# `[[d1_databases]]` stanza at all — see `d1_databases = []` under `[env.unit]`.
 # ---------------------------------------------------------------------------
 
 # ===========================================================================

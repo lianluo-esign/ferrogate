@@ -67,17 +67,15 @@ export interface AgentRuntimeBindings {
   readonly AGENT_RUN_STATE: DurableObjectNamespace;
   /** Per-`${tenant_id}:${workspace_id}` self-hosted dispatch queue. */
   readonly WORKER_PLANE: DurableObjectNamespace;
-  /** One authoritative SQLite-backed tenant database per tenant (#859). */
-  readonly TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
   /**
-   * The TENANT database (`sql/d1-ts/tenant`), holding `api_keys`.
+   * One authoritative SQLite-backed tenant database per tenant (#859).
    *
-   * Bound ⇒ tenant bearer credentials resolve through the two-hop
-   * {@link twoHopApiKeyPort}. Absent ⇒ see {@link resolveDeps} for what is left.
-   * Same binding name and same schema `apps/gateway/wrangler.toml` declares, so
-   * one key authenticates identically on both Workers.
+   * Since #821 PR2-delete this is the ONLY home for tenant data: the shared
+   * `ferrogate-tenant` `DB` binding is retired, so `api_keys` (two-hop
+   * {@link twoHopApiKeyPort}), the money legs and the lifecycle project/workspace
+   * tiers all resolve the caller tenant's own object here.
    */
-  readonly DB?: D1Database;
+  readonly TENANT_DATA?: import("@ferrogate/storage/durable-objects").TenantDataNamespace;
   /**
    * The CONTROL database (`sql/d1-ts/control`), holding
    * `self_hosted_worker_registrations`.
@@ -822,9 +820,10 @@ export function d1LifecycleRowSource(
  *
  * `routingTenantId` is the resolved credential's own tenant; every project and
  * workspace it names belongs to that tenant, so the object is addressed by it.
- * A blank tenant (or no router) falls back to the shared `tenant` binding —
- * which is the `"off"`/no-`TENANT_DATA` posture and what keeps `env.DB`
- * declared-and-read.
+ * A blank tenant (or no router) falls back to a CONTROL-only source — since
+ * #821 PR2-delete the shared `ferrogate-tenant` `env.DB` is gone, so `projects`
+ * / `workspaces` have no shared home and only `tenants` (a CONTROL row) still
+ * applies to an as-yet-unroutable credential.
  *
  * A router failure surfaces from `projectRow`/`workspaceRow` and is caught by
  * {@link resolveLifecycleChain}'s caller as `unavailable` (503) — an unreadable
@@ -832,12 +831,11 @@ export function d1LifecycleRowSource(
  */
 export function lifecycleRowSourceFor(
   control: D1Database | undefined,
-  tenant: D1Database | undefined,
   router: TenantDatabaseRouter | undefined,
 ): (routingTenantId: string | null) => LifecycleRowSource {
   return (routingTenantId: string | null): LifecycleRowSource => {
     if (router === undefined || routingTenantId === null || routingTenantId === "") {
-      return d1LifecycleRowSource(control, tenant);
+      return d1LifecycleRowSource(control, undefined);
     }
     const tenantDb = async (): Promise<D1Database> => (await router.forTenant(routingTenantId)).db;
     return {
@@ -846,7 +844,9 @@ export function lifecycleRowSourceFor(
         return asLifecycleRow(await control.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
       },
       async projectRow(id: string): Promise<LifecycleRow | null> {
-        return asLifecycleRow(await (await tenantDb()).prepare(LIFECYCLE_PROJECT_SQL).bind(id).first());
+        return asLifecycleRow(
+          await (await tenantDb()).prepare(LIFECYCLE_PROJECT_SQL).bind(id).first(),
+        );
       },
       async workspaceRow(id: string): Promise<LifecycleRow | null> {
         return asLifecycleRow(
@@ -1553,9 +1553,10 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
   const dev = env.FG_DEV_IN_MEMORY_PORTS === "1";
 
   // #880 — resolve the CONTROL database through the S4 seam (the CONTROL_DATA
-  // object facade). env.DB is the TENANT database and is NO LONGER read for
-  // credentials — the two-hop directory model routes to the tenant's OWN
-  // `TenantDataObject` — but it stays bound for the lifecycle gate below.
+  // object facade). Since #821 PR2-delete the shared `ferrogate-tenant` `env.DB`
+  // is gone entirely: the two-hop directory model routes credentials to the
+  // tenant's OWN `TenantDataObject`, and the lifecycle/money legs route there
+  // too — nothing on this Worker reads `env.DB` any more.
   const controlDb = controlDatabaseFrom(env);
 
   // #821 — the DURABLE credential leg is now the TWO-HOP directory model:
@@ -1598,15 +1599,14 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
    * `apps/mcp/test/fleet-tenancy-suspension.test.ts` red.
    */
   const apiKeys: ApiKeyPort | undefined =
-    resolvedApiKeys === undefined ||
-    (env.DB === undefined && controlDb === undefined && tenantRouter === undefined)
+    resolvedApiKeys === undefined || (controlDb === undefined && tenantRouter === undefined)
       ? resolvedApiKeys
       : tenancyGatedApiKeyPort(
           resolvedApiKeys,
-          // #821 PR2a — `projects`/`workspaces` route to the caller tenant's own
-          // object via `tenantRouter`; `tenants` stays in CONTROL and `env.DB` is
-          // the fallback for the `"off"`/no-`TENANT_DATA` posture.
-          lifecycleRowSourceFor(controlDb, env.DB, tenantRouter),
+          // #821 PR2a/PR2-delete — `projects`/`workspaces` route to the caller
+          // tenant's own object via `tenantRouter`; `tenants` stays in CONTROL.
+          // The shared `ferrogate-tenant` `env.DB` fallback is gone.
+          lifecycleRowSourceFor(controlDb, tenantRouter),
         );
 
   const workerIdentities: WorkerIdentityPort | undefined =
@@ -1627,9 +1627,10 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
     // The admission ladder reads `CONTROL_DB` (quota policies), `RATE_LIMIT`
     // (the shared RPM counter) and — for the money legs — the CALLER tenant's
     // own Durable Object via `tenantRouter` (#821 PR2a: monthly-budget rollups
-    // and the prepaid wallet). Absent a router it falls back to the shared `DB`.
-    // Every source is OPTIONAL and each degrades in the tightening direction
-    // only — see `src/admission/admit.ts`.
+    // and the prepaid wallet). Absent a router it falls back to the opt-in
+    // NO_SPEND_SOURCE / NO_WALLET_ADMISSION stand-ins — the shared `env.DB` is
+    // gone (#821 PR2-delete). Every source is OPTIONAL and each degrades in the
+    // tightening direction only — see `src/admission/admit.ts`.
     admission: admissionFromEnv(
       env as AdmissionBindings,
       tenantRouter !== undefined ? { router: tenantRouter } : {},

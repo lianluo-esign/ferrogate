@@ -75,13 +75,12 @@
  * a misconfigured deploy serve unlimited traffic silently.
  *
  * **The other two sources need NO new binding at all.** `quotaPolicySourceFromEnv`
- * reads `CONTROL_DB` and `spendSourceFromEnv` / `walletAdmissionFromEnv` read
- * `DB` — the two databases this Worker's credential authorities already use,
- * whose (commented) `[[d1_databases]]` stanzas are already written out in
- * `wrangler.toml`. Uncommenting them at deploy time turns on the quota chain,
- * the monthly budget and the wallet in the same edit.
+ * reads `CONTROL_DB`, and — since #821 PR2-delete — the monthly budget and the
+ * prepaid wallet route to the CALLER tenant's own `TENANT_DATA` object via
+ * `routedSpendSource` / `routedWalletAdmission`; the shared `ferrogate-tenant`
+ * `DB` stanza is retired and nothing reads `env.DB` any more.
  *
- * **DO NOT commit those D1 stanzas at development time**, and do not add a
+ * **DO NOT commit the CONTROL D1 stanza at development time**, and do not add a
  * `FG_DEV_QUOTA_POLICIES` entry to `[vars]` either: `vitest.config.ts` loads
  * `wrangler.toml` through `wrangler: { configPath }`, so a committed binding is
  * injected into every unit test. That is measured, not feared — the D1 stanzas
@@ -147,7 +146,7 @@ export {
   quotaPolicySourceFromEnv,
   quotaPolicySourceFromVars,
   resolveQuotaWindows,
-  spendSourceFromEnv,
+  routedSpendSource,
 } from "./quota.js";
 
 export {
@@ -159,9 +158,7 @@ export {
   DEFAULT_WALLET_HOLD_CREDITS,
   NO_WALLET_ADMISSION,
   WALLET_HOLD_TTL_SECONDS,
-  agentRuntimeTenantHandle,
-  d1WalletAdmission,
-  walletAdmissionFromEnv,
+  routedWalletAdmission,
   walletHoldId,
 } from "./wallet.js";
 

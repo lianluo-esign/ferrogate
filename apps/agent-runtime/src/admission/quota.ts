@@ -587,13 +587,15 @@ export const NO_SPEND_SOURCE: SpendSource = {
   },
 };
 
-/** Worker bindings {@link spendSourceFromEnv} reads. */
+/**
+ * Worker bindings the spend gate used to read.
+ *
+ * `DB` is retained only as a vestigial type field: since #821 PR2-delete the
+ * shared `ferrogate-tenant` D1 is gone and the spend/wallet reads route to the
+ * caller tenant's own Durable Object via {@link routedSpendSource}. Nothing on
+ * this Worker reads `env.DB` any more.
+ */
 export interface SpendBindings {
-  /**
-   * The TENANT database (`sql/d1-ts/tenant/`). The SAME binding `d1ApiKeyPort`
-   * already reads for `api_keys` — so the budget and wallet gates need no new
-   * database either.
-   */
   readonly DB?: D1Database | undefined;
 }
 
@@ -671,12 +673,6 @@ export function d1SpendSource(
       }
     },
   };
-}
-
-/** D1 whenever the tenant database is bound, {@link NO_SPEND_SOURCE} otherwise. */
-export function spendSourceFromEnv(env: SpendBindings): SpendSource {
-  const db = d1Binding(env.DB);
-  return db === undefined ? NO_SPEND_SOURCE : d1SpendSource(db);
 }
 
 /**
