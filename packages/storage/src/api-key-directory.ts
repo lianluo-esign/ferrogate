@@ -269,6 +269,19 @@ export class D1TwoHopApiKeyDirectory implements TwoHopApiKeyDirectory {
     // The directory names a key whose tenant row is gone — a revoke that landed
     // its second leg, or a create that never did. The authority for its scopes
     // does not exist, so it authenticates nothing (401, never disclosed as 403).
+    //
+    // NOTE this ALSO absorbs the "unprovisioned tenant" case under a Durable
+    // Object router: `forTenant` materializes an object by addressing it and
+    // never throws `not_found`, so an unprovisioned tenant reaches here with a
+    // null row rather than taking the `unroutable` branch above (which only fires
+    // for a router that SIGNALS not_found, e.g. the env-binding shared router).
+    // Both are fail-closed. The one practical difference is that a consumer which
+    // lets `suspended` fall through to a static-config table (the gateway does,
+    // for Rust `find_map` parity) would then let a config key answer — but only a
+    // config key holding the byte-identical secret, which is not reachable by an
+    // attacker. If a strict no-fallthrough guarantee for unprovisioned tenants is
+    // ever required under the DO router, distinguish the two here with a
+    // tenant-provisioned probe rather than relying on the `unroutable` branch.
     if (row === null) return { kind: "suspended", reason: "revoked" };
 
     // The TENANT row is the authority for lifecycle too, not the directory

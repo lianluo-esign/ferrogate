@@ -297,6 +297,14 @@ export function twoHopApiKeyPort(
         case "unavailable":
           return { outcome: "unavailable", detail: twoHop.detail };
         case "resolved":
+          // Tenant identity comes from the tenant-database `api_keys` ROW here,
+          // deliberately — this Worker treats the row an operator edits as the
+          // authority and refuses a blank `tenant_id` downstream (a key that
+          // routes through a real object but names no tenant on its row). The
+          // gateway instead attributes from `directory.tenant_id`; in production
+          // the two are written from the same dual-write and always agree, so the
+          // difference is observable only in fixtures. Unifying the authority is a
+          // deliberate cross-Worker decision, not made here (see PR #921 review).
           return { outcome: "resolved", auth: authContextFromRow(twoHop.row) };
       }
     },
