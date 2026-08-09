@@ -72,8 +72,8 @@ export interface AgentRuntimeBindings {
   /**
    * The TENANT database (`sql/d1-ts/tenant`), holding `api_keys`.
    *
-   * Bound ⇒ tenant bearer credentials resolve from D1 through
-   * {@link d1ApiKeyPort}. Absent ⇒ see {@link resolveDeps} for what is left.
+   * Bound ⇒ tenant bearer credentials resolve through the two-hop
+   * {@link twoHopApiKeyPort}. Absent ⇒ see {@link resolveDeps} for what is left.
    * Same binding name and same schema `apps/gateway/wrangler.toml` declares, so
    * one key authenticates identically on both Workers.
    */
@@ -1471,7 +1471,7 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
  *
  * | port | durable source | dev source |
  * |---|---|---|
- * | `apiKeys` | `env.DB` → `api_keys` ({@link d1ApiKeyPort}) | `FG_DEV_API_KEYS` |
+ * | `apiKeys` | `api_key_directory`@CONTROL → tenant `api_keys` ({@link twoHopApiKeyPort}) | `FG_DEV_API_KEYS` |
  * | `workerIdentities` | `env.CONTROL_DB` → `self_hosted_worker_registrations` ({@link d1WorkerIdentityPort}) | `FG_DEV_SELF_HOSTED_WORKERS` |
  *
  * **A bound database WINS over the dev flag**, and that ordering is deliberate

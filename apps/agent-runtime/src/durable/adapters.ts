@@ -135,7 +135,7 @@ export interface D1ApiKeyPortOptions {
 /**
  * The durable {@link ApiKeyPort} over the TWO-HOP directory model (#821).
  *
- * The single-hop {@link d1ApiKeyPort} read `api_keys` straight off `env.DB` — the
+ * The former single-hop `d1ApiKeyPort` read `api_keys` straight off `env.DB` — the
  * ferrogate-tenant D1. That premise ("a Worker cannot open a tenant database by
  * uuid at runtime, so credentials must live in one flat table") was wrong: a
  * Worker selects a database by BINDING NAME, and the credential→tenant map lives
